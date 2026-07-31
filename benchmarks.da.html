@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast mod SABnzbd, NZBGet og rustnzb: 4 klienter × 7 scenarier på identisk hardware. Ærlige resultater, inklusive de ben, nzbfast ikke vinder, med reproduktionstrin.">
+<meta name="description" content="nzbfast mod SABnzbd, NZBGet, rustnzb og andre klienter: 8 scenarier på identisk hardware. Ærlige resultater, inklusive de ben, nzbfast ikke vinder, med reproduktionstrin.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,24 +44,24 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Benchmarks</h1>
-  <p class="sub">Fire klienter, syv scenarier, identisk hardware og udbydere, kørsler
+  <p class="sub">Fem klienter, otte scenarier, identisk hardware og udbydere, kørsler
   flettet, så udbyderdrift ophæves. Målet er <b>tid til en brugbar fil</b>:
   hentet, verificeret, udpakket. Inklusive de ben, vi ikke vinder.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">På denne side</p>
-  <nav aria-label="På denne side" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Opsætningen</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Hvad usenet faktisk udgiver</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Gemte arkiver: en jobkø</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Krypterede arkiver: halvt så meget skrivning</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">190.6 GB → én enkelt 167.9 GB mkv (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tid til brugbar fil, efter jobstørrelse</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-navngivet 4K → brugbar mkv (østkysten)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">At holde linjen tændt gennem en kø (østkysten, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De ben, vi ikke vinder</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lav-hukommelses-stigen: 190 GB i ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ti nestede former: hvem bliver færdig uden dig</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Udpaknings- og reparationsmotorerne, i soloopgør</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Hvad hver klient kan</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motoren mætter rigtige linjer</a></nav>
+  <nav aria-label="På denne side" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Opsætningen</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Hvad usenet faktisk udgiver</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Gemte arkiver: en jobkø</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Krypterede arkiver: halvt så meget skrivning</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">190.6 GB → én enkelt 167.9 GB mkv (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tid til brugbar fil, efter jobstørrelse</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-navngivet 4K → brugbar mkv (østkysten)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">At holde linjen tændt gennem en kø (østkysten, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De ben, vi ikke vinder</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lav-hukommelses-stigen: 190 GB i ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ti nestede former: hvem bliver færdig uden dig</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Klientloftet: 9.68 GB serveret fra RAM, og du kan bygge det igen</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De mere tekniske målinger, for dem der vil have flere data</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Hvad hver klient kan</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motoren mætter rigtige linjer</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Hvad et job koster maskinen</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vi følger de næste udgivelser</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
     <p class="kicker">Metode først</p>
     <h2>Opsætningen</h2>
     <ul class="plain">
-      <li><b>Klienter:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 (den nærmeste Rust-modpart), alle på samme maskine pr. scenarie (Apple M-serie-maskiner: "Europa" M1 Ultra på 10&nbsp;GbE, "østkysten" M3 Ultra ~2.4–3.0 Gbps-linje). nzbfasts egne tal spænder over builds 1.0.2 til 1.0.8, mens motoren ændrede sig; ældre kørsler undervurderer den udgivne build i stedet for at smigre den.</li>
+      <li><b>Klienter:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, alle på samme maskine pr. scenarie (Apple M-serie-maskiner: "Europa" M1 Ultra på 10&nbsp;GbE, "østkysten" M3 Ultra ~2.4–3.0 Gbps-linje). De vigtigste udbyderben (35, 77 og 190 GB) blev målt igen 31. juli 2026 på den udgivne nzbfast-build med alle fem klienter, hvert eneste ben over TLS. Et par ældre ben er tilbage og siger det selv; de undervurderer den udgivne build i stedet for at smigre den.</li>
       <li><b>Fairness:</b> samme 6 udbydere × 8 forbindelser, TLS overalt, ben kørt ryg mod ryg og flettet. Hver konkurrent tunet til sit dokumenterede bedste: SABnzbd fik <code>pipelining_requests=8</code> (<b>den leveres med 1, dvs. upipelinet</b>; alene den indstilling bragte dens 190 GB-tid fra 24m24s til 19m02s), NZBGet fik ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb sin dokumenterede konfiguration.</li>
       <li><b>Sluttilstand:</b> en verificeret, udpakket, brugbar fil, ikke "download færdig". Det er det, du faktisk venter på.</li>
-      <li><b>Reproducerbarhed:</b> hver påstand kan spores til en dateret post i vores benchmark-log, optaget med de driver-scripts, der frembragte den: vægur + interface-byte-tællere + top-RSS for procestræet, 1–2 s opløsning.</li>
+      <li><b>Reproducerbarhed:</b> hver påstand er dateret og målt på samme måde: forløbet tid + interface-byte-tællere + top-RSS for procestræet, 1–2 s opløsning. Hvor et ben kører på en offentligt lagt NZB, nævner vi den, så du selv kan køre den.</li>
     </ul>
   </div>
 </section>
@@ -91,27 +91,32 @@
     <p class="kicker">Scenarie 1 · rent, kæmpe</p>
     <h2>190.6 GB → én enkelt 167.9 GB mkv (Europa, 10 GbE)</h2>
     <div class="bars">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:23%"></i></span><span class="t">4m 33s</span></div>
-      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:41%"></i></span><span class="t">7m 58s · +75%</span></div>
-      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:100%"></i></span><span class="t">19m 32s · +329%</span></div>
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:20%"></i></span><span class="t">4m 47s</span></div>
+      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:39%"></i></span><span class="t">9m 06s · +90%</span></div>
+      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:82%"></i></span><span class="t">19m 29s · +307%</span></div>
+      <div class="bar"><span>Weaver (varm)</span><span class="trk"><i style="width:100%"></i></span><span class="t">23m 38s · +394%</span></div>
       <div class="bar"><span>rustnzb 1.3.4</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">intet output¹</span></div>
     </div>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>rustnzb 1.3.4</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver (varm)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
-        <tr><td>tid til brugbar fil</td><td class="win">4m 33s</td><td class="lose">7m 58s (+75%)</td><td class="lose">19m 32s (+329%)</td><td class="bad">ingen¹</td></tr>
-        <tr><td>GB på ledningen</td><td class="win num">169.6</td><td class="num">169.8</td><td class="num">169.7</td><td class="num">186.5</td></tr>
-        <tr><td>top-RSS</td><td class="num">1.4 GB²</td><td class="num">1.5 GB</td><td class="num">1.8 GB</td><td class="win num">0.6 GB</td></tr>
+        <tr><td>tid til brugbar fil</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td><td class="bad">ingen¹</td></tr>
+        <tr><td>GB på ledningen</td><td class="win num">169.7</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">186.6</td></tr>
+        <tr><td>CPU-tid</td><td class="win num">290 s</td><td class="num">764 s</td><td class="num">2,081 s</td><td class="num">1,625 s</td><td class="num">5,745 s</td></tr>
+        <tr><td>maksimal hukommelse (RSS)</td><td class="num">1.1 GB²</td><td class="num">2.0 GB</td><td class="num">1.8 GB</td><td class="num">2.1 GB</td><td class="win num">0.6 GB</td></tr>
+        <tr><td>maksimal ekstra disk</td><td class="win num">156.6 GB (1.0×)</td><td class="num">312.9 GB (2.0×)</td><td class="num">312.8 GB (2.0×)</td><td class="num">317.3 GB (2.0×)</td><td class="num">–¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:left">¹ rustnzb blev færdig med at flytte bytes på 5m 42s efter at have
-    trukket 186.5 GB (10% mere ledning end nogen anden), men efterlod <b>ingen udpakkede medier</b>, dens
-    tredje fejlede runde i træk på denne post.
-    · ² nzbfasts hukommelse følger sit <em>konfigurerede budget</em>, ikke jobbet: denne runde kørte
-    standard-auto-budgettet og toppede på 1.4 GB; et bevidst kæmpestort 64 GB-budget køber kun 4% (4m 22s),
-    og begrænset til <b>1 GB</b> fuldføres samme 190 GB-job stadig (se lav-hukommelses-stigen nedenfor).
-    På den tidligere østkyst-runde (~2.4–3 Gbps-linje) kørte
-    samme scenarie 9m 00s mod NZBGet +30% og SABnzbd +111%. Forspringet holder på tværs af linjehastigheder.</p>
+    <p class="note" style="text-align:start">Målt igen 31. juli 2026 på den udgivne build, alle
+    fem klienter, alle udbydere over TLS; tiden svarer til vores bedste nogensinde fra 20. juli (284 s)
+    inden for udbydervarians. ¹ rustnzb meldte <i>færdig</i> efter 5m 48s efter at have trukket 186.6 GB
+    (10% mere ledning end nogen anden), men efterlod en <b>tom output-mappe</b>, dens fjerde fejlede
+    runde i træk på denne post. · ² nzbfasts hukommelse følger sit <em>konfigurerede budget</em>, ikke
+    jobbet: standard-auto-budgettet toppede på 1.1 GB, og begrænset til <b>1 GB</b> fuldføres samme
+    190 GB-job stadig (se lav-hukommelses-stigen nedenfor). Kolonnen med 2.0× maksimal disk er den
+    praktiske: på dette job skal skriv-ud-og-udpak-klienterne have ~313 GB fri, hvor nzbfast skal have
+    157 GB. På den tidligere østkyst-runde (~2.4–3 Gbps-linje) kørte samme scenarie 9m 00s mod
+    NZBGet +30% og SABnzbd +111%. Forspringet holder på tværs af linjehastigheder.</p>
   </div>
 </section>
 
@@ -120,20 +125,26 @@
     <p class="kicker">Scenarie 2 · forspringet vokser med størrelsen</p>
     <h2>Tid til brugbar fil, efter jobstørrelse</h2>
     <p class="lead">One-pass betyder ingen verificerings-/udpakningsfase efter download, så jo større jobbet er,
-    jo længere foran lander den. Sekventielle kørsler på samme maskine:</p>
+    jo længere foran lander den. Sekventielle kørsler på samme maskine, målt igen 31. juli 2026 på den
+    udgivne build (Europa, 10 GbE, alt over TLS), medmindre andet er angivet:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Job</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th></tr></thead>
+      <thead><tr><th>Job</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (varm)</th></tr></thead>
       <tbody>
-        <tr><td>7.4 GB REMUX (Europa, 10 GbE)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td></tr>
-        <tr><td>35 GB obfuskeret 4K (Europa)</td><td class="win">67 s</td><td class="lose">108 s (+61%)</td><td class="lose">285 s (+325%)</td></tr>
-        <tr><td>87 GB 4K (østkysten)</td><td class="win">272 s</td><td class="lose">370 s (+36%)</td><td class="lose">708 s (+160%)</td></tr>
-        <tr><td>87 GB på en disk med 97 GB fri (Europa)</td><td class="win">3m 08s</td><td class="bad">kan ikke køre²</td><td class="bad">kan ikke køre²</td></tr>
-        <tr><td>190.6 GB (østkysten)</td><td class="win">9m 00s</td><td class="lose">11m 43s (+30%)</td><td class="lose">19m 02s (+111%)</td></tr>
+        <tr><td>7.4 GB REMUX (ældre runde)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
+        <tr><td>35 GB obfuskeret 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
+        <tr><td>77 GB 4K</td><td class="win">90 s</td><td class="lose">206 s (+129%)</td><td class="lose">504 s (+460%)</td><td class="lose">509 s (+466%)</td></tr>
+        <tr><td>87 GB på en disk med 97 GB fri (ældre runde)</td><td class="win">3m 08s</td><td class="bad">kan ikke køre²</td><td class="bad">kan ikke køre²</td><td class="bad">kan ikke køre²</td></tr>
+        <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:left">² Deres maksimale fodaftryk (volumener + udpakket output
-    samtidig, ~156 GB) oversteg de 97 GB fri. One-pass kræver 1× indholdets størrelse:
-    den halverer den disk, du har brug for, ikke kun tiden.</p>
+    <p class="note" style="text-align:start">rustnzb kørte hvert eneste ben og leverede en brugbar fil
+    på ingen af dem, så den har ingen kolonne her; detaljerne står i omkostningsafsnittet nedenfor.
+    Weaver er målt efter sin varme bedste-tilfælde-protokol (vedvarende daemon, kasseret opvarmningsjob,
+    forbindelser trappet op til 120, før uret starter). ² Deres maksimale fodaftryk (volumener + udpakket
+    output samtidig, ~156 GB ved 87 GB) oversteg de 97 GB fri. One-pass kræver 1× indholdets størrelse:
+    den halverer den disk, du har brug for, ikke kun tiden. Gentagne nzbfast-ben på 35 og 77 GB-korpusserne
+    samme formiddag gav i gennemsnit 39.7 s og 94 s (3 ben hver), så enkelttallene ovenfor er ikke
+    håndplukkede hurtige kørsler.</p>
   </div>
 </section>
 
@@ -141,16 +152,81 @@
   <div class="wrap">
     <p class="kicker">Scenarie 3 · obfuskeret post</p>
     <h2>35 GB hash-navngivet 4K → brugbar mkv (østkysten)</h2>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>rustnzb</th></tr></thead>
+    <p class="lead">Hver fil i posten er et heksadecimalt hash; nyttelasten får først sit rigtige navn fra PAR2-metadataene. Kørt om 31. juli 2026 på den leverede build, alle fem klienter, alt over TLS (riggfejlen bag SABnzbds færdigsignal - dets historik-API returnerer 10 pladser som standard - er rettet, så hvert tal nedenfor er aktuelt):</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (varm)</th><th>rustnzb</th></tr></thead>
       <tbody>
-        <tr><td>tid til brugbar fil</td><td class="win">96 s</td><td class="lose">153 s (+59%)</td><td class="lose">259 s (+170%)</td><td class="bad">ingen brugbar fil³</td></tr>
-        <tr><td>top-RSS</td><td class="win num">1.55 GB</td><td class="num">3.7 GB</td><td class="num">8.8 GB</td><td class="num">3.6 GB</td></tr>
+        <tr><td>tid til brugbar fil</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">ingen brugbar fil³</td></tr>
+        <tr><td>processortid</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
+        <tr><td>maksimal hukommelse (RSS)</td><td class="num">0.45 GB</td><td class="num">1.31 GB</td><td class="num">1.98 GB</td><td class="num">1.13 GB</td><td class="win num">0.15 GB</td></tr>
+        <tr><td>maksimal ekstra disk</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:left">³ rustnzb hentede på 119 s, markerede jobbet
-    <i>Completed</i>, og leverede de rå obfuskerede volumener: ingen omdøbning, ingen udpakning.
-    nzbfast deobfuskerede ud fra PAR2-metadata og udpakkede i strømmen, nul tilbagelæsningsblokke.</p>
+    <p class="note" style="text-align:start">³ rustnzb hentede på 97 s, markerede jobbet som <i>færdigt</i> og leverede de rå sløredede arkivdele: ingen omdøbning, ingen udpakning - både på 1.3.4 og på 1.3.9 († dets disktal er alene download). nzbfast afslørede navnene ud fra PAR2-metadataene og pakkede ud undervejs, nul genlæste blokke; spændet 76&ndash;83 s er dets første og sidste etape i runden. Mod 23. juli-udgaven af denne tabel er den leverede build her hurtigere med 3.4× mindre hukommelse (1.55 → 0.45 GB): engangsgennemløbsarbejdet fra sidst i juli, målt på samme maskine og samme korpus.</p>
+  </div>
+</section>
+
+<section id="job-cost">
+  <div class="wrap">
+    <p class="kicker">Den instrumenterede runde</p>
+    <h2>Hvad et job koster maskinen: CPU, hukommelse, disk, I/O</h2>
+    <p class="lead">Uret alene skjuler, hvor arbejdet gik hen, så 31. juli 2026 kørte hver klient de
+    samme tre job med målerne slået til: CPU-sekunder for hele procestræet (uafhængigt af linjehastighed),
+    maksimal hukommelse (RSS), diskens højvandsmærke over benets startpunkt (aflæst hvert 2. sekund) og
+    samlet disk-I/O. Samme maskine, samme seks udbydere, alt over TLS, ét instrumenteret ben pr. klient
+    pr. job. Det er one-pass-løftet målt frem for påstået: nzbfasts maksimale diskforbrug er selve
+    nyttelasten, og dens I/O svarer til at skrive hver byte én gang.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>35 GB obfuskeret (nyttelast 32 GB)</th><th>tid</th><th>CPU</th><th>CPU-s/GB</th><th>maksimal hukommelse (RSS)</th><th>maksimal ekstra disk</th><th>disk-I/O</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">39 s</td><td class="win num">59 s</td><td class="win num">1.7</td><td class="num">0.41 GB</td><td class="win num">31.8 GB (1.0×)</td><td class="win num">31.9 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">85 s</td><td class="num">157 s</td><td class="num">4.6</td><td class="num">1.45 GB</td><td class="num">62.0 GB (1.9×)</td><td class="num">66.2 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">217 s</td><td class="num">416 s</td><td class="num">12.1</td><td class="num">1.38 GB</td><td class="num">63.6 GB (2.0×)</td><td class="num">66.1 GB</td></tr>
+        <tr><td>Weaver (varm)</td><td class="num">258 s</td><td class="num">304 s</td><td class="num">8.8</td><td class="num">1.21 GB</td><td class="num">64.2 GB (2.0×)</td><td class="num">94.4 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">ikke fuldført† (75 s)</td><td class="bad num">1,201 s</td><td class="bad num">31.7</td><td class="num">0.19 GB</td><td class="num">34.8 GB†</td><td class="num">35.6 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>77 GB (nyttelast 72 GB)</th><th>tid</th><th>CPU</th><th>CPU-s/GB</th><th>maksimal hukommelse (RSS)</th><th>maksimal ekstra disk</th><th>disk-I/O</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">90 s</td><td class="win num">135 s</td><td class="win num">1.7</td><td class="num">0.57 GB</td><td class="win num">71.3 GB (1.0×)</td><td class="win num">71.5 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">206 s</td><td class="num">348 s</td><td class="num">4.5</td><td class="num">1.30 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">171.5 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">504 s</td><td class="num">978 s</td><td class="num">12.6</td><td class="num">3.03 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">258.5 GB</td></tr>
+        <tr><td>Weaver (varm)</td><td class="num">509 s</td><td class="num">635 s</td><td class="num">8.2</td><td class="num">1.53 GB</td><td class="num">145.3 GB (2.0×)</td><td class="num">315.2 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">ikke fuldført† (166 s)</td><td class="bad num">2,665 s</td><td class="bad num">31.3</td><td class="num">0.36 GB</td><td class="num">80.0 GB†</td><td class="num">80.8 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>190 GB (nyttelast 157 GB)</th><th>tid</th><th>CPU</th><th>CPU-s/GB</th><th>maksimal hukommelse (RSS)</th><th>maksimal ekstra disk</th><th>disk-I/O</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">287 s</td><td class="win num">290 s</td><td class="win num">1.7</td><td class="num">1.11 GB</td><td class="win num">156.6 GB (1.0×)</td><td class="win num">159.0 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">546 s</td><td class="num">764 s</td><td class="num">4.5</td><td class="num">1.93 GB</td><td class="num">312.9 GB (2.0×)</td><td class="num">393.0 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">1,169 s</td><td class="num">2,081 s</td><td class="num">12.3</td><td class="num">1.80 GB</td><td class="num">312.8 GB (2.0×)</td><td class="num">586.8 GB</td></tr>
+        <tr><td>Weaver (varm)</td><td class="num">1,418 s</td><td class="num">1,625 s</td><td class="num">9.6</td><td class="num">2.04 GB</td><td class="num">317.3 GB (2.0×)</td><td class="num">808.9 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">ikke fuldført† (348 s)</td><td class="bad num">5,745 s</td><td class="bad num">30.8</td><td class="num">0.54 GB</td><td class="bad">intet output†</td><td class="num">74.0 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <p><b>Det samme job, tegnet.</b> CPU og maksimal disk for 190 GB-jobbet, skaleret efter den
+    tungeste klient:</p>
+    <div class="bars wide">
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:5%"></i></span><span class="t">290 CPU-s</span></div>
+      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:13%"></i></span><span class="t">764 CPU-s</span></div>
+      <div class="bar"><span>Weaver (varm)</span><span class="trk"><i style="width:28%"></i></span><span class="t">1,625 CPU-s</span></div>
+      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:36%"></i></span><span class="t">2,081 CPU-s</span></div>
+      <div class="bar"><span>rustnzb</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">5,745 CPU-s · intet output†</span></div>
+    </div>
+    <div class="bars wide" style="margin-top:14px">
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:49%"></i></span><span class="t">156.6 GB maksimal disk · 1.0×</span></div>
+      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.8 GB · 2.0×</span></div>
+      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.9 GB · 2.0×</span></div>
+      <div class="bar"><span>Weaver (varm)</span><span class="trk"><i style="width:100%"></i></span><span class="t">317.3 GB · 2.0×</span></div>
+    </div>
+
+    <p class="note" style="text-align:start">† rustnzb pakkede aldrig ud i nogen af de tre job, selv om det meldte <i>færdigt</i> hver gang; dets disktal udelader den udpakningskopi, enhver anden klient betalte, dets processor (omkring 16 kerner mættet gennem hele etaper, 20× nzbfast pr. GB i disse etaper) ligner en vedvarende reparationsmalen, der aldrig frembragte nyttelasten - en gentagelse samme dag og omkampen på 1.3.9 målte begge den malen fraværende, så det er en tilstand, dets kørsler kan ramme, snarere end en konstant, og disse celler er, hvad vores instrumenterede etaper registrerede, snarere end en takst, det altid betaler; og på 190 GB-jobbet var dets udmappe tom. Aflæsninger over de tre størrelser: nzbfast ligger fladt på <b>1.7 processorsekunder pr. GB og en disktop på 1.0× nyttelasten</b> fra 35 til 190 GB; NZBGet og SABnzbd holder en ren 2.0× top.</p>
   </div>
 </section>
 
@@ -158,19 +234,16 @@
   <div class="wrap">
     <p class="kicker">Scenarie 4 · kø på tre</p>
     <h2>At holde linjen tændt gennem en kø (østkysten, ~43 GB)</h2>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>rustnzb</th><th>NZBGet</th><th>SABnzbd</th></tr></thead>
+    <p class="lead">Tre job tilføjet på én gang - en REMUX på 7.4 GB, den hash-navngivne 4K-udgivelse på 35 GB og et lille opslag på 0.35 GB - og uret løber, indtil hver nyttelast ligger på disken, verificeret og udpakket. Målt igen 31. juli 2026 på den leverede build, alle fem klienter; en af de seks udbydere afviste login hele runden, ens for hver klient.</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th></th><th>nzbfast</th><th>rustnzb 1.3.4 / 1.3.9</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (varm)</th></tr></thead>
       <tbody>
-        <tr><td>kø-vægtid</td><td class="win">122 s</td><td class="num">136 s</td><td class="num">162 s</td><td class="num">277 s</td></tr>
-        <tr><td>linje i tomgang (&lt;20 MB/s)</td><td class="win">2 s (2%)</td><td class="num">16 s (12%)</td><td class="num">0 s</td><td class="bad">168 s (61%)</td></tr>
+        <tr><td>tid til at tømme køen</td><td class="win">144&ndash;148 s</td><td class="bad">ikke fuldført¹ (138 / 125 s)</td><td class="num">164 s</td><td class="num">249 s</td><td class="num">328 s</td></tr>
+        <tr><td>job leveret brugbare</td><td class="win">3/3</td><td class="bad">2/3¹ (begge versioner)</td><td class="num">3/3</td><td class="num">3/3</td><td class="num">3/3</td></tr>
+        <tr><td>linje i tomgang (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:left">Tre udgaver af samme problem: nzbfasts hale-overlap
-    holder linjen travl kant til kant; NZBGet står aldrig i tomgang, men kører ~35% langsommere, mens den udpakker
-    samtidig; SABnzbd henter hurtigt og lader så linjen ligge <b>mørk 61% af tiden</b> under
-    seriel efterbehandling. I resiliens-varianten (ét job med krypterede RAR-headers) satte
-    SABnzbds kø sig fast på det krypterede job, og kun 1 af 3 job blev nogensinde færdige; nzbfast
-    parkerede det med en tydelig besked og gjorde resten færdig.</p>
+    <p class="note" style="text-align:start">nzbfast bliver færdig først blandt de klienter, der leverer alle tre nyttelaster. ¹ rustnzbs kolonne er en udgåen, ikke et resultat: dets ur stoppede først (138 s på 1.3.4, 125 s på det nuværende 1.3.9, kørt for at give det den bedste chance), fordi det afleverede 35 GB-jobbet som rå slørede arkivdele markeret <i>Completed</i> - ingen omdøbning, ingen udpakning, i begge versioner (se opfølgningsafsnittet længere nede). En målstreg, det ikke nåede, kan ikke sammenlignes med klienter, der gjorde, så hver celle i den kolonne er markeret ugyldig i stedet for hurtig. SABnzbd lader igen linjen ligge <b>mørk 63% af løbet</b> under seriel efterbehandling - det eneste tal her, der har stået stabilt gennem hver udgave af denne tabel. NZBGet hviler aldrig, men betaler den samtidige udpakning på sluttiden. ² Vores egen tomgangsandel er ærlig og aktuel, og det er det tal, der har flyttet sig mest: to af de seks udbydere var utilgængelige denne runde, og overlappet mellem job kræver en sund, ledig server at køre det næste job på. Med alle seks sunde målte den tidligere udgave 2% tomgang. Motoren trækker sig nu og siger det, i stedet for at starte det næste job på en server, der ikke kan svare - en ændring denne runde fremkaldte, fordi den første måling viste den bygge videre på en død server. I modstandsdygtighedsvarianten (ét job med krypterede RAR-headere, ældre runde) satte SABnzbds kø sig fast på det krypterede job, og kun 1 af 3 job blev nogensinde færdigt; nzbfast parkerede det med en klar besked og gjorde resten færdigt.</p>
   </div>
 </section>
 
@@ -178,9 +251,10 @@
   <div class="wrap">
     <p class="kicker">Den ærlige kolonne</p>
     <h2>De ben, vi ikke vinder</h2>
-    <div>
-    </div>
-    <p class="lead">Begge tests, der stod her, er målt om på den udgivne build, og ingen af dem er længere et nederlag: det beskadigede store-mode-post tager os nu 30 s mod NZBGets 38 s, og rekonstruktion udelukkende fra paritet er færdig på 9 s, hvor den tog 19 s, på en test hvor NZBGet vender tilbage på samme tid, men ikke leverer noget. Vi lader afsnittet blive stående i stedet for at slette det: det er her, vores nederlag hører til, og den næste runde, der finder et, sætter det tilbage.</p>
+
+    <p class="lead">Hver etape, der har stået i dette afsnit, er før eller siden blevet målt om på en nyere leveret build, og denne runde tømte det, hvilket taler for forsigtighed frem for tilfredshed. Hvad der forlod det, hvert tilfælde forklaret ved siden af sin egen tabel frem for stille redigeret væk: den tungeste PAR2-reparation, som stod som tab på to maskiner gennem to udgaver af denne side; genopbygning af manglende <code>.rev</code>-genopretningsdele, det største tab denne side har båret, med 6.6× langsommere end RARLabs eget værktøj og nu en snæver sejr; og tre udpakningsformer, der lå fra få procent til en tredjedel efter unrar, hvor årsagen viste sig at være snævrere end den forklaring, vi offentliggjorde for den.</p>
+
+    <p class="lead">Hvad der <em>ikke</em> er forsvundet, er afvejningen bag de tal, og det er, hvad dette afsnit siger nu: <b>vi bruger mere hukommelse end de selvstændige værktøjer</b>, og den tungeste reparation bruger nu mere end før. Vores udpakker og reparatør er bygget til at følge med en igangværende download frem for at køre én gang fra en kommandolinje, og det koster resident hukommelse; detaljerne står ved siden af komponenttabellerne. Er din begrænsning det mindst mulige aftryk til et enkeltstående job, vinder de dedikerede værktøjer den kolonne, og det vil vi ikke lade som om andet.</p>
     <div class="callout">Hvorfor overhovedet vise et nederlag? Fordi sejrene kun er troværdige ved siden af det. Hvert tal på denne side kommer fra de samme flettede kørsler, og en test vi taber bliver stående, indtil en ny kørsel erstatter den.</div>
   </div>
 </section>
@@ -242,6 +316,48 @@
   </div>
 </section>
 
+<section id="disk-cost">
+  <div class="wrap">
+    <p class="kicker">Hvad et job koster</p>
+    <h2>Maksimalt diskforbrug for 1,5 GB nyttelast</h2>
+    <p class="lead">Løftet om én gennemgang handler lige så meget om disk som om hastighed, så her er det målt i stedet for påstået: det højeste arbejdsmappen nåede under de indlejrede kørsler, aflæst to gange i sekundet. En enkelt aflæsning til sidst ville intet sige, for en klient, der sletter sine volumener efter udpakning, ville se ud som om den aldrig havde skrevet dem.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>form</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
+      <tbody>
+        <tr><td>store-RAR i store-RAR</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
+        <tr><td>komprimeret indre lag</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
+        <tr><td>RAR i RAR, dybde 2</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
+        <tr><td>7z pakket i en store-RAR</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">Megabyte, lavere er bedre. <b>NZBGet er på højde med os her</b>, og det er værd at sige hvorfor: den kører med <code>DirectUnpack</code> og <code>DirectWrite</code> slået til, sådan som vi konfigurerer enhver konkurrent, og på disse former er det nok til én kopi på disken. SABnzbd holder to. Forskellen, der er tilbage, er den, pipelinen blev bygget til: vi materialiserer slet ikke volumenerne, så toppen er nyttelasten selv frem for nyttelasten plus arkivet, der bar den.</p>
+  </div>
+</section>
+
+<section id="client-ceiling">
+  <div class="wrap">
+    <p class="kicker">Scenarie 8 · fem klienter, reproducerbart indhold</p>
+    <h2>Klientloftet: 9.68 GB serveret fra RAM, og du kan bygge det igen</h2>
+    <p class="lead">Hvert ben ovenfor kører mod kommercielle udbydere, så du er nødt til at tage vores ord for linjeforholdene. Dette her kan du bygge igen selv: indholdet er Blenders åbne film (Tears of Steel 4K, Sintel, Big Buck Bunny 4K ved 60 og 30 fps), CC-BY 3.0, pakket som store-mode-RAR plus 10% PAR2 til 53 filer og 14,521 artikler, serveret over loopback-NNTP fra RAM af en rig, der ligger i dette repository. <b>Ingen udbyder er involveret</b>, så dette måler klienten selv, med udbydervarians fjernet frem for udjævnet.</p>
+    <p class="note" style="text-align:start">Fordi artiklerne kommer fra hukommelsen, er de absolutte tider langt kortere end noget virkeligt download og er <b>ikke</b> sammenlignelige med udbyderbenene ovenfor. Læs forholdstallene og diskkolonnen, ikke sekunderne.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>klient</th><th>tid til færdig</th><th>forbindelser</th><th>top-disk</th><th>mod nzbfast</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>basislinje</td></tr>
+        <tr><td>Weaver (varmkørt)</td><td>8 s</td><td>120 (auto-ramp)</td><td>17.9 GB</td><td>1.6× langsommere</td></tr>
+        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× langsommere</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× langsommere</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× langsommere</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Målt igen 31. juli 2026</b>, samme rig, samme korpus, efter en styresystemsopdatering på maskinen. Fire klienter flyttede sig et til tre sekunder; SABnzbd gjorde ikke: det tager nu 57 s, hvor 24. juli-udgaven af denne tabel noterede 14 s, gentaget otte gange over to rigvarianter, rørledningsdybden bekræftet til 8 ved API-genlæsning hver kørsel, og identisk ved 16 forbindelser. Dets resultater på farmetaperne andre steder på denne side er upåvirkede, så dette ser ud til at være specifikt for hastigheder fodret over loopback på maskinens nuværende styresystem; vi offentliggør, hvad riggen måler i dag, og tester igen ved næste styresystems- og SABnzbd-udgivelse.</p>
+
+    <p class="note" style="text-align:start"><b>Tid til færdig</b> løber fra jobbet startes, til alle fire videoer ligger på disken, verificeret og udpakket. <b>Top-disk</b> er den mest disk, klienten nogensinde optog i ét enkelt øjeblik, aflæst to gange i sekundet, og det er den kolonne, der betyder mest her: One-pass kræver omkring 1× indholdet, alt andet omkring 2×. Alle fem endte med de samme 8.6 GB, da de havde ryddet op, hvilket er præcis derfor, toppen er det interessante tal. Hver klient frembragte alle fire payloads sha256-identiske med kilden. Hver enkelt er vist ved det antal forbindelser, der gjorde <i>den</i> hurtigst (8, 16 og 32 blev prøvet på hver; nzbfast lå fladt ved alle tre, så flere forbindelser ville ikke have hjulpet den).</p>
+    <p class="note" style="text-align:start"><b>Hver konkurrent ved sit dokumenterede bedste.</b> En rival må aldrig tabe, fordi vi har sat den forkert op, så hver klients indstillinger offentliggøres sammen med runden. To er nemme at få galt fat i og værd at kende, hvis du kører dine egne: SABnzbd omskriver sin egen ini ved opstart og sætter <code>pipelining_requests</code> tilbage til den leverede <code>1</code>, så pipelining skal sættes over API bagefter og læses tilbage for at bekræfte det; og en selvstændig NZBGet-konfiguration med <code>-c</code> arver NZBGets indbyggede standardværdier frem for værdierne i den leverede conf, hvilket i stilhed lader artikelcachen være slået fra. Begge kørte med det rettet. Weaver måles varm, fordi den auto-optrapper sit antal forbindelser og justerer sine puljer under det første job, og fordi dens <code>download</code>-kommando aldrig afslutter, så den kører som en vedvarende daemon med en kasseret opvarmningsrunde. Dens 8 s er derfor en varm daemon ved 120 forbindelser mod vores kolde engangskørsel ved 8. Det er hver klient ved sit bedste efter vores egen regel, men asymmetrien er reel, og vi siger den hellere end at begrave den.</p>
+    <p class="note" style="text-align:start">Top-disk aflæses to gange i sekundet frem for én gang til sidst, og det betyder mere, end det lyder til: hver klient her sletter sine volumener efter udpakning, så alle fem slutter med de samme 8.6 GB, og fire af dem ser ud som One-pass, hvis man kun måler bagefter. Aflæst gennem hele kørslen topper fire tæt på 18 GB. For alt, der rydder op efter sig selv: rapportér toppen, ikke resterne.</p>
+  </div>
+</section>
+
 <section id="shape-store">
   <div class="wrap">
     <p class="kicker">Form 1 &middot; 84 % af dataene</p>
@@ -300,74 +416,209 @@
 <section id="unpack-repair">
   <div class="wrap">
     <p class="kicker">Komponent-dueller</p>
-    <h2>Udpaknings- og reparationsmotorerne, i soloopgør</h2>
-    <p class="lead">Udpakning og PAR2 er vores egen native kode, så vi kører dem også selvstændigt mod
-    feltet på identiske korpusser. En tid tæller kun, når outputtet er byte-identisk med kilde-payloaden.</p>
-    <div class="grid2">
-      <div class="card"><h3>RAR-udpakning · 8 arkivformer</h3>
-        <p>Mod unrar 7.23, 7-Zip, bsdtar, unar og upstream rars-craten på en Apple M3 Ultra vinder eller
-        deler nzbfasts udpakker hver form: 400 små filer <b>0.13 s</b> mod unrars 0.66 s, solid
-        <b>0.50</b> mod 0.87, krypteret <b>0.49</b> mod 0.82, et RAR7-arkiv med 128 MB-ordbog <b>0.71</b>
-        mod 0.92. Kørt igen på en 20-kernes M1 Ultra og på en 14-kernes Intel-laptop holder resultatet
-        på hver form, og på laptoppen bliver marginerne bredere: de parallelle
-        afkodningsstier skalerer ind i de ekstra tråde. Hver rapporteret tid gav sha256-identisk output.</p></div>
-      <div class="card"><h3>PAR2-verificering + reparation · 1 GiB-sæt</h3>
-        <p>Mod klassisk par2cmdline, SIMD-forken par2cmdline-turbo og MultiPar har nzbfast den
-        hurtigste verificering og den hurtigste reparation på hver benchet maskine. 20-kernes
-        desktop: ren verificering <b>0.40 s</b> mod turboens 1.08 og klassikerens 3.67; reparation
-        af 101 beskadigede blokke <b>1.26 s</b> mod 2.61 og 7.52. 14-kernes laptop: verificering
-        <b>1.26</b> mod 1.48, reparation <b>2.57</b> mod 3.62. Hver repareret fil byte-identisk.
-        En ærlig note: vi opretter ikke PAR2 (en downloader behøver det ikke, og ParPar ejer det ben).</p></div>
+    <h2>De mere tekniske målinger, for dem der vil have flere data</h2>
+    <p class="lead">Reparation (PAR2) og udpakning (RAR) er vores egen native kode frem for medfølgende tredjeparts-binære filer, så vi kører dem også selvstændigt mod de dedikerede værktøjer på identiske korpusser, på fire maskiner, der spænder over, hvad en læser rent faktisk kunne eje. En tid tæller kun, når outputtet er byte-identisk med kilde-payloaden: hvert RAR-tal nedenfor er sha256-kontrolleret mod kilden, og hver repareret fil mod det ubeskadigede sæt.</p>
+    <div class="chips">
+      <span class="chip"><b>4</b> maskiner, bærbar til 32 kerner</span>
+      <span class="chip"><b>7</b> RAR-arkivformer</span>
+      <span class="chip"><b>6</b> udpakkere i løbet</span>
+      <span class="chip"><b>1 GB</b> data pr. form</span>
+      <span class="chip"><b>bedste af 3</b> flettet, varm cache</span>
     </div>
+
+    <h3 style="margin:38px 0 4px">RAR-udpakning: 7 arkivformer, 6 værktøjer</h3>
+    <p class="note" style="text-align:start;margin-top:6px">Den forrige runde af denne tabel brugte 100 MB til 200 MB pr. form, og det var en fejl: omkring 28 ms procesopstart udgjorde 40 % af store-etapen, og den rækkefølge, det gav, holder ikke ved en realistisk størrelse. Denne runde bruger <b>1 GB data pr. form</b>, og det ændrer flere svar, nogle af dem den anden vej. Arkiverne er lavet med officielle <code>rar</code> 7.23, så intet værktøj bedømmes på input fra sin egen indkoder, og det er de samme bytes på hver eneste maskine.</p>
+
+    <p class="note" style="text-align:start"><b>Hvad der er i dataene betyder mere, end det ser ud til.</b> Data bygget af blokkopier gør enhver komprimeret form til en hukommelseskopi-test; data af ren tekst gør den til en literal- og Huffman-test; vi har målt begge, og de er ikke enige om, hvem der vinder. Derfor består de fire komprimerede former af lige dele tekst, strukturerede poster og ukomprimerbare bytes, og de to former i hver ende af det spænd er bevidst selvstændige etaper: <code>store</code> kan ikke komprimeres, og <code>repetitive</code> er næsten kun match. Generatoren og prøvebænken ligger i repositoriet, så korpusset kan bygges igen byte for byte.</p>
+
+    <p class="note" style="text-align:start"><b>Hele feltet, i sekunder, lavere er bedre.</b> Bedste af tre, værktøjerne flettet inde i hver runde i stedet for kørt i blokke, og outputtet kontrolleret mod kildedataene ved hver eneste kørsel. Et værktøj, der leverer forkerte bytes, får en korrekthedsnote, aldrig en hurtig tid. <code>rarpar</code> er Weavers egen RAR- og PAR2-kode, bygget fra kilden ved <code>bd87611</code>; vi fastholder committet frem for en version, fordi dens crates bærer tre forskellige versionsnumre.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>form</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <tbody>
+        <tr><td colspan="7" class="grp">High-end desktop, 32 kerner</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 små filer</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>solid</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>repetitiv</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>stor, 4 volumener</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">forkert output²</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>krypteret</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">ingen kryptering³</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>128 MiB ordbog</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">ingen stor ordbog⁴</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td colspan="7" class="grp">Ældre desktop, 20 kerner</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>400 små filer</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>solid</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>repetitiv</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>stor, 4 volumener</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">forkert output²</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>krypteret</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">ingen kryptering³</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td>128 MiB ordbog</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">ingen stor ordbog⁴</td><td class="no">ikke understøttet¹</td></tr>
+        <tr><td colspan="7" class="grp">Bærbar, 14 kerner / 20 tråde, Windows⁵</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">ingen CLI⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 små filer</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">ingen CLI⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>solid</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">ingen CLI⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>repetitiv</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">ingen CLI⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>stor, 4 volumener</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">ingen CLI⁵</td><td class="no">forkert output²</td><td>4.21</td></tr>
+        <tr><td>krypteret</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">ingen CLI⁵</td><td class="no">ingen kryptering³</td><td>4.13</td></tr>
+        <tr><td>128 MiB ordbog</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">ingen CLI⁵</td><td class="no">ingen stor ordbog⁴</td><td>2.51</td></tr>
+        <tr><td colspan="7" class="grp">Bærbar, Apple M5 Max⁶</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>400 små filer</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>solid</td><td><b>1.15</b></td><td>1.87</td><td>1.97</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>repetitiv</td><td><b>0.10</b></td><td>0.15</td><td>0.18</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>stor, 4 volumener</td><td><b>0.98</b></td><td>1.75</td><td>1.54</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>krypteret</td><td><b>0.99</b></td><td>1.91</td><td>1.55</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+        <tr><td>128 MiB ordbog</td><td><b>0.94</b></td><td>1.52</td><td>1.33</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td><td class="no">ikke kørt⁶</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Hvor feltet ikke kunne være med, og hvorfor.</b> ¹ 7-Zip 26.02 afviser hver eneste komprimerede form med <code>ERROR: Unsupported Method</code>: den implementerer ikke den komprimeringsalgoritme, RAR 7 bruger som standard, og kan på macOS derfor kun læse den gemte form. Samme 7-Zip-version på Windows afkoder dem godt nok, så det er en forskel mellem det projekts to builds og ikke noget ved arkiverne: det er de samme bytes. ² bsdtar understøtter ikke RAR5-arkiver i flere volumener og lavede en afkortet fil uden at melde fejl; den etape er derfor en korrekthedsfejl og ikke en langsom tid. Vores prøvebænk fangede det, fordi den kontrollerer outputtet, og netop derfor er det værd at kontrollere det. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar leverer ikke et kommandolinjeværktøj til Windows, så feltet på den bærbare er fem. ⁶ Rækkerne for M5 Max sætter de tre værktøjer op mod hinanden, som en macOS-læser rent faktisk ville gribe efter - unrar, <code>rarpar</code> og os; unar, bsdtar og 7-Zip blev ikke kørt på den maskine. unrar er på de rækker 7.22, det nyeste build der kører uovervåget der.</p>
+
+    <p class="note" style="text-align:start"><b>Hver form på hver maskine på nær én, og den ene er uafgjort.</b> Den forrige udgave af denne side tabte fem af disse celler, og hvorfor de flyttede sig er værd at sige, for det er ikke den grund, vi først gav. Vi gav platformens hukommelseskopieringsrutine skylden, og profilen sagde noget snævrere: et match på to til toogtredive byte betalte et fuldt kald ind i den rutine, og kaldet kostede mere end kopieringen. I stedet at kopiere faste toogtredive byte gennem et register fjernede det, og derfor flyttede <code>repetitive</code>, <code>solid</code> og 128 MiB-ordbogen sig alle på én gang - det er de tre former, der er bygget af korte match. Særskilt kørte kontrolsummen på skriverens tråd og holdt den tilbage; at flytte den nedstrøms tog resten. Den ene celle, der ikke er vores, er den gemte form på den stationære med 32 kerner, hvor unrar og vi ligger tre millisekunder fra hinanden på en etape, der udelukkende flytter byte.</p>
+
+    <p class="note" style="text-align:start">Den form, vi vinder mest på, er den, usenet faktisk lægger op i hundredvis ad gangen: <b>400 små filer, 4.3× og 4.4× mod unrar</b> og 5.4× til 5.5× mod <code>rarpar</code>. Det er parallelitet på tværs af medlemmerne, og det er forskellen mellem en udpakker skrevet til en downloadkø og en skrevet til en kommandolinje. Den gemte form, som ifølge <a href="#census">optællingen ovenfor</a> er 84 % af de bytes, der går over ledningen, er nærmest uafgjort for de tre seriøse værktøjer, for på det punkt flytter alle bare bytes.</p>
+
+    <p class="note" style="text-align:start"><b>Ét valg værd at erklære.</b> Arkiverne pakkes med kompressoren låst til fire tråde. Ellers følger RARs blokopdeling kerneantallet i den maskine, der pakkede arkivet, så en 32-kernet og en 20-kernet maskine producerer forskellige byte ud af samme input, og maskinerne holder op med at være sammenlignelige. Låsningen gør udpakningskorpusset byteidentisk overalt, hvilket er pointen, men den sætter også loft over, hvor meget af afkodningen der kan køre parallelt - derfor kørte vi de to tætteste former om, mens de stadig var tab, mod arkiver pakket med alle 32 tråde for at kontrollere, at låsningen ikke var årsagen. Det var den ikke: solid gik fra 4.2% bagud til 2.4% bagud og 128 MiB-ordbogen fra 6.6% til 6.3%, samme rækkefølge i begge tilfælde. Begge er nu sejre på det låste korpus, med en bredere margin end den kontrol kunne forklare.</p>
+
+    <h3 style="margin:44px 0 4px">PAR2-kontrol og -reparation: 1 GiB-sæt, fire skadesniveauer</h3>
+    <p class="note" style="text-align:start;margin-top:6px">Korpus: 1 GiB tilfældig nyttelast pakket i lagringstilstand i 21 RAR-dele, derefter to PAR2-sæt med 10% redundans, ét med 1 MiB-blokke og ét med 64 KiB, derefter faste skadekort. Hver kørsel bruger samme protokol: frisk kopi, læs hele korpusset én gang for at varme cachen, og mål så. Bedste af tre sammenflettede runder; hver repareret del sammenlignes med det ubeskadigede sæt i hver runde. Lavere er bedre.</p>
+
+    <p class="note" style="text-align:start"><b>En rettelse om korpusset, fordi en tidligere udgave af denne side tog for hårdt i.</b> Vi sagde, at hver maskine kørte et byteidentisk korpus, kontrolleret med hash. At hashe hver del af hvert sæt viser, at det passer for den stationære med 32 kerner og Windows-bærbaren, som matcher præcist, og ikke for den stationære med 20 kerner, som rummer en anden tilfældig udtrækning af samme form: de samme 21 dele i de samme størrelser, de samme to blokstørrelser, og skade verificeret ved de samme 3, 101 og 1.500 blokke fordelt over det samme antal filer. Hvert tal inden for en række er stadig målt på byte, som hvert værktøj i den række deler, og det er, hvad hver sammenligning hviler på. Men rækkerne er ikke fire blikke på ét input, og da nyttelastens karakter er værd omkring 7% for én konkurrents gennemsøgning, er det værd at sige frem for at glide hen over.</p>
+
+    <p class="note" style="text-align:start"><b>Hvilken par2 er hvilken.</b> Den oprindelige <code>par2cmdline</code> er referenceimplementeringen, alle har forgrenet fra. <code>par2cmdline-turbo</code> er den fork, der medbringer <b>ParPar</b>s håndskrevne SIMD-Galoislegemekerner: det er præcis, hvad «turbo» betyder, og derfor er det turbo og ikke originalen, der er værd at måle imod. Begge turbo-kolonner nedenfor kører de samme ParPar-kerner. Det, der adskiller dem, er ikke aritmetikken, men build og flag.</p>
+
+    <p class="note" style="text-align:start"><b>Så konkurrenten optræder to gange, og den ene af de kolonner er dens bedste tilfælde frem for dens standard.</b> Den udgivelsesbinær, du ville hente, er oversat til en generisk CPU og hasher kun et par filer ad gangen; den samme kilde bygget til maskinens faktiske CPU og startet med <code>-T16</code> bruger de instruktioner, maskinen virkelig har, og hasher seksten filer på én gang. På den bærbare er det op til 2.6×, alene på grund af build og flag. Bedøm os på den tunede kolonne, som er den hårdere sammenligning; kolonnen «som leveret» er det, en der henter den, faktisk oplever. <code>par2cmdline</code> er originalen, version 1.2.0, bygget fra kilden på hver maskine. <code>rarpar</code> er Weavers egen PAR2-implementering, bygget fra kilden med Metal-GPU-backenden slået til. MultiPars <code>par2j</code> findes kun til Windows og optræder derfor kun på rækkerne for den bærbare med Windows. Rækkerne for M5 Max sætter de to værktøjer med aktuelle macOS-arm64-builds op ved siden af de to turbo-kolonner; <code>par2cmdline</code> klassisk blev ikke kørt på den maskine.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr>
+        <th>skade</th><th>maskine</th><th>nzbfast</th>
+        <th>par2-turbo<br><span class="note">tunet</span></th>
+        <th>par2-turbo<br><span class="note">som leveret</span></th>
+        <th>par2cmdline</th>
+        <th>rarpar</th>
+        <th>MultiPar</th>
+      </tr></thead>
+      <tbody>
+        <tr><td rowspan="4">ingen<br><span class="note">ren kontrol</span></td>
+            <td>desktop, 32 kerner</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">kun Windows</td></tr>
+        <tr><td>desktop, 20 kerner</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">kun Windows</td></tr>
+        <tr><td>bærbar, 14 kerner</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+        <tr><td>bærbar, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">ikke kørt</td><td>2.32</td><td class="no">kun Windows</td></tr>
+
+        <tr><td rowspan="4">3 blokke<br><span class="note">et par døde artikler</span></td>
+            <td>desktop, 32 kerner</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">kun Windows</td></tr>
+        <tr><td>desktop, 20 kerner</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">kun Windows</td></tr>
+        <tr><td>bærbar, 14 kerner</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+        <tr><td>bærbar, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">ikke kørt</td><td>3.64</td><td class="no">kun Windows</td></tr>
+
+        <tr><td rowspan="4">101 blokke</td>
+            <td>desktop, 32 kerner</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">kun Windows</td></tr>
+        <tr><td>desktop, 20 kerner</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">kun Windows</td></tr>
+        <tr><td>bærbar, 14 kerner</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+        <tr><td>bærbar, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">ikke kørt</td><td>4.17</td><td class="no">kun Windows</td></tr>
+
+        <tr><td rowspan="4">1.500 blokke<br><span class="note">91 % af genopretningen brugt</span></td>
+            <td>desktop, 32 kerner</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">kun Windows</td></tr>
+        <tr><td>desktop, 20 kerner</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">kun Windows</td></tr>
+        <tr><td>bærbar, 14 kerner</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+        <tr><td>bærbar, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">ikke kørt</td><td>6.91</td><td class="no">kun Windows</td></tr>
+      </tbody>
+    </table></div>
+
+    <p class="note" style="text-align:start">Alle seksten rækker er vores, flere af dem med mere end 2× mod den tunede build og med 2.3× til 7.7× mod den, du faktisk ville hente. De to rækker med tung skade, der stod her som nederlag i den forrige udgave af denne side, er sejre nu, og noten nedenfor forklarer, hvad der ændrede sig, for et vendt nederlag fortjener en forklaring, ikke en stille rettelse.</p>
+
+    <p class="note" style="text-align:start"><b>Originalen er tilbage i tabellen, og det er værd at se, hvorfor forken findes.</b> En tidligere udgave af denne side fjernede kolonnen <code>par2cmdline</code> med den begrundelse, at den var langsommere end alt andet i runden, hvilket er sandt og ikke er en god nok grund: det er den implementering, næsten alle andre værktøjer nedstammer fra, og læsere fortjener referencen frem for vores påstand om den. På det tungeste skadesniveau bruger den omkring 69 s, hvor SIMD-forken bruger 3.2 s og vi bruger 3.1 s. Den faktor tyve er hele argumentet for de håndskrevne Galoislegemekerner, og det er det samme argument, vi fører for vores.</p>
+
+    <p class="note" style="text-align:start"><b>Let skade er det tilfælde, der betyder noget.</b> En håndfuld fejlede artikler er langt mere typisk end 101 døde blokke, og slet ikke 1.500. Det meste af en let reparation er slet ikke Reed-Solomon-matematikken, det er at læse og MD5-beregne en gigabyte, og derfor følger rækken med 3 blokke rækken for ren kontrol frem for reparationsrækkerne.</p>
+
+    <p class="note" style="text-align:start"><b>Den tungeste række plejede at være den, vi taber, og den forrige udgave af denne side skrev, at løsningen ville være "en anden algoritme og ikke en tuningsrunde". Det er den algoritme.</b> Det sidste niveau beskadiger 1.500 blokke fordelt på alle 21 volumener og bruger omkring 91 % af genopretningsdataene, og det er der, Reed-Solomon-aritmetikken, og ikke hashing eller disken, bliver næsten hele arbejdet. Den udgivne build beregner nu de tungeste reparationer med en taltoretisk transformation i stedet for den klassiske Galoislegeme-foldning - den samme matematik, evalueret i en form der skalerer langt bedre ved høje bloktal - og hver eneste tung række vendte: 2.6× foran den tunede build på desktoppen med 20 kerner, som var vores tætteste nederlag, og 2.5× på den bærbare, som var vores værste. Hver kørsel kontrolleres bagefter mod filernes hashværdier, og en reparation, der ikke bestod kontrollen, ville blive lavet om ad den klassiske vej; på tværs af hver eneste etape på denne side skete det ikke én gang. Let skade kører stadig den klassiske vej, og derfor flyttede de øvrige rækker sig næsten ikke.</p>
+
+    <p class="note" style="text-align:start"><b>En hurtigere vej er kun værd at have, hvis den ikke kan tage fejl.</b> Begge veje beregner den samme størrelse og er bitidentiske ved konstruktion, og hver reparation på denne side var betinget af, at de genopbyggede filer matchede det ubeskadigede sæt: 228 tidtagne reparationer på tværs af maskinerne i denne runde, nul afvigelser. Den leverede build læner sig ikke op ad den historik. Hver reparation verificerer sit eget output mod filernes hashes, og en, der fejlede, ville blive gjort om automatisk med den klassiske vej, logge afvigelsen og beholde den klassiske vej resten af den kørsel. Indstillingen findes i panelet som <b>Hurtig PAR-tilstand</b>, hvis du hellere vil undvære den helt, og maskiner med for lidt hukommelse til den siger selv nej frem for at forsøge og fejle.</p>
+
+    <p class="note" style="text-align:start"><b>Rækken for den bærbare trængte til en rettelse, og den går imod os.</b> Windows flytter vedvarende baggrundsarbejde over på sine effektivitetskerner efter få sekunder. Vores dæmon melder sig fra det ved opstart, og ingen af de andre værktøjer kan gøre det, så en tidligere udgave af denne side offentliggjorde deres strubede tider, som var de værktøjernes egne. Kører man den maskine igen med hvert værktøj hævet til høj prioritet, flytter hele feltet sig: på det tungeste skadesniveau går <code>par2-turbo</code> fra 22.4 s til 6.41 og <code>rarpar</code> fra 59.2 s til 14.4, og i én udgave af denne side gjorde det rækken fra vores til en, vi tabte. Hele rækken for den bærbare er nu målt sådan - rettelsen bliver stående, selv om rækken siden er vundet tilbage af algoritmeændringen ovenfor, for feltets tider på den maskine er kun ærlige med struben løftet.</p>
+
+    <h3 style="margin:44px 0 4px">RAR-genopretningsposter: reparation uden PAR2</h3>
+    <p class="note" style="text-align:start;margin-top:6px">Når PAR2 ikke kan dække skaden, er genopretningsposten inde i selve RAR-filen den sidste forsvarslinje. Indtil 1.0.8 fejlede vores på ethvert arkiv over cirka 13 MB, så denne etape kunne slet ikke køres. Skaden er tre huller på 3.000 byte ved 20 %, 50 % og 80 % af det beskyttede område. Begge værktøjer leverede output byte-identisk med den uskadte fil, og vores er byte-identisk med det, <code>rar r</code> selv skriver. Bedste af tre, desktop med 32 kerner.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>arkiv</th><th>nzbfast</th><th>rar 7.23 reparation</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× hurtigere</td></tr>
+        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× hurtigere</td></tr>
+        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× hurtigere</td></tr>
+        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× hurtigere</td></tr>
+        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× hurtigere</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">En tidligere udgave af denne side viste rækken på 512 MB som et nederlag og forklarede det som prisen for at gennemgå volumenet i stykker frem for at holde det hele i hukommelsen. Den forklaring var rigtig dengang og er nu forældet: omkostningen var en bit-seriel CRC64 i reparationsstien, erstattet af en tabelbaseret, og nederlaget forsvandt med den. Der er ikke længere et skæringspunkt, og det begrænsede arbejdssæt blev bevaret. Rækken på 2 GB er her, fordi de volumener, en dæmon faktisk møder, er på 8 GB til 20 GB og ikke 512 MB, og en etape, der stopper under det virkelige interval, er ikke nogen stor prøve.</p>
+    <p class="note" style="text-align:start">M5 Max gentager mønsteret, kørt 31. juli med samme korpus og samme kriterier: 0.050 / 0.066 / 0.171 / 0.581 s mod <code>rar r</code>s 0.211 / 0.335 / 0.751 / 1.735 ved 16 MB til 512 MB - 3.0&times; til 5.1&times; hurtigere; størrelsen 2 GB blev ikke kørt på den maskine.</p>
+    <p class="note" style="text-align:start">Weavers <code>rarpar</code> mangler kun i denne tabel, og ikke af eget valg: den implementerer ikke denne reparation. Bedt om at reparere et af disse arkiver svarer den <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> og efterlader filen beskadiget. Den er med i alle andre sammenligninger på denne side: alle fire PAR2-etaper ovenfor, alle syv udpakningsformer længere oppe og genopretningsvolumen-etapen lige nedenfor, som er præcis det arbejde, den siger den udfører, og som den vinder.</p>
+
+    <h3 style="margin:44px 0 4px">Genopretningsvolumener: at genopbygge helt manglende <code>.rev</code>-filer</h3>
+    <p class="note" style="text-align:start;margin-top:6px">Den anden halvdel af RARs egen genopretningshistorie, og indtil denne runde det største tab på denne side. En <code>.rev</code>-fil er en selvstændig genopretningsdel: tre af dem ved siden af et sæt på 21 dele kan genopbygge hvilke som helst tre dele, der aldrig kom frem. Korpus: 1 GiB gemt i 21 dele à 50 MB med <code>rar rv3</code>, derefter delene 4, 11 og 19 slettet - tre tabt mod tre genopretningsdele, det værste tilfælde sættet stadig overlever. Bedste af tre, hver genopbygget del sammenlignet med den ubeskadigede.</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th>maskine</th><th>nzbfast</th><th>rar 7.23 <code>rc</code></th><th>rarpar <code>restore-volumes</code></th></tr></thead>
+      <tbody>
+        <tr><td>stationær, 32 kerner</td><td><b>0.44</b></td><td>0.46</td><td>0.48</td></tr>
+        <tr><td>stationær, 20 kerner</td><td><b>0.50</b></td><td>0.58</td><td>0.61</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Denne række lå på 3.12 s mod <code>rar rc</code>s 0.47 i sidste udgave af denne side, offentliggjort som 6.6× langsommere og som det dårligste tal på den.</b> Årsagen var, at udslettelsesløsningen kørte ved omkring 48 MB/s genopbygget output, hvor RARLab klarede 320; den kører nu på samme tabelbaserede aritmetik som resten af genopretningskoden, hvilket er en syvdobbelt forbedring og vender tabet til en sejr på begge maskiner. Marginerne er 3% og 14%, så det er en sejr, man konstaterer nøgternt frem for at sætte på forsiden, og grunden til at den nævnes overhovedet er, at tabet blev nævnt først.</p>
+    <p class="note" style="text-align:start">Denne etape findes, fordi Weavers <code>rarpar</code> gør præcis dette og bad om at blive målt på den. Den vandt den komfortabelt, da vi først offentliggjorde den, og vi offentliggjorde den dengang netop derfor.</p>
+    <p class="note" style="text-align:start">Filmatchningen var aldrig omkostningen, hvilket er værd at notere, fordi den var den intuitive mistænkte: genopretningsdele bærer ingen filnavne, så vi afgør, hvilke pladser der overlevede, ved at beregne kontrolsum på hver del på disken frem for at stole på, hvad de hedder, og mod et ubeskadiget sæt, hvor der kun matches, tager hele gennemløbet 0.18 s.</p>
+
+    <p class="note" style="text-align:start"><b>Hvad der ellers flyttede sig, og hvor det ikke kan ses.</b> To andre motorændringer landede, som disse korpora ikke kan vise, nævnt her, så tallene ovenfor ikke læses som hele historien: RAR5-arkiver med titusindvis af medlemmer slår hvert medlem op én gang i stedet for at gennemgå listen pr. arbejder, hvilket er 3× mindre processortid ved 40.000 medlemmer; og RAR1.3-bitlæseren arbejder et ord ad gangen, hvilket er 2×. Ingen af dem viser sig ovenfor, for formerne her har 400 medlemmer og ingen RAR1.3.</p>
+
+    <p class="note" style="text-align:start"><b>Hvad vi bevidst ikke gør:</b> vi <i>opretter</i> aldrig PAR2. En downloader har ingen grund til det, og den etape tilhører ParPar. Vi køber også fart med hukommelse i begge motorer: udpakningen topper omkring 240 MB mod unrars 41 MB, og verifikationen omkring 126 MB mod turbos 7 MB, fordi dette er de indbyggede motorer, der følger med en igangværende download frem for selvstændige engangskørsler. Formen med 128 MiB-ordbog er det værste tilfælde, ved omkring 423 MB mod unrars 139 MB. <b>Den tungeste reparation koster nu også hukommelse:</b> den hurtigere metode til 512 eller flere manglende blokke arbejder ud fra genopretningsdata holdt i hukommelsen, så den må bruge op til en fjerdedel af maskinens RAM, med loft på 4 GB, og en maskine, der ikke kan undvære det, tager stille den strømmende metode - samme aritmetik og samme tider som midterrækkerne i PAR2-tabellen, blot uden 3× på den sidste. Vil du have det mindst mulige hukommelsesaftryk til et enkeltstående job, vinder de dedikerede værktøjer stadig den kolonne.</p>
+    <div class="callout">Hvert tal på denne side er en dateret kørsel med sin nøjagtige kommando og sine betingelser optaget, negative resultater og opgivne tilgange inkluderet. Disse sider er den offentliggjorte dokumentation, og de bliver fyldt ud, efterhånden som flere runder lander.</div>
   </div>
 </section>
 
-<section id="disk-cost">
-  <div class="wrap">
-    <p class="kicker">Hvad et job koster</p>
-    <h2>Maksimalt diskforbrug for 1,5 GB nyttelast</h2>
-    <p class="lead">Løftet om én gennemgang handler lige så meget om disk som om hastighed, så her er det målt i stedet for påstået: det højeste arbejdsmappen nåede under de indlejrede kørsler, aflæst to gange i sekundet. En enkelt aflæsning til sidst ville intet sige, for en klient, der sletter sine volumener efter udpakning, ville se ud som om den aldrig havde skrevet dem.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>form</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
-      <tbody>
-        <tr><td>store-RAR i store-RAR</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
-        <tr><td>komprimeret indre lag</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
-        <tr><td>RAR i RAR, dybde 2</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
-        <tr><td>7z pakket i en store-RAR</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">Megabyte, lavere er bedre. <b>NZBGet er på højde med os her</b>, og det er værd at sige hvorfor: den kører med <code>DirectUnpack</code> og <code>DirectWrite</code> slået til, sådan som vi konfigurerer enhver konkurrent, og på disse former er det nok til én kopi på disken. SABnzbd holder to. Forskellen, der er tilbage, er den, pipelinen blev bygget til: vi materialiserer slet ikke volumenerne, så toppen er nyttelasten selv frem for nyttelasten plus arkivet, der bar den.</p>
-  </div>
-</section>
 
 <section class="alt" id="client-matrix">
   <div class="wrap">
     <p class="kicker">Formåen, ikke mikro-benchmarks</p>
     <h2>Hvad hver klient kan</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>pipelinet NNTP</td><td class="yes">ja</td><td class="half">fra som standard</td><td class="no">nej</td><td class="yes">ja</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>fuld verificering under download</td><td class="yes">hver blok</td><td class="no">efter</td><td class="half">hurtigtjek</td><td class="no">efter</td><td class="no">efter</td><td class="no">efter</td></tr>
-        <tr><td>udpak under download</td><td class="yes">i strømmen, ingen volumener på disk</td><td class="half">direkte udpakning⁴</td><td class="half">direkte udpakning⁴</td><td class="half">upålidelig⁵</td><td class="no">nej</td><td class="no">nej</td></tr>
-        <tr><td>disk krævet til en N-GB-post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>fuldførbarheds-dom før download</td><td class="yes">blok-eksakt</td><td class="no">nej</td><td class="half">sundhed %</td><td class="no">nej</td><td class="yes">artikeltjek</td><td class="no">nej</td></tr>
-        <tr><td>begrænset hukommelse (swapper aldrig)</td><td class="yes">budgetteret</td><td class="no">9.3 GB @ 190 GB</td><td class="half">cache-indstilling</td><td class="no">nej</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>tjek filen på ethvert punkt under download</td><td class="yes">ja</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">sekventiel</td><td class="no">nej</td></tr>
-        <tr><td>indbygget indexer + postervæg</td><td class="yes">ja, nøglefri</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">søge-UI</td><td class="half">gruppebrowser</td></tr>
-        <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="half">delvis</td><td class="no">nej</td><td class="no">nej</td></tr>
-        <tr><td>telefon-fjernbetjeninger (nzb360/LunaSea)</td><td class="yes">via NZBGet-RPC</td><td class="yes">ja</td><td class="yes">ja</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td></tr>
-        <tr><td>overvågningslistens auto-hent + opgraderinger</td><td class="yes">indbygget</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">nej</td><td class="yes">Watchdog</td><td class="half">regler</td></tr>
-        <tr><td>én selvstændig binær</td><td class="yes">ja</td><td class="no">Python</td><td class="yes">ja</td><td class="yes">ja</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>open source</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">ja</td><td class="no">betalt</td><td class="no">betalt</td></tr>
-        <tr><td>platforme</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="no">kun mac</td><td class="no">kun win</td></tr>
+        <tr><td>pipelinet NNTP</td><td class="yes">ja</td><td class="half">fra som standard</td><td class="no">nej</td><td class="yes">ja</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>fuld verificering under download</td><td class="yes">hver blok</td><td class="no">efter</td><td class="half">hurtigtjek</td><td class="no">efter</td><td class="no">efter</td><td class="no">efter</td><td class="no">efter</td></tr>
+        <tr><td>udpak under download</td><td class="yes">i strømmen, ingen volumener på disk</td><td class="half">direkte udpakning⁴</td><td class="half">direkte udpakning⁴</td><td class="half">upålidelig⁵</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td></tr>
+        <tr><td>disk krævet til en N-GB-post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>fuldførbarheds-dom før download</td><td class="yes">blok-eksakt</td><td class="no">nej</td><td class="half">sundhed %</td><td class="no">nej</td><td class="no">-⁷</td><td class="yes">artikeltjek</td><td class="no">nej</td></tr>
+        <tr><td>begrænset hukommelse (swapper aldrig)</td><td class="yes">budgetteret</td><td class="no">9.3 GB @ 190 GB</td><td class="half">cache-indstilling</td><td class="no">nej</td><td class="no">nej</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>tjek filen på ethvert punkt under download</td><td class="yes">ja</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">sekventiel</td><td class="no">nej</td></tr>
+        <tr><td>indbygget indexer + postervæg</td><td class="yes">ja, nøglefri</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">søge-UI</td><td class="half">gruppebrowser</td></tr>
+        <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="half">delvis</td><td class="half">NZBGet-kompatibel RPC⁷</td><td class="no">nej</td><td class="no">nej</td></tr>
+        <tr><td>telefon-fjernbetjeninger (nzb360/LunaSea)</td><td class="yes">via NZBGet-RPC</td><td class="yes">ja</td><td class="yes">ja</td><td class="no">nej</td><td class="no">-⁷</td><td class="no">nej</td><td class="no">nej</td></tr>
+        <tr><td>overvågningslistens auto-hent + opgraderinger</td><td class="yes">indbygget</td><td class="no">via *arr</td><td class="no">via *arr</td><td class="no">nej</td><td class="no">nej</td><td class="yes">Watchdog</td><td class="half">regler</td></tr>
+        <tr><td>én selvstændig binær</td><td class="yes">ja</td><td class="no">Python</td><td class="yes">ja</td><td class="yes">ja</td><td class="yes">ja</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>open source</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">ja</td><td class="yes">ja</td><td class="no">betalt</td><td class="no">betalt</td></tr>
+        <tr><td>platforme</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="half">kilde-build⁷</td><td class="no">kun mac</td><td class="no">kun win</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:left">⁴ Direkte udpakning materialiserer stadig volumenerne først:
+    <p class="note" style="text-align:start">⁴ Direkte udpakning materialiserer stadig volumenerne først:
     2× skrivninger og 2× disk. ⁵ rustnzb leverede obfuskerede volumener markeret "Completed" i vores runde
     (dens udpakning hænger også med RARLab-unrar, medmindre den er slået fra). ⁶ GPL-3.0-or-later.
+    ⁷ Weaver v0.7.5; dens målte rækker (verificering, udpakning, disk, hukommelse) kommer fra vores
+    instrumenterede runde 31. juli, og dens formåen-celler markeret "-" er funktioner, vi ikke har
+    vurderet, frem for bekræftede mangler; den taler en NZBGet-kompatibel RPC, som er den måde, vores
+    prøvebænk styrer den på, men vi har ikke prøvet telefon-fjernbetjeningerne mod den.
     Usenapp/Newsbin er kommercielle læsere til én platform med downloader-funktioner; de er
     med, fordi folk spørger, ikke fordi de konkurrerer på hastighed.</p>
+  </div>
+</section>
+
+<section id="weaver-method">
+  <div class="wrap">
+    <p class="kicker">Metode &middot; i sin helhed, fordi vi blev bedt om det</p>
+    <h2>Sådan testede vi Weaver</h2>
+    <p class="lead">Weavers udvikler har offentligt sagt, at vi undgik at måle det. Det modsatte er tilfældet: det indgår i hver eneste sammenligning på denne side, som det kan køre, herunder etapen med genopretningsdele, som det vinder, og som vi offentliggør netop derfor. Her er hele metoden, hvert problem vi stødte på, og hver omvej vi tog, så kørslerne kan gentages og anfægtes.</p>
+    <ul>
+      <li><b>Hvad vi kørte:</b> den officielle arm64-udgivelsesbinær v0.7.5. Hvor en bygning fra kildekoden var nødvendig (dets egen komponent <code>rarpar</code> til PAR2- og udpakningstabellerne), angiver vi den præcise commit ved siden af tabellen.</li>
+      <li><b>Samme vilkår som alle andre:</b> identisk maskine, de samme seks kommercielle servere, TLS på hver forbindelse, job indsendt via dets NZBGet-kompatible API, og samme beståelsesregel som for hver klient på denne side: en etape tæller kun, når den udpakkede nyttelast er byteverificeret på disken. Dets egen færdiglog krydstjekkes altid, tros aldrig alene.</li>
+      <li><b>Målt når det er bedst, ikke når det er værst:</b> downloadetaper mærket <i>varm</i> kører en vedvarende tjeneste, giver den først et rigtigt opvarmningsjob og venter, til dens automatiske forbindelsesoptrapning når loftet på 120 forbindelser, før det tidtagne job starter. Koldstartstal er, hvor de vises, mærket kolde. Vi byggede og offentliggjorde varmstartsriggen, efter at vi bemærkede, at koldstarter undervurderer det.</li>
+      <li><b>Problemer vi stødte på, og hvad vi gjorde ved dem:</b> engangstilstanden til download fuldfører et job, men afslutter aldrig (vi tog tid på tjenestetilstanden i stedet); Mac-maskiner uden skærm sætter sig fast på en nøglering-forespørgsel (omgået med dets miljøvariabel til krypteringsnøglen); en vedvarende dublet-spærredatabase nægter at genindsende samme NZB selv efter en datasletning (omgået med dets force-flag); bygning fra kildekoden fejler uden den separat byggede webflade (erstattet med en stump; den officielle binær er upåvirket); det afviste vores kørigs selvsignerede certifikat, så køetapen ovenfor bruger de klienter, der ville forbinde; og én kold 190 GB-kørsel i juli endte i fejltilstand efter 33 minutter, så vi kørte den om og offentliggjorde den fuldførte omkørsel. Hver omvej falder ud til Weavers fordel, ikke vores.</li>
+      <li><b>Hvad tallene siger:</b> det holder samme disktop på 2.0&times; som de øvrige klienter, der skriver ud og pakker ud, og dets disktrafik vokser hurtigere end nogen andens med jobstørrelsen (2.5&times; vores ved 35 GB, 5.1&times; ved 190 GB), fordi dets krypterede lager genlæser og genskriver næsten alt, hvad det henter. Det design har reelle fordele, som en fartside ikke måler; hvad det koster, ses i I/O-kolonnen.</li>
+      <li><b>Gør det efter:</b> de præcise drivere, inklusive varmstartsriggen og dens tokenhåndtering, ligger i benchmappen i vores offentlige arkiv. Ret dem mod dine egne servere og offentliggør, hvad du får.</li>
+    </ul>
   </div>
 </section>
 
@@ -385,27 +636,96 @@
     </ul>
     <p class="note" style="text-align:start"><b>Hvad download koster i CPU.</b> Ét lokalt rig
     serverer artikler fra RAM, så det kun er klienten, der bliver målt, og hver række angiver sin
-    kørsel. Konkurrenternes rækker er uændrede fra runden 22. juli - samme versioner på samme
-    maskine, målt af Linux cgroup på én CPU-kerne - og står, indtil en ny udgivelse ændrer en af
-    dem. nzbfast-rækkerne blev målt igen 31. juli 2026 på den nuværende build.</p>
+    kørsel. SABnzbd- og NZBGet-rækkerne er uændrede fra runden 22. juli - samme versioner på
+    samme maskine, målt af Linux cgroup på én CPU-kerne - og står, indtil en ny udgivelse ændrer
+    en af dem. Rækkerne for nzbfast, Weaver og rustnzb blev målt 31. juli 2026 på M3 Ultra på
+    østkysten, nzbfast på den nuværende build, Weaver varmstartet ved sit dokumenterede
+    bedste.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>klient</th><th>CPU-sekunder pr. GB</th><th>med TLS</th><th>kørsel</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">0.64</td><td class="num">0.83</td><td>M3 Ultra på østkysten, 31. juli, nuværende build</td></tr>
+                <tr><td><b>nzbfast</b></td><td class="win num">0.43</td><td class="num">&ndash;</td><td>M5 Max, 31. juli, lokal 64 GB-kæde ved 76&ndash;79 Gbps, alle filer komplette</td></tr>
+        <tr><td><b>nzbfast</b></td><td class="num">0.58</td><td class="num">0.80</td><td>M3 Ultra på østkysten, 31. juli, nuværende build</td></tr>
         <tr><td><b>nzbfast</b></td><td class="num">0.74</td><td class="num">1.06</td><td>M1 Ultra i Europa, 31. juli, nuværende build</td></tr>
         <tr><td><b>nzbfast</b></td><td class="num">0.72</td><td class="num">&ndash;</td><td>Linux-container med én kerne, 22. juli</td></tr>
         <tr><td>SABnzbd 5.0.4</td><td class="num">1.5</td><td class="num">&ndash;</td><td>Linux-container med én kerne, 22. juli</td></tr>
+        <tr><td>Weaver (varmkørt)</td><td class="num">2.15</td><td class="num">&ndash;</td><td>M3 Ultra på østkysten, 31. juli</td></tr>
         <tr><td>NZBGet 26.2</td><td class="num">3.0</td><td class="num">&ndash;</td><td>Linux-container med én kerne, 22. juli</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="num">21.1</td><td class="num">22.2</td><td>M3 Ultra på østkysten, 31. juli</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">TLS koster hver klient CPU; vores er målt til +30%
+    <p class="note" style="text-align:start">TLS koster hver klient CPU; vores er målt til +38%
     pr. GB på M3 Ultra og +44% på M1 Ultra, og pipelinen kører stadig ved operativsystemets eget
-    ~32 Gbps-loft for lokale sockets med TLS slået til. Ingen konkurrent er endnu kørt på
-    TLS-benet, så de celler forbliver tomme frem for at blive estimeret. På en Intel-bærbar fra
+    ~32 Gbps-loft for lokale sockets med TLS slået til. rustnzbs TLS-tillæg er lille, men oven
+    på sidens højeste ukrypterede grundlinje; dens tal er reelt jobarbejde, ikke tomgang -
+    processen er helt stille mellem jobs. Weaver afviste riggens selvsignerede certifikat, så
+    dens TLS-celle forbliver tom, og SABnzbd og NZBGet er endnu ikke kørt på TLS-benet - tomme
+    celler er umålte, aldrig estimerede. På en Intel-bærbar fra
     2022 (i7-1280P, Windows 11) er nzbfasts eget arbejde de samme ~0.7 CPU-sekunder pr. GB;
     Windows-kernen og antivirus tredobler groft regnet totalen, og den platforms lokale
     socket-vej topper nær 8 Gbps.</p>
+    <p class="note" style="text-align:start"><b>Og den samme omkostning målt på rigtige job, alle fem
+    klienter.</b> Riggen ovenfor isolerer transporten; den instrumenterede runde 31. juli måler hele
+    jobbet - download over TLS fra seks udbydere, verificering, reparation, udpakning - som
+    CPU-sekunder pr. hentet GB. Hver klient lå fladt på tværs af 35, 77 og 190 GB-korpusserne, så ét
+    tal pr. klient er ærligt:</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>klient</th><th>CPU-sekunder pr. GB for hele jobbet</th><th>mod nzbfast</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">1.7</td><td>basislinje</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">4.5&ndash;4.6</td><td class="num">2.7×</td></tr>
+        <tr><td>Weaver (varm)</td><td class="num">8.2&ndash;9.6</td><td class="num">5.2×</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">12.1&ndash;12.6</td><td class="num">7.2×</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, ingen brugbar fil</td></tr>
+      </tbody>
+    </table></div>
     <div class="callout"><b>Stående regel: hver ydelsespåstand angiver de betingelser, den kørte under</b>, inklusive negative resultater og forkerte drejninger.</div>
+  </div>
+</section>
+
+<section class="alt" id="next-releases">
+  <div class="wrap">
+    <p class="kicker">Fremad</p>
+    <h2>Vi følger de næste udgivelser</h2>
+    <p>De andre klienter bliver også bedre, og vi måler deres forhåndsudgivelser, så snart de
+    dukker op, så disse tabeller aldrig halter efter en rivals næste stabile version. Den
+    31. juli 2026 kørte vi NZBGets 26.3-testing-build (28. juli) og SABnzbds 5.1.0RC1 mod de
+    fastlåste stabile versioner på denne side - hvert par flettet ældst/nyest/nyest/ældst på
+    samme maskine med identiske indstillinger, og hver kørsel verificeret helt ned til den
+    udpakkede fil. To ben: det reproducerbare 9.68&nbsp;GB-sæt serveret fra RAM (Europa M1 Ultra)
+    og den ~35&nbsp;GB hash-navngivne 4K-udgivelse over de sædvanlige 6 udbydere.</p>
+
+    <table>
+      <tr><th>9.68 GB fra RAM</th><th class="num">tid til færdig</th><th class="num">CPU</th><th class="num">maksimal hukommelse (RSS)</th></tr>
+      <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
+      <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
+      <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
+      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
+    </table>
+
+    <table>
+      <tr><th>~35 GB, 6 udbydere</th><th class="num">tid til færdig</th><th class="num">CPU</th><th class="num">maksimal hukommelse (RSS)</th></tr>
+      <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
+      <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
+      <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
+      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
+    </table>
+
+    <p>Hvad der flyttede sig: NZBGets forhåndsudgivelse skærer sin CPU-omkostning med omtrent en
+    tredjedel og sit maksimale hukommelsesforbrug med op til halvdelen ved uændrede sluttider -
+    ægte effektiviseringsarbejde (en rettelse af en spin-løkke, rettelser af datakapløb, opdaterede
+    udpakningsværktøjer). SABnzbds RC måler inden for støjen af 5.0.4 på begge ben; dens
+    ydelsesændringer sigter mod genforsøg og parsing af header-krypterede poster, og de veje bliver
+    ikke brugt af disse ben. <b>Tid til en brugbar fil, det mål denne side leder med, flyttede sig
+    ikke for nogen af klienterne på nogen af benene.</b></p>
+
+    <p>rustnzb bevæger sig hurtigst af alle - fem udgivelser mellem vores fastlåste 1.3.4 (18. juli) og 1.3.9 (28. juli) - så vi byggede 1.3.9 fra kildekoden og kørte det om samme dag. Dets ændringslog lover rettelser for præcis det, vores tabeller rapporterer (»gøre direkte udpakning pålidelig«, »afvise fuldførte job uden brugbart output«): målt ankommer den slørede 35&nbsp;GB-udgivelse stadig som rå arkivdele markeret <i>færdigt</i>, både på det enkelte job og i køen. Det, der ændrede sig, er omkostning og tempo: tider omkring 10% hurtigere, og den processormættende malen, vi målte på 1.3.4, manglede i hver etape på 1.3.9 - selv om en gentagelse af 1.3.4 samme dag også målte lavt, så den omkostning afhænger af forholdene frem for at være løst af versionen, og vi anfører den intet sted som ét enkelt tal.</p>
+
+    <p class="note" style="text-align:start">Tallene i dette afsnit er forhåndsudgivelser og kan kun
+    sammenlignes inden for dette afsnit (riggens tilstand er en anden end på benene ovenfor - det er
+    parret stabil mod forhåndsudgivelse, der er pointen). Når disse versioner udkommer som stabile,
+    kører vi hvert offentliggjort ben, de berører, om igen og erstatter tallene frem for at lægge
+    til dem, efter den stående regel i bunden.</p>
   </div>
 </section>
 
@@ -421,9 +741,19 @@
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
   </div>
-  <p class="fine">Benchmark-data: konkurrence-runder 19.-24. juli 2026. Klientversioner:
-  SABnzbd 5.0.4, NZBGet 26.2 (nzbget.com-fork), rustnzb 1.3.4. Hvis en nyere version af
-  en klient ændrer et resultat væsentligt, kører vi igen og opdaterer.</p>
+  <p class="fine">Benchmark-data: konkurrence-runder 19&ndash;31. juli 2026. Klientversioner:
+  SABnzbd 5.0.4, NZBGet 26.2 (nzbget.com-fork), rustnzb 1.3.4, Weaver v0.7.5 officiel arm64
+  (klientlofts-benet brugte dens kilde-build <code>410c114</code> fra 23. juli; den oplyser ingen
+  egen versionsstreng).
+  Hvis en nyere version af en klient ændrer et resultat væsentligt, kører vi igen og opdaterer -
+  afsnittet "Vi følger de næste udgivelser" ovenfor er det løfte holdt på forskud.
+  De vigtigste udbyderben (35, 77 og 190 GB) og den instrumenterede omkostningsrunde blev målt igen
+  <b>31. juli 2026 på den udgivne build</b>, hver klient, hvert ben over TLS, og de erstatter tallene
+  fra 20&ndash;24. juli frem for at lægge til dem. De få tilbageværende ældre ben (kø-runden,
+  lav-hukommelses-stigen, østkyst-rækkerne) ligger før arbejdet på motoren sidst i juli og
+  undervurderer den nuværende build frem for at smigre den. Vi forbereder også testfiler, hvis
+  NZB-filer vi kan offentliggøre, så udbyderbenene bliver uafhængigt reproducerbare på samme måde
+  som klientlofts- og komponentbenene allerede er.</p>
 </div></footer>
 
 </body>

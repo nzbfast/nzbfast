@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>محک‌ها - nzbfast</title>
-<meta name="description" content="nzbfast در برابر SABnzbd، NZBGet و rustnzb: 4 کلاینت × 7 سناریو روی سخت‌افزار یکسان. نتایج صادقانه از جمله لِگ‌هایی که nzbfast در آنها نمی‌برد، همراه با گام‌های بازتولید.">
+<meta name="description" content="nzbfast در برابر SABnzbd، NZBGet، rustnzb و کلاینت‌های دیگر: 8 سناریو روی سخت‌افزار یکسان. نتایج صادقانه از جمله لِگ‌هایی که nzbfast در آنها نمی‌برد، همراه با گام‌های بازتولید.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,24 +44,24 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>محک‌ها</h1>
-  <p class="sub">چهار کلاینت، هفت سناریو، سخت‌افزار و ارائه‌دهنده‌های یکسان، اجراها
+  <p class="sub">پنج کلاینت، هشت سناریو، سخت‌افزار و ارائه‌دهنده‌های یکسان، اجراها
   درهم‌تنیده تا رانش ارائه‌دهنده خنثی شود. معیار <b>زمان تا یک فایل قابل‌استفاده</b> است:
   دانلودشده، تأییدشده، استخراج‌شده. شامل لِگ‌هایی که در آنها نمی‌بریم.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">در این صفحه</p>
-  <nav aria-label="در این صفحه" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">راه‌اندازی</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">آنچه واقعاً در یوزنت منتشر می‌شود</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های ذخیره‌شده: یک صف کار</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های رمزگذاری‌شده: نصف نوشتن</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">190.6 GB ← یک mkv واحد 167.9 GB (اروپا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">زمان تا فایل قابل‌استفاده، بر اساس اندازهٔ کار</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">روشن نگه داشتن خط در سراسر یک صف (ساحل شرقی، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">لِگ‌هایی که در آنها نمی‌بریم</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">نردبان حافظهٔ کم: 190 GB در ~1.1 GB از RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ده شکل تودرتو: چه کسی بدون شما تمام می‌کند</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">موتورهای بازکردن و تعمیر، در مسابقهٔ انفرادی</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">هر کلاینت چه می‌تواند بکند</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">موتور خط‌های واقعی را اشباع می‌کند</a></nav>
+  <nav aria-label="در این صفحه" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">راه‌اندازی</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">آنچه واقعاً در یوزنت منتشر می‌شود</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های ذخیره‌شده: یک صف کار</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های رمزگذاری‌شده: نصف نوشتن</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">190.6 GB ← یک mkv واحد 167.9 GB (اروپا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">زمان تا فایل قابل‌استفاده، بر اساس اندازهٔ کار</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">روشن نگه داشتن خط در سراسر یک صف (ساحل شرقی، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">لِگ‌هایی که در آنها نمی‌بریم</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">نردبان حافظهٔ کم: 190 GB در ~1.1 GB از RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ده شکل تودرتو: چه کسی بدون شما تمام می‌کند</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف کلاینت: ‏9.68 GB از RAM، و خودتان می‌توانید بازسازی‌اش کنید</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">محک‌های فنی‌تر، برای کسانی که داده بیشتر می‌خواهند</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">هر کلاینت چه می‌تواند بکند</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">موتور خط‌های واقعی را اشباع می‌کند</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">یک کار چه هزینه‌ای برای ماشین دارد</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">رصد انتشارهای بعدی</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
     <p class="kicker">اول روش‌شناسی</p>
     <h2>راه‌اندازی</h2>
     <ul class="plain">
-      <li><b>کلاینت‌ها:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 (نزدیک‌ترین همتای Rust)، همگی روی همان ماشین در هر سناریو (ماشین‌های سری M اپل: «اروپا» M1 Ultra روی 10&nbsp;GbE، «ساحل شرقی» M3 Ultra خط ~2.4–3.0 Gbps). اعداد خود nzbfast نسخه‌های ۱.۰.۲ تا ۱.۰.۷ را در بر می‌گیرد، همان‌طور که موتور تغییر کرده است؛ اجراهای قدیمی‌تر نسخهٔ منتشرشده را دست‌کم می‌گیرند نه آنکه بزرگ‌نمایی کنند.</li>
+      <li><b>کلاینت‌ها:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5، همگی روی همان ماشین در هر سناریو (ماشین‌های سری M اپل: «اروپا» M1 Ultra روی 10&nbsp;GbE، «ساحل شرقی» M3 Ultra خط ~2.4–3.0 Gbps). لِگ‌های شاخص ارائه‌دهنده (35، 77 و 190 GB) در 31 ژوئیهٔ 2026 روی ساخت منتشرشدهٔ nzbfast با هر پنج کلاینت دوباره سنجیده شدند، هر لِگ روی TLS. چند لِگ قدیمی‌تر باقی مانده‌اند و خودشان این را می‌گویند؛ آنها ساخت منتشرشده را دست‌کم می‌گیرند نه آنکه بزرگ‌نمایی کنند.</li>
       <li><b>انصاف:</b> همان 6 ارائه‌دهنده × 8 اتصال، TLS همه‌جا، لِگ‌ها پشت‌سرهم درهم‌تنیده اجرا می‌شوند. هر رقیب به بهترین حالت مستندش تنظیم شده: SABnzbd به <code>pipelining_requests=8</code> رسید (<b>با 1 عرضه می‌شود، یعنی بدون خط‌لوله</b>؛ همان تنظیم به‌تنهایی زمان 190 GB آن را از 24m24s به 19m02s رساند)، NZBGet به ArticleCache/DirectWrite/DirectUnpack/ParQuick، rustnzb به پیکربندی مستندش.</li>
       <li><b>حالت پایانی:</b> یک فایل تأییدشده، استخراج‌شده و قابل‌استفاده، نه «دانلود تمام شد». آن چیزی است که واقعاً منتظرش می‌مانید.</li>
-      <li><b>بازتولیدپذیری:</b> هر ادعا به یک ورودی تاریخ‌دار در گزارش محک ما ردیابی می‌شود، ثبت‌شده با اسکریپت‌های راننده‌ای که آن را تولید کرده‌اند: ساعت دیواری + شمارنده‌های بایت رابط + اوج RSS درخت-فرایند، با تفکیک 1–2 ثانیه.</li>
+      <li><b>بازتولیدپذیری:</b> هر ادعا تاریخ‌دار است و به یک روش سنجیده می‌شود: زمان سپری‌شده + شمارنده‌های بایت رابط + اوج RSS درخت-فرایند، با تفکیک 1–2 s. هرجا یک لِگ روی یک NZB منتشرشدهٔ عمومی اجرا شود، نامش را می‌آوریم تا خودتان بتوانید اجرایش کنید.</li>
     </ul>
   </div>
 </section>
@@ -91,26 +91,32 @@
     <p class="kicker">سناریو 1 · تمیز، عظیم</p>
     <h2>190.6 GB ← یک mkv واحد 167.9 GB (اروپا، 10 GbE)</h2>
     <div class="bars">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:23%"></i></span><span class="t">4m 33s</span></div>
-      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:41%"></i></span><span class="t">7m 58s · +75%</span></div>
-      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:100%"></i></span><span class="t">19m 32s · +329%</span></div>
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:20%"></i></span><span class="t">4m 47s</span></div>
+      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:39%"></i></span><span class="t">9m 06s · +90%</span></div>
+      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:82%"></i></span><span class="t">19m 29s · +307%</span></div>
+      <div class="bar"><span>‏Weaver (گرم)</span><span class="trk"><i style="width:100%"></i></span><span class="t">23m 38s · +394%</span></div>
       <div class="bar"><span>rustnzb 1.3.4</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">بدون خروجی¹</span></div>
     </div>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>rustnzb 1.3.4</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>‏Weaver (گرم)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
-        <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">4m 33s</td><td class="lose">7m 58s (+75%)</td><td class="lose">19m 32s (+329%)</td><td class="bad">هیچ¹</td></tr>
-        <tr><td>GB روی سیم</td><td class="win num">169.6</td><td class="num">169.8</td><td class="num">169.7</td><td class="num">186.5</td></tr>
-        <tr><td>اوج RSS</td><td class="num">1.4 GB²</td><td class="num">1.5 GB</td><td class="num">1.8 GB</td><td class="win num">0.6 GB</td></tr>
+        <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td><td class="bad">هیچ¹</td></tr>
+        <tr><td>GB روی سیم</td><td class="win num">169.7</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">186.6</td></tr>
+        <tr><td>زمان پردازنده</td><td class="win num">290 s</td><td class="num">764 s</td><td class="num">2,081 s</td><td class="num">1,625 s</td><td class="num">5,745 s</td></tr>
+        <tr><td>اوج حافظه (RSS)</td><td class="num">1.1 GB²</td><td class="num">2.0 GB</td><td class="num">1.8 GB</td><td class="num">2.1 GB</td><td class="win num">0.6 GB</td></tr>
+        <tr><td>اوج دیسک اضافی</td><td class="win num">156.6 GB (1.0×)</td><td class="num">312.9 GB (2.0×)</td><td class="num">312.8 GB (2.0×)</td><td class="num">317.3 GB (2.0×)</td><td class="num">–¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">¹ rustnzb جابه‌جایی بایت‌ها را در 5m 42s تمام کرد در حالی که
-    186.5 GB کشیده بود (10% سیم بیشتر از هرکسی) اما <b>هیچ رسانهٔ استخراج‌شده‌ای باقی نگذاشت</b>؛
-    سومین دور شکست‌خوردهٔ پیاپی‌اش روی این پست.
-    · ² حافظهٔ nzbfast <em>بودجهٔ پیکربندی‌شده‌اش</em> را دنبال می‌کند، نه کار را: این دور با
-    بودجهٔ خودکار پیش‌فرض اجرا شد و در 1.4 GB به اوج رسید؛ یک بودجهٔ عمداً عظیم 64 GB فقط 4% می‌خرد
-    (4m 22s)، و با سقف <b>1 GB</b> همان کار 190 GB باز هم کامل می‌شود
-    (نردبان حافظهٔ کم را پایین‌تر ببینید). در دور پیشین ساحل شرقی (خط ~2.4–3 Gbps) همان
+    <p class="note" style="text-align:start">در 31 ژوئیهٔ 2026 روی ساخت منتشرشده دوباره سنجیده شد،
+    هر پنج کلاینت، همهٔ ارائه‌دهنده‌ها روی TLS؛ این زمان با بهترین رکورد ما در 20 ژوئیه (284 s) در
+    محدودهٔ پراکندگی ارائه‌دهنده برابر است. ¹ rustnzb در 5m 48s <i>تمام‌شده</i> گزارش داد در حالی که
+    186.6 GB کشیده بود (10% سیم بیشتر از هرکسی) اما یک <b>پوشهٔ خروجی خالی</b> بر جا گذاشت؛
+    چهارمین دور شکست‌خوردهٔ پیاپی‌اش روی این پست.
+    · ² حافظهٔ nzbfast <em>بودجهٔ پیکربندی‌شده‌اش</em> را دنبال می‌کند، نه کار را: بودجهٔ خودکار
+    پیش‌فرض در 1.1 GB به اوج رسید، و با سقف <b>1 GB</b> همان کار 190 GB باز هم کامل می‌شود
+    (نردبان حافظهٔ کم را پایین‌تر ببینید). ستون اوج دیسک 2.0× ستون عملی ماجراست: در این کار
+    کلاینت‌های بنویس-و-باز-کن به ~313 GB فضای آزاد نیاز دارند جایی که nzbfast به 157 GB نیاز دارد.
+    در دور پیشین ساحل شرقی (خط ~2.4–3 Gbps) همان
     سناریو 9m 00s اجرا شد در برابر NZBGet +30% و SABnzbd +111%. فاصله در سراسر سرعت‌های خط پابرجاست.</p>
   </div>
 </section>
@@ -120,20 +126,26 @@
     <p class="kicker">سناریو 2 · فاصله با اندازه رشد می‌کند</p>
     <h2>زمان تا فایل قابل‌استفاده، بر اساس اندازهٔ کار</h2>
     <p class="lead">تک‌گذر یعنی بدون گذر تأیید/باز کردن پس از دانلود، پس هرچه کار بزرگ‌تر باشد،
-    جلوتر فرود می‌آید. اجراهای متوالی روی همان ماشین:</p>
+    جلوتر فرود می‌آید. اجراهای متوالی روی همان ماشین، جز آنجا که خلافش گفته شده در 31 ژوئیهٔ 2026
+    روی ساخت منتشرشده دوباره سنجیده شد (اروپا، 10 GbE، همه با TLS):</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>کار</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th></tr></thead>
+      <thead><tr><th>کار</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>‏Weaver (گرم)</th></tr></thead>
       <tbody>
-        <tr><td>7.4 GB REMUX (اروپا، 10 GbE)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td></tr>
-        <tr><td>35 GB مبهم 4K (اروپا)</td><td class="win">67 s</td><td class="lose">108 s (+61%)</td><td class="lose">285 s (+325%)</td></tr>
-        <tr><td>87 GB 4K (ساحل شرقی)</td><td class="win">272 s</td><td class="lose">370 s (+36%)</td><td class="lose">708 s (+160%)</td></tr>
-        <tr><td>87 GB روی دیسک با 97 GB آزاد (اروپا)</td><td class="win">3m 08s</td><td class="bad">نمی‌تواند اجرا شود²</td><td class="bad">نمی‌تواند اجرا شود²</td></tr>
-        <tr><td>190.6 GB (ساحل شرقی)</td><td class="win">9m 00s</td><td class="lose">11m 43s (+30%)</td><td class="lose">19m 02s (+111%)</td></tr>
+        <tr><td>7.4 GB REMUX (دور قدیمی‌تر)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
+        <tr><td>35 GB مبهم 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
+        <tr><td>77 GB 4K</td><td class="win">90 s</td><td class="lose">206 s (+129%)</td><td class="lose">504 s (+460%)</td><td class="lose">509 s (+466%)</td></tr>
+        <tr><td>87 GB روی دیسک با 97 GB آزاد (دور قدیمی‌تر)</td><td class="win">3m 08s</td><td class="bad">نمی‌تواند اجرا شود²</td><td class="bad">نمی‌تواند اجرا شود²</td><td class="bad">نمی‌تواند اجرا شود²</td></tr>
+        <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">² اوج ردپای آن‌ها (جلدها + خروجی بازشده
+    <p class="note" style="text-align:start">rustnzb هر لِگ را اجرا کرد و در هیچ‌کدام فایل
+    قابل‌استفاده‌ای تحویل نداد، پس اینجا ستونی ندارد؛ جزئیاتش در بخش هزینه در پایین است. ‏Weaver
+    زیر قرارداد بهترین حالت گرمش سنجیده می‌شود (سرویس ماندگار، یک کار گرم‌کردنِ دورریز، اتصال‌ها
+    پیش از شروع ساعت تا 120 بالا برده شده). ² اوج ردپای آن‌ها (جلدها + خروجی بازشده
     هم‌زمان، ~156 GB) از 97 GB آزاد فراتر رفت. تک‌گذر به 1× اندازهٔ محتوا نیاز دارد:
-    دیسک موردنیاز شما را نصف می‌کند، نه فقط زمان را.</p>
+    دیسک موردنیاز شما را نصف می‌کند، نه فقط زمان را. لِگ‌های تکراری nzbfast روی پیکره‌های 35 و
+    77 GB در همان صبح به‌طور میانگین 39.7 s و 94 s شدند (هرکدام 3 لِگ)، پس اعداد تک‌لِگی بالا
+    اجراهای سریعِ گلچین‌شده نیستند.</p>
   </div>
 </section>
 
@@ -141,16 +153,81 @@
   <div class="wrap">
     <p class="kicker">سناریو 3 · پست مبهم</p>
     <h2>35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</h2>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>rustnzb</th></tr></thead>
+    <p class="lead">هر فایل در این پست یک درهم‌ساز شانزده‌شانزدهی است؛ بار داده تنها از فراداده‌های PAR2 نام واقعی‌اش را بازمی‌یابد. در ۳۱ ژوئیهٔ ۲۰۲۶ روی نسخهٔ منتشرشده بازاجرا شد، هر پنج کارخواه، همه روی TLS (نقص چیدمان پشت سیگنال پایان SABnzbd - رابط تاریخچه‌اش به‌طور پیش‌فرض ۱۰ جایگاه برمی‌گرداند - برطرف شده است، پس هر عدد زیر به‌روز است):</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (گرم)</th><th>rustnzb</th></tr></thead>
       <tbody>
-        <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">96 s</td><td class="lose">153 s (+59%)</td><td class="lose">259 s (+170%)</td><td class="bad">بدون فایل قابل‌استفاده³</td></tr>
-        <tr><td>اوج RSS</td><td class="win num">1.55 GB</td><td class="num">3.7 GB</td><td class="num">8.8 GB</td><td class="num">3.6 GB</td></tr>
+        <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">بدون فایل قابل‌استفاده³</td></tr>
+        <tr><td>زمان پردازنده</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
+        <tr><td>اوج حافظه (RSS)</td><td class="num">0.45 GB</td><td class="num">1.31 GB</td><td class="num">1.98 GB</td><td class="num">1.13 GB</td><td class="win num">0.15 GB</td></tr>
+        <tr><td>اوج دیسک اضافی</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">³ rustnzb در 119 s دانلود کرد، کار را
-    <i>تمام‌شده</i> نشان‌دار کرد، و جلدهای مبهم خام را تحویل داد: بدون تغییرنام، بدون استخراج.
-    nzbfast از فرادادهٔ PAR2 ابهام‌زدایی و در جریان استخراج کرد، صفر بلوک بازخوانی.</p>
+    <p class="note" style="text-align:start">³ rustnzb در ۹۷ ثانیه دانلود کرد، کار را <i>انجام‌شده</i> علامت زد و بخش‌های مبهم‌شدهٔ خام را تحویل داد: بدون تغییر نام، بدون استخراج - هم روی ۱.۳.۴ و هم روی ۱.۳.۹ († رقم دیسکش تنها دانلود است). nzbfast ابهام را از فراداده‌های PAR2 گشود و حین دانلود استخراج کرد، صفر بلوک بازخوانی‌شده؛ بازهٔ 76&ndash;83 ثانیه نخستین و آخرین مرحلهٔ آن در این دور است. در برابر نسخهٔ ۲۳ ژوئیهٔ این جدول، نسخهٔ منتشرشده اینجا سریع‌تر است و ۳.۴ برابر حافظهٔ کمتری می‌گیرد (1.55 → 0.45 GB): کار تک‌گذر اواخر ژوئیه، سنجیده روی همان دستگاه و همان پیکره.</p>
+  </div>
+</section>
+
+<section id="job-cost">
+  <div class="wrap">
+    <p class="kicker">دورِ ابزارگذاری‌شده</p>
+    <h2>یک کار چه هزینه‌ای برای ماشین دارد: پردازنده، حافظه، دیسک، ورودی/خروجی</h2>
+    <p class="lead">ساعت به‌تنهایی پنهان می‌کند که کار کجا رفته است، پس در 31 ژوئیهٔ 2026 هر کلاینت
+    همان سه کار را با ابزارهای اندازه‌گیری روشن اجرا کرد: ثانیه‌های پردازندهٔ درخت-فرایند (مستقل از
+    سرعت خط)، اوج حافظه (RSS)، بیشترین دیسک بالاتر از نقطهٔ آغاز لِگ (نمونه‌برداری هر 2 s)، و کل
+    ترافیک ورودی/خروجی. همان ماشین، همان شش ارائه‌دهنده، همه با TLS، یک لِگ ابزارگذاری‌شده برای هر
+    کلاینت در هر کار. این همان ادعای تک‌گذر است که سنجیده شده نه ادعا شده: اوج دیسک nzbfast خودِ
+    محتواست، و ورودی/خروجی‌اش برابر است با یک بار نوشتن هر بایت.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>35 GB مبهم (محتوا 32 GB)</th><th>زمان</th><th>پردازنده</th><th>ثانیهٔ پردازنده/GB</th><th>اوج حافظه (RSS)</th><th>اوج دیسک اضافی</th><th>ورودی/خروجی دیسک</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">39 s</td><td class="win num">59 s</td><td class="win num">1.7</td><td class="num">0.41 GB</td><td class="win num">31.8 GB (1.0×)</td><td class="win num">31.9 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">85 s</td><td class="num">157 s</td><td class="num">4.6</td><td class="num">1.45 GB</td><td class="num">62.0 GB (1.9×)</td><td class="num">66.2 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">217 s</td><td class="num">416 s</td><td class="num">12.1</td><td class="num">1.38 GB</td><td class="num">63.6 GB (2.0×)</td><td class="num">66.1 GB</td></tr>
+        <tr><td>‏Weaver (گرم)</td><td class="num">258 s</td><td class="num">304 s</td><td class="num">8.8</td><td class="num">1.21 GB</td><td class="num">64.2 GB (2.0×)</td><td class="num">94.4 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">کامل نشد† (75 s)</td><td class="bad num">1,201 s</td><td class="bad num">31.7</td><td class="num">0.19 GB</td><td class="num">34.8 GB†</td><td class="num">35.6 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>77 GB (محتوا 72 GB)</th><th>زمان</th><th>پردازنده</th><th>ثانیهٔ پردازنده/GB</th><th>اوج حافظه (RSS)</th><th>اوج دیسک اضافی</th><th>ورودی/خروجی دیسک</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">90 s</td><td class="win num">135 s</td><td class="win num">1.7</td><td class="num">0.57 GB</td><td class="win num">71.3 GB (1.0×)</td><td class="win num">71.5 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">206 s</td><td class="num">348 s</td><td class="num">4.5</td><td class="num">1.30 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">171.5 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">504 s</td><td class="num">978 s</td><td class="num">12.6</td><td class="num">3.03 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">258.5 GB</td></tr>
+        <tr><td>‏Weaver (گرم)</td><td class="num">509 s</td><td class="num">635 s</td><td class="num">8.2</td><td class="num">1.53 GB</td><td class="num">145.3 GB (2.0×)</td><td class="num">315.2 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">کامل نشد† (166 s)</td><td class="bad num">2,665 s</td><td class="bad num">31.3</td><td class="num">0.36 GB</td><td class="num">80.0 GB†</td><td class="num">80.8 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>190 GB (محتوا 157 GB)</th><th>زمان</th><th>پردازنده</th><th>ثانیهٔ پردازنده/GB</th><th>اوج حافظه (RSS)</th><th>اوج دیسک اضافی</th><th>ورودی/خروجی دیسک</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">287 s</td><td class="win num">290 s</td><td class="win num">1.7</td><td class="num">1.11 GB</td><td class="win num">156.6 GB (1.0×)</td><td class="win num">159.0 GB</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">546 s</td><td class="num">764 s</td><td class="num">4.5</td><td class="num">1.93 GB</td><td class="num">312.9 GB (2.0×)</td><td class="num">393.0 GB</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">1,169 s</td><td class="num">2,081 s</td><td class="num">12.3</td><td class="num">1.80 GB</td><td class="num">312.8 GB (2.0×)</td><td class="num">586.8 GB</td></tr>
+        <tr><td>‏Weaver (گرم)</td><td class="num">1,418 s</td><td class="num">1,625 s</td><td class="num">9.6</td><td class="num">2.04 GB</td><td class="num">317.3 GB (2.0×)</td><td class="num">808.9 GB</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="bad">کامل نشد† (348 s)</td><td class="bad num">5,745 s</td><td class="bad num">30.8</td><td class="num">0.54 GB</td><td class="bad">بدون خروجی†</td><td class="num">74.0 GB†</td></tr>
+      </tbody>
+    </table></div>
+
+    <p><b>همان کار، ترسیم‌شده.</b> پردازنده و اوج دیسک برای کار 190 GB، مقیاس‌شده نسبت به
+    سنگین‌ترین کلاینت:</p>
+    <div class="bars wide">
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:5%"></i></span><span class="t">290 ثانیهٔ پردازنده</span></div>
+      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:13%"></i></span><span class="t">764 ثانیهٔ پردازنده</span></div>
+      <div class="bar"><span>‏Weaver (گرم)</span><span class="trk"><i style="width:28%"></i></span><span class="t">1,625 ثانیهٔ پردازنده</span></div>
+      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:36%"></i></span><span class="t">2,081 ثانیهٔ پردازنده</span></div>
+      <div class="bar"><span>rustnzb</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">5,745 ثانیهٔ پردازنده · بدون خروجی†</span></div>
+    </div>
+    <div class="bars wide" style="margin-top:14px">
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:49%"></i></span><span class="t">156.6 GB اوج دیسک · 1.0×</span></div>
+      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.8 GB · 2.0×</span></div>
+      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.9 GB · 2.0×</span></div>
+      <div class="bar"><span>‏Weaver (گرم)</span><span class="trk"><i style="width:100%"></i></span><span class="t">317.3 GB · 2.0×</span></div>
+    </div>
+
+    <p class="note" style="text-align:start">† rustnzb در هیچ‌یک از سه کار استخراج نکرد با آنکه هر بار <i>انجام‌شده</i> گزارش می‌داد؛ ارقام دیسکش نسخهٔ استخراجی را که هر کارخواه دیگری پرداخت جا می‌اندازد، پردازنده‌اش (حدود ۱۶ هسته اشباع در سرتاسر مرحله‌ها، ۲۰ برابر nzbfast به‌ازای هر گیگابایت در این مرحله‌ها) مانند آسیابِ تعمیرِ پیوسته‌ای به نظر می‌رسد که هرگز بار داده را تولید نکرد - یک بازاجرا در همان روز و مسابقهٔ دوبارهٔ ۱.۳.۹ هر دو نبودِ آن آسیاب را سنجیدند، پس این وضعیتی است که اجراهایش ممکن است به آن بربخورند نه یک ثابت، و این خانه‌ها همان چیزی است که مرحله‌های سنجیدهٔ ما ثبت کردند نه نرخی که همیشه می‌پردازد؛ و در کار ۱۹۰ گیگابایتی پوشهٔ خروجی‌اش خالی بود. خوانش‌ها در هر سه اندازه: nzbfast از ۳۵ تا ۱۹۰ گیگابایت روی <b>۱.۷ ثانیهٔ پردازنده به‌ازای هر گیگابایت و اوج دیسک ۱.۰ برابر بار داده</b> صاف می‌ماند؛ NZBGet و SABnzbd اوج تمیز ۲.۰ برابر را نگه می‌دارند.</p>
   </div>
 </section>
 
@@ -158,19 +235,16 @@
   <div class="wrap">
     <p class="kicker">سناریو 4 · صف سه‌تایی</p>
     <h2>روشن نگه داشتن خط در سراسر یک صف (ساحل شرقی، ~43 GB)</h2>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>rustnzb</th><th>NZBGet</th><th>SABnzbd</th></tr></thead>
+    <p class="lead">سه کار که یک‌جا افزوده شدند - یک REMUX ‏۷.۴ گیگابایتی، انتشار 4K ‏۳۵ گیگابایتی با نام‌های درهم‌ساز و یک پست کوچک ۰.۳۵ گیگابایتی - و ساعت تا وقتی می‌رود که هر بار داده روی دیسک، راستی‌آزمایی‌شده و استخراج‌شده باشد. در ۳۱ ژوئیهٔ ۲۰۲۶ روی نسخهٔ منتشرشده بازسنجی شد، هر پنج کارخواه؛ یکی از شش فراهم‌کننده در سرتاسر دور احراز هویت را رد کرد، به‌طور یکسان برای هر کارخواه.</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th></th><th>nzbfast</th><th>rustnzb 1.3.4 / 1.3.9</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (گرم)</th></tr></thead>
       <tbody>
-        <tr><td>زمان دیواری صف</td><td class="win">122 s</td><td class="num">136 s</td><td class="num">162 s</td><td class="num">277 s</td></tr>
-        <tr><td>بیکاری خط (&lt;20 MB/s)</td><td class="win">2 s (2%)</td><td class="num">16 s (12%)</td><td class="num">0 s</td><td class="bad">168 s (61%)</td></tr>
+        <tr><td>زمان تا پایان صف</td><td class="win">144&ndash;148 s</td><td class="bad">کامل نشد¹ (138 / 125 s)</td><td class="num">164 s</td><td class="num">249 s</td><td class="num">328 s</td></tr>
+        <tr><td>کارهای تحویل‌شدهٔ قابل‌استفاده</td><td class="win">3/3</td><td class="bad">2/3¹ (هر دو نسخه)</td><td class="num">3/3</td><td class="num">3/3</td><td class="num">3/3</td></tr>
+        <tr><td>بیکاری خط (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">سه شکل از یک مسئله: هم‌پوشانی-دنبالهٔ nzbfast
-    خط را از لبه تا لبه مشغول نگه می‌دارد؛ NZBGet هرگز بیکار نمی‌شود اما در حین باز کردن هم‌زمان ~35% کندتر
-    اجرا می‌شود؛ SABnzbd سریع دانلود می‌کند، سپس خط را در طول پس‌پردازش سریالی <b>61% اوقات خاموش</b> رها
-    می‌کند. در گونهٔ تاب‌آوری (یک کار با هدرهای RAR رمزگذاری‌شده)،
-    صف SABnzbd روی کار رمزگذاری‌شده گیر کرد و تنها 1 از 3 کار اصلاً کامل شد؛ nzbfast
-    آن را با یک پیام روشن پارک کرد و بقیه را تمام کرد.</p>
+    <p class="note" style="text-align:start">nzbfast در میان کارخواه‌هایی که هر سه بار داده را تحویل می‌دهند نخستین است که تمام می‌کند. ¹ ستون rustnzb یک انصراف است نه یک نتیجه: ساعتش نخست ایستاد (۱۳۸ ثانیه روی ۱.۳.۴، ۱۲۵ ثانیه روی ۱.۳.۹ کنونی، که اجرا شد تا بهترین فرصت به آن داده شود) زیرا کار ۳۵ گیگابایتی را به شکل بخش‌های مبهم‌شدهٔ خام با نشان <i>Completed</i> تحویل داد - بدون تغییر نام، بدون استخراج، در هر دو نسخه (بخش پیگیری پایین‌تر را ببینید). خط پایانی که از آن نگذشته است با کارخواه‌هایی که گذشته‌اند سنجیدنی نیست، پس هر خانه در آن ستون به‌جای سریع، نامعتبر علامت خورده است. SABnzbd باز هم خط را <b>۶۳٪ از مسیر تاریک</b> رها می‌کند در حین پردازش پایانی سریالی - تنها عددی اینجا که در هر نسخه از این جدول ثابت مانده است. NZBGet هرگز بیکار نمی‌ماند اما بهای استخراج هم‌زمان را در زمان پایانی‌اش می‌پردازد. ² سهم بیکاری خودمان صادقانه و به‌روز است، و همان عددی است که بیش از همه جابه‌جا شد: دو تن از شش فراهم‌کننده در این دور در دسترس نبودند، و هم‌پوشانی میان کارها به یک کارساز سالم و آزاد نیاز دارد تا کار بعدی روی آن اجرا شود. با سلامت هر شش، نسخهٔ پیشین ۲٪ بیکاری سنجیده بود. موتور اکنون کنار می‌کشد و همین را می‌گوید، به‌جای آنکه کار بعدی را روی کارسازی آغاز کند که نمی‌تواند پاسخ دهد - تغییری که همین دور برانگیخت، چون نخستین سنجش نشانش داد که روی کارسازی مرده بنا می‌کند. در گونهٔ تاب‌آوری (یک کار با سرآیندهای رمزگذاری‌شدهٔ RAR، دوری قدیمی‌تر) صف SABnzbd روی کار رمزگذاری‌شده گیر کرد و تنها ۱ کار از ۳ به پایان رسید؛ nzbfast آن را با پیامی روشن کنار گذاشت و بقیه را تمام کرد.</p>
   </div>
 </section>
 
@@ -180,7 +254,9 @@
     <h2>لِگ‌هایی که در آنها نمی‌بریم</h2>
     <div>
     </div>
-    <p class="lead">هر دو مرحله‌ای که اینجا بودند روی نسخهٔ منتشرشده دوباره اندازه‌گیری شدند و هیچ‌کدام دیگر باخت نیستند: پست آسیب‌دیدهٔ حالت store اکنون ۳۰ ثانیه از ما می‌گیرد در برابر ۳۸ ثانیهٔ NZBGet، و بازسازی تنها از روی توازن در ۹ ثانیه تمام می‌شود به‌جای ۱۹ ثانیه، در مرحله‌ای که NZBGet در همان زمان بازمی‌گردد اما چیزی تحویل نمی‌دهد. این بخش را به‌جای حذف، سر جایش نگه می‌داریم: باخت‌های ما اینجا می‌آیند و دور بعدی که یکی پیدا کند، آن را همین‌جا می‌گذارد.</p>
+    <p class="lead">هر مرحله‌ای که در این بخش نشسته بود سرانجام روی نسخهٔ منتشرشدهٔ تازه‌تری بازسنجی شد، و این دور آن را خالی کرد، که جای احتیاط دارد نه خرسندی. آنچه رفت، هر مورد کنار جدول خودش توضیح داده شده نه در سکوت ویرایش شده: سنگین‌ترین تعمیر PAR2، که در دو نسخه از این صفحه روی دو دستگاه باخت بود؛ بازسازی بخش‌های بازیابی <code>.rev</code> گمشده، بزرگ‌ترین باختی که این صفحه بر دوش کشیده، با ۶.۶ برابر کندتر از ابزار خودِ RARLab و اکنون بردی باریک؛ و سه صورت استخراج که از چند درصد تا یک‌سوم از unrar عقب بودند، جایی که علت باریک‌تر از توضیحی درآمد که برایش منتشر کرده بودیم.</p>
+
+    <p class="lead">آنچه از میان <em>نرفته</em> است بده‌بستان پشت آن ارقام است، و این بخش اکنون همین را می‌گوید: <b>ما بیش از ابزارهای مستقل حافظه مصرف می‌کنیم</b>، و سنگین‌ترین تعمیر اکنون بیش از گذشته مصرف می‌کند. استخراج‌کننده و تعمیرگر ما ساخته شده‌اند تا همراه یک دانلود جاری بروند نه اینکه یک‌بار از خط فرمان اجرا شوند، و این حافظهٔ مقیم هزینه دارد؛ جزئیات کنار جدول‌های مؤلفه‌هاست. اگر محدودیت شما کوچک‌ترین ردپای ممکن برای کاری یک‌باره است، ابزارهای اختصاصی در آن ستون می‌برند و ما وانمود به خلافش نخواهیم کرد.</p>
     <div class="callout">چرا اصلاً یک باخت را نشان دهیم؟ چون بردها فقط در کنار آن باورپذیرند. هر عدد روی این صفحه از همان اجراهای درهم‌تنیده می‌آید، و مرحله‌ای که می‌بازیم تا زمانی که اجرای تازه‌ای جای آن را بگیرد منتشر می‌ماند.</div>
   </div>
 </section>
@@ -245,6 +321,48 @@
   </div>
 </section>
 
+<section id="disk-cost">
+  <div class="wrap">
+    <p class="kicker">یک کار چه هزینه‌ای دارد</p>
+    <h2>اوج مصرف دیسک برای ۱٫۵ گیگابایت</h2>
+    <p class="lead">ادعای تک‌گذر به همان اندازه که به سرعت مربوط است به دیسک هم مربوط می‌شود؛ پس این هم اندازه‌گیری‌شده و نه ادعاشده: بالاترین حدی که پوشهٔ کاری در طول اجراهای تودرتو به آن رسید، با نمونه‌برداری دو بار در ثانیه. یک بار خواندن در پایان هیچ نمی‌گفت، چون کلاینتی که پس از استخراج جلدهایش را پاک می‌کند چنان به نظر می‌رسد که هرگز آن‌ها را ننوشته است.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>شکل</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
+      <tbody>
+        <tr><td>‏RAR store درون RAR store</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
+        <tr><td>لایهٔ درونی فشرده</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
+        <tr><td>‏RAR درون RAR، عمق ۲</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
+        <tr><td>‏7z پیچیده در یک RAR store</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">مگابایت، کمتر بهتر است. <b>‏NZBGet اینجا با ما برابر است</b> و گفتن دلیلش می‌ارزد: با <code>DirectUnpack</code> و <code>DirectWrite</code> روشن اجرا می‌شود، همان‌طور که هر رقیب را پیکربندی می‌کنیم، و در این شکل‌ها همین برای یک نسخه روی دیسک کافی است. ‏SABnzbd دو نسخه نگه می‌دارد. فاصله‌ای که می‌ماند همان است که خط لوله برایش ساخته شد: ما اصلاً جلدها را روی دیسک پدید نمی‌آوریم، پس اوج همان محتواست نه محتوا به‌علاوهٔ آرشیوی که آن را حمل می‌کرد.</p>
+  </div>
+</section>
+
+<section id="client-ceiling">
+  <div class="wrap">
+    <p class="kicker">سناریو 8 · پنج کلاینت، محتوای بازتولیدپذیر</p>
+    <h2>سقف کلاینت: ‏9.68 GB از RAM، و خودتان می‌توانید بازسازی‌اش کنید</h2>
+    <p class="lead">هر لِگ بالا در برابر ارائه‌دهنده‌های تجاری اجرا می‌شود، پس دربارهٔ شرایط خط باید حرف ما را بپذیرید. این یکی را خودتان می‌توانید بازسازی کنید: محتوا فیلم‌های آزاد Blender است (‏Tears of Steel 4K، ‏Sintel، ‏Big Buck Bunny 4K با 60 و 30 fps)، با مجوز CC-BY 3.0، بسته‌بندی‌شده در RAR حالت-ذخیره به‌همراه 10% PAR2 در 53 فایل و 14,521 مقاله، که سکویی در همین مخزن آن را از RAM روی NNTP از راه loopback سرو می‌کند. <b>هیچ ارائه‌دهنده‌ای در کار نیست</b>، پس این خودِ کلاینت را می‌سنجد، با حذف پراکندگی ارائه‌دهنده به‌جای میانگین‌گیری از آن.</p>
+    <p class="note" style="text-align:start">چون مقاله‌ها از حافظه می‌آیند، زمان‌های مطلق بسیار کوتاه‌تر از هر دانلود واقعی‌اند و با لِگ‌های ارائه‌دهندهٔ بالا <b>قابل مقایسه نیستند</b>. نسبت‌ها و ستون دیسک را بخوانید، نه ثانیه‌ها را.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>کلاینت</th><th>زمان تا پایان</th><th>اتصال‌ها</th><th>اوج دیسک</th><th>در برابر nzbfast</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>مبنا</td></tr>
+        <tr><td>‏Weaver (گرم‌شده)</td><td>8 s</td><td>‏120 (افزایش خودکار)</td><td>17.9 GB</td><td>‏1.6× کندتر</td></tr>
+        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>‏2.4× کندتر</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>‏2.8× کندتر</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>‏4.6× کندتر</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>بازسنجی‌شده در ۳۱ ژوئیهٔ ۲۰۲۶</b>، همان چیدمان، همان پیکره، پس از یک به‌روزرسانی سیستم‌عامل روی دستگاه. چهار کارخواه یک تا سه ثانیه جابه‌جا شدند؛ SABnzbd نه: اکنون ۵۷ ثانیه می‌گیرد آنجا که نسخهٔ ۲۴ ژوئیهٔ این جدول ۱۴ ثانیه ثبت کرده بود، هشت بار روی دو گونهٔ چیدمان بازتولید شد، عمق خط لوله در هر اجرا با بازخوانی از رابط برنامه‌نویسی روی ۸ تأیید شد، و با ۱۶ اتصال یکسان بود. نتایجش در مرحله‌های مزرعه در جاهای دیگر این صفحه دست‌نخورده‌اند، پس این ویژهٔ نرخ‌های تغذیه‌شده از حلقهٔ محلی روی سیستم‌عامل کنونی این دستگاه به نظر می‌رسد؛ آنچه را چیدمان امروز می‌سنجد منتشر می‌کنیم و با انتشارهای بعدی سیستم‌عامل و SABnzbd دوباره می‌آزماییم.</p>
+
+    <p class="note" style="text-align:start"><b>زمان تا پایان</b> از آغاز کار تا وقتی است که هر چهار ویدئو روی دیسک، تأییدشده و استخراج‌شده باشند. <b>اوج دیسک</b> بیشترین فضایی است که کلاینت در هر لحظه اشغال کرده، با نمونه‌برداری دو بار در ثانیه، و همین ستون اینجا از همه مهم‌تر است: تک‌گذر حدود 1× اندازهٔ محتوا می‌خواهد و بقیه حدود 2×. هر پنج کلاینت پس از مرتب‌کردن، در پایان همان 8.6 GB را نگه داشتند و دقیقاً به همین دلیل اوج، عدد جالب ماجراست. هر کلاینت هر چهار محموله را sha256-یکسان با منبع تولید کرد. هرکدام با همان تعداد اتصالی نشان داده شده که <i>خودش</i> را سریع‌ترین کرده است (روی هرکدام 8، 16 و 32 آزموده شد؛ nzbfast در هر سه یکنواخت بود، پس اتصال بیشتر کمکی به آن نمی‌کرد).</p>
+    <p class="note" style="text-align:start"><b>هر رقیب در بهترین حالت مستندش.</b> یک رقیب هرگز نباید به سبب پیکربندی بد ما ببازد، پس تنظیمات هر کلاینت همراه با دور منتشر می‌شود. دوتای‌شان به‌آسانی اشتباه می‌شوند و اگر خودتان اجرا می‌کنید دانستنشان می‌ارزد: SABnzbd هنگام راه‌اندازی فایل ini خودش را بازنویسی می‌کند و <code>pipelining_requests</code> را به همان <code>1</code> کارخانه برمی‌گرداند، پس خط‌لوله را باید پس از آن از راه API تنظیم و برای اطمینان دوباره خواند؛ و یک پیکربندی مستقل <code>-c</code> در NZBGet به‌جای مقادیر فایل conf همراهش، پیش‌فرض‌های درون‌ساخت NZBGet را به ارث می‌برد و بی‌صدا حافظهٔ نهان مقاله را خاموش می‌گذارد. هر دو با همین اصلاح‌ها اجرا شدند. ‏Weaver گرم سنجیده می‌شود، چون تعداد اتصالش را خودکار بالا می‌برد و استخرهایش را در کار اول تنظیم می‌کند و فرمان <code>download</code> آن هرگز خارج نمی‌شود، پس همچون یک سرویس ماندگار با یک گذر گرم‌کردنِ دورریز اجرا می‌شود. پس 8 s آن یعنی یک سرویس گرم‌شده با 120 اتصال در برابر اجرای سرد و یک‌بارهٔ ما با 8 اتصال. این یعنی هر کلاینت در بهترین حالتش بنا بر قاعدهٔ خودمان، اما این نامتقارنی واقعی است و ترجیح می‌دهیم بگوییمش تا آنکه پنهانش کنیم.</p>
+    <p class="note" style="text-align:start">اوج دیسک دو بار در ثانیه نمونه‌برداری می‌شود نه یک‌بار در پایان، و این از آنچه به نظر می‌رسد مهم‌تر است: هر کلاینت اینجا جلدهایش را پس از استخراج پاک می‌کند، پس هر پنج‌تا در پایان همان 8.6 GB را نگه می‌دارند و اگر فقط پس از کار اندازه بگیرید چهارتای‌شان تک‌گذر به نظر می‌رسند. با نمونه‌برداری در طول اجرا، چهارتا نزدیک 18 GB اوج می‌گیرند. برای هرچه خودش را تمیز می‌کند، اوج را گزارش کنید نه باقی‌مانده را.</p>
+  </div>
+</section>
+
 <section id="shape-store">
   <div class="wrap">
     <p class="kicker">شکل ۱ &middot; ۸۴٪ داده‌ها</p>
@@ -303,78 +421,209 @@
 <section id="unpack-repair">
   <div class="wrap">
     <p class="kicker">دوئل اجزا</p>
-    <h2>موتورهای بازکردن و تعمیر، در مسابقهٔ انفرادی</h2>
-    <p class="lead">استخراج و PAR2 کد بومی خود ما هستند، پس آنها را جداگانه هم روی پیکره‌های
-    یکسان با میدان مسابقه می‌دهیم. یک زمان فقط وقتی حساب می‌شود که خروجی بایت‌به‌بایت با
-    محمولهٔ منبع یکسان باشد.</p>
-    <div class="grid2">
-      <div class="card"><h3>استخراج RAR · ‏8 شکل آرشیو</h3>
-        <p>در برابر unrar 7.23، ‏7-Zip، ‏bsdtar، ‏unar و crate بالادستی rars روی یک Apple M3
-        Ultra، استخراج‌گر nzbfast در هر شکل می‌برد یا مساوی می‌کند: 400 فایل کوچک در
-        <b>0.13 s</b> در برابر 0.66 s آنِ unrar، ‏solid ‏<b>0.50</b> در برابر 0.87،
-        رمزگذاری‌شده <b>0.49</b> در برابر 0.82، یک آرشیو RAR7 با دیکشنری 128 MB ‏<b>0.71</b>
-        در برابر 0.92. با اجرای دوباره روی یک M1 Ultra با 20 هسته و روی یک لپ‌تاپ Intel با
-        14 هسته، نتیجه در هر شکل پابرجا می‌ماند و روی لپ‌تاپ فاصله‌ها بازتر می‌شوند:
-        مسیرهای رمزگشایی موازی در نخ‌های اضافی گسترش می‌یابند. هر زمان گزارش‌شده خروجی
-        sha256-یکسان تولید کرد.</p></div>
-      <div class="card"><h3>تأیید + تعمیر PAR2 · مجموعهٔ 1 GiB</h3>
-        <p>در برابر par2cmdline کلاسیک، فورک SIMD ‏par2cmdline-turbo و MultiPar، ‏nzbfast
-        روی هر ماشین سنجیده‌شده سریع‌ترین تأیید و سریع‌ترین تعمیر را دارد. دسکتاپ 20 هسته‌ای:
-        تأیید تمیز <b>0.40 s</b> در برابر 1.08 آنِ turbo و 3.67 آنِ کلاسیک؛ تعمیر 101 بلوک
-        خراب <b>1.26 s</b> در برابر 2.61 و 7.52. لپ‌تاپ 14 هسته‌ای: تأیید <b>1.26</b> در
-        برابر 1.48، تعمیر <b>2.57</b> در برابر 3.62. هر فایل تعمیرشده بایت‌به‌بایت یکسان.
-        یک یادداشت صادقانه: ما PAR2 نمی‌سازیم (یک دانلودر نیازی به آن ندارد و آن لِگ مال
-        ParPar است).</p></div>
+    <h2>محک‌های فنی‌تر، برای کسانی که داده بیشتر می‌خواهند</h2>
+    <p class="lead">تعمیر (PAR2) و باز کردن (RAR) کد بومی خودمان هستند نه باینری‌های همراهِ شخص ثالث، پس آنها را جداگانه هم روی پیکره‌های یکسان با ابزارهای اختصاصی مسابقه می‌دهیم، روی چهار ماشین که گسترهٔ آنچه را یک خواننده واقعاً دارد پوشش می‌دهند. یک زمان تنها وقتی حساب می‌شود که خروجی بایت‌به‌بایت با محمولهٔ منبع یکسان باشد: هر عدد RAR پایین با sha256 در برابر منبع بررسی شد و هر فایل تعمیرشده در برابر مجموعهٔ سالم.</p>
+    <div class="chips">
+      <span class="chip"><b>4</b> دستگاه، از لپ‌تاپ تا ۳۲ هسته</span>
+      <span class="chip"><b>7</b> شکل بایگانی RAR</span>
+      <span class="chip"><b>6</b> ابزار استخراج در مسابقه</span>
+      <span class="chip"><b>1 GB</b> داده برای هر شکل</span>
+      <span class="chip"><b>بهترین از ۳</b> درهم‌آمیخته، حافظهٔ نهان گرم</span>
     </div>
+
+    <h3 style="margin:38px 0 4px">استخراج RAR: ۷ شکل بایگانی، ۶ ابزار</h3>
+    <p class="note" style="text-align:start;margin-top:6px">دور پیشین این جدول برای هر شکل از ۱۰۰ تا ۲۰۰ مگابایت استفاده می‌کرد و این اشتباه بود: حدود ۲۸ میلی‌ثانیه راه‌اندازی فرایند ۴۰٪ از مرحلهٔ ذخیره را می‌ساخت و ترتیبی که به دست می‌داد در اندازهٔ واقع‌گرایانه دوام نمی‌آورد. این دور از <b>۱ گیگابایت داده برای هر شکل</b> استفاده می‌کند و این چند پاسخ را عوض می‌کند، برخی در جهت مخالف. بایگانی‌ها با <code>rar</code> ۷.۲۳ رسمی ساخته شده‌اند، پس هیچ ابزاری با ورودی رمزگذار خودش سنجیده نمی‌شود و روی هر چهار دستگاه همان بایت‌ها مسابقه می‌دهند.</p>
+
+    <p class="note" style="text-align:start"><b>آنچه درون داده است بیش از آنکه به نظر برسد وزن دارد.</b> داده‌ای که از رونوشت بلوک‌ها ساخته شده هر شکل فشرده را به آزمون کپی حافظه بدل می‌کند؛ دادهٔ متن خالص آن را به آزمون لفظ‌ها و هافمن بدل می‌کند؛ هر دو را سنجیدیم و بر سر برنده هم‌نظر نیستند. از این رو چهار شکل فشرده از سه بخش برابر متن، رکوردهای ساخت‌یافته و بایت‌های فشرده‌ناپذیر تشکیل شده‌اند، و دو شکل در دو سر این بازه عمداً مرحله‌های جداگانه‌اند: <code>store</code> فشرده‌ناپذیر است و <code>repetitive</code> تقریباً تماماً تطبیق است. سازنده و میز آزمون در مخزن هستند، پس پیکره را می‌توان بایت‌به‌بایت بازساخت.</p>
+
+    <p class="note" style="text-align:start"><b>تمام میدان، بر حسب ثانیه، کمتر بهتر است.</b> بهترین از سه، ابزارها درون هر دور درهم‌آمیخته و نه بلوکی، و خروجی در تک‌تک اجراها در برابر دادهٔ منبع بررسی شده. ابزاری که بایت نادرست تولید کند یادداشت درستی می‌گیرد، هرگز زمان سریع. <code>rarpar</code> کد RAR و PAR2 خودِ Weaver است، از منبع در <code>bd87611</code> ساخته شده؛ کامیت را به جای نسخه پین می‌کنیم چون بسته‌هایش سه شمارهٔ نسخهٔ متفاوت دارند.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>شکل</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <tbody>
+        <tr><td colspan="7" class="grp">رومیزی رده‌بالا، ۳۲ هسته</td></tr>
+        <tr><td>store، ۱ گیگابایت</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>۴۰۰ پروندهٔ کوچک</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>یکپارچه</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>تکراری</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>بزرگ، ۴ جلد</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">خروجی نادرست²</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>رمزگذاری‌شده</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">بدون رمزگذاری³</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>واژه‌نامهٔ ۱۲۸ مبی</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">بدون واژه‌نامهٔ بزرگ⁴</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td colspan="7" class="grp">رومیزی قدیمی‌تر، ۲۰ هسته</td></tr>
+        <tr><td>store، ۱ گیگابایت</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>۴۰۰ پروندهٔ کوچک</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>یکپارچه</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>تکراری</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>بزرگ، ۴ جلد</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">خروجی نادرست²</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>رمزگذاری‌شده</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">بدون رمزگذاری³</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td>واژه‌نامهٔ ۱۲۸ مبی</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">بدون واژه‌نامهٔ بزرگ⁴</td><td class="no">پشتیبانی نمی‌شود¹</td></tr>
+        <tr><td colspan="7" class="grp">لپ‌تاپ، ۱۴ هسته / ۲۰ رشته، ویندوز⁵</td></tr>
+        <tr><td>store، ۱ گیگابایت</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">بدون خط فرمان⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>۴۰۰ پروندهٔ کوچک</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">بدون خط فرمان⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>یکپارچه</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">بدون خط فرمان⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>تکراری</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">بدون خط فرمان⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>بزرگ، ۴ جلد</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">بدون خط فرمان⁵</td><td class="no">خروجی نادرست²</td><td>4.21</td></tr>
+        <tr><td>رمزگذاری‌شده</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">بدون خط فرمان⁵</td><td class="no">بدون رمزگذاری³</td><td>4.13</td></tr>
+        <tr><td>واژه‌نامهٔ ۱۲۸ مبی</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">بدون خط فرمان⁵</td><td class="no">بدون واژه‌نامهٔ بزرگ⁴</td><td>2.51</td></tr>
+        <tr><td colspan="7" class="grp">لپ‌تاپ، ‏Apple M5 Max⁶</td></tr>
+        <tr><td>store، ۱ گیگابایت</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>۴۰۰ پروندهٔ کوچک</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>یکپارچه</td><td><b>1.15</b></td><td>1.87</td><td>1.97</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>تکراری</td><td><b>0.10</b></td><td>0.15</td><td>0.18</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>بزرگ، ۴ جلد</td><td><b>0.98</b></td><td>1.75</td><td>1.54</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>رمزگذاری‌شده</td><td><b>0.99</b></td><td>1.91</td><td>1.55</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+        <tr><td>واژه‌نامهٔ ۱۲۸ مبی</td><td><b>0.94</b></td><td>1.52</td><td>1.33</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td><td class="no">مسابقه داده نشد⁶</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>جایی که میدان نتوانست رقابت کند، و چرا.</b> ¹ 7-Zip ۲۶.۰۲ هر شکل فشرده را با <code>ERROR: Unsupported Method</code> رد می‌کند: الگوریتم فشرده‌سازی‌ای را که RAR ۷ به‌طور پیش‌فرض به کار می‌برد پیاده نکرده است و بنابراین روی macOS تنها می‌تواند شکل ذخیره‌شده را بخواند. همان نسخهٔ 7-Zip روی ویندوز آن‌ها را رمزگشایی می‌کند، پس این تفاوتی میان دو ساخت آن پروژه است و نه چیزی دربارهٔ بایگانی‌ها: بایت‌ها یکی‌اند. ² bsdtar از بایگانی‌های RAR5 چندجلدی پشتیبانی نمی‌کند و بدون گزارش هیچ خطایی پرونده‌ای بریده تولید کرد؛ پس آن مرحله شکست درستی است و نه زمان کند. میز آزمون ما آن را گرفت چون خروجی را بررسی می‌کند، و دقیقاً به همین دلیل بررسی خروجی ارزش دارد. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar ابزار خط فرمانی برای ویندوز عرضه نمی‌کند، پس میدان لپ‌تاپ پنج‌تایی است. ⁶ سطرهای M5 Max سه ابزاری را مسابقه می‌دهند که یک خوانندهٔ macOS واقعاً سراغشان می‌رود: unrar، <code>rarpar</code> و ما؛ unar و bsdtar و 7-Zip روی آن دستگاه مسابقه داده نشدند. unrar در آن سطرها نسخهٔ ۷.۲۲ است، تازه‌ترین ساختی که آنجا بدون دخالت اجرا می‌شود.</p>
+
+    <p class="note" style="text-align:start"><b>هر صورت روی هر دستگاه جز یکی، و آن یکی مساوی است.</b> نسخهٔ پیشین این صفحه پنج تا از این خانه‌ها را می‌باخت، و اینکه چرا جابه‌جا شدند گفتنی است، چون دلیلی نیست که نخست آوردیم. ما روال کپی حافظهٔ سکو را مقصر دانستیم، و نمایه چیز باریک‌تری گفت: تطبیقی از دو تا سی‌ودو بایت بهای یک فراخوان کامل به آن روال را می‌پرداخت، و فراخوان از خود کپی گران‌تر بود. کپی‌کردن سی‌ودو بایت ثابت از راه یک ثبات به‌جای آن، این را برداشت، و به همین دلیل <code>repetitive</code>، <code>solid</code> و واژه‌نامهٔ ۱۲۸ مبی‌بایتی همه یک‌جا جابه‌جا شدند - این‌ها همان سه صورتی هستند که از تطبیق‌های کوتاه ساخته شده‌اند. جدا از آن، مجموع کنترلی روی نخ نویسنده اجرا می‌شد و آن را نگه می‌داشت؛ بردنش به پایین‌دست بقیه را برداشت. تنها خانه‌ای که از آنِ ما نیست صورت ذخیره‌شده روی رومیزی ۳۲ هسته‌ای است، جایی که ما و unrar در مرحله‌ای که تمامش جابه‌جایی بایت است سه هزارم ثانیه فاصله داریم.</p>
+
+    <p class="note" style="text-align:start">شکلی که با بیشترین فاصله می‌بریم همان است که یوزنت واقعاً صدها تای آن را یک‌جا منتشر می‌کند: <b>۴۰۰ پروندهٔ کوچک، ۴.۳ و ۴.۴ برابر در برابر unrar</b> و ۵.۴ تا ۵.۵ برابر در برابر <code>rarpar</code>. این هم‌روندی میان اعضاست، و همان تفاوت میان استخراج‌کننده‌ای است که برای صف دانلود نوشته شده و آن که برای خط فرمان نوشته شده. شکل ذخیره‌شده، که بنا بر <a href="#census">سرشماری بالا</a> ۸۴٪ بایت‌های روی سیم است، برای هر سه ابزار جدی تقریباً مساوی است، چون در آن نقطه همه فقط بایت جابه‌جا می‌کنند.</p>
+
+    <p class="note" style="text-align:start"><b>یک انتخاب که گفتنی است.</b> بایگانی‌ها با فشرده‌ساز سنجاق‌شده روی چهار نخ بسته‌بندی می‌شوند. وگرنه تقسیم بلوک RAR از شمار هسته‌های دستگاهی پیروی می‌کند که بایگانی را بسته‌بندی کرده، پس دستگاهی با ۳۲ هسته و دستگاهی با ۲۰ هسته از یک ورودی بایت‌های متفاوت تولید می‌کنند و دستگاه‌ها دیگر سنجیدنی با هم نیستند. سنجاق‌کردن پیکرهٔ استخراج را همه‌جا بایت‌به‌بایت یکسان می‌کند، که مقصود همین است، اما سقفی هم می‌گذارد بر اینکه چه اندازه از رمزگشایی می‌تواند موازی اجرا شود - از این رو، وقتی دو صورت نزدیک‌تر هنوز باخت بودند، آن‌ها را در برابر بایگانی‌هایی که با هر ۳۲ نخ بسته‌بندی شده بودند بازاجرا کردیم تا بررسی کنیم سنجاق‌کردن علتش نبوده باشد. نبود: solid از ۴.۲٪ عقب به ۲.۴٪ عقب رفت و واژه‌نامهٔ ۱۲۸ مبی‌بایتی از ۶.۶٪ به ۶.۳٪، با همان ترتیب در هر دو حالت. هر دو اکنون روی پیکرهٔ سنجاق‌شده بردند، با حاشیه‌ای گسترده‌تر از آنچه آن بررسی بتواند توضیح دهد.</p>
+
+    <h3 style="margin:44px 0 4px">بررسی و ترمیم PAR2: مجموعهٔ ۱ گیبی، چهار سطح آسیب</h3>
+    <p class="note" style="text-align:start;margin-top:6px">پیکره: ۱ گیبی‌بایت بار دادهٔ تصادفی که در حالت ذخیره در ۲۱ بخش RAR بسته‌بندی شد، سپس دو مجموعهٔ PAR2 با ۱۰٪ افزونگی، یکی با بلوک‌های ۱ مبی‌بایتی و یکی ۶۴ کیبی‌بایتی، سپس نقشه‌های آسیب ثابت. هر اجرا از همان شیوه‌نامه استفاده می‌کند: نسخهٔ تازه، خواندن یک‌بارهٔ کل پیکره برای گرم‌کردن نهانگاه، سپس سنجش. بهترین از سه دور درهم‌بافته؛ هر بخش تعمیرشده در هر دور با مجموعهٔ سالم مقایسه می‌شود. کمتر بهتر است.</p>
+
+    <p class="note" style="text-align:start"><b>یک تصحیح دربارهٔ پیکره، چون نسخهٔ پیشین این صفحه بیش از حد ادعا کرد.</b> گفتیم هر دستگاه پیکره‌ای بایت‌به‌بایت یکسان اجرا می‌کند که با درهم‌ساز بررسی شده است. درهم‌سازی هر بخش از هر مجموعه نشان می‌دهد این دربارهٔ رومیزی ۳۲ هسته‌ای و لپ‌تاپ ویندوزی درست است، که دقیقاً هم‌خوانی دارند، و دربارهٔ رومیزی ۲۰ هسته‌ای نادرست، که قرعهٔ تصادفی متفاوتی از همان صورت را در خود دارد: همان ۲۱ بخش با همان اندازه‌ها، همان دو اندازهٔ بلوک، و آسیبِ راستی‌آزمایی‌شده در همان ۳، ۱۰۱ و ۱٬۵۰۰ بلوک پخش‌شده روی همان شمار فایل. هر عدد درون یک ردیف هنوز روی بایت‌هایی سنجیده می‌شود که هر ابزار در آن ردیف در آن شریک است، و هر مقایسه بر همین تکیه دارد. اما ردیف‌ها چهار نگاه به یک ورودی نیستند، و چون طبع بار داده برای پویش یکی از رقیبان حدود ۷٪ می‌ارزد، گفتنش بهتر از سرسری گذشتن است.</p>
+
+    <p class="note" style="text-align:start"><b>کدام par2 کدام است.</b> <code>par2cmdline</code> اصلی پیاده‌سازی مرجعی است که همه از آن انشعاب گرفته‌اند. <code>par2cmdline-turbo</code> انشعابی است که هسته‌های میدان گالوای دست‌نویس SIMD از <b>ParPar</b> را در خود دارد: «توربو» دقیقاً همین معنی را می‌دهد، و به همین سبب توربو، و نه اصلِ کار، ابزاری است که سنجیدن در برابرش می‌ارزد. هر دو ستون توربوی زیر همان هسته‌های ParPar را اجرا می‌کنند. آنچه جدایشان می‌کند حساب نیست، بلکه ساخت و پرچم‌هاست.</p>
+
+    <p class="note" style="text-align:start"><b>پس رقیب دو بار ظاهر می‌شود، و یکی از آن ستون‌ها بهترین حالت اوست و نه حالت پیش‌فرضش.</b> فایل اجرایی انتشاری که دانلود می‌کنید برای پردازندهٔ عمومی کامپایل شده و هر بار تنها چند پرونده را درهم‌سازی می‌کند؛ همان منبع ساخته‌شده برای پردازندهٔ واقعی دستگاه و اجراشده با <code>-T16</code> از دستورهایی که آن دستگاه واقعاً دارد استفاده می‌کند و شانزده پرونده را یک‌جا درهم‌سازی می‌کند. روی لپ‌تاپ این تا ۲.۶ برابر می‌ارزد، تنها از ساخت و پرچم‌ها. ما را با ستون تنظیم‌شده بسنجید، که مقایسهٔ سخت‌تر است؛ ستون «همان‌گونه که عرضه می‌شود» چیزی است که دانلودکننده واقعاً تجربه می‌کند. <code>par2cmdline</code> همان اصل است، نسخهٔ ۱.۲.۰، روی هر دستگاه از منبع ساخته شد. <code>rarpar</code> پیاده‌سازی PAR2 خودِ Weaver است، از منبع با پشتوانهٔ GPU متال فعال ساخته شد. <code>par2j</code> از MultiPar تنها برای ویندوز است، پس تنها در سطرهای لپ‌تاپ ویندوزی ظاهر می‌شود. سطرهای M5 Max آن دو ابزاری را مسابقه می‌دهند که ساخت روزآمد macOS arm64 دارند، در کنار دو ستون توربو؛ <code>par2cmdline</code> کلاسیک روی آن دستگاه مسابقه داده نشد.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr>
+        <th>آسیب</th><th>دستگاه</th><th>nzbfast</th>
+        <th>par2-turbo<br><span class="note">تنظیم‌شده</span></th>
+        <th>par2-turbo<br><span class="note">همان‌گونه که عرضه می‌شود</span></th>
+        <th>par2cmdline</th>
+        <th>rarpar</th>
+        <th>MultiPar</th>
+      </tr></thead>
+      <tbody>
+        <tr><td rowspan="4">هیچ<br><span class="note">بررسی سالم</span></td>
+            <td>رومیزی، ۳۲ هسته</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>رومیزی، ۲۰ هسته</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>لپ‌تاپ، ۱۴ هسته</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+        <tr><td>لپ‌تاپ، M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">مسابقه داده نشد</td><td>2.32</td><td class="no">فقط ویندوز</td></tr>
+
+        <tr><td rowspan="4">۳ بلوک<br><span class="note">چند مقالهٔ مرده</span></td>
+            <td>رومیزی، ۳۲ هسته</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>رومیزی، ۲۰ هسته</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>لپ‌تاپ، ۱۴ هسته</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+        <tr><td>لپ‌تاپ، M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">مسابقه داده نشد</td><td>3.64</td><td class="no">فقط ویندوز</td></tr>
+
+        <tr><td rowspan="4">۱۰۱ بلوک</td>
+            <td>رومیزی، ۳۲ هسته</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>رومیزی، ۲۰ هسته</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>لپ‌تاپ، ۱۴ هسته</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+        <tr><td>لپ‌تاپ، M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">مسابقه داده نشد</td><td>4.17</td><td class="no">فقط ویندوز</td></tr>
+
+        <tr><td rowspan="4">۱٬۵۰۰ بلوک<br><span class="note">۹۱٪ از دادهٔ بازیابی مصرف شد</span></td>
+            <td>رومیزی، ۳۲ هسته</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>رومیزی، ۲۰ هسته</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">فقط ویندوز</td></tr>
+        <tr><td>لپ‌تاپ، ۱۴ هسته</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+        <tr><td>لپ‌تاپ، M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">مسابقه داده نشد</td><td>6.91</td><td class="no">فقط ویندوز</td></tr>
+      </tbody>
+    </table></div>
+
+    <p class="note" style="text-align:start">هر شانزده سطر از آنِ ماست، چند تا از آن‌ها با بیش از ۲ برابر در برابر ساخت تنظیم‌شده و با ۲.۳ تا ۷.۷ برابر در برابر همانی که واقعاً دانلود می‌کردید. آن دو سطر آسیب سنگین که در نسخهٔ پیشین این صفحه اینجا باخت بودند اکنون برد شده‌اند، و یادداشت پایین توضیح می‌دهد چه چیزی عوض شد، چون یک باختِ برگشته سزاوار توضیح است نه ویرایش بی‌صدا.</p>
+
+    <p class="note" style="text-align:start"><b>اصل کار به جدول بازگشته، و دیدن اینکه چرا انشعاب وجود دارد می‌ارزد.</b> نسخهٔ پیشین این صفحه ستون <code>par2cmdline</code> را با این استدلال حذف کرده بود که از هر چیز دیگری در آن دور کندتر است؛ این درست است و دلیل کافی نیست: این همان پیاده‌سازی‌ای است که تقریباً همهٔ ابزارهای دیگر از آن نسب می‌برند، و خواننده سزاوار خودِ معیار است و نه ادعای ما دربارهٔ آن. در سنگین‌ترین سطح آسیب حدود ۶۹ ثانیه می‌برد، جایی که انشعاب SIMD ۳.۲ ثانیه و ما ۳.۱ ثانیه می‌بریم. آن ضریب بیست تمام استدلال به سود هسته‌های دست‌نویس میدان گالواست، و همان استدلالی است که برای هسته‌های خودمان می‌آوریم.</p>
+
+    <p class="note" style="text-align:start"><b>آسیب سبک همان حالتی است که اهمیت دارد.</b> مشتی مقالهٔ ناموفق بسیار رایج‌تر از ۱۰۱ بلوک مرده است، چه رسد به ۱٬۵۰۰. بیشتر یک ترمیم سبک اصلاً ریاضیات رید-سولومون نیست، بلکه خواندن و MD5 گرفتن از یک گیگابایت است، و به همین سبب سطر سه‌بلوکی از سطر بررسی سالم پیروی می‌کند و نه از سطرهای ترمیم.</p>
+
+    <p class="note" style="text-align:start"><b>سنگین‌ترین سطر پیش‌تر همانی بود که می‌باختیم، و نسخهٔ پیشین این صفحه گفته بود که چاره «الگوریتمی دیگر است و نه یک دور تنظیم». این همان الگوریتم است.</b> آن سطح آخر ۱٬۵۰۰ بلوک را در سراسر هر ۲۱ جلد آسیب می‌زند و حدود ۹۱٪ دادهٔ بازیابی را مصرف می‌کند، و آنجاست که حساب رید-سولومون، و نه درهم‌سازی یا دیسک، تقریباً تمام کار می‌شود. ساخت منتشرشده اکنون سنگین‌ترین ترمیم‌ها را به‌جای تاخوردگی کلاسیک میدان گالوا با یک تبدیل نظریه-عددی محاسبه می‌کند - همان ریاضیات، ارزیابی‌شده در شکلی که در شمار بلوک‌های بالا بسیار بهتر مقیاس می‌گیرد - و هر سطر سنگین برگشت: ۲.۶ برابر جلوتر از ساخت تنظیم‌شده روی رومیزی ۲۰ هسته‌ای که نزدیک‌ترین باخت ما بود، و ۲.۵ برابر روی لپ‌تاپی که بدترین باخت ما بود. هر اجرا پس از کار در برابر درهم‌سازی‌های پرونده تأیید می‌شود، و ترمیمی که در تأیید رد شود با مسیر کلاسیک دوباره انجام می‌شد؛ در هیچ‌یک از مرحله‌های این صفحه چنین نشد. آسیب سبک همچنان مسیر کلاسیک را اجرا می‌کند، و به همین سبب سطرهای دیگر تقریباً هیچ تکان نخوردند.</p>
+
+    <p class="note" style="text-align:start"><b>مسیر سریع‌تر تنها وقتی ارزش دارد که نتواند اشتباه کند.</b> هر دو مسیر همان کمیت را حساب می‌کنند و بنا به ساخت بیت‌به‌بیت یکسان‌اند، و هر تعمیری در این صفحه مشروط بود به اینکه فایل‌های بازسازی‌شده با مجموعهٔ سالم بخوانند: ۲۲۸ تعمیر زمان‌گرفته روی دستگاه‌های این دور، صفر ناهم‌خوانی. نسخهٔ منتشرشده به آن کارنامه تکیه نمی‌کند. هر تعمیر خروجی خودش را در برابر درهم‌سازهای فایل راستی‌آزمایی می‌کند، و آنکه شکست بخورد به‌طور خودکار با مسیر کلاسیک بازانجام می‌شود، واگرایی را ثبت می‌کند و مسیر کلاسیک را برای باقی آن اجرا نگه می‌دارد. این تنظیم در پیشخوان با نام <b>حالت PAR سریع</b> هست اگر ترجیح می‌دهید اصلاً نداشته باشیدش، و دستگاه‌هایی که حافظهٔ کافی برایش ندارند خودشان ردش می‌کنند به‌جای آنکه تلاش کنند و شکست بخورند.</p>
+
+    <p class="note" style="text-align:start"><b>سطر لپ‌تاپ به تصحیح نیاز داشت، و به زیان ماست.</b> ویندوز کار پس‌زمینهٔ ممتد را پس از چند ثانیه به هسته‌های کم‌مصرف خود پایین می‌آورد. سرویس ما هنگام راه‌اندازی خود را از آن بیرون می‌کشد و هیچ‌یک از ابزارهای دیگر نمی‌تواند چنین کند، پس نسخهٔ پیشین این صفحه زمان‌های خفه‌شدهٔ آن‌ها را چنان منتشر کرد که گویی زمان خودِ ابزارهاست. اجرای دوبارهٔ آن دستگاه با بالا بردن هر ابزار به اولویت بالا تمام میدان را جابه‌جا می‌کند: در سنگین‌ترین سطح آسیب <code>par2-turbo</code> از ۲۲.۴ ثانیه به 6.41 می‌رسد، <code>rarpar</code> از ۵۹.۲ ثانیه به 14.4، و برای یک نسخه از این صفحه همین سطری را که از آنِ ما بود به سطری بدل کرد که می‌باختیم. تمام سطر لپ‌تاپ اکنون به همین شیوه سنجیده می‌شود - و این تصحیح می‌ماند، هرچند آن سطر از آن پس با تغییر الگوریتمی بالا بازپس گرفته شده، چون زمان‌های میدان روی آن دستگاه تنها با برداشتن خفگی صادقانه‌اند.</p>
+
+    <h3 style="margin:44px 0 4px">رکوردهای بازیابی RAR: ترمیم بدون PAR2</h3>
+    <p class="note" style="text-align:start;margin-top:6px">وقتی PAR2 نمی‌تواند آسیب را بپوشاند، رکورد بازیابی درون خودِ پروندهٔ RAR آخرین خط دفاع است. تا نسخهٔ ۱.۰.۸ مالِ ما روی هر بایگانی بیش از حدود ۱۳ مگابایت شکست می‌خورد، پس این مرحله اصلاً قابل اجرا نبود. آسیب سه حفرهٔ ۳٬۰۰۰ بایتی در ۲۰٪، ۵۰٪ و ۸۰٪ ناحیهٔ محافظت‌شده است. هر دو ابزار خروجی‌ای بایت‌به‌بایت یکسان با پروندهٔ سالم تولید کردند، و مالِ ما بایت‌به‌بایت با آنچه خودِ <code>rar r</code> می‌نویسد یکسان است. بهترین از سه، رومیزی ۳۲ هسته‌ای.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>بایگانی</th><th>nzbfast</th><th>ترمیم rar ۷.۲۳</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× سریع‌تر</td></tr>
+        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× سریع‌تر</td></tr>
+        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× سریع‌تر</td></tr>
+        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× سریع‌تر</td></tr>
+        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× سریع‌تر</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">نسخهٔ پیشین این صفحه سطر ۵۱۲ مگابایت را باخت نشان می‌داد و آن را بهای پیمودن جلد به‌صورت تکه‌تکه به جای نگه‌داشتن تمام آن در حافظه توضیح می‌داد. آن توضیح در زمان خود درست بود و اکنون منسوخ است: هزینه یک CRC64 بیت‌به‌بیت در مسیر ترمیم بود که با نسخهٔ جدول‌محور جایگزین شد و باخت هم با آن رفت. دیگر نقطهٔ تقاطعی وجود ندارد و مجموعهٔ کاری کران‌دار حفظ شد. سطر ۲ گیگابایت اینجاست چون جلدهایی که یک سرویس واقعاً با آن‌ها روبه‌رو می‌شود ۸ تا ۲۰ گیگابایت‌اند و نه ۵۱۲ مگابایت، و مرحله‌ای که زیر بازهٔ واقعی تمام شود آزمون بزرگی نیست.</p>
+    <p class="note" style="text-align:start">M5 Max همان الگو را تکرار می‌کند، در ۳۱ ژوئیه با همان پیکره و همان معیارها اجرا شد: 0.050 / 0.066 / 0.171 / 0.581 ثانیه در برابر 0.211 / 0.335 / 0.751 / 1.735 برای <code>rar r</code> از ۱۶ مگابایت تا ۵۱۲ مگابایت - از 3.0&times; تا 5.1&times; سریع‌تر؛ اندازهٔ ۲ گیگابایت روی آن دستگاه اجرا نشد.</p>
+    <p class="note" style="text-align:start"><code>rarpar</code> از Weaver تنها در همین جدول غایب است، و نه به انتخاب خود: این ترمیم را پیاده نکرده است. وقتی از او خواسته شود یکی از این بایگانی‌ها را درست کند پاسخ می‌دهد <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> و پرونده را آسیب‌دیده رها می‌کند. او در هر مقایسهٔ دیگر این صفحه هست: هر چهار مرحلهٔ PAR2 بالا، هر هفت شکل استخراج بالاتر از آن، و مرحلهٔ جلدهای بازیابی درست در پایین، که دقیقاً همان کاری است که می‌گوید انجام می‌دهد، و آن را می‌برد.</p>
+
+    <h3 style="margin:44px 0 4px">جلدهای بازیابی: بازسازی پرونده‌های <code>.rev</code> که کاملاً غایب‌اند</h3>
+    <p class="note" style="text-align:start;margin-top:6px">نیمهٔ دیگر داستان بازیابی خودِ RAR، و تا این دور بزرگ‌ترین باخت این صفحه. یک فایل <code>.rev</code> یک بخش بازیابی مستقل است: سه تای آن در کنار مجموعه‌ای از ۲۱ بخش می‌تواند هر سه بخشی را که هرگز نرسیده‌اند بازسازی کند. پیکره: ۱ گیبی‌بایت ذخیره‌شده در ۲۱ بخش ۵۰ مگابایتی با <code>rar rv3</code>، سپس بخش‌های ۴، ۱۱ و ۱۹ حذف شدند - سه گم‌شده در برابر سه بخش بازیابی، بدترین حالتی که مجموعه هنوز از آن جان به‌در می‌برد. بهترین از سه، هر بخش بازسازی‌شده با بخش سالم مقایسه شد.</p>
+        <div class="tblwrap"><table>
+      <thead><tr><th>دستگاه</th><th>nzbfast</th><th>rar 7.23 <code>rc</code></th><th>rarpar <code>restore-volumes</code></th></tr></thead>
+      <tbody>
+        <tr><td>رومیزی، ۳۲ هسته</td><td><b>0.44</b></td><td>0.46</td><td>0.48</td></tr>
+        <tr><td>رومیزی، ۲۰ هسته</td><td><b>0.50</b></td><td>0.58</td><td>0.61</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>این ردیف در نسخهٔ پیشین این صفحه ۳.۱۲ ثانیه در برابر ۰.۴۷ برای <code>rar rc</code> بود، و به‌عنوان ۶.۶ برابر کندتر و بدترین عدد آن منتشر شد.</b> علتش این بود که حل‌کنندهٔ پاک‌شدگی با حدود ۴۸ مگابایت بر ثانیه خروجی بازسازی‌شده کار می‌کرد، جایی که RARLab ‏۳۲۰ را نگه می‌داشت؛ اکنون روی همان حساب جدول‌محورِ بقیهٔ کد بازیابی کار می‌کند، که بهبودی هفت‌برابری است و باخت را روی هر دو دستگاه به برد بدل می‌کند. حاشیه‌ها ۳٪ و ۱۴٪ است، پس بردی است که ساده گفته می‌شود نه تیتر می‌شود، و دلیل گفتنش اصلاً این است که باخت نخست گفته شد.</p>
+    <p class="note" style="text-align:start">این مرحله وجود دارد چون <code>rarpar</code> متعلق به Weaver دقیقاً همین کار را می‌کند و خواست که بر آن سنجیده شود. وقتی نخستین‌بار منتشرش کردیم با فاصله می‌برد، و آن زمان دقیقاً به همین دلیل منتشرش کردیم.</p>
+    <p class="note" style="text-align:start">تطبیق فایل‌ها هرگز هزینه نبود، و این ثبت‌کردنی است چون مظنون شهودی همان بود: بخش‌های بازیابی نام فایل ندارند، پس تشخیص می‌دهیم کدام جایگاه‌ها زنده مانده‌اند با گرفتن مجموع کنترلی هر بخش روی دیسک به‌جای اعتماد به نامشان، و در برابر مجموعه‌ای سالم، که در آن تنها تطبیق رخ می‌دهد، کل گذر ۰.۱۸ ثانیه طول می‌کشد.</p>
+
+    <p class="note" style="text-align:start"><b>چه چیز دیگری تکان خورد، و کجا دیده نمی‌شود.</b> دو تغییر موتور دیگر نیز فرود آمد که این پیکره‌ها نمی‌توانند نشانشان دهند، اینجا فهرست شده‌اند تا اعداد بالا تمام داستان خوانده نشوند: بایگانی‌های RAR5 با ده‌ها هزار عضو هر عضو را یک بار حل می‌کنند به جای پیمودن فهرست برای هر کارگر، که در ۴۰٬۰۰۰ عضو ۳ برابر زمان پردازنده کمتر است؛ و خوانندهٔ بیت RAR1.3 کلمه‌به‌کلمه کار می‌کند، که ۲ برابر است. هیچ‌کدام بالا دیده نمی‌شوند، چون شکل‌های اینجا ۴۰۰ عضو دارند و هیچ RAR1.3 ندارند.</p>
+
+    <p class="note" style="text-align:start"><b>آنچه عمداً انجام نمی‌دهیم:</b> هرگز PAR2 <i>نمی‌سازیم</i>. یک برنامهٔ دانلود دلیلی برای آن ندارد، و آن مرحله از آنِ ParPar است. در هر دو موتور سرعت را با حافظه هم می‌خریم: استخراج حدود ۲۴۰ مگابایت اوج می‌گیرد در برابر ۴۱ مگابایت unrar، و راستی‌آزمایی حدود ۱۲۶ مگابایت در برابر ۷ مگابایت turbo، چون این‌ها موتورهای درون‌ساخته‌ای هستند که همراه یک دانلود جاری می‌روند نه اجراهای مستقل یک‌باره. صورت با واژه‌نامهٔ ۱۲۸ مبی‌بایتی بدترین حالت است، در حدود ۴۲۳ مگابایت در برابر ۱۳۹ مگابایت unrar. <b>سنگین‌ترین تعمیر اکنون حافظه هم می‌گیرد:</b> روش سریع‌تر برای ۵۱۲ بلوک گمشده و بیشتر از دادهٔ بازیابیِ نگه‌داشته در حافظه کار می‌کند، پس تا یک‌چهارم حافظهٔ دستگاه، با سقف ۴ گیگابایت، به آن اجازه داده می‌شود، و دستگاهی که نتواند آن را کنار بگذارد بی‌سروصدا روش جریانی را برمی‌گیرد - همان حساب و همان زمان‌های ردیف‌های میانی جدول PAR2، فقط بدون ۳ برابرِ آخری. اگر کوچک‌ترین ردپای حافظهٔ ممکن را برای کاری مستقل می‌خواهید، ابزارهای اختصاصی هنوز در آن ستون می‌برند.</p>
+    <div class="callout">هر عدد این صفحه یک اجرای تاریخ‌دار است که فرمان دقیق و شرایطش ثبت شده، از جمله نتایج منفی و رویکردهای رهاشده. این صفحه‌ها همان سابقهٔ منتشرشده‌اند و با فرود دورهای بعدی کامل‌تر می‌شوند.</div>
   </div>
 </section>
 
-<section id="disk-cost">
-  <div class="wrap">
-    <p class="kicker">یک کار چه هزینه‌ای دارد</p>
-    <h2>اوج مصرف دیسک برای ۱٫۵ گیگابایت</h2>
-    <p class="lead">ادعای تک‌گذر به همان اندازه که به سرعت مربوط است به دیسک هم مربوط می‌شود؛ پس این هم اندازه‌گیری‌شده و نه ادعاشده: بالاترین حدی که پوشهٔ کاری در طول اجراهای تودرتو به آن رسید، با نمونه‌برداری دو بار در ثانیه. یک بار خواندن در پایان هیچ نمی‌گفت، چون کلاینتی که پس از استخراج جلدهایش را پاک می‌کند چنان به نظر می‌رسد که هرگز آن‌ها را ننوشته است.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>شکل</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
-      <tbody>
-        <tr><td>‏RAR store درون RAR store</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
-        <tr><td>لایهٔ درونی فشرده</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
-        <tr><td>‏RAR درون RAR، عمق ۲</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
-        <tr><td>‏7z پیچیده در یک RAR store</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">مگابایت، کمتر بهتر است. <b>‏NZBGet اینجا با ما برابر است</b> و گفتن دلیلش می‌ارزد: با <code>DirectUnpack</code> و <code>DirectWrite</code> روشن اجرا می‌شود، همان‌طور که هر رقیب را پیکربندی می‌کنیم، و در این شکل‌ها همین برای یک نسخه روی دیسک کافی است. ‏SABnzbd دو نسخه نگه می‌دارد. فاصله‌ای که می‌ماند همان است که خط لوله برایش ساخته شد: ما اصلاً جلدها را روی دیسک پدید نمی‌آوریم، پس اوج همان محتواست نه محتوا به‌علاوهٔ آرشیوی که آن را حمل می‌کرد.</p>
-  </div>
-</section>
 
 <section class="alt" id="client-matrix">
   <div class="wrap">
     <p class="kicker">توانمندی، نه ریزمحک‌ها</p>
     <h2>هر کلاینت چه می‌تواند بکند</h2>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>NNTP خط‌لوله‌ای</td><td class="yes">بله</td><td class="half">به‌طور پیش‌فرض خاموش</td><td class="no">خیر</td><td class="yes">بله</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>تأیید کامل حین دانلود</td><td class="yes">هر بلوک</td><td class="no">پس از آن</td><td class="half">بررسی سریع</td><td class="no">پس از آن</td><td class="no">پس از آن</td><td class="no">پس از آن</td></tr>
-        <tr><td>استخراج حین دانلود</td><td class="yes">در جریان، بدون جلد روی دیسک</td><td class="half">باز کردن مستقیم⁴</td><td class="half">باز کردن مستقیم⁴</td><td class="half">نامطمئن⁵</td><td class="no">خیر</td><td class="no">خیر</td></tr>
-        <tr><td>دیسک موردنیاز برای یک پست N-GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>حکم قابل‌تکمیل بودن پیش از دانلود</td><td class="yes">بلوک-دقیق</td><td class="no">خیر</td><td class="half">درصد سلامت</td><td class="no">خیر</td><td class="yes">بررسی مقاله</td><td class="no">خیر</td></tr>
-        <tr><td>حافظهٔ کران‌دار (هرگز swap)</td><td class="yes">بودجه‌بندی‌شده</td><td class="no">9.3 GB @ 190 GB</td><td class="half">تنظیم حافظهٔ نهان</td><td class="no">خیر</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>بررسی فایل در هر نقطه حین دانلود</td><td class="yes">بله</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="half">سریالی</td><td class="no">خیر</td></tr>
-        <tr><td>ایندکسر داخلی + دیوار پوستر</td><td class="yes">بله، بدون کلید</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="half">رابط جست‌وجو</td><td class="half">مرورگر گروه</td></tr>
-        <tr><td>جایگزین Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">بومی</td><td class="yes">بومی</td><td class="half">جزئی</td><td class="no">خیر</td><td class="no">خیر</td></tr>
-        <tr><td>کنترل‌های گوشی (nzb360/LunaSea)</td><td class="yes">از طریق RPC NZBGet</td><td class="yes">بله</td><td class="yes">بله</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td></tr>
-        <tr><td>گرفتن خودکار فهرست پیگیری + ارتقاها</td><td class="yes">درون‌ساخت</td><td class="no">از طریق *arr</td><td class="no">از طریق *arr</td><td class="no">خیر</td><td class="yes">Watchdog</td><td class="half">قواعد</td></tr>
-        <tr><td>یک باینری خودکفای واحد</td><td class="yes">بله</td><td class="no">Python</td><td class="yes">بله</td><td class="yes">بله</td><td class="yes">‎.app</td><td class="yes">‎.exe</td></tr>
-        <tr><td>متن‌باز</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">بله</td><td class="no">پولی</td><td class="no">پولی</td></tr>
-        <tr><td>پلتفرم‌ها</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="no">فقط mac</td><td class="no">فقط win</td></tr>
+        <tr><td>NNTP خط‌لوله‌ای</td><td class="yes">بله</td><td class="half">به‌طور پیش‌فرض خاموش</td><td class="no">خیر</td><td class="yes">بله</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>تأیید کامل حین دانلود</td><td class="yes">هر بلوک</td><td class="no">پس از آن</td><td class="half">بررسی سریع</td><td class="no">پس از آن</td><td class="no">پس از آن</td><td class="no">پس از آن</td><td class="no">پس از آن</td></tr>
+        <tr><td>استخراج حین دانلود</td><td class="yes">در جریان، بدون جلد روی دیسک</td><td class="half">باز کردن مستقیم⁴</td><td class="half">باز کردن مستقیم⁴</td><td class="half">نامطمئن⁵</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td></tr>
+        <tr><td>دیسک موردنیاز برای یک پست N-GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>حکم قابل‌تکمیل بودن پیش از دانلود</td><td class="yes">بلوک-دقیق</td><td class="no">خیر</td><td class="half">درصد سلامت</td><td class="no">خیر</td><td class="no">-⁷</td><td class="yes">بررسی مقاله</td><td class="no">خیر</td></tr>
+        <tr><td>حافظهٔ کران‌دار (هرگز swap)</td><td class="yes">بودجه‌بندی‌شده</td><td class="no">9.3 GB @ 190 GB</td><td class="half">تنظیم حافظهٔ نهان</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>بررسی فایل در هر نقطه حین دانلود</td><td class="yes">بله</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="half">سریالی</td><td class="no">خیر</td></tr>
+        <tr><td>ایندکسر داخلی + دیوار پوستر</td><td class="yes">بله، بدون کلید</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="no">خیر</td><td class="half">رابط جست‌وجو</td><td class="half">مرورگر گروه</td></tr>
+        <tr><td>جایگزین Sonarr/Radarr</td><td class="yes">API SAB + Newznab</td><td class="yes">بومی</td><td class="yes">بومی</td><td class="half">جزئی</td><td class="half">‏RPC سازگار با NZBGet⁷</td><td class="no">خیر</td><td class="no">خیر</td></tr>
+        <tr><td>کنترل‌های گوشی (nzb360/LunaSea)</td><td class="yes">از طریق RPC NZBGet</td><td class="yes">بله</td><td class="yes">بله</td><td class="no">خیر</td><td class="no">-⁷</td><td class="no">خیر</td><td class="no">خیر</td></tr>
+        <tr><td>گرفتن خودکار فهرست پیگیری + ارتقاها</td><td class="yes">درون‌ساخت</td><td class="no">از طریق *arr</td><td class="no">از طریق *arr</td><td class="no">خیر</td><td class="no">خیر</td><td class="yes">Watchdog</td><td class="half">قواعد</td></tr>
+        <tr><td>یک باینری خودکفای واحد</td><td class="yes">بله</td><td class="no">Python</td><td class="yes">بله</td><td class="yes">بله</td><td class="yes">بله</td><td class="yes">‎.app</td><td class="yes">‎.exe</td></tr>
+        <tr><td>متن‌باز</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">بله</td><td class="yes">بله</td><td class="no">پولی</td><td class="no">پولی</td></tr>
+        <tr><td>پلتفرم‌ها</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="half">ساخت از منبع⁷</td><td class="no">فقط mac</td><td class="no">فقط win</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">⁴ باز کردن مستقیم هنوز اول جلدها را مادی می‌کند:
     2× نوشتن و 2× دیسک. ⁵ rustnzb در دور ما جلدهای مبهم را با نشان «Completed» تحویل داد
     (باز کردنش هم با unrar از RARLab قفل می‌شود مگر غیرفعال شود). ⁶ GPL-3.0-or-later.
+    ⁷ ‏Weaver v0.7.5؛ سطرهای سنجیده‌شده‌اش (تأیید، استخراج، دیسک، حافظه) از دور ابزارگذاری‌شدهٔ
+    31 ژوئیهٔ ما می‌آیند، و خانه‌های توانمندی که با «-» نشان‌دار شده‌اند ویژگی‌هایی‌اند که هنوز
+    ارزیابی‌شان نکرده‌ایم، نه نبودهای تأییدشده؛ یک RPC سازگار با NZBGet حرف می‌زند، که میز آزمون ما
+    از همان راه آن را می‌راند، اما کنترل‌های گوشی را در برابرش نیازموده‌ایم.
     Usenapp/Newsbin خواننده‌های تجاری تک‌پلتفرمی با قابلیت‌های دانلودر هستند؛ به این دلیل
     فهرست شده‌اند که مردم می‌پرسند، نه چون بر سر سرعت رقابت می‌کنند.</p>
+  </div>
+</section>
+
+<section id="weaver-method">
+  <div class="wrap">
+    <p class="kicker">روش‌شناسی &middot; به‌تمامی، چون از ما خواسته شد</p>
+    <h2>چگونه Weaver را آزمودیم</h2>
+    <p class="lead">توسعه‌دهندهٔ Weaver آشکارا گفته است که ما از سنجیدن آن پرهیز کرده‌ایم. عکسش درست است: در هر مقایسه‌ای در این صفحه که بتواند اجرا کند حاضر است، از جمله مرحلهٔ تعمیر با بخش‌های بازیابی، که در آن می‌برد و ما دقیقاً به همین دلیل منتشرش می‌کنیم. این هم روش کامل، هر مشکلی که به آن برخوردیم و هر دور زدنی که به کار بستیم، تا اجراها بتوانند بازتولید و به چالش کشیده شوند.</p>
+    <ul>
+      <li><b>چه اجرا کردیم:</b> فایل اجرایی رسمی arm64 نسخهٔ v0.7.5. هرجا ساخت از منبع لازم بود (مؤلفهٔ <code>rarpar</code> خودش برای جدول‌های PAR2 و استخراج)، کامیت دقیق را کنار جدول می‌آوریم.</li>
+      <li><b>همان شرایطی که برای همه:</b> دستگاه یکسان، همان شش کارساز تجاری، TLS روی هر اتصال، کارها از راه رابط سازگار با NZBGet آن فرستاده شد، و همان قاعدهٔ قبولی که برای هر کارخواه در این صفحه هست: یک مرحله تنها وقتی به شمار می‌آید که بار دادهٔ استخراج‌شده بایت‌به‌بایت روی دیسک راستی‌آزمایی شود. سیاههٔ پایان خودش همیشه با منابع دیگر مقابله می‌شود و هرگز به‌تنهایی باور نمی‌شود.</li>
+      <li><b>در بهترین حالتش سنجیده شد، نه بدترین:</b> مرحله‌های دانلودِ نشان‌دار <i>گرم</i> یک سرویس پایدار اجرا می‌کنند، نخست یک کار گرم‌کردن واقعی به آن می‌خورانند و صبر می‌کنند تا افزایش خودکار اتصال‌هایش به سقف ۱۲۰ اتصال برسد، آنگاه کار زمان‌گرفته آغاز می‌شود. ارقام شروع سرد، هرجا نشان داده شده‌اند، سرد برچسب خورده‌اند. چیدمان شروع گرم را پس از آن ساختیم و منتشر کردیم که دیدیم شروع‌های سرد آن را کم‌ارزش نشان می‌دهند.</li>
+      <li><b>مشکل‌هایی که دیدیم و با آن‌ها چه کردیم:</b> حالت دانلود تک‌شلیک یک کار را تمام می‌کند اما هرگز خارج نمی‌شود (به‌جایش حالت سرویس را زمان گرفتیم)؛ مک‌های بدون نمایشگر روی پرسش جاکلیدی گیر می‌کنند (با متغیر محیطی کلید رمزگذاری‌اش دور زده شد)؛ یک پایگاه دادهٔ پایدار مسدودسازی تکراری از ارسال دوبارهٔ همان NZB حتی پس از پاک‌سازی داده سر باز می‌زند (با گزینهٔ force دور زده شد)؛ ساخت از منبع بدون رابط وب که جداگانه ساخته می‌شود شکست می‌خورد (با یک قطعهٔ ساختگی جایگزین شد؛ فایل اجرایی رسمی از این آسیب نمی‌بیند)؛ گواهی خودامضای چیدمان صف ما را رد کرد، پس مرحلهٔ صف بالا از کارخواه‌هایی استفاده می‌کند که حاضر به اتصال شدند؛ و یک اجرای سرد ۱۹۰ گیگابایتی در ژوئیه پس از ۳۳ دقیقه در وضعیت خطا پایان یافت، پس بازاجرایش کردیم و بازاجرای کامل‌شده را منتشر کردیم. هر دور زدنی به سود نتیجهٔ Weaver است نه به سود ما.</li>
+      <li><b>ارقام چه می‌گویند:</b> همان اوج دیسک 2.0&times; را نگه می‌دارد که دیگر کارخواه‌هایی که می‌نویسند و سپس استخراج می‌کنند دارند، و ترافیک دیسکش با اندازهٔ کار تندتر از هر کس دیگری رشد می‌کند (2.5&times; مال ما در ۳۵ گیگابایت، 5.1&times; در ۱۹۰ گیگابایت) چون انبار رمزگذاری‌شده‌اش تقریباً هر چه را دانلود می‌کند دوباره می‌خواند و دوباره می‌نویسد. آن طراحی مزیت‌های واقعی دارد که یک صفحهٔ سرعت آن‌ها را نمی‌سنجد؛ بهایش همان است که در ستون ورودی/خروجی می‌بینید.</li>
+      <li><b>بازتولیدش کنید:</b> راه‌اندازهای دقیق، از جمله چیدمان شروع گرم و مدیریت رمزینه‌هایش، در پوشهٔ سنجش مخزن عمومی ما هستند. آن‌ها را به کارسازهای خودتان نشانه بروید و آنچه به دست می‌آورید منتشر کنید.</li>
+    </ul>
   </div>
 </section>
 
@@ -392,27 +641,95 @@
     </ul>
     <p class="note" style="text-align:start"><b>دانلود چقدر پردازنده هزینه دارد.</b> یک ریگ
     محلی مقاله‌ها را از RAM سرو می‌کند تا فقط خود کلاینت زمان‌گیری شود، و هر ردیف اجرای خود را
-    ذکر می‌کند. ردیف‌های رقبا نسبت به دور 22 ژوئیه بدون تغییرند - همان نسخه‌ها روی همان ماشین،
+    ذکر می‌کند. ردیف‌های SABnzbd و NZBGet نسبت به دور 22 ژوئیه بدون تغییرند - همان نسخه‌ها روی همان ماشین،
     سنجیده با cgroup لینوکس روی یک هستهٔ پردازنده - و تا وقتی نسخهٔ جدیدی یکی از آنها را تغییر
-    دهد پابرجا می‌مانند. ردیف‌های nzbfast در 31 ژوئیهٔ 2026 با نسخهٔ فعلی دوباره سنجیده شدند.</p>
+    دهد پابرجا می‌مانند. ردیف‌های nzbfast و Weaver و rustnzb در 31 ژوئیهٔ 2026 روی M3 Ultra
+    ساحل شرقی سنجیده شدند، nzbfast با نسخهٔ فعلی و Weaver گرم‌راه‌اندازی‌شده در بهترین حالت مستندش.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>کلاینت</th><th>ثانیهٔ پردازنده به ازای هر GB</th><th>با TLS</th><th>اجرا</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">0.64</td><td class="num">0.83</td><td>M3 Ultra ساحل شرقی، 31 ژوئیه، نسخهٔ فعلی</td></tr>
+                <tr><td><b>nzbfast</b></td><td class="win num">0.43</td><td class="num">&ndash;</td><td>M5 Max، ۳۱ ژوئیه، خط لولهٔ محلی ۶۴ گیگابایتی با 76&ndash;79 گیگابیت بر ثانیه، همهٔ فایل‌ها کامل</td></tr>
+        <tr><td><b>nzbfast</b></td><td class="num">0.58</td><td class="num">0.80</td><td>M3 Ultra ساحل شرقی، 31 ژوئیه، نسخهٔ فعلی</td></tr>
         <tr><td><b>nzbfast</b></td><td class="num">0.74</td><td class="num">1.06</td><td>M1 Ultra اروپا، 31 ژوئیه، نسخهٔ فعلی</td></tr>
         <tr><td><b>nzbfast</b></td><td class="num">0.72</td><td class="num">&ndash;</td><td>کانتینر لینوکس تک‌هسته، 22 ژوئیه</td></tr>
         <tr><td>SABnzbd 5.0.4</td><td class="num">1.5</td><td class="num">&ndash;</td><td>کانتینر لینوکس تک‌هسته، 22 ژوئیه</td></tr>
+        <tr><td>‏Weaver (گرم‌شده)</td><td class="num">2.15</td><td class="num">&ndash;</td><td>M3 Ultra ساحل شرقی، 31 ژوئیه</td></tr>
         <tr><td>NZBGet 26.2</td><td class="num">3.0</td><td class="num">&ndash;</td><td>کانتینر لینوکس تک‌هسته، 22 ژوئیه</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="num">21.1</td><td class="num">22.2</td><td>M3 Ultra ساحل شرقی، 31 ژوئیه</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">TLS برای هر کلاینتی پردازنده هزینه دارد؛ مال ما
-    +30% به ازای هر GB روی M3 Ultra و +44% روی M1 Ultra سنجیده شده، و خط‌لوله همچنان با روشن
-    بودن TLS با سقف ~32 Gbps خودِ سیستم‌عامل برای سوکت محلی کار می‌کند. هنوز هیچ رقیبی روی
-    لِگ TLS اجرا نشده، پس آن خانه‌ها به جای تخمین خالی می‌مانند. روی یک لپ‌تاپ اینتل 2022
+    +38% به ازای هر GB روی M3 Ultra و +44% روی M1 Ultra سنجیده شده، و خط‌لوله همچنان با روشن
+    بودن TLS با سقف ~32 Gbps خودِ سیستم‌عامل برای سوکت محلی کار می‌کند. اضافه‌بار TLS در
+    rustnzb کوچک است، اما از بالاترین پایهٔ بدون TLS این صفحه حساب می‌شود؛ رقمش کار واقعی
+    خودِ کار است، نه چرخش بیکار - فرایند بین کارها کاملاً ساکت است. ‏Weaver گواهی خودامضای
+    ریگ را نپذیرفت، پس خانهٔ TLS آن خالی می‌ماند، و SABnzbd و NZBGet هنوز روی لِگ TLS اجرا
+    نشده‌اند - خانه‌های خالی سنجیده‌نشده‌اند، هرگز تخمینی نیستند. روی یک لپ‌تاپ اینتل 2022
     (i7-1280P، Windows 11) کار خودِ nzbfast همان ~0.7 ثانیهٔ پردازنده به ازای هر GB است؛
     هستهٔ ویندوز و آنتی‌ویروس مجموع را تقریباً سه برابر می‌کنند، و مسیر سوکت محلی آن پلتفرم
     نزدیک 8 Gbps سقف می‌خورد.</p>
+    <p class="note" style="text-align:start"><b>و همان هزینه، سنجیده روی کارهای واقعی، با هر پنج
+    کلاینت.</b> ریگ بالا فقط انتقال را جدا می‌کند؛ دور ابزارگذاری‌شدهٔ 31 ژوئیه تمام کار را
+    می‌سنجد - دانلود روی TLS از شش ارائه‌دهنده، تأیید، ترمیم، باز کردن - بر حسب ثانیهٔ پردازنده به
+    ازای هر GB دانلودشده. هر کلاینت در سراسر پیکره‌های 35، 77 و 190 GB یکنواخت بود، پس یک عدد برای
+    هر کلاینت صادقانه است:</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>کلاینت</th><th>ثانیهٔ پردازندهٔ کل کار به ازای هر GB</th><th>در برابر nzbfast</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">1.7</td><td>مبنا</td></tr>
+        <tr><td>NZBGet 26.2</td><td class="num">4.5&ndash;4.6</td><td class="num">2.7×</td></tr>
+        <tr><td>‏Weaver (گرم)</td><td class="num">8.2&ndash;9.6</td><td class="num">5.2×</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td class="num">12.1&ndash;12.6</td><td class="num">7.2×</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×، بدون فایل قابل‌استفاده</td></tr>
+      </tbody>
+    </table></div>
     <div class="callout"><b>قاعدهٔ پابرجا: هر ادعای کارایی شرایطی را که تحت آن اجرا شده ذکر می‌کند</b>، از جمله نتایج منفی و مسیرهای اشتباه.</div>
+  </div>
+</section>
+
+<section class="alt" id="next-releases">
+  <div class="wrap">
+    <p class="kicker">نگاه به جلو</p>
+    <h2>رصد انتشارهای بعدی</h2>
+    <p>کلاینت‌های دیگر هم پیوسته بهتر می‌شوند، و ما پیش‌انتشارهایشان را همان لحظه که پیدا می‌شوند
+    محک می‌زنیم تا این جدول‌ها هرگز یک نسخه از پایدارِ بعدی رقیب عقب نمانند. در 31 ژوئیهٔ 2026
+    ساخت 26.3-testing از NZBGet (28 ژوئیه) و 5.1.0RC1 از SABnzbd را در برابر پایدارهای پین‌شدهٔ
+    این صفحه اجرا کردیم؛ هر جفت روی همان دستگاه با تنظیمات یکسان به ترتیب قدیمی/جدید/جدید/قدیمی
+    درهم‌آمیخته شد و هر اجرا تا خودِ فایل استخراج‌شده تأیید شد. دو لِگ: مجموعهٔ بازتولیدپذیر
+    9.68&nbsp;GB که از RAM سرو می‌شود (اروپا M1 Ultra)، و انتشار ~35&nbsp;GB 4K با نام هش روی
+    همان 6 ارائه‌دهندهٔ همیشگی.</p>
+
+    <table>
+      <tr><th>9.68 GB از RAM</th><th class="num">زمان تا پایان</th><th class="num">پردازنده</th><th class="num">اوج حافظه (RSS)</th></tr>
+      <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
+      <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
+      <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
+      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
+    </table>
+
+    <table>
+      <tr><th>~35 GB، 6 ارائه‌دهنده</th><th class="num">زمان تا پایان</th><th class="num">پردازنده</th><th class="num">اوج حافظه (RSS)</th></tr>
+      <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
+      <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
+      <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
+      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
+    </table>
+
+    <p>چه چیزی تکان خورد: پیش‌انتشار NZBGet هزینهٔ پردازنده‌اش را حدود یک‌سوم و اوج حافظه‌اش را تا
+    نصف کم می‌کند، آن هم با زمان‌های پایان بدون تغییر؛ کار بهره‌وری واقعی (اصلاح یک حلقهٔ چرخشی،
+    اصلاح رقابت‌های داده، ابزارهای باز کردن به‌روزشده). ‏RC از SABnzbd در هر دو لِگ در حد نوفه با
+    5.0.4 برابر است؛ تغییرهای کاراییِ آن تلاش دوباره و تجزیهٔ هدرهای رمزگذاری‌شده را هدف گرفته‌اند،
+    مسیرهایی که این لِگ‌ها آنها را به کار نمی‌گیرند. <b>زمان تا یک فایل قابل‌استفاده، همان معیاری که
+    این صفحه با آن آغاز می‌شود، برای هیچ‌کدام از این دو کلاینت در هیچ‌کدام از دو لِگ تکان
+    نخورد.</b></p>
+
+    <p>rustnzb از همه تندتر حرکت می‌کند - پنج انتشار میان ۱.۳.۴ سنجاق‌شدهٔ ما (۱۸ ژوئیه) و ۱.۳.۹ (۲۸ ژوئیه) - پس ۱.۳.۹ را از منبع ساختیم و همان روز بازاجرا کردیم. سیاههٔ تغییراتش دقیقاً برای همان چیزهایی که جدول‌های ما گزارش می‌کنند اصلاح وعده می‌دهد («استخراج مستقیم را قابل‌اتکا کن»، «کارهای کامل‌شدهٔ بدون خروجی قابل‌استفاده را رد کن»): در سنجش، انتشار مبهم‌شدهٔ ۳۵&nbsp;گیگابایتی هنوز به شکل بخش‌های خام با نشان <i>انجام‌شده</i> می‌رسد، هم در کار تکی و هم در صف. آنچه تغییر کرد هزینه و آهنگ است: زمان‌ها حدود ۱۰٪ سریع‌تر، و آسیاب اشباع‌کنندهٔ پردازنده که روی ۱.۳.۴ سنجیدیم در هیچ مرحله‌ای از ۱.۳.۹ نبود - هرچند بازاجرای ۱.۳.۴ در همان روز هم پایین سنجید، پس آن هزینه وابسته به شرایط است نه رفع‌شده با نسخه، و ما در هیچ جا آن را به‌صورت یک عدد یگانه نقل نمی‌کنیم.</p>
+
+    <p class="note" style="text-align:start">ارقام این بخش از ساخت‌های پیش‌انتشار می‌آیند و تنها
+    درون همین بخش قابل مقایسه‌اند (وضعیت ریگ با لِگ‌های بالا فرق دارد؛ نکته همان جفت‌کردن پایدار با
+    پیش‌انتشار است). وقتی این نسخه‌ها به‌عنوان پایدار منتشر شوند، هر لِگ منتشرشده‌ای را که تحت تأثیر
+    قرار می‌دهند دوباره اجرا می‌کنیم و اعداد را جایگزین می‌کنیم نه آنکه به آنها بیفزاییم، بنا بر
+    همان قاعدهٔ پابرجای پاورقی.</p>
   </div>
 </section>
 
@@ -428,9 +745,7 @@
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
   </div>
-  <p class="fine">دادهٔ محک: دورهای رقابتی 19–24 ژوئیهٔ 2026. نسخه‌های
-  کلاینت: SABnzbd 5.0.4، NZBGet 26.2 (فورک nzbget.com)، rustnzb 1.3.4. اگر نسخهٔ جدیدتری از
-  هر کلاینت نتیجه‌ای را به‌طور اساسی تغییر دهد، دوباره اجرا و به‌روزرسانی می‌کنیم.</p>
+  <p class="fine">دادهٔ محک: دورهای رقابتی 19&ndash;31 ژوئیهٔ 2026. نسخه‌های کلاینت: SABnzbd 5.0.4، NZBGet 26.2 (فورک nzbget.com)، rustnzb 1.3.4، Weaver v0.7.5 رسمی arm64 (لِگ سقف کلاینت از بیلد 23 ژوئیهٔ منبعش <code>410c114</code> استفاده کرد؛ خودش هیچ رشتهٔ نسخه‌ای گزارش نمی‌کند). اگر نسخهٔ جدیدتری از هر کلاینت نتیجه‌ای را به‌طور اساسی تغییر دهد، دوباره اجرا و به‌روزرسانی می‌کنیم؛ بخش «رصد انتشارهای بعدی» در بالا همین قول است که پیشاپیش عمل شده. لِگ‌های شاخص ارائه‌دهنده (35، 77 و 190 GB) و دور هزینهٔ ابزارگذاری‌شده <b>در 31 ژوئیهٔ 2026 روی ساخت منتشرشده</b> دوباره سنجیده شدند، با هر کلاینت و هر لِگ روی TLS، و جای اعداد 20&ndash;24 ژوئیه را گرفتند نه آنکه به آنها افزوده شوند. چند لِگ قدیمی‌ترِ باقی‌مانده (دور صف، نردبان حافظهٔ کم، سطرهای ساحل شرقی) پیش از کارهای موتور در اواخر ژوئیه‌اند و ساخت فعلی را دست‌کم می‌گیرند نه آنکه بزرگ‌نمایی کنند. همچنین فایل‌های آزمایشی‌ای آماده می‌کنیم که بتوانیم NZBهایشان را منتشر کنیم، تا لِگ‌های ارائه‌دهنده هم مستقلاً بازتولیدپذیر شوند، همان‌طور که لِگ‌های سقف کلاینت و اجزا هم‌اکنون هستند.</p>
 </div></footer>
 
 </body>
