@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - Kullanım Kılavuzu</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--surface);
   border-radius:0 9px 9px 0;padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-left-color:var(--dim)}
 .warn-box{border-left-color:var(--warn)}
@@ -181,6 +402,45 @@ yazmayı atla: Ayarlar → Usenet sunucuları → <b>SABnzbd / NZBGet'ten içe a
 kurulumunu bulur ve sunucularını kopyalar. Komut satırında ayrıca <code>nzbfast import-sab</code>
 de vardır.</div>
 
+<h3 id="firstrun-key">API anahtarın</h3>
+<p>Gerçekten yeni bir kurulumda nzbfast, arka plan süreci ilk kez başladığında kendine
+bir API anahtarı üretir ve onu panel adresinin hemen altındaki bir başlıkta bir kez
+yazdırır. O andan sonra her istek o anahtara ihtiyaç duyar; böylece panel ve API,
+makineye erişebilen her şeye açık olmaz.</p>
+<p>Onunla ne yapacağın nzbfast'i nasıl başlattığına bağlıdır:</p>
+<ul>
+  <li><b>macOS uygulaması, Windows bildirim alanı ya da <code>serve --open</code></b>: hiçbir şey.
+  Anahtarı açtıkları tarayıcı penceresine geçirirler, panel onu hatırlar ve zaten
+  oturum açmış olursun.</li>
+  <li><b>Kendin açtığın bir tarayıcı</b> ya da bir telefondaki veya başka bir bilgisayardaki
+  panel: sayfa anahtarı bir kez ister ve ondan sonra hatırlar.</li>
+  <li><b>Sonarr, Radarr, nzb360 ve arkadaşları</b>: onu SABnzbd ya da NZBGet anahtarı
+  olarak yapıştır (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>Anahtar, yapılandırma dosyanın yanında <code>apikey</code> adlı bir dosyada tutulur;
+böylece yeniden başlatmalar boyunca aynı kalır ve ihtiyacın olduğunda geri okuyabilirsin.
+macOS ve Linux'ta o dosya yalnızca nzbfast'i çalıştıran hesap tarafından okunabilir.
+Ayrıca arka plan sürecinin kendi çıktısındadır, yani terminal kayıp gittiyse panelin
+Günlük kartında durur.</p>
+<div class="note"><b>Yükseltme hiçbir şeyi değiştirmez.</b>Zaten var olan bir kurulum,
+anahtarlı ya da anahtarsız, tam olduğu gibi bırakılır. Anahtar yalnızca bir ilk
+çalıştırmada üretilir - panel ayarı ve kaydedilmiş kuyruğu olmayan bir çalıştırmada -
+çünkü çalışan bir kurulumun altında beliren bir anahtar, bağlamayı hiç aklına
+getirmediğin bir yeniden başlatmada, önceden bağladığın her Sonarr'ı, Radarr'ı ve telefon
+uygulamasını dışarıda bırakırdı.</div>
+<p>Bunun yerine kendi anahtarını kullanmak için onu Ayarlar → Güvenlik'e yaz; hemen
+geçerli olur. O panel anahtarı değiştirir ama mevcut olanı asla göstermez, dolayısıyla
+üretilen değeri geri istiyorsan <code>apikey</code> dosyasını oku. nzbfast'in önündeki bir
+şey oturum açmayı zaten hallettiği için hiç anahtarsız çalıştırmak istersen, onu ortamda
+<code>NZBFAST_OPEN=1</code> ile başlat. nzbfast o zaman açık kalır ve bunu başlangıçta
+açıkça söyler.</p>
+<p>Arka plan sürecine hangi makinelerin hiç erişebileceği ayrı bir seçimdir:
+<code>serve --bind</code>. Varsayılan <code>0.0.0.0</code>'dır, yani her ağ arayüzü;
+çünkü bir NAS kutusunun, bir telefonun ve başka bir bilgisayardaki bir Sonarr'ın hepsinin
+bağlanabilmesi gerekir. <code>--bind 127.0.0.1</code> bunu nzbfast'in çalıştığı makineyle
+sınırlar; başka hiçbir şeyin erişime ihtiyacı olmadığı tek bir masaüstünde isteyeceğin
+şey budur.</p>
+
 <h2 id="concepts">3 · nzbfast nasıl çalışır</h2>
 <p>Kılavuzun geri kalanının rahat okunması için hızlı bir sözlük:</p>
 <table>
@@ -301,10 +561,11 @@ zorlar.</p>
 belirdiğinde, kalite tercihleri ve yükseltme kurallarıyla (daha iyi bir kopya daha kötüsünün
 yerini alır) otomatik yakalanır.</p>
 <h3 id="dash-history">Geçmiş</h3>
-<p>Durum, boyut, konum ile son indirmeler; başarısız işler <b>Yeniden Dene</b> sunar
+<p>Son indirmeler, her biri tek satır. Başarısız işler <b>Yeniden Dene</b> sunar
 (günlükten devam eder). Şifreli arşivler bir 🔑 kilit açma denetimi gösterir - parolayı gir
 ve iş yerinde biter. Doğrulama sağlığı şeridi, indirme başına bozuk PAR2 bloklarını çizer -
 yükselen bir kuyruk makalelerin hasarlı geldiği anlamına gelir.</p>
+<p>Kart varsayılan olarak on indirme listeler, gerisi ▤ düğmesiyle bir tık uzaktadır. Durum, konum ve bir işin neden başarısız olduğu satırın kendisine tıklamanın arkasındadır; böylece yaygın durum - ne bitti, ne kadar büyük, ne zaman - kaydırmadan okunabilir kalır. Bunun yerine kartın alt kenarını sürükleyerek listeyi seçtiğiniz bir yükseklikte kaydırabilirsiniz. Ayarlar → Arayüz altındaki <b>History rows</b> bu onu değiştirir; tarayıcınızın değil daemon'un bir özelliği olduğundan, bu kuruluma bakan her cihaz için geçerlidir. Yanındaki <b>Colour History names</b> biten adları yeşile, başarısız olanları kırmızıya boyar; kapatıldığında adlar sade kalır ve renkli nokta ile satırın kendi ayrıntıları hangisinin hangisi olduğunu yine söyler.</p>
 <h3 id="dash-usage">Veri kullanımı</h3>
 <p>Sağlayıcı başına günlük çubuklar ve Bugün / 7 günlük / 30 günlük toplamlar - sayaçlı ve
 blok hesaplar için elzem. Blok hesaplar ömür boyu kullanımı boyutlarına karşı gösterir.</p>
@@ -320,6 +581,7 @@ anlatılan üç kendini ölçme aracı.</p>
 5 saniye içinde alınır ve dosya kaldırılır. Dizinleyici sitelerinden tek tıkla yakalamalar
 için tarayıcının indirme dizinini buna yönlendir.</td></tr>
 <tr><td><b>Bir URL'den</b></td><td>Bir NZB bağlantısı yapıştır (API <code>mode=addurl</code> ya da bağlı herhangi bir uygulama üzerinden).</td></tr>
+<tr><td><b>nzblnk: bağlantıları</b></td><td>Bir <code>nzblnk:</code> bağlantısını panonun herhangi bir yerine yapıştırın ya da içine sürükleyin. macOS DMG'sinden veya Windows kurulumundan kurduysanız bir board üzerinde doğrudan tıklayabilirsiniz de. Aşağıdaki <a href="#nzblnk">nzblnk bağlantıları</a> bölümüne bakın.</td></tr>
 <tr><td><b>Dizine göz at</b></td><td>Göz at kartındaki tam bir sürüme tıkla.</td></tr>
 <tr><td><b>İzleme listesi / RSS</b></td><td>Otomatik - bkz. <a href="#automation">Otomasyon</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr vb.</b></td><td>Yakalamaları doğrudan kuyruğa gönderir - bkz. <a href="#arr">§11</a>.</td></tr>
@@ -332,10 +594,37 @@ klasörü olur ve Akıllı Klasörler (bkz. <a href="#automation">§10</a>) onla
 atayabilir.</li>
 <li><b>Öncelikler</b>: Zorla &gt; Yüksek &gt; Normal &gt; Düşük. Zorla, duraklamayı ve kotayı
 atlar.</li>
-<li>Şifreli arşivler için <b>parolalar</b> NZB içindeki
-<code>&lt;meta type="password"&gt;</code>'dan ya da bir
-<code>Name{{password}}.nzb</code> dosya adından otomatik alınır ve API üzerinden iş
-başına ya da sonradan Geçmiş'ten (🔑) sağlanabilir.</li>
+<li><b>Şifreli arşivlerin parolaları</b> NZB içindeki
+<code>&lt;meta type="password"&gt;</code> alanından, bir
+<code>Name{{password}}.nzb</code> dosya adından ya da bir
+<a href="#nzblnk">nzblnk bağlantısının</a> <code>p=</code> alanından otomatik alınır;
+ayrıca iş başına API üzerinden veya sonradan Geçmiş'ten (🔑) verilebilir.</li>
+</ul>
+
+<h3 id="nzblnk">nzblnk bağlantıları</h3>
+<p>Bazı board'lar, çoğunlukla Alman ve Hollanda kaynaklı olanlar, NZB dosyası yerine bir
+<code>nzblnk:</code> bağlantısı yayımlar. Gönderi belirsizleştirilmiştir, dolayısıyla
+bağlanılacak bir dosya adı yoktur. Bağlantı bunun yerine bir başlık taşır,
+<code>h=</code>; bu bir konum değil, bir arama anahtarıdır. Yanında isteğe bağlı bir
+başlık <code>t=</code>, bir parola <code>p=</code> ve bir grup <code>g=</code> bulunur.
+Gönderiyi önce birinin gidip bulması gerekir.</p>
+<p>nzbfast başlığı önce kendi dizininde arar, bunun için hiç ağ gerekmez; ancak orada
+bulunamazsa yapılandırdığınız arama dizinleyicilerine sorar (Ayarlar → Arama
+dizinleyicileri, <a href="#settings">§9</a>) ve bunu her aramada geçerli olan aynı günlük
+bütçeler ve aynı geri çekilmeyle yapar. Başlık işin adı olur, parola ise işe otomatik
+uygulanır.</p>
+<ul>
+<li><b>Yapıştırmak veya sürüklemek</b> her kurulumda çalışır, Docker ve NAS kutuları
+dahil: bağlantıyı board'dan kopyalayın ve panonun herhangi bir yerine yapıştırın.</li>
+<li><b>Tıklamak</b> için şemanın masaüstünüze kayıtlı olması gerekir. <b>macOS DMG</b>
+uygulaması bunu kaydeder, <b>Windows kurulumu</b> ise bir görev olarak sunar: önce sorar
+ve şemayı NZB Monkey ya da NZBDonkey zaten tutuyorsa ona dokunmaz. Düz macOS tarball'ı,
+Homebrew ve Linux kurulumlarının masaüstü işleyicisi yoktur; oralarda giriş yolu
+yapıştırmaktır.</li>
+<li>Çözümleme bilerek hız sınırlıdır. Kayıtlı bir şema, ziyaret ettiğiniz her sayfadan
+yalnızca bir tarayıcı sorusu uzaktadır; bu yüzden bağlantılar dakika başına
+sınırlandırılır ve bir dakikanın yalnızca ilk birkaçı dizinleyicilerinize ulaşabilir,
+ondan sonrası yalnızca yerel dizinden yanıtlanır.</li>
 </ul>
 
 <h2 id="wall">6 · Poster duvarı</h2>
@@ -408,11 +697,44 @@ bir sunucuyu havuza alıp havuzdan çıkarma. Her sunucuda şunlar bulunur:</p>
 <table>
 <tr><th>Alan</th><th>Notlar</th></tr>
 <tr><td>Adres / port</td><td>SSL portu <b>563</b>'ü kullan. TLS ölçülebilir hiçbir maliyet getirmez - nzbfast her zaman şifreler.</td></tr>
-<tr><td>Kullanıcı adı / parola</td><td><code>config.local.json</code> içinde yerel olarak saklanır, tarayıcıya asla geri gösterilmez. Düzenlemede parolayı boş bırakmak saklananı korur.</td></tr>
+<tr><td>Kullanıcı adı / parola</td><td><code>config.local.json</code> içinde yerel olarak saklanır, tarayıcıya asla geri gösterilmez. Düzenlemede parolayı boş bırakmak saklananı korur. Parolalar diskte <a href="#passwords">şifrelenmez, gizlenir</a>.</td></tr>
 <tr><td>Bağlantılar</td><td>Sunucu başına eşzamanlı bağlantı. Yükseği tahmin etmek yerine her sağlayıcının en uygun noktasını bulmak için <b>Bağlantı ayarı</b>'nı (<a href="#performance">§13</a>) kullan.</td></tr>
 <tr><td>Düzey (katman)</td><td>0 = birincil; daha yüksek düzeyler yalnızca her alt düzeyin kaçırdığı makaleler için istenen dolum sunucularıdır. Sınırsız hesapları 0'a, blok hesaplarını 1+'a koy.</td></tr>
 <tr><td>Blok boyutu (GB)</td><td>Blok (GB başına ücret) hesaplar için: nzbfast ömür boyu kullanımı buna karşı izler ve bittiğinde sunucuyu kullanmayı bırakır (%85'te uyarı).</td></tr>
 </table>
+<p><b>Hesabının bağlantı sınırının altında biraz pay bırak.</b> Bağlantıları sınırın biraz altına ayarlamak hiçbir şeye mal olmaz: hız son bir iki bağlantıdan çok önce düzleşir ve <b>Bağlantı ayarı</b> (<a href="#performance">§13</a>) zaten sınırın altında kalır. İkinci bir cihazın, başka bir istemcinin ya da kopan bir soketten sonraki yeniden denemenin yine de girebilmesini sağlayan şey o boş yerlerdir; aksi hâlde bu taraf her yeri tutarken reddedilirler.</p>
+<h3 id="passwords">Sağlayıcı parolalarınız nasıl saklanıyor</h3>
+<p><code>config.local.json</code> içindeki sağlayıcı parolaları <b>gizlenmiştir,
+şifrelenmemiştir</b>. <code>obf1:</code> ve ardından kodlanmış bir biçim olarak
+saklanırlar; böylece dosya bir ekran görüntüsünde, bir forum iletisinde, bir hata
+raporunda ya da başkasının görebileceği bir ekranda belirdiğinde düz metin olarak
+okunmaz.</p>
+<p>Bunun size ne kazandırdığı ve ne kazandırmadığı açık olsun:</p>
+<ul>
+<li><b>Bu şifreleme değildir ve dosyayı eline geçiren kimseye karşı hiçbir koruma
+sağlamaz.</b> Yöntem açık kaynağımızda duruyor ve çözücü nzbfast'ın içinde geliyor;
+dosyayı elinde tutan parolayı saniyeler içinde geri çıkarır. Dosyayı, parolalar
+okunabilir olsaydı nasıl saklardıysanız tam olarak öyle gizli tutun.</li>
+<li><b>Sıradan sızıntıyı ortadan kaldırır</b>, ki yaygın olan odur. Yapılandırmalar
+destek başlıklarına yapıştırılıyor ve ekran görüntülerine takılıyor; diskten
+çalınmalarından çok daha sık.</li>
+<li>Kendi elinizle düz metin yazdığınız bir parola yine çalışır. nzbfast her iki biçimi
+de okur, böylece elle düzenlenmiş yapılandırmalar ve başka istemcilerden içe aktarımlar
+asla bozulmaz; bir sonraki kayıtta gizlenmiş biçimi yazar.</li>
+<li>Dosya ayrıca yalnızca nzbfast'ı çalıştıran hesabın okuyabileceği şekilde yazılır
+(macOS ve Linux'ta 0600 kipi).</li>
+</ul>
+<p>Karşılaştırma olsun: <b>NZBGet ve SABnzbd sağlayıcı parolalarını yapılandırma
+dosyalarında okunabilir düz metin olarak saklar</b>. Gizlemeyi bunun üzerine küçük bir
+iyileştirme sayıyoruz, bir güvenlik özelliği değil.</p>
+<p><b>Neden sistem anahtar zinciri değil?</b> macOS Keychain, Windows Kimlik Bilgileri
+Yöneticisi ve Linux gizli servisleri gerçek koruma verirdi ve buna yeniden bakabiliriz.
+Bugün iki şey engelliyor. Anahtar zinciri erişimi uygulama kimliğine bağlıdır ve
+nzbfast henüz kod imzalı değil; dolayısıyla her güncellemeden sonraki sorular ve davranış
+kötü oluyor. Ayrıca kurulumların büyük bir bölümü Docker, ekransız sunucular ve NAS
+kutuları; oralarda anahtar zinciri diye bir şey yok, bu da doğru tutulması gereken iki
+ayrı saklama yolu bırakırdı. Her yerde aynı davranan tek ve iyi anlaşılmış bir biçim
+şimdilik daha iyi bir takas.</p>
 <p>Sunucu başına iki seçeneğin panoda henüz bir denetimi yok: bunları o sunucunun
 <code>config.local.json</code> içindeki girdisine elle ekleyin
 (bkz. <a href="#files">§17</a>) ve yeniden başlatın.</p>
@@ -509,6 +831,7 @@ adlar tahmin edilmek yerine gönderildiği gibi bırakılır.</p>
 <tr><td>Sürüm grubunu dahil et</td><td>Sondaki <code>-GROUP</code> etiketi.</td></tr>
 <tr><td>Çöp dosyaları kaldır</td><td><b>Öntanımlı olarak açık.</b> Biten film ve dizi klasörlerinden artakalan <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> dosyalarını ve örnek klipleri siler. Videoyu ya da altyazılarını asla.</td></tr>
 <tr><td>Yalnızca medya dosyasını tut</td><td><b>Öntanımlı olarak kapalı ve yıkıcı:</b> klasörde video(lar) ve altyazılar dışındaki her şeyi kalıcı olarak siler. Bir sezon paketinin her bölümü korunur. İkisi de açıkken <b>Çöp dosyaları kaldır</b> ayarının önüne geçer.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>Varsayılan olarak açık.</b> Spor, yarışlar ve diğer etkinlikler çoğu zaman sezon boyunca yinelenen tek bir başlıktır ve aralarında yalnızca bir iki kelime fark vardır - "Round11 Hungary Race" ile "Round11 Hungary Qualifying" gibi. Bir sezonun tamamının aynı isme dönüşmesini engelleyen şey, işte o kelimeleri korumaktır. Yalnızca adın başka türlü düzeltilemediği yerlerde devreye girer, dolayısıyla sıradan filmler ve bölümler etkilenmez.</td></tr>
 </table>
 <p class="dim">Grubun tamamı onarım ve açmanın ardından, <b>Tamamlananları şuraya
 taşı</b> işleminden önce çalışır ve hâlâ parola bekleyen bir iş için tümüyle atlanır.
@@ -524,8 +847,21 @@ klasörü</b>, <b>son işlem betiği</b> (her işten sonra SABnzbd uyumlu argüm
 Klasörler</b> ve <b>TV dosyalama</b> (bkz. <a href="#automation">§10</a>).</p>
 
 <h3>Dizinleme <span class="pill live">canlı</span></h3>
+<div class="note"><b>Dahili dizinleyici varsayılan olarak kapalıdır.</b> Gerçek bir
+dosya adıyla atılmış gönderileri bulur; Usenet'in büyük ve büyüyen bir bölümü ise
+bilerek böyle bir ad olmadan atılır: rastgele konu, içeride rastgele dosya adları,
+her şeyin atıldığı bir gruba bırakılmış. Gerçek ad yalnızca yükleyicinin başka bir yerde
+yayımladığı bir NZB'de yaşar, yani hiçbir tarayıcının okuyabileceği biçimde Usenet'te
+hiç bulunmadı. Kendi dizinimizde ölçtük: taranan 14,8 milyon gönderi yaklaşık 31.000
+göz atılabilir yayın verdi, kabaca beş yüzde bir. Ticari dizinleyicileri kullanmayı
+sürdürün ve onları Ayarlar → Arama dizinleyicileri altına ekleyin ki duvardan
+arayabilesiniz. İnsanların hâlâ gerçek adlarla attığı belirli grupları izliyorsanız ya
+da sağlayıcınızın gerçekte ne taşıdığını görmek istiyorsanız bunu açın. Anahtar
+kapalıyken hiçbir şey taranmaz veya çekilmez, veritabanı oluşturulmaz; duvar, Göz at,
+izleme listesi ve newznab beslemesi gizlenir.</div>
 <table>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
+<tr><td>Dahili dizinleyici</td><td>Ana anahtar, <b>siz açmadıkça kapalı</b>. Kapalı demek: tarama yok, meta veri sorgusu yok, erişilebilirlik örneklemesi yok, newznab beslemesi yok; diskte hâlihazırda duran bir dizin korunur (silme düğmesi vardır), dolayısıyla yeniden açmak baştan taramak yerine kaldığı yerden sürdürür.</td></tr>
 <tr><td>Gruplar</td><td>Gömülü dizinleyicinin taradığı haber grupları (örn. <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>Tarama aralığı</td><td>Geçişler arasındaki saniye (varsayılan 900).</td></tr>
 <tr><td>Geriye doldurma makaleleri</td><td>Bir grubun ilk taramasında getirilen başlıklar.</td></tr>
@@ -539,8 +875,7 @@ Klasörler</b> ve <b>TV dosyalama</b> (bkz. <a href="#automation">§10</a>).</p>
 
 <h3>Kitaplık, Güvenlik, Arayüz</h3>
 <p><b>Kitaplık</b>: anlık kitaplık girişleri olarak ele alınan kategoriler + yeniden denetim
-aralığı. <b>Güvenlik</b>: tam API anahtarı (her şey) ve NZB anahtarı (yalnızca ekleme -
-dizinleyici sitelerine vermek güvenli), ikisi de canlı döndürülebilir. <b>Arayüz</b>: tık
+aralığı. <b>Güvenlik</b>: tam API anahtarı (her şey) ve NZB anahtarı (yalnızca ekleme - dizinleyici sitelerine vermek güvenli), ikisi de canlı döndürülebilir. Her iki kutu da alandan ayrılır ayrılmaz ait olduğu anahtarı değiştirir, bir kutuyu boş bırakmak ise onun hâlihazırdaki anahtarını korur. API anahtarında ayrıca <b>Show</b> vardır; mevcut anahtarı gösterip kopyalar, böylece canınız istediğinde Sonarr, Radarr veya NZB360'a yapıştırabilirsiniz. <b>Create new</b> ise yerine yenisini basar - eski anahtar anında çalışmayı bırakır, dolayısıyla bağlı olan her şeye yenisinin verilmesi gerekir. İkisi de API anahtarının kendisine bağlıdır: yalnızca ekleme yapan NZB anahtarı onu okuyamaz, zaten o anahtarın bütün amacı budur. Yeni bir kurulumda anahtarın nereden geldiği için <a href="#firstrun-key">§2</a>'ye bak. <b>Arayüz</b>: tık
 sesleri, tamamlanmada masaüstü bildirimleri, sağlayıcı yeniden sıralama aralığı.</p>
 
 <p><b>Hız birimleri</b> <span class="pill live">live</span>, panodaki her hızın nasıl
@@ -588,7 +923,7 @@ değişkenlerini alır - geniş SAB betikleri ekosistemi olduğu gibi çalışı
 <ol>
 <li>Sonarr/Radarr'da: Settings → Download Clients → <b>SABnzbd</b> ekle.</li>
 <li>Host: nzbfast makinen · Port: <b>6789</b> · API key: tam API anahtarın
-(Ayarlar → Güvenlik; QR/kopyala denetimi yanındadır).</li>
+(nerede bulacağın: <a href="#firstrun-key">§2</a>).</li>
 <li>İstediğin kategori (örn. <code>tv</code> / <code>movies</code>). Test → yeşil onay → Kaydet.</li>
 </ol>
 <p>Kuyruk, geçmiş, iş başına durum, "kaldır &amp; sil", yeniden deneme ve kategori
@@ -601,9 +936,14 @@ yönlendirmesinin hepsi *arr'ların beklediği gibi davranır.</p>
 <code>tvsearch</code> ve <code>movie</code> sorgularını sunar ve
 <code>/getnzb/&lt;id&gt;</code> NZB'yi geri verir.</li>
 </ol>
-<div class="note"><b>Neden zahmet?</b>Tam olarak önem verdiğin grupların kendi kendine
-barındırılan bir dizinleyicisi: hesap yok, API isabet sınırı yok, taramasına izin verdiğin
-kadar derin saklama.</div>
+<div class="note"><b>Önce dahili dizinleyiciyi açın</b> (Ayarlar → Dizinleme). Varsayılan
+olarak kapalıdır ve kapalı olduğu sürece bu cephe her sorguya boş sonuç yerine
+<code>&lt;error code="101"&gt;</code> yanıtı verir; böylece bir yanlış, dizinleyiciyi
+eklediğiniz anda görünür, haftalar sonra değil.<br><br>
+<b>Neden zahmet edilsin?</b> Tam olarak önemsediğiniz grupların kendi barındırdığınız
+dizinleyicisi: hesap yok, API çağrı sınırı yok, taramasına izin verdiğiniz kadar derin
+saklama. Bu, alışılmış dizinleyicilerinizin yerine değil onlara ek olarak durur, çünkü
+yalnızca gerçek bir dosya adıyla atılanı bulur.</div>
 
 <h2 id="remotes">12 · Telefon &amp; uzaktan uygulamalar</h2>
 <p>nzbfast iki büyük uzaktan kumanda protokolünün <em>ikisini de</em> uygular, bu yüzden
@@ -749,7 +1089,7 @@ boş bir denetim URL'si de aynısını yapar.</li>
 <table>
 <tr><th>Komut</th><th>Amaç</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Etkileşimli sunucu kurulumu.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>Arka plan sürecini çalıştır (panel + API + otomasyon). <code>--open</code> tarayıcıyı açar; tam bayrak listesi için <code>--help</code>'e bak - her panel ayarının bir bayrak ikizi vardır.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>Arka plan sürecini çalıştır (panel + API + otomasyon). <code>--open</code> tarayıcıyı açar; <code>--apikey</code> anahtarı elle ayarlar (<a href="#firstrun-key">§2</a>); <code>--bind</code> dinleme adresini seçer, varsayılan <code>0.0.0.0</code> (her arayüz), yalnızca bu makine için <code>127.0.0.1</code>. Tam bayrak listesi için <code>--help</code>'e bak - her panel ayarının bir bayrak ikizi vardır.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Bir NZB'yi indir, tam işlem hattı, arka plan süreci yok. <code>--preflight</code> gönderi tamamlanamazsa erken durdurur; şifreli kümeler için <code>--password</code>.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Kullanılabilirlik kararı - COMPLETE / REPAIRABLE / IMPOSSIBLE - yükü indirmeden.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>Dosyaları bir dizindeki PAR2 kümesine karşı doğrula.</td></tr>
@@ -769,10 +1109,10 @@ olarak yükler ve eşleşen NZB'yi yazar. Bir işletim aracıdır; açık bir
 <p>Temel uç nokta: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır. İki anahtar:
 <b>API anahtarı</b> (tam denetim) ve <b>NZB anahtarı</b> (yalnızca ekleme:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> bilerek yalnızca ekleme kümesinde değildir: bir bağlantıyı çözümlemek ölçülen dizinleyici kotası harcayabilir, ki bu yalnızca ekleme yetkisinin işi değildir.</p>
 <table>
 <tr><th>Alan</th><th>Modlar</th></tr>
-<tr><td>Kuyruk</td><td><code>queue</code> (<code>name=delete/pause/resume/priority/switch</code> ile), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>Kuyruk</td><td><code>queue</code> (<code>name=delete/pause/resume/priority/switch</code> ile), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>Bilgi</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>Yapılandırma</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (her Ayarlar alanı), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Dizin &amp; duvar</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, ayrıca <code>/api?t=caps|search|tvsearch|movie</code> ve <code>/getnzb/&lt;id&gt;</code>'de newznab</td></tr>
@@ -785,8 +1125,9 @@ SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır
 <h2 id="files">17 · Dosyalar &amp; konumlar</h2>
 <table>
 <tr><th>Dosya</th><th>İçerik</th></tr>
-<tr><td><code>config.local.json</code></td><td>Sunucu kimlik bilgileri ve sunucu başına seçenekler. Sihirbaz tarafından oluşturulur; Ayarlar'da düzenlenebilir. Onu gizli tut.</td></tr>
+<tr><td><code>config.local.json</code></td><td>Sunucu kimlik bilgileri ve sunucu başına seçenekler. Sihirbaz tarafından oluşturulur; Ayarlar'da düzenlenebilir. Onu gizli tut. Parolalar <a href="#passwords">gizlenir, şifrelenmez</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Panelde değiştirilen her ayar. Yapılandırmanın yanında yaşar; arayüz değerleri komut satırı bayraklarını geçersiz kılar. Bayraklara/varsayılanlara dönmek için bir anahtarı (ya da dosyayı) sil.</td></tr>
+<tr><td><code>apikey</code></td><td>nzbfast'in ilk çalıştırmada kendine ürettiği API anahtarı (<a href="#firstrun-key">§2</a>). Yapılandırmanın yanında yaşar; macOS ve Linux'ta yalnızca nzbfast'i çalıştıran hesap tarafından okunabilir. Yeni bir anahtar almak için onu silme: zaten çalışmış bir kurulumda yerine hiçbir şey gelmez ve arka plan süreci hiç anahtarsız geri açılır. Bunun yerine Ayarlar → Güvenlik'ten yeni bir tane ayarla.</td></tr>
 <tr><td><code>index.db</code></td><td>Sürüm dizini (SQLite) + duvar meta verisi. Silmek güvenli - taramadan yeniden inşa olur (Ayarlar → Dizinleme → Sil bunu senin için yapar).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Kuyruk durumu (yeniden başlatmaları atlatır), iş başına NZB'ler, kullanım defteri, kıyaslama geçmişi, poster görsel önbelleği.</td></tr>
 <tr><td>Makale günlüğü</td><td>Eksikken her işin çıktı klasörünün içinde - çökme sonrası devam ve yeniden denemeyi çalıştırır. Başarıda kaldırılır.</td></tr>
@@ -803,7 +1144,10 @@ gitmiş olanları önceden işaretler. Bu biçimdeki ilk başarısızlık, bir b
 kendiliğinden bir kez yinelenir; çünkü yayılma gecikmesi tıpatıp aynı görünür ve
 kendiliğinden düzelir.</td></tr>
 <tr><td>Biten arşiv parola istiyor</td><td>Geçmiş satırı 🔑 gösterir - parolayı orada gir; iş yerinde biter. </td></tr>
+<tr><td>Bir arşiv çıkarılamıyor</td><td>Parola ve onarım hataları kendilerini Geçmiş satırında adlandırır. Geri kalan her şey için bir kaçış kapısı vardır: Ayarlar → İzleme klasörü &amp; son işlem → <b>Harici unrar ile çıkar</b> (gelişmiş bir ayar) çıkarma işini yerleşik çıkarıcı yerine makinende kurulu <code>unrar</code> programına devreder. Bunun dışında kapalı bırak: yerleşik yol ölçtüğümüz her biçimde daha hızlıdır ve hash adlı gizlenmiş gönderiler zaten her zaman onu kullanır, çünkü unrar onların yeniden adlandırmasını izleyemez. <code>nzbfast get</code> çalıştırmaları için aynı anahtar <code>NZBFAST_NO_NATIVE_UNRAR=1</code> ortam değişkenidir. Yerleşik çıkarıcının reddettiği bir arşivi unrar çıkarırsa, yerleşik yolu düzeltebilmemiz için lütfen bildir.</td></tr>
 <tr><td>Sonarr/Radarr bağlanamıyor</td><td>Port 6789 erişilebilir mi? API anahtarı doğru mu (tam anahtar, NZB anahtarı değil)? İstemci türü SABnzbd olarak mı ayarlı?</td></tr>
+<tr><td>Panel hiç ayarlamadığım bir API anahtarı istiyor</td><td>Yeni bir kurulum kendine bir tane üretir ve onu başlangıçta bir kez yazdırır (<a href="#firstrun-key">§2</a>). Yapılandırmanın yanındaki <code>apikey</code> dosyasında ve başlangıç çıktısındadır. Ya da zaten oturum açmış bir tarayıcıdan Ayarlar → Güvenlik'e kendi anahtarını yaz.</td></tr>
+<tr><td>Ağdaki hiçbir şey arka plan sürecine erişemiyor</td><td><code>--bind</code>'ı denetle: <code>127.0.0.1</code> yalnızca nzbfast'in çalıştığı makineye hizmet eder. Varsayılan olan <code>0.0.0.0</code> her arayüze hizmet eder. Sonra makinenin kendi güvenlik duvarını 6789 portu için denetle.</td></tr>
 <tr><td>Göz at kartı küçük kalıyor</td><td>Dizinleyici arka planda büyür - Ayarlar → Dizinleme gruplarının ayarlı olduğunu denetle ve Tarama başına derinleştir'e geçmiş biriktirmesi için zaman ver. "Şimdi tara" bir geçişi zorlar; durum satırı canlı ilerlemeyi gösterir.</td></tr>
 <tr><td>Duvar yanlış/görselsiz gösteriyor</td><td>Ayrıntı sayfası → ✎ Eşleşmeyi düzelt ya da ↻ Meta veriyi yenile. Film aramaları ücretsiz bir OMDb anahtarıyla iyileşir.</td></tr>
 <tr><td>Arka plan süreci başlamıyor: port kullanımda</td><td>Başka bir örnek çalışıyor - ya da <code>--port</code>'u değiştir.</td></tr>

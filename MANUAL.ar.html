@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - دليل المستخدم</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:start;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 0;padding-inline-end:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--surface);
   border-start-start-radius:0;border-end-start-radius:0;border-start-end-radius:9px;border-end-end-radius:9px;
   padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-inline-start-color:var(--dim)}
@@ -187,6 +408,44 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 تثبيتك الحالي وينسخ خوادمه. يتوفّر أيضًا <code>nzbfast import-sab</code>
 على سطر الأوامر.</div>
 
+<h3 id="firstrun-key">مفتاح API لديك</h3>
+<p>على تثبيت جديد فعلًا، يصنع nzbfast لنفسه مفتاح API أول مرة تبدأ فيها
+الخدمة، ويطبعه مرة واحدة في لافتة تحت عنوان لوحة التحكم مباشرةً.
+ومن ثَمّ يحتاج كل طلب إلى ذلك المفتاح، فلا تكون لوحة التحكم ولا API
+مفتوحتين لكل ما يصل إلى الجهاز.</p>
+<p>وما تفعله به يعتمد على كيفية تشغيلك nzbfast:</p>
+<ul>
+  <li><b>تطبيق macOS، أو صينية Windows، أو <code>serve --open</code></b>: لا شيء.
+  تمرّر المفتاح إلى نافذة المتصفّح التي تفتحها، وتتذكّره لوحة التحكم،
+  وتكون قد سجّلت الدخول أصلًا.</li>
+  <li><b>متصفّح فتحته بنفسك</b>، أو لوحة التحكم على هاتف أو حاسوب
+  آخر: تطلب الصفحة المفتاح مرة واحدة ثم تتذكّره بعد ذلك.</li>
+  <li><b>Sonarr وRadarr وnzb360 وأمثالها</b>: ألصِقه بوصفه مفتاح SABnzbd أو
+  NZBGet لديها (<a href="#arr">§11</a>، <a href="#remotes">§12</a>).</li>
+</ul>
+<p>يُحفظ المفتاح في ملف اسمه <code>apikey</code> بجانب ملف الإعداد، فيبقى
+كما هو عبر إعادة التشغيل ويمكنك قراءته متى احتجت إليه.
+وعلى macOS وLinux لا يقرأ ذلك الملف إلا الحساب الذي يشغّل nzbfast.
+وهو أيضًا في خرج الخدمة نفسها، فبطاقة السجل في لوحة التحكم تحتويه إن كانت
+الطرفية قد انزلقت بعيدًا.</p>
+<div class="note"><b>الترقية لا تغيّر شيئًا.</b>التثبيت الموجود مسبقًا
+يُترك كما هو تمامًا، بمفتاح أو بلا مفتاح. ولا يُصنع مفتاح إلا في تشغيلة أولى -
+واحدة بلا إعدادات لوحة تحكم وبلا قائمة انتظار محفوظة - لأن ظهور مفتاح تحت
+تثبيت عامل كان سيقفل الباب أمام كل Sonarr وRadarr وتطبيق هاتف سبق أن
+وصلته، عند إعادة تشغيل لم تربطها قط بتغيير إعداد.</div>
+<p>ولاستعمال مفتاح من عندك بدلًا من ذلك، اكتبه في الإعدادات ← الأمان؛ يسري
+فورًا. وتلك اللوحة تغيّر المفتاح لكنها لا تعرض الحالي أبدًا، فاقرأ ملف
+<code>apikey</code> إن احتجت إلى استرجاع القيمة المولَّدة. وللتشغيل بلا مفتاح
+البتة، لأن شيئًا أمام nzbfast يتولّى تسجيل الدخول أصلًا، شغّله مع
+<code>NZBFAST_OPEN=1</code> في البيئة. عندها يبقى nzbfast مفتوحًا ويقول
+ذلك صراحةً عند البدء.</p>
+<p>أما أيّ الأجهزة يمكنها الوصول إلى الخدمة أصلًا فاختيار منفصل:
+<code>serve --bind</code>. والافتراضي هو <code>0.0.0.0</code>، أي كل
+واجهة شبكة، لأن صندوق NAS وهاتفًا وSonarr على حاسوب آخر يجب أن تكون
+جميعها قادرة على الاتصال. و<code>--bind 127.0.0.1</code> يضيّقه إلى
+الجهاز الذي يعمل عليه nzbfast، وهو ما تريده على سطح مكتب واحد لا يحتاج
+غيره إلى وصول.</p>
+
 <h2 id="concepts">3 · كيف يعمل nzbfast</h2>
 <p>مفردات سريعة كي تقرأ بقية الدليل بسهولة:</p>
 <table>
@@ -308,10 +567,11 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 في الفهرس يُجلَب تلقائيًا، مع تفضيلات الجودة وقواعد
 الترقية (نسخة أفضل تحل محل الأسوأ).</p>
 <h3 id="dash-history">السجل</h3>
-<p>التنزيلات الأخيرة مع الحالة والحجم والموقع؛ المهام الفاشلة تعرض <b>أعد المحاولة</b>
+<p>التنزيلات الأخيرة، كل واحدة في صف. المهام الفاشلة تعرض <b>أعد المحاولة</b>
 (يستأنف من السجلّ). الأرشيفات المشفّرة تعرض عنصر فك قفل 🔑 - أدخل
 كلمة المرور فتنتهي المهمة في مكانها. يرسم شريط سلامة التحقق كتل PAR2
 التالفة لكل تنزيل - والذيل المتصاعد يعني وصول المقالات تالفة.</p>
+<p>تعرض البطاقة عشر تنزيلات افتراضيًا، والبقية على بُعد نقرة واحدة عبر الزر ▤. أما الحالة والموقع وسبب فشل المهمة فتقع خلف نقرة على الصف نفسه، بحيث تبقى الحالة الشائعة - ما الذي انتهى، وبأي حجم، ومتى - مقروءة دون تمرير. أو اسحب الحافة السفلية للبطاقة لتمرّر القائمة عند ارتفاع تختاره أنت. ويغيّر <b>History rows</b> في الإعدادات ← الواجهة هذا العدد؛ ولأنه خاصية للخفي (daemon) لا لمتصفحك، فإنه يسري على كل جهاز ينظر إلى هذا التثبيت. ويلوّن <b>Colour History names</b> المجاور له الأسماء المكتملة بالأخضر والفاشلة بالأحمر؛ وبإيقافه تبقى الأسماء بلا لون، وتظل النقطة الملوّنة وتفاصيل الصف نفسها تقول أيّها أيّ.</p>
 <h3 id="dash-usage">استهلاك البيانات</h3>
 <p>أشرطة يومية لكل مزوّد وإجماليات اليوم / 7 أيام / 30 يومًا - ضرورية للحسابات
 المحدودة بعدّاد وحسابات الكتلة. تعرض حسابات الكتلة الاستخدام مدى الحياة مقابل حجمها.</p>
@@ -327,6 +587,7 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 يُلتقَط خلال 5 ثوانٍ ويُزال الملف. وجّه مجلّد تنزيلات متصفّحك
 إليه للجلب بنقرة واحدة من مواقع المفهرِسات.</td></tr>
 <tr><td><b>من رابط</b></td><td>الصق رابط NZB (واجهة <code>mode=addurl</code>، أو عبر أي تطبيق متصل).</td></tr>
+<tr><td><b>روابط nzblnk:</b></td><td>الصق رابط <code>nzblnk:</code> في أي موضع من لوحة التحكم، أو اسحبه إليها. وإن كنت ثبّتّ من صورة DMG على macOS أو من مثبّت Windows فيمكنك أيضًا النقر على واحد مباشرةً في منتدى. انظر <a href="#nzblnk">روابط nzblnk</a> أدناه.</td></tr>
 <tr><td><b>تصفّح الفهرس</b></td><td>انقر أي إصدار كامل في بطاقة التصفّح.</td></tr>
 <tr><td><b>قائمة المتابعة / RSS</b></td><td>تلقائي - انظر <a href="#automation">الأتمتة</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr إلخ.</b></td><td>ترسل عمليات الجلب مباشرةً إلى قائمة الانتظار - انظر <a href="#arr">§11</a>.</td></tr>
@@ -338,9 +599,33 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 تنزيلك، ويمكن للمجلدات الذكية (انظر <a href="#automation">§10</a>) أن تسندها بقاعدة.</li>
 <li><b>الأولويات</b>: إجبار &gt; عالية &gt; عادية &gt; منخفضة. الإجبار يتجاوز الإيقاف المؤقت والحصة.</li>
 <li><b>كلمات المرور</b> للأرشيفات المشفّرة تُلتقَط تلقائيًا من
-<code>&lt;meta type="password"&gt;</code> داخل NZB أو من اسم ملف
-<code>Name{{password}}.nzb</code>، ويمكن تزويدها لكل مهمة عبر
+<code>&lt;meta type="password"&gt;</code> داخل NZB، أو من اسم ملف
+<code>Name{{password}}.nzb</code>، أو من حقل <code>p=</code> في
+<a href="#nzblnk">رابط nzblnk</a>، ويمكن تزويدها لكل مهمة عبر
 الواجهة أو لاحقًا من السجل (🔑).</li>
+</ul>
+
+<h3 id="nzblnk">روابط nzblnk</h3>
+<p>بعض المنتديات، ولا سيما الألمانية والهولندية، تنشر رابط <code>nzblnk:</code> بدل
+ملف NZB. المنشور مموَّه، فلا يوجد أصلًا اسم ملف يمكن الربط إليه. يحمل الرابط بدلًا من
+ذلك ترويسة، <code>h=</code>، وهي مفتاح بحث لا موضع، إضافة إلى عنوان <code>t=</code>
+وكلمة مرور <code>p=</code> ومجموعة <code>g=</code> اختيارية. على أحدهم أن يذهب أولًا
+ليعثر على المنشور.</p>
+<p>يبحث nzbfast عن الترويسة في فهرسه هو أولًا، وهذا لا يحتاج شبكة على الإطلاق، ولا
+يسأل مفهرسات البحث التي أعددتها (الإعدادات ← مفهرسات البحث،
+<a href="#settings">§9</a>) إلا إذا أخفق ذلك، وضمن الميزانيات اليومية نفسها والتراجع
+نفسه المتّبع في أي بحث آخر. يصير العنوان اسمَ المهمة وتُطبَّق كلمة المرور على المهمة
+تلقائيًا.</p>
+<ul>
+<li><b>اللصق أو السحب</b> يعمل على أي تنصيب، بما فيه Docker وصناديق NAS: انسخ الرابط من
+المنتدى والصقه في أي موضع من لوحة التحكم.</li>
+<li><b>النقر</b> على رابط يستلزم تسجيل المخطّط لدى سطح مكتبك. يسجّله تطبيق <b>صورة DMG
+على macOS</b>، ويعرضه <b>مثبّت Windows</b> كمهمة: يسأل أولًا، ويترك المخطّط وشأنه إن كان
+NZB Monkey أو NZBDonkey يحوزه بالفعل. أما أرشيف macOS المجرّد وHomebrew وتنصيبات Linux
+فلا معالِج سطح مكتب لها، وهناك يكون اللصق هو باب الدخول.</li>
+<li>الحلّ محدود المعدّل عن قصد. تسجيل مخطّط يجعله على بُعد سؤال متصفّح واحد من أي صفحة
+تزورها، فللروابط سقف في الدقيقة ولا يبلغ مفهرساتِك إلا أوائلها في كل دقيقة؛ وما بعد ذلك
+يُجاب من الفهرس المحلي وحده.</li>
 </ul>
 
 <h2 id="wall">6 · جدار الملصقات</h2>
@@ -412,11 +697,38 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <table>
 <tr><th>الحقل</th><th>ملاحظات</th></tr>
 <tr><td>المضيف / المنفذ</td><td>استخدم منفذ SSL <b>563</b>. TLS لا يكلّف شيئًا قابلًا للقياس - يشفّر nzbfast دائمًا.</td></tr>
-<tr><td>اسم المستخدم / كلمة المرور</td><td>تُخزَّن محليًا في <code>config.local.json</code>، ولا تُعاد للمتصفّح أبدًا. ترك كلمة المرور فارغةً عند التحرير يُبقي المخزَّنة.</td></tr>
+<tr><td>اسم المستخدم / كلمة المرور</td><td>تُخزَّن محليًا في <code>config.local.json</code>، ولا تُعاد للمتصفّح أبدًا. ترك كلمة المرور فارغةً عند التحرير يُبقي المخزَّنة. كلمات المرور <a href="#passwords">مموّهة على القرص، لا مشفّرة</a>.</td></tr>
 <tr><td>الاتصالات</td><td>الاتصالات المتزامنة لكل خادم. استخدم <b>ضبط الاتصالات</b> (<a href="#performance">§13</a>) لإيجاد النقطة المثلى لكل مزوّد بدل التخمين عاليًا.</td></tr>
 <tr><td>المستوى (الطبقة)</td><td>0 = أساسي؛ المستويات الأعلى خوادم تعبئة، تُطلَب فقط للمقالات التي فوّتها كل مستوى أدنى. ضع الحسابات غير المحدودة عند 0، وحسابات الكتلة عند 1+.</td></tr>
 <tr><td>حجم الكتلة (GB)</td><td>لحسابات الكتلة (الدفع لكل GB): يتتبّع nzbfast الاستخدام مدى الحياة مقابل هذا ويتوقّف عن استخدام الخادم عند النفاد (تحذير عند 85%).</td></tr>
 </table>
+<p><b>اترك هامشًا بسيطًا تحت حد الاتصالات في حسابك.</b> ضبط الاتصالات أقل قليلًا من الحد لا يكلّف شيئًا: تتسطّح السرعة قبل الاتصالين الأخيرين بكثير، و<b>ضبط الاتصالات</b> (<a href="#performance">§13</a>) يستقر تحته على أي حال. تلك الأماكن الشاغرة هي ما يسمح لجهاز ثانٍ أو لبرنامج آخر أو لمحاولة جديدة بعد انقطاع المقبس بالدخول رغم ذلك، بدلًا من رفضها بينما يشغل هذا كل مكان.</p>
+<h3 id="passwords">كيف تُحفَظ كلمات مرور مزوّديك</h3>
+<p>كلمات مرور المزوّدين في <code>config.local.json</code> <b>مموّهة، لا مشفّرة</b>.
+تُخزَّن على هيئة <code>obf1:</code> يتبعها شكل مُرمَّز، حتى لا يُقرأ الملف نصًّا
+صريحًا إن ظهر في لقطة شاشة أو منشور منتدى أو تقرير علّة أو على شاشة يراها شخص آخر.</p>
+<p>لنكن واضحين بشأن ما يمنحه هذا وما لا يمنحه:</p>
+<ul>
+<li><b>هذا ليس تشفيرًا ولا يقدّم أي حماية ممن يملك الملف.</b> الطريقة موجودة في
+مصدرنا العلني وفاكّ الترميز يأتي داخل nzbfast، فمن يحوز الملف يستعيد كلمة المرور في
+ثوانٍ. عامِل الملف على أنه سرّ تمامًا كما لو كانت كلمات المرور مقروءة.</li>
+<li><b>يزيل التسريب العابر</b>، وهو الشائع. ملفات الإعداد تُلصَق في خيوط الدعم
+وتُلتقط في لقطات الشاشة أكثر بكثير مما تُسرَق من القرص.</li>
+<li>كلمة مرور كتبتها بنفسك نصًّا صريحًا تظل تعمل. يقرأ nzbfast الشكلين معًا، فلا تنكسر
+أبدًا الإعدادات المحرَّرة يدويًا ولا الاستيراد من عملاء آخرين؛ ويكتب الشكل المموَّه في
+عملية الحفظ التالية.</li>
+<li>يُكتَب الملف كذلك مقروءًا فقط للحساب الذي يشغّل nzbfast (الوضع 0600 على macOS
+وLinux).</li>
+</ul>
+<p>للمقارنة، <b>يخزّن كل من NZBGet وSABnzbd كلمات مرور المزوّدين نصًّا مقروءًا</b> في
+ملفات إعدادهما. نرى التمويه تحسينًا صغيرًا على ذلك، لا ميزة أمنية.</p>
+<p><b>ولمَ لا سلسلة مفاتيح النظام؟</b> Keychain على macOS ومدير بيانات الاعتماد في
+Windows وخدمات الأسرار في Linux ستمنح حماية حقيقية، وقد نعود إليها. يمنعنا اليوم أمران.
+الوصول إلى سلسلة المفاتيح مرتبط بهوية التطبيق، وnzbfast غير موقَّع بعد، فتصبح المطالبات
+والسلوك بعد كل تحديث سيئة. كما أن حصة كبيرة من التنصيبات هي Docker وخوادم بلا شاشة
+وصناديق NAS لا توجد فيها سلسلة مفاتيح أصلًا، ما يترك مسارَي تخزين مختلفين يجب إبقاؤهما
+صحيحين. صيغة واحدة مفهومة جيدًا وتتصرّف بالطريقة نفسها في كل مكان هي، في الوقت الحالي،
+الصفقة الأفضل.</p>
 <p>خياران آخران لكل خادم لا يملكان بعد عنصر تحكّم في اللوحة: أضفهما يدويًا إلى مدخل
 ذلك الخادم في <code>config.local.json</code> (انظر <a href="#files">§17</a>) ثم أعد
 التشغيل.</p>
@@ -504,6 +816,7 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <tr><td>تضمين مجموعة الإصدار</td><td>علامة <code>-GROUP</code> في النهاية.</td></tr>
 <tr><td>إزالة ملفات النفايات</td><td><b>مفعّلة افتراضيًا.</b> تحذف ما تبقّى من <code>.par2</code> و<code>.nzb</code> و<code>.sfv</code> و<code>.nfo</code> ومقاطع العيّنة من مجلدات الأفلام والمسلسلات المنتهية. ولا تحذف الفيديو ولا ترجماته أبدًا.</td></tr>
 <tr><td>الاحتفاظ بملف الوسائط فقط</td><td><b>مطفأة افتراضيًا، ومدمّرة:</b> تحذف نهائيًا كل ما في المجلد عدا الفيديو (أو مقاطع الفيديو) والترجمات. وتُحفظ كل حلقة من حزمة الموسم. وتتقدّم على <b>إزالة ملفات النفايات</b> حين تكون الاثنتان مفعّلتين.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>مُفعَّل افتراضيًا.</b> كثيرًا ما تكون الرياضة والسباقات وغيرها من الفعاليات عنوانًا واحدًا يتكرّر طوال الموسم، ولا يفصل بينها سوى كلمة أو كلمتين - "Round11 Hungary Race" مقابل "Round11 Hungary Qualifying". والاحتفاظ بتلك الكلمات هو ما يمنع موسمًا كاملًا من الانهيار إلى الاسم نفسه. ولا ينطبق إلا حيث تعذّر ترتيب الاسم بأي طريقة أخرى، فتبقى الأفلام والحلقات العادية دون مساس.</td></tr>
 </table>
 <p class="dim">تعمل المجموعة كلها بعد الإصلاح وفكّ الضغط وقبل <b>نقل المكتملة إلى</b>،
 وتُتخطّى بالكامل لمهمة ما زالت تنتظر كلمة مرور. وتنطبق خطوتا الحذف <em>فقط</em> على
@@ -518,8 +831,19 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 و<b>ترتيب المسلسلات</b> (انظر <a href="#automation">§10</a>).</p>
 
 <h3>الفهرسة <span class="pill live">مباشر</span></h3>
+<div class="note"><b>المفهرس المدمج مُطفأ افتراضيًا.</b> يعثر على المنشورات التي
+نُشرت باسم ملف حقيقي، وحصة كبيرة ومتنامية من Usenet تُنشَر عمدًا بلا اسم كهذا: موضوع
+عشوائي، وأسماء ملفات عشوائية بالداخل، ملقاة في مجموعة عامة. الاسم الحقيقي لا يعيش إلا
+في ملف NZB ينشره الرافع في مكان آخر، فهو لم يكن يومًا على Usenet ليقرأه أي ماسح. بالقياس
+على فهرسنا نحن، أنتج 14.8 مليون منشور ممسوح نحو 31٬000 إصدار قابل للتصفّح، أي واحد من
+كل خمسمائة تقريبًا. واصِل استخدام المفهرسات التجارية، وأضِفها تحت الإعدادات ← مفهرسات
+البحث لتتمكن من البحث فيها من الجدار. شغّل هذا إن كنت تتابع مجموعات بعينها ما زال الناس
+ينشرون فيها بأسماء حقيقية، أو أردت أن ترى ما يحمله مزوّدك فعلًا. ومع إطفاء المفتاح لا
+يُمسَح شيء ولا يُجلَب، ولا تُنشَأ قاعدة بيانات، ويُخفى الجدار وتصفّح الفهرس وقائمة
+المراقبة وتغذية newznab.</div>
 <table>
 <tr><th>الإعداد</th><th>ما يفعله</th></tr>
+<tr><td>المفهرس المدمج</td><td>المفتاح الرئيسي، <b>مُطفأ ما لم تشغّله</b>. الإطفاء يعني لا مسح ولا استعلامات بيانات وصفية ولا أخذ عيّنات توفّر ولا تغذية newznab؛ ويُحتفَظ بأي فهرس موجود على القرص (ثمة زر حذف)، فإعادة التشغيل تستأنف بدل إعادة المسح.</td></tr>
 <tr><td>المجموعات</td><td>مجموعات الأخبار التي يفحصها المفهرِس المدمج (مثل <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>فترة الفحص</td><td>الثواني بين التمريرات (الافتراضي 900).</td></tr>
 <tr><td>مقالات التعبئة الرجعية</td><td>الترويسات المجلوبة عند أول فحص لمجموعة.</td></tr>
@@ -533,8 +857,7 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 
 <h3>المكتبة، الأمان، الواجهة</h3>
 <p><b>المكتبة</b>: الفئات المعامَلة كإدخالات مكتبة فورية + فترة إعادة الفحص.
-<b>الأمان</b>: مفتاح API الكامل (كل شيء) ومفتاح NZB (إضافة فقط - آمن
-لإعطائه لمواقع المفهرِسات)، كلاهما قابل للتدوير مباشرةً. <b>الواجهة</b>: أصوات النقر،
+<b>الأمان</b>: مفتاح API الكامل (كل شيء) ومفتاح NZB (إضافة فقط - آمن لإعطائه لمواقع المفهرِسات)، كلاهما قابل للتدوير مباشرةً. ويستبدل كل صندوق المفتاح الذي يخصّه بمجرد مغادرتك الحقل، أما ترك الصندوق فارغًا فيُبقي المفتاح الموجود فيه أصلًا. ولمفتاح API أيضًا <b>Show</b> الذي يكشف المفتاح الحالي وينسخه لتلصقه في Sonarr أو Radarr أو NZB360 متى شئت، و<b>Create new</b> الذي يسكّ مفتاحًا بديلًا - فيتوقف القديم عن العمل فورًا، ومن ثمّ يجب تزويد كل ما هو متصل بالفعل بالمفتاح الجديد. وكلاهما مشروط بمفتاح API نفسه: فمفتاح NZB ذو الإضافة فقط لا يستطيع قراءته، وهذا هو مغزى ذلك المفتاح كله. ولمعرفة مصدر المفتاح في تثبيت جديد، انظر <a href="#firstrun-key">§2</a>. <b>الواجهة</b>: أصوات النقر،
 وإشعارات سطح المكتب عند الاكتمال، وفترة إعادة ترتيب المزوّدين.</p>
 
 <p><b>وحدات السرعة</b> <span class="pill live">live</span> تحدّد كيف تُعرض كل سرعة في
@@ -582,7 +905,7 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <ol>
 <li>في Sonarr/Radarr: Settings ← Download Clients ← أضِف <b>SABnzbd</b>.</li>
 <li>المضيف: جهاز nzbfast لديك · المنفذ: <b>6789</b> · مفتاح API: مفتاح API الكامل لديك
-(الإعدادات ← الأمان؛ عنصر QR/النسخ بجانبه).</li>
+(أين تجده: <a href="#firstrun-key">§2</a>).</li>
 <li>الفئة كما تريد (مثل <code>tv</code> / <code>movies</code>). Test ← علامة صح خضراء ← Save.</li>
 </ol>
 <p>قائمة الانتظار، والسجل، وحالة كل مهمة، و"إزالة وحذف"، وإعادة المحاولة وتوجيه الفئات
@@ -595,8 +918,13 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <code>movie</code> من فهرسه الخاص لمجموعاتك المراقَبة، و
 <code>/getnzb/&lt;id&gt;</code> يعيد NZB.</li>
 </ol>
-<div class="note"><b>لماذا العناء؟</b>مفهرِس ذاتي الاستضافة لتلك المجموعات بالضبط التي
-تهتم بها: بلا حسابات، بلا حدود لطلبات API، ومدة احتفاظ عميقة بقدر ما تسمح له بالفحص.</div>
+<div class="note"><b>شغّل المفهرس المدمج أولًا</b> (الإعدادات ← الفهرسة). إنه مُطفأ
+افتراضيًا، وما دام مُطفأً تردّ هذه الواجهة على كل استعلام بـ
+<code>&lt;error code="101"&gt;</code> بدل نتيجة فارغة، فيظهر الخطأ لحظة إضافتك للمفهرس
+لا بعد أسابيع.<br><br>
+<b>ولمَ العناء؟</b> مفهرس تستضيفه بنفسك لتلك المجموعات التي تهمّك بالضبط: بلا حسابات،
+وبلا حدود لنداءات الواجهة، وباستبقاء بعمق ما تسمح له بمسحه. إنه إضافة إلى مفهرساتك
+المعتادة لا بديل عنها، لأنه لا يجد إلا ما نُشر باسم ملف حقيقي.</div>
 
 <h2 id="remotes">12 · تطبيقات الهاتف والتحكم عن بُعد</h2>
 <p>يُنفّذ nzbfast <em>كلا</em> بروتوكولَي التحكم عن بُعد الرئيسيَّين، فيعمل تقريبًا كل
@@ -740,7 +1068,7 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <table>
 <tr><th>الأمر</th><th>الغرض</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>إعداد خادم تفاعلي.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>شغّل الخدمة (لوحة التحكم + API + أتمتة). <code>--open</code> يفتح المتصفّح؛ انظر <code>--help</code> لقائمة الأعلام الكاملة - لكل إعداد في لوحة التحكم توأم عَلَم.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>شغّل الخدمة (لوحة التحكم + API + أتمتة). <code>--open</code> يفتح المتصفّح؛ و<code>--apikey</code> يضبط المفتاح يدويًا (<a href="#firstrun-key">§2</a>)؛ و<code>--bind</code> يختار عنوان الإصغاء، والافتراضي <code>0.0.0.0</code> (كل واجهة)، و<code>127.0.0.1</code> لهذا الجهاز وحده. انظر <code>--help</code> لقائمة الأعلام الكاملة - لكل إعداد في لوحة التحكم توأم عَلَم.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>نزّل NZB واحدًا، خط المعالجة الكامل، بلا خدمة. <code>--preflight</code> يجهض مبكرًا إن تعذّر اكتمال المنشور؛ <code>--password</code> للمجموعات المشفّرة.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>حكم على التوفّر - COMPLETE / REPAIRABLE / IMPOSSIBLE - دون تنزيل الحمولة.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>تحقّق من الملفات مقابل مجموعة PAR2 في مجلد.</td></tr>
@@ -760,10 +1088,10 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <p>نقطة النهاية الأساسية: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 متوافقة مع SABnzbd، فتعمل تكاملات SAB الحالية دون تغيير. مفتاحان:
 <b>مفتاح API</b> (تحكّم كامل) و<b>مفتاح NZB</b> (إضافة فقط:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> ليس ضمن مجموعة الإضافة فقط عن قصد: فحلّ رابط قد يستهلك حصة مفهرس مدفوعة، وهذا ليس من شأن اعتماد مخصّص للإضافة فقط.</p>
 <table>
 <tr><th>المجال</th><th>الأوضاع</th></tr>
-<tr><td>قائمة الانتظار</td><td><code>queue</code> (مع <code>name=delete/pause/resume/priority/switch</code>)، <code>pause</code>، <code>resume</code>، <code>addfile</code>، <code>addurl</code>، <code>retry</code>، <code>set_password</code></td></tr>
+<tr><td>قائمة الانتظار</td><td><code>queue</code> (مع <code>name=delete/pause/resume/priority/switch</code>)، <code>pause</code>، <code>resume</code>، <code>addfile</code>، <code>addurl</code>، <code>addnzblnk</code>، <code>retry</code>، <code>set_password</code></td></tr>
 <tr><td>المعلومات</td><td><code>history</code>، <code>status</code>/<code>fullstatus</code>، <code>stats</code>، <code>version</code>، <code>server_stats</code>، <code>usage</code>، <code>log</code>، <code>warnings</code></td></tr>
 <tr><td>الإعداد</td><td><code>get_config</code>، <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (كل حقل في الإعدادات)، <code>server_save/delete/test/enable/reorder</code>، <code>import_probe/apply</code></td></tr>
 <tr><td>الفهرس والجدار</td><td><code>index_search</code>، <code>index_get</code>، <code>index_stats</code>، <code>index_scan_now</code>، <code>wall</code>، <code>wall_search/fix/refresh/art</code>، إضافةً إلى newznab عند <code>/api?t=caps|search|tvsearch|movie</code> و<code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -776,8 +1104,9 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 <h2 id="files">17 · الملفات والمواقع</h2>
 <table>
 <tr><th>الملف</th><th>المحتويات</th></tr>
-<tr><td><code>config.local.json</code></td><td>بيانات اعتماد الخوادم وخيارات كل خادم. يُنشئه المعالج؛ قابل للتحرير في الإعدادات. أبقِه خاصًّا.</td></tr>
+<tr><td><code>config.local.json</code></td><td>بيانات اعتماد الخوادم وخيارات كل خادم. يُنشئه المعالج؛ قابل للتحرير في الإعدادات. أبقِه خاصًّا. كلمات المرور <a href="#passwords">مموّهة، لا مشفّرة</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>كل إعداد غُيّر في لوحة التحكم. يقيم بجانب الإعداد؛ قيم الواجهة تتجاوز أعلام سطر الأوامر. احذف مفتاحًا (أو الملف) للعودة إلى الأعلام/الافتراضيات.</td></tr>
+<tr><td><code>apikey</code></td><td>مفتاح API الذي صنعه nzbfast لنفسه في تشغيلة أولى (<a href="#firstrun-key">§2</a>). يقيم بجانب الإعداد؛ ولا يقرأه إلا الحساب الذي يشغّل nzbfast على macOS وLinux. لا تحذفه للحصول على مفتاح جديد: على تثبيت سبق أن عمل، لا شيء يحلّ محلّه وتعود الخدمة بلا مفتاح البتة. اضبط مفتاحًا جديدًا من الإعدادات ← الأمان بدلًا من ذلك.</td></tr>
 <tr><td><code>index.db</code></td><td>فهرس الإصدارات (SQLite) + بيانات الجدار الوصفية. آمن للحذف - يُعاد بناؤه من الفحص (الإعدادات ← الفهرسة ← محو يفعل ذلك نيابةً عنك).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>حالة قائمة الانتظار (تبقى عبر إعادة التشغيل)، وملفات NZB لكل مهمة، وسجلّ الاستخدام، وتاريخ قياس الأداء، وذاكرة صور الملصقات المؤقتة.</td></tr>
 <tr><td>سجلّ المقالات</td><td>داخل مجلد خرج كل مهمة أثناء عدم اكتمالها - يشغّل استئناف التعطّل وإعادة المحاولة. يُزال عند النجاح.</td></tr>
@@ -793,7 +1122,10 @@ Wikipedia وAniList لا تحتاج حسابات. مفتاح OMDb (مجاني، 
 (<a href="#oracle">§13</a>). والإخفاق الأول من هذا الشكل يعيد نفسه مرة واحدة بعد مهلة،
 لأن تأخّر الانتشار يبدو مطابقًا له وينحلّ وحده.</td></tr>
 <tr><td>الأرشيف المنتهي يريد كلمة مرور</td><td>يعرض صف السجل 🔑 - أدخل كلمة المرور هناك؛ فتكتمل المهمة في مكانها. </td></tr>
+<tr><td>أرشيف يتعذر فك ضغطه</td><td>أخطاء كلمة المرور والإصلاح تسمي نفسها في صف السجل. ولكل ما عدا ذلك يوجد مخرج طوارئ: الإعدادات → مجلد المراقبة والمعالجة اللاحقة → <b>فك الضغط بواسطة unrar خارجي</b> (إعداد متقدم) يسلم فك الضغط إلى برنامج <code>unrar</code> المثبت على جهازك بدلًا من المستخرج المدمج. اتركه معطلًا فيما عدا ذلك: المسار المدمج أسرع في كل شكل قسناه، والمنشورات المموهة بأسماء التجزئة تستخدمه دائمًا على أي حال، لأن unrar لا يستطيع متابعة إعادة تسميتها. المفتاح نفسه لتشغيلات <code>nzbfast get</code> هو متغير البيئة <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. إذا فك unrar ضغط أرشيف رفضه المستخرج المدمج، فأبلغنا من فضلك لنصلح المسار المدمج.</td></tr>
 <tr><td>يتعذّر على Sonarr/Radarr الاتصال</td><td>هل المنفذ 6789 قابل للوصول؟ مفتاح API صحيح (المفتاح الكامل، لا مفتاح NZB)؟ نوع العميل مضبوط على SABnzbd؟</td></tr>
+<tr><td>تطلب لوحة التحكم مفتاح API لم أضبطه قط</td><td>يصنع التثبيت الجديد واحدًا لنفسه ويطبعه مرة واحدة عند البدء (<a href="#firstrun-key">§2</a>). وهو في ملف <code>apikey</code> بجانب إعدادك، وفي خرج البدء. أو اكتب مفتاحًا من عندك في الإعدادات ← الأمان من متصفّح سجّل الدخول أصلًا.</td></tr>
+<tr><td>لا شيء على الشبكة يصل إلى الخدمة</td><td>افحص <code>--bind</code>: فـ<code>127.0.0.1</code> يخدم الجهاز الذي يعمل عليه nzbfast وحده. والافتراضي، <code>0.0.0.0</code>، يخدم كل واجهة. ثم افحص جدار حماية الجهاز نفسه للمنفذ 6789.</td></tr>
 <tr><td>بطاقة التصفّح تبقى صغيرة</td><td>ينمو المفهرِس في الخلفية - تحقّق من ضبط مجموعات الإعدادات ← الفهرسة، وامنح التعميق لكل فحص وقتًا لتراكم التاريخ. "افحص الآن" يجبر تمريرة؛ ويعرض سطر الحالة تقدّمًا حيًّا.</td></tr>
 <tr><td>الجدار يعرض صورًا خاطئة/لا صور</td><td>ورقة التفاصيل ← ✎ أصلِح التطابق أو ↻ حدّث البيانات الوصفية. تتحسّن عمليات البحث عن الأفلام بمفتاح OMDb مجاني.</td></tr>
 <tr><td>لا تبدأ الخدمة: المنفذ مستخدم</td><td>مثيل آخر يعمل - أو غيّر <code>--port</code>.</td></tr>

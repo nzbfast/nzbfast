@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - Manual de utilizare</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--surface);
   border-radius:0 9px 9px 0;padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-left-color:var(--dim)}
 .warn-box{border-left-color:var(--warn)}
@@ -181,6 +402,45 @@ Setări → Servere Usenet → <b>Importă din SABnzbd / NZBGet…</b> îți gă
 existentă și îi copiază serverele. Există și <code>nzbfast import-sab</code>
 pe linia de comandă.</div>
 
+<h3 id="firstrun-key">Cheia ta API</h3>
+<p>La o instalare cu adevărat nouă, nzbfast își face singur o cheie API prima dată când
+pornește daemonul și o afișează o singură dată într-un banner chiar sub adresa panoului.
+De atunci înainte fiecare cerere are nevoie de acea cheie, așa că panoul și API-ul nu
+rămân deschise pentru tot ce poate ajunge la mașină.</p>
+<p>Ce faci cu ea depinde de cum ai pornit nzbfast:</p>
+<ul>
+  <li><b>Aplicația de macOS, tray-ul de Windows sau <code>serve --open</code></b>: nimic.
+  Ele dau cheia ferestrei de browser pe care o deschid, panoul o ține minte și ești deja
+  autentificat.</li>
+  <li><b>Un browser deschis de tine</b>, sau panoul pe un telefon ori pe alt calculator:
+  pagina cere cheia o dată și o ține minte după aceea.</li>
+  <li><b>Sonarr, Radarr, nzb360 și prietenii</b>: lipește-o drept cheia lor de SABnzbd
+  sau NZBGet (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>Cheia se păstrează într-un fișier numit <code>apikey</code> lângă fișierul tău de
+configurare, așa că rămâne aceeași peste reporniri și o poți citi înapoi oricând ai
+nevoie. Pe macOS și Linux acel fișier poate fi citit doar de contul care rulează
+nzbfast. Apare și în ieșirea proprie a daemonului, deci cardul Jurnal din panou o are
+dacă terminalul a derulat între timp.</p>
+<div class="note"><b>Actualizarea nu schimbă nimic.</b>O instalare care există deja este
+lăsată exact cum era, cu cheie sau fără. O cheie se face doar la o primă rulare - una
+fără setări de panou și fără coadă salvată - fiindcă o cheie apărută peste o instalare
+care merge ar bloca fiecare Sonarr, Radarr și aplicație de telefon pe care le
+conectaseși deja, la o repornire pe care nu ai lega-o niciodată de o schimbare de
+setări.</div>
+<p>Ca să folosești o cheie proprie, scrie-o în Setări → Securitate; se aplică imediat.
+Panoul acela schimbă cheia, dar nu arată niciodată cheia curentă, așa că citește
+fișierul <code>apikey</code> dacă ai nevoie înapoi de valoarea generată. Ca să rulezi
+fără nicio cheie, fiindcă ceva din fața lui nzbfast se ocupă deja de autentificare,
+pornește-l cu <code>NZBFAST_OPEN=1</code> în mediu. nzbfast rămâne atunci deschis și o
+spune clar la pornire.</p>
+<p>Ce mașini pot ajunge la daemon este o alegere separată:
+<code>serve --bind</code>. Valoarea implicită este <code>0.0.0.0</code>, adică fiecare
+interfață de rețea, pentru că un NAS, un telefon și un Sonarr de pe alt calculator
+trebuie să se poată conecta toate. <code>--bind 127.0.0.1</code> îl restrânge la mașina
+pe care rulează nzbfast, ceea ce vrei pe un desktop singur unde nimic altceva nu are
+nevoie de acces.</p>
+
 <h2 id="concepts">3 · Cum funcționează nzbfast</h2>
 <p>O scurtă terminologie ca restul manualului să se citească ușor:</p>
 <table>
@@ -300,10 +560,11 @@ extern. Linia de stare arată progresul scanării; <b>Scanează acum</b> forțea
 apare în index, este preluat automat, cu preferințe de calitate și reguli de
 upgrade (o copie mai bună o înlocuiește pe una mai slabă).</p>
 <h3 id="dash-history">Istoric</h3>
-<p>Descărcări recente cu stare, dimensiune, locație; joburile eșuate oferă <b>Reîncearcă</b>
+<p>Descărcări recente, câte un rând fiecare. Joburile eșuate oferă <b>Reîncearcă</b>
 (reia din jurnal). Arhivele criptate arată un control de deblocare 🔑 - introdu
 parola și jobul se termină pe loc. Fâșia de sănătate a verificării trasează blocurile PAR2
 defecte per descărcare - o coadă în creștere înseamnă că articolele sosesc deteriorate.</p>
+<p>Cardul listează implicit zece descărcări, iar restul sunt la un clic distanță, pe butonul ▤. Starea, locația și motivul pentru care un job a eșuat stau în spatele unui clic pe rândul însuși, astfel încât cazul obișnuit - ce s-a terminat, cât de mare, când - rămâne lizibil fără derulare. Trage în schimb de marginea de jos a cardului ca lista să deruleze la o înălțime aleasă de tine. <b>History rows</b> din Setări → Interfață schimbă acel zece; fiind o proprietate a daemonului și nu a browserului tău, se aplică fiecărui dispozitiv care se uită la această instalare. <b>Colour History names</b>, alături, colorează numele terminate în verde și pe cele eșuate în roșu; dezactivat, numele rămân neutre, iar punctul colorat și detaliile rândului spun în continuare care e care.</p>
 <h3 id="dash-usage">Consum de date</h3>
 <p>Bare zilnice per provider și totaluri Azi / 7 zile / 30 de zile - esențiale pentru conturile contorizate
 și cu bloc. Conturile cu bloc arată utilizarea pe toată durata față de dimensiunea lor.</p>
@@ -319,6 +580,7 @@ defecte per descărcare - o coadă în creștere înseamnă că articolele soses
 preluat în 5 secunde, iar fișierul e eliminat. Îndreaptă directorul de descărcări al browserului tău
 spre el pentru preluări cu un singur clic de pe site-urile de indexer.</td></tr>
 <tr><td><b>Dintr-un URL</b></td><td>Lipește un link NZB (API <code>mode=addurl</code>, sau prin orice aplicație conectată).</td></tr>
+<tr><td><b>Legături nzblnk:</b></td><td>Lipește o legătură <code>nzblnk:</code> oriunde pe panou, sau trage-o înăuntru. Dacă ai instalat din DMG-ul macOS sau din instalatorul Windows, poți și să dai clic pe una direct pe un board. Vezi <a href="#nzblnk">legăturile nzblnk</a> mai jos.</td></tr>
 <tr><td><b>Răsfoiește indexul</b></td><td>Dă clic pe orice release complet din cardul Răsfoiește.</td></tr>
 <tr><td><b>Watchlist / RSS</b></td><td>Automat - vezi <a href="#automation">Automatizare</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr etc.</b></td><td>Trimit preluările direct în coadă - vezi <a href="#arr">§11</a>.</td></tr>
@@ -329,10 +591,37 @@ spre el pentru preluări cu un singur clic de pe site-urile de indexer.</td></tr
 <li><b>Categoriile</b> sunt etichete libere; fiecare devine un subfolder al directorului tău de
 descărcare, iar Folderele inteligente (vezi <a href="#automation">§10</a>) le pot atribui după reguli.</li>
 <li><b>Priorități</b>: Forțată &gt; Ridicată &gt; Normală &gt; Scăzută. Forțata ignoră pauza și cota.</li>
-<li><b>Parolele</b> pentru arhivele criptate sunt preluate automat din
-<code>&lt;meta type="password"&gt;</code> din interiorul NZB-ului sau dintr-un
-nume de fișier <code>Name{{password}}.nzb</code> și pot fi furnizate per job prin
-API sau ulterior din Istoric (🔑).</li>
+<li><b>Parolele</b> arhivelor criptate sunt preluate automat din
+<code>&lt;meta type="password"&gt;</code> din NZB, dintr-un nume de fișier
+<code>Name{{password}}.nzb</code> sau din câmpul <code>p=</code> al unei
+<a href="#nzblnk">legături nzblnk</a>, și pot fi date per sarcină prin API sau ulterior
+din Istoric (🔑).</li>
+</ul>
+
+<h3 id="nzblnk">Legăturile nzblnk</h3>
+<p>Unele board-uri, mai ales germane și olandeze, publică o legătură
+<code>nzblnk:</code> în loc de un fișier NZB. Postarea este ofuscată, deci nu există
+niciun nume de fișier către care s-ar putea trimite. Legătura duce în schimb un antet,
+<code>h=</code>, care este o cheie de căutare și nu o locație, plus un titlu
+<code>t=</code>, o parolă <code>p=</code> și un grup <code>g=</code> opționale. Cineva
+trebuie mai întâi să se ducă și să găsească postarea.</p>
+<p>nzbfast caută antetul mai întâi în propriul index, ceea ce nu cere deloc rețea, și
+abia dacă acolo nu îl găsește întreabă indexatoarele de căutare pe care le-ai configurat
+(Setări → Indexatoare de căutare, <a href="#settings">§9</a>), sub aceleași bugete
+zilnice și aceeași retragere ca orice altă căutare. Titlul devine numele sarcinii, iar
+parola se aplică automat.</p>
+<ul>
+<li><b>Lipirea sau tragerea</b> merge pe orice instalare, Docker și cutii NAS incluse:
+copiază legătura de pe board și lipește-o oriunde pe panou.</li>
+<li><b>Clicul</b> pe o legătură cere ca schema să fie înregistrată la desktopul tău.
+Aplicația din <b>DMG-ul macOS</b> o înregistrează, iar <b>instalatorul Windows</b> o
+oferă ca sarcină: întreabă mai întâi și lasă schema în pace dacă NZB Monkey sau
+NZBDonkey o deține deja. Arhiva macOS simplă, Homebrew și instalările Linux nu au
+niciun handler de desktop, acolo calea de intrare este lipirea.</li>
+<li>Rezolvarea este limitată ca ritm intenționat. O schemă înregistrată stă la o singură
+solicitare de browser distanță de orice pagină pe care o vizitezi, deci legăturile au un
+plafon pe minut și doar primele câteva dintr-un minut pot ajunge la indexatoarele tale;
+dincolo de asta se răspunde doar din indexul local.</li>
 </ul>
 
 <h2 id="wall">6 · Peretele de postere</h2>
@@ -405,11 +694,44 @@ sau excluderea oricărui server din pool. Fiecare server are:</p>
 <table>
 <tr><th>Câmp</th><th>Note</th></tr>
 <tr><td>Host / port</td><td>Folosește portul SSL <b>563</b>. TLS nu costă nimic măsurabil - nzbfast criptează întotdeauna.</td></tr>
-<tr><td>Nume de utilizator / parolă</td><td>Stocate local în <code>config.local.json</code>, nearătate niciodată înapoi browserului. Lăsând parola goală la editare, se păstrează cea stocată.</td></tr>
+<tr><td>Nume de utilizator / parolă</td><td>Stocate local în <code>config.local.json</code>, nearătate niciodată înapoi browserului. Lăsând parola goală la editare, se păstrează cea stocată. Parolele sunt <a href="#passwords">ofuscate pe disc, nu criptate</a>.</td></tr>
 <tr><td>Conexiuni</td><td>Conexiuni simultane per server. Folosește <b>Reglarea conexiunilor</b> (<a href="#performance">§13</a>) pentru a găsi punctul optim al fiecărui provider în loc să ghicești mare.</td></tr>
 <tr><td>Nivel (treaptă)</td><td>0 = primar; nivelurile mai mari sunt servere de umplere, întrebate doar pentru articolele pe care le-a ratat fiecare nivel inferior. Pune conturile nelimitate la 0, conturile cu bloc la 1+.</td></tr>
 <tr><td>Dimensiunea blocului (GB)</td><td>Pentru conturile cu bloc (plată-per-GB): nzbfast urmărește utilizarea pe toată durata față de aceasta și nu mai folosește serverul când e consumat (avertisment la 85%).</td></tr>
 </table>
+<p><b>Lasă puțină marjă sub limita de conexiuni a contului tău.</b> Setarea conexiunilor puțin sub limită nu costă nimic: debitul se aplatizează cu mult înainte de ultimele una sau două conexiuni, iar <b>Reglarea conexiunilor</b> (<a href="#performance">§13</a>) rămâne oricum sub ea. Acele locuri libere sunt cele care lasă un al doilea dispozitiv, alt client sau o reîncercare după un socket căzut să intre totuşi, în loc să fie refuzate în timp ce acesta ocupă fiecare loc.</p>
+<h3 id="passwords">Cum sunt păstrate parolele furnizorilor tăi</h3>
+<p>Parolele de furnizor din <code>config.local.json</code> sunt <b>ofuscate, nu
+criptate</b>. Sunt scrise ca <code>obf1:</code> urmat de o formă codificată, așa încât
+fișierul să nu se citească drept text simplu dacă apare într-o captură de ecran,
+într-un mesaj de forum, într-un raport de eroare sau pe un ecran pe care îl vede
+altcineva.</p>
+<p>Să fim limpezi cu ce îți aduce și ce nu:</p>
+<ul>
+<li><b>Nu este criptare și nu oferă nicio protecție față de cine are fișierul.</b>
+Metoda se află în sursele noastre publice, iar decodorul vine chiar în nzbfast, deci
+oricine ține fișierul scoate parola în câteva secunde. Tratează fișierul ca pe un
+secret exact cum ai face-o dacă parolele ar fi lizibile.</li>
+<li><b>Elimină scurgerea din neatenție</b>, care este cea obișnuită. Configurațiile
+ajung lipite în fire de suport și prinse în capturi de ecran mult mai des decât sunt
+furate de pe disc.</li>
+<li>O parolă pe care ai scris-o tu ca text simplu funcționează în continuare. nzbfast
+citește ambele forme, deci configurațiile editate de mână și importurile din alți
+clienți nu se strică niciodată; scrie forma ofuscată la următoarea salvare.</li>
+<li>Fișierul este scris, în plus, lizibil doar pentru contul care rulează nzbfast
+(mod 0600 pe macOS și Linux).</li>
+</ul>
+<p>Prin comparație, <b>NZBGet și SABnzbd păstrează amândouă parolele de furnizor ca
+text lizibil</b> în fișierele lor de configurare. Considerăm ofuscarea o mică
+îmbunătățire față de asta, nu o funcție de securitate.</p>
+<p><b>De ce nu inelul de chei al sistemului?</b> Keychain pe macOS, Managerul de
+credențiale din Windows și serviciile de secrete din Linux ar da o protecție reală și
+poate revenim asupra ei. Astăzi ne opresc două lucruri. Accesul la inelul de chei ține
+de identitatea aplicației, iar nzbfast încă nu este semnat, așa că solicitările și
+comportamentul după fiecare actualizare sunt proaste. Și o parte mare a instalărilor
+sunt Docker, servere fără ecran și cutii NAS unde nu există niciun inel de chei, ceea
+ce ar lăsa două căi diferite de stocare de ținut corecte. Un singur format bine
+înțeles, care se poartă la fel peste tot, este deocamdată târgul mai bun.</p>
 <p>Alte două opțiuni per server nu au încă un control în panou: adaugă-le manual în
 intrarea acelui server din <code>config.local.json</code>
 (vezi <a href="#files">§17</a>) și repornește.</p>
@@ -506,6 +828,7 @@ fie ghicite.</p>
 <tr><td>Include grupul de release</td><td>Marcajul <code>-GROUP</code> de la final.</td></tr>
 <tr><td>Elimină fișierele inutile</td><td><b>Activată implicit.</b> Șterge fișierele <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> rămase și clipurile-eșantion din folderele de film și serial finalizate. Niciodată videoclipul sau subtitrările lui.</td></tr>
 <tr><td>Păstrează doar fișierul media</td><td><b>Dezactivată implicit și distructivă:</b> șterge definitiv tot din folder în afară de videoclip(uri) și subtitrări. Fiecare episod dintr-un pachet de sezon este păstrat. Are întâietate față de <b>Elimină fișierele inutile</b> când ambele sunt active.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>Activat implicit.</b> Sportul, cursele și alte evenimente sunt adesea un singur titlu repetat tot sezonul, la un cuvânt sau două distanță - "Round11 Hungary Race" față de "Round11 Hungary Qualifying". Păstrarea acelor cuvinte este ceea ce împiedică un sezon întreg să se reducă la același nume. Se aplică doar acolo unde numele nu a putut fi pus la punct altfel, așa că filmele și episoadele obișnuite rămân neatinse.</td></tr>
 </table>
 <p class="dim">Întregul grup rulează după reparare și dezarhivare și înainte de <b>Mută
 finalizatele în</b>, și este sărit complet pentru o sarcină care încă așteaptă o parolă.
@@ -521,8 +844,21 @@ curățat.</p>
 și <b>arhivare TV</b> (vezi <a href="#automation">§10</a>).</p>
 
 <h3>Indexare <span class="pill live">live</span></h3>
+<div class="note"><b>Indexatorul încorporat este oprit implicit.</b> Găsește postările
+făcute sub un nume de fișier real, iar o parte mare și în creștere din Usenet este
+postată intenționat fără unul: subiect aleator, nume de fișiere aleatoare înăuntru,
+aruncate într-un grup de-a valma. Numele adevărat trăiește doar într-un NZB pe care
+uploaderul îl publică în altă parte, deci nu a fost niciodată pe Usenet ca vreun scaner
+să îl citească. Măsurat pe propriul nostru index, 14,8 milioane de postări scanate au
+dat cam 31.000 de release-uri de răsfoit, aproximativ unul din cinci sute. Folosește
+mai departe indexatoare comerciale și adaugă-le la Setări → Indexatoare de căutare, ca
+să le poți interoga din perete. Pornește asta dacă urmărești grupuri anume în care lumea
+încă postează sub nume reale, sau dacă vrei să vezi ce duce de fapt furnizorul tău. Cu
+comutatorul oprit nu se scanează și nu se descarcă nimic, nu se creează nicio bază de
+date, iar peretele, Răsfoiește, Watchlist și fluxul newznab sunt ascunse.</div>
 <table>
 <tr><th>Setare</th><th>Ce face</th></tr>
+<tr><td>Indexator încorporat</td><td>Comutatorul principal, <b>oprit până nu îl pornești</b>. Oprit înseamnă fără scanare, fără căutări de metadate, fără eșantionare a disponibilității și fără flux newznab; un index deja aflat pe disc este păstrat (există un buton de ștergere), așa că repornirea reia în loc să rescaneze.</td></tr>
 <tr><td>Grupuri</td><td>Newsgroup-urile pe care le scanează indexerul integrat (ex. <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>Interval de scanare</td><td>Secunde între treceri (implicit 900).</td></tr>
 <tr><td>Articole de backfill</td><td>Antete preluate la prima scanare a unui grup.</td></tr>
@@ -536,8 +872,7 @@ curățat.</p>
 
 <h3>Bibliotecă, Securitate, Interfață</h3>
 <p><b>Bibliotecă</b>: categorii tratate ca intrări instantanee de bibliotecă + interval de reverificare.
-<b>Securitate</b>: cheia API completă (tot) și cheia NZB (doar adăugare - sigur de dat
-site-urilor de indexer), ambele rotibile live. <b>Interfață</b>: sunete la clic, notificări desktop
+<b>Securitate</b>: cheia API completă (tot) și cheia NZB (doar adăugare - sigur de dat site-urilor de indexer), ambele rotibile live. Fiecare casetă înlocuiește cheia de care ține de îndată ce ieși din câmp, iar o casetă lăsată goală păstrează cheia pe care o are deja. Cheia API are în plus <b>Show</b>, care dezvăluie și copiază cheia curentă ca s-o lipești în Sonarr, Radarr sau NZB360 când ai chef, și <b>Create new</b>, care bate una de schimb - cheia veche încetează să funcționeze imediat, așa că tot ce este deja conectat trebuie să primească pe cea nouă. Ambele depind de cheia API însăși: cheia NZB doar-adăugare nu o poate citi, ceea ce este chiar rostul acelei chei. Pentru de unde vine cheia pe o instalare nouă, vezi <a href="#firstrun-key">§2</a>. <b>Interfață</b>: sunete la clic, notificări desktop
 la finalizare, interval de resortare a providerilor.</p>
 
 <p><b>Unități de viteză</b> <span class="pill live">live</span> decide cum este
@@ -587,7 +922,7 @@ ca atare.</p>
 <ol>
 <li>În Sonarr/Radarr: Settings → Download Clients → adaugă <b>SABnzbd</b>.</li>
 <li>Host: mașina ta nzbfast · Port: <b>6789</b> · Cheie API: cheia ta API completă
-(Setări → Securitate; controlul QR/copiere este lângă ea).</li>
+(unde o găsești: <a href="#firstrun-key">§2</a>).</li>
 <li>Categorie după preferință (ex. <code>tv</code> / <code>movies</code>). Test → bifă verde → Save.</li>
 </ol>
 <p>Coada, istoricul, starea per job, „remove &amp; delete”, reîncercarea și rutarea pe categorii
@@ -600,8 +935,14 @@ se comportă toate cum se așteaptă *arr-urile.</p>
 <code>movie</code> din propriul index al grupurilor tale urmărite, iar
 <code>/getnzb/&lt;id&gt;</code> returnează NZB-ul.</li>
 </ol>
-<div class="note"><b>De ce să te obosești?</b>Un indexer auto-găzduit exact al grupurilor care te
-interesează: fără conturi, fără limite de accesări API, retenție atât de adâncă pe cât o lași să scaneze.</div>
+<div class="note"><b>Pornește mai întâi indexatorul încorporat</b> (Setări → Indexare).
+Este oprit implicit, iar cât timp este oprit această fațadă răspunde la orice
+interogare cu <code>&lt;error code="101"&gt;</code> în loc de un rezultat gol, așa că o
+greșeală se vede când adaugi indexatorul, nu peste săptămâni.<br><br>
+<b>De ce să te obosești?</b> Un indexator găzduit de tine exact peste grupurile care te
+interesează: fără conturi, fără limite de apeluri API, cu retenție atât de adâncă pe cât
+îl lași să scaneze. Este un adaos la indexatoarele tale obișnuite, nu un înlocuitor,
+pentru că găsește doar ce a fost postat sub un nume de fișier real.</div>
 
 <h2 id="remotes">12 · Telefon și aplicații la distanță</h2>
 <p>nzbfast implementează <em>ambele</em> protocoale majore de control la distanță, așa că aproape fiecare
@@ -752,7 +1093,7 @@ de actualizare; un URL de verificare gol face același lucru.</li>
 <table>
 <tr><th>Comandă</th><th>Scop</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Configurare interactivă a serverului.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>Rulează daemonul (panou + API + automatizare). <code>--open</code> deschide browserul; vezi <code>--help</code> pentru lista completă de flaguri - fiecare setare din panou are un flag geamăn.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>Rulează daemonul (panou + API + automatizare). <code>--open</code> deschide browserul; <code>--apikey</code> setează cheia manual (<a href="#firstrun-key">§2</a>); <code>--bind</code> alege adresa de ascultare, implicit <code>0.0.0.0</code> (fiecare interfață), <code>127.0.0.1</code> doar pentru această mașină. Vezi <code>--help</code> pentru lista completă de flaguri - fiecare setare din panou are un flag geamăn.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Descarcă un NZB, pipeline complet, fără daemon. <code>--preflight</code> abandonează devreme dacă postarea nu se poate finaliza; <code>--password</code> pentru seturi criptate.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Verdict de disponibilitate - COMPLETE / REPAIRABLE / IMPOSSIBLE - fără a descărca payload-ul.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>Verifică fișierele în raport cu setul PAR2 dintr-un director.</td></tr>
@@ -772,10 +1113,10 @@ yEnc și scrie NZB-ul corespunzător. Este o unealtă de operare, cere un
 <p>Endpoint de bază: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 compatibil SABnzbd, așa că integrările SAB existente funcționează neschimbate. Două chei:
 <b>cheia API</b> (control complet) și <b>cheia NZB</b> (doar adăugare:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> lipsește intenționat din setul de doar adăugare: rezolvarea unei legături poate consuma cotă contorizată de indexator, ceea ce nu este treaba unei credențiale de doar adăugare.</p>
 <table>
 <tr><th>Zonă</th><th>Moduri</th></tr>
-<tr><td>Coadă</td><td><code>queue</code> (cu <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>Coadă</td><td><code>queue</code> (cu <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>Config</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (fiecare câmp din Setări), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Index și perete</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, plus newznab la <code>/api?t=caps|search|tvsearch|movie</code> și <code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -788,8 +1129,9 @@ compatibil SABnzbd, așa că integrările SAB existente funcționează neschimba
 <h2 id="files">17 · Fișiere și locații</h2>
 <table>
 <tr><th>Fișier</th><th>Conținut</th></tr>
-<tr><td><code>config.local.json</code></td><td>Credențiale de server și opțiuni per server. Creat de asistent; editabil în Setări. Păstrează-l privat.</td></tr>
+<tr><td><code>config.local.json</code></td><td>Credențiale de server și opțiuni per server. Creat de asistent; editabil în Setări. Păstrează-l privat. Parolele sunt <a href="#passwords">ofuscate, nu criptate</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Fiecare setare schimbată în panou. Se află lângă config; valorile din interfață au prioritate față de flagurile din linia de comandă. Șterge o cheie (sau fișierul) pentru a reveni la flaguri/valori implicite.</td></tr>
+<tr><td><code>apikey</code></td><td>Cheia API pe care nzbfast și-a făcut-o singur la o primă rulare (<a href="#firstrun-key">§2</a>). Se află lângă config; pe macOS și Linux poate fi citită doar de contul care rulează nzbfast. Nu îl șterge ca să obții o cheie nouă: pe o instalare care a rulat deja, nimic nu o înlocuiește, iar daemonul revine fără nicio cheie. Setează una nouă din Setări → Securitate în schimb.</td></tr>
 <tr><td><code>index.db</code></td><td>Indexul de release-uri (SQLite) + metadatele peretelui. Sigur de șters - se reconstruiește prin scanare (Setări → Indexare → Golire face asta pentru tine).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Starea cozii (supraviețuiește repornirilor), NZB-uri per job, registrul de utilizare, istoricul benchmark-urilor, cache-ul de imagini poster.</td></tr>
 <tr><td>Jurnal de articole</td><td>În interiorul folderului de ieșire al fiecărui job cât timp e incomplet - alimentează reluarea după blocare și reîncercarea. Eliminat la succes.</td></tr>
@@ -806,7 +1148,10 @@ punctul său de disponibilitate (<a href="#oracle">§13</a>). Un prim eșec de a
 reia singur o dată după o așteptare, fiindcă întârzierea de propagare arată exact la fel
 și se rezolvă de la sine.</td></tr>
 <tr><td>Arhiva terminată cere o parolă</td><td>Rândul din Istoric arată 🔑 - introdu parola acolo; jobul se finalizează pe loc. </td></tr>
+<tr><td>O arhivă nu se despachetează</td><td>Eșecurile de parolă și de reparare se numesc singure în rândul din Istoric. Pentru orice altceva există o supapă de siguranță: Setări → Folder monitorizat și post-procesare → <b>Despachetează cu unrar extern</b> (o setare avansată) predă despachetarea programului <code>unrar</code> instalat pe mașina ta în locul extractorului integrat. Altfel las-o dezactivată: calea integrată este mai rapidă pe fiecare formă pe care am măsurat-o, iar postările obfuscate cu nume hash o folosesc oricum întotdeauna, pentru că unrar nu le poate urmări redenumirea. Același comutator pentru rulările <code>nzbfast get</code> este variabila de mediu <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Dacă unrar despachetează o arhivă pe care extractorul integrat a refuzat-o, te rugăm să ne-o semnalezi ca să reparăm calea integrată.</td></tr>
 <tr><td>Sonarr/Radarr nu se poate conecta</td><td>Portul 6789 e accesibil? Cheia API e corectă (cheia completă, nu cheia NZB)? Tipul de client setat pe SABnzbd?</td></tr>
+<tr><td>Panoul cere o cheie API pe care nu am setat-o niciodată</td><td>O instalare nouă își face una singură și o afișează o dată la pornire (<a href="#firstrun-key">§2</a>). Se află în fișierul <code>apikey</code> de lângă configul tău și în ieșirea de pornire. Sau scrie o cheie proprie în Setări → Securitate dintr-un browser care este deja autentificat.</td></tr>
+<tr><td>Nimic din rețea nu ajunge la daemon</td><td>Verifică <code>--bind</code>: <code>127.0.0.1</code> servește doar mașina pe care rulează nzbfast. Valoarea implicită, <code>0.0.0.0</code>, servește fiecare interfață. Apoi verifică firewallul mașinii pentru portul 6789.</td></tr>
 <tr><td>Cardul Răsfoiește rămâne mic</td><td>Indexerul crește în fundal - verifică dacă grupurile din Setări → Indexare sunt setate și dă-i timp Aprofundării per scanare să acumuleze istoric. „Scanează acum” forțează o trecere; linia de stare arată progresul în timp real.</td></tr>
 <tr><td>Peretele arată grafică greșită/lipsă</td><td>Fișa de detalii → ✎ Corectează potrivirea sau ↻ Reîmprospătează metadatele. Căutările de filme se îmbunătățesc cu o cheie OMDb gratuită.</td></tr>
 <tr><td>Daemonul nu pornește: portul e ocupat</td><td>Rulează altă instanță - sau schimbă <code>--port</code>.</td></tr>

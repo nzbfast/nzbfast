@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - מדריך למשתמש</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:start;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 0;padding-inline-end:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--surface);
   border-start-start-radius:0;border-end-start-radius:0;border-start-end-radius:9px;border-end-end-radius:9px;
   padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-inline-start-color:var(--dim)}
@@ -190,6 +411,44 @@ Settings → Usenet servers → <b>Import from SABnzbd / NZBGet…</b> מוצא 
 הקיימת שלך ומעתיק את השרתים שלה. יש גם <code>nzbfast import-sab</code>
 בשורת הפקודה.</div>
 
+<h3 id="firstrun-key">מפתח ה-API שלך</h3>
+<p>בהתקנה חדשה באמת, nzbfast יוצר לעצמו מפתח API בפעם הראשונה שהדימון
+עולה, ומדפיס אותו פעם אחת בכרזה ממש מתחת לכתובת לוח המחוונים.
+מכאן והלאה כל בקשה זקוקה למפתח הזה, כך שלוח המחוונים וה-API אינם
+פתוחים לכל דבר שמסוגל להגיע למכונה.</p>
+<p>מה שאתה עושה איתו תלוי באיך הפעלת את nzbfast:</p>
+<ul>
+  <li><b>אפליקציית macOS, מגש Windows, או <code>serve --open</code></b>: כלום.
+  הם מעבירים את המפתח לחלון הדפדפן שהם פותחים, לוח המחוונים זוכר אותו,
+  ואתה כבר מחובר.</li>
+  <li><b>דפדפן שפתחת בעצמך</b>, או לוח המחוונים בטלפון או במחשב
+  אחר: הדף מבקש את המפתח פעם אחת וזוכר אותו מכאן והלאה.</li>
+  <li><b>Sonarr, Radarr, nzb360 וחברים</b>: הדבק אותו כמפתח ה-SABnzbd או
+  ה-NZBGet שלהם (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>המפתח נשמר בקובץ בשם <code>apikey</code> ליד קובץ התצורה שלך, כך שהוא
+נשאר זהה בין הפעלות מחדש ואפשר לקרוא אותו בחזרה מתי שצריך.
+ב-macOS וב-Linux הקובץ קריא רק לחשבון שמריץ את nzbfast.
+הוא נמצא גם בפלט של הדימון עצמו, כך שכרטיס היומן בלוח המחוונים מחזיק אותו
+אם הטרמינל כבר נגלל.</p>
+<div class="note"><b>שדרוג לא משנה דבר.</b>התקנה שכבר קיימת
+נשארת בדיוק כפי שהייתה, עם מפתח או בלעדיו. מפתח נוצר אך ורק בהרצה ראשונה -
+כזו בלי הגדרות לוח מחוונים ובלי תור שמור - כי מפתח שמופיע תחת
+התקנה עובדת היה נועל בחוץ כל Sonarr, Radarr ואפליקציית טלפון שכבר
+חיברת, בהפעלה מחדש שמעולם לא קישרת לשינוי הגדרות.</div>
+<p>כדי להשתמש במפתח משלך במקום, הקלד אותו ב-Settings → Security; הוא חל
+מיד. הפאנל הזה מחליף את המפתח אך לעולם אינו מציג את הנוכחי, אז קרא את קובץ
+<code>apikey</code> אם אתה צריך את הערך שנוצר בחזרה. כדי להריץ בלי מפתח
+כלל, כי משהו שנמצא לפני nzbfast כבר מטפל בהתחברות, הפעל אותו עם
+<code>NZBFAST_OPEN=1</code> בסביבה. nzbfast אז נשאר פתוח ואומר זאת
+במפורש בהפעלה.</p>
+<p>אילו מכונות יכולות בכלל להגיע לדימון היא בחירה נפרדת:
+<code>serve --bind</code>. ברירת המחדל היא <code>0.0.0.0</code>, כלומר כל
+ממשק רשת, כי קופסת NAS, טלפון, ו-Sonarr במחשב אחר צריכים כולם להיות
+מסוגלים להתחבר. <code>--bind 127.0.0.1</code> מצמצם זאת למכונה שעליה
+nzbfast רץ, וזה מה שאתה רוצה בשולחן עבודה יחיד שבו שום דבר אחר לא
+צריך גישה.</p>
+
 <h2 id="concepts">3 · איך nzbfast עובד</h2>
 <p>אוצר מילים מהיר כדי ששאר המדריך ייקרא בקלות:</p>
 <table>
@@ -310,10 +569,11 @@ NZB אחר לא מראה לך זאת; הוא קיים כדי להוכיח נקו
 מופיע באינדקס הוא נתפס אוטומטית, עם העדפות איכות וכללי
 שדרוג (עותק טוב יותר מחליף גרוע יותר).</p>
 <h3 id="dash-history">היסטוריה</h3>
-<p>הורדות אחרונות עם סטטוס, גודל, מיקום; משימות שנכשלו מציעות <b>נסה שוב</b>
+<p>הורדות אחרונות, שורה לכל אחת. משימות שנכשלו מציעות <b>נסה שוב</b>
 (מתחדש מהיומן). ארכיונים מוצפנים מציגים בקרת שחרור 🔑 - הזן את
 הסיסמה והמשימה מסתיימת במקום. רצועת תקינות-האימות מגרפת בלוקי PAR2
 פגומים לכל הורדה - זנב עולה פירושו שמאמרים מגיעים פגומים.</p>
+<p>הכרטיס מציג עשר הורדות כברירת מחדל, והשאר במרחק לחיצה אחת, בכפתור ▤. הסטטוס, המיקום והסיבה לכישלון של משימה נמצאים מאחורי לחיצה על השורה עצמה, כך שהמקרה הרגיל - מה הסתיים, באיזה גודל, מתי - נשאר קריא בלי גלילה. לחלופין, גרור את הקצה התחתון של הכרטיס כדי שהרשימה תיגלל בגובה שתבחר. <b>History rows</b> ב-Settings → Interface משנה את העשר האלה; מכיוון שזו תכונה של הדימון ולא של הדפדפן שלך, היא חלה על כל מכשיר שמסתכל על ההתקנה הזו. <b>Colour History names</b>, לצידו, צובע שמות שהושלמו בירוק ושנכשלו באדום; בכיבוי השמות נשארים נייטרליים, והנקודה הצבעונית ופרטי השורה עדיין אומרים מה זה מה.</p>
 <h3 id="dash-usage">שימוש בנתונים</h3>
 <p>פסים יומיים לכל ספק וסה"כ היום / 7 ימים / 30 ימים - חיוני לחשבונות מדודים
 ובלוק. חשבונות בלוק מציגים שימוש לכל החיים מול גודלם.</p>
@@ -329,6 +589,7 @@ NZB אחר לא מראה לך זאת; הוא קיים כדי להוכיח נקו
 נקלט תוך 5 שניות והקובץ מוסר. כוון אליה את תיקיית ההורדות של הדפדפן
 שלך לתפיסות בלחיצה אחת מאתרי אינדקסרים.</td></tr>
 <tr><td><b>מכתובת URL</b></td><td>הדבק קישור NZB (API <code>mode=addurl</code>, או דרך כל אפליקציה מחוברת).</td></tr>
+<tr><td><b>קישורי nzblnk:</b></td><td>הדבק קישור <code>nzblnk:</code> בכל מקום בלוח הבקרה, או גרור אותו פנימה. אם התקנת מ-DMG של macOS או ממתקין Windows, אפשר גם ללחוץ על אחד ישירות בלוח. ראה <a href="#nzblnk">קישורי nzblnk</a> למטה.</td></tr>
 <tr><td><b>עיון באינדקס</b></td><td>לחץ על כל רליס שלם בכרטיס העיון.</td></tr>
 <tr><td><b>רשימת מעקב / RSS</b></td><td>אוטומטי - ראה <a href="#automation">אוטומציה</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr וכו'</b></td><td>הם שולחים תפיסות ישר לתור - ראה <a href="#arr">§11</a>.</td></tr>
@@ -340,9 +601,33 @@ NZB אחר לא מראה לך זאת; הוא קיים כדי להוכיח נקו
 ההורדות שלך, ותיקיות חכמות (ראה <a href="#automation">§10</a>) יכולות להקצות אותן לפי כלל.</li>
 <li><b>עדיפויות</b>: כפייה &gt; גבוהה &gt; רגילה &gt; נמוכה. כפייה עוקפת השהיה ומכסה.</li>
 <li><b>סיסמאות</b> לארכיונים מוצפנים נקלטות אוטומטית מ
-<code>&lt;meta type="password"&gt;</code> בתוך ה-NZB או משם קובץ
-<code>Name{{password}}.nzb</code>, וניתן לספק אותן לכל משימה דרך
+<code>&lt;meta type="password"&gt;</code> בתוך ה-NZB, משם קובץ
+<code>Name{{password}}.nzb</code>, או משדה <code>p=</code> של
+<a href="#nzblnk">קישור nzblnk</a>, וניתן לספק אותן לכל משימה דרך
 ה-API או אחר כך מההיסטוריה (🔑).</li>
+</ul>
+
+<h3 id="nzblnk">קישורי nzblnk</h3>
+<p>לוחות מסוימים, בעיקר גרמניים והולנדיים, מפרסמים קישור <code>nzblnk:</code> במקום
+קובץ NZB. הפוסט מעורפל, ולכן אין שם קובץ כלשהו שאפשר לקשר אליו. במקום זאת הקישור נושא
+כותרת, <code>h=</code>, שהיא מפתח חיפוש ולא מיקום, ולצדה כותרת <code>t=</code>, סיסמה
+<code>p=</code> וקבוצה <code>g=</code> אופציונליות. מישהו צריך קודם ללכת ולמצוא את
+הפוסט.</p>
+<p>nzbfast מחפש את הכותרת קודם באינדקס שלו עצמו, מה שאינו דורש רשת כלל, ורק אם זה
+מחטיא הוא פונה לאינדקסרי החיפוש שהגדרת (Settings → Search indexers,
+<a href="#settings">§9</a>), תחת אותם תקציבים יומיים ואותה נסיגה כמו כל חיפוש אחר.
+הכותרת הופכת לשם המשימה והסיסמה מוחלת על המשימה אוטומטית.</p>
+<ul>
+<li><b>הדבקה או גרירה</b> עובדת בכל התקנה, כולל Docker וקופסאות NAS: העתק את הקישור
+מהלוח והדבק אותו בכל מקום בלוח הבקרה.</li>
+<li><b>לחיצה</b> על קישור דורשת שהסכימה תהיה רשומה אצל שולחן העבודה שלך. היישום מתוך
+<b>ה-DMG של macOS</b> רושם אותה, ו<b>מתקין Windows</b> מציע אותה כמשימה: הוא שואל
+קודם, ומשאיר את הסכימה בשקט אם NZB Monkey או NZBDonkey כבר מחזיקים בה. ל-tarball הפשוט
+של macOS, ל-Homebrew ולהתקנות Linux אין מטפל שולחן עבודה, ושם ההדבקה היא הדרך
+פנימה.</li>
+<li>הפענוח מוגבל בקצב בכוונה. רישום סכימה מציב אותה במרחק שאלת דפדפן אחת מכל עמוד שאתה
+מבקר בו, ולכן הקישורים מוגבלים לדקה ורק הראשונים שבכל דקה רשאים להגיע לאינדקסרים שלך;
+מעבר לכך התשובה מגיעה מהאינדקס המקומי בלבד.</li>
 </ul>
 
 <h2 id="wall">6 · קיר הפוסטרים</h2>
@@ -413,11 +698,39 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <table>
 <tr><th>שדה</th><th>הערות</th></tr>
 <tr><td>מארח / פורט</td><td>השתמש בפורט SSL <b>563</b>. TLS לא עולה שום דבר מדיד - nzbfast תמיד מצפין.</td></tr>
-<tr><td>שם משתמש / סיסמה</td><td>נשמרים מקומית ב-<code>config.local.json</code>, לעולם לא מוצגים חזרה לדפדפן. השארת סיסמה ריקה בעריכה שומרת על השמורה.</td></tr>
+<tr><td>שם משתמש / סיסמה</td><td>נשמרים מקומית ב-<code>config.local.json</code>, לעולם לא מוצגים חזרה לדפדפן. השארת סיסמה ריקה בעריכה שומרת על השמורה. הסיסמאות <a href="#passwords">מעורפלות על הדיסק, לא מוצפנות</a>.</td></tr>
 <tr><td>חיבורים</td><td>חיבורים בו-זמניים לכל שרת. השתמש ב-<b>כוונון חיבורים</b> (<a href="#performance">§13</a>) כדי למצוא את הנקודה המתוקה של כל ספק במקום לנחש גבוה.</td></tr>
 <tr><td>דרגה (רמה)</td><td>0 = ראשי; רמות גבוהות יותר הן שרתי מילוי, נשאלים רק על מאמרים שכל רמה נמוכה יותר החמיצה. שים חשבונות ללא הגבלה ב-0, חשבונות בלוק ב-1+.</td></tr>
 <tr><td>גודל בלוק (GB)</td><td>לחשבונות בלוק (תשלום-לכל-GB): nzbfast עוקב אחר שימוש לכל החיים מול זה ומפסיק להשתמש בשרת כשמנוצל (אזהרה ב-85%).</td></tr>
 </table>
+<p><b>השאר קצת מרווח מתחת למגבלת החיבורים של החשבון שלך.</b> הגדרת החיבורים מעט מתחת למגבלה לא עולה דבר: קצב ההעברה מתיישר הרבה לפני החיבור האחרון או השניים האחרונים, ו<b>כוונון חיבורים</b> (<a href="#performance">§13</a>) מגיע ממילא מתחתיה. המקומות הפנויים האלה הם מה שמאפשר למכשיר שני, לתוכנה אחרת או לניסיון חוזר אחרי שקע שנפל להיכנס בכל זאת, במקום להידחות בזמן שזה תופס כל מקום.</p>
+<h3 id="passwords">כיצד נשמרות סיסמאות הספקים שלך</h3>
+<p>סיסמאות הספקים בקובץ <code>config.local.json</code> הן <b>מעורפלות, לא
+מוצפנות</b>. הן נשמרות בצורת <code>obf1:</code> ואחריה צורה מקודדת, כך שהקובץ אינו
+נקרא כטקסט גלוי אם הוא מופיע בצילום מסך, בהודעה בפורום, בדוח תקלה או על מסך שמישהו
+אחר יכול לראות.</p>
+<p>נהיה ברורים לגבי מה זה נותן ומה לא:</p>
+<ul>
+<li><b>זו אינה הצפנה והיא אינה מגנה כלל מפני מי שיש לו הקובץ.</b> השיטה נמצאת בקוד
+הפתוח שלנו והמפענח מגיע בתוך nzbfast, כך שכל מי שמחזיק בקובץ משחזר את הסיסמה תוך
+שניות. התייחס לקובץ כאל סוד בדיוק כפי שהיית עושה אילו הסיסמאות היו קריאות.</li>
+<li><b>זה מסיר את הדליפה המקרית</b>, שהיא הנפוצה. קובצי הגדרות מודבקים לשרשורי תמיכה
+ונתפסים בצילומי מסך הרבה יותר מאשר נגנבים מהדיסק.</li>
+<li>סיסמה שהקלדת בעצמך כטקסט גלוי ממשיכה לעבוד. nzbfast קורא את שתי הצורות, כך
+שהגדרות שנערכו ביד וייבוא מלקוחות אחרים לעולם אינם נשברים; בשמירה הבאה הוא כותב את
+הצורה המעורפלת.</li>
+<li>הקובץ גם נכתב כך שרק החשבון שמריץ את nzbfast יכול לקרוא אותו (מצב 0600 ב-macOS
+וב-Linux).</li>
+</ul>
+<p>לשם השוואה, <b>NZBGet ו-SABnzbd שומרים שניהם את סיסמאות הספקים כטקסט קריא</b>
+בקובצי ההגדרות שלהם. אנחנו רואים בערפול שיפור קטן על כך, לא תכונת אבטחה.</p>
+<p><b>למה לא מחזיק המפתחות של המערכת?</b> Keychain של macOS, מנהל האישורים של Windows
+ושירותי הסודות של Linux היו נותנים הגנה אמיתית, ואולי נחזור לזה. שני דברים עוצרים
+אותנו היום. הגישה למחזיק המפתחות קשורה לזהות היישום, ו-nzbfast עדיין אינו חתום, ולכן
+ההתראות וההתנהגות אחרי כל עדכון גרועות. וחלק גדול מההתקנות הוא Docker, שרתים בלי מסך
+וקופסאות NAS שבהן אין מחזיק מפתחות כלל, מה שהיה מותיר שני מסלולי אחסון שונים לשמור
+נכונים. פורמט אחד מובן היטב שמתנהג אותו דבר בכל מקום הוא, בינתיים, העסקה
+הטובה יותר.</p>
 <p>לשתי אפשרויות נוספות לכל שרת עדיין אין פקד בלוח הבקרה: הוסף אותן ידנית ברשומה של
 אותו שרת בקובץ <code>config.local.json</code> (ראה <a href="#files">§17</a>) והפעל
 מחדש.</p>
@@ -505,6 +818,7 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <tr><td>כלול קבוצת רליס</td><td>התג <code>-GROUP</code> בסוף.</td></tr>
 <tr><td>הסר קובצי זבל</td><td><b>פעיל כברירת מחדל.</b> מוחק שאריות <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> וקטעי דוגמה מתיקיות סרטים וסדרות שהסתיימו. לעולם לא את הווידאו או הכתוביות שלו.</td></tr>
 <tr><td>שמור רק את קובץ המדיה</td><td><b>כבוי כברירת מחדל, והרסני:</b> מוחק לצמיתות כל מה שבתיקייה חוץ מהווידאו (או הווידאו־אים) והכתוביות. כל פרק בחבילת עונה נשמר. גובר על <b>הסר קובצי זבל</b> כששניהם פעילים.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>מופעל כברירת מחדל.</b> ספורט, מרוצים ואירועים אחרים הם לעיתים קרובות אותה כותרת שחוזרת על עצמה לאורך כל העונה, במרחק מילה או שתיים - "Round11 Hungary Race" מול "Round11 Hungary Qualifying". שמירת המילים האלה היא מה שמונע מעונה שלמה להתמוטט לאותו שם. חל רק במקומות שבהם לא ניתן היה לסדר את השם בדרך אחרת, כך שסרטים ופרקים רגילים אינם נוגעים.</td></tr>
 </table>
 <p class="dim">הקבוצה כולה פועלת אחרי התיקון והפריסה ולפני <b>העבר את שהושלמו אל</b>,
 ומדולגת לגמרי עבור משימה שעדיין ממתינה לסיסמה. שני שלבי המחיקה חלים <em>רק</em> על
@@ -519,8 +833,19 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 ו-<b>תיוק TV</b> (ראה <a href="#automation">§10</a>).</p>
 
 <h3>אינדוקס <span class="pill live">חי</span></h3>
+<div class="note"><b>האינדקסר המובנה כבוי כברירת מחדל.</b> הוא מוצא פוסטים שפורסמו
+תחת שם קובץ אמיתי, וחלק גדול והולך וגדל מ-Usenet מפורסם בכוונה בלי כזה: נושא אקראי,
+שמות קבצים אקראיים בפנים, נזרק לקבוצה כללית שהכול מושלך אליה. השם האמיתי חי רק בקובץ NZB
+שהמעלה מפרסם במקום אחר, ולכן הוא מעולם לא היה על Usenet כדי שסורק כלשהו יקרא אותו.
+נמדד על האינדקס שלנו: 14.8 מיליון פוסטים סרוקים הניבו כ-31,000 רליסים לעיון, בערך אחד
+מתוך חמש מאות. המשך להשתמש באינדקסרים מסחריים, והוסף אותם תחת Settings → Search
+indexers כדי שתוכל לחפש בהם מהקיר. הפעל את זה אם אתה עוקב אחרי קבוצות מסוימות שבהן
+עדיין מפרסמים בשמות אמיתיים, או אם אתה רוצה לראות מה הספק שלך באמת נושא. כשהמתג כבוי
+דבר אינו נסרק או נמשך, לא נוצר מסד נתונים, והקיר, עיון, רשימת המעקב וערוץ ה-newznab
+מוסתרים.</div>
 <table>
 <tr><th>הגדרה</th><th>מה היא עושה</th></tr>
+<tr><td>אינדקסר מובנה</td><td>המתג הראשי, <b>כבוי אלא אם תדליק אותו</b>. כבוי פירושו בלי סריקה, בלי חיפושי מטא-נתונים, בלי דגימת זמינות ובלי ערוץ newznab; אינדקס שכבר נמצא על הדיסק נשמר (יש כפתור מחיקה), כך שהדלקה מחדש ממשיכה במקום לסרוק מחדש.</td></tr>
 <tr><td>קבוצות</td><td>קבוצות דיון שהאינדקסר המובנה סורק (לדוגמה <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>מרווח סריקה</td><td>שניות בין מעברים (ברירת מחדל 900).</td></tr>
 <tr><td>מאמרי מילוי לאחור</td><td>כותרות שמורדות בסריקה הראשונה של קבוצה.</td></tr>
@@ -534,8 +859,7 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 
 <h3>ספרייה, אבטחה, ממשק</h3>
 <p><b>ספרייה</b>: קטגוריות המטופלות כרשומות ספרייה מיידיות + מרווח בדיקה חוזרת.
-<b>אבטחה</b>: מפתח ה-API המלא (הכול) ומפתח ה-NZB (הוספה בלבד - בטוח
-לתת לאתרי אינדקסרים), שניהם ניתנים להחלפה חי. <b>ממשק</b>: צלילי לחיצה, התראות
+<b>אבטחה</b>: מפתח ה-API המלא (הכול) ומפתח ה-NZB (הוספה בלבד - בטוח לתת לאתרי אינדקסרים), שניהם ניתנים להחלפה חי. כל תיבה מחליפה את המפתח שהיא שייכת לו ברגע שאתה יוצא מהשדה, והשארת תיבה ריקה שומרת על המפתח שכבר יש לה. למפתח ה-API יש גם <b>Show</b>, שחושף ומעתיק את המפתח הנוכחי כדי שתדביק אותו ב-Sonarr, ב-Radarr או ב-NZB360 מתי שיתאים לך, ו-<b>Create new</b>, שמנפיק מפתח חלופי - הישן מפסיק לעבוד מיד, ולכן כל מה שכבר מחובר צריך לקבל את החדש. שניהם מותנים במפתח ה-API עצמו: מפתח ה-NZB להוספה בלבד אינו יכול לקרוא אותו, וזו כל הנקודה במפתח הזה. מהיכן מגיע המפתח בהתקנה חדשה, ראה <a href="#firstrun-key">§2</a>. <b>ממשק</b>: צלילי לחיצה, התראות
 שולחן עבודה בהשלמה, מרווח מיון מחדש של ספקים.</p>
 
 <p><b>יחידות מהירות</b> <span class="pill live">live</span> קובע כיצד מוצגת כל מהירות
@@ -583,7 +907,7 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <ol>
 <li>ב-Sonarr/Radarr: Settings → Download Clients → הוסף <b>SABnzbd</b>.</li>
 <li>מארח: מכונת ה-nzbfast שלך · פורט: <b>6789</b> · מפתח API: מפתח ה-API המלא שלך
-(Settings → Security; בקרת ה-QR/העתקה נמצאת לידו).</li>
+(היכן למצוא אותו: <a href="#firstrun-key">§2</a>).</li>
 <li>קטגוריה כרצונך (לדוגמה <code>tv</code> / <code>movies</code>). בדיקה → סימון ירוק → שמור.</li>
 </ol>
 <p>תור, היסטוריה, סטטוס לכל משימה, "הסר ומחק", ניסיון חוזר וניתוב קטגוריות
@@ -596,8 +920,12 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <code>movie</code> מהאינדקס שלו עצמו של הקבוצות במעקב שלך, ו
 <code>/getnzb/&lt;id&gt;</code> מחזיר את ה-NZB.</li>
 </ol>
-<div class="note"><b>למה לטרוח?</b>אינדקסר בהתארחות עצמית של בדיוק הקבוצות ש
-חשובות לך: בלי חשבונות, בלי מגבלות פגיעות API, שמירה עמוקה ככל שתיתן לו לסרוק.</div>
+<div class="note"><b>הדלק קודם את האינדקסר המובנה</b> (Settings → Indexing). הוא כבוי
+כברירת מחדל, וכל עוד הוא כבוי החזית הזו עונה לכל שאילתה ב-<code>&lt;error code="101"&gt;</code>
+במקום בתוצאה ריקה, כך שטעות מתגלה כשאתה מוסיף את האינדקסר ולא שבועות אחר כך.<br><br>
+<b>למה בכלל?</b> אינדקסר באירוח עצמי של בדיוק הקבוצות שמעניינות אותך: בלי חשבונות, בלי
+מגבלות קריאות API, שימור עמוק ככל שתיתן לו לסרוק. זו תוספת לאינדקסרים הרגילים שלך ולא
+תחליף, מפני שהוא מוצא רק את מה שפורסם תחת שם קובץ אמיתי.</div>
 
 <h2 id="remotes">12 · טלפון ואפליקציות מרחוק</h2>
 <p>nzbfast מיישם את <em>שני</em> פרוטוקולי השליטה-מרחוק המרכזיים, כך שכמעט כל
@@ -742,7 +1070,7 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <table>
 <tr><th>פקודה</th><th>מטרה</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>הגדרת שרת אינטראקטיבית.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>הרץ את הדימון (לוח מחוונים + API + אוטומציה). <code>--open</code> פותח את הדפדפן; ראה <code>--help</code> לרשימת הדגלים המלאה - לכל הגדרת לוח מחוונים יש דגל תאום.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>הרץ את הדימון (לוח מחוונים + API + אוטומציה). <code>--open</code> פותח את הדפדפן; <code>--apikey</code> קובע את המפתח ידנית (<a href="#firstrun-key">§2</a>); <code>--bind</code> בוחר את כתובת ההאזנה, ברירת המחדל <code>0.0.0.0</code> (כל ממשק), <code>127.0.0.1</code> למכונה זו בלבד. ראה <code>--help</code> לרשימת הדגלים המלאה - לכל הגדרת לוח מחוונים יש דגל תאום.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>הורד NZB אחד, צינור מלא, בלי דימון. <code>--preflight</code> מבטל מוקדם אם הפוסט לא יכול להסתיים; <code>--password</code> לסטים מוצפנים.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>פסק דין זמינות - שלם / ניתן לתיקון / בלתי אפשרי - בלי הורדת מטען.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>אמת קבצים מול סט ה-PAR2 בתיקייה.</td></tr>
@@ -762,10 +1090,10 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <p>נקודת קצה בסיסית: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 תואם-SABnzbd, כך שאינטגרציות SAB קיימות עובדות ללא שינוי. שני מפתחות:
 <b>מפתח ה-API</b> (שליטה מלאה) ו<b>מפתח ה-NZB</b> (הוספה בלבד:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> אינו נכלל בכוונה בקבוצת ההוספה בלבד: פענוח קישור עלול לצרוך מכסת אינדקסר נמדדת, וזה לא עניינו של אישור שנועד להוספה בלבד.</p>
 <table>
 <tr><th>תחום</th><th>מצבים</th></tr>
-<tr><td>תור</td><td><code>queue</code> (עם <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>תור</td><td><code>queue</code> (עם <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>מידע</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>תצורה</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (כל שדה הגדרות), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>אינדקס וקיר</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, בתוספת newznab ב-<code>/api?t=caps|search|tvsearch|movie</code> ו-<code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -778,8 +1106,9 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 <h2 id="files">17 · קבצים ומיקומים</h2>
 <table>
 <tr><th>קובץ</th><th>תוכן</th></tr>
-<tr><td><code>config.local.json</code></td><td>אישורי שרת ואפשרויות לכל שרת. נוצר על ידי האשף; ניתן לעריכה ב-Settings. שמור אותו פרטי.</td></tr>
+<tr><td><code>config.local.json</code></td><td>אישורי שרת ואפשרויות לכל שרת. נוצר על ידי האשף; ניתן לעריכה ב-Settings. שמור אותו פרטי. הסיסמאות <a href="#passwords">מעורפלות, לא מוצפנות</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>כל הגדרה ששונתה בלוח המחוונים. חי ליד התצורה; ערכי הממשק עוקפים דגלי שורת-פקודה. מחק מפתח (או את הקובץ) כדי לחזור לדגלים/ברירות מחדל.</td></tr>
+<tr><td><code>apikey</code></td><td>מפתח ה-API ש-nzbfast יצר לעצמו בהרצה ראשונה (<a href="#firstrun-key">§2</a>). חי ליד התצורה; קריא רק לחשבון שמריץ את nzbfast ב-macOS וב-Linux. אל תמחק אותו כדי לקבל מפתח חדש: בהתקנה שכבר רצה, שום דבר לא מחליף אותו והדימון עולה בחזרה בלי מפתח כלל. קבע מפתח חדש ב-Settings → Security במקום זאת.</td></tr>
 <tr><td><code>index.db</code></td><td>אינדקס הרליסים (SQLite) + מטא-נתוני הקיר. בטוח למחיקה - הוא נבנה מחדש מסריקה (Settings → Indexing → Wipe עושה זאת עבורך).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>מצב התור (שורד הפעלות מחדש), קובצי NZB לכל משימה, יומן שימוש, היסטוריית בדיקות ביצועים, מטמון אמנות פוסטרים.</td></tr>
 <tr><td>יומן מאמרים</td><td>בתוך תיקיית הפלט של כל משימה בזמן שהיא לא שלמה - מפעיל חידוש לאחר קריסה וניסיון חוזר. מוסר בהצלחה.</td></tr>
@@ -795,7 +1124,10 @@ Wikipedia ו-AniList לא צריכים חשבונות. מפתח OMDb (חינמי
 (<a href="#oracle">§13</a>). כישלון ראשון מסוג זה חוזר על עצמו פעם אחת מאליו אחרי
 המתנה, משום שהשהיית תפוצה נראית בדיוק אותו הדבר ונפתרת מעצמה.</td></tr>
 <tr><td>ארכיון שהסתיים רוצה סיסמה</td><td>שורת ההיסטוריה מציגה 🔑 - הזן את הסיסמה שם; המשימה מסתיימת במקום. </td></tr>
+<tr><td>ארכיון לא נחלץ</td><td>כשלי סיסמה ותיקון מציגים את עצמם בשורת ההיסטוריה. לכל השאר יש פתח מילוט: הגדרות → תיקיית מעקב ועיבוד לאחר הורדה → <b>חילוץ עם unrar חיצוני</b> (הגדרה מתקדמת) מוסר את החילוץ לתוכנת <code>unrar</code> המותקנת במחשב שלך במקום המחלץ המובנה. אחרת השאירו כבוי: הנתיב המובנה מהיר יותר בכל צורה שמדדנו, ופרסומים מוסווים עם שמות hash תמיד משתמשים בו ממילא, כי unrar אינו יכול לעקוב אחר שינויי השמות שלהם. אותו מתג עבור הרצות <code>nzbfast get</code> הוא משתנה הסביבה <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. אם unrar חילץ ארכיון שהמחלץ המובנה סירב לו, אנא דווחו כדי שנתקן את הנתיב המובנה.</td></tr>
 <tr><td>Sonarr/Radarr לא מצליחים להתחבר</td><td>פורט 6789 נגיש? מפתח API נכון (מפתח מלא, לא מפתח NZB)? סוג הקליינט מוגדר ל-SABnzbd?</td></tr>
+<tr><td>לוח המחוונים מבקש מפתח API שמעולם לא קבעתי</td><td>התקנה חדשה יוצרת אחד לעצמה ומדפיסה אותו פעם אחת בהפעלה (<a href="#firstrun-key">§2</a>). הוא נמצא בקובץ <code>apikey</code> ליד התצורה שלך, וגם בפלט ההפעלה. או הקלד מפתח משלך ב-Settings → Security מדפדפן שכבר מחובר.</td></tr>
+<tr><td>שום דבר ברשת לא מצליח להגיע לדימון</td><td>בדוק את <code>--bind</code>: <code>127.0.0.1</code> משרת רק את המכונה שעליה nzbfast רץ. ברירת המחדל, <code>0.0.0.0</code>, משרתת כל ממשק. אחר כך בדוק את חומת האש של המכונה עצמה עבור פורט 6789.</td></tr>
 <tr><td>כרטיס העיון נשאר קטן</td><td>האינדקסר גדל ברקע - בדוק שקבוצות Settings → Indexing מוגדרות, ותן ל-העמקה בכל סריקה זמן לצבור היסטוריה. "סרוק עכשיו" מכריח מעבר; שורת הסטטוס מציגה התקדמות חיה.</td></tr>
 <tr><td>הקיר מציג אמנות שגויה/חסרה</td><td>גיליון פרטים → ✎ תקן התאמה או ↻ רענן מטא-נתונים. חיפושי סרטים משתפרים עם מפתח OMDb חינמי.</td></tr>
 <tr><td>הדימון לא מתחיל: פורט בשימוש</td><td>מופע אחר רץ - או שנה את <code>--port</code>.</td></tr>

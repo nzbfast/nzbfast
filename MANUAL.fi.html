@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - Käyttöohje</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--surface);
   border-radius:0 9px 9px 0;padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-left-color:var(--dim)}
 .warn-box{border-left-color:var(--warn)}
@@ -180,6 +401,45 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 Asetukset → Usenet-palvelimet → <b>Tuo SABnzbdistä / NZBGetistä…</b> löytää olemassa olevan
 asennuksesi ja kopioi sen palvelimet. Komentorivillä on myös <code>nzbfast import-sab</code>.</div>
 
+<h3 id="firstrun-key">API-avaimesi</h3>
+<p>Aidosti uudessa asennuksessa nzbfast tekee itselleen API-avaimen, kun daemon
+käynnistyy ensimmäisen kerran, ja tulostaa sen kerran banneriin heti koontinäytön
+osoitteen alle. Siitä eteenpäin jokainen pyyntö tarvitsee tuon avaimen, joten
+koontinäyttö ja API eivät ole auki kaikelle, mikä yltää koneelle.</p>
+<p>Mitä sillä teet, riippuu siitä, miten käynnistit nzbfastin:</p>
+<ul>
+  <li><b>macOS-sovellus, Windowsin ilmaisinalue tai <code>serve --open</code></b>: ei mitään.
+  Ne välittävät avaimen avaamalleen selainikkunalle, koontinäyttö muistaa sen, ja olet
+  jo kirjautuneena.</li>
+  <li><b>Itse avaamasi selain</b>, tai koontinäyttö puhelimessa tai toisella koneella:
+  sivu kysyy avainta kerran ja muistaa sen sen jälkeen.</li>
+  <li><b>Sonarr, Radarr, nzb360 ja kumppanit</b>: liitä se niiden SABnzbd- tai
+  NZBGet-avaimeksi (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>Avain säilytetään tiedostossa nimeltä <code>apikey</code> määritystiedostosi vieressä,
+joten se pysyy samana uudelleenkäynnistysten yli ja voit lukea sen takaisin milloin
+tahansa. macOS:llä ja Linuxilla tuo tiedosto on luettavissa vain sillä tilillä, joka ajaa
+nzbfastia. Se on myös daemonin omassa tulosteessa, joten koontinäytön Loki-kortissa se on
+tallessa, jos terminaali on jo vierinyt ohi.</p>
+<div class="note"><b>Päivitys ei muuta mitään.</b>Jo olemassa oleva asennus jätetään
+täsmälleen sellaiseksi kuin se oli, avaimen kanssa tai ilman. Avain tehdään vain
+ensimmäisellä ajolla - sellaisella, jossa ei ole koontinäytön asetuksia eikä tallennettua
+jonoa - koska toimivan asennuksen alle ilmestyvä avain lukitsisi ulos jokaisen jo
+liittämäsi Sonarrin, Radarrin ja puhelinsovelluksen, uudelleenkäynnistyksellä, jota et
+koskaan yhdistänyt asetusmuutokseen.</div>
+<p>Jos haluat käyttää sen sijaan omaa avaintasi, kirjoita se kohtaan Asetukset → Suojaus;
+se astuu voimaan heti. Tuo paneeli vaihtaa avaimen mutta ei koskaan näytä nykyistä, joten
+lue <code>apikey</code>-tiedosto, jos tarvitset generoidun arvon takaisin. Ajaaksesi
+kokonaan ilman avainta, koska jokin nzbfastin edessä hoitaa jo kirjautumisen, käynnistä se
+ympäristössä, jossa on <code>NZBFAST_OPEN=1</code>. nzbfast pysyy silloin auki ja sanoo sen
+selvästi käynnistyksessä.</p>
+<p>Se, mitkä koneet ylipäätään yltävät daemonille, on erillinen valinta:
+<code>serve --bind</code>. Oletus on <code>0.0.0.0</code>, eli jokainen
+verkkoliitäntä, koska NAS-laatikon, puhelimen ja toisella koneella olevan Sonarrin on
+kaikkien pystyttävä yhdistämään. <code>--bind 127.0.0.1</code> kaventaa sen siihen
+koneeseen, jolla nzbfast ajaa, mikä on juuri se, mitä haluat yhdellä työpöytäkoneella,
+jossa mikään muu ei tarvitse pääsyä.</p>
+
 <h2 id="concepts">3 · Miten nzbfast toimii</h2>
 <p>Nopea sanasto, jotta loppu käyttöohjeesta luistaa helposti:</p>
 <table>
@@ -300,10 +560,11 @@ indeksoijaa tarvita. Tilarivi näyttää skannausedistymisen; <b>Skannaa nyt</b>
 ilmestyy indeksiin, se napataan automaattisesti laatuvalintojen ja
 päivityssääntöjen mukaan (parempi kopio korvaa huonomman).</p>
 <h3 id="dash-history">Historia</h3>
-<p>Viimeaikaiset lataukset tilan, koon ja sijainnin kera; epäonnistuneet työt tarjoavat <b>Yritä uudelleen</b>
+<p>Viimeaikaiset lataukset, kukin omalla rivillään. Epäonnistuneet työt tarjoavat <b>Yritä uudelleen</b>
 (jatkaa journaalista). Salatut arkistot näyttävät 🔑-lukituksen avauksen - syötä
 salasana ja työ valmistuu paikan päällä. Varmistuksen tila -nauha piirtää viallisia PAR2-
 lohkoja latausta kohti - nouseva loppupää tarkoittaa, että artikkelit saapuvat vioittuneina.</p>
+<p>Kortti listaa oletuksena kymmenen latausta, ja loput ovat yhden klikkauksen päässä ▤-painikkeesta. Tila, sijainti ja epäonnistumisen syy ovat rivin oman klikkauksen takana, joten tavallinen tapaus - mikä valmistui, kuinka suuri, milloin - pysyy luettavana ilman vieritystä. Vedä sen sijaan kortin alareunasta, niin lista vierii valitsemallasi korkeudella. <b>History rows</b> kohdassa Asetukset → Käyttöliittymä muuttaa tuota kymmentä; koska se on daemonin eikä selaimesi ominaisuus, se koskee jokaista tätä asennusta katsovaa laitetta. <b>Colour History names</b> sen vieressä värjää valmiit nimet vihreiksi ja epäonnistuneet punaisiksi; pois päältä nimet pysyvät neutraaleina, ja värillinen piste ja rivin omat tiedot kertovat yhä kumpi on kumpi.</p>
 <h3 id="dash-usage">Datan käyttö</h3>
 <p>Palveluntarjoajakohtaiset päiväpalkit ja Tänään / 7 päivää / 30 päivää -kokonaismäärät - olennaista
 mitatuille ja lohkotileille. Lohkotilit näyttävät elinaikaisen käytön kokoaan vasten.</p>
@@ -319,6 +580,7 @@ mitatuille ja lohkotileille. Lohkotilit näyttävät elinaikaisen käytön kokoa
 poimitaan 5 sekunnin sisällä ja tiedosto poistetaan. Ohjaa selaimesi latauskansio
 siihen saadaksesi yhden napsautuksen nappaukset indeksoijasivustoilta.</td></tr>
 <tr><td><b>URL:sta</b></td><td>Liitä NZB-linkki (API <code>mode=addurl</code> tai minkä tahansa yhdistetyn sovelluksen kautta).</td></tr>
+<tr><td><b>nzblnk:-linkit</b></td><td>Liitä <code>nzblnk:</code>-linkki mihin tahansa kohtaan hallintapaneelia tai raahaa se sisään. Jos asensit macOS-DMG:stä tai Windows-asennusohjelmasta, voit myös napsauttaa linkkiä suoraan boardilla. Katso <a href="#nzblnk">nzblnk-linkit</a> alempaa.</td></tr>
 <tr><td><b>Selaa indeksiä</b></td><td>Napsauta mitä tahansa täydellistä julkaisua Selaa-kortissa.</td></tr>
 <tr><td><b>Seurantalista / RSS</b></td><td>Automaattinen - katso <a href="#automation">Automaatio</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr yms.</b></td><td>Ne lähettävät nappaukset suoraan jonoon - katso <a href="#arr">§11</a>.</td></tr>
@@ -329,10 +591,38 @@ siihen saadaksesi yhden napsautuksen nappaukset indeksoijasivustoilta.</td></tr>
 <li><b>Kategoriat</b> ovat vapaamuotoisia nimilappuja; kustakin tulee latauskansiosi
 alikansio, ja Älykkäät kansiot (katso <a href="#automation">§10</a>) voivat määrittää ne säännöllä.</li>
 <li><b>Prioriteetit</b>: Pakota &gt; Korkea &gt; Normaali &gt; Matala. Pakota ohittaa keskeytyksen ja kiintiön.</li>
-<li><b>Salasanat</b> salatuille arkistoille poimitaan automaattisesti
-<code>&lt;meta type="password"&gt;</code>-kentästä NZB:n sisältä tai
-<code>Name{{password}}.nzb</code>-tiedostonimestä, ja ne voidaan antaa työkohtaisesti
-API:n kautta tai jälkikäteen Historiasta (🔑).</li>
+<li><b>Salatun arkiston salasanat</b> poimitaan automaattisesti NZB:n sisältä kohdasta
+<code>&lt;meta type="password"&gt;</code>, tiedostonimestä
+<code>Name{{password}}.nzb</code> tai <a href="#nzblnk">nzblnk-linkin</a> kentästä
+<code>p=</code>, ja ne voi antaa työkohtaisesti API:n kautta tai jälkikäteen
+Historiasta (🔑).</li>
+</ul>
+
+<h3 id="nzblnk">nzblnk-linkit</h3>
+<p>Osa boardeista, etenkin saksalaiset ja hollantilaiset, julkaisee
+<code>nzblnk:</code>-linkin NZB-tiedoston sijaan. Postaus on hämärretty, joten
+tiedostonimeä, johon linkittää, ei ole. Linkki kantaa sen sijaan otsikkoa
+<code>h=</code>, joka on hakuavain eikä sijainti, sekä valinnaisen otsikon
+<code>t=</code>, salasanan <code>p=</code> ja ryhmän <code>g=</code>. Postaus on siis
+ensin etsittävä.</p>
+<p>nzbfast hakee otsikkoa ensin omasta indeksistään, mikä ei vaadi verkkoa lainkaan, ja
+vasta jos se ei osu, se kysyy määrittämiltäsi hakuindeksoijilta (Asetukset →
+Hakuindeksoijat, <a href="#settings">§9</a>) samoilla päivittäisillä budjeteilla ja
+samalla perääntymisellä kuin mikä tahansa muu haku. Otsikosta tulee työn nimi ja
+salasana liitetään työhön automaattisesti.</p>
+<ul>
+<li><b>Liittäminen tai raahaaminen</b> toimii jokaisessa asennuksessa, Docker ja
+NAS-laitteet mukaan lukien: kopioi linkki boardilta ja liitä se mihin tahansa kohtaan
+hallintapaneelia.</li>
+<li><b>Napsauttaminen</b> edellyttää, että skeema on rekisteröity työpöydällesi.
+<b>macOS-DMG:n</b> sovellus rekisteröi sen, ja <b>Windows-asennusohjelma</b> tarjoaa
+sitä tehtävänä: se kysyy ensin ja jättää skeeman rauhaan, jos NZB Monkey tai NZBDonkey
+pitää sitä jo hallussaan. Pelkällä macOS-tarballilla, Homebrew'llä ja Linux-asennuksilla
+ei ole työpöytäkäsittelijää, niissä liittäminen on tie sisään.</li>
+<li>Ratkaisu on tarkoituksella nopeusrajoitettu. Rekisteröity skeema on yhden
+selainkyselyn päässä jokaiselta sivulta, jolla käyt, joten linkeillä on minuuttikatto ja
+vain minuutin ensimmäiset saavat tavoittaa indeksoijasi; sen jälkeen vastaus tulee
+pelkästä paikallisesta indeksistä.</li>
 </ul>
 
 <h2 id="wall">6 · Julisteseinä</h2>
@@ -406,11 +696,43 @@ tahansa palvelin mukaan pooliin tai pois siitä. Jokaisella palvelimella on:</p>
 <table>
 <tr><th>Kenttä</th><th>Huomiot</th></tr>
 <tr><td>Osoite / portti</td><td>Käytä SSL-porttia <b>563</b>. TLS ei maksa mitattavasti mitään - nzbfast salaa aina.</td></tr>
-<tr><td>Käyttäjänimi / salasana</td><td>Tallennetaan paikallisesti tiedostoon <code>config.local.json</code>, ei koskaan näytetä takaisin selaimelle. Salasanan jättäminen tyhjäksi muokatessa säilyttää tallennetun.</td></tr>
+<tr><td>Käyttäjänimi / salasana</td><td>Tallennetaan paikallisesti tiedostoon <code>config.local.json</code>, ei koskaan näytetä takaisin selaimelle. Salasanan jättäminen tyhjäksi muokatessa säilyttää tallennetun. Salasanat ovat <a href="#passwords">levyllä hämärrettyjä, ei salattuja</a>.</td></tr>
 <tr><td>Yhteydet</td><td>Palvelinkohtaiset samanaikaiset yhteydet. Käytä <b>Yhteyksien viritystä</b> (<a href="#performance">§13</a>) löytääksesi kunkin palveluntarjoajan makeimman kohdan sen sijaan, että arvaisit korkealta.</td></tr>
 <tr><td>Taso / porras</td><td>0 = ensisijainen; korkeammat tasot ovat täyttöpalvelimia, joilta kysytään vain artikkeleita, jotka jokainen alempi taso jätti väliin. Aseta rajoittamattomat tilit tasolle 0, lohkotilit tasolle 1+.</td></tr>
 <tr><td>Lohkon koko (GB)</td><td>Lohko- (maksa-per-GB) tileille: nzbfast seuraa elinaikaista käyttöä tätä vasten ja lakkaa käyttämästä palvelinta, kun se on käytetty loppuun (varoitus 85%:ssa).</td></tr>
 </table>
+<p><b>Jätä hieman pelivaraa tilisi yhteysrajan alle.</b> Yhteysmäärän asettaminen hieman rajan alle ei maksa mitään: siirtonopeus tasaantuu jo hyvissä ajoin ennen viimeistä paria yhteyttä, ja <b>Yhteyksien viritys</b> (<a href="#performance">§13</a>) päätyy joka tapauksessa sen alle. Juuri nuo vapaat paikat päästävät toisen laitteen, toisen ohjelman tai katkenneen yhteyden uusintayrityksen silti sisään sen sijaan, että ne torjuttaisiin tämän varatessa jokaisen paikan.</p>
+<h3 id="passwords">Miten palveluntarjoajien salasanat tallennetaan</h3>
+<p>Palvelinsalasanat tiedostossa <code>config.local.json</code> ovat <b>hämärrettyjä,
+eivät salattuja</b>. Ne tallennetaan muodossa <code>obf1:</code> ja sen perässä
+koodattu esitys, jotta tiedosto ei lue selväkielisenä, jos se päätyy kuvakaappaukseen,
+foorumiviestiin, vikailmoitukseen tai näytölle, jonka joku muu näkee.</p>
+<p>Sanotaan selvästi, mitä se antaa ja mitä ei:</p>
+<ul>
+<li><b>Se ei ole salausta eikä suojaa lainkaan siltä, jolla tiedosto on.</b> Menetelmä
+on julkisessa lähdekoodissamme ja purkaja kulkee nzbfastin sisällä, joten tiedoston
+haltija saa salasanan esiin sekunneissa. Kohtele tiedostoa salaisena täsmälleen niin
+kuin kohtelisit, jos salasanat olisivat luettavissa.</li>
+<li><b>Se poistaa huolimattoman vuodon</b>, ja juuri se on yleinen. Asetustiedostoja
+liimataan tukiketjuihin ja jää kuvakaappauksiin paljon useammin kuin niitä varastetaan
+levyltä.</li>
+<li>Itse selväkielisenä kirjoittamasi salasana toimii yhä. nzbfast lukee molemmat
+muodot, joten käsin muokatut asetukset ja tuonnit muista ohjelmista eivät koskaan
+hajoa; se kirjoittaa hämärretyn muodon seuraavalla tallennuksella.</li>
+<li>Tiedosto kirjoitetaan lisäksi luettavaksi vain sille tilille, joka ajaa nzbfastia
+(tila 0600 macOSissa ja Linuxissa).</li>
+</ul>
+<p>Vertailun vuoksi: <b>NZBGet ja SABnzbd tallentavat molemmat palvelinsalasanat
+luettavana selväkielenä</b> asetustiedostoihinsa. Pidämme hämärrystä pienenä
+parannuksena siihen, emme tietoturvaominaisuutena.</p>
+<p><b>Miksei järjestelmän avainnippu?</b> macOSin avainnippu, Windowsin
+tunnistetietojen hallinta ja Linuxin salaisuuspalvelut antaisivat todellista suojaa, ja
+saatamme palata asiaan. Kaksi asiaa estää sen tänään. Avainnipun käyttö on sidottu
+sovelluksen identiteettiin, eikä nzbfastia ole vielä allekirjoitettu, joten kyselyt ja
+käytös jokaisen päivityksen jälkeen ovat huonoja. Ja iso osa asennuksista on Dockeria,
+näytöttömiä palvelimia ja NAS-laitteita, joissa avainnippua ei ole lainkaan, mikä
+jättäisi kaksi eri tallennuspolkua pidettäväksi oikeina. Yksi hyvin ymmärretty muoto,
+joka käyttäytyy kaikkialla samoin, on toistaiseksi parempi kauppa.</p>
 <p>Kahdelle muulle palvelinkohtaiselle asetukselle ei vielä ole hallintaa
 koontinäytössä: lisää ne käsin kyseisen palvelimen kohtaan tiedostossa
 <code>config.local.json</code> (katso <a href="#files">§17</a>) ja käynnistä
@@ -509,6 +831,7 @@ julkaistiin sen sijaan että niitä arvattaisiin.</p>
 <tr><td>Sisällytä julkaisuryhmä</td><td>Lopussa oleva <code>-GROUP</code>-merkintä.</td></tr>
 <tr><td>Poista roskatiedostot</td><td><b>Oletuksena päällä.</b> Poistaa yli jääneet <code>.par2</code>-, <code>.nzb</code>-, <code>.sfv</code>- ja <code>.nfo</code>-tiedostot sekä näytepätkät valmiista elokuva- ja sarjakansioista. Ei koskaan videota eikä sen tekstityksiä.</td></tr>
 <tr><td>Säilytä vain mediatiedosto</td><td><b>Oletuksena pois, ja tuhoava:</b> poistaa pysyvästi kaiken kansiosta paitsi videon (tai videot) ja tekstitykset. Kausipaketin jokainen jakso säilytetään. Ohittaa asetuksen <b>Poista roskatiedostot</b>, kun molemmat ovat päällä.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>Päällä oletuksena.</b> Urheilu, kilpailut ja muut tapahtumat ovat usein yksi ja sama nimi toistettuna koko kauden ajan, vain sanan tai kahden päässä toisistaan - "Round11 Hungary Race" vastaan "Round11 Hungary Qualifying". Noiden sanojen säilyttäminen on juuri se, mikä estää koko kautta luhistumasta samaksi nimeksi. Pätee vain siellä, missä nimeä ei voitu siistiä muulla tavoin, joten tavallisiin elokuviin ja jaksoihin ei kosketa.</td></tr>
 </table>
 <p class="dim">Koko ryhmä ajetaan korjauksen ja purun jälkeen ja ennen kohtaa <b>Siirrä
 valmiit kohteeseen</b>, ja se ohitetaan kokonaan työltä, joka odottaa vielä salasanaa.
@@ -524,8 +847,21 @@ ja <code>SAB_*</code>-ympäristöllä - olemassa olevat SAB-komentosarjat toimiv
 ja <b>TV-arkistointi</b> (katso <a href="#automation">§10</a>).</p>
 
 <h3>Indeksointi <span class="pill live">live</span></h3>
+<div class="note"><b>Sisäänrakennettu indeksoija on oletuksena pois päältä.</b> Se
+löytää postaukset, jotka on julkaistu oikealla tiedostonimellä, ja iso ja kasvava osa
+Usenetistä julkaistaan tarkoituksella ilman sellaista: satunnainen aihe, satunnaiset
+tiedostonimet sisällä, pudotettuna kaatoryhmään. Oikea nimi elää vain NZB-tiedostossa,
+jonka lataaja julkaisee muualla, joten se ei koskaan ollut Usenetissä minkään skannerin
+luettavaksi. Omalla indeksillämme mitattuna 14,8 miljoonaa skannattua postausta tuotti
+noin 31 000 selattavaa julkaisua, karkeasti yksi viidestäsadasta. Jatka kaupallisten
+indeksoijien käyttöä ja lisää ne kohtaan Asetukset → Hakuindeksoijat, jotta voit hakea
+niistä seinältä. Kytke tämä päälle, jos seuraat tiettyjä ryhmiä, joissa yhä
+julkaistaan oikeilla nimillä, tai jos haluat nähdä, mitä palveluntarjoajasi oikeasti
+kantaa. Kytkin pois päältä: mitään ei skannata eikä haeta, tietokantaa ei luoda, ja
+seinä, Selaa, seurantalista ja newznab-syöte ovat piilossa.</div>
 <table>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
+<tr><td>Sisäänrakennettu indeksoija</td><td>Pääkytkin, <b>pois päältä ellet kytke sitä</b>. Pois tarkoittaa: ei skannausta, ei metatietohakuja, ei saatavuusotantaa eikä newznab-syötettä; levyllä jo oleva indeksi säilytetään (poistopainike on olemassa), joten päälle kytkeminen jatkaa sen sijaan että skannaisi uudelleen.</td></tr>
 <tr><td>Ryhmät</td><td>Keskusteluryhmät, joita sisäänrakennettu indeksoija skannaa (esim. <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>Skannausväli</td><td>Sekunteja kierrosten välillä (oletus 900).</td></tr>
 <tr><td>Täydennysartikkelit</td><td>Otsakkeet, jotka haetaan ryhmän aivan ensimmäisellä skannauksella.</td></tr>
@@ -539,8 +875,7 @@ ja <b>TV-arkistointi</b> (katso <a href="#automation">§10</a>).</p>
 
 <h3>Kirjasto, Suojaus, Käyttöliittymä</h3>
 <p><b>Kirjasto</b>: kategoriat, joita kohdellaan välittöminä kirjastomerkintöinä + uudelleentarkistusväli.
-<b>Suojaus</b>: täysi API-avain (kaikki) ja NZB-avain (vain lisäävä - turvallista
-antaa indeksoijasivustoille), molemmat vaihdettavissa livenä. <b>Käyttöliittymä</b>: napsautusäänet, työpöytä-
+<b>Suojaus</b>: täysi API-avain (kaikki) ja NZB-avain (vain lisäävä - turvallista antaa indeksoijasivustoille), molemmat vaihdettavissa livenä. Kumpi tahansa kenttä korvaa sille kuuluvan avaimen heti kun poistut kentästä, ja tyhjäksi jätetty kenttä säilyttää avaimen, joka sillä jo on. API-avaimella on lisäksi <b>Show</b>, joka paljastaa ja kopioi nykyisen avaimen, jotta voit liittää sen Sonarriin, Radarriin tai NZB360:een silloin kun sinulle sopii, sekä <b>Create new</b>, joka lyö tilalle uuden - vanha avain lakkaa toimimasta välittömästi, joten kaikelle jo yhdistetylle on annettava uusi. Molemmat on portitettu itse API-avaimeen: vain lisäävä NZB-avain ei voi lukea sitä, mikä on koko tuon avaimen tarkoitus. Mistä avain tulee uudessa asennuksessa, katso <a href="#firstrun-key">§2</a>. <b>Käyttöliittymä</b>: napsautusäänet, työpöytä-
 ilmoitukset valmistuessa, palveluntarjoajien uudelleenjärjestysväli.</p>
 
 <p><b>Nopeusyksiköt</b> <span class="pill live">live</span> ratkaisee, miten jokainen
@@ -589,7 +924,7 @@ ja se voi toimia myös niiden <em>indeksoijana</em>.</p>
 <ol>
 <li>Sonarrissa/Radarrissa: Settings → Download Clients → lisää <b>SABnzbd</b>.</li>
 <li>Host: nzbfast-koneesi · Port: <b>6789</b> · API key: täysi API-avaimesi
-(Asetukset → Suojaus; QR/kopioi-ohjain on sen vieressä).</li>
+(mistä löydät sen: <a href="#firstrun-key">§2</a>).</li>
 <li>Kategoria halutusti (esim. <code>tv</code> / <code>movies</code>). Test → vihreä ruksi → Save.</li>
 </ol>
 <p>Jono, historia, työkohtainen tila, ”remove &amp; delete”, uudelleenyritys ja kategoriaohjaus
@@ -602,8 +937,14 @@ käyttäytyvät kaikki niin kuin *arrit odottavat.</p>
 <code>movie</code>-kyselyt omasta indeksistään valvotuista ryhmistäsi, ja
 <code>/getnzb/&lt;id&gt;</code> palauttaa NZB:n.</li>
 </ol>
-<div class="note"><b>Miksi vaivautua?</b>Itse ylläpidetty indeksoija juuri niistä ryhmistä, joista
-välität: ei tilejä, ei API-kutsurajoja, säilytys niin syvälle kuin annat sen skannata.</div>
+<div class="note"><b>Kytke sisäänrakennettu indeksoija ensin päälle</b> (Asetukset →
+Indeksointi). Se on oletuksena pois päältä, ja niin kauan kuin se on, tämä julkisivu
+vastaa jokaiseen kyselyyn <code>&lt;error code="101"&gt;</code> tyhjän tuloksen sijaan,
+joten virhe näkyy silloin kun lisäät indeksoijan eikä viikkoja myöhemmin.<br><br>
+<b>Miksi vaivautua?</b> Itse ylläpidetty indeksoija juuri niistä ryhmistä, jotka sinua
+kiinnostavat: ei tilejä, ei API-kutsurajoja, säilyvyys niin syvälle kuin annat sen
+skannata. Se on lisä tavanomaisiin indeksoijiisi eikä korvaaja, koska se löytää vain
+sen, mikä julkaistiin oikealla tiedostonimellä.</div>
 
 <h2 id="remotes">12 · Puhelin- &amp; etäsovellukset</h2>
 <p>nzbfast toteuttaa <em>molemmat</em> suuret etäohjausprotokollat, joten lähes jokainen
@@ -755,7 +1096,7 @@ yhteyttä; tyhjä tarkistus-URL tekee saman.</li>
 <table>
 <tr><th>Komento</th><th>Tarkoitus</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interaktiivinen palvelinasennus.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>Aja daemon (koontinäyttö + API + automaatio). <code>--open</code> avaa selaimen; katso <code>--help</code> koko lippulistalle - jokaisella koontinäytön asetuksella on lipun kaksonen.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>Aja daemon (koontinäyttö + API + automaatio). <code>--open</code> avaa selaimen; <code>--apikey</code> asettaa avaimen käsin (<a href="#firstrun-key">§2</a>); <code>--bind</code> valitsee kuunteluosoitteen, oletus <code>0.0.0.0</code> (jokainen liitäntä), <code>127.0.0.1</code> vain tälle koneelle. Katso <code>--help</code> koko lippulistalle - jokaisella koontinäytön asetuksella on lipun kaksonen.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Lataa yksi NZB, täysi liukuhihna, ei daemonia. <code>--preflight</code> keskeyttää aikaisin, jos julkaisu ei voi valmistua; <code>--password</code> salatuille sarjoille.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Saatavuustuomio - COMPLETE / REPAIRABLE / IMPOSSIBLE - ilman hyötykuorman lataamista.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>Varmista tiedostot hakemiston PAR2-sarjaa vasten.</td></tr>
@@ -776,10 +1117,10 @@ puolestasi.</p>
 <p>Peruspäätepiste: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatta. Kaksi avainta:
 <b>API-avain</b> (täysi hallinta) ja <b>NZB-avain</b> (vain lisäävä:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> ei tarkoituksella kuulu pelkän lisäyksen joukkoon: linkin ratkaiseminen voi kuluttaa mitattua indeksoijakiintiötä, mikä ei kuulu pelkkään lisäykseen tarkoitetulle tunnukselle.</p>
 <table>
 <tr><th>Alue</th><th>Tilat</th></tr>
-<tr><td>Jono</td><td><code>queue</code> (nimellä <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>Jono</td><td><code>queue</code> (nimellä <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>Tiedot</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>Määritys</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (jokainen Asetukset-kenttä), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Indeksi &amp; seinä</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, sekä newznab osoitteessa <code>/api?t=caps|search|tvsearch|movie</code> ja <code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -792,8 +1133,9 @@ SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatt
 <h2 id="files">17 · Tiedostot &amp; sijainnit</h2>
 <table>
 <tr><th>Tiedosto</th><th>Sisältö</th></tr>
-<tr><td><code>config.local.json</code></td><td>Palvelintunnukset ja palvelinkohtaiset valinnat. Velhon luoma; muokattavissa Asetuksissa. Pidä se yksityisenä.</td></tr>
+<tr><td><code>config.local.json</code></td><td>Palvelintunnukset ja palvelinkohtaiset valinnat. Velhon luoma; muokattavissa Asetuksissa. Pidä se yksityisenä. Salasanat ovat <a href="#passwords">hämärrettyjä, ei salattuja</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Jokainen koontinäytöllä muutettu asetus. Asuu määrityksen vieressä; käyttöliittymäarvot voittavat komentorivilliput. Poista avain (tai tiedosto) palataksesi lippuihin/oletuksiin.</td></tr>
+<tr><td><code>apikey</code></td><td>API-avain, jonka nzbfast teki itselleen ensimmäisellä ajolla (<a href="#firstrun-key">§2</a>). Asuu määrityksen vieressä; macOS:llä ja Linuxilla luettavissa vain sillä tilillä, joka ajaa nzbfastia. Älä poista sitä saadaksesi tuoreen avaimen: jo kertaalleen ajetussa asennuksessa mikään ei tule tilalle, ja daemon nousee takaisin täysin ilman avainta. Aseta uusi sen sijaan kohdassa Asetukset → Suojaus.</td></tr>
 <tr><td><code>index.db</code></td><td>Julkaisuindeksi (SQLite) + seinän metatiedot. Turvallista poistaa - se rakentuu uudelleen skannauksesta (Asetukset → Indeksointi → Pyyhi tekee tämän puolestasi).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Jonon tila (säilyy uudelleenkäynnistyksissä), työkohtaiset NZB:t, käyttökirjanpito, mittaushistoria, julistekuvien välimuisti.</td></tr>
 <tr><td>Artikkelijournaali</td><td>Kunkin työn tulostuskansion sisällä keskeneräisenä - pyörittää kaatumisen jälkeistä jatkoa ja uudelleenyritystä. Poistetaan onnistuessa.</td></tr>
@@ -810,7 +1152,10 @@ saatavuuspisteellään (<a href="#oracle">§13</a>). Tämänmuotoinen ensimmäin
 epäonnistuminen uusitaan itsestään kerran odotuksen jälkeen, sillä levitysviive näyttää
 täsmälleen samalta ja korjaantuu itsestään.</td></tr>
 <tr><td>Valmis arkisto haluaa salasanan</td><td>Historiarivi näyttää 🔑 - syötä salasana siihen; työ valmistuu paikan päällä. </td></tr>
+<tr><td>Arkisto ei purkaudu</td><td>Salasana- ja korjausvirheet nimeävät itsensä historiarivillä. Kaikelle muulle on hätäluukku: Asetukset → Valvontakansio &amp; jälkikäsittely → <b>Pura ulkoisella unrarilla</b> (lisäasetus) antaa purkamisen koneellesi asennetulle <code>unrar</code>-ohjelmalle sisäänrakennetun purkajan sijasta. Pidä se muuten pois päältä: sisäänrakennettu polku on nopeampi kaikissa mittaamissamme muodoissa, ja hash-nimiset obfuskoidut julkaisut käyttävät sitä joka tapauksessa aina, koska unrar ei voi seurata niiden uudelleennimeämistä. Sama kytkin <code>nzbfast get</code>-ajoille on ympäristömuuttuja <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Jos unrar purkaa arkiston, jonka sisäänrakennettu purkaja hylkäsi, ilmoita siitä, jotta voimme korjata sisäänrakennetun polun.</td></tr>
 <tr><td>Sonarr/Radarr ei saa yhteyttä</td><td>Onko portti 6789 tavoitettavissa? API-avain oikein (täysi avain, ei NZB-avain)? Asiakastyyppi asetettu SABnzbdiksi?</td></tr>
+<tr><td>Koontinäyttö kysyy API-avainta, jota en koskaan asettanut</td><td>Uusi asennus tekee sellaisen itselleen ja tulostaa sen kerran käynnistyksessä (<a href="#firstrun-key">§2</a>). Se on <code>apikey</code>-tiedostossa määrityksesi vieressä ja käynnistystulosteessa. Tai kirjoita oma avaimesi kohtaan Asetukset → Suojaus selaimesta, joka on jo kirjautuneena.</td></tr>
+<tr><td>Mikään verkossa ei tavoita daemonia</td><td>Tarkista <code>--bind</code>: <code>127.0.0.1</code> palvelee vain sitä konetta, jolla nzbfast ajaa. Oletus, <code>0.0.0.0</code>, palvelee jokaista liitäntää. Tarkista sitten koneen oma palomuuri portin 6789 osalta.</td></tr>
 <tr><td>Selaa-kortti pysyy pienenä</td><td>Indeksoija kasvaa taustalla - tarkista, että Asetukset → Indeksointi -ryhmät on asetettu, ja anna Syvennä per skannaus -asetukselle aikaa kerätä historiaa. ”Skannaa nyt” pakottaa kierroksen; tilarivi näyttää live-edistymisen.</td></tr>
 <tr><td>Seinä näyttää väärän/ei kuvitusta</td><td>Tietosivu → ✎ Korjaa osuma tai ↻ Päivitä metatiedot. Elokuvahaut paranevat ilmaisella OMDb-avaimella.</td></tr>
 <tr><td>Daemon ei käynnisty: portti käytössä</td><td>Toinen instanssi on käynnissä - tai vaihda <code>--port</code>.</td></tr>

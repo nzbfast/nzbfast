@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - Användarhandbok</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--surface);
   border-radius:0 9px 9px 0;padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-left-color:var(--dim)}
 .warn-box{border-left-color:var(--warn)}
@@ -181,6 +402,45 @@ Inställningar → Usenet-servrar → <b>Importera från SABnzbd / NZBGet…</b>
 installation och kopierar över dess servrar. Det finns också <code>nzbfast import-sab</code>
 på kommandoraden.</div>
 
+<h3 id="firstrun-key">Din API-nyckel</h3>
+<p>Vid en verkligt ny installation skapar nzbfast en API-nyckel åt sig själv första
+gången daemonen startar, och skriver ut den en gång i en banner precis under
+instrumentpanelens adress. Från och med då kräver varje förfrågan den nyckeln, så att
+instrumentpanelen och API:et inte står öppna för allt som kan nå maskinen.</p>
+<p>Vad du gör med den beror på hur du startade nzbfast:</p>
+<ul>
+  <li><b>macOS-appen, Windows-fältikonen eller <code>serve --open</code></b>: ingenting.
+  De skickar nyckeln till webbläsarfönstret de öppnar, instrumentpanelen kommer ihåg
+  den, och du är redan inloggad.</li>
+  <li><b>En webbläsare du öppnat själv</b>, eller instrumentpanelen på en telefon eller
+  en annan dator: sidan frågar efter nyckeln en gång och kommer ihåg den efter det.</li>
+  <li><b>Sonarr, Radarr, nzb360 med flera</b>: klistra in den som deras SABnzbd- eller
+  NZBGet-nyckel (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>Nyckeln sparas i en fil som heter <code>apikey</code> bredvid din konfigurationsfil,
+så den är densamma efter omstarter och du kan läsa tillbaka den när du behöver.
+På macOS och Linux är den filen läsbar endast för kontot som kör nzbfast. Den finns
+också i daemonens egen utskrift, så instrumentpanelens Logg-kort har den om
+terminalen redan rullat förbi.</p>
+<div class="note"><b>Uppgradering ändrar ingenting.</b>En installation som redan
+finns lämnas exakt som den var, med eller utan nyckel. En nyckel skapas bara vid en
+första körning - en utan inställningar på instrumentpanelen och utan sparad kö -
+eftersom en nyckel som dök upp under en fungerande installation skulle stänga ute
+varje Sonarr, Radarr och telefonapp du redan kopplat in, vid en omstart som du aldrig
+kopplade ihop med en ändrad inställning.</div>
+<p>Vill du använda en egen nyckel i stället skriver du in den under Inställningar →
+Säkerhet; den gäller direkt. Den panelen ändrar nyckeln men visar aldrig den
+nuvarande, så läs filen <code>apikey</code> om du behöver få tillbaka det genererade
+värdet. Vill du köra helt utan nyckel, för att något framför nzbfast redan sköter
+inloggningen, startar du den med <code>NZBFAST_OPEN=1</code> i miljön. nzbfast förblir
+då öppen och säger det rakt ut vid start.</p>
+<p>Vilka maskiner som över huvud taget kan nå daemonen är ett separat val:
+<code>serve --bind</code>. Standard är <code>0.0.0.0</code>, alltså varje
+nätverksgränssnitt, eftersom en NAS-låda, en telefon och en Sonarr på en annan dator
+alla måste kunna ansluta. <code>--bind 127.0.0.1</code> smalnar av det till maskinen
+som nzbfast kör på, vilket är vad du vill ha på ett enskilt skrivbord där inget annat
+behöver åtkomst.</p>
+
 <h2 id="concepts">3 · Så fungerar nzbfast</h2>
 <p>En snabb ordlista så att resten av handboken blir lätt att läsa:</p>
 <table>
@@ -300,10 +560,11 @@ indexerare behövs. Statusraden visar skanningsförloppet; <b>Skanna nu</b> tvin
 dyker upp i indexet hämtas den automatiskt, med kvalitetspreferenser och
 uppgraderingsregler (en bättre kopia ersätter en sämre).</p>
 <h3 id="dash-history">Historik</h3>
-<p>Senaste nedladdningarna med status, storlek, plats; misslyckade jobb erbjuder <b>Försök igen</b>
+<p>Senaste nedladdningarna, en rad var. Misslyckade jobb erbjuder <b>Försök igen</b>
 (återupptar från journalen). Krypterade arkiv visar en 🔑 upplåsningskontroll - ange
 lösenordet så blir jobbet klart på plats. Verifieringshälsoremsan diagramlägger dåliga PAR2-
 block per nedladdning - en stigande svans betyder att artiklar kommer in skadade.</p>
+<p>Kortet listar tio nedladdningar som standard och resten är ett klick bort, på knappen ▤. Status, plats och orsaken till ett misslyckande ligger bakom ett klick på själva raden, så att det vanliga fallet - vad som blev klart, hur stort, när - förblir läsbart utan att scrolla. Dra i kortets nederkant för att låta listan scrolla på en höjd du väljer i stället. <b>History rows</b> under Inställningar → Gränssnitt ändrar tian; eftersom det är en egenskap hos daemonen och inte hos din webbläsare gäller det varje enhet som tittar på den här installationen. <b>Colour History names</b> bredvid färgar klara namn gröna och misslyckade röda; avstängt blir namnen neutrala, och den färgade pricken och radens egna detaljer säger fortfarande vilket som är vilket.</p>
 <h3 id="dash-usage">Dataförbrukning</h3>
 <p>Dagliga staplar per provider och Idag / 7-dagars / 30-dagars totaler - nödvändigt för mätade
 konton och blockkonton. Blockkonton visar livstidsförbrukning mot sin storlek.</p>
@@ -319,6 +580,7 @@ konton och blockkonton. Blockkonton visar livstidsförbrukning mot sin storlek.<
 plockas upp inom 5 sekunder och filen tas bort. Rikta din webbläsares nedladdnings-
 mapp mot den för grabbar med ett klick från indexersidor.</td></tr>
 <tr><td><b>Från en URL</b></td><td>Klistra in en NZB-länk (API <code>mode=addurl</code>, eller via valfri ansluten app).</td></tr>
+<tr><td><b>nzblnk:-länkar</b></td><td>Klistra in en <code>nzblnk:</code>-länk var som helst på panelen, eller dra in den. Har du installerat från macOS-DMG:en eller Windows-installeraren kan du också klicka på en direkt på ett board. Se <a href="#nzblnk">nzblnk-länkar</a> nedan.</td></tr>
 <tr><td><b>Bläddra i indexet</b></td><td>Klicka på valfri komplett release i Bläddra-kortet.</td></tr>
 <tr><td><b>Bevakningslista / RSS</b></td><td>Automatiskt - se <a href="#automation">Automatisering</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr m.fl.</b></td><td>De skickar grabbar rakt till kön - se <a href="#arr">§11</a>.</td></tr>
@@ -329,10 +591,36 @@ mapp mot den för grabbar med ett klick från indexersidor.</td></tr>
 <li><b>Kategorier</b> är fritt formulerade etiketter; var och en blir en undermapp i din nedladdnings-
 mapp, och Smarta mappar (se <a href="#automation">§10</a>) kan tilldela dem per regel.</li>
 <li><b>Prioriteter</b>: Tvinga &gt; Hög &gt; Normal &gt; Låg. Tvinga kringgår paus och kvot.</li>
-<li><b>Lösenord</b> för krypterade arkiv plockas upp automatiskt från
-<code>&lt;meta type="password"&gt;</code> inuti NZB:en eller ett
-<code>Name{{password}}.nzb</code>-filnamn, och kan anges per jobb via
-API:et eller efteråt från Historik (🔑).</li>
+<li><b>Lösenord</b> till krypterade arkiv plockas upp automatiskt från
+<code>&lt;meta type="password"&gt;</code> inuti NZB:n, från ett filnamn
+<code>Name{{password}}.nzb</code> eller från fältet <code>p=</code> i en
+<a href="#nzblnk">nzblnk-länk</a>, och kan anges per jobb via API:et eller efteråt från
+Historik (🔑).</li>
+</ul>
+
+<h3 id="nzblnk">nzblnk-länkar</h3>
+<p>Vissa board, mest tyska och nederländska, publicerar en <code>nzblnk:</code>-länk
+i stället för en NZB-fil. Inlägget är fördunklat, så det finns inget filnamn att länka
+till. Länken bär i stället ett huvud, <code>h=</code>, som är en söknyckel och inte en
+plats, plus en valfri titel <code>t=</code>, ett lösenord <code>p=</code> och en grupp
+<code>g=</code>. Någon måste först gå och hitta inlägget.</p>
+<p>nzbfast slår upp huvudet i sitt eget index först, vilket inte kräver något nätverk
+alls, och bara om det missar frågar det sökindexerarna du har ställt in (Inställningar →
+Sökindexerare, <a href="#settings">§9</a>), under samma dagsbudgetar och samma backoff
+som varje annan sökning. Titeln blir jobbets namn och lösenordet läggs på jobbet
+automatiskt.</p>
+<ul>
+<li><b>Klistra in eller dra</b> fungerar på varje installation, Docker och NAS
+inräknade: kopiera länken från boardet och klistra in den var som helst på panelen.</li>
+<li><b>Att klicka</b> på en länk kräver att schemat är registrerat hos ditt skrivbord.
+Appen från <b>macOS-DMG:en</b> registrerar det, och <b>Windows-installeraren</b> erbjuder
+det som en uppgift: den frågar först och lämnar schemat i fred om NZB Monkey eller
+NZBDonkey redan håller det. Den rena macOS-tarbollen, Homebrew och Linux-installationerna
+har ingen skrivbordshanterare, där är inklistring vägen in.</li>
+<li>Uppslagningen är hastighetsbegränsad med flit. Ett registrerat schema ligger en
+webbläsarfråga bort från varje sida du besöker, så länkar har ett tak per minut och bara
+de första under en minut får nå dina indexerare; därefter besvaras de enbart ur det
+lokala indexet.</li>
 </ul>
 
 <h2 id="wall">6 · Posterväggen</h2>
@@ -405,11 +693,43 @@ ta in eller ur poolen vilken server som helst. Varje server har:</p>
 <table>
 <tr><th>Fält</th><th>Anmärkningar</th></tr>
 <tr><td>Host / port</td><td>Använd SSL-port <b>563</b>. TLS kostar inget mätbart - nzbfast krypterar alltid.</td></tr>
-<tr><td>Användarnamn / lösenord</td><td>Lagras lokalt i <code>config.local.json</code>, visas aldrig tillbaka till webbläsaren. Att lämna lösenordet tomt vid redigering behåller det sparade.</td></tr>
+<tr><td>Användarnamn / lösenord</td><td>Lagras lokalt i <code>config.local.json</code>, visas aldrig tillbaka till webbläsaren. Att lämna lösenordet tomt vid redigering behåller det sparade. Lösenord är <a href="#passwords">fördunklade på disk, inte krypterade</a>.</td></tr>
 <tr><td>Anslutningar</td><td>Samtidiga anslutningar per server. Använd <b>Anslutningstrimning</b> (<a href="#performance">§13</a>) för att hitta varje providers optimala punkt i stället för att gissa högt.</td></tr>
 <tr><td>Nivå (tier)</td><td>0 = primär; högre nivåer är fyllnadsservrar, som bara tillfrågas om artiklar varje lägre nivå missat. Sätt obegränsade konton på 0, blockkonton på 1+.</td></tr>
 <tr><td>Blockstorlek (GB)</td><td>För block-konton (betala per GB): nzbfast spårar livstidsförbrukning mot detta och slutar använda servern när den är slut (varning vid 85 %).</td></tr>
 </table>
+<p><b>Lämna lite marginal under kontots anslutningstak.</b> Att ställa anslutningarna en bit under taket kostar ingenting: genomströmningen planar ut långt före de sista en eller två anslutningarna, och <b>Anslutningstrimning</b> (<a href="#performance">§13</a>) hamnar ändå under. Det är de lediga platserna som låter en andra enhet, ett annat program eller ett nytt försök efter en bruten socket komma in ändå, i stället för att nekas medan den här upptar varenda plats.</p>
+<h3 id="passwords">Så lagras dina leverantörslösenord</h3>
+<p>Leverantörslösenord i <code>config.local.json</code> är <b>fördunklade, inte
+krypterade</b>. De sparas som <code>obf1:</code> följt av en kodad form, så att filen
+inte läses som klartext om den dyker upp i en skärmbild, ett foruminlägg, en
+felrapport eller på en skärm som någon annan kan se.</p>
+<p>Låt oss vara tydliga med vad det ger dig och vad det inte ger:</p>
+<ul>
+<li><b>Det är inte kryptering och skyddar inte alls mot någon som har filen.</b>
+Metoden finns i vår öppna källkod och avkodaren följer med inuti nzbfast, så den som
+har filen får fram lösenordet på några sekunder. Behandla filen som hemlig precis som
+du skulle gjort om lösenorden var läsbara.</li>
+<li><b>Det tar bort den slarviga läckan</b>, som är den vanliga. Konfigurationer
+klistras in i supporttrådar och fastnar på skärmbilder betydligt oftare än de stjäls
+från disk.</li>
+<li>Ett lösenord du själv skrivit in som klartext fungerar fortfarande. nzbfast läser
+båda formerna, så handredigerade konfigurationer och import från andra klienter går
+aldrig sönder; nästa gång det sparar skriver det den fördunklade formen.</li>
+<li>Filen skrivs dessutom läsbar endast för kontot som kör nzbfast (läge 0600 på macOS
+och Linux).</li>
+</ul>
+<p>Som jämförelse: <b>NZBGet och SABnzbd lagrar båda leverantörslösenord som läsbar
+klartext</b> i sina konfigurationsfiler. Vi tycker att fördunkling är en liten
+förbättring på det, inte en säkerhetsfunktion.</p>
+<p><b>Varför inte systemets nyckelring?</b> macOS Keychain, Windows Credential Manager
+och Linux hemlighetstjänster skulle ge verkligt skydd, och vi kan komma att återvända
+till det. Två saker hindrar oss i dag. Åtkomst till nyckelringen hänger på programmets
+identitet, och nzbfast är ännu inte kodsignerat, så dialogerna och beteendet efter
+varje uppdatering blir dåliga. Och en stor andel av installationerna är Docker,
+skärmlösa servrar och NAS-lådor där det inte finns någon nyckelring alls, vilket skulle
+lämna två olika lagringsvägar att hålla korrekta. Ett enda välförstått format som
+beter sig likadant överallt är tills vidare den bättre affären.</p>
 <p>Två ytterligare alternativ per server har ännu ingen kontroll i panelen: lägg in
 dem för hand i serverns post i <code>config.local.json</code>
 (se <a href="#files">§17</a>) och starta om.</p>
@@ -504,6 +824,7 @@ som de postades i stället för att gissas.</p>
 <tr><td>Ta med releasegrupp</td><td>Märket <code>-GROUP</code> på slutet.</td></tr>
 <tr><td>Ta bort skräpfiler</td><td><b>På som standard.</b> Raderar kvarblivna <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> och samplingsklipp ur färdiga film- och seriemappar. Aldrig videon eller dess undertexter.</td></tr>
 <tr><td>Behåll bara mediefilen</td><td><b>Av som standard, och destruktiv:</b> raderar permanent allt i mappen utom videon (eller videorna) och undertexterna. Varje avsnitt i ett säsongspaket behålls. Går före <b>Ta bort skräpfiler</b> när båda är på.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>På som standard.</b> Sport, tävlingar och andra evenemang är ofta en och samma titel upprepad hela säsongen, och bara ett ord eller två isär - "Round11 Hungary Race" mot "Round11 Hungary Qualifying". Att behålla de orden är det som hindrar en hel säsong från att falla ihop till samma namn. Gäller bara där namnet inte kunde städas upp på annat sätt, så vanliga filmer och avsnitt lämnas orörda.</td></tr>
 </table>
 <p class="dim">Hela gruppen körs efter reparation och uppackning och före <b>Flytta
 färdiga till</b>, och hoppas över helt för ett jobb som fortfarande väntar på lösenord.
@@ -519,8 +840,21 @@ och <code>SAB_*</code>-miljö - befintliga SAB-skript fungerar oförändrade),
 och <b>TV-arkivering</b> (se <a href="#automation">§10</a>).</p>
 
 <h3>Indexering <span class="pill live">live</span></h3>
+<div class="note"><b>Den inbyggda indexeraren är avstängd som standard.</b> Den hittar
+inlägg som postats under ett riktigt filnamn, och en stor och växande del av Usenet
+postas medvetet utan ett: slumpmässigt ämne, slumpmässiga filnamn inuti, nedsläppt i en
+samlingsgrupp. Det riktiga namnet finns bara i en NZB som uppladdaren publicerar
+någon annanstans, alltså fanns det aldrig på Usenet för någon skanner att läsa. Mätt på
+vårt eget index gav 14,8 miljoner skannade inlägg omkring 31 000 bläddringsbara
+releaser, ungefär en på femhundra. Fortsätt använda kommersiella indexerare och lägg in
+dem under Inställningar → Sökindexerare, så att du kan söka i dem från väggen. Slå på
+det här om du följer bestämda grupper där folk fortfarande postar under riktiga namn,
+eller om du vill se vad din leverantör faktiskt bär. Med reglaget av skannas eller
+hämtas ingenting, ingen databas skapas, och väggen, Bläddra, bevakningslistan och
+newznab-flödet är dolda.</div>
 <table>
 <tr><th>Inställning</th><th>Vad den gör</th></tr>
+<tr><td>Inbyggd indexerare</td><td>Huvudreglaget, <b>av tills du slår på det</b>. Av innebär ingen skanning, inga metadatasökningar, ingen tillgänglighetsprovtagning och inget newznab-flöde; ett index som redan finns på disk behålls (det finns en raderaknapp), så att slå på igen återupptar i stället för att skanna om.</td></tr>
 <tr><td>Grupper</td><td>Newsgroups som den inbyggda indexeraren skannar (t.ex. <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>Skanningsintervall</td><td>Sekunder mellan pass (standard 900).</td></tr>
 <tr><td>Backfill-artiklar</td><td>Headers som hämtas vid en grupps allra första skanning.</td></tr>
@@ -534,8 +868,7 @@ och <b>TV-arkivering</b> (se <a href="#automation">§10</a>).</p>
 
 <h3>Bibliotek, Säkerhet, Gränssnitt</h3>
 <p><b>Bibliotek</b>: kategorier som behandlas som direkta biblioteksposter + omkontrollintervall.
-<b>Säkerhet</b>: den fullständiga API-nyckeln (allt) och NZB-nyckeln (enbart tillägg - säker att
-ge till indexersidor), båda roterbara live. <b>Gränssnitt</b>: klickljud, skrivbords-
+<b>Säkerhet</b>: den fullständiga API-nyckeln (allt) och NZB-nyckeln (enbart tillägg - säker att ge till indexersidor), båda roterbara live. Vardera rutan ersätter den nyckel den hör till så snart du lämnar fältet, och lämnar du en ruta tom behåller den nyckeln den redan har. API-nyckeln har dessutom <b>Show</b>, som visar och kopierar den nuvarande nyckeln så att du kan klistra in den i Sonarr, Radarr eller NZB360 när det passar dig, och <b>Create new</b>, som präglar en ersättare - den gamla nyckeln slutar fungera omedelbart, så allt som redan är anslutet måste få den nya. Båda är beroende av själva API-nyckeln: NZB-nyckeln för enbart tillägg kan inte läsa den, vilket är hela poängen med den nyckeln. Var nyckeln kommer ifrån på en ny installation, se <a href="#firstrun-key">§2</a>. <b>Gränssnitt</b>: klickljud, skrivbords-
 aviseringar vid slutförande, omsorteringsintervall för providers.</p>
 
 <p><b>Hastighetsenheter</b> <span class="pill live">live</span> avgör hur varje
@@ -584,7 +917,7 @@ och den kan agera som deras <em>indexerare</em> också.</p>
 <ol>
 <li>I Sonarr/Radarr: Settings → Download Clients → lägg till <b>SABnzbd</b>.</li>
 <li>Host: din nzbfast-maskin · Port: <b>6789</b> · API-nyckel: din fullständiga API-nyckel
-(Inställningar → Säkerhet; QR/kopieringskontrollen finns bredvid den).</li>
+(var du hittar den: <a href="#firstrun-key">§2</a>).</li>
 <li>Kategori efter önskemål (t.ex. <code>tv</code> / <code>movies</code>). Test → grön bock → Save.</li>
 </ol>
 <p>Kö, historik, status per jobb, "remove &amp; delete", nytt försök och kategoriroutning
@@ -597,8 +930,14 @@ beter sig alla som *arr-verktygen förväntar sig.</p>
 <code>movie</code>-frågor från sitt eget index över dina bevakade grupper, och
 <code>/getnzb/&lt;id&gt;</code> lämnar tillbaka NZB:en.</li>
 </ol>
-<div class="note"><b>Varför bry sig?</b>En självhostad indexerare av exakt de grupper du
-bryr dig om: inga konton, inga gränser för API-anrop, retention så djup som du låter den skanna.</div>
+<div class="note"><b>Slå på den inbyggda indexeraren först</b> (Inställningar →
+Indexering). Den är avstängd som standard, och så länge den är det svarar den här
+fasaden på varje fråga med <code>&lt;error code="101"&gt;</code> i stället för ett tomt
+resultat, så ett misstag syns när du lägger till indexeraren och inte veckor senare.<br><br>
+<b>Varför bry sig?</b> En egen indexerare över precis de grupper du bryr dig om: inga
+konton, inga API-taktgränser, retention så djup som du låter den skanna. Den är ett
+tillägg till dina vanliga indexerare snarare än en ersättning, eftersom den bara hittar
+det som postats under ett riktigt filnamn.</div>
 
 <h2 id="remotes">12 · Telefon &amp; fjärrappar</h2>
 <p>nzbfast implementerar <em>båda</em> de stora fjärrstyrningsprotokollen, så nästan varje
@@ -748,7 +1087,7 @@ uppdateringsmanifestet; en tom URL för uppdateringskontroll gör detsamma.</li>
 <table>
 <tr><th>Kommando</th><th>Syfte</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interaktiv serverkonfiguration.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>Kör daemonen (instrumentpanel + API + automatisering). <code>--open</code> öppnar webbläsaren; se <code>--help</code> för hela flagglistan - varje inställning på instrumentpanelen har en flaggtvilling.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>Kör daemonen (instrumentpanel + API + automatisering). <code>--open</code> öppnar webbläsaren; <code>--apikey</code> sätter nyckeln för hand (<a href="#firstrun-key">§2</a>); <code>--bind</code> väljer lyssningsadressen, standard <code>0.0.0.0</code> (varje gränssnitt), <code>127.0.0.1</code> för bara den här maskinen. Se <code>--help</code> för hela flagglistan; varje inställning på instrumentpanelen har en flaggtvilling.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Ladda ner en NZB, hela rörledningen, ingen daemon. <code>--preflight</code> avbryter tidigt om inlägget inte kan slutföras; <code>--password</code> för krypterade set.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Tillgänglighetsutlåtande - COMPLETE / REPAIRABLE / IMPOSSIBLE - utan att ladda ner nyttolast.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>Verifiera filer mot PAR2-setet i en katalog.</td></tr>
@@ -768,10 +1107,10 @@ uttryckligt <code>--post-server</code> och väljer aldrig server åt dig.</p>
 <p>Bas-slutpunkt: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-kompatibel, så befintliga SAB-integrationer fungerar oförändrade. Två nycklar:
 <b>API-nyckeln</b> (full kontroll) och <b>NZB-nyckeln</b> (enbart tillägg:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> ingår med flit inte i uppsättningen för enbart tillägg: att lösa upp en länk kan förbruka mätt indexerarkvot, vilket en nyckel för enbart tillägg inte har med att göra.</p>
 <table>
 <tr><th>Område</th><th>Lägen</th></tr>
-<tr><td>Kö</td><td><code>queue</code> (med <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>Kö</td><td><code>queue</code> (med <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>Konfig</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (varje inställningsfält), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Index &amp; vägg</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, plus newznab på <code>/api?t=caps|search|tvsearch|movie</code> och <code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -784,8 +1123,9 @@ SABnzbd-kompatibel, så befintliga SAB-integrationer fungerar oförändrade. Tv�
 <h2 id="files">17 · Filer &amp; platser</h2>
 <table>
 <tr><th>Fil</th><th>Innehåll</th></tr>
-<tr><td><code>config.local.json</code></td><td>Serverinloggningar och alternativ per server. Skapas av guiden; redigerbar i Inställningar. Håll den privat.</td></tr>
+<tr><td><code>config.local.json</code></td><td>Serverinloggningar och alternativ per server. Skapas av guiden; redigerbar i Inställningar. Håll den privat. Lösenord är <a href="#passwords">fördunklade, inte krypterade</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Varje inställning som ändrats på instrumentpanelen. Ligger bredvid config; UI-värden åsidosätter kommandoradsflaggor. Radera en nyckel (eller filen) för att falla tillbaka på flaggor/standardvärden.</td></tr>
+<tr><td><code>apikey</code></td><td>API-nyckeln nzbfast skapade åt sig själv vid en första körning (<a href="#firstrun-key">§2</a>). Ligger bredvid config; läsbar endast för kontot som kör nzbfast på macOS och Linux. Radera den inte för att få en ny nyckel: på en installation som redan körts ersätts den inte av något, och daemonen kommer tillbaka helt utan nyckel. Sätt en ny under Inställningar → Säkerhet i stället.</td></tr>
 <tr><td><code>index.db</code></td><td>Releaseindexet (SQLite) + väggmetadata. Säkert att radera - det byggs om från skanning (Inställningar → Indexering → Radera gör detta åt dig).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Kötillstånd (överlever omstarter), NZB:er per jobb, förbrukningsjournal, benchmark-historik, cache för posteromslag.</td></tr>
 <tr><td>Artikeljournal</td><td>Inuti varje jobbs utmapp medan det är ofullständigt - driver kraschåterupptagning och nytt försök. Tas bort vid framgång.</td></tr>
@@ -802,7 +1142,10 @@ tillgänglighetsprick (<a href="#oracle">§13</a>). Ett första misslyckande av 
 formen görs om en gång av sig självt efter en väntetid, eftersom
 propagationsfördröjning ser likadan ut och löser sig själv.</td></tr>
 <tr><td>Färdigt arkiv vill ha ett lösenord</td><td>Historikraden visar 🔑 - ange lösenordet där; jobbet blir klart på plats. </td></tr>
+<tr><td>Ett arkiv packas inte upp</td><td>Lösenords- och reparationsfel namnger sig själva i historikraden. För allt annat finns en nödutgång: Inställningar → Bevakningsmapp &amp; efterbehandling → <b>Packa upp med externt unrar</b> (en avancerad inställning) lämnar uppackningen till programmet <code>unrar</code> som är installerat på din maskin i stället för den inbyggda uppackaren. Låt den annars vara av: den inbyggda vägen är snabbare på varje form vi har mätt, och obfuskerade poster med hashnamn använder den ändå alltid, eftersom unrar inte kan följa deras namnbyten. Samma omkopplare för <code>nzbfast get</code>-körningar är miljövariabeln <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Om unrar packar upp ett arkiv som den inbyggda uppackaren vägrade, rapportera det gärna så att vi kan laga den inbyggda vägen.</td></tr>
 <tr><td>Sonarr/Radarr kan inte ansluta</td><td>Port 6789 nåbar? API-nyckel korrekt (full nyckel, inte NZB-nyckel)? Klienttyp satt till SABnzbd?</td></tr>
+<tr><td>Instrumentpanelen frågar efter en API-nyckel jag aldrig satt</td><td>En ny installation skapar en åt sig själv och skriver ut den en gång vid start (<a href="#firstrun-key">§2</a>). Den finns i filen <code>apikey</code> bredvid din config, och i startutskriften. Eller skriv in en egen nyckel under Inställningar → Säkerhet från en webbläsare som redan är inloggad.</td></tr>
+<tr><td>Ingenting på nätverket når daemonen</td><td>Kontrollera <code>--bind</code>: <code>127.0.0.1</code> betjänar bara maskinen som nzbfast kör på. Standarden, <code>0.0.0.0</code>, betjänar varje gränssnitt. Kontrollera sedan maskinens egen brandvägg för port 6789.</td></tr>
 <tr><td>Bläddra-kortet förblir litet</td><td>Indexeraren växer i bakgrunden - kontrollera att grupper är satta i Inställningar → Indexering, och ge Fördjupa per skanning tid att samla historik. "Skanna nu" tvingar fram ett pass; statusraden visar live-förlopp.</td></tr>
 <tr><td>Väggen visar fel/inget omslag</td><td>Detaljblad → ✎ Korrigera matchning eller ↻ Uppdatera metadata. Filmuppslag blir bättre med en gratis OMDb-nyckel.</td></tr>
 <tr><td>Daemonen vill inte starta: porten upptagen</td><td>En annan instans körs - eller ändra <code>--port</code>.</td></tr>

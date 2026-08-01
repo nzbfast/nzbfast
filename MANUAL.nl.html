@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - Handleiding</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-left:3px solid var(--acc);background:var(--surface);
   border-radius:0 9px 9px 0;padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-left-color:var(--dim)}
 .warn-box{border-left-color:var(--warn)}
@@ -181,6 +402,47 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 inloggegevens: Instellingen → Usenet-servers → <b>Importeren uit SABnzbd / NZBGet…</b>
 vindt je bestaande installatie en neemt de servers over. Op de commandoregel is er
 ook <code>nzbfast import-sab</code>.</div>
+
+<h3 id="firstrun-key">Je API-sleutel</h3>
+<p>Bij een echt nieuwe installatie maakt nzbfast zelf een API-sleutel aan zodra de
+daemon voor het eerst start, en toont hem één keer in een banner net onder het
+dashboardadres. Vanaf dat moment heeft elk verzoek die sleutel nodig, zodat het
+dashboard en de API niet openstaan voor alles wat de machine kan bereiken.</p>
+<p>Wat je ermee moet doen, hangt af van hoe je nzbfast gestart hebt:</p>
+<ul>
+  <li><b>De macOS-app, het Windows-systeemvak of <code>serve --open</code></b>: niets.
+  Ze geven de sleutel door aan het browservenster dat ze openen, het dashboard
+  onthoudt hem en je bent al ingelogd.</li>
+  <li><b>Een browser die je zelf geopend hebt</b>, of het dashboard op een telefoon
+  of een andere computer: de pagina vraagt één keer om de sleutel en onthoudt hem
+  daarna.</li>
+  <li><b>Sonarr, Radarr, nzb360 en consorten</b>: plak hem erin als hun SABnzbd- of
+  NZBGet-sleutel (<a href="#arr">§11</a>, <a href="#remotes">§12</a>).</li>
+</ul>
+<p>De sleutel wordt bewaard in een bestand met de naam <code>apikey</code> naast je
+configbestand, dus hij blijft hetzelfde na een herstart en je kunt hem teruglezen
+wanneer je maar wilt. Op macOS en Linux is dat bestand alleen leesbaar voor het
+account waaronder nzbfast draait. Hij staat ook in de uitvoer van de daemon zelf,
+dus de Log-kaart van het dashboard heeft hem als de terminal al weggescrold is.</p>
+<div class="note"><b>Upgraden verandert niets.</b>Een installatie die al bestaat
+blijft precies zoals hij was, met of zonder sleutel. Een sleutel wordt alleen ooit
+aangemaakt bij een eerste start - eentje zonder dashboardinstellingen en zonder
+bewaarde wachtrij - want een sleutel die opeens onder een werkende installatie
+opduikt zou elke Sonarr, Radarr en telefoon-app die je al verbonden had
+buitensluiten, bij een herstart die je nooit aan een gewijzigde instelling
+gekoppeld had.</div>
+<p>Wil je in plaats daarvan een eigen sleutel gebruiken? Typ hem bij Instellingen →
+Beveiliging; hij geldt meteen. Dat paneel wijzigt de sleutel maar toont de huidige
+nooit, dus lees het bestand <code>apikey</code> als je de gegenereerde waarde terug
+wilt zien. Wil je helemaal zonder sleutel draaien, omdat iets vóór nzbfast het
+inloggen al afhandelt, start hem dan met <code>NZBFAST_OPEN=1</code> in de omgeving.
+nzbfast blijft dan open en zegt dat ook onomwonden bij het starten.</p>
+<p>Welke machines de daemon überhaupt kunnen bereiken is een aparte keuze:
+<code>serve --bind</code>. De standaard is <code>0.0.0.0</code>, oftewel elke
+netwerkinterface, want een NAS, een telefoon en een Sonarr op een andere computer
+moeten allemaal verbinding kunnen maken. <code>--bind 127.0.0.1</code> beperkt het
+tot de machine waarop nzbfast draait, en dat is wat je wilt op een enkele desktop
+waar verder niets toegang nodig heeft.</p>
 
 <h2 id="concepts">3 · Hoe nzbfast werkt</h2>
 <p>Eerst wat vocabulaire, dan leest de rest van de handleiding makkelijk:</p>
@@ -311,11 +573,12 @@ forceert een ronde.</p>
 release in de index verschijnt wordt hij automatisch opgehaald, met
 kwaliteitsvoorkeuren en upgraderegels (een betere versie vervangt een slechtere).</p>
 <h3 id="dash-history">Geschiedenis</h3>
-<p>Recente downloads met status, grootte en locatie; mislukte taken bieden <b>Opnieuw
+<p>Recente downloads, één regel per stuk. Mislukte taken bieden <b>Opnieuw
 proberen</b> (gaat verder vanuit het journal). Versleutelde archieven tonen een
 🔑-ontgrendelknop - voer het wachtwoord in en de taak maakt zichzelf ter plekke af. De
 verificatiegezondheidsstrook zet beschadigde PAR2-blokken per download uit - een
 oplopende staart betekent dat artikelen beschadigd binnenkomen.</p>
+<p>De kaart toont standaard tien downloads en de rest is één klik weg, via de knop ▤. Status, locatie en de reden van een mislukking zitten achter een klik op de regel zelf, zodat het gewone geval - wat klaar is, hoe groot, wanneer - leesbaar blijft zonder scrollen. Sleep in plaats daarvan de onderrand van de kaart om de lijst op een door jou gekozen hoogte te laten scrollen. <b>History rows</b> in Instellingen → Interface verandert die tien; omdat het een eigenschap van de daemon is en niet van je browser, geldt het voor elk apparaat dat naar deze installatie kijkt. <b>Colour History names</b> daarnaast kleurt voltooide namen groen en mislukte rood; uitgezet blijven de namen neutraal, en de gekleurde stip en de details van de regel zeggen nog steeds welke welke is.</p>
 <h3 id="dash-usage">Dataverbruik</h3>
 <p>Dagelijkse balken per provider en totalen voor Vandaag / 7 dagen / 30 dagen -
 onmisbaar voor accounts met een datalimiet en blokaccounts. Blokaccounts tonen het
@@ -332,6 +595,7 @@ in <a href="#performance">Prestatietools</a>.</p>
 opslaat wordt binnen 5 seconden opgepikt en het bestand verwijderd. Zet de downloadmap
 van je browser erop voor één-klik-grabs vanaf indexersites.</td></tr>
 <tr><td><b>Vanaf een URL</b></td><td>Plak een NZB-link (API <code>mode=addurl</code>, of via elke gekoppelde app).</td></tr>
+<tr><td><b>nzblnk:-links</b></td><td>Plak een <code>nzblnk:</code>-link ergens op het dashboard, of sleep hem erin. Heb je geïnstalleerd vanaf de macOS-DMG of het Windows-installatieprogramma, dan kun je er ook rechtstreeks een aanklikken op een board. Zie <a href="#nzblnk">nzblnk-links</a> hieronder.</td></tr>
 <tr><td><b>Index doorzoeken</b></td><td>Klik op een complete release in de kaart Index doorzoeken.</td></tr>
 <tr><td><b>Watchlist / RSS</b></td><td>Automatisch - zie <a href="#automation">Automatisering</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr e.d.</b></td><td>Die sturen grabs rechtstreeks de wachtrij in - zie <a href="#arr">§11</a>.</td></tr>
@@ -344,9 +608,35 @@ downloadmap, en Slimme mappen (zie <a href="#automation">§10</a>) kunnen ze op 
 toewijzen.</li>
 <li><b>Prioriteiten</b>: Geforceerd &gt; Hoog &gt; Normaal &gt; Laag. Geforceerd negeert pauze en quotum.</li>
 <li><b>Wachtwoorden</b> voor versleutelde archieven worden automatisch opgepikt uit
-<code>&lt;meta type="password"&gt;</code> in de NZB of uit een bestandsnaam
-<code>Name{{password}}.nzb</code>, en kunnen per taak via de API worden meegegeven of
-achteraf vanuit Geschiedenis (🔑).</li>
+<code>&lt;meta type="password"&gt;</code> in de NZB, uit een bestandsnaam
+<code>Name{{password}}.nzb</code> of uit het veld <code>p=</code> van een
+<a href="#nzblnk">nzblnk-link</a>, en kunnen per klus via de API of achteraf vanuit
+Geschiedenis (🔑) worden meegegeven.</li>
+</ul>
+
+<h3 id="nzblnk">nzblnk-links</h3>
+<p>Sommige boards, vooral Duitse en Nederlandse, publiceren een <code>nzblnk:</code>-link
+in plaats van een NZB-bestand. De post is versluierd, dus er is geen bestandsnaam om
+naar te linken. De link draagt in plaats daarvan een header, <code>h=</code>, die een
+zoeksleutel is en geen locatie, plus een optionele titel <code>t=</code>, wachtwoord
+<code>p=</code> en groep <code>g=</code>. Iemand moet de post eerst gaan vinden.</p>
+<p>nzbfast zoekt de header eerst op in zijn eigen index, waarvoor helemaal geen netwerk
+nodig is, en pas als dat misgaat vraagt het de zoekindexers die je hebt ingesteld
+(Instellingen → Zoekindexers, <a href="#settings">§9</a>), onder dezelfde dagbudgetten
+en dezelfde terugval als elke andere zoekopdracht. De titel wordt de klusnaam en het
+wachtwoord wordt automatisch aan de klus meegegeven.</p>
+<ul>
+<li><b>Plakken of slepen</b> werkt op elke installatie, Docker en NAS inbegrepen: kopieer
+de link van het board en plak hem ergens op het dashboard.</li>
+<li><b>Aanklikken</b> vereist dat het schema bij je bureaublad geregistreerd is. De app
+uit de <b>macOS-DMG</b> registreert het, en het <b>Windows-installatieprogramma</b> biedt
+het aan als taak: het vraagt eerst, en laat het schema met rust als NZB Monkey of
+NZBDonkey het al heeft. Het kale macOS-tarball, Homebrew en de Linux-installaties hebben
+geen bureaubladafhandeling: daar is plakken de weg naar binnen.</li>
+<li>Het oplossen is met opzet in snelheid begrensd. Een geregistreerd schema ligt één
+browserprompt verwijderd van elke pagina die je bezoekt, dus links zijn per minuut
+begrensd en alleen de eerste paar van een minuut mogen je indexers bereiken; daarna
+wordt er alleen uit de lokale index geantwoord.</li>
 </ul>
 
 <h2 id="wall">6 · De posterwall</h2>
@@ -424,11 +714,46 @@ server in of uit de pool halen. Elke server heeft:</p>
 <table>
 <tr><th>Veld</th><th>Toelichting</th></tr>
 <tr><td>Host / poort</td><td>Gebruik SSL-poort <b>563</b>. TLS kost niets meetbaars - nzbfast versleutelt altijd.</td></tr>
-<tr><td>Gebruikersnaam / wachtwoord</td><td>Lokaal opgeslagen in <code>config.local.json</code>, nooit terug naar de browser gestuurd. Laat je het wachtwoord bij bewerken leeg, dan blijft het opgeslagen wachtwoord staan.</td></tr>
+<tr><td>Gebruikersnaam / wachtwoord</td><td>Lokaal opgeslagen in <code>config.local.json</code>, nooit terug naar de browser gestuurd. Laat je het wachtwoord bij bewerken leeg, dan blijft het opgeslagen wachtwoord staan. Wachtwoorden zijn <a href="#passwords">op schijf versluierd, niet versleuteld</a>.</td></tr>
 <tr><td>Verbindingen</td><td>Gelijktijdige verbindingen per server. Gebruik <b>Verbindingstuning</b> (<a href="#performance">§13</a>) om de sweet spot van elke provider te vinden in plaats van hoog te gokken.</td></tr>
 <tr><td>Niveau (tier)</td><td>0 = primair; hogere niveaus zijn fill-servers, die alleen artikelen gevraagd worden die elk lager niveau miste. Zet onbeperkte accounts op 0, blokaccounts op 1+.</td></tr>
 <tr><td>Blokgrootte (GB)</td><td>Voor blokaccounts (betalen per GB): nzbfast houdt hiertegen het totale verbruik bij en stopt met de server zodra het blok op is (waarschuwing bij 85%).</td></tr>
 </table>
+<p><b>Laat wat ruimte onder de verbindingslimiet van je account.</b> De verbindingen net onder de limiet zetten kost niets: de doorvoer vlakt al ruim voor de laatste een of twee verbindingen af, en <b>Verbindingstuning</b> (<a href="#performance">§13</a>) komt er toch al onder uit. Die vrije plekken zijn wat een tweede apparaat, een ander programma of een nieuwe poging na een verbroken socket er nog door laat, in plaats van geweigerd te worden terwijl deze elke plek bezet houdt.</p>
+<h3 id="passwords">Hoe je providerwachtwoorden worden bewaard</h3>
+<p>Providerwachtwoorden in <code>config.local.json</code> zijn <b>versluierd, niet
+versleuteld</b>. Ze worden opgeslagen als <code>obf1:</code> gevolgd door een
+gecodeerde vorm, zodat het bestand niet als platte tekst leest als het opduikt in een
+schermafbeelding, een forumbericht, een bugrapport of op een scherm dat iemand anders
+kan zien.</p>
+<p>Wees duidelijk over wat dat je wel en niet oplevert:</p>
+<ul>
+<li><b>Het is geen versleuteling en biedt geen enkele bescherming tegen wie het
+bestand heeft.</b> De methode staat in onze publieke broncode en de decoder zit in
+nzbfast zelf, dus wie het bestand heeft haalt het wachtwoord er in seconden uit.
+Behandel het bestand precies zo geheim als je zou doen wanneer de wachtwoorden
+leesbaar waren.</li>
+<li><b>Het haalt het achteloze lek weg</b>, en dat is het gewone lek. Configs worden
+veel vaker in supportdraadjes geplakt en op schermafbeeldingen vastgelegd dan dat ze
+van schijf worden gestolen.</li>
+<li>Een wachtwoord dat je zelf als platte tekst hebt ingetypt werkt gewoon. nzbfast
+leest beide vormen, dus met de hand bewerkte configs en imports uit andere clients
+gaan nooit stuk; bij de volgende keer opslaan schrijft het de versluierde vorm.</li>
+<li>Het bestand wordt bovendien alleen leesbaar geschreven voor het account waaronder
+nzbfast draait (modus 0600 op macOS en Linux).</li>
+</ul>
+<p>Ter vergelijking: <b>NZBGet en SABnzbd bewaren providerwachtwoorden allebei als
+leesbare platte tekst</b> in hun configuratiebestanden. Wij vinden versluiering daar
+een kleine verbetering op, geen beveiligingsfunctie.</p>
+<p><b>Waarom niet de systeemsleutelbos?</b> macOS Keychain, Windows Credential Manager
+en de Linux secret services zouden echte bescherming geven, en misschien komen we er
+nog op terug. Twee dingen houden ons vandaag tegen. Toegang tot de sleutelbos hangt
+aan de identiteit van de applicatie, en nzbfast is nog niet ondertekend, dus de
+prompts en het gedrag na elke update zijn slecht. En een groot deel van de installaties
+is Docker, servers zonder scherm en NAS-apparaten waar helemaal geen sleutelbos
+bestaat, wat twee verschillende opslagpaden zou opleveren die correct moeten blijven.
+Eén goed begrepen formaat dat zich overal hetzelfde gedraagt is voorlopig de betere
+ruil.</p>
 <p>Twee andere opties per server hebben nog geen bediening in het dashboard: zet ze
 met de hand bij de vermelding van die server in <code>config.local.json</code>
 (zie <a href="#files">§17</a>) en herstart.</p>
@@ -526,6 +851,7 @@ worden.</p>
 <tr><td>Releasegroep opnemen</td><td>Het label <code>-GROUP</code> aan het eind.</td></tr>
 <tr><td>Junkbestanden verwijderen</td><td><b>Standaard aan.</b> Verwijdert achtergebleven <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> en samplefragmenten uit voltooide film- en seriemappen. Nooit de video of de ondertitels.</td></tr>
 <tr><td>Alleen het mediabestand bewaren</td><td><b>Standaard uit, en destructief:</b> verwijdert permanent alles in de map behalve de video('s) en de ondertitels. Elke aflevering van een seizoenspakket blijft staan. Gaat vóór <b>Junkbestanden verwijderen</b> als beide aan staan.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>Standaard aan.</b> Sport, races en andere evenementen zijn vaak één titel die het hele seizoen wordt herhaald, met maar een woord of twee verschil - "Round11 Hungary Race" tegenover "Round11 Hungary Qualifying". Die woorden bewaren is wat voorkomt dat een heel seizoen tot dezelfde naam samenvalt. Geldt alleen waar de naam niet op een andere manier opgeruimd kon worden, dus gewone films en afleveringen blijven ongemoeid.</td></tr>
 </table>
 <p class="dim">De hele groep draait na reparatie en uitpakken en vóór <b>Voltooide
 verplaatsen naar</b>, en wordt volledig overgeslagen bij een taak die nog op een
@@ -541,8 +867,21 @@ film of serie zijn herkend: een softwarepayload of een niet te classificeren
 en <b>tv-opbergen</b> (zie <a href="#automation">§10</a>).</p>
 
 <h3>Indexeren <span class="pill live">live</span></h3>
+<div class="note"><b>De ingebouwde indexer staat standaard uit.</b> Hij vindt posts die
+onder een echte bestandsnaam zijn geplaatst, en een groot en groeiend deel van Usenet
+wordt bewust zonder zo'n naam geplaatst: willekeurig onderwerp, willekeurige
+bestandsnamen erin, gedumpt in een verzamelgroep. De echte naam leeft alleen in een NZB
+die de uploader elders publiceert, dus hij stond nooit op Usenet waar een scanner hem
+kon lezen. Gemeten op onze eigen index leverden 14,8 miljoen gescande posts ongeveer
+31.000 doorzoekbare releases op, grofweg één op de vijfhonderd. Blijf commerciële
+indexers gebruiken en voeg ze toe onder Instellingen → Zoekindexers, zodat je ze vanaf
+de wall kunt doorzoeken. Zet dit aan als je specifieke groepen volgt waar mensen nog
+onder echte namen posten, of als je wilt zien wat je provider werkelijk draagt. Met de
+schakelaar uit wordt er niets gescand of opgehaald, wordt er geen database aangemaakt,
+en zijn de wall, Index doorzoeken, de watchlist en de newznab-feed verborgen.</div>
 <table>
 <tr><th>Instelling</th><th>Wat het doet</th></tr>
+<tr><td>Ingebouwde indexer</td><td>De hoofdschakelaar, <b>uit tenzij je hem aanzet</b>. Uit betekent geen scannen, geen metadata-opvragingen, geen beschikbaarheidssteekproeven en geen newznab-feed; een index die al op schijf staat blijft bewaard (er is een verwijderknop), dus weer aanzetten hervat in plaats van opnieuw te scannen.</td></tr>
 <tr><td>Groepen</td><td>Nieuwsgroepen die de ingebouwde indexer scant (bijv. <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>Scaninterval</td><td>Seconden tussen rondes (standaard 900).</td></tr>
 <tr><td>Backfill-artikelen</td><td>Headers die bij de allereerste scan van een groep worden opgehaald.</td></tr>
@@ -556,10 +895,8 @@ en <b>tv-opbergen</b> (zie <a href="#automation">§10</a>).</p>
 
 <h3>Bibliotheek, Beveiliging, Interface</h3>
 <p><b>Bibliotheek</b>: categorieën die als directe bibliotheekitems worden behandeld +
-het hercontrole-interval. <b>Beveiliging</b>: de volledige API-sleutel (alles) en de
-NZB-sleutel (alleen toevoegen - veilig om aan indexersites te geven), beide live te
-roteren. <b>Interface</b>: klikgeluiden, bureaubladmeldingen bij voltooiing,
-provider-hersorteerinterval.</p>
+het hercontrole-interval. <b>Beveiliging</b>: de volledige API-sleutel (alles) en de NZB-sleutel (alleen toevoegen - veilig om aan indexersites te geven), beide live te roteren. Elk van beide vakjes vervangt de sleutel waar het bij hoort zodra je het veld verlaat, en een leeg gelaten vakje houdt de sleutel die het al heeft. De API-sleutel heeft daarnaast <b>Show</b>, dat de huidige sleutel toont en kopieert zodat je hem in Sonarr, Radarr of NZB360 kunt plakken wanneer het je uitkomt, en <b>Create new</b>, dat een vervanger aanmaakt - de oude sleutel werkt onmiddellijk niet meer, dus alles wat al verbonden is moet de nieuwe krijgen. Beide zijn afhankelijk van de API-sleutel zelf: de NZB-sleutel voor alleen toevoegen kan hem niet lezen, en dat is precies het punt van die sleutel. Waar de sleutel bij een nieuwe installatie vandaan komt, zie <a href="#firstrun-key">§2</a>. <b>Interface</b>: klikgeluiden, bureaubladmeldingen
+bij voltooiing, provider-hersorteerinterval.</p>
 
 <p><b>Snelheidseenheden</b> <span class="pill live">live</span> bepaalt hoe elke
 snelheid in het dashboard wordt getoond: megabytes (MB/s, de norm bij
@@ -609,7 +946,7 @@ kan ook als hun <em>indexer</em> optreden.</p>
 <ol>
 <li>In Sonarr/Radarr: Settings → Download Clients → voeg <b>SABnzbd</b> toe.</li>
 <li>Host: je nzbfast-machine · Poort: <b>6789</b> · API-sleutel: je volledige API-sleutel
-(Instellingen → Beveiliging; de QR-/kopieerknop staat ernaast).</li>
+(waar je hem vindt: <a href="#firstrun-key">§2</a>).</li>
 <li>Categorie naar wens (bijv. <code>tv</code> / <code>movies</code>). Test → groen vinkje → Save.</li>
 </ol>
 <p>Wachtrij, geschiedenis, status per taak, "verwijderen &amp; wissen", opnieuw
@@ -622,9 +959,14 @@ proberen en categorierouting gedragen zich allemaal zoals de *arrs verwachten.</
 <code>movie</code>-queries uit zijn eigen index van je gescande groepen, en
 <code>/getnzb/&lt;id&gt;</code> levert de NZB terug.</li>
 </ol>
-<div class="note"><b>Waarom zou je?</b>Een zelfgehoste indexer van precies de groepen
-die jou interesseren: geen accounts, geen API-hit-limieten, retentie zo diep als je
-hem laat scannen.</div>
+<div class="note"><b>Zet eerst de ingebouwde indexer aan</b> (Instellingen → Indexeren).
+Hij staat standaard uit, en zolang dat zo is beantwoordt deze façade elke query met
+<code>&lt;error code="101"&gt;</code> in plaats van met een leeg resultaat, zodat een fout
+opvalt op het moment dat je de indexer toevoegt en niet pas weken later.<br><br>
+<b>Waarom zou je?</b> Een zelfgehoste indexer van precies de groepen waar je om geeft:
+geen accounts, geen API-limieten, retentie zo diep als je hem laat scannen. Het is een
+aanvulling op je gebruikelijke indexers en geen vervanging, want hij vindt alleen wat
+onder een echte bestandsnaam is geplaatst.</div>
 
 <h2 id="remotes">12 · Telefoon &amp; remote-apps</h2>
 <p>nzbfast implementeert <em>beide</em> grote afstandsbedieningsprotocollen, dus
@@ -780,7 +1122,7 @@ niet meer; een lege update-check-URL doet hetzelfde.</li>
 <table>
 <tr><th>Commando</th><th>Doel</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interactieve serverinstallatie.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>Draai de daemon (dashboard + API + automatisering). <code>--open</code> opent de browser; zie <code>--help</code> voor de volledige vlaggenlijst - elke dashboardinstelling heeft een vlag als tweelingbroer.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>Draai de daemon (dashboard + API + automatisering). <code>--open</code> opent de browser; <code>--apikey</code> stelt de sleutel met de hand in (<a href="#firstrun-key">§2</a>); <code>--bind</code> kiest het luisteradres, standaard <code>0.0.0.0</code> (elke interface), <code>127.0.0.1</code> voor alleen deze machine. Zie <code>--help</code> voor de volledige vlaggenlijst; elke dashboardinstelling heeft een vlag als tweelingbroer.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>Download één NZB, volledige pipeline, zonder daemon. <code>--preflight</code> breekt vroeg af als de post niet compleet kán zijn; <code>--password</code> voor versleutelde sets.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>Beschikbaarheidsoordeel - COMPLETE / REPAIRABLE / IMPOSSIBLE - zonder payload te downloaden.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>Verifieer bestanden tegen de PAR2-set in een map.</td></tr>
@@ -800,10 +1142,10 @@ vereist een expliciete <code>--post-server</code> en kiest nooit zelf een server
 <p>Basis-endpoint: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 SABnzbd-compatibel, dus bestaande SAB-integraties werken ongewijzigd. Twee sleutels:
 de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toevoegen:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> zit met opzet niet in de alleen-toevoegen set: een link oplossen kan afgerekende indexerquota kosten, en daar gaat een alleen-toevoegen sleutel niet over.</p>
 <table>
 <tr><th>Gebied</th><th>Modes</th></tr>
-<tr><td>Wachtrij</td><td><code>queue</code> (met <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>retry</code>, <code>set_password</code></td></tr>
+<tr><td>Wachtrij</td><td><code>queue</code> (met <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
 <tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
 <tr><td>Config</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (elk veld uit Instellingen), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Index &amp; wall</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, plus newznab op <code>/api?t=caps|search|tvsearch|movie</code> en <code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -816,8 +1158,9 @@ de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toev
 <h2 id="files">17 · Bestanden &amp; locaties</h2>
 <table>
 <tr><th>Bestand</th><th>Inhoud</th></tr>
-<tr><td><code>config.local.json</code></td><td>Serverinloggegevens en opties per server. Aangemaakt door de wizard; te bewerken in Instellingen. Houd hem privé.</td></tr>
+<tr><td><code>config.local.json</code></td><td>Serverinloggegevens en opties per server. Aangemaakt door de wizard; te bewerken in Instellingen. Houd hem privé. Wachtwoorden zijn <a href="#passwords">versluierd, niet versleuteld</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Elke instelling die in het dashboard is gewijzigd. Staat naast de config; UI-waarden overschrijven commandoregelvlaggen. Verwijder een sleutel (of het bestand) om terug te vallen op vlaggen/standaardwaarden.</td></tr>
+<tr><td><code>apikey</code></td><td>De API-sleutel die nzbfast bij een eerste start voor zichzelf aanmaakte (<a href="#firstrun-key">§2</a>). Staat naast de config; op macOS en Linux alleen leesbaar voor het account waaronder nzbfast draait. Verwijder hem niet om een verse sleutel te krijgen: bij een installatie die al gedraaid heeft komt er niets voor in de plaats en start de daemon weer op zonder enige sleutel. Stel er in plaats daarvan een nieuwe in bij Instellingen → Beveiliging.</td></tr>
 <tr><td><code>index.db</code></td><td>De release-index (SQLite) + wall-metadata. Veilig te verwijderen - hij wordt door het scannen opnieuw opgebouwd (Instellingen → Indexeren → Wissen doet dit voor je).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Wachtrijstatus (overleeft herstarts), NZB's per taak, verbruiksgrootboek, benchmarkgeschiedenis, posterart-cache.</td></tr>
 <tr><td>Artikeljournal</td><td>Staat in de uitvoermap van elke taak zolang die incompleet is - drijft crash-hervatting en opnieuw proberen aan. Wordt bij succes verwijderd.</td></tr>
@@ -834,7 +1177,10 @@ beschikbaarheidsstip (<a href="#oracle">§13</a>). Een eerste mislukking van dez
 probeert het na een wachttijd één keer vanzelf opnieuw, want propagatievertraging ziet
 er precies zo uit en lost zichzelf op.</td></tr>
 <tr><td>Voltooid archief vraagt om een wachtwoord</td><td>De geschiedenisregel toont 🔑 - voer daar het wachtwoord in; de taak maakt zichzelf ter plekke af. </td></tr>
+<tr><td>Een archief pakt niet uit</td><td>Wachtwoord- en reparatiefouten melden zichzelf in de geschiedenisregel. Voor al het andere is er een noodluik: Instellingen → Watchmap &amp; nabewerking → <b>Uitpakken met externe unrar</b> (een geavanceerde instelling) geeft het uitpakken aan het op je machine geïnstalleerde programma <code>unrar</code> in plaats van de ingebouwde uitpakker. Laat het anders uit: het ingebouwde pad is sneller op elke vorm die we hebben gemeten, en versluierde posts met hash-namen gebruiken het toch altijd, omdat unrar hun hernoeming niet kan volgen. Dezelfde schakelaar voor <code>nzbfast get</code>-runs is de omgevingsvariabele <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Als unrar een archief uitpakt dat de ingebouwde uitpakker weigerde, meld het dan zodat we het ingebouwde pad kunnen repareren.</td></tr>
 <tr><td>Sonarr/Radarr krijgt geen verbinding</td><td>Poort 6789 bereikbaar? API-sleutel correct (volledige sleutel, niet de NZB-sleutel)? Clienttype op SABnzbd gezet?</td></tr>
+<tr><td>Het dashboard vraagt om een API-sleutel die ik nooit heb ingesteld</td><td>Een nieuwe installatie maakt er zelf een aan en toont hem één keer bij het starten (<a href="#firstrun-key">§2</a>). Hij staat in het bestand <code>apikey</code> naast je config, en in de startuitvoer. Of typ een eigen sleutel bij Instellingen → Beveiliging vanuit een browser die al ingelogd is.</td></tr>
+<tr><td>Niets op het netwerk kan de daemon bereiken</td><td>Check <code>--bind</code>: <code>127.0.0.1</code> bedient alleen de machine waarop nzbfast draait. De standaard, <code>0.0.0.0</code>, bedient elke interface. Controleer daarna de firewall van de machine zelf op poort 6789.</td></tr>
 <tr><td>De kaart Index doorzoeken blijft klein</td><td>De indexer groeit op de achtergrond - check of er groepen zijn ingesteld bij Instellingen → Indexeren, en geef Verdiepen per scan de tijd om geschiedenis op te bouwen. "Nu scannen" forceert een ronde; de statusregel toont live de voortgang.</td></tr>
 <tr><td>De wall toont verkeerde/geen artwork</td><td>Detailblad → ✎ Match corrigeren of ↻ Metadata verversen. Filmlookups worden beter met een gratis OMDb-sleutel.</td></tr>
 <tr><td>Daemon start niet: poort in gebruik</td><td>Er draait al een instantie - of wijzig <code>--port</code>.</td></tr>

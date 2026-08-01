@@ -4,17 +4,238 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>nzbfast - راهنمای کاربر</title>
+<!-- Shared design tokens + the pre-paint theme script, substituted by
+     serve.rs from web/ui-tokens.html. This page used to follow the OS
+     light/dark setting only, so an explicit theme choice in Settings
+     did not reach it. -->
+<!--
+  ONE design system for every page nzbfast serves: the dashboard, the wall
+  and the manual (all 16 translations of it).
+
+  Before this file, each surface carried its own palette under its own
+  variable names - the dashboard on #0e1014/--card, the wall on
+  #0a0b10/--panel, the manual on #0f1116/--card - and only the dashboard
+  read the user's theme at all. Picking "Light" in Settings gave you a
+  light dashboard, a pitch-black wall and a manual that did whatever the
+  OS said. There was no shared stylesheet to fix it in, because the same
+  role had a different NAME on each page.
+
+  serve.rs (ui_themed) substitutes this whole snippet for the tokens
+  placeholder in each page's <head>, so it is inlined (no extra round
+  trip, no flash of unstyled content) and there is exactly one copy to
+  edit. Do not write the placeholder's literal name in here: it would be
+  re-emitted into every served page.
+
+  Surfaces are --surface / --surface-2, and nothing else. The dashboard's
+  --card/--card2 and the wall's --panel/--panel2 were kept as aliases
+  while the wall was being restructured in parallel; all 54 uses, the
+  contrast report's token read, and the 16 manuals have since migrated,
+  so the aliases are gone. One name per role.
+-->
+<script>
+// Appearance, applied BEFORE first paint. This has to be an inline script
+// in <head>: running it from the page's main script at the end of <body>
+// means the page paints with the default dark palette first, and a
+// light-theme user sees a dark flash on every load.
+//
+// Deliberately tiny and defensive - it runs before anything else exists,
+// so it cannot call helpers, and a corrupt localStorage value must not
+// stop the page loading.
+(function(){
+  try{
+    var r=document.documentElement;
+    var m=localStorage.getItem('nzbfastTheme');
+    // "auto" (or absent) means no attribute, leaving prefers-color-scheme
+    // in charge.
+    if(m&&m!=='auto') r.setAttribute('data-theme',m);
+    var a=localStorage.getItem('nzbfastAccent');
+    // Only a literal #rrggbb is honoured: this value reaches a CSS custom
+    // property, so anything else stays out of the stylesheet.
+    if(a&&/^#[0-9a-f]{6}$/i.test(a)){
+      r.style.setProperty('--user-acc',a);
+      r.setAttribute('data-accent','1');
+    }
+    var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
+    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    // §Stage6 appearance layers. Same reasoning as the theme: applied
+    // before first paint, so nobody watches the page change shape after
+    // it has already drawn. Each value is checked against a fixed list,
+    // because it reaches a CSS attribute selector.
+    var L={corners:['square','round'],border:['faint','strong'],
+           palette:['cb','warm'],motion:['full','none'],font:['readable','mono']};
+    for(var k in L){
+      var v=localStorage.getItem('nzbfast'+k[0].toUpperCase()+k.slice(1));
+      if(v&&L[k].indexOf(v)>=0) r.setAttribute('data-'+k,v);
+    }
+    // Custom colours, literal #rrggbb only - these reach custom properties.
+    var C={userbg:'--user-bg',usersurface:'--user-surface',userfg:'--user-fg'};
+    for(var a in C){
+      var cv=localStorage.getItem('nzbfast'+a);
+      if(cv&&/^#[0-9a-f]{6}$/i.test(cv)){ r.style.setProperty(C[a],cv); r.setAttribute('data-'+a,'1'); }
+    }
+    var d=localStorage.getItem('nzbfastDensity');
+    if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
+  }catch(e){/* private mode, or a corrupt value: keep the defaults */}
+})();
+</script>
 <style>
 :root{
-  --bg:#f7f8fb;--card:#ffffff;--fg:#16181d;--dim:#5b6270;--line:rgba(30,40,70,.12);
-  --acc:#1f6fd6;--acc2:#6d47e6;--ok:#1f9e6e;--warn:#b97e14;--bad:#c94747;
+  /* Tell the browser this is a dark UI. Without it, every control the OS
+     draws itself - <select> popups, scrollbars, number spinners, date
+     pickers - is painted LIGHT while inheriting our near-white --fg, so
+     the dropdown list came out white-on-white (measured 1.20:1, i.e.
+     invisible). Reported from a Windows machine; macOS happened to hide
+     it because its popups carry their own colours. */
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+  --p0:#4da3ff;--p1:#35c88a;--p2:#f5b445;--p3:#ec5a5a;--p4:#7c5cff;--p5:#22c3d6;
+  /* Identity colours: things that ARE something (a provider, a server),
+     not things that MEAN something. Deliberately avoids the exact
+     ok/warn/bad hues so a healthy provider is never painted error-red
+     just because it is fourth in the list. */
+  --id0:#4da3ff;--id1:#22c3d6;--id2:#8d71ff;--id3:#e07ab8;--id4:#7cb87c;--id5:#c9a15a;
+  --gold:#f0c33c;--code:#1d222d;--mark:#4a3f14;
+}
+/* The light theme used to override only the neutrals and accents, so it
+   inherited the DARK palette's status colours and rendered them on white:
+   ok 2.15:1, warn 1.83:1, bad 2.98:1 - all below the 4.5:1 floor, which
+   is why "Completed" looked washed out in light mode. These are the same
+   hues walked down in lightness until they clear 4.5:1 on white, --bg and
+   --surface-2 alike. The chart series (--p0..--p5) stay bright: they are
+   fills read against their own legend, not body text. */
+@media (prefers-color-scheme:light){:root{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
+  --code:#f0f2f7;--mark:#fff3c9;
+}}
+/* Explicit theme choice. These are attribute selectors, so they outrank
+   the media query above whichever way the OS is set - "Auto" simply means
+   no data-theme attribute at all, which leaves the media query in charge.
+   Applied before first paint by the script above, so a light-theme user
+   never sees a dark flash. */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#eef0f5;--surface:#fff;--surface-2:#f6f7fb;--fg:#171b26;--dim:#5c6577;
+  --line:rgba(30,40,70,.10);--acc:#1e6bcf;--acc2:#6d47e6;
+  --ok:#217c56;--warn:#976208;--bad:#d81919;
   --code:#f0f2f7;--mark:#fff3c9;
 }
-@media(prefers-color-scheme:dark){:root{
-  --bg:#0f1116;--card:#161a22;--fg:#e8eaf0;--dim:#9aa2b1;--line:rgba(140,150,175,.16);
-  --acc:#4da3ff;--acc2:#9b7cff;--ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1014;--surface:#171a21;--surface-2:#1e222b;--fg:#e8eaf0;--dim:#8991a5;
+  --line:rgba(140,150,175,.14);--acc:#4da3ff;--acc2:#8d71ff;
+  --ok:#35c88a;--warn:#f5b445;--bad:#ec5a5a;
   --code:#1d222d;--mark:#4a3f14;
-}}
+}
+/* High contrast: pure black ground, white text, and a --dim that is a
+   real reading colour rather than a muted one. Every pair here clears
+   WCAG AAA (7:1) against --bg, and the borders stop being hairlines. */
+:root[data-theme="contrast"]{
+  color-scheme:dark;
+  --bg:#000;--surface:#0b0b0d;--surface-2:#16161a;--fg:#fff;--dim:#d2d6e0;
+  --line:rgba(255,255,255,.34);--acc:#7ac2ff;--acc2:#c0a8ff;
+  --ok:#5ce0a4;--warn:#ffd166;--bad:#ff8b8b;
+  --p0:#7ac2ff;--p1:#5ce0a4;--p2:#ffd166;--p3:#ff8b8b;--p4:#c0a8ff;--p5:#63dcec;
+  --id0:#7ac2ff;--id1:#63dcec;--id2:#c0a8ff;--id3:#f2a5d2;--id4:#a4d6a4;--id5:#e0c08a;
+  --gold:#ffd166;--code:#16161a;--mark:#5a4a12;
+}
+/* A user-set accent overrides whatever the theme chose. Kept as its own
+   layer so switching theme does not silently discard the accent. */
+:root[data-accent]{--acc:var(--user-acc)}
+/* §Stage6 appearance studio. Everything below is a LAYER over the chosen
+   theme rather than a replacement for it, so switching theme keeps your
+   shape, density and palette, and a custom colour keeps overriding until
+   you clear it. All applied before first paint by the script above. */
+:root{--radius:13px;--radius-sm:7px}
+:root[data-corners="square"]{--radius:3px;--radius-sm:3px}
+:root[data-corners="round"]{--radius:20px;--radius-sm:12px}
+/* Border strength. Composed from --fg so one rule covers light and dark:
+   the theme flips --fg, and the border follows it. */
+:root[data-border="faint"]{--line:color-mix(in srgb,var(--fg) 6%,transparent)}
+:root[data-border="strong"]{--line:color-mix(in srgb,var(--fg) 30%,transparent)}
+/* Chart series. The default set is chosen for separation on a dark
+   ground; the colour-blind-safe set is Okabe-Ito, which stays
+   distinguishable under deuteranopia and protanopia - the common cases,
+   and the ones a red/green pair fails. */
+:root[data-palette="cb"]{--p0:#56b4e9;--p1:#009e73;--p2:#e69f00;--p3:#d55e00;
+  --p4:#cc79a7;--p5:#0072b2;
+  --id0:#56b4e9;--id1:#0072b2;--id2:#cc79a7;--id3:#e69f00;--id4:#009e73;--id5:#d55e00}
+:root[data-palette="warm"]{--p0:#f0894a;--p1:#e5c04a;--p2:#d9605e;--p3:#b07cc6;
+  --p4:#5ea9c9;--p5:#7cb87c;
+  --id0:#f0894a;--id1:#e5c04a;--id2:#b07cc6;--id3:#5ea9c9;--id4:#7cb87c;--id5:#d9605e}
+/* Motion. The OS setting is honoured by default (the media query above);
+   these let someone override it per browser in either direction. */
+:root[data-motion="none"] *{animation:none!important;transition:none!important;
+  scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){
+  :root[data-motion="full"] *{animation-duration:revert!important;transition-duration:revert!important}
+}
+/* A user's own colours, applied over whichever theme is selected. */
+:root[data-userbg]{--bg:var(--user-bg)}
+:root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
+:root[data-userfg]{--fg:var(--user-fg)}
+/* Font. OpenDyslexic is not shipped (it is a licensed download), so this
+   picks the most legible stacks already on the machine rather than
+   pretending to install one. */
+:root[data-font="readable"] body{font-family:"Atkinson Hyperlegible","Lexend",Verdana,Tahoma,
+  -apple-system,BlinkMacSystemFont,system-ui,sans-serif;letter-spacing:.01em}
+:root[data-font="mono"] body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Native popup lists take neither our page background nor, on some
+   engines, the color-scheme hint - so state them outright. Belt and
+   braces with color-scheme above: whichever the engine honours, the list
+   is legible. */
+option,optgroup{background:var(--surface);color:var(--fg)}
+/* Shape reaches the surfaces through these, so a page rule that names a
+   literal radius simply keeps its own. */
+.card,.tile,.sheet,#fsmodal,#gbmodal,.vpmenu,.setrail{border-radius:var(--radius)}
+button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!--
+  §Stage5 icon sprite. Fourteen emoji used to carry meaning across these
+  pages: they render differently on every OS and font, cannot take the
+  accent colour, and two of them (a braille pattern for drag, a
+  square-with-rows for density) were genuinely unguessable.
+
+  These are stroke paths on currentColor, so an icon inherits whatever
+  colour its control already has - including a user's accent - and looks
+  the same on every platform. Sits in the shared snippet because the
+  dashboard and the wall both use it.
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <g id="i-bolt"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z"/></g>
+  <g id="i-dash"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g>
+  <g id="i-wall"><rect x="2.5" y="5.5" width="19" height="14" rx="2.5"/><path d="M8 5.5v14M16 5.5v14M2.5 12h19"/></g>
+  <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4 5.3 5.3"/></g>
+  <g id="i-manual"><path d="M3.5 5.5A2 2 0 0 1 5.5 3.5H11v17H5.5a2 2 0 0 0-2 2z"/><path d="M20.5 5.5a2 2 0 0 0-2-2H13v17h5.5a2 2 0 0 1 2 2z"/></g>
+  <g id="i-grid"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></g>
+  <g id="i-list"><path d="M3.5 6h17M3.5 12h17M3.5 18h17"/></g>
+  <g id="i-search"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></g>
+  <g id="i-arrow-down"><path d="M12 4v15M6 13.5l6 6 6-6"/></g>
+  <g id="i-drag"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></g>
+  <g id="i-density"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></g>
+  <g id="i-close"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-help"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.6 2.6 0 1 1 3.3 2.5c-.6.2-.8.7-.8 1.4v.5"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-lock"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></g>
+  <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
+  <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
+  <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+</defs></svg>
+<style>
+/* One icon class. 1em so an icon scales with the text it sits beside,
+   including the user's text-size setting. */
+.ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ic.solid{fill:currentColor;stroke:none}
+</style>
+
+<style>
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -52,7 +273,7 @@ table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
 th{text-align:start;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 0;padding-inline-end:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
-.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--card);
+.tip,.note,.warn-box{border-inline-start:3px solid var(--acc);background:var(--surface);
   border-start-start-radius:0;border-end-start-radius:0;border-start-end-radius:9px;border-end-end-radius:9px;
   padding:10px 16px;margin:14px 0;font-size:14px}
 .note{border-inline-start-color:var(--dim)}
@@ -190,6 +411,45 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 پیدا و سرورهایش را کپی می‌کند. در خط فرمان هم <code>nzbfast import-sab</code>
 هست.</div>
 
+<h3 id="firstrun-key">کلید API شما</h3>
+<p>روی یک نصب واقعاً تازه، nzbfast نخستین باری که دیمن بالا می‌آید برای خود
+یک کلید API می‌سازد و آن را یک بار در بنری درست زیر نشانی داشبورد چاپ
+می‌کند. از آن پس هر درخواستی به آن کلید نیاز دارد، پس داشبورد و API به روی
+هر چیزی که به ماشین می‌رسد باز نیستند.</p>
+<p>اینکه با آن چه می‌کنید بستگی دارد به اینکه nzbfast را چگونه راه انداخته‌اید:</p>
+<ul>
+  <li><b>اپ macOS، سینی Windows، یا <code>serve --open</code></b>: هیچ.
+  کلید را به پنجرهٔ مرورگری که باز می‌کنند می‌دهند، داشبورد آن را به یاد
+  می‌سپارد و شما از پیش وارد شده‌اید.</li>
+  <li><b>مرورگری که خودتان باز کرده‌اید</b>، یا داشبورد روی گوشی یا رایانه‌ای
+  دیگر: صفحه یک بار کلید را می‌پرسد و پس از آن به یادش می‌سپارد.</li>
+  <li><b>Sonarr، Radarr، nzb360 و دوستان</b>: آن را به‌عنوان کلید SABnzbd یا
+  NZBGet آن‌ها بچسبانید (<a href="#arr">§11</a>، <a href="#remotes">§12</a>).</li>
+</ul>
+<p>کلید در فایلی به نام <code>apikey</code> کنار فایل config شما نگه داشته
+می‌شود، پس در راه‌اندازی‌های مجدد همان می‌ماند و هر وقت لازم شد می‌توانید
+دوباره بخوانیدش. روی macOS و Linux آن فایل تنها برای حسابی که nzbfast را
+اجرا می‌کند خواندنی است. در خروجی خودِ دیمن هم هست، پس اگر ترمینال اسکرول
+شده باشد کارت گزارش داشبورد آن را دارد.</p>
+<div class="note"><b>ارتقا چیزی را تغییر نمی‌دهد.</b>نصبی که از پیش وجود دارد
+دقیقاً همان‌طور که بود رها می‌شود، با کلید یا بی‌کلید. کلید تنها در نخستین
+اجرا ساخته می‌شود - اجرایی بدون تنظیم داشبورد و بدون صف ذخیره‌شده - چون
+پیدا شدن کلید زیر یک نصب کارکُن، هر Sonarr و Radarr و اپ گوشی‌ای را که پیش‌تر
+وصل کرده بودید بیرون می‌گذاشت، آن هم در راه‌اندازی مجددی که هرگز به تغییر
+تنظیمی ربطش نداده‌اید.</div>
+<p>برای استفاده از کلید خودتان به‌جای آن، آن را در تنظیمات → امنیت تایپ کنید؛
+بی‌درنگ اعمال می‌شود. آن پنل کلید را عوض می‌کند اما هرگز کلید فعلی را نشان
+نمی‌دهد، پس اگر مقدار ساخته‌شده را می‌خواهید فایل <code>apikey</code> را
+بخوانید. برای اجرا بدون هیچ کلیدی، چون چیزی جلوی nzbfast از پیش ورود را
+مدیریت می‌کند، آن را با <code>NZBFAST_OPEN=1</code> در محیط اجرا کنید. آنگاه
+nzbfast باز می‌ماند و هنگام شروع صریح می‌گوید.</p>
+<p>اینکه اصلاً کدام ماشین‌ها می‌توانند به دیمن برسند انتخابی جداست:
+<code>serve --bind</code>. پیش‌فرض <code>0.0.0.0</code> است، یعنی هر رابط
+شبکه، چون یک جعبهٔ NAS، یک گوشی، و یک Sonarr روی رایانه‌ای دیگر همه باید
+بتوانند وصل شوند. <code>--bind 127.0.0.1</code> آن را به ماشینی که nzbfast
+روی آن اجرا می‌شود محدود می‌کند، و همین است آنچه روی یک دسکتاپ تنها که
+چیز دیگری به دسترسی نیاز ندارد می‌خواهید.</p>
+
 <h2 id="concepts">3 · nzbfast چگونه کار می‌کند</h2>
 <p>یک واژه‌نامهٔ سریع تا بقیهٔ راهنما راحت خوانده شود:</p>
 <table>
@@ -311,10 +571,11 @@ RAR بسته‌بندی می‌شوند. nzbfast این را تشخیص می‌�
 ریلیز منطبق در ایندکس ظاهر شود خودکار گرفته می‌شود، با ترجیحات کیفیت و قواعد ارتقا
 (یک نسخهٔ بهتر جایگزین بدتر می‌شود).</p>
 <h3 id="dash-history">تاریخچه</h3>
-<p>دانلودهای اخیر با وضعیت، اندازه، مکان؛ کارهای ناموفق <b>تلاش مجدد</b> ارائه می‌دهند
+<p>دانلودهای اخیر، هرکدام یک ردیف. کارهای ناموفق <b>تلاش مجدد</b> ارائه می‌دهند
 (از ژورنال از سر می‌گیرد). آرشیوهای رمزگذاری‌شده یک کنترل باز کردن 🔑 نشان می‌دهند -
 رمز را وارد کنید و کار در جای خود تمام می‌شود. نوار سلامت‌تأیید بلوک‌های خراب PAR2
 در هر دانلود را نمودار می‌کند - دنبالهٔ صعودی یعنی مقاله‌ها خراب می‌رسند.</p>
+<p>کارت به‌طور پیش‌فرض ده دانلود را فهرست می‌کند و بقیه یک کلیک فاصله دارند، روی دکمهٔ ▤. وضعیت، مکان و دلیل شکست یک کار پشت یک کلیک روی خودِ ردیف قرار دارند، تا حالت رایج - چه چیزی تمام شد، با چه اندازه‌ای، و چه زمانی - بدون پیمایش خوانا بماند. در عوض می‌توانید لبهٔ پایینی کارت را بکشید تا فهرست در ارتفاعی که خودتان انتخاب می‌کنید پیمایش شود. <b>History rows</b> در تنظیمات → رابط آن عدد ده را تغییر می‌دهد؛ چون این ویژگیِ دیمن است نه مرورگر شما، برای هر دستگاهی که به این نصب نگاه می‌کند اعمال می‌شود. <b>Colour History names</b> در کنار آن، نام‌های کامل‌شده را سبز و ناموفق‌ها را قرمز می‌کند؛ با خاموش کردنش نام‌ها ساده می‌مانند و نقطهٔ رنگی و جزئیات خود ردیف همچنان می‌گویند کدام کدام است.</p>
 <h3 id="dash-usage">مصرف داده</h3>
 <p>میله‌های روزانهٔ هر ارائه‌دهنده و کل‌های امروز / 7-روزه / 30-روزه - برای حساب‌های
 اندازه‌گیری‌شده و بلوکی ضروری است. حساب‌های بلوکی مصرف مادام‌العمر را در برابر
@@ -331,6 +592,7 @@ RAR بسته‌بندی می‌شوند. nzbfast این را تشخیص می‌�
 در آن ظرف 5 ثانیه برداشته و فایل حذف می‌شود. پوشهٔ دانلود مرورگرتان را روی آن تنظیم
 کنید تا از سایت‌های ایندکسر با یک کلیک بگیرید.</td></tr>
 <tr><td><b>از یک URL</b></td><td>یک لینک NZB را جای‌گذاری کنید (API <code>mode=addurl</code>، یا از طریق هر اپ متصل).</td></tr>
+<tr><td><b>پیوندهای nzblnk:</b></td><td>یک پیوند <code>nzblnk:</code> را هر جای داشبورد بچسبانید، یا داخلش بکشید. اگر از DMG مک‌اواس یا نصب‌کننده ویندوز نصب کرده‌اید، می‌توانید یکی را مستقیم روی یک بورد هم کلیک کنید. <a href="#nzblnk">پیوندهای nzblnk</a> در پایین را ببینید.</td></tr>
 <tr><td><b>مرور ایندکس</b></td><td>روی هر ریلیز کامل در کارت مرور کلیک کنید.</td></tr>
 <tr><td><b>فهرست پیگیری / RSS</b></td><td>خودکار - <a href="#automation">خودکارسازی</a> را ببینید.</td></tr>
 <tr><td><b>Sonarr/Radarr و غیره</b></td><td>آن‌ها گرفتن‌ها را مستقیم به صف می‌فرستند - <a href="#arr">§11</a> را ببینید.</td></tr>
@@ -342,9 +604,34 @@ RAR بسته‌بندی می‌شوند. nzbfast این را تشخیص می‌�
 پوشه‌های هوشمند (<a href="#automation">§10</a> را ببینید) می‌توانند آن‌ها را با قاعده تخصیص دهند.</li>
 <li><b>اولویت‌ها</b>: اجباری &gt; بالا &gt; عادی &gt; پایین. اجباری مکث و سهمیه را دور می‌زند.</li>
 <li><b>رمزهای عبور</b> برای آرشیوهای رمزگذاری‌شده خودکار از
-<code>&lt;meta type="password"&gt;</code> درون NZB یا نام فایل
-<code>Name{{password}}.nzb</code> برداشته می‌شوند، و می‌توانند به‌ازای هر کار از طریق
+<code>&lt;meta type="password"&gt;</code> درون NZB، از نام فایل
+<code>Name{{password}}.nzb</code>، یا از فیلد <code>p=</code> یک
+<a href="#nzblnk">پیوند nzblnk</a> برداشته می‌شوند، و می‌توانند به‌ازای هر کار از طریق
 API یا بعداً از تاریخچه (🔑) داده شوند.</li>
+</ul>
+
+<h3 id="nzblnk">پیوندهای nzblnk</h3>
+<p>برخی بوردها، بیشتر آلمانی و هلندی، به‌جای فایل NZB یک پیوند <code>nzblnk:</code>
+منتشر می‌کنند. پست مبهم‌سازی شده است، پس اصلاً نام فایلی نیست که بشود به آن پیوند داد.
+پیوند در عوض یک سرآیند حمل می‌کند، <code>h=</code>، که کلید جستجوست نه یک مکان، به‌علاوه
+عنوان <code>t=</code>، رمز عبور <code>p=</code> و گروه <code>g=</code> اختیاری. اول
+کسی باید برود و پست را پیدا کند.</p>
+<p>nzbfast نخست سرآیند را در ایندکس خودش جستجو می‌کند، که هیچ شبکه‌ای لازم ندارد، و تنها
+اگر آنجا نیافت از ایندکسرهای جستجویی که پیکربندی کرده‌اید می‌پرسد (تنظیمات →
+ایندکسرهای جستجو، <a href="#settings">§9</a>)، زیر همان بودجه‌های روزانه و همان عقب‌نشینی
+هر جستجوی دیگر. عنوان نام کار می‌شود و رمز عبور خودکار روی کار اعمال می‌شود.</p>
+<ul>
+<li><b>چسباندن یا کشیدن</b> روی هر نصبی کار می‌کند، از جمله Docker و جعبه‌های NAS: پیوند
+را از بورد کپی کنید و هر جای داشبورد بچسبانید.</li>
+<li><b>کلیک‌کردن</b> روی یک پیوند نیاز دارد که طرح‌واره نزد میزکارتان ثبت شده باشد.
+برنامه <b>DMG مک‌اواس</b> آن را ثبت می‌کند و <b>نصب‌کننده ویندوز</b> آن را به‌عنوان یک
+وظیفه پیشنهاد می‌دهد: اول می‌پرسد، و اگر NZB Monkey یا NZBDonkey از پیش آن را در دست
+دارد کاری به طرح‌واره ندارد. تاربال ساده مک‌اواس، Homebrew و نصب‌های لینوکس هیچ
+گرداننده میزکار ندارند؛ آنجا راه ورود چسباندن است.</li>
+<li>حل‌کردن پیوند عمداً محدود به نرخ است. ثبت یک طرح‌واره آن را به فاصله یک پرسش مرورگر
+از هر صفحه‌ای که بازدید می‌کنید می‌آورد، پس پیوندها سقف دقیقه‌ای دارند و تنها چند تای
+نخست هر دقیقه اجازه دارند به ایندکسرهای شما برسند؛ پس از آن تنها از ایندکس محلی پاسخ
+داده می‌شود.</li>
 </ul>
 
 <h2 id="wall">6 · دیوار پوسترها</h2>
@@ -418,11 +705,42 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 <table>
 <tr><th>فیلد</th><th>یادداشت‌ها</th></tr>
 <tr><td>میزبان / پورت</td><td>از پورت SSL <b>563</b> استفاده کنید. TLS هزینهٔ محسوسی ندارد - nzbfast همیشه رمزگذاری می‌کند.</td></tr>
-<tr><td>نام کاربری / رمز عبور</td><td>به‌صورت محلی در <code>config.local.json</code> ذخیره می‌شود، هرگز به مرورگر بازنشان داده نمی‌شود. خالی گذاشتن رمز عبور هنگام ویرایش، رمز ذخیره‌شده را حفظ می‌کند.</td></tr>
+<tr><td>نام کاربری / رمز عبور</td><td>به‌صورت محلی در <code>config.local.json</code> ذخیره می‌شود، هرگز به مرورگر بازنشان داده نمی‌شود. خالی گذاشتن رمز عبور هنگام ویرایش، رمز ذخیره‌شده را حفظ می‌کند. رمزهای عبور روی دیسک <a href="#passwords">مبهم‌سازی می‌شوند، نه رمزگذاری</a>.</td></tr>
 <tr><td>اتصال‌ها</td><td>اتصال‌های هم‌زمان به‌ازای هر سرور. برای یافتن نقطهٔ بهینهٔ هر ارائه‌دهنده به‌جای حدس زدن عدد بالا از <b>تنظیم دقیق اتصال</b> (<a href="#performance">§13</a>) استفاده کنید.</td></tr>
 <tr><td>سطح (رده)</td><td>0 = اصلی؛ سطوح بالاتر سرورهای پُرسازی‌اند و فقط مقاله‌هایی از آن‌ها خواسته می‌شود که هر سطح پایین‌تر کم داشته. حساب‌های نامحدود را روی 0، حساب‌های بلوکی را روی 1+ بگذارید.</td></tr>
 <tr><td>اندازهٔ بلوک (GB)</td><td>برای حساب‌های بلوکی (پرداخت به‌ازای هر GB): nzbfast مصرف مادام‌العمر را در برابر این دنبال می‌کند و وقتی تمام شد استفاده از سرور را متوقف می‌کند (هشدار در 85%).</td></tr>
 </table>
+<p><b>کمی فضا زیر سقف اتصال حسابتان باقی بگذارید.</b> تنظیم اتصال‌ها کمی پایین‌تر از سقف هیچ هزینه‌ای ندارد: توان عبور خیلی پیش از یکی دو اتصال آخر صاف می‌شود و <b>تنظیم دقیق اتصال</b> (<a href="#performance">§13</a>) به هر حال زیر آن می‌ماند. همان جاهای خالی است که به دستگاه دوم، برنامه‌ای دیگر یا تلاش دوباره پس از افت سوکت اجازه می‌دهد باز هم وارد شود، به‌جای آنکه رد شود در حالی که این یکی همه‌ی جاها را گرفته است.</p>
+<h3 id="passwords">رمزهای عبور سرویس‌دهنده‌های شما چگونه ذخیره می‌شوند</h3>
+<p>رمزهای عبور سرویس‌دهنده در <code>config.local.json</code> <b>مبهم‌سازی شده‌اند، نه
+رمزگذاری</b>. آن‌ها به شکل <code>obf1:</code> و پس از آن یک صورت کدشده ذخیره می‌شوند،
+تا اگر فایل در یک عکس صفحه، یک پست انجمن، یک گزارش خطا یا روی نمایشگری که کس دیگری
+می‌بیند ظاهر شد، به‌صورت متن ساده خوانده نشود.</p>
+<p>روشن بگوییم این چه چیزی به شما می‌دهد و چه چیزی نمی‌دهد:</p>
+<ul>
+<li><b>این رمزگذاری نیست و در برابر کسی که فایل را دارد هیچ محافظتی نمی‌کند.</b> روش
+در کد عمومی ما هست و رمزگشا داخل خود nzbfast می‌آید، پس هر کسی فایل را داشته باشد
+رمز را در چند ثانیه بیرون می‌کشد. فایل را دقیقاً همان‌قدر محرمانه بدانید که اگر رمزها
+خوانا بودند می‌دانستید.</li>
+<li><b>نشت اتفاقی را برمی‌دارد</b>، و همان است که رایج است. فایل‌های پیکربندی خیلی
+بیشتر از آنکه از روی دیسک دزدیده شوند، در رشته‌های پشتیبانی چسبانده و در عکس‌های صفحه
+ثبت می‌شوند.</li>
+<li>رمزی که خودتان به‌صورت متن ساده تایپ کرده‌اید همچنان کار می‌کند. nzbfast هر دو
+صورت را می‌خواند، پس پیکربندی‌های دست‌ویرایش‌شده و درون‌ریزی از کلاینت‌های دیگر هرگز
+نمی‌شکنند؛ در ذخیره‌سازی بعدی صورت مبهم را می‌نویسد.</li>
+<li>فایل افزون بر این طوری نوشته می‌شود که تنها حسابی که nzbfast را اجرا می‌کند
+بتواند بخواندش (حالت 0600 روی macOS و Linux).</li>
+</ul>
+<p>برای مقایسه، <b>NZBGet و SABnzbd هر دو رمزهای عبور سرویس‌دهنده را به‌صورت متن خوانا
+نگه می‌دارند</b> در فایل‌های پیکربندی‌شان. ما مبهم‌سازی را بهبودی کوچک بر آن می‌دانیم،
+نه یک ویژگی امنیتی.</p>
+<p><b>چرا از جاکلیدی سیستم استفاده نمی‌کنیم؟</b> Keychain در macOS، مدیر اعتبارنامه‌های
+Windows و سرویس‌های راز در Linux محافظت واقعی می‌دادند و شاید دوباره سراغش برویم. امروز
+دو چیز جلوی ما را می‌گیرد. دسترسی به جاکلیدی به هویت برنامه گره خورده است و nzbfast
+هنوز امضای کد ندارد، بنابراین پرسش‌ها و رفتار پس از هر به‌روزرسانی بد از آب درمی‌آید.
+و سهم بزرگی از نصب‌ها Docker، سرورهای بدون نمایشگر و جعبه‌های NAS است که اصلاً جاکلیدی
+ندارند، و این دو مسیر ذخیره‌سازی متفاوت باقی می‌گذارد که باید هر دو درست بمانند. یک
+قالب واحد و خوش‌فهم که همه‌جا یکسان رفتار می‌کند فعلاً معامله بهتری است.</p>
 <p>دو گزینهٔ دیگر برای هر سرور هنوز کنترلی در داشبورد ندارند: آن‌ها را دستی در مدخل
 همان سرور در <code>config.local.json</code> بیفزایید (نگاه کنید به
 <a href="#files">§17</a>) و دوباره راه‌اندازی کنید.</p>
@@ -515,6 +833,7 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 <tr><td>گنجاندن گروه ریلیز</td><td>برچسب <code>-GROUP</code> در انتها.</td></tr>
 <tr><td>حذف فایل‌های آشغال</td><td><b>به‌طور پیش‌فرض روشن.</b> <code>.par2</code>، <code>.nzb</code>، <code>.sfv</code>، <code>.nfo</code>‌های برجای‌مانده و کلیپ‌های نمونه را از پوشه‌های تمام‌شدهٔ فیلم و سریال پاک می‌کند. هرگز ویدیو یا زیرنویس‌هایش را.</td></tr>
 <tr><td>فقط فایل رسانه را نگه دار</td><td><b>به‌طور پیش‌فرض خاموش، و ویرانگر:</b> همهٔ محتوای پوشه را جز ویدیو (یا ویدیوها) و زیرنویس‌ها برای همیشه حذف می‌کند. همهٔ قسمت‌های یک بستهٔ فصل نگه داشته می‌شوند. هرگاه هر دو روشن باشند، بر <b>حذف فایل‌های آشغال</b> مقدم است.</td></tr>
+<tr><td>Keep the other words in the name</td><td><b>به‌طور پیش‌فرض روشن.</b> ورزش، مسابقات و رویدادهای دیگر اغلب یک عنوان واحدند که در تمام فصل تکرار می‌شود و تنها یکی دو کلمه با هم فرق دارند - "Round11 Hungary Race" در برابر "Round11 Hungary Qualifying". نگه داشتن همان کلمه‌هاست که نمی‌گذارد یک فصل کامل به یک نام واحد فروبریزد. تنها جایی اعمال می‌شود که نام به هیچ روش دیگری قابل مرتب کردن نبوده، بنابراین فیلم‌ها و قسمت‌های معمولی دست‌نخورده می‌مانند.</td></tr>
 </table>
 <p class="dim">کل این گروه پس از تعمیر و باز‌کردن و پیش از <b>انتقال کامل‌شده‌ها به</b>
 اجرا می‌شود، و برای کاری که هنوز چشم‌به‌راه گذرواژه است به‌کلی نادیده گرفته می‌شود. هر
@@ -530,8 +849,21 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 و <b>بایگانی TV</b> (<a href="#automation">§10</a> را ببینید).</p>
 
 <h3>ایندکس‌گذاری <span class="pill live">زنده</span></h3>
+<div class="note"><b>ایندکسر داخلی به‌طور پیش‌فرض خاموش است.</b> پست‌هایی را پیدا
+می‌کند که با نام فایل واقعی گذاشته شده‌اند، و سهم بزرگ و رو به رشدی از Usenet عمداً
+بدون چنین نامی گذاشته می‌شود: موضوع تصادفی، نام فایل‌های تصادفی در درون، رها شده در یک
+گروه همه‌کاره. نام واقعی تنها در یک NZB زندگی می‌کند که آپلودکننده جای دیگری منتشرش
+می‌کند، پس هرگز روی Usenet نبوده که هیچ اسکنری بتواند بخواندش. بر پایه ایندکس خودمان،
+۱۴٫۸ میلیون پست اسکن‌شده حدود ۳۱٬۰۰۰ ریلیز قابل مرور داد، تقریباً یکی از هر پانصد.
+همچنان از ایندکسرهای تجاری استفاده کنید و آن‌ها را در تنظیمات → ایندکسرهای جستجو
+بیفزایید تا بتوانید از دیوار در آن‌ها بگردید. این را روشن کنید اگر گروه‌های مشخصی را
+دنبال می‌کنید که مردم هنوز با نام‌های واقعی در آن‌ها پست می‌گذارند، یا می‌خواهید ببینید
+سرویس‌دهنده‌تان واقعاً چه چیزی حمل می‌کند. با کلید خاموش هیچ چیز اسکن یا دریافت
+نمی‌شود، هیچ پایگاه داده‌ای ساخته نمی‌شود، و دیوار، مرور ایندکس، فهرست پیگیری و خوراک
+newznab پنهان می‌مانند.</div>
 <table>
 <tr><th>تنظیم</th><th>کارکرد</th></tr>
+<tr><td>ایندکسر داخلی</td><td>کلید اصلی، <b>خاموش مگر آنکه روشنش کنید</b>. خاموش یعنی بدون اسکن، بدون جستجوی فراداده، بدون نمونه‌گیری در دسترس‌بودن و بدون خوراک newznab؛ ایندکسی که از پیش روی دیسک است نگه داشته می‌شود (دکمه حذف وجود دارد)، پس روشن‌کردن دوباره از سر گرفته می‌شود نه اسکن مجدد.</td></tr>
 <tr><td>گروه‌ها</td><td>گروه‌های خبری که ایندکسر داخلی اسکن می‌کند (مثلاً <code>alt.binaries.teevee</code>).</td></tr>
 <tr><td>فاصلهٔ اسکن</td><td>ثانیه بین گذرها (پیش‌فرض 900).</td></tr>
 <tr><td>مقاله‌های پُرسازی گذشته</td><td>هدرهایی که در نخستین اسکن یک گروه واکشی می‌شوند.</td></tr>
@@ -545,8 +877,7 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 
 <h3>کتابخانه، امنیت، رابط</h3>
 <p><b>کتابخانه</b>: دسته‌هایی که به‌عنوان رکوردهای آنی کتابخانه در نظر گرفته می‌شوند +
-فاصلهٔ بررسی مجدد. <b>امنیت</b>: کلید API کامل (همه‌چیز) و کلید NZB (فقط-افزودن - دادنش
-به سایت‌های ایندکسر امن است)، هر دو به‌صورت زنده قابل چرخش. <b>رابط</b>: صداهای کلیک،
+فاصلهٔ بررسی مجدد. <b>امنیت</b>: کلید API کامل (همه‌چیز) و کلید NZB (فقط-افزودن - دادنش به سایت‌های ایندکسر امن است)، هر دو به‌صورت زنده قابل چرخش. هر جعبه به‌محض خروج شما از فیلد، کلیدی را که به آن تعلق دارد جایگزین می‌کند، و خالی گذاشتن یک جعبه کلیدی را که از پیش دارد نگه می‌دارد. کلید API افزون بر این <b>Show</b> را دارد که کلید فعلی را آشکار و کپی می‌کند تا هر وقت خواستید در Sonarr، Radarr یا NZB360 بچسبانید، و <b>Create new</b> که جایگزینی می‌سازد - کلید قدیمی بی‌درنگ از کار می‌افتد، پس هر چیزی که از پیش متصل است باید کلید تازه را بگیرد. هر دو به خودِ کلید API مشروط‌اند: کلید NZB فقط-افزودن نمی‌تواند آن را بخواند، و تمام فلسفهٔ آن کلید همین است. برای اینکه کلید در یک نصب تازه از کجا می‌آید، <a href="#firstrun-key">§2</a> را ببینید. <b>رابط</b>: صداهای کلیک،
 اعلان‌های دسکتاپ هنگام اتمام، فاصلهٔ مرتب‌سازی مجدد ارائه‌دهنده‌ها.</p>
 
 <p><b>واحدهای سرعت</b> <span class="pill live">live</span> تعیین می‌کند هر سرعتی در
@@ -593,7 +924,7 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 <ol>
 <li>در Sonarr/Radarr: Settings → Download Clients → افزودن <b>SABnzbd</b>.</li>
 <li>میزبان: ماشین nzbfast شما · پورت: <b>6789</b> · کلید API: کلید API کامل شما
-(تنظیمات → امنیت؛ کنترل QR/کپی کنارش است).</li>
+(کجا پیدایش کنید: <a href="#firstrun-key">§2</a>).</li>
 <li>دسته به دلخواه (مثلاً <code>tv</code> / <code>movies</code>). Test → تیک سبز → Save.</li>
 </ol>
 <p>صف، تاریخچه، وضعیت هر کار، «حذف و پاک کردن»، تلاش مجدد و مسیریابی دسته
@@ -606,9 +937,14 @@ Wikipedia و AniList به حساب نیاز ندارند. یک کلید OMDb (ر
 <code>movie</code> را از ایندکس خودش از گروه‌های پایش‌شدهٔ شما سرو می‌کند، و
 <code>/getnzb/&lt;id&gt;</code> فایل NZB را بازمی‌گرداند.</li>
 </ol>
-<div class="note"><b>چرا این کار؟</b>یک ایندکسر خودمیزبان دقیقاً از گروه‌هایی که
-برایتان مهم‌اند: بدون حساب، بدون محدودیت تعداد فراخوان API، نگهداری تا هر عمقی که
-اجازهٔ اسکنش را بدهید.</div>
+<div class="note"><b>نخست ایندکسر داخلی را روشن کنید</b> (تنظیمات → ایندکس‌گذاری). به‌طور
+پیش‌فرض خاموش است، و تا وقتی خاموش باشد این نما به هر پرس‌وجو به‌جای نتیجه خالی با
+<code>&lt;error code="101"&gt;</code> پاسخ می‌دهد، تا اشتباه همان لحظه‌ای که ایندکسر را
+می‌افزایید دیده شود، نه هفته‌ها بعد.<br><br>
+<b>چرا به زحمتش بیفتیم؟</b> یک ایندکسر خودمیزبان دقیقاً از همان گروه‌هایی که برایتان
+مهم‌اند: بدون حساب، بدون سقف فراخوانی API، با نگهداشتی به هر عمقی که اجازه اسکنش را
+بدهید. این افزوده‌ای بر ایندکسرهای همیشگی شماست نه جایگزین آن‌ها، چون تنها چیزی را
+می‌یابد که با نام فایل واقعی پست شده باشد.</div>
 
 <h2 id="remotes">12 · گوشی و اپ‌های راه دور</h2>
 <p>nzbfast <em>هر دو</em> پروتکل اصلی کنترل از راه دور را پیاده‌سازی می‌کند، پس تقریباً
@@ -756,7 +1092,7 @@ NAS 2 GB اضافه دارد. آگاه باشید که در آن نقطه، تع
 <table>
 <tr><th>فرمان</th><th>هدف</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>راه‌اندازی تعاملی سرور.</td></tr>
-<tr><td><code>nzbfast serve</code></td><td>اجرای دیمن (داشبورد + API + خودکارسازی). <code>--open</code> مرورگر را باز می‌کند؛ برای فهرست کامل پرچم‌ها <code>--help</code> را ببینید - هر تنظیم داشبورد یک پرچم دوقلو دارد.</td></tr>
+<tr><td><code>nzbfast serve</code></td><td>اجرای دیمن (داشبورد + API + خودکارسازی). <code>--open</code> مرورگر را باز می‌کند؛ <code>--apikey</code> کلید را دستی تعیین می‌کند (<a href="#firstrun-key">§2</a>)؛ <code>--bind</code> نشانی گوش‌دادن را انتخاب می‌کند، پیش‌فرض <code>0.0.0.0</code> (هر رابط)، <code>127.0.0.1</code> فقط برای همین ماشین. برای فهرست کامل پرچم‌ها <code>--help</code> را ببینید - هر تنظیم داشبورد یک پرچم دوقلو دارد.</td></tr>
 <tr><td><code>nzbfast get file.nzb</code></td><td>دانلود یک NZB، خط پردازش کامل، بدون دیمن. <code>--preflight</code> اگر پست نتواند کامل شود زود لغو می‌کند؛ <code>--password</code> برای مجموعه‌های رمزگذاری‌شده.</td></tr>
 <tr><td><code>nzbfast check file.nzb</code></td><td>حکم موجود بودن - COMPLETE / REPAIRABLE / IMPOSSIBLE - بدون دانلود محموله.</td></tr>
 <tr><td><code>nzbfast verify DIR</code></td><td>تأیید فایل‌ها در برابر مجموعهٔ PAR2 در یک پوشه.</td></tr>
@@ -776,10 +1112,10 @@ NAS 2 GB اضافه دارد. آگاه باشید که در آن نقطه، تع
 <p>نقطهٔ پایانی پایه: <code>http://host:6789/api?mode=…&amp;apikey=…&amp;output=json</code> -
 سازگار با SABnzbd، پس یکپارچه‌سازی‌های موجود SAB بی‌تغییر کار می‌کنند. دو کلید:
 <b>کلید API</b> (کنترل کامل) و <b>کلید NZB</b> (فقط-افزودن:
-<code>addfile</code>/<code>addurl</code>).</p>
+<code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> عمداً در مجموعه فقط‌افزودن نیست: حل‌کردن یک پیوند می‌تواند سهمیه اندازه‌گیری‌شده ایندکسر را خرج کند، و این کارِ یک اعتبارنامه فقط‌افزودن نیست.</p>
 <table>
 <tr><th>حوزه</th><th>حالت‌ها</th></tr>
-<tr><td>صف</td><td><code>queue</code> (با <code>name=delete/pause/resume/priority/switch</code>)، <code>pause</code>، <code>resume</code>، <code>addfile</code>، <code>addurl</code>، <code>retry</code>، <code>set_password</code></td></tr>
+<tr><td>صف</td><td><code>queue</code> (با <code>name=delete/pause/resume/priority/switch</code>)، <code>pause</code>، <code>resume</code>، <code>addfile</code>، <code>addurl</code>، <code>addnzblnk</code>، <code>retry</code>، <code>set_password</code></td></tr>
 <tr><td>اطلاعات</td><td><code>history</code>، <code>status</code>/<code>fullstatus</code>، <code>stats</code>، <code>version</code>، <code>server_stats</code>، <code>usage</code>، <code>log</code>، <code>warnings</code></td></tr>
 <tr><td>پیکربندی</td><td><code>get_config</code>، <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (هر فیلد تنظیمات)، <code>server_save/delete/test/enable/reorder</code>، <code>import_probe/apply</code></td></tr>
 <tr><td>ایندکس و دیوار</td><td><code>index_search</code>، <code>index_get</code>، <code>index_stats</code>، <code>index_scan_now</code>، <code>wall</code>، <code>wall_search/fix/refresh/art</code>، به‌علاوه newznab در <code>/api?t=caps|search|tvsearch|movie</code> و <code>/getnzb/&lt;id&gt;</code></td></tr>
@@ -792,8 +1128,9 @@ NAS 2 GB اضافه دارد. آگاه باشید که در آن نقطه، تع
 <h2 id="files">17 · فایل‌ها و مکان‌ها</h2>
 <table>
 <tr><th>فایل</th><th>محتوا</th></tr>
-<tr><td><code>config.local.json</code></td><td>اعتبارنامه‌های سرور و گزینه‌های هر سرور. توسط جادوگر ساخته می‌شود؛ در تنظیمات قابل ویرایش. آن را خصوصی نگه دارید.</td></tr>
+<tr><td><code>config.local.json</code></td><td>اعتبارنامه‌های سرور و گزینه‌های هر سرور. توسط جادوگر ساخته می‌شود؛ در تنظیمات قابل ویرایش. آن را خصوصی نگه دارید. رمزهای عبور <a href="#passwords">مبهم‌سازی شده‌اند، نه رمزگذاری</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>هر تنظیمی که در داشبورد تغییر داده شده. کنار config زندگی می‌کند؛ مقادیر رابط بر پرچم‌های خط فرمان می‌چربند. یک کلید (یا فایل) را حذف کنید تا به پرچم‌ها/پیش‌فرض‌ها بازگردد.</td></tr>
+<tr><td><code>apikey</code></td><td>کلید APIای که nzbfast در نخستین اجرا برای خود ساخت (<a href="#firstrun-key">§2</a>). کنار config زندگی می‌کند؛ روی macOS و Linux تنها برای حسابی که nzbfast را اجرا می‌کند خواندنی است. برای گرفتن کلیدی تازه حذفش نکنید: روی نصبی که از پیش اجرا شده، چیزی جایش را نمی‌گیرد و دیمن بدون هیچ کلیدی بالا می‌آید. به‌جایش کلید تازه را در تنظیمات → امنیت تعیین کنید.</td></tr>
 <tr><td><code>index.db</code></td><td>ایندکس ریلیز (SQLite) + فرادادهٔ دیوار. حذفش امن است - از اسکن دوباره ساخته می‌شود (تنظیمات → ایندکس‌گذاری → پاک کردن این کار را برایتان می‌کند).</td></tr>
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>حالت صف (از راه‌اندازی مجدد جان به در می‌برد)، NZBهای هر کار، دفتر مصرف، تاریخچهٔ محک، حافظهٔ نهان تصویر پوستر.</td></tr>
 <tr><td>ژورنال مقاله</td><td>درون پوشهٔ خروجی هر کار تا زمانی که ناقص است - ازسرگیری پس از خرابی و تلاش مجدد را نیرو می‌دهد. هنگام موفقیت حذف می‌شود.</td></tr>
@@ -810,7 +1147,10 @@ NAS 2 GB اضافه دارد. آگاه باشید که در آن نقطه، تع
 خودبه‌خود تکرار می‌شود، چون تأخیر انتشار دقیقاً همین شکل را دارد و خودبه‌خود برطرف
 می‌شود.</td></tr>
 <tr><td>آرشیو تمام‌شده رمز عبور می‌خواهد</td><td>ردیف تاریخچه 🔑 نشان می‌دهد - رمز را همان‌جا وارد کنید؛ کار در جای خود کامل می‌شود. </td></tr>
+<tr><td>آرشیوی استخراج نمی‌شود</td><td>خطاهای رمز عبور و تعمیر خودشان را در ردیف تاریخچه نشان می‌دهند. برای بقیه موارد یک راه فرار هست: تنظیمات → پوشهٔ پایش و پس‌پردازش → <b>استخراج با unrar خارجی</b> (تنظیمی پیشرفته) استخراج را به برنامه <code>unrar</code> نصب‌شده روی دستگاه شما می‌سپارد، به‌جای استخراج‌کننده داخلی. در غیر این صورت آن را خاموش بگذارید: مسیر داخلی در هر شکلی که سنجیده‌ایم سریع‌تر است، و پست‌های مبهم‌سازی‌شده با نام‌های hash به هر حال همیشه از آن استفاده می‌کنند، چون unrar نمی‌تواند تغییر نام آن‌ها را دنبال کند. همین کلید برای اجراهای <code>nzbfast get</code> متغیر محیطی <code>NZBFAST_NO_NATIVE_UNRAR=1</code> است. اگر unrar آرشیوی را استخراج کرد که استخراج‌کننده داخلی رد کرده بود، لطفاً گزارش دهید تا مسیر داخلی را درست کنیم.</td></tr>
 <tr><td>Sonarr/Radarr نمی‌تواند متصل شود</td><td>پورت 6789 قابل دسترس است؟ کلید API درست است (کلید کامل، نه کلید NZB)؟ نوع کلاینت روی SABnzbd تنظیم شده؟</td></tr>
+<tr><td>داشبورد کلید APIای می‌خواهد که هرگز تعیینش نکرده‌ام</td><td>نصب تازه یکی برای خود می‌سازد و هنگام شروع یک بار چاپش می‌کند (<a href="#firstrun-key">§2</a>). در فایل <code>apikey</code> کنار config شما و در خروجی شروع هست. یا از مرورگری که از پیش وارد شده، کلید خودتان را در تنظیمات → امنیت تایپ کنید.</td></tr>
+<tr><td>هیچ‌چیز روی شبکه به دیمن نمی‌رسد</td><td><code>--bind</code> را بررسی کنید: <code>127.0.0.1</code> تنها به ماشینی که nzbfast روی آن اجرا می‌شود سرویس می‌دهد. پیش‌فرض، <code>0.0.0.0</code>، به هر رابط سرویس می‌دهد. سپس فایروال خودِ ماشین را برای پورت 6789 بررسی کنید.</td></tr>
 <tr><td>کارت مرور کوچک می‌ماند</td><td>ایندکسر در پس‌زمینه رشد می‌کند - بررسی کنید گروه‌های تنظیمات → ایندکس‌گذاری تنظیم شده باشند، و به عمیق‌سازی در هر اسکن زمان بدهید تا تاریخچه انباشته شود. «همین حالا اسکن کن» یک گذر را اجبار می‌کند؛ خط وضعیت پیشرفت زنده را نشان می‌دهد.</td></tr>
 <tr><td>دیوار تصویر اشتباه/بدون تصویر نشان می‌دهد</td><td>برگهٔ جزئیات → ✎ اصلاح تطبیق یا ↻ تازه‌سازی فراداده. جست‌وجوهای فیلم با یک کلید رایگان OMDb بهتر می‌شوند.</td></tr>
 <tr><td>دیمن شروع نمی‌شود: پورت در حال استفاده</td><td>نمونهٔ دیگری در حال اجراست - یا <code>--port</code> را تغییر دهید.</td></tr>
