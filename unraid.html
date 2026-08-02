@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install on Unraid - nzbfast</title>
+<meta name="description" content="Install nzbfast on Unraid from Community Applications: search Apps, click Install, keep the pre-filled paths. Step-by-step guide, including updates and Sonarr/Radarr.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<style>
+  .steps{list-style:none;counter-reset:s;padding:0;margin:0}
+  .steps>li{position:relative;padding:0 0 22px 46px;margin:0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;inset-inline-start:0;top:-2px;
+    width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;
+    background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+  .steps>li:not(:last-child)::after{content:"";position:absolute;inset-inline-start:14px;top:32px;bottom:6px;width:2px;
+    background:var(--line)}
+  .steps h3{margin:2px 0 8px;font-size:16px}
+  .steps p,.steps ul{color:var(--dim);font-size:14.5px}
+  .tbl{overflow-x:auto;margin:14px 0;border:1px solid var(--line);border-radius:12px}
+  .tbl table{min-width:480px}
+  .lead-guide{color:var(--dim);font-size:16px;max-width:720px;margin:0 0 8px}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>nzbfast on <em>Unraid</em></h1>
+  <p class="sub">One container gives you the full dashboard, the SABnzbd/NZBGet API for
+  Sonarr &amp; Radarr, and the built-in indexer. Search Apps, click Install, keep the
+  values that are already filled in.</p>
+</div>
+
+<section style="padding-top:20px">
+  <div class="wrap">
+    <p class="lead-guide">nzbfast is in <b>Community Applications</b>, so on Unraid there is no
+    compose file to write and no folders to create by hand. The template fills in the port, the
+    three paths and the user IDs for you, using the Unraid defaults.</p>
+    <div class="callout"><b>Two registries, one image.</b> The identical image lives on Docker Hub as
+    <code>nzbfast/nzbfast</code> and on GitHub as <code>ghcr.io/nzbfast/nzbfast</code>. The template
+    uses the Docker Hub name. The image is multi-arch, so it also runs on ARM boxes, though Unraid
+    itself is 64-bit Intel and AMD only.</div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Install it <span class="tag now" style="vertical-align:middle">recommended</span></h2>
+    <p class="lead-guide">You need the <b>Community Applications</b> plugin. If your Unraid has an
+    <b>Apps</b> tab, you already have it.</p>
+    <ol class="steps">
+      <li><h3>Find it</h3>
+        <p><b>Apps</b> tab, search <code>nzbfast</code>, then <b>Install</b>. Unraid opens its normal
+        Add Container form with everything already filled in from the template.</p>
+      </li>
+      <li><h3>Glance over the values</h3>
+        <p>The defaults work as they are. What they mean:</p>
+        <div class="tbl"><table>
+          <thead><tr><th>Setting</th><th>Default</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td>Web UI Port</td><td><code>6789</code></td><td>Dashboard and the SABnzbd-compatible API. Change the host side only if something already uses 6789.</td></tr>
+            <tr><td>Config</td><td><code>/mnt/user/appdata/nzbfast</code></td><td>Settings and the index database. Keep this on appdata.</td></tr>
+            <tr><td>Downloads</td><td><code>/mnt/user/downloads/nzbfast</code></td><td>Finished files land here. Point it wherever you keep downloads.</td></tr>
+            <tr><td>Watch</td><td><code>/mnt/user/downloads/nzbfast/watch</code></td><td>Drop an <code>.nzb</code> in here and it downloads by itself.</td></tr>
+            <tr><td>PUID / PGID</td><td><code>99</code> / <code>100</code></td><td>The Unraid defaults, <code>nobody</code> and <code>users</code>, so downloaded files belong to you and not to root.</td></tr>
+            <tr><td>TZ</td><td><code>Etc/UTC</code></td><td>Your timezone, for example <code>Europe/London</code>. Under <b>Show more settings</b>.</td></tr>
+            <tr><td>API Key</td><td>empty</td><td>Only needed for Sonarr, Radarr and friends. Also under <b>Show more settings</b>, and you can set it later in the dashboard instead.</td></tr>
+          </tbody>
+        </table></div>
+      </li>
+      <li><h3>Apply</h3>
+        <p>Unraid pulls the image and starts the container. Then carry on to
+        <a href="#firstrun">First run</a> below.</p>
+      </li>
+    </ol>
+    <div class="callout"><b>Not in Apps yet?</b> The Community Applications catalogue is rebuilt on a
+    schedule rather than the moment a template lands, so a brand-new entry can take a little while to
+    show up. You do not have to wait: add
+    <code>https://github.com/nzbfast/unraid-templates</code> under <b>Docker</b> →
+    <b>Template repositories</b> (bottom of the page) and nzbfast appears in the template dropdown on
+    <b>Add Container</b> straight away, with the same pre-filled values.</div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 id="firstrun">First run: add your provider</h2>
+    <p class="lead-guide">There is <b>no config file to edit.</b> Open
+    <code>http://YOUR_SERVER_IP:6789</code>, or just click the nzbfast icon on the Docker tab and
+    choose <b>WebUI</b>. A <b>Welcome</b> panel asks for your Usenet server. Enter the host, username,
+    password and connection count from your provider's welcome email and save. It applies
+    immediately, with no restart. Drop an <code>.nzb</code> on the dashboard, or into the
+    <code>watch</code> folder, and it downloads.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Connecting Sonarr / Radarr</h2>
+    <p class="lead-guide">nzbfast speaks the SABnzbd API. In your *arr app, add a <b>SABnzbd</b>
+    download client: <b>Host</b> = your server's IP, <b>Port</b> = <code>6789</code>,
+    <b>API Key</b> = the key from the container's <b>API Key</b> variable, or from the dashboard's
+    Settings page if you set it there. It also exposes the NZBGet JSON-RPC API, so nzb360 and LunaSea
+    connect the same way.</p>
+    <div class="callout"><b>One thing that catches people out.</b> If you left the API Key empty at
+    install time, set one in the dashboard under <b>Settings</b> before you point an *arr app at it.
+    An *arr client with no key, or the wrong key, simply reports that it cannot connect.</div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2 id="updating">Updating</h2>
+    <p class="lead-guide">The image is the update channel: nzbfast in a container never swaps its own
+    binary, you move it forward by pulling a newer image. Your settings, queue and downloads live in
+    the folders you mapped, so they survive the swap.</p>
+    <ul class="plain">
+      <li><b>By hand:</b> <b>Docker</b> tab → <b>Check for Updates</b> at the bottom of the page. When
+      nzbfast shows <b>update ready</b>, click its icon and choose <b>Apply Update</b>. Unraid
+      recreates the container with the same settings.</li>
+      <li><b>Automatically:</b> Community Applications adds an <b>Auto Update Applications</b> page
+      under <b>Settings</b>, where you can tick nzbfast and let it update on a schedule. You do not
+      need Watchtower or anything else on Unraid.</li>
+    </ul>
+    <div class="callout"><b>Check your image tag first.</b> Both of the above assume your container is
+    on <code>nzbfast/nzbfast:latest</code>, which is what the template sets. If you pinned it to a
+    version, say <code>:1.0.3</code>, nothing will ever move it, because a re-pull fetches the tag the
+    container was created with. The <b>Docker</b> tab shows the tag next to the container.</div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Troubleshooting</h2>
+    <ul class="plain">
+      <li><b>It won't start</b>, or stops again right away: the container prints the reason and exits,
+      so it is in the container's own log. <b>Docker</b> tab → click the nzbfast icon → <b>Logs</b>.
+      Over SSH that is <code>docker logs --tail 50 nzbfast</code>. A container that quits a second or
+      two after starting, repeatedly, is usually refusing on purpose rather than crashing, and the log
+      says which case it is.</li>
+      <li><b>"Permission denied" or files owned by root</b>: check <b>PUID</b> is <code>99</code> and
+      <b>PGID</b> is <code>100</code>, and that the share you pointed <code>/downloads</code> at is
+      writable by <code>nobody</code>. This is the most common issue, and on Unraid it usually means
+      the defaults were changed.</li>
+      <li><b>Can't reach the dashboard</b>: confirm the container is running, and that the host side of
+      the port is what you are browsing to. If something else already uses 6789, change the host side
+      to something free, for example <code>6889</code>, and browse to that instead.</li>
+      <li><b>Downloads are slow, or the array is busy</b>: point <code>/downloads</code> at a cache
+      pool or an unassigned SSD rather than a parity-protected array share. This is a general Unraid
+      write-speed point and is not specific to nzbfast, but it is the single biggest difference you
+      will feel.</li>
+      <li><b>Nothing downloads</b>: open the dashboard. If the Welcome panel is still showing, the
+      provider has not been saved yet.</li>
+      <li><b>Auto-update never fires</b>: check the container is on the <code>latest</code> tag rather
+      than a pinned version, and that nzbfast is actually ticked on the <b>Auto Update
+      Applications</b> page.</li>
+    </ul>
+    <div class="callout" style="margin-top:22px"><b>What you need.</b> Any Unraid release with the
+    <b>Community Applications</b> plugin, on 64-bit Intel or AMD. The same image also runs on
+    <b>Synology</b> (<a href="synology.html">guide</a>), <b>TrueNAS SCALE</b> and <b>QNAP</b>
+    Container Station.</div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Free software, GPL-3.0-or-later. PAR2 repair and RAR extraction are native code inside the binary, no bundled third-party tools.</p>
+</div></footer>
+
+</body>
+</html>
