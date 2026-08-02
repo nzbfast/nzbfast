@@ -78,10 +78,10 @@
     </ul>
     <p>Asta a schimbat la ce lucrăm. Are puțin sens să optimizăm o cale de compresie care poartă 1,4 % din date, așa că le-am optimizat pe cele două care poartă restul.</p>
     <p>Nici criptarea nu este distribuită uniform. Crește odată cu dimensiunea:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Dimensiunea lansării</th><th class="num">Parte din toate datele</th><th class="num">Stocate</th><th class="num">Criptate</th></tr>
       <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>peste 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Descărcările obișnuite sunt aproape întotdeauna arhive stocate simple. La cele mari este ca datul cu banul între stocate și criptate. Mai jos este cum tratează nzbfast fiecare caz.</p>
   </div>
 </section>
@@ -247,7 +247,7 @@
         <tr><td>linie inactivă (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast termină primul dintre clienții care livrează toate cele trei sarcini utile. ¹ Coloana rustnzb este un abandon, nu un rezultat: ceasul său s-a oprit primul (138 s pe 1.3.4, 125 s pe actualul 1.3.9, rulat ca să îi dăm cea mai bună șansă) pentru că a livrat sarcina de 35 GB ca volume ofuscate brute marcate <i>Completed</i> - fără redenumire, fără extragere, în ambele versiuni (vedeți secțiunea de urmărire de mai jos). O linie de sosire pe care nu a trecut-o nu poate fi comparată cu a clienților care au trecut-o, așa că fiecare celulă din acea coloană este marcată drept nevalidă, nu rapidă. SABnzbd lasă din nou linia <b>întunecată 63% din cursă</b> în timpul post-procesării seriale - singura cifră de aici care a rămas stabilă în fiecare variantă a acestui tabel. NZBGet nu stă niciodată degeaba, dar plătește extragerea concurentă în timpul său final. ² Propria noastră proporție de inactivitate este onestă și actuală, și este cifra care s-a mișcat cel mai mult: doi dintre cei șase furnizori au fost indisponibili în această rundă, iar suprapunerea între sarcini are nevoie de un server sănătos și liber pe care să ruleze sarcina următoare. Cu toți șase sănătoși, varianta anterioară măsura 2% inactivitate. Motorul se retrage acum și o spune, în loc să pornească sarcina următoare pe un server care nu poate răspunde - o schimbare pe care această rundă a provocat-o, pentru că prima măsurătoare îl arăta construind pe unul mort. În varianta de reziliență (o sarcină cu anteturi RAR criptate, rundă mai veche), coada SABnzbd s-a blocat pe sarcina criptată și doar 1 din 3 sarcini a ajuns vreodată la capăt; nzbfast a parcat-o cu un mesaj clar și a terminat restul.</p>
+    <p class="note" style="text-align:start">nzbfast termină primul dintre clienții care livrează toate cele trei sarcini utile. ¹ Coloana rustnzb este un abandon, nu un rezultat: ceasul său s-a oprit primul (138 s pe 1.3.4, 125 s pe actualul 1.3.9, rulat ca să îi dăm cea mai bună șansă) pentru că a livrat sarcina de 35 GB ca volume ofuscate brute marcate <i>Completed</i> - fără redenumire, fără extragere, în ambele versiuni (vedeți secțiunea de urmărire de mai jos). O linie de sosire pe care nu a trecut-o nu poate fi comparată cu a clienților care au trecut-o, așa că fiecare celulă din acea coloană este marcată drept nevalidă, nu rapidă. SABnzbd lasă din nou linia <b>întunecată 63% din cursă</b> în timpul post-procesării seriale - singura cifră de aici care a rămas stabilă în fiecare variantă a acestui tabel. NZBGet nu stă niciodată degeaba, dar plătește extragerea concurentă în timpul său final. ² Propria noastră proporție de inactivitate este onestă și actuală, și este cifra care s-a mișcat cel mai mult: doi dintre cei șase furnizori au fost indisponibili în această rundă, iar suprapunerea între sarcini are nevoie de un server liber pe care să ruleze sarcina următoare - această măsurătoare a surprins motorul construind sarcina următoare pe unul mort, iar remedierea care a urmat face ceva mai bun decât să se retragă: când fiecare server liber refuză să răspundă, motorul împrumută o felie limitată de conexiuni de la serverele ocupate și păstrează suprapunerea. Retestat în anduranță pe 2 august 2026, în aceeași stare cu furnizori căzuți: golurile din mijlocul rulării care alcătuiau această celulă au dispărut (49 s de inactivitate între sarcini atunci, sub 6 s acum), cu sarcina următoare mergând în întregime pe conexiuni împrumutate. În varianta de reziliență (o sarcină cu anteturi RAR criptate, rundă mai veche), coada SABnzbd s-a blocat pe sarcina criptată și doar 1 din 3 sarcini a ajuns vreodată la capăt; nzbfast a parcat-o cu un mesaj clar și a terminat restul.</p>
   </div>
 </section>
 
@@ -297,30 +297,50 @@
     arhivă store, o scară de straturi, un lanț de parole. Această rundă notează ce rămâne pe seama
     operatorului. <b>auto</b> înseamnă fiecare payload extras, identic la octet, fără nicio
     intervenție; <b>manual</b> înseamnă că clientul a raportat succes, dar a lăsat o arhivă
-    interioară în directorul de ieșire, să o deschizi tu.</p>
+    interioară în directorul de ieșire, să o deschizi tu. Rulat din nou pe 2 august 2026 pe
+    versiunea curentă, acum cu cinci clienți.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>forma</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>forma</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>RAR store într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>RAR comprimat într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>7z într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>scară pe 5 niveluri, 6 payload-uri</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td></tr>
-        <tr><td>lanț de parole, 3 niveluri criptate</td><td class="win">auto · 3/3</td><td class="bad">cere o parolă</td><td class="bad">cere o parolă</td><td class="bad">a eșuat</td></tr>
-        <tr><td><b>auto-finalizare, toate cele zece forme</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>RAR store într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>RAR comprimat într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>7z într-un RAR store</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>scară pe 5 niveluri, 6 payload-uri</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>deteriorată la toate cele trei niveluri</td><td class="win">auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>lanț de parole, 3 niveluri criptate</td><td class="win">auto · 3/3</td><td class="bad">a renunțat (timeout)</td><td class="bad">cere o parolă</td><td class="bad">cere o parolă</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>auto-finalizare, toate cele zece forme</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Montaj loopback, corpus generat de mașină, toți cei
-    patru clienți pe aceeași mașină, notare după hash-ul conținutului, așa că un client care
+    cinci clienți pe aceeași mașină, notare după hash-ul conținutului, așa că un client care
     redenumește payload-ul tot primește credit. Pentru că straturile interioare sunt dezimbricate
     din mers, nzbfast ține pe disc o singură copie de ~1.5 GB, acolo unde clienții care scriu pe
-    disc și despachetează țin ~3 GB, și termină aceste probe în 1–2 s față de 4–8 s. La lanțul de
+    disc și despachetează țin ~3 GB, și termină aceste probe în 1–4 s față de 4–10 s. La lanțul de
     parole, parola fiecărui strat vine într-un fișier pe care îl extrage stratul de deasupra:
     nzbfast îl citește și deblochează toate cele trei niveluri; ceilalți se opresc și așteaptă să
-    o tastezi tu. Cele două forme pe care nu le auto-finalizează sunt notate dinadins cu asprime:
-    o scară pe 10 niveluri dincolo de plafonul implicit de adâncime și o postare deteriorată la
-    toate cele trei niveluri. Pe ambele recuperează mai multe payload-uri decât oricare alt client,
-    dar iese cu cod diferit de zero în loc să numească succes un job parțial, așa că ambele
-    contează aici ca eșecuri.</p>
+    o tastezi tu. Nou față de varianta anterioară: postarea deteriorată la toate cele trei
+    niveluri ale ei se termină acum fără ajutor - reparare PAR2 exterioară, apoi o reparare PAR2
+    a stratului din mijloc din volumele împachetate alături de el, apoi propria înregistrare de
+    recuperare a arhivei celei mai interioare, o singură trecere, 4 secunde. Singura formă rămasă
+    este scara pe 10 niveluri, iar aceea este o setare, nu o limită: la plafonul implicit de
+    adâncime de 5, jobul se încheie curat cu 9 din 11 payload-uri și cu stratul cel mai adânc
+    lăsat ca arhivă sănătoasă - tot mai mult decât recuperează oricare alt client - iar același
+    job cu <code>nested_max_depth</code> ridicat la 10 le finalizează automat pe toate 11.
+    ¹ Weaver (v0.7.5, cea mai recentă versiune a sa, prima dată în acest tabel) nu a terminat
+    niciuna dintre cele zece probe, iar unde greșește se vede chiar în jurnalul său: fiecare
+    probă se încheie cu &quot;not repairable: 2013 damaged slices, only 0 recovery blocks
+    available in NZB&quot;. Ambele jumătăți ale acelei linii sunt contrazise pe acest montaj -
+    ceilalți patru clienți decodează și verifică aceleași articole identic la octet (yEnc-ul
+    corpusului poartă trailere CRC), deci datele pe care le judecă deteriorate sunt sănătoase;
+    și fiecare dintre aceste NZB-uri poartă un set PAR2 de 10% postat, deci blocurile de
+    recuperare pe care le raportează absente sunt acolo. Judecă greșit articole intacte drept
+    deteriorate, apoi nu poate găsi datele de reparare care ar fi salvat chiar și o postare cu
+    adevărat deteriorată. Două probe rămân blocate în loc să eșueze. După propria regulă a
+    acestei pagini, un client care nu produce niciodată payload-ul primește o coloană roșie,
+    nu un timp.
+    Cifra SABnzbd coboară de la 6 la 5 pentru că proba de reconstrucție doar din PAR, măsurată pe
+    acest montaj, este abandonată după 2 secunde fără nimic reconstruit; reconstrucția sa
+    anterioară de 390 s a fost pe altă mașină, iar noi notăm ce a măsurat această rundă.</p>
   </div>
 </section>
 
@@ -351,11 +371,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>client</th><th>timp până la final</th><th>conexiuni</th><th>vârf de disc</th><th>față de nzbfast</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>referință</td></tr>
-        <tr><td>Weaver (încălzit)</td><td>8 s</td><td>120 (creștere automată)</td><td>17.9 GB</td><td>1.6× mai lent</td></tr>
-        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× mai lent</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× mai lent</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× mai lent</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>referință</td></tr>
+        <tr><td>Weaver (încălzit)</td><td>11 s</td><td>120 (creștere automată)</td><td>17.9 GB</td><td>1.6× mai lent</td></tr>
+        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>2.0× mai lent</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>3.1× mai lent</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 identic)</td><td>17.6 GB</td><td>8.1× mai lent</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Remăsurat pe 31 iulie 2026</b>, același banc, același corpus, după o actualizare a sistemului de operare pe mașină. Patru clienți s-au mișcat cu una până la trei secunde; SABnzbd nu: acum ia 57 s acolo unde varianta din 24 iulie a acestui tabel consemna 14 s, reprodus de opt ori pe două variante de banc, canalizarea confirmată la 8 prin recitirea API-ului la fiecare rulare și identică la 16 conexiuni. Rezultatele sale pe etapele de fermă din alte părți ale acestei pagini nu sunt afectate, deci pare specific ratelor alimentate prin bucla locală pe sistemul de operare actual al acestei mașini; publicăm ce măsoară bancul astăzi și vom testa din nou la următoarele versiuni de sistem și de SABnzbd.</p>
@@ -392,13 +412,13 @@
       <div class="bar"><span>înainte</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
       <div class="bar me"><span>acum</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
     </div>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">înainte</th><th class="num">acum</th><th class="num">Schimbare</th></tr>
       <tr><td><b>Scris pe disc</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">jumătate</td></tr>
       <tr><td><b>Maxim de disc folosit simultan</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">cu 46 % mai puțin</td></tr>
       <tr><td><b>Pauză după descărcare</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">eliminată</td></tr>
       <tr><td>Timp total</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">cu 5,6 % mai rapid</td></tr>
-    </table>
+    </table></div>
     <p>Maximul de disc folosit simultan este acum 89,6 GB, exact dimensiunea fișierului cerut. Nu mai există niciun moment, în timpul unei descărcări criptate, în care nzbfast să aibă nevoie de loc pentru o a doua copie.</p>
     <h3>Cum arată</h3>
     <div class="shot" style="background:transparent;padding:10px">
@@ -444,29 +464,29 @@
       <thead><tr><th>formă</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">Desktop de vârf, 32 de nuclee</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 de fișiere mici</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>solid</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>repetitiv</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>mare, 4 volume</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">ieșire greșită²</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>criptat</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">fără criptare³</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>dicționar de 128 MiB</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">fără dicționar mare⁴</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 de fișiere mici</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>solid</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>repetitiv</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>mare, 4 volume</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">ieșire greșită²</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>criptat</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">fără criptare³</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>dicționar de 128 MiB</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">fără dicționar mare⁴</td><td class="no">nesuportat¹</td></tr>
         <tr><td colspan="7" class="grp">Desktop mai vechi, 20 de nuclee</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
         <tr><td>400 de fișiere mici</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>solid</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>repetitiv</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>mare, 4 volume</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">ieșire greșită²</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>criptat</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">fără criptare³</td><td class="no">nesuportat¹</td></tr>
-        <tr><td>dicționar de 128 MiB</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">fără dicționar mare⁴</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>solid</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>repetitiv</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>mare, 4 volume</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">ieșire greșită²</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>criptat</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">fără criptare³</td><td class="no">nesuportat¹</td></tr>
+        <tr><td>dicționar de 128 MiB</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">fără dicționar mare⁴</td><td class="no">nesuportat¹</td></tr>
         <tr><td colspan="7" class="grp">Laptop, 14 nuclee / 20 de fire, Windows⁵</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">fără CLI⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 de fișiere mici</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">fără CLI⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>solid</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">fără CLI⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>repetitiv</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">fără CLI⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>mare, 4 volume</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">fără CLI⁵</td><td class="no">ieșire greșită²</td><td>4.21</td></tr>
-        <tr><td>criptat</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">fără CLI⁵</td><td class="no">fără criptare³</td><td>4.13</td></tr>
-        <tr><td>dicționar de 128 MiB</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">fără CLI⁵</td><td class="no">fără dicționar mare⁴</td><td>2.51</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">fără CLI⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 de fișiere mici</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">fără CLI⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>solid</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">fără CLI⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>repetitiv</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">fără CLI⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>mare, 4 volume</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">fără CLI⁵</td><td class="no">ieșire greșită²</td><td>4.21</td></tr>
+        <tr><td>criptat</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">fără CLI⁵</td><td class="no">fără criptare³</td><td>4.13</td></tr>
+        <tr><td>dicționar de 128 MiB</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">fără CLI⁵</td><td class="no">fără dicționar mare⁴</td><td>2.51</td></tr>
         <tr><td colspan="7" class="grp">Laptop, Apple M5 Max⁶</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">fără cursă⁶</td><td class="no">fără cursă⁶</td><td class="no">fără cursă⁶</td></tr>
         <tr><td>400 de fișiere mici</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">fără cursă⁶</td><td class="no">fără cursă⁶</td><td class="no">fără cursă⁶</td></tr>
@@ -505,27 +525,27 @@
       </tr></thead>
       <tbody>
         <tr><td rowspan="4">niciuna<br><span class="note">verificare curată</span></td>
-            <td>desktop, 32 de nuclee</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">doar Windows</td></tr>
-        <tr><td>desktop, 20 de nuclee</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">doar Windows</td></tr>
-        <tr><td>laptop, 14 nuclee</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+            <td>desktop, 32 de nuclee</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">doar Windows</td></tr>
+        <tr><td>desktop, 20 de nuclee</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">doar Windows</td></tr>
+        <tr><td>laptop, 14 nuclee</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">fără cursă</td><td>2.32</td><td class="no">doar Windows</td></tr>
 
         <tr><td rowspan="4">3 blocuri<br><span class="note">câteva articole moarte</span></td>
-            <td>desktop, 32 de nuclee</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">doar Windows</td></tr>
-        <tr><td>desktop, 20 de nuclee</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">doar Windows</td></tr>
-        <tr><td>laptop, 14 nuclee</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+            <td>desktop, 32 de nuclee</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">doar Windows</td></tr>
+        <tr><td>desktop, 20 de nuclee</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">doar Windows</td></tr>
+        <tr><td>laptop, 14 nuclee</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">fără cursă</td><td>3.64</td><td class="no">doar Windows</td></tr>
 
         <tr><td rowspan="4">101 blocuri</td>
-            <td>desktop, 32 de nuclee</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">doar Windows</td></tr>
-        <tr><td>desktop, 20 de nuclee</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">doar Windows</td></tr>
-        <tr><td>laptop, 14 nuclee</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+            <td>desktop, 32 de nuclee</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">doar Windows</td></tr>
+        <tr><td>desktop, 20 de nuclee</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">doar Windows</td></tr>
+        <tr><td>laptop, 14 nuclee</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">fără cursă</td><td>4.17</td><td class="no">doar Windows</td></tr>
 
         <tr><td rowspan="4">1.500 de blocuri<br><span class="note">91 % din recuperare folosit</span></td>
-            <td>desktop, 32 de nuclee</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">doar Windows</td></tr>
-        <tr><td>desktop, 20 de nuclee</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">doar Windows</td></tr>
-        <tr><td>laptop, 14 nuclee</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+            <td>desktop, 32 de nuclee</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">doar Windows</td></tr>
+        <tr><td>desktop, 20 de nuclee</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">doar Windows</td></tr>
+        <tr><td>laptop, 14 nuclee</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">fără cursă</td><td>6.91</td><td class="no">doar Windows</td></tr>
       </tbody>
     </table></div>
@@ -536,26 +556,27 @@
 
     <p class="note" style="text-align:start"><b>Deteriorarea ușoară este cazul care contează.</b> O mână de articole eșuate este mult mai tipică decât 101 blocuri moarte, darămite 1.500. Cea mai mare parte a unei reparații ușoare nu este deloc matematica Reed-Solomon, ci citirea și calculul MD5 al unui gigabyte, și de aceea rândul cu 3 blocuri urmează rândul verificării curate și nu pe cele ale reparațiilor.</p>
 
-    <p class="note" style="text-align:start"><b>Rândul cel mai greu era cel pe care îl pierdeam, iar ediția anterioară a acestei pagini spunea că soluția va fi „un alt algoritm și nu o trecere de reglaj”. Acesta este acel algoritm.</b> Acel ultim nivel deteriorează 1.500 de blocuri pe toate cele 21 de volume și consumă circa 91 % din datele de recuperare, iar acolo aritmetica Reed-Solomon, și nu hashingul sau discul, devine aproape tot lucrul. Versiunea publicată calculează acum cele mai grele reparații cu o transformare din teoria numerelor în locul plierii clasice pe corp Galois - aceeași matematică, evaluată într-o formă care scalează mult mai bine la numere mari de blocuri - și fiecare rând greu s-a răsturnat: de 2.6× înaintea compilării optimizate pe desktopul cu 20 de nuclee, care era cea mai strânsă înfrângere a noastră, și de 2.5× pe laptopul unde era cea mai urâtă. Fiecare rulare este verificată ulterior față de hash-urile fișierelor, iar o reparație care ar pica verificarea ar fi refăcută pe calea clasică; pe toate probele de pe această pagină, niciuna nu a picat. Deteriorarea ușoară rulează în continuare pe calea clasică, de aceea celelalte rânduri s-au mișcat abia perceptibil.</p>
+    <p class="note" style="text-align:start"><b>Rândul cel mai greu era cel pe care îl pierdeam, iar ediția anterioară a acestei pagini spunea că soluția va fi „un alt algoritm și nu o trecere de reglaj”. Acesta este acel algoritm.</b> Acel ultim nivel deteriorează 1.500 de blocuri pe toate cele 21 de volume și consumă circa 91 % din datele de recuperare, iar acolo aritmetica Reed-Solomon, și nu hashingul sau discul, devine aproape tot lucrul. Versiunea publicată calculează acum cele mai grele reparații cu o transformare din teoria numerelor în locul plierii clasice pe corp Galois - aceeași matematică, evaluată într-o formă care scalează mult mai bine la numere mari de blocuri - și fiecare rând greu s-a răsturnat: de 2.7× înaintea compilării optimizate pe desktopul cu 20 de nuclee, care era cea mai strânsă înfrângere a noastră, și de 2.7× pe laptopul unde era cea mai urâtă. Deteriorarea ușoară rulează în continuare pe calea clasică, de aceea celelalte rânduri s-au mișcat abia perceptibil. Pe laptopul cu Windows înseamnă totodată de 2.2× înaintea MultiPar. Transformarea se plătește abia peste circa 512 blocuri deteriorate, sub acest prag dispecerul nu o folosește.</p>
 
-    <p class="note" style="text-align:start"><b>O cale mai rapidă merită avută doar dacă nu poate greși.</b> Ambele căi calculează aceeași mărime și sunt identice bit cu bit prin construcție, iar fiecare reparație de pe această pagină a fost condiționată de potrivirea fișierelor reconstruite cu setul intact: 228 de reparații cronometrate pe mașinile din această rundă, zero nepotriviri. Versiunea livrată nu se sprijină pe acest istoric. Fiecare reparație își verifică propria ieșire față de hash-urile fișierelor, iar una care ar eșua ar fi refăcută automat pe calea clasică, ar consemna divergența și ar păstra calea clasică pentru restul acelei rulări. Setarea se află în panou ca <b>Mod PAR rapid</b> dacă preferați să nu o aveți deloc, iar mașinile cu prea puțină memorie pentru ea o refuză singure în loc să încerce și să eșueze.</p>
+    <p class="note" style="text-align:start"><b>O cale mai rapidă merită avută doar dacă nu poate greși.</b> Ambele căi calculează aceeași mărime și sunt identice bit cu bit prin construcție, iar fiecare reparație de pe această pagină a fost condiționată de potrivirea fișierelor reconstruite cu setul intact: 228 de reparații cronometrate pe mașinile din această rundă, zero nepotriviri. Versiunea livrată nu se sprijină pe acest istoric. Fiecare reparație își verifică propria ieșire față de hash-urile fișierelor, iar una care ar eșua ar fi refăcută automat pe calea clasică, ar consemna divergența și ar păstra calea clasică pentru restul acelei rulări. Setarea se află în panou ca <b>Mod PAR rapid</b> dacă preferați să nu o aveți deloc, iar mașinile cu prea puțină memorie pentru ea o refuză singure în loc să încerce și să eșueze. Remăsurat pe 2 august pe compilarea actuală: cele două desktopuri se încadrează la câteva procente de acest tabel, iar cu <b>modul PAR rapid</b> oprit cel cu 20 de nuclee ajunge exact pe înfrângerea pe care o publica înainte, ceea ce arată că avansul ține de metodă, nu de condiții.</p>
 
     <p class="note" style="text-align:start"><b>Rândul laptopului avea nevoie de o corecție, și e în defavoarea noastră.</b> Windows retrogradează munca de fundal susținută pe nucleele sale de eficiență după câteva secunde. Demonul nostru se dezabonează de la asta la pornire și niciuna dintre celelalte unelte nu poate, așa că o versiune anterioară a acestei pagini a publicat timpii lor limitați ca și cum ar fi fost ai uneltelor înseși. Rulând din nou acea mașină cu fiecare unealtă ridicată la prioritate înaltă, se mișcă tot plutonul: la cel mai greu nivel de deteriorare <code>par2-turbo</code> trece de la 22.4 s la 6.41, iar <code>rarpar</code> de la 59.2 s la 14.4, iar pentru o ediție a acestei pagini asta a transformat rândul din unul al nostru în unul pe care îl pierdeam. Tot rândul laptopului este măsurat astfel acum - corecția rămâne chiar dacă rândul a fost între timp recâștigat prin schimbarea de algoritm de mai sus, fiindcă timpii plutonului pe acea mașină sunt onești doar cu limitarea ridicată.</p>
 
     <h3 style="margin:44px 0 4px">Înregistrări de recuperare RAR: reparare fără PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Când PAR2 nu poate acoperi deteriorarea, înregistrarea de recuperare din interiorul fișierului RAR este ultima linie de apărare. Până la 1.0.8 a noastră eșua la orice arhivă de peste circa 13 MB, deci această etapă nu putea fi rulată deloc. Deteriorarea constă în trei goluri de 3.000 de octeți la 20 %, 50 % și 80 % din regiunea protejată. Ambele unelte au produs o ieșire identică la octet cu fișierul intact, iar a noastră este identică la octet cu ce scrie <code>rar r</code> însuși. Cel mai bun din trei, desktop cu 32 de nuclee.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Când PAR2 nu poate acoperi deteriorarea, înregistrarea de recuperare din interiorul fișierului RAR este ultima linie de apărare. Până la 1.0.8 a noastră eșua la orice arhivă de peste circa 13 MB, deci această etapă nu putea fi rulată deloc. Deteriorarea constă în trei goluri de 3.000 de octeți la 20 %, 50 % și 80 % din regiunea protejată. Ambele unelte au produs o ieșire identică la octet cu fișierul intact, iar a noastră este identică la octet cu ce scrie <code>rar r</code> însuși. Cel mai bun din trei, desktop cu 32 de nuclee. Ambele unelte au fost remăsurate împreună pe 2 august.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>arhivă</th><th>nzbfast</th><th>reparare rar 7.23</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× mai rapid</td></tr>
-        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× mai rapid</td></tr>
-        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× mai rapid</td></tr>
-        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× mai rapid</td></tr>
-        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× mai rapid</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× mai rapid</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× mai rapid</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× mai rapid</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× mai rapid</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× mai rapid</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">O versiune anterioară a acestei pagini arăta rândul de 512 MB ca pe o înfrângere și îl explica drept prețul parcurgerii volumului pe bucăți în loc să fie ținut întreg în memorie. Explicația era corectă atunci și este acum depășită: costul era un CRC64 bit cu bit pe calea de reparare, înlocuit cu unul bazat pe tabelă, iar înfrângerea a plecat odată cu el. Nu mai există un punct de încrucișare, iar setul de lucru limitat s-a păstrat. Rândul de 2 GB este aici pentru că volumele pe care un demon le întâlnește cu adevărat au 8 GB până la 20 GB, nu 512 MB, iar o etapă care se oprește sub intervalul real nu e mare test.</p>
-    <p class="note" style="text-align:start">M5 Max repetă tiparul, rulat pe 31 iulie cu același corpus și aceleași criterii: 0.050 / 0.066 / 0.171 / 0.581 s față de 0.211 / 0.335 / 0.751 / 1.735 ale <code>rar r</code> între 16 MB și 512 MB - de la 3.0&times; la 5.1&times; mai rapid; dimensiunea de 2 GB nu a fost rulată pe acea mașină.</p>
+    <p class="note" style="text-align:start"><b>Ce s-a schimbat în această versiune și martorul care o arată.</b> Aflarea blocurilor deteriorate devenise cea mai mare etapă a acestei reparații - mai mare decât aritmetica reparării în sine - și rula pe un singur fir, citind 64 KB din fiecare grup de-a lungul fișierului, o dată pentru fiecare grup. Acum face o singură trecere secvențială în ordinea fișierului, cu sumele de control pe fragment calculate în paralel, iar volumul reparat este clonat în loc să fie copiat acolo unde sistemul de fișiere poate face asta. Numai detecția a scăzut de la circa 300 ms la 18 ms pe arhiva de 512 MB, iar asta explică cea mai mare parte a schimbării de mai sus. Martorul este coloana de lângă a noastră: <code>rar r</code> a fost remăsurat în aceleași runde, pe aceeași mașină, și a revenit la câteva procente de timpii săi anteriori, deci schimbarea diferenței ne aparține, nu standului de test.</p>
+    <p class="note" style="text-align:start">M5 Max repetă tiparul, rulat pe 31 iulie cu același corpus și aceleași criterii: 0.050 / 0.066 / 0.171 / 0.581 s față de 0.211 / 0.335 / 0.751 / 1.735 ale <code>rar r</code> între 16 MB și 512 MB - de la 3.0&times; la 5.1&times; mai rapid; dimensiunea de 2 GB nu a fost rulată pe acea mașină. Aceste cifre sunt anterioare rescrierii detecției descrise mai sus, deci aparțin versiunii mai vechi și stau aici ca a doua mașină, nu ca valoare actuală.</p>
     <p class="note" style="text-align:start"><code>rarpar</code> al lui Weaver lipsește doar din acest tabel, și nu din alegere proprie: nu implementează această reparare. Rugat să repare una dintre aceste arhive răspunde <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> și lasă fișierul deteriorat. Apare în toate celelalte comparații de pe această pagină: toate cele patru etape PAR2 de mai sus, toate cele șapte forme de extragere de mai sus, și etapa volumelor de recuperare imediat de mai jos, care este exact treaba pe care spune că o face, și pe care o câștigă.</p>
 
     <h3 style="margin:44px 0 4px">Volume de recuperare: reconstruirea unor fișiere <code>.rev</code> lipsă cu totul</h3>
@@ -704,21 +725,21 @@
     reproductibil de 9.68&nbsp;GB servit din RAM (Europa M1 Ultra) și lansarea 4K de ~35&nbsp;GB cu
     nume de tip hash, pe cei 6 provideri obișnuiți.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>9.68 GB din RAM</th><th class="num">timp până la final</th><th class="num">CPU</th><th class="num">memorie de vârf (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 provideri</th><th class="num">timp până la final</th><th class="num">CPU</th><th class="num">memorie de vârf (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>Ce s-a mișcat: pre-versiunea NZBGet își taie costul de CPU cu circa o treime și memoria de
     vârf cu până la jumătate, la timpi de final neschimbați - muncă reală de eficiență (o corecție

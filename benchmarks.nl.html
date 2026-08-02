@@ -78,10 +78,10 @@
     </ul>
     <p>Dat veranderde waar we aan werken. Het heeft weinig zin een compressiepad te optimaliseren dat 1,4 % van de data draagt, dus optimaliseerden we de twee die de rest dragen.</p>
     <p>Ook versleuteling is niet gelijkmatig verdeeld. Ze neemt toe met de omvang:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Releaseomvang</th><th class="num">Aandeel van alle data</th><th class="num">Opgeslagen</th><th class="num">Versleuteld</th></tr>
       <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>meer dan 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Gewone downloads zijn bijna altijd eenvoudige opgeslagen archieven. Bij de grote is het kop of munt tussen opgeslagen en versleuteld. Hieronder staat hoe nzbfast beide behandelt.</p>
   </div>
 </section>
@@ -244,7 +244,7 @@
         <tr><td>lijn inactief (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast is als eerste klaar onder de clients die alle drie de payloads leveren. ¹ De kolom van rustnzb is een opgave, geen resultaat: zijn klok stopte het eerst (138 s op 1.3.4, 125 s op het huidige 1.3.9, gereden om het zijn beste kans te geven) omdat het de taak van 35 GB afleverde als ruwe versluierde volumes gemarkeerd als <i>Completed</i> - geen hernoeming, geen uitpakken, in beide versies (zie het volgdeel hieronder). Een finish die het niet haalde valt niet te vergelijken met clients die dat wel deden, dus elke cel in die kolom is als ongeldig gemarkeerd in plaats van als snel. SABnzbd laat de lijn opnieuw <b>63% van de rit donker</b> tijdens seriële nabewerking - het enige cijfer hier dat stabiel is gebleven in elke versie van deze tabel. NZBGet ligt nooit stil maar betaalt het gelijktijdige uitpakken in zijn eindtijd. ² Ons eigen aandeel stilstand is eerlijk en actueel, en het is het cijfer dat het meest is bewogen: twee van de zes providers waren deze ronde niet beschikbaar, en overlap tussen taken heeft een gezonde, vrije server nodig om de volgende taak op te draaien. Met alle zes gezond mat de vorige versie 2% stilstand. De motor treedt nu terug en zegt het, in plaats van de volgende taak te starten op een server die niet kan antwoorden - een verandering die deze ronde heeft uitgelokt, omdat de eerste meting liet zien hoe hij op een dode server voortbouwde. In de veerkrachtvariant (één taak met versleutelde RAR-headers, oudere ronde) liep de wachtrij van SABnzbd vast op de versleutelde taak en werd maar 1 van de 3 taken ooit klaar; nzbfast parkeerde hem met een duidelijke melding en maakte de rest af.</p>
+    <p class="note" style="text-align:start">nzbfast is als eerste klaar onder de clients die alle drie de payloads leveren. ¹ De kolom van rustnzb is een opgave, geen resultaat: zijn klok stopte het eerst (138 s op 1.3.4, 125 s op het huidige 1.3.9, gereden om het zijn beste kans te geven) omdat het de taak van 35 GB afleverde als ruwe versluierde volumes gemarkeerd als <i>Completed</i> - geen hernoeming, geen uitpakken, in beide versies (zie het volgdeel hieronder). Een finish die het niet haalde valt niet te vergelijken met clients die dat wel deden, dus elke cel in die kolom is als ongeldig gemarkeerd in plaats van als snel. SABnzbd laat de lijn opnieuw <b>63% van de rit donker</b> tijdens seriële nabewerking - het enige cijfer hier dat stabiel is gebleven in elke versie van deze tabel. NZBGet ligt nooit stil maar betaalt het gelijktijdige uitpakken in zijn eindtijd. ² Ons eigen aandeel stilstand is eerlijk en actueel, en het is het cijfer dat het meest is bewogen: twee van de zes providers waren deze ronde niet beschikbaar, en overlap tussen taken heeft een vrije server nodig om de volgende taak op te draaien - deze meting betrapte de motor erop dat hij de volgende taak op een dode server opbouwde, en de fix die volgde doet iets beters dan terugtreden: wanneer elke vrije server weigert te antwoorden, leent de motor een begrensd deel van de verbindingen van de bezige servers en behoudt de overlap. Opnieuw doorgemeten op 2 augustus 2026 in dezelfde toestand met dode provider: de gaten halverwege de rit die deze cel vormden zijn weg (toen 49 s stilstand tussen taken, nu onder de 6 s), waarbij de vervolgtaak volledig op geleende verbindingen draait. In de veerkrachtvariant (één taak met versleutelde RAR-headers, oudere ronde) liep de wachtrij van SABnzbd vast op de versleutelde taak en werd maar 1 van de 3 taken ooit klaar; nzbfast parkeerde hem met een duidelijke melding en maakte de rest af.</p>
   </div>
 </section>
 
@@ -293,28 +293,44 @@
     store-archief, een ladder van lagen, een wachtwoordketen. Deze ronde beoordeelt wat er voor de operator
     overblijft. <b>auto</b> betekent elke payload uitgepakt, byte-identiek, zonder ook maar iets te doen;
     <b>handmatig</b> betekent dat de client succes meldde maar een binnenste archief in de uitvoermap liet
-    liggen om zelf te openen.</p>
+    liggen om zelf te openen. Opnieuw gereden op 2 augustus 2026 op de huidige build, nu vijf clients.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>vorm</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>vorm</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>store-RAR in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td></tr>
-        <tr><td>gecomprimeerde RAR in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td></tr>
-        <tr><td>7z in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td></tr>
-        <tr><td>ladder van 5 niveaus, 6 payloads</td><td class="win">auto · 6/6</td><td class="bad">handmatig · 3/6</td><td class="bad">handmatig · 1/6</td><td class="bad">handmatig · 1/6</td></tr>
-        <tr><td>wachtwoordketen, 3 versleutelde niveaus</td><td class="win">auto · 3/3</td><td class="bad">vraagt om een wachtwoord</td><td class="bad">vraagt om een wachtwoord</td><td class="bad">mislukt</td></tr>
-        <tr><td><b>automatisch voltooid, alle tien vormen</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>store-RAR in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td><td class="bad">DNF¹</td></tr>
+        <tr><td>gecomprimeerde RAR in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td><td class="bad">DNF¹</td></tr>
+        <tr><td>7z in een store-RAR</td><td class="win">auto</td><td>auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td><td class="bad">DNF¹</td></tr>
+        <tr><td>ladder van 5 niveaus, 6 payloads</td><td class="win">auto · 6/6</td><td class="bad">handmatig · 3/6</td><td class="bad">handmatig · 1/6</td><td class="bad">handmatig · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>beschadigd op alle drie de niveaus</td><td class="win">auto</td><td class="bad">handmatig</td><td class="bad">handmatig</td><td class="bad">handmatig</td><td class="bad">DNF¹</td></tr>
+        <tr><td>wachtwoordketen, 3 versleutelde niveaus</td><td class="win">auto · 3/3</td><td class="bad">gaf op (time-out)</td><td class="bad">vraagt om een wachtwoord</td><td class="bad">vraagt om een wachtwoord</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>automatisch voltooid, alle tien vormen</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Loopback-rig, machinaal gegenereerd corpus, alle vier de clients
+    <p class="note" style="text-align:start">Loopback-rig, machinaal gegenereerd corpus, alle vijf de clients
     op dezelfde machine, beoordeeld op content-hash, dus een client die de payload hernoemt krijgt gewoon de
     punten. Doordat binnenste lagen on-the-fly worden ontnest, houdt nzbfast één kopie van ~1.5 GB op schijf
-    vast waar wegschrijf-en-uitpak-clients ~3 GB vasthouden, en maakt het deze legs af in 1–2 s tegenover
-    4–8 s. Bij de wachtwoordketen zit het wachtwoord van elke laag in een bestand dat de laag erboven uitpakt:
+    vast waar wegschrijf-en-uitpak-clients ~3 GB vasthouden, en maakt het deze legs af in 1–4 s tegenover
+    4–10 s. Bij de wachtwoordketen zit het wachtwoord van elke laag in een bestand dat de laag erboven uitpakt:
     nzbfast leest het en ontgrendelt alle drie de niveaus; de anderen stoppen en wachten tot jij het intypt.
-    De twee vormen die hij niet automatisch afmaakt worden met opzet streng beoordeeld: een ladder van 10
-    niveaus voorbij z'n standaard dieptelimiet en een post die op alle drie de niveaus beschadigd is. Op beide
-    redt hij meer payloads dan welke andere client ook, maar hij eindigt met een niet-nul exitcode in plaats
-    van een half werk succes te noemen, dus beide tellen hier als mislukkingen.</p>
+    Nieuw sinds de vorige versie: de post die op alle drie z'n niveaus beschadigd is wordt nu zonder hulp
+    afgemaakt - PAR2-reparatie van de buitenlaag, dan een PAR2-reparatie van de middelste laag uit volumes
+    die ernaast zijn meegepakt, dan het eigen herstelrecord van het binnenste archief, in één doorgang,
+    4 seconden. De ene vorm die overblijft is de ladder van 10 niveaus, en dat is een instelling, geen limiet:
+    op de standaard dieptelimiet van 5 eindigt de taak netjes met 9 van de 11 payloads en de diepste laag
+    achtergelaten als een gezond archief - nog altijd meer dan welke andere client ook redt - en dezelfde
+    taak met <code>nested_max_depth</code> verhoogd naar 10 voltooit alle 11 automatisch. ¹ Weaver (v0.7.5,
+    zijn nieuwste, voor het eerst in deze tabel) voltooide geen van de tien legs, en waar het misgaat is
+    zichtbaar in zijn eigen log: elke leg eindigt met &quot;not repairable: 2013 damaged slices, only 0
+    recovery blocks available in NZB&quot;. Beide helften van die regel worden op deze rig weersproken -
+    de vier andere clients decoderen en verifiëren dezelfde artikelen byte-identiek (de yEnc van het corpus
+    draagt CRC-trailers), dus de data die hij als beschadigd beoordeelt is gezond; en elk van deze NZB's
+    draagt een meegeposte PAR2-set van 10%, dus de herstelblokken die hij als afwezig meldt zijn er. Hij
+    beoordeelt intacte artikelen ten onrechte als beschadigd, en kan vervolgens de reparatiedata niet vinden
+    die zelfs een echt beschadigde post had gered. Twee legs blijven hangen in plaats van te falen. Volgens
+    de eigen regel van deze pagina krijgt een client die de payload nooit oplevert een rode kolom, geen tijd. De telling van SABnzbd gaat van 6 naar 5 omdat
+    de leg met reconstructie uit alleen PAR-bestanden, gemeten op deze rig, na 2 seconden wordt opgegeven
+    zonder dat er iets is herbouwd; zijn eerdere herbouw van 390 s was op een andere machine, en wij
+    beoordelen wat deze ronde heeft gemeten.</p>
   </div>
 </section>
 
@@ -345,11 +361,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>client</th><th>tijd tot klaar</th><th>verbindingen</th><th>piek op schijf</th><th>vs nzbfast</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>referentie</td></tr>
-        <tr><td>Weaver (warm)</td><td>8 s</td><td>120 (auto-ramp)</td><td>17.9 GB</td><td>1.6× trager</td></tr>
-        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× trager</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× trager</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× trager</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>referentie</td></tr>
+        <tr><td>Weaver (warm)</td><td>11 s</td><td>120 (auto-ramp)</td><td>17.9 GB</td><td>1.6× trager</td></tr>
+        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>2.0× trager</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>3.1× trager</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 identiek)</td><td>17.6 GB</td><td>8.1× trager</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Opnieuw gemeten op 31 juli 2026</b>, dezelfde opstelling, hetzelfde corpus, na een besturingssysteemupdate op de machine. Vier clients bewogen een seconde of drie; SABnzbd niet: het doet er nu 57 s over waar de versie van 24 juli van deze tabel 14 s noteerde, acht keer herhaald over twee varianten van de opstelling, de pijplijndiepte bij elke run via de API bevestigd op 8, en gelijk bij 16 verbindingen. Zijn resultaten op de farm-etappes elders op deze pagina zijn niet geraakt, dus dit lijkt eigen aan via de lokale lus gevoede snelheden op het huidige besturingssysteem van deze machine; we publiceren wat de opstelling vandaag meet en testen opnieuw bij de volgende versies van het besturingssysteem en van SABnzbd.</p>
@@ -386,13 +402,13 @@
       <div class="bar"><span>voorheen</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
       <div class="bar me"><span>nu</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
     </div>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">voorheen</th><th class="num">nu</th><th class="num">Verschil</th></tr>
       <tr><td><b>Naar schijf geschreven</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">half zoveel</td></tr>
       <tr><td><b>Meeste schijf tegelijk in gebruik</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">46 % minder</td></tr>
       <tr><td><b>Pauze na de download</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">verdwenen</td></tr>
       <tr><td>Totale tijd</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">5,6 % sneller</td></tr>
-    </table>
+    </table></div>
     <p>De meeste schijf die tegelijk in gebruik is, bedraagt nu 89,6 GB, precies de omvang van het bestand dat u vroeg. Er is tijdens een versleutelde download geen moment meer waarop nzbfast ruimte voor een tweede kopie nodig heeft.</p>
     <h3>Hoe dat eruitziet</h3>
     <div class="shot" style="background:transparent;padding:10px">
@@ -438,29 +454,29 @@
       <thead><tr><th>vorm</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">High-end desktop, 32 cores</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 kleine bestanden</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>solide</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>repetitief</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>groot, 4 volumes</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">verkeerde uitvoer²</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>versleuteld</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">geen versleuteling³</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>woordenboek van 128 MiB</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">geen groot wdb.⁴</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 kleine bestanden</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>solide</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>repetitief</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>groot, 4 volumes</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">verkeerde uitvoer²</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>versleuteld</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">geen versleuteling³</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>woordenboek van 128 MiB</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">geen groot wdb.⁴</td><td class="no">niet ondersteund¹</td></tr>
         <tr><td colspan="7" class="grp">Oudere desktop, 20 cores</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
         <tr><td>400 kleine bestanden</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>solide</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>repetitief</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>groot, 4 volumes</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">verkeerde uitvoer²</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>versleuteld</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">geen versleuteling³</td><td class="no">niet ondersteund¹</td></tr>
-        <tr><td>woordenboek van 128 MiB</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">geen groot wdb.⁴</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>solide</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>repetitief</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>groot, 4 volumes</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">verkeerde uitvoer²</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>versleuteld</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">geen versleuteling³</td><td class="no">niet ondersteund¹</td></tr>
+        <tr><td>woordenboek van 128 MiB</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">geen groot wdb.⁴</td><td class="no">niet ondersteund¹</td></tr>
         <tr><td colspan="7" class="grp">Laptop, 14 cores / 20 threads, Windows⁵</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">geen CLI⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 kleine bestanden</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">geen CLI⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>solide</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">geen CLI⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>repetitief</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">geen CLI⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>groot, 4 volumes</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">geen CLI⁵</td><td class="no">verkeerde uitvoer²</td><td>4.21</td></tr>
-        <tr><td>versleuteld</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">geen CLI⁵</td><td class="no">geen versleuteling³</td><td>4.13</td></tr>
-        <tr><td>woordenboek van 128 MiB</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">geen CLI⁵</td><td class="no">geen groot wdb.⁴</td><td>2.51</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">geen CLI⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 kleine bestanden</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">geen CLI⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>solide</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">geen CLI⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>repetitief</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">geen CLI⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>groot, 4 volumes</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">geen CLI⁵</td><td class="no">verkeerde uitvoer²</td><td>4.21</td></tr>
+        <tr><td>versleuteld</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">geen CLI⁵</td><td class="no">geen versleuteling³</td><td>4.13</td></tr>
+        <tr><td>woordenboek van 128 MiB</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">geen CLI⁵</td><td class="no">geen groot wdb.⁴</td><td>2.51</td></tr>
         <tr><td colspan="7" class="grp">Laptop, Apple M5 Max⁶</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">niet geracet⁶</td><td class="no">niet geracet⁶</td><td class="no">niet geracet⁶</td></tr>
         <tr><td>400 kleine bestanden</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">niet geracet⁶</td><td class="no">niet geracet⁶</td><td class="no">niet geracet⁶</td></tr>
@@ -499,27 +515,27 @@
       </tr></thead>
       <tbody>
         <tr><td rowspan="4">geen<br><span class="note">schone controle</span></td>
-            <td>desktop, 32 cores</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">alleen Windows</td></tr>
-        <tr><td>desktop, 20 cores</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">alleen Windows</td></tr>
-        <tr><td>laptop, 14 cores</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+            <td>desktop, 32 cores</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">alleen Windows</td></tr>
+        <tr><td>desktop, 20 cores</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">alleen Windows</td></tr>
+        <tr><td>laptop, 14 cores</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">niet geracet</td><td>2.32</td><td class="no">alleen Windows</td></tr>
 
         <tr><td rowspan="4">3 blokken<br><span class="note">een paar dode artikelen</span></td>
-            <td>desktop, 32 cores</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">alleen Windows</td></tr>
-        <tr><td>desktop, 20 cores</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">alleen Windows</td></tr>
-        <tr><td>laptop, 14 cores</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+            <td>desktop, 32 cores</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">alleen Windows</td></tr>
+        <tr><td>desktop, 20 cores</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">alleen Windows</td></tr>
+        <tr><td>laptop, 14 cores</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">niet geracet</td><td>3.64</td><td class="no">alleen Windows</td></tr>
 
         <tr><td rowspan="4">101 blokken</td>
-            <td>desktop, 32 cores</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">alleen Windows</td></tr>
-        <tr><td>desktop, 20 cores</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">alleen Windows</td></tr>
-        <tr><td>laptop, 14 cores</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+            <td>desktop, 32 cores</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">alleen Windows</td></tr>
+        <tr><td>desktop, 20 cores</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">alleen Windows</td></tr>
+        <tr><td>laptop, 14 cores</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">niet geracet</td><td>4.17</td><td class="no">alleen Windows</td></tr>
 
         <tr><td rowspan="4">1.500 blokken<br><span class="note">91 % van het herstel gebruikt</span></td>
-            <td>desktop, 32 cores</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">alleen Windows</td></tr>
-        <tr><td>desktop, 20 cores</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">alleen Windows</td></tr>
-        <tr><td>laptop, 14 cores</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+            <td>desktop, 32 cores</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">alleen Windows</td></tr>
+        <tr><td>desktop, 20 cores</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">alleen Windows</td></tr>
+        <tr><td>laptop, 14 cores</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
         <tr><td>laptop, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">niet geracet</td><td>6.91</td><td class="no">alleen Windows</td></tr>
       </tbody>
     </table></div>
@@ -530,26 +546,27 @@
 
     <p class="note" style="text-align:start"><b>Lichte schade is het geval dat ertoe doet.</b> Een handjevol mislukte artikelen is veel typischer dan 101 dode blokken, laat staan 1.500. Het meeste van een lichte reparatie is helemaal geen Reed-Solomon-wiskunde, het is een gigabyte lezen en er MD5 over doen, en daarom volgt de rij met 3 blokken die van de schone controle en niet die van de reparaties.</p>
 
-    <p class="note" style="text-align:start"><b>De zwaarste rij was degene die we verloren, en de vorige versie van deze pagina zei dat de oplossing "een ander algoritme en geen afstelronde" zou zijn. Dit is dat algoritme.</b> Dat laatste niveau beschadigt 1.500 blokken verspreid over alle 21 volumes en verbruikt ongeveer 91 % van de herstelgegevens; daar wordt de Reed-Solomon-rekenkunde, en niet het hashen of de schijf, bijna al het werk. De uitgeleverde build berekent de zwaarste reparaties nu met een getaltheoretische transformatie in plaats van de klassieke Galoisveldvouwing - dezelfde wiskunde, in een vorm die bij hoge blokaantallen veel beter schaalt - en elke zware rij kantelde: 2.6× vóór de afgestemde build op de 20-core desktop die onze nauwste nederlaag was, en 2.5× op de laptop die onze grootste was. Elke run wordt achteraf tegen de bestandshashes gecontroleerd, en een reparatie die die controle niet haalt zou opnieuw worden gedaan via het klassieke pad; over alle legs op deze pagina heen gebeurde dat geen enkele keer. Lichte schade loopt nog steeds via het klassieke pad, en daarom bewogen de andere rijen nauwelijks.</p>
+    <p class="note" style="text-align:start"><b>De zwaarste rij was degene die we verloren, en de vorige versie van deze pagina zei dat de oplossing "een ander algoritme en geen afstelronde" zou zijn. Dit is dat algoritme.</b> Dat laatste niveau beschadigt 1.500 blokken verspreid over alle 21 volumes en verbruikt ongeveer 91 % van de herstelgegevens; daar wordt de Reed-Solomon-rekenkunde, en niet het hashen of de schijf, bijna al het werk. De uitgeleverde build berekent de zwaarste reparaties nu met een getaltheoretische transformatie in plaats van de klassieke Galoisveldvouwing - dezelfde wiskunde, in een vorm die bij hoge blokaantallen veel beter schaalt - en elke zware rij kantelde: 2.7× vóór de afgestemde build op de 20-core desktop die onze nauwste nederlaag was, en 2.7× op de laptop die onze grootste was. Lichte schade loopt nog steeds via het klassieke pad, en daarom bewogen de andere rijen nauwelijks. Op de Windows-laptop is dat tegelijk 2.2× vóór MultiPar. De transformatie loont pas boven ongeveer 512 beschadigde blokken, daaronder kiest de verdeler er niet voor.</p>
 
-    <p class="note" style="text-align:start"><b>Een sneller pad is alleen de moeite waard als het niet fout kan zijn.</b> Beide paden berekenen dezelfde grootheid en zijn per constructie bit voor bit gelijk, en elke reparatie op deze pagina was afhankelijk gesteld van herbouwde bestanden die overeenkomen met de ongeschonden set: 228 geklokte reparaties over de machines van deze ronde, nul afwijkingen. De uitgeleverde build steunt niet op dat verleden. Elke reparatie controleert zijn eigen uitvoer tegen de bestandshashes, en een die zou mislukken wordt automatisch overgedaan met het klassieke pad, legt de afwijking vast en houdt het klassieke pad aan voor de rest van die run. De instelling staat in het dashboard als <b>Snelle PAR-modus</b> als u hem liever helemaal niet heeft, en machines met te weinig geheugen ervoor wijzen hem uit zichzelf af in plaats van het te proberen en te falen.</p>
+    <p class="note" style="text-align:start"><b>Een sneller pad is alleen de moeite waard als het niet fout kan zijn.</b> Beide paden berekenen dezelfde grootheid en zijn per constructie bit voor bit gelijk, en elke reparatie op deze pagina was afhankelijk gesteld van herbouwde bestanden die overeenkomen met de ongeschonden set: 228 geklokte reparaties over de machines van deze ronde, nul afwijkingen. De uitgeleverde build steunt niet op dat verleden. Elke reparatie controleert zijn eigen uitvoer tegen de bestandshashes, en een die zou mislukken wordt automatisch overgedaan met het klassieke pad, legt de afwijking vast en houdt het klassieke pad aan voor de rest van die run. De instelling staat in het dashboard als <b>Snelle PAR-modus</b> als u hem liever helemaal niet heeft, en machines met te weinig geheugen ervoor wijzen hem uit zichzelf af in plaats van het te proberen en te falen. Op 2 augustus opnieuw gemeten op de huidige build: de twee desktops komen tot op een paar procent van deze tabel uit, en met <b>Snelle PAR-modus</b> uit belandt de 20-core desktop precies weer op de nederlaag die hij eerder publiceerde, en dat laat zien dat de voorsprong in de methode zit en niet in de omstandigheden.</p>
 
     <p class="note" style="text-align:start"><b>De laptoprij had een correctie nodig, en die pakt tegen ons uit.</b> Windows schuift langdurig achtergrondwerk na een paar seconden naar zijn zuinige cores. Onze daemon meldt zich daar bij het opstarten voor af en geen van de andere gereedschappen kan dat, dus publiceerde een eerdere versie van deze pagina hun geknepen tijden alsof het de tijden van de gereedschappen zelf waren. Die machine opnieuw draaien met elk gereedschap op hoge prioriteit verschuift het hele veld: op het zwaarste schadeniveau gaat <code>par2-turbo</code> van 22.4 s naar 6.41 en <code>rarpar</code> van 59.2 s naar 14.4, en één versie van deze pagina lang veranderde de rij die van ons was daardoor in een die we verloren. De hele laptoprij is nu zo gemeten - de correctie blijft staan ook al is de rij inmiddels teruggewonnen door de algoritmewijziging hierboven, want de tijden van het veld op die machine zijn alleen eerlijk met de rem eraf.</p>
 
     <h3 style="margin:44px 0 4px">RAR-herstelrecords: repareren zonder PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Wanneer PAR2 de schade niet kan dekken, is het herstelrecord in het RAR-bestand zelf de laatste verdedigingslinie. Tot 1.0.8 faalde het onze op elk archief boven ongeveer 13 MB, dus deze etappe kon helemaal niet gereden worden. De schade bestaat uit drie gaten van 3.000 byte op 20 %, 50 % en 80 % van het beschermde gebied. Beide gereedschappen leverden uitvoer die byte-identiek was aan het ongeschonden bestand, en de onze is byte-identiek aan wat <code>rar r</code> zelf schrijft. Beste van drie, 32-core desktop.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Wanneer PAR2 de schade niet kan dekken, is het herstelrecord in het RAR-bestand zelf de laatste verdedigingslinie. Tot 1.0.8 faalde het onze op elk archief boven ongeveer 13 MB, dus deze etappe kon helemaal niet gereden worden. De schade bestaat uit drie gaten van 3.000 byte op 20 %, 50 % en 80 % van het beschermde gebied. Beide gereedschappen leverden uitvoer die byte-identiek was aan het ongeschonden bestand, en de onze is byte-identiek aan wat <code>rar r</code> zelf schrijft. Beste van drie, 32-core desktop. Beide gereedschappen zijn op 2 augustus samen opnieuw gemeten.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>archief</th><th>nzbfast</th><th>rar 7.23 reparatie</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× sneller</td></tr>
-        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× sneller</td></tr>
-        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× sneller</td></tr>
-        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× sneller</td></tr>
-        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× sneller</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× sneller</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× sneller</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× sneller</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× sneller</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× sneller</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Een eerdere versie van deze pagina liet de rij van 512 MB als verlies zien en verklaarde dat als de prijs van het volume in stukken doorlopen in plaats van het geheel in het geheugen houden. Die verklaring klopte toen en is nu achterhaald: de kosten waren een bit-seriële CRC64 in het reparatiepad, vervangen door een tabelgestuurde, en het verlies ging ermee weg. Er is geen omslagpunt meer, en de begrensde werkset bleef behouden. De rij van 2 GB staat er omdat de volumes die een daemon werkelijk tegenkomt 8 GB tot 20 GB groot zijn, geen 512 MB, en een etappe die onder het echte bereik stopt is geen echte test.</p>
-    <p class="note" style="text-align:start">De M5 Max herhaalt het patroon, gereden op 31 juli met hetzelfde corpus en dezelfde criteria: 0.050 / 0.066 / 0.171 / 0.581 s tegen 0.211 / 0.335 / 0.751 / 1.735 van <code>rar r</code> bij 16 MB tot 512 MB - 3.0&times; tot 5.1&times; sneller; de maat van 2 GB is op die machine niet gereden.</p>
+    <p class="note" style="text-align:start"><b>Wat er in deze versie is verschoven, en de controle die dat aantoont.</b> Uitzoeken welke blokken beschadigd zijn was de grootste fase van deze reparatie geworden - groter dan het reparatierekenwerk zelf - en het draaide op één thread, die 64 KB uit elke groep over het bestand las, eenmaal per groep. Nu is het één sequentiële doorloop in bestandsvolgorde met de controlesommen per fragment parallel berekend, en het gerepareerde volume wordt gekloond in plaats van gekopieerd waar het bestandssysteem dat kan. Alleen de detectie ging op het archief van 512 MB van ongeveer 300 ms naar 18 ms, en dat is het meeste van wat hierboven is verschoven. De controle is de kolom naast de onze: <code>rar r</code> is in dezelfde rondes op dezelfde machine opnieuw gemeten en kwam binnen een paar procent van zijn eerdere tijden terug, dus het verschil dat verandert is het onze en niet dat van de meetbank.</p>
+    <p class="note" style="text-align:start">De M5 Max herhaalt het patroon, gereden op 31 juli met hetzelfde corpus en dezelfde criteria: 0.050 / 0.066 / 0.171 / 0.581 s tegen 0.211 / 0.335 / 0.751 / 1.735 van <code>rar r</code> bij 16 MB tot 512 MB - 3.0&times; tot 5.1&times; sneller; de maat van 2 GB is op die machine niet gereden. Die cijfers dateren van vóór de hierboven beschreven herschrijving van de detectie, dus ze horen bij de oudere build en staan hier als de tweede machine, niet als actueel getal.</p>
     <p class="note" style="text-align:start">Weavers <code>rarpar</code> ontbreekt alleen in deze tabel, en niet uit vrije wil: het implementeert deze reparatie niet. Gevraagd een van deze archieven te herstellen antwoordt het <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> en laat het bestand beschadigd achter. Het doet in elke andere vergelijking op deze pagina mee: alle vier de PAR2-etappes hierboven, alle zeven uitpakvormen daarboven, en de etappe met herstelvolumes direct hieronder, wat precies het werk is dat het zegt te doen, en die het wint.</p>
 
     <h3 style="margin:44px 0 4px">Herstelvolumes: volledig ontbrekende <code>.rev</code>-bestanden opnieuw opbouwen</h3>
@@ -698,21 +715,21 @@
     bestand. Twee legs: de reproduceerbare set van 9.68&nbsp;GB uit RAM (Europa M1 Ultra), en de
     hash-benoemde 4K-release van ~35&nbsp;GB via de gebruikelijke zes providers.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>9.68 GB uit RAM</th><th class="num">tijd tot klaar</th><th class="num">CPU</th><th class="num">piekgeheugen (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 providers</th><th class="num">tijd tot klaar</th><th class="num">CPU</th><th class="num">piekgeheugen (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>Wat er bewoog: de pre-release van NZBGet verlaagt z'n CPU-kosten met ongeveer een derde en
     z'n piekgeheugen met tot de helft, bij ongewijzigde eindtijden - echt efficiëntiewerk (een

@@ -86,13 +86,13 @@
     carries 1.4% of the data, so we tuned the two that carry the rest.</p>
 
     <p>Encryption is not spread evenly either. It scales with size:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Release size</th><th class="num">Share of all data</th><th class="num">Stored</th><th class="num">Encrypted</th></tr>
       <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr>
       <tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr>
       <tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr>
       <tr><td>over 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Ordinary downloads are almost always plain stored archives. The big
     ones are a coin flip between stored and encrypted. Below is how nzbfast handles each.</p>
   </div>
@@ -291,11 +291,14 @@
     run</b> during serial post-processing - the one number here that has been stable across
     every cut of this table. NZBGet never idles but pays for concurrent unpacking in its
     finish time. ² Our own idle share is honest and current, and it is the number that moved most: two of
-    the six providers were unavailable for this round, and cross-job overlap needs a healthy
-    idle server to run the next job on. With all six healthy the earlier cut measured 2%
-    idle. The engine now stands down and says so rather than starting the next job on a
-    server that cannot answer - a change this round prompted, because the first
-    measurement showed it building on a dead one. In the resilience variant (one job with encrypted
+    the six providers were unavailable for this round, and cross-job overlap needs an
+    idle server to run the next job on - this measurement caught the engine building the
+    next job on a dead one, and the fix that followed does something better than standing
+    down: when every idle server refuses to answer, the engine borrows a bounded slice of
+    connections from the busy ones and keeps the overlap. Re-soaked 2 August 2026 in the
+    same dead-provider state: the mid-run gaps that made up this cell are gone (49 s of
+    idle between jobs then, under 6 s now), with the follow-on job riding entirely on
+    borrowed connections. In the resilience variant (one job with encrypted
     RAR headers, older round), SABnzbd's queue wedged on the encrypted job and only 1 of 3
     jobs ever completed; nzbfast parked it with a clear message and finished the rest.</p>
   </div>
@@ -349,28 +352,43 @@
     archive, a ladder of layers, a password chain. This round grades what's left for the operator.
     <b>auto</b> means every payload extracted, byte-identical, no hands; <b>manual</b> means the
     client reported success but left an inner archive sitting in the output directory for you to
-    open yourself.</p>
+    open yourself. Re-raced 2 August 2026 on the current build, now five clients.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>shape</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>shape</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>store RAR inside store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>compressed RAR inside store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>7z inside a store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>5-level ladder, 6 payloads</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td></tr>
-        <tr><td>password chain, 3 encrypted levels</td><td class="win">auto · 3/3</td><td class="bad">asks for a password</td><td class="bad">asks for a password</td><td class="bad">failed</td></tr>
-        <tr><td><b>auto-complete, all ten shapes</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>store RAR inside store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>compressed RAR inside store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>7z inside a store RAR</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>5-level ladder, 6 payloads</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>damaged at all three levels</td><td class="win">auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>password chain, 3 encrypted levels</td><td class="win">auto · 3/3</td><td class="bad">gave up (timeout)</td><td class="bad">asks for a password</td><td class="bad">asks for a password</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>auto-complete, all ten shapes</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Loopback rig, machine-generated corpus, all four clients
+    <p class="note" style="text-align:start">Loopback rig, machine-generated corpus, all five clients
     on the same machine, graded by content hash, so a client that renames the payload still gets
     credit. Because inner layers are denested on the fly, nzbfast holds one ~1.5 GB copy on disk
-    where write-out-and-unpack clients hold ~3 GB, and finishes these legs in 1–2 s against 4–8 s.
+    where write-out-and-unpack clients hold ~3 GB, and finishes these legs in 1–4 s against 4–10 s.
     On the password chain, each layer's password ships in a file the layer above it extracts:
     nzbfast reads it and unlocks all three levels; the others stop and wait for you to type it.
-    The two shapes it doesn't auto-complete are graded harshly on purpose: a 10-level ladder past
-    its default depth cap and a post damaged at all three levels. On both it recovers more payloads
-    than any other client, but exits nonzero instead of calling a partial job a success, so both
-    count as failures here.</p>
+    New since the last cut: the post damaged at all three of its levels now finishes without help -
+    outer PAR2 repair, then a PAR2 repair of the middle layer from volumes packed alongside it,
+    then the innermost archive's own recovery record, one pass, 4 seconds. The one shape left is
+    the 10-level ladder, and that is a setting, not a limit: at the default depth cap of 5 the job
+    ends cleanly with 9 of 11 payloads and the deepest layer left as a healthy archive - still more
+    than any other client recovers - and the same job with <code>nested_max_depth</code> raised
+    to 10 completes all 11 automatically. ¹ Weaver (v0.7.5, its latest, first time in this table)
+    finished none of the ten legs, and where it goes wrong is visible in its own log: every leg
+    ends with &quot;not repairable: 2013 damaged slices, only 0 recovery blocks available in
+    NZB&quot;. Both halves of that line are contradicted on this rig - the four other clients
+    decode and verify the same articles byte-identically (the corpus's yEnc carries CRC trailers),
+    so the data it judges damaged is healthy; and every one of these NZBs carries a posted 10%
+    PAR2 set, so the recovery blocks it reports absent are there. It misjudges intact articles as
+    damaged, then cannot find the repair data that would have saved even a genuinely damaged post.
+    Two legs hang rather than fail. Per this page's own rule a client that never produces the
+    payload gets a red column, not a time. SABnzbd's count moves from 6 to 5 because the par-only reconstruction leg, measured on
+    this rig, is abandoned after 2 seconds with nothing rebuilt; its earlier 390 s rebuild was on
+    a different machine and we grade what this round measured.</p>
   </div>
 </section>
 
@@ -504,13 +522,13 @@
       <div class="bar me"><span>now</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB written</span></div>
     </div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">Before</th><th class="num">Now</th><th class="num">Change</th></tr>
       <tr><td><b>Written to disk</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">half as much</td></tr>
       <tr><td><b>Most disk used at once</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">46% less</td></tr>
       <tr><td><b>Pause after the download</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">gone</td></tr>
       <tr><td>Time to finish</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">5.6% faster</td></tr>
-    </table>
+    </table></div>
     <p>The most disk used at once is now 89.6&nbsp;GB, which is exactly the size of the
     file you asked for. There is no moment during an encrypted download when nzbfast needs
     room for a second copy.</p>
@@ -673,24 +691,25 @@
 
     <p class="note" style="text-align:start"><b>The heaviest row used to be the one we lose, and the previous cut of this page said the fix would be "a different algorithm rather than a tuning pass". This is that algorithm.</b> That last level damages 1,500 blocks across all 21 volumes and consumes about 91% of the recovery data, which is where the Reed-Solomon arithmetic, rather than hashing or disk, becomes nearly all of the work. The shipping build now computes the heaviest repairs with a number-theoretic transform instead of the classic Galois-field fold - the same maths, evaluated in a form that scales far better at high block counts - and every heavy row flipped: 2.7× ahead of the tuned build on the 20-core desktop that was our closest loss, and on the Windows laptop that was our worst one, 2.7× ahead of the tuned build and 2.2× ahead of MultiPar. Light damage still runs the classic path, which is why the other rows moved barely at all: the transform only pays above about 512 damaged blocks, so below that the dispatcher does not use it.</p>
 
-    <p class="note" style="text-align:start"><b>A faster path is only worth having if it cannot be wrong.</b> Both paths compute the same quantity and are bit-identical by construction, and every repair on this page was gated on the rebuilt files matching the pristine set: 228 timed repairs across the machines in this round, zero mismatches. The shipping build does not rely on that record. Every repair verifies its own output against the file hashes, and one that failed would be redone with the classic path automatically, log the divergence, and keep the classic path for the rest of that run. The setting is in the dashboard as <b>Fast PAR mode</b> if you would rather not have it at all, and machines with too little memory for it decline it on their own rather than trying and failing.</p>
+    <p class="note" style="text-align:start"><b>A faster path is only worth having if it cannot be wrong.</b> Both paths compute the same quantity and are bit-identical by construction, and every repair on this page was gated on the rebuilt files matching the pristine set: 228 timed repairs across the machines in this round, zero mismatches. The shipping build does not rely on that record. Every repair verifies its own output against the file hashes, and one that failed would be redone with the classic path automatically, log the divergence, and keep the classic path for the rest of that run. The setting is in the dashboard as <b>Fast PAR mode</b> if you would rather not have it at all, and machines with too little memory for it decline it on their own rather than trying and failing. Re-measured on 2 August on the current build: the two desktops land within a few percent of this table, and with <b>Fast PAR mode</b> switched off the 20-core desktop returns to exactly the loss it used to publish, which is what says the win is the method and not the conditions.</p>
 
     <p class="note" style="text-align:start"><b>The laptop row needed a correction, and it goes against us.</b> Windows demotes sustained background work onto its efficiency cores a few seconds in. Our daemon opts out of that at startup and none of the other tools can, so an earlier version of this page published their throttled times as though they were the tools' own. Rerunning that machine with every tool lifted to high priority moves the whole field: on the heaviest damage level <code>par2-turbo</code> goes from 22.4 s to 6.41 and <code>rarpar</code> from 59.2 s to 14.4, and for one cut of this page that turned the row from ours into one we lost. The whole laptop row is measured that way now - the correction stays even though the row has since been won back by the algorithm change above, because the field's times on that machine are only honest with the throttle lifted.</p>
 
     <h3 style="margin:44px 0 4px">RAR recovery records: repairing without PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">When PAR2 cannot cover the damage, the recovery record inside the RAR itself is the last line of defence. Until 1.0.8 ours failed on any archive over about 13 MB, so this leg could not be run at all. Damage is three 3,000-byte holes at 20%, 50% and 80% through the protected region. Both tools produced output byte-identical to the pristine file, and ours is byte-identical to what <code>rar r</code> itself writes. Best of three, 32-core desktop.</p>
+    <p class="note" style="text-align:start;margin-top:6px">When PAR2 cannot cover the damage, the recovery record inside the RAR itself is the last line of defence. Until 1.0.8 ours failed on any archive over about 13 MB, so this leg could not be run at all. Damage is three 3,000-byte holes at 20%, 50% and 80% through the protected region. Both tools produced output byte-identical to the pristine file, and ours is byte-identical to what <code>rar r</code> itself writes. Best of three, 32-core desktop, both tools re-raced together on 2 August.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>archive</th><th>nzbfast</th><th>rar 7.23 repair</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.065</b></td><td>0.30</td><td>4.6× faster</td></tr>
-        <tr><td>32 MB</td><td><b>0.082</b></td><td>0.49</td><td>6.0× faster</td></tr>
-        <tr><td>128 MB</td><td><b>0.20</b></td><td>1.13</td><td>5.7× faster</td></tr>
-        <tr><td>512 MB</td><td><b>0.62</b></td><td>2.35</td><td>3.8× faster</td></tr>
-        <tr><td>2 GB</td><td><b>2.46</b></td><td>6.41</td><td>2.6× faster</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× faster</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× faster</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× faster</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× faster</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× faster</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">An earlier version of this page showed the 512 MB row as a loss, and explained it as the price of working through the volume in pieces rather than holding all of it in memory. That explanation was correct at the time and is now obsolete: the cost was a bit-serial CRC64 in the repair path, replaced with a table-driven one, and the loss went with it. There is no longer a crossover, and the bounded working set was kept. The 2 GB row is here because the volumes a daemon actually meets are 8 GB to 20 GB, not 512 MB, and a leg that stops below the real range is not much of a test.</p>
-    <p class="note" style="text-align:start">The M5 Max repeats the pattern, raced 31 July with the same corpus and gates: 0.050 / 0.066 / 0.171 / 0.581 s against <code>rar r</code>'s 0.211 / 0.335 / 0.751 / 1.735 at 16 MB to 512 MB - 3.0&times; to 5.1&times; faster; the 2 GB size was not raced on that machine.</p>
+    <p class="note" style="text-align:start"><b>What moved this cut, and the control that says so.</b> Finding which blocks are damaged had become the largest phase of this repair - larger than the repair arithmetic itself - and it ran on a single thread, reading 64 KB out of every group across the file, once per group. It now makes one sequential pass in file order with the per-shard checksums computed in parallel, and the repaired volume is cloned rather than copied where the filesystem can do that. Detection alone fell from about 300 ms to 18 ms on the 512 MB archive, which is most of what moved above. The control is the column beside ours: <code>rar r</code> was re-raced in the same rounds on the same machine and came back within a few percent of its previous times, so the change in the gap is ours and not the bench's.</p>
+    <p class="note" style="text-align:start">The M5 Max repeats the pattern, raced 31 July with the same corpus and gates: 0.050 / 0.066 / 0.171 / 0.581 s against <code>rar r</code>'s 0.211 / 0.335 / 0.751 / 1.735 at 16 MB to 512 MB - 3.0&times; to 5.1&times; faster; the 2 GB size was not raced on that machine. Those figures predate the detection rewrite described above, so they are the older build's, kept here as the second machine rather than as a current number.</p>
     <p class="note" style="text-align:start">Weaver's <code>rarpar</code> is absent from this table alone, and not by choice: it does not implement this repair. Asked to fix one of these archives it answers <i>"embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data"</i>, and leaves the file damaged. It appears in every other comparison on this page: all four PAR2 legs above, all seven extraction shapes above that, and the recovery-volume leg immediately below, which is the job it says it does - and which it wins.</p>
 
     <h3 style="margin:44px 0 4px">Recovery volumes: rebuilding whole missing <code>.rev</code> files</h3>
@@ -876,21 +895,21 @@
     reproducible 9.68&nbsp;GB set served from RAM (Europe M1 Ultra), and the ~35&nbsp;GB
     hash-named 4K release over the usual 6 providers.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>9.68 GB from RAM</th><th class="num">time to finish</th><th class="num">CPU</th><th class="num">peak memory (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 providers</th><th class="num">time to finish</th><th class="num">CPU</th><th class="num">peak memory (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>What moved: NZBGet's pre-release cuts its CPU cost by roughly a third and its peak
     memory by up to half, at unchanged finish times - genuine efficiency work (a spin-loop

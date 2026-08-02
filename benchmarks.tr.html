@@ -86,13 +86,13 @@
     yolunu iyileştirmenin pek anlamı yok, bu yüzden geri kalanını taşıyan ikisini iyileştirdik.</p>
 
     <p>Şifreleme de eşit dağılmıyor. Boyutla birlikte artıyor:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Yayın boyutu</th><th class="num">Tüm verideki payı</th><th class="num">Depolanmış</th><th class="num">Şifreli</th></tr>
       <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr>
       <tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr>
       <tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr>
       <tr><td>60 GB üzeri</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Sıradan indirmeler neredeyse her zaman düz depolanmış arşivlerdir.
     Büyüklerde ise depolanmış ile şifreli arasında yazı tura gibidir. Aşağıda nzbfast'in her
     birini nasıl ele aldığı var.</p>
@@ -258,7 +258,7 @@
         <tr><td>hat boşta (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast, üç yükü de teslim eden istemciler arasında ilk bitiren. ¹ rustnzb'nin sütunu bir sonuç değil, bir terk: saati ilk durdu (1.3.4'te 138 s, en iyi şansı verilmek üzere koşulan güncel 1.3.9'da 125 s) çünkü 35 GB'lık işi <i>Completed</i> işaretli ham gizlenmiş birimler olarak teslim etti - yeniden adlandırma yok, çıkarma yok, her iki sürümde de (aşağıdaki izleme bölümüne bakın). Geçmediği bir bitiş çizgisi, geçen istemcilerle karşılaştırılamaz, dolayısıyla o sütundaki her hücre hızlı değil geçersiz olarak işaretlendi. SABnzbd yine seri son işleme sırasında hattı <b>koşunun 63%'ünde karanlık</b> bırakıyor - buradaki, bu tablonun her kesitinde sabit kalmış tek sayı. NZBGet hiç boşta kalmıyor ama eşzamanlı çıkarmanın bedelini bitiş süresinde ödüyor. ² Kendi boşta payımız dürüst ve güncel, ve en çok hareket eden sayı bu: bu turda altı sağlayıcıdan ikisi kullanılamıyordu, ve işler arası örtüşme, bir sonraki işi üzerinde koşturacak sağlıklı ve boş bir sunucuya ihtiyaç duyuyor. Altısı da sağlıklıyken önceki kesit 2% boşta ölçmüştü. Motor artık geri çekiliyor ve bunu söylüyor, bir sonraki işi yanıt veremeyen bir sunucuda başlatmak yerine - bu turun yol açtığı bir değişiklik, çünkü ilk ölçüm onu ölü bir sunucu üzerine inşa ederken gösterdi. Dayanıklılık türevinde (şifreli RAR başlıklı bir iş, daha eski tur) SABnzbd'nin kuyruğu şifreli işte takıldı ve 3 işten yalnızca 1'i tamamlandı; nzbfast onu net bir iletiyle park etti ve gerisini bitirdi.</p>
+    <p class="note" style="text-align:start">nzbfast, üç yükü de teslim eden istemciler arasında ilk bitiren. ¹ rustnzb'nin sütunu bir sonuç değil, bir terk: saati ilk durdu (1.3.4'te 138 s, en iyi şansı verilmek üzere koşulan güncel 1.3.9'da 125 s) çünkü 35 GB'lık işi <i>Completed</i> işaretli ham gizlenmiş birimler olarak teslim etti - yeniden adlandırma yok, çıkarma yok, her iki sürümde de (aşağıdaki izleme bölümüne bakın). Geçmediği bir bitiş çizgisi, geçen istemcilerle karşılaştırılamaz, dolayısıyla o sütundaki her hücre hızlı değil geçersiz olarak işaretlendi. SABnzbd yine seri son işleme sırasında hattı <b>koşunun 63%'ünde karanlık</b> bırakıyor - buradaki, bu tablonun her kesitinde sabit kalmış tek sayı. NZBGet hiç boşta kalmıyor ama eşzamanlı çıkarmanın bedelini bitiş süresinde ödüyor. ² Kendi boşta payımız dürüst ve güncel, ve en çok hareket eden sayı bu: bu turda altı sağlayıcıdan ikisi kullanılamıyordu, ve işler arası örtüşme, bir sonraki işi üzerinde koşturacak boş bir sunucuya ihtiyaç duyuyor - bu ölçüm, motoru bir sonraki işi ölü bir sunucu üzerine inşa ederken yakaladı, ve ardından gelen düzeltme geri çekilmekten daha iyisini yapıyor: boştaki her sunucu yanıt vermeyi reddettiğinde motor, meşgul sunuculardan sınırlı bir dilim bağlantı ödünç alıyor ve örtüşmeyi koruyor. 2 Ağustos 2026'da aynı ölü-sağlayıcı durumunda yeniden uzun süreli koşuldu: bu hücreyi oluşturan koşu ortası boşluklar kayboldu (o zaman işler arasında 49 s boşta, şimdi 6 s'nin altında), sonraki iş tümüyle ödünç bağlantılar üzerinde ilerledi. Dayanıklılık türevinde (şifreli RAR başlıklı bir iş, daha eski tur) SABnzbd'nin kuyruğu şifreli işte takıldı ve 3 işten yalnızca 1'i tamamlandı; nzbfast onu net bir iletiyle park etti ve gerisini bitirdi.</p>
   </div>
 </section>
 
@@ -310,29 +310,45 @@
     arşivine sokulmuş bir 7z, katmanlardan bir merdiven, bir parola zinciri. Bu tur, operatöre ne
     kaldığını notlandırır. <b>otomatik</b>, her yükün elle hiç dokunulmadan, bayt bayt özdeş
     biçimde çıkarıldığı anlamına gelir; <b>manuel</b> ise istemcinin başarı bildirdiği ama çıktı
-    dizininde kendin açasın diye bir iç arşiv bıraktığı anlamına gelir.</p>
+    dizininde kendin açasın diye bir iç arşiv bıraktığı anlamına gelir. 2 Ağustos 2026'da güncel
+    derlemeyle yeniden yarıştırıldı, artık beş istemci.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>biçim</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>biçim</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>depolama RAR içinde depolama RAR</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td></tr>
-        <tr><td>depolama RAR içinde sıkıştırılmış RAR</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td></tr>
-        <tr><td>depolama RAR içinde 7z</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td></tr>
-        <tr><td>5 düzeyli merdiven, 6 yük</td><td class="win">otomatik · 6/6</td><td class="bad">manuel · 3/6</td><td class="bad">manuel · 1/6</td><td class="bad">manuel · 1/6</td></tr>
-        <tr><td>parola zinciri, 3 şifreli düzey</td><td class="win">otomatik · 3/3</td><td class="bad">parola soruyor</td><td class="bad">parola soruyor</td><td class="bad">başarısız</td></tr>
-        <tr><td><b>otomatik tamamlama, on biçimin hepsi</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>depolama RAR içinde depolama RAR</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td><td class="bad">DNF¹</td></tr>
+        <tr><td>depolama RAR içinde sıkıştırılmış RAR</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td><td class="bad">DNF¹</td></tr>
+        <tr><td>depolama RAR içinde 7z</td><td class="win">otomatik</td><td>otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td><td class="bad">DNF¹</td></tr>
+        <tr><td>5 düzeyli merdiven, 6 yük</td><td class="win">otomatik · 6/6</td><td class="bad">manuel · 3/6</td><td class="bad">manuel · 1/6</td><td class="bad">manuel · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>üç düzeyin üçünde de hasarlı</td><td class="win">otomatik</td><td class="bad">manuel</td><td class="bad">manuel</td><td class="bad">manuel</td><td class="bad">DNF¹</td></tr>
+        <tr><td>parola zinciri, 3 şifreli düzey</td><td class="win">otomatik · 3/3</td><td class="bad">vazgeçti (zaman aşımı)</td><td class="bad">parola soruyor</td><td class="bad">parola soruyor</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>otomatik tamamlama, on biçimin hepsi</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Geri döngü düzeneği, makine üretimi derlem, dört
+    <p class="note" style="text-align:start">Geri döngü düzeneği, makine üretimi derlem, beş
     istemci de aynı makinede, içerik özetine göre notlandırıldı; böylece yükü yeniden adlandıran
     bir istemci de hakkını alır. İç katmanlar akış sırasında iç içelikten çözüldüğü için nzbfast
     diskte ~1.5 GB'lık tek bir kopya tutar; yaz-ve-aç istemcileri ~3 GB tutar ve nzbfast bu ayakları
-    4–8 sn'ye karşı 1–2 sn'de bitirir. Parola zincirinde her katmanın parolası, bir üstteki katmanın
+    4–10 sn'ye karşı 1–4 sn'de bitirir. Parola zincirinde her katmanın parolası, bir üstteki katmanın
     çıkardığı bir dosyada gelir: nzbfast onu okur ve üç düzeyin de kilidini açar; diğerleri durup
-    senin yazmanı bekler. Otomatik tamamlayamadığı iki biçim bilerek sert notlandırıldı: varsayılan
-    derinlik sınırının ötesindeki 10 düzeyli bir merdiven ve üç düzeyin üçünde de hasarlı bir
-    gönderi. Her ikisinde de diğer tüm istemcilerden daha fazla yük kurtarır ama yarım kalmış bir
-    işe başarı demek yerine sıfırdan farklı bir kodla çıkar; bu yüzden ikisi de burada başarısız
-    sayılır.</p>
+    senin yazmanı bekler. Son kesitten bu yana yeni: üç düzeyin üçünde de hasarlı gönderi artık
+    yardımsız bitiyor - dıştaki PAR2 onarımı, sonra orta katmanın yanına paketlenmiş birimlerden bir
+    PAR2 onarımı, sonra en içteki arşivin kendi kurtarma kaydı, tek geçiş, 4 saniye. Kalan tek biçim
+    10 düzeyli merdiven ve bu bir sınır değil, bir ayar: varsayılan derinlik sınırı 5'te iş, 11
+    yükün 9'uyla temiz biçimde biter ve en derin katman sağlıklı bir arşiv olarak kalır - yine de
+    diğer tüm istemcilerin kurtardığından fazlası - ve aynı iş <code>nested_max_depth</code> 10'a
+    yükseltildiğinde 11'inin hepsini otomatik tamamlar. ¹ Weaver (v0.7.5, en yenisi, bu tabloda ilk
+    kez) on ayağın hiçbirini bitirmedi ve nerede yanıldığı kendi günlüğünde görülüyor: her ayak
+    &quot;not repairable: 2013 damaged slices, only 0 recovery blocks available in NZB&quot; ile
+    bitiyor. O satırın iki yarısı da bu düzenekte çürütülüyor - diğer dört istemci aynı makaleleri
+    bayt bayt aynı biçimde çözüp doğruluyor (derlemin yEnc'i CRC son eklerini taşıyor), yani hasarlı
+    saydığı veri sağlıklı; ve bu NZB'lerin her biri gönderilmiş bir %10 PAR2 seti taşıyor, yani yok
+    diye bildirdiği kurtarma blokları orada. Sağlam makaleleri hasarlı diye yanlış değerlendiriyor,
+    sonra gerçekten hasarlı bir gönderiyi bile kurtaracak onarım verisini bulamıyor. İki ayak
+    başarısız olmak yerine askıda kalıyor. Bu sayfanın kendi kuralına göre, yükü hiç üretmeyen bir
+    istemci bir süre değil, kırmızı bir sütun alır. SABnzbd'nin sayısı 6'dan 5'e iniyor, çünkü bu
+    düzenekte ölçülen yalnızca-PAR yeniden inşa ayağı 2 saniye sonra hiçbir şey yeniden
+    inşa edilmeden terk ediliyor; daha önceki 390 s'lik yeniden inşası başka bir makinedeydi ve biz
+    bu turun ölçtüğünü notlandırıyoruz.</p>
   </div>
 </section>
 
@@ -379,11 +395,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>istemci</th><th>bitirme süresi</th><th>bağlantı</th><th>zirve disk</th><th>nzbfast'e karşı</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>temel</td></tr>
-        <tr><td>Weaver (ısıtılmış)</td><td>8 s</td><td>120 (otomatik artış)</td><td>17.9 GB</td><td>1.6× daha yavaş</td></tr>
-        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× daha yavaş</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× daha yavaş</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× daha yavaş</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>temel</td></tr>
+        <tr><td>Weaver (ısıtılmış)</td><td>11 s</td><td>120 (otomatik artış)</td><td>17.9 GB</td><td>1.6× daha yavaş</td></tr>
+        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>2.0× daha yavaş</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>3.1× daha yavaş</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 aynı)</td><td>17.6 GB</td><td>8.1× daha yavaş</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>31 Temmuz 2026'da yeniden ölçüldü</b>, aynı düzenek, aynı derlem, makinede bir işletim sistemi güncellemesinden sonra. Dört istemci bir ila üç saniye oynadı; SABnzbd oynamadı: bu tablonun 24 Temmuz kesitinin 14 s kaydettiği yerde artık 57 s alıyor, iki düzenek türevinde sekiz kez yinelendi, ardışık düzen her koşuda API geri okumasıyla 8 olarak doğrulandı ve 16 bağlantıda da aynı. Bu sayfanın başka yerlerindeki çiftlik ayaklarındaki sonuçları etkilenmiyor, dolayısıyla bu, bu makinenin şu anki işletim sisteminde geri döngüyle beslenen hızlara özgü görünüyor; düzeneğin bugün ölçtüğünü yayımlıyoruz ve bir sonraki işletim sistemi ve SABnzbd sürümlerinde yeniden sınayacağız.</p>
@@ -461,13 +477,13 @@
       <div class="bar me"><span>şimdi</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB yazıldı</span></div>
     </div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">önce</th><th class="num">şimdi</th><th class="num">Değişim</th></tr>
       <tr><td><b>Diske yazılan</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">yarısı</td></tr>
       <tr><td><b>Aynı anda en çok disk</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">%46 daha az</td></tr>
       <tr><td><b>İndirmeden sonraki duraklama</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">kalktı</td></tr>
       <tr><td>Toplam süre</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">%5,6 daha hızlı</td></tr>
-    </table>
+    </table></div>
     <p>Aynı anda kullanılan en çok disk artık 89,6&nbsp;GB, yani istediğiniz dosyanın tam boyutu.
     Şifreli bir indirme sırasında nzbfast'in ikinci bir kopya için yer istediği bir an artık yok.</p>
 
@@ -532,29 +548,29 @@
       <thead><tr><th>biçim</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">Üst seviye masaüstü, 32 çekirdek</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 küçük dosya</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>katı</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>tekrarlı</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>büyük, 4 birim</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">yanlış çıktı²</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>şifreli</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">şifreleme yok³</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>128 MiB sözlük</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">büyük sözlük yok⁴</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 küçük dosya</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>katı</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>tekrarlı</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>büyük, 4 birim</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">yanlış çıktı²</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>şifreli</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">şifreleme yok³</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>128 MiB sözlük</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">büyük sözlük yok⁴</td><td class="no">desteklenmiyor¹</td></tr>
         <tr><td colspan="7" class="grp">Daha eski masaüstü, 20 çekirdek</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
         <tr><td>400 küçük dosya</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>katı</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>tekrarlı</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>büyük, 4 birim</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">yanlış çıktı²</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>şifreli</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">şifreleme yok³</td><td class="no">desteklenmiyor¹</td></tr>
-        <tr><td>128 MiB sözlük</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">büyük sözlük yok⁴</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>katı</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>tekrarlı</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>büyük, 4 birim</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">yanlış çıktı²</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>şifreli</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">şifreleme yok³</td><td class="no">desteklenmiyor¹</td></tr>
+        <tr><td>128 MiB sözlük</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">büyük sözlük yok⁴</td><td class="no">desteklenmiyor¹</td></tr>
         <tr><td colspan="7" class="grp">Dizüstü, 14 çekirdek / 20 iş parçacığı, Windows⁵</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">CLI yok⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 küçük dosya</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">CLI yok⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>katı</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">CLI yok⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>tekrarlı</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">CLI yok⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>büyük, 4 birim</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">CLI yok⁵</td><td class="no">yanlış çıktı²</td><td>4.21</td></tr>
-        <tr><td>şifreli</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">CLI yok⁵</td><td class="no">şifreleme yok³</td><td>4.13</td></tr>
-        <tr><td>128 MiB sözlük</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">CLI yok⁵</td><td class="no">büyük sözlük yok⁴</td><td>2.51</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">CLI yok⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 küçük dosya</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">CLI yok⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>katı</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">CLI yok⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>tekrarlı</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">CLI yok⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>büyük, 4 birim</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">CLI yok⁵</td><td class="no">yanlış çıktı²</td><td>4.21</td></tr>
+        <tr><td>şifreli</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">CLI yok⁵</td><td class="no">şifreleme yok³</td><td>4.13</td></tr>
+        <tr><td>128 MiB sözlük</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">CLI yok⁵</td><td class="no">büyük sözlük yok⁴</td><td>2.51</td></tr>
         <tr><td colspan="7" class="grp">Dizüstü, Apple M5 Max⁶</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">yarışmadı⁶</td><td class="no">yarışmadı⁶</td><td class="no">yarışmadı⁶</td></tr>
         <tr><td>400 küçük dosya</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">yarışmadı⁶</td><td class="no">yarışmadı⁶</td><td class="no">yarışmadı⁶</td></tr>
@@ -593,27 +609,27 @@
       </tr></thead>
       <tbody>
         <tr><td rowspan="4">yok<br><span class="note">temiz doğrulama</span></td>
-            <td>masaüstü, 32 çekirdek</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>dizüstü, 14 çekirdek</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+            <td>masaüstü, 32 çekirdek</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>dizüstü, 14 çekirdek</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
         <tr><td>dizüstü, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">yarışmadı</td><td>2.32</td><td class="no">yalnızca Windows</td></tr>
 
         <tr><td rowspan="4">3 blok<br><span class="note">birkaç ölü makale</span></td>
-            <td>masaüstü, 32 çekirdek</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>dizüstü, 14 çekirdek</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+            <td>masaüstü, 32 çekirdek</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>dizüstü, 14 çekirdek</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
         <tr><td>dizüstü, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">yarışmadı</td><td>3.64</td><td class="no">yalnızca Windows</td></tr>
 
         <tr><td rowspan="4">101 blok</td>
-            <td>masaüstü, 32 çekirdek</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>dizüstü, 14 çekirdek</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+            <td>masaüstü, 32 çekirdek</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>masaüstü, 20 çekirdek</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>dizüstü, 14 çekirdek</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
         <tr><td>dizüstü, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">yarışmadı</td><td>4.17</td><td class="no">yalnızca Windows</td></tr>
 
         <tr><td rowspan="4">1.500 blok<br><span class="note">kurtarmanın %91'i kullanıldı</span></td>
-            <td>masaüstü, 32 çekirdek</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>masaüstü, 20 çekirdek</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">yalnızca Windows</td></tr>
-        <tr><td>dizüstü, 14 çekirdek</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+            <td>masaüstü, 32 çekirdek</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>masaüstü, 20 çekirdek</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">yalnızca Windows</td></tr>
+        <tr><td>dizüstü, 14 çekirdek</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
         <tr><td>dizüstü, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">yarışmadı</td><td>6.91</td><td class="no">yalnızca Windows</td></tr>
       </tbody>
     </table></div>
@@ -624,26 +640,27 @@
 
     <p class="note" style="text-align:start"><b>Önemli olan durum hafif hasardır.</b> Bir avuç başarısız makale, 101 ölü bloktan çok daha tipiktir, 1.500 ise hiç değil. Hafif bir onarımın büyük kısmı Reed-Solomon matematiği değildir; bir gigabaytı okumak ve MD5'ini almaktır ve bu yüzden 3 bloklu satır onarım satırlarını değil temiz doğrulama satırını izler.</p>
 
-    <p class="note" style="text-align:start"><b>En ağır satır bir zamanlar kaybettiğimiz satırdı ve bu sayfanın önceki baskısı düzeltmenin "bir ayar turu değil farklı bir algoritma" olacağını söylüyordu. İşte o algoritma.</b> Bu son düzey 21 birimin tamamında 1.500 bloğu bozar ve kurtarma verisinin yaklaşık %91'ini tüketir; işte orada işi neredeyse tamamen özetleme veya disk değil Reed-Solomon aritmetiği oluşturur. Dağıtılan derleme en ağır onarımları artık klasik Galois cismi katlaması yerine bir sayı teorik dönüşümle hesaplıyor - aynı matematik, yüksek blok sayılarında çok daha iyi ölçeklenen bir biçimde değerlendiriliyor - ve bütün ağır satırlar taraf değiştirdi: en yakın kaybımız olan 20 çekirdekli masaüstünde ayarlanmış derlemenin 2.6× önünde, en kötü kaybımız olan dizüstünde 2.5× önünde. Her çalıştırma sonrasında dosya özetlerine karşı doğrulanıyor ve doğrulamayı geçemeyen bir onarım klasik yolla yeniden yapılırdı; bu sayfadaki hiçbir ayakta bu gerekmedi. Hafif hasar hâlâ klasik yolu çalıştırıyor; diğer satırların neredeyse hiç oynamamasının nedeni de bu.</p>
+    <p class="note" style="text-align:start"><b>En ağır satır bir zamanlar kaybettiğimiz satırdı ve bu sayfanın önceki baskısı düzeltmenin "bir ayar turu değil farklı bir algoritma" olacağını söylüyordu. İşte o algoritma.</b> Bu son düzey 21 birimin tamamında 1.500 bloğu bozar ve kurtarma verisinin yaklaşık %91'ini tüketir; işte orada işi neredeyse tamamen özetleme veya disk değil Reed-Solomon aritmetiği oluşturur. Dağıtılan derleme en ağır onarımları artık klasik Galois cismi katlaması yerine bir sayı teorik dönüşümle hesaplıyor - aynı matematik, yüksek blok sayılarında çok daha iyi ölçeklenen bir biçimde değerlendiriliyor - ve bütün ağır satırlar taraf değiştirdi: en yakın kaybımız olan 20 çekirdekli masaüstünde ayarlanmış derlemenin 2.7× önünde, en kötü kaybımız olan dizüstünde 2.7× önünde. Hafif hasar hâlâ klasik yolu çalıştırıyor; diğer satırların neredeyse hiç oynamamasının nedeni de bu. Windows dizüstünde bu aynı zamanda MultiPar'ın 2.2× önünde demek. Dönüşüm ancak yaklaşık 512 hasarlı bloğun üzerinde kazanç sağlıyor, altında dağıtıcı onu seçmiyor.</p>
 
-    <p class="note" style="text-align:start"><b>Daha hızlı bir yol, ancak yanılamıyorsa değerlidir.</b> Her iki yol da aynı niceliği hesaplar ve kuruluşu gereği bit bit aynıdır; bu sayfadaki her onarım, yeniden inşa edilen dosyaların sağlam kümeyle eşleşmesi koşuluna bağlıydı: bu turun makinelerinde 228 zamanlanmış onarım, sıfır uyuşmazlık. Dağıtılan sürüm bu sicile yaslanmıyor. Her onarım kendi çıktısını dosya özetlerine karşı doğrular ve başarısız olan biri klasik yolla kendiliğinden yinelenir, sapmayı günlüğe yazar ve o koşunun geri kalanında klasik yolu korur. Ayar, hiç istemiyorsanız panoda <b>Hızlı PAR kipi</b> olarak duruyor ve bunun için belleği yetersiz makineler deneyip başarısız olmak yerine kendiliğinden geri çeviriyor.</p>
+    <p class="note" style="text-align:start"><b>Daha hızlı bir yol, ancak yanılamıyorsa değerlidir.</b> Her iki yol da aynı niceliği hesaplar ve kuruluşu gereği bit bit aynıdır; bu sayfadaki her onarım, yeniden inşa edilen dosyaların sağlam kümeyle eşleşmesi koşuluna bağlıydı: bu turun makinelerinde 228 zamanlanmış onarım, sıfır uyuşmazlık. Dağıtılan sürüm bu sicile yaslanmıyor. Her onarım kendi çıktısını dosya özetlerine karşı doğrular ve başarısız olan biri klasik yolla kendiliğinden yinelenir, sapmayı günlüğe yazar ve o koşunun geri kalanında klasik yolu korur. Ayar, hiç istemiyorsanız panoda <b>Hızlı PAR kipi</b> olarak duruyor ve bunun için belleği yetersiz makineler deneyip başarısız olmak yerine kendiliğinden geri çeviriyor. 2 Ağustos'ta güncel derlemeyle yeniden ölçüldü: iki masaüstü bu tablonun yüzde birkaçı içinde kalıyor ve <b>hızlı PAR kipi</b> kapalıyken 20 çekirdekli olan tam olarak eskiden yayımladığı kaybın üzerine düşüyor; bu da üstünlüğün yöntemde olduğunu, koşullarda olmadığını gösteriyor.</p>
 
     <p class="note" style="text-align:start"><b>Dizüstü satırının bir düzeltmeye ihtiyacı vardı ve bu bizim aleyhimize.</b> Windows sürekli arka plan işini birkaç saniye sonra verimlilik çekirdeklerine indiriyor. Arka plan sürecimiz başlangıçta bundan muaf tutuluyor ve diğer araçların hiçbiri bunu yapamıyor; bu yüzden bu sayfanın önceki bir sürümü onların kısıtlanmış sürelerini sanki araçların kendi süreleriymiş gibi yayımladı. O makineyi her araç yüksek önceliğe yükseltilmiş hâlde yeniden çalıştırmak tüm sahayı kaydırıyor: en ağır hasar düzeyinde <code>par2-turbo</code> 22.4 s değerinden 6.41 değerine, <code>rarpar</code> 59.2 s değerinden 14.4 değerine geçiyor ve bu sayfanın bir baskısında söz konusu satır bizimkinden kaybettiğimiz bir satıra dönüştü. Dizüstü satırının tamamı artık böyle ölçülüyor - satır yukarıdaki algoritma değişikliğiyle geri kazanılmış olsa da düzeltme yerinde kalıyor, çünkü o makinede sahanın süreleri ancak kısıtlama kaldırılmışken dürüsttür.</p>
 
     <h3 style="margin:44px 0 4px">RAR kurtarma kayıtları: PAR2 olmadan onarım</h3>
-    <p class="note" style="text-align:start;margin-top:6px">PAR2 hasarı karşılayamadığında, RAR dosyasının kendi içindeki kurtarma kaydı son savunma hattıdır. 1.0.8'e kadar bizimki yaklaşık 13 MB üzerindeki her arşivde başarısız oluyordu, dolayısıyla bu etap hiç koşulamıyordu. Hasar, korunan bölgenin %20, %50 ve %80'inde üç adet 3.000 baytlık boşluktur. Her iki araç da sağlam dosyayla bayt bayt aynı çıktı üretti ve bizimki <code>rar r</code>'ın kendi yazdığıyla bayt bayt aynıdır. Üç denemenin en iyisi, 32 çekirdekli masaüstü.</p>
+    <p class="note" style="text-align:start;margin-top:6px">PAR2 hasarı karşılayamadığında, RAR dosyasının kendi içindeki kurtarma kaydı son savunma hattıdır. 1.0.8'e kadar bizimki yaklaşık 13 MB üzerindeki her arşivde başarısız oluyordu, dolayısıyla bu etap hiç koşulamıyordu. Hasar, korunan bölgenin %20, %50 ve %80'inde üç adet 3.000 baytlık boşluktur. Her iki araç da sağlam dosyayla bayt bayt aynı çıktı üretti ve bizimki <code>rar r</code>'ın kendi yazdığıyla bayt bayt aynıdır. Üç denemenin en iyisi, 32 çekirdekli masaüstü. İki araç da 2 Ağustos'ta birlikte yeniden koşuldu.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>arşiv</th><th>nzbfast</th><th>rar 7.23 onarımı</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× daha hızlı</td></tr>
-        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× daha hızlı</td></tr>
-        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× daha hızlı</td></tr>
-        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× daha hızlı</td></tr>
-        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× daha hızlı</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× daha hızlı</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× daha hızlı</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× daha hızlı</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× daha hızlı</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× daha hızlı</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Bu sayfanın önceki bir sürümü 512 MB satırını bir kayıp olarak gösteriyor ve bunu, birimi tamamen bellekte tutmak yerine parçalar hâlinde işlemenin bedeli olarak açıklıyordu. O açıklama o zaman doğruydu ve artık geçersiz: bedel onarım yolundaki bit bit çalışan bir CRC64'tü, tablo tabanlı olanla değiştirildi ve kayıp onunla birlikte gitti. Artık bir kesişme noktası yok ve sınırlı çalışma kümesi korundu. 2 GB satırı burada, çünkü bir arka plan sürecinin gerçekte karşılaştığı birimler 512 MB değil 8 GB ile 20 GB arasındadır ve gerçek aralığın altında biten bir etap pek de sınav sayılmaz.</p>
-    <p class="note" style="text-align:start">M5 Max deseni yineliyor, 31 Temmuz'da aynı derlem ve aynı ölçütlerle koşuldu: 16 MB ile 512 MB arasında <code>rar r</code>'ın 0.211 / 0.335 / 0.751 / 1.735 değerlerine karşı 0.050 / 0.066 / 0.171 / 0.581 s - 3.0&times; ile 5.1&times; arası daha hızlı; 2 GB boyu o makinede koşulmadı.</p>
+    <p class="note" style="text-align:start"><b>Bu turda ne değişti ve bunu gösteren kontrol.</b> Hangi blokların hasarlı olduğunu bulmak bu onarımın en büyük aşaması hâline gelmişti - onarım aritmetiğinin kendisinden bile büyük - ve tek bir iş parçacığında çalışıyor, dosya boyunca her gruptan 64 KB okuyordu, grup başına bir kez. Artık dosya sırasıyla tek bir sıralı geçiş yapıyor, parça başına sağlama toplamları paralel hesaplanıyor ve onarılan birim, dosya sisteminin elverdiği yerde kopyalanmak yerine klonlanıyor. Yalnızca tespit, 512 MB'lık arşivde yaklaşık 300 ms'den 18 ms'ye düştü; yukarıda değişenin büyük bölümü bu. Kontrol, bizimkinin yanındaki sütun: <code>rar r</code> aynı turlarda aynı makinede yeniden koşuldu ve önceki sürelerine yüzde birkaç yaklaşarak döndü, yani değişen fark bizim, ölçüm düzeneğinin değil.</p>
+    <p class="note" style="text-align:start">M5 Max deseni yineliyor, 31 Temmuz'da aynı derlem ve aynı ölçütlerle koşuldu: 16 MB ile 512 MB arasında <code>rar r</code>'ın 0.211 / 0.335 / 0.751 / 1.735 değerlerine karşı 0.050 / 0.066 / 0.171 / 0.581 s - 3.0&times; ile 5.1&times; arası daha hızlı; 2 GB boyu o makinede koşulmadı. Bu rakamlar yukarıda anlatılan tespit yeniden yazımından öncesine ait; dolayısıyla eski derlemeye aitler ve burada güncel bir değer olarak değil, ikinci makine olarak duruyorlar.</p>
     <p class="note" style="text-align:start">Weaver'ın <code>rarpar</code>ı yalnızca bu tabloda yok ve bu kendi tercihi değil: bu onarımı uygulamıyor. Bu arşivlerden birini onarması istendiğinde <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> yanıtını veriyor ve dosyayı hasarlı bırakıyor. Bu sayfadaki diğer bütün karşılaştırmalarda yer alıyor: yukarıdaki dört PAR2 etabında, onun da üstündeki yedi çıkarma biçiminde ve hemen aşağıdaki kurtarma birimi etabında; ki o etap tam da yaptığını söylediği iştir ve onu kazanıyor.</p>
 
     <h3 style="margin:44px 0 4px">Kurtarma birimleri: tamamen eksik <code>.rev</code> dosyalarını yeniden kurmak</h3>
@@ -794,21 +811,21 @@
     9.68&nbsp;GB'lık küme (Avrupa M1 Ultra) ve her zamanki 6 sağlayıcı üzerinden
     ~35&nbsp;GB'lık hash adlı 4K yayın.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>RAM'den 9.68 GB</th><th class="num">bitirme süresi</th><th class="num">CPU</th><th class="num">zirve bellek (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 sağlayıcı</th><th class="num">bitirme süresi</th><th class="num">CPU</th><th class="num">zirve bellek (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>Ne değişti: NZBGet'in ön sürümü, bitirme süreleri değişmeden CPU maliyetini kabaca
     üçte bir, zirve belleğini ise yarıya kadar azaltıyor - gerçek bir verimlilik çalışması

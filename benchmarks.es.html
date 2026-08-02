@@ -78,10 +78,10 @@
     </ul>
     <p>Eso cambió en qué trabajamos. De poco sirve optimizar una ruta de compresión que lleva el 1,4 % de los datos, así que optimizamos las dos que llevan el resto.</p>
     <p>El cifrado tampoco se reparte de forma uniforme. Aumenta con el tamaño:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Tamaño</th><th class="num">Parte de los datos</th><th class="num">Almacenados</th><th class="num">Cifrados</th></tr>
       <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>más de 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Las descargas corrientes son casi siempre archivos almacenados. En las grandes es una moneda al aire entre almacenados y cifrados. Aquí está cómo nzbfast trata cada una.</p>
   </div>
 </section>
@@ -243,7 +243,7 @@
         <tr><td>línea ociosa (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast termina primero entre los clientes que entregan las tres cargas útiles. ¹ La columna de rustnzb es un abandono, no un resultado: su reloj se detuvo primero (138 s en 1.3.4, 125 s en el actual 1.3.9, corrido para darle su mejor oportunidad) porque entregó el trabajo de 35 GB como volúmenes ofuscados en bruto marcados <i>Completed</i> - sin renombrar, sin extraer, en ambas versiones (véase la sección de seguimiento más abajo). Una meta que no cruzó no puede compararse con la de clientes que sí la cruzaron, así que cada celda de esa columna está marcada como inválida en lugar de rápida. SABnzbd vuelve a dejar la línea <b>apagada el 63% de la carrera</b> durante el post-procesado en serie: la única cifra aquí que se ha mantenido estable en todas las versiones de esta tabla. NZBGet nunca queda ocioso, pero paga la extracción concurrente en su tiempo final. ² Nuestra propia proporción de inactividad es honesta y actual, y es la cifra que más se ha movido: dos de los seis proveedores no estaban disponibles en esta ronda, y el solapamiento entre trabajos necesita un servidor sano y libre en el que lanzar el siguiente. Con los seis sanos, la versión anterior medía un 2% de inactividad. El motor ahora se retira y lo dice, en lugar de arrancar el siguiente trabajo en un servidor que no puede responder: un cambio que provocó esta ronda, porque la primera medición lo mostraba construyendo sobre uno muerto. En la variante de resiliencia (un trabajo con cabeceras RAR cifradas, ronda anterior), la cola de SABnzbd se atascó en el trabajo cifrado y solo 1 de 3 trabajos llegó a terminar; nzbfast lo aparcó con un mensaje claro y completó el resto.</p>
+    <p class="note" style="text-align:start">nzbfast termina primero entre los clientes que entregan las tres cargas útiles. ¹ La columna de rustnzb es un abandono, no un resultado: su reloj se detuvo primero (138 s en 1.3.4, 125 s en el actual 1.3.9, corrido para darle su mejor oportunidad) porque entregó el trabajo de 35 GB como volúmenes ofuscados en bruto marcados <i>Completed</i> - sin renombrar, sin extraer, en ambas versiones (véase la sección de seguimiento más abajo). Una meta que no cruzó no puede compararse con la de clientes que sí la cruzaron, así que cada celda de esa columna está marcada como inválida en lugar de rápida. SABnzbd vuelve a dejar la línea <b>apagada el 63% de la carrera</b> durante el post-procesado en serie: la única cifra aquí que se ha mantenido estable en todas las versiones de esta tabla. NZBGet nunca queda ocioso, pero paga la extracción concurrente en su tiempo final. ² Nuestra propia proporción de inactividad es honesta y actual, y es la cifra que más se ha movido: dos de los seis proveedores no estaban disponibles en esta ronda, y el solapamiento entre trabajos necesita un servidor libre en el que lanzar el siguiente - esta medición sorprendió al motor construyendo el siguiente trabajo sobre uno muerto, y la corrección que siguió hace algo mejor que retirarse: cuando ningún servidor libre responde, el motor toma prestada una porción acotada de conexiones de los ocupados y mantiene el solapamiento. Vuelto a medir el 2 de agosto de 2026 en el mismo estado de proveedores caídos: los huecos a mitad de carrera que formaban esta celda han desaparecido (49 s de inactividad entre trabajos entonces, menos de 6 s ahora), con el trabajo siguiente corriendo por completo sobre conexiones prestadas. En la variante de resiliencia (un trabajo con cabeceras RAR cifradas, ronda anterior), la cola de SABnzbd se atascó en el trabajo cifrado y solo 1 de 3 trabajos llegó a terminar; nzbfast lo aparcó con un mensaje claro y completó el resto.</p>
   </div>
 </section>
 
@@ -294,28 +294,44 @@
     archivo en modo almacenamiento, una escalera de capas, una cadena de contraseñas. Esta ronda califica lo que
     le queda por hacer al operador. <b>auto</b> significa cada carga útil extraída, byte a byte idéntica, sin
     tocar nada; <b>manual</b> significa que el cliente informó de éxito pero dejó un archivo interno en el
-    directorio de salida para que lo abras tú mismo.</p>
+    directorio de salida para que lo abras tú mismo. Vuelto a correr el 2 de agosto de 2026 sobre la versión actual, ahora con cinco clientes.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>forma</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>forma</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>RAR en modo almacenamiento dentro de otro igual</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>RAR comprimido dentro de un RAR en modo almacenamiento</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>7z dentro de un RAR en modo almacenamiento</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td></tr>
-        <tr><td>escalera de 5 niveles, 6 cargas útiles</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td></tr>
-        <tr><td>cadena de contraseñas, 3 niveles cifrados</td><td class="win">auto · 3/3</td><td class="bad">pide una contraseña</td><td class="bad">pide una contraseña</td><td class="bad">falló</td></tr>
-        <tr><td><b>completado automático, las diez formas</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>RAR en modo almacenamiento dentro de otro igual</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>RAR comprimido dentro de un RAR en modo almacenamiento</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>7z dentro de un RAR en modo almacenamiento</td><td class="win">auto</td><td>auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>escalera de 5 niveles, 6 cargas útiles</td><td class="win">auto · 6/6</td><td class="bad">manual · 3/6</td><td class="bad">manual · 1/6</td><td class="bad">manual · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>dañado en los tres niveles</td><td class="win">auto</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">manual</td><td class="bad">DNF¹</td></tr>
+        <tr><td>cadena de contraseñas, 3 niveles cifrados</td><td class="win">auto · 3/3</td><td class="bad">se rindió (tiempo agotado)</td><td class="bad">pide una contraseña</td><td class="bad">pide una contraseña</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>completado automático, las diez formas</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Banco en bucle local, corpus generado por máquina, los cuatro
+    <p class="note" style="text-align:start">Banco en bucle local, corpus generado por máquina, los cinco
     clientes en la misma máquina, calificación por hash del contenido, así que un cliente que renombra la carga
     útil sigue recibiendo el mérito. Como las capas internas se desanidan al vuelo, nzbfast mantiene una sola
     copia de ~1.5 GB en disco donde los clientes de «escribir y desempaquetar» mantienen ~3 GB, y termina estos
-    tramos en 1–2 s frente a 4–8 s. En la cadena de contraseñas, la contraseña de cada capa viaja en un archivo
+    tramos en 1–4 s frente a 4–10 s. En la cadena de contraseñas, la contraseña de cada capa viaja en un archivo
     que extrae la capa de encima: nzbfast lo lee y desbloquea los tres niveles; los demás se detienen y esperan
-    a que la escribas. Las dos formas que no completa en automático se califican con dureza a propósito: una
-    escalera de 10 niveles más allá de su tope de profundidad por defecto y una publicación dañada en los tres
-    niveles. En ambas recupera más cargas útiles que cualquier otro cliente, pero sale con código distinto de
-    cero en lugar de llamar éxito a un trabajo parcial, así que ambas cuentan aquí como fallos.</p>
+    a que la escribas. Novedad desde la última versión de esta tabla: la publicación dañada en sus tres niveles
+    ahora termina sin ayuda - reparación PAR2 externa, después una reparación PAR2 de la capa intermedia con los
+    volúmenes empaquetados junto a ella, después el propio registro de recuperación del archivo más interno, una
+    sola pasada, 4 segundos. La única forma que queda es la escalera de 10 niveles, y eso es un ajuste, no un
+    límite: con el tope de profundidad por defecto de 5 el trabajo termina limpiamente con 9 de las 11 cargas
+    útiles y la capa más profunda queda como un archivo sano - todavía más de lo que recupera cualquier otro
+    cliente - y el mismo trabajo con <code>nested_max_depth</code> subido a 10 completa las 11 automáticamente.
+    ¹ Weaver (v0.7.5, su última versión, primera vez en esta tabla) no terminó ninguno de los diez tramos,
+    y dónde se tuerce queda a la vista en su propio registro: cada tramo termina con &quot;not repairable:
+    2013 damaged slices, only 0 recovery blocks available in NZB&quot;. Las dos mitades de esa línea quedan
+    desmentidas en este banco - los otros cuatro clientes decodifican y verifican los mismos artículos byte
+    a byte idénticos (el yEnc del corpus lleva colas CRC), así que los datos que juzga dañados están sanos;
+    y cada uno de estos NZB lleva publicado un juego PAR2 del 10%, así que los bloques de recuperación que
+    declara ausentes están ahí. Juzga dañados artículos intactos y después no encuentra los datos de
+    reparación que habrían salvado incluso una publicación dañada de verdad. Dos tramos se quedan colgados
+    en lugar de fallar. Según la regla de esta misma página, un cliente que nunca produce la carga útil
+    recibe una columna en rojo, no un tiempo. El recuento de SABnzbd pasa de 6 a 5 porque el tramo de reconstrucción solo
+    con PAR, medido en este banco, se abandona a los 2 segundos sin nada reconstruido; su reconstrucción
+    anterior de 390 s fue en otra máquina y aquí calificamos lo que midió esta ronda.</p>
   </div>
 </section>
 
@@ -346,11 +362,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>cliente</th><th>tiempo hasta terminar</th><th>conexiones</th><th>pico de disco</th><th>vs nzbfast</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>referencia</td></tr>
-        <tr><td>Weaver (en caliente)</td><td>8 s</td><td>120 (rampa auto)</td><td>17.9 GB</td><td>1.6× más lento</td></tr>
-        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× más lento</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× más lento</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× más lento</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>referencia</td></tr>
+        <tr><td>Weaver (en caliente)</td><td>11 s</td><td>120 (rampa auto)</td><td>17.9 GB</td><td>1.6× más lento</td></tr>
+        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>2.0× más lento</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>3.1× más lento</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 idéntico)</td><td>17.6 GB</td><td>8.1× más lento</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Vuelto a medir el 31 de julio de 2026</b>, mismo banco, mismo corpus, tras una actualización del sistema operativo en la máquina. Cuatro clientes se movieron uno o tres segundos; SABnzbd no: ahora tarda 57 s donde la versión del 24 de julio de esta tabla registraba 14 s, reproducido ocho veces en dos variantes del banco, la segmentación confirmada en 8 por relectura de la API en cada ejecución, e idéntica con 16 conexiones. Sus resultados en las etapas de granja de otras partes de esta página no se ven afectados, así que esto parece específico de los ritmos alimentados por bucle local en el sistema operativo actual de esta máquina; publicamos lo que el banco mide hoy y volveremos a probar con las próximas versiones del sistema y de SABnzbd.</p>
@@ -387,13 +403,13 @@
       <div class="bar"><span>antes</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
       <div class="bar me"><span>ahora</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
     </div>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">antes</th><th class="num">ahora</th><th class="num">Cambio</th></tr>
       <tr><td><b>Escrito en el disco</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">la mitad</td></tr>
       <tr><td><b>Disco máximo usado a la vez</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">46 % menos</td></tr>
       <tr><td><b>Pausa tras la descarga</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">eliminada</td></tr>
       <tr><td>Tiempo total</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">5,6 % más rápido</td></tr>
-    </table>
+    </table></div>
     <p>El disco máximo usado a la vez es ahora de 89,6 GB, exactamente el tamaño del archivo que pidió. En ningún momento de una descarga cifrada nzbfast necesita sitio para una segunda copia.</p>
     <h3>La forma que tiene</h3>
     <div class="shot" style="background:transparent;padding:10px">
@@ -439,29 +455,29 @@
       <thead><tr><th>forma</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">Escritorio de gama alta, 32 núcleos</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 archivos pequeños</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">no compatible¹</td></tr>
-        <tr><td>sólido</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">no compatible¹</td></tr>
-        <tr><td>repetitivo</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">no compatible¹</td></tr>
-        <tr><td>grande, 4 volúmenes</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">salida errónea²</td><td class="no">no compatible¹</td></tr>
-        <tr><td>cifrado</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">sin cifrado³</td><td class="no">no compatible¹</td></tr>
-        <tr><td>diccionario de 128 MiB</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">sin dicc. grande⁴</td><td class="no">no compatible¹</td></tr>
+        <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 archivos pequeños</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">no compatible¹</td></tr>
+        <tr><td>sólido</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">no compatible¹</td></tr>
+        <tr><td>repetitivo</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">no compatible¹</td></tr>
+        <tr><td>grande, 4 volúmenes</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">salida errónea²</td><td class="no">no compatible¹</td></tr>
+        <tr><td>cifrado</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">sin cifrado³</td><td class="no">no compatible¹</td></tr>
+        <tr><td>diccionario de 128 MiB</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">sin dicc. grande⁴</td><td class="no">no compatible¹</td></tr>
         <tr><td colspan="7" class="grp">Escritorio más antiguo, 20 núcleos</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
         <tr><td>400 archivos pequeños</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">no compatible¹</td></tr>
-        <tr><td>sólido</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">no compatible¹</td></tr>
-        <tr><td>repetitivo</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">no compatible¹</td></tr>
-        <tr><td>grande, 4 volúmenes</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">salida errónea²</td><td class="no">no compatible¹</td></tr>
-        <tr><td>cifrado</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">sin cifrado³</td><td class="no">no compatible¹</td></tr>
-        <tr><td>diccionario de 128 MiB</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">sin dicc. grande⁴</td><td class="no">no compatible¹</td></tr>
+        <tr><td>sólido</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">no compatible¹</td></tr>
+        <tr><td>repetitivo</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">no compatible¹</td></tr>
+        <tr><td>grande, 4 volúmenes</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">salida errónea²</td><td class="no">no compatible¹</td></tr>
+        <tr><td>cifrado</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">sin cifrado³</td><td class="no">no compatible¹</td></tr>
+        <tr><td>diccionario de 128 MiB</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">sin dicc. grande⁴</td><td class="no">no compatible¹</td></tr>
         <tr><td colspan="7" class="grp">Portátil, 14 núcleos / 20 hilos, Windows⁵</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">sin CLI⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 archivos pequeños</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">sin CLI⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>sólido</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">sin CLI⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>repetitivo</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">sin CLI⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>grande, 4 volúmenes</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">sin CLI⁵</td><td class="no">salida errónea²</td><td>4.21</td></tr>
-        <tr><td>cifrado</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">sin CLI⁵</td><td class="no">sin cifrado³</td><td>4.13</td></tr>
-        <tr><td>diccionario de 128 MiB</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">sin CLI⁵</td><td class="no">sin dicc. grande⁴</td><td>2.51</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">sin CLI⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 archivos pequeños</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">sin CLI⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>sólido</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">sin CLI⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>repetitivo</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">sin CLI⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>grande, 4 volúmenes</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">sin CLI⁵</td><td class="no">salida errónea²</td><td>4.21</td></tr>
+        <tr><td>cifrado</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">sin CLI⁵</td><td class="no">sin cifrado³</td><td>4.13</td></tr>
+        <tr><td>diccionario de 128 MiB</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">sin CLI⁵</td><td class="no">sin dicc. grande⁴</td><td>2.51</td></tr>
         <tr><td colspan="7" class="grp">Portátil, Apple M5 Max⁶</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">no compitió⁶</td><td class="no">no compitió⁶</td><td class="no">no compitió⁶</td></tr>
         <tr><td>400 archivos pequeños</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">no compitió⁶</td><td class="no">no compitió⁶</td><td class="no">no compitió⁶</td></tr>
@@ -500,27 +516,27 @@
       </tr></thead>
       <tbody>
         <tr><td rowspan="4">ninguno<br><span class="note">verificación limpia</span></td>
-            <td>escritorio, 32 núcleos</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">solo Windows</td></tr>
-        <tr><td>escritorio, 20 núcleos</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">solo Windows</td></tr>
-        <tr><td>portátil, 14 núcleos</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+            <td>escritorio, 32 núcleos</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">solo Windows</td></tr>
+        <tr><td>escritorio, 20 núcleos</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">solo Windows</td></tr>
+        <tr><td>portátil, 14 núcleos</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
         <tr><td>portátil, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">no compitió</td><td>2.32</td><td class="no">solo Windows</td></tr>
 
         <tr><td rowspan="4">3 bloques<br><span class="note">unos pocos artículos muertos</span></td>
-            <td>escritorio, 32 núcleos</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">solo Windows</td></tr>
-        <tr><td>escritorio, 20 núcleos</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">solo Windows</td></tr>
-        <tr><td>portátil, 14 núcleos</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+            <td>escritorio, 32 núcleos</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">solo Windows</td></tr>
+        <tr><td>escritorio, 20 núcleos</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">solo Windows</td></tr>
+        <tr><td>portátil, 14 núcleos</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
         <tr><td>portátil, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">no compitió</td><td>3.64</td><td class="no">solo Windows</td></tr>
 
         <tr><td rowspan="4">101 bloques</td>
-            <td>escritorio, 32 núcleos</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">solo Windows</td></tr>
-        <tr><td>escritorio, 20 núcleos</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">solo Windows</td></tr>
-        <tr><td>portátil, 14 núcleos</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+            <td>escritorio, 32 núcleos</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">solo Windows</td></tr>
+        <tr><td>escritorio, 20 núcleos</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">solo Windows</td></tr>
+        <tr><td>portátil, 14 núcleos</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
         <tr><td>portátil, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">no compitió</td><td>4.17</td><td class="no">solo Windows</td></tr>
 
         <tr><td rowspan="4">1.500 bloques<br><span class="note">91 % de la recuperación usada</span></td>
-            <td>escritorio, 32 núcleos</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">solo Windows</td></tr>
-        <tr><td>escritorio, 20 núcleos</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">solo Windows</td></tr>
-        <tr><td>portátil, 14 núcleos</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+            <td>escritorio, 32 núcleos</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">solo Windows</td></tr>
+        <tr><td>escritorio, 20 núcleos</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">solo Windows</td></tr>
+        <tr><td>portátil, 14 núcleos</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
         <tr><td>portátil, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">no compitió</td><td>6.91</td><td class="no">solo Windows</td></tr>
       </tbody>
     </table></div>
@@ -531,26 +547,27 @@
 
     <p class="note" style="text-align:start"><b>El daño leve es el caso que importa.</b> Un puñado de artículos fallidos es mucho más típico que 101 bloques muertos, y no digamos 1.500. La mayor parte de una reparación leve no es en absoluto la matemática Reed-Solomon: es leer y calcular el MD5 de un gigabyte, y por eso la fila de 3 bloques sigue a la de verificación limpia y no a las de reparación.</p>
 
-    <p class="note" style="text-align:start"><b>La fila más severa solía ser la que perdíamos, y la versión anterior de esta página decía que la solución sería «un algoritmo distinto y no una pasada de ajuste». Este es ese algoritmo.</b> Ese último nivel daña 1.500 bloques repartidos por los 21 volúmenes y consume alrededor del 91 % de los datos de recuperación, que es donde la aritmética Reed-Solomon, y no el hash ni el disco, pasa a ser casi todo el trabajo. La versión publicada calcula ahora las reparaciones más severas con una transformada teórico-numérica en lugar del plegado clásico sobre el campo de Galois, la misma matemática evaluada de una forma que escala mucho mejor con recuentos de bloques altos, y todas las filas severas se dieron la vuelta: 2.6× por delante de la compilación optimizada en el escritorio de 20 núcleos, que era nuestra derrota más ajustada, y 2.5× en el portátil, que era la peor. Cada ejecución se verifica después contra los hash de los archivos, y una reparación que no pasara la verificación se rehace por la ruta clásica; en todos los tramos de esta página, ninguna lo necesitó. El daño leve sigue por la ruta clásica, y por eso las demás filas apenas se movieron.</p>
+    <p class="note" style="text-align:start"><b>La fila más severa solía ser la que perdíamos, y la versión anterior de esta página decía que la solución sería «un algoritmo distinto y no una pasada de ajuste». Este es ese algoritmo.</b> Ese último nivel daña 1.500 bloques repartidos por los 21 volúmenes y consume alrededor del 91 % de los datos de recuperación, que es donde la aritmética Reed-Solomon, y no el hash ni el disco, pasa a ser casi todo el trabajo. La versión publicada calcula ahora las reparaciones más severas con una transformada teórico-numérica en lugar del plegado clásico sobre el campo de Galois, la misma matemática evaluada de una forma que escala mucho mejor con recuentos de bloques altos, y todas las filas severas se dieron la vuelta: 2.7× por delante de la compilación optimizada en el escritorio de 20 núcleos, que era nuestra derrota más ajustada, y 2.7× en el portátil, que era la peor. El daño leve sigue por la ruta clásica, y por eso las demás filas apenas se movieron. En el portátil con Windows eso es además 2.2× por delante de MultiPar. La transformada solo compensa por encima de unos 512 bloques dañados, así que por debajo el despachador no la usa.</p>
 
-    <p class="note" style="text-align:start"><b>Un camino más rápido solo merece la pena si no puede equivocarse.</b> Ambos caminos calculan la misma cantidad y son idénticos bit a bit por construcción, y cada reparación de esta página estaba condicionada a que los archivos reconstruidos coincidieran con el conjunto intacto: 228 reparaciones cronometradas en las máquinas de esta ronda, cero discrepancias. La versión distribuida no se apoya en ese historial. Cada reparación verifica su propia salida contra los hashes de los archivos, y una que fallara se reharía automáticamente con el camino clásico, registraría la divergencia y mantendría el camino clásico durante el resto de esa ejecución. El ajuste está en el panel como <b>Modo PAR rápido</b> por si prefiere no tenerlo en absoluto, y las máquinas con muy poca memoria para él lo rechazan por su cuenta en lugar de intentarlo y fallar.</p>
+    <p class="note" style="text-align:start"><b>Un camino más rápido solo merece la pena si no puede equivocarse.</b> Ambos caminos calculan la misma cantidad y son idénticos bit a bit por construcción, y cada reparación de esta página estaba condicionada a que los archivos reconstruidos coincidieran con el conjunto intacto: 228 reparaciones cronometradas en las máquinas de esta ronda, cero discrepancias. La versión distribuida no se apoya en ese historial. Cada reparación verifica su propia salida contra los hashes de los archivos, y una que fallara se reharía automáticamente con el camino clásico, registraría la divergencia y mantendría el camino clásico durante el resto de esa ejecución. El ajuste está en el panel como <b>Modo PAR rápido</b> por si prefiere no tenerlo en absoluto, y las máquinas con muy poca memoria para él lo rechazan por su cuenta en lugar de intentarlo y fallar. Vuelto a medir el 2 de agosto con la compilación actual: los dos equipos de escritorio quedan a unos pocos por ciento de esta tabla, y con el <b>modo PAR rápido</b> desactivado el de 20 núcleos vuelve exactamente a la derrota que publicaba antes, lo que muestra que la ventaja está en el método y no en las condiciones.</p>
 
     <p class="note" style="text-align:start"><b>La fila del portátil necesitaba una corrección, y va en nuestra contra.</b> Windows relega el trabajo de fondo prolongado a sus núcleos de eficiencia a los pocos segundos. Nuestro demonio se da de baja de eso al arrancar y ninguna de las otras herramientas puede hacerlo, así que una versión anterior de esta página publicó sus tiempos limitados como si fueran los propios de las herramientas. Al repetir esa máquina con cada herramienta elevada a prioridad alta se mueve todo el campo: en el nivel de daño más severo <code>par2-turbo</code> pasa de 22.4 s a 6.41 y <code>rarpar</code> de 59.2 s a 14.4, y durante una versión de esta página eso convirtió la fila que era nuestra en una que perdíamos. Toda la fila del portátil está medida así ahora, y la corrección se queda aunque la fila haya vuelto a ser nuestra por el cambio de algoritmo de arriba, porque los tiempos del campo en esa máquina solo son honestos con la limitación levantada.</p>
 
     <h3 style="margin:44px 0 4px">Registros de recuperación RAR: reparar sin PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Cuando el PAR2 no alcanza para cubrir el daño, el registro de recuperación dentro del propio RAR es la última línea de defensa. Hasta la 1.0.8 el nuestro fallaba en cualquier archivo de más de unos 13 MB, así que este tramo no se podía ejecutar en absoluto. El daño son tres huecos de 3.000 bytes al 20 %, 50 % y 80 % de la región protegida. Ambas herramientas produjeron una salida byte a byte idéntica al archivo intacto, y la nuestra es byte a byte idéntica a lo que escribe el propio <code>rar r</code>. Mejor de tres, escritorio de 32 núcleos.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Cuando el PAR2 no alcanza para cubrir el daño, el registro de recuperación dentro del propio RAR es la última línea de defensa. Hasta la 1.0.8 el nuestro fallaba en cualquier archivo de más de unos 13 MB, así que este tramo no se podía ejecutar en absoluto. El daño son tres huecos de 3.000 bytes al 20 %, 50 % y 80 % de la región protegida. Ambas herramientas produjeron una salida byte a byte idéntica al archivo intacto, y la nuestra es byte a byte idéntica a lo que escribe el propio <code>rar r</code>. Mejor de tres, escritorio de 32 núcleos. Ambas herramientas se repitieron juntas el 2 de agosto.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>archivo</th><th>nzbfast</th><th>reparación rar 7.23</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× más rápido</td></tr>
-        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× más rápido</td></tr>
-        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× más rápido</td></tr>
-        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× más rápido</td></tr>
-        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× más rápido</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× más rápido</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× más rápido</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× más rápido</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× más rápido</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× más rápido</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Una versión anterior de esta página mostraba la fila de 512 MB como una derrota y la explicaba como el precio de recorrer el volumen por partes en lugar de mantenerlo entero en memoria. Aquella explicación era correcta entonces y hoy está obsoleta: el coste era un CRC64 bit a bit en la ruta de reparación, sustituido por uno basado en tabla, y la derrota se fue con él. Ya no hay punto de cruce, y el conjunto de trabajo acotado se mantuvo. La fila de 2 GB está aquí porque los volúmenes con los que un demonio se encuentra de verdad son de 8 GB a 20 GB, no de 512 MB, y un tramo que se detiene por debajo del rango real no es gran prueba.</p>
-    <p class="note" style="text-align:start">El M5 Max repite el patrón, corrido el 31 de julio con el mismo corpus y los mismos criterios: 0.050 / 0.066 / 0.171 / 0.581 s frente a 0.211 / 0.335 / 0.751 / 1.735 de <code>rar r</code> de 16 MB a 512 MB - de 3.0&times; a 5.1&times; más rápido; el tamaño de 2 GB no se corrió en esa máquina.</p>
+    <p class="note" style="text-align:start"><b>Qué se movió en esta versión, y el control que lo demuestra.</b> Averiguar qué bloques están dañados se había convertido en la fase más grande de esta reparación - mayor que la propia aritmética de reparación - y corría en un solo hilo, leyendo 64 KB de cada grupo a lo largo del archivo, una vez por grupo. Ahora hace una única pasada secuencial en orden de archivo con las sumas de verificación por fragmento calculadas en paralelo, y el volumen reparado se clona en lugar de copiarse allí donde el sistema de archivos puede hacerlo. Solo la detección bajó de unos 300 ms a 18 ms en el archivo de 512 MB, que es la mayor parte de lo que se movió arriba. El control es la columna que está junto a la nuestra: <code>rar r</code> se volvió a medir en las mismas rondas y en la misma máquina, y quedó a pocos puntos porcentuales de sus tiempos anteriores, así que el cambio en la diferencia es nuestro y no del banco de pruebas.</p>
+    <p class="note" style="text-align:start">El M5 Max repite el patrón, corrido el 31 de julio con el mismo corpus y los mismos criterios: 0.050 / 0.066 / 0.171 / 0.581 s frente a 0.211 / 0.335 / 0.751 / 1.735 de <code>rar r</code> de 16 MB a 512 MB - de 3.0&times; a 5.1&times; más rápido; el tamaño de 2 GB no se corrió en esa máquina. Esas cifras son anteriores a la reescritura de la detección descrita arriba, así que pertenecen a la compilación anterior y figuran aquí como la segunda máquina, no como un dato actual.</p>
     <p class="note" style="text-align:start">El <code>rarpar</code> de Weaver falta solo en esta tabla, y no por elección: no implementa esta reparación. Cuando se le pide arreglar uno de estos archivos responde <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> y deja el archivo dañado. Aparece en todas las demás comparaciones de esta página: los cuatro tramos PAR2 de arriba, las siete formas de extracción más arriba y el tramo de volúmenes de recuperación justo debajo, que es el trabajo que dice hacer, y que gana.</p>
 
     <h3 style="margin:44px 0 4px">Volúmenes de recuperación: reconstruir archivos <code>.rev</code> que faltan por completo</h3>
@@ -700,21 +717,21 @@
     servido desde la RAM (M1 Ultra de Europa) y la publicación 4K de ~35&nbsp;GB con nombre hash sobre los seis
     proveedores habituales.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>9.68 GB desde la RAM</th><th class="num">tiempo hasta terminar</th><th class="num">CPU</th><th class="num">memoria pico (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 proveedores</th><th class="num">tiempo hasta terminar</th><th class="num">CPU</th><th class="num">memoria pico (RSS)</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>Qué se movió: la versión previa de NZBGet recorta su coste de CPU en torno a un tercio y su memoria pico
     hasta a la mitad, con tiempos de finalización sin cambios: trabajo de eficiencia genuino (arreglo de un bucle

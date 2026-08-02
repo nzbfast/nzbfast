@@ -78,10 +78,10 @@
     </ul>
     <p>Se muutti sen, mitä teemme. Ei ole juuri järkeä optimoida tiivistyspolkua, joka kantaa 1,4 % datasta, joten optimoimme ne kaksi, jotka kantavat lopun.</p>
     <p>Salaus ei myöskään jakaudu tasaisesti. Se kasvaa koon mukana:</p>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>Julkaisun koko</th><th class="num">Osuus kaikesta datasta</th><th class="num">Tallennettu</th><th class="num">Salattu</th></tr>
       <tr><td>1-5 Gt</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 Gt</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 Gt</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>yli 60 Gt</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
-    </table>
+    </table></div>
     <p class="note">Tavalliset lataukset ovat lähes aina yksinkertaisia tallennettuja arkistoja. Suurissa se on kolikonheitto tallennetun ja salatun välillä. Alla on, miten nzbfast käsittelee kummankin.</p>
   </div>
 </section>
@@ -243,7 +243,7 @@
         <tr><td>linja jouten (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast valmistuu ensimmäisenä niistä asiakasohjelmista, jotka toimittavat kaikki kolme hyötykuormaa. ¹ rustnzbin sarake on keskeytys, ei tulos: sen kello pysähtyi ensimmäisenä (138 s versiossa 1.3.4, 125 s nykyisessä 1.3.9:ssä, ajettuna sille parhaan mahdollisuuden antamiseksi), koska se toimitti 35 GB:n työn raakoina hämärrettyinä osina merkinnällä <i>Completed</i> - ei uudelleennimeämistä, ei purkua, molemmissa versioissa (katso seurantaosio alempana). Maalilinjaa, jota se ei ylittänyt, ei voi verrata asiakasohjelmiin, jotka ylittivät sen, joten jokainen tuon sarakkeen solu on merkitty pätemättömäksi eikä nopeaksi. SABnzbd jättää linjan jälleen <b>pimeäksi 63% ajosta</b> sarjamuotoisen jälkikäsittelyn aikana - ainoa tämän taulukon luku, joka on pysynyt vakaana jokaisessa leikkauksessa. NZBGet ei ole koskaan joutilaana mutta maksaa rinnakkaisen purkamisen loppuajassaan. ² Oma joutokäyntiosuutemme on rehellinen ja ajantasainen, ja se on luku, joka liikkui eniten: kaksi kuudesta palveluntarjoajasta ei ollut käytettävissä tällä kierroksella, ja töiden välinen limitys tarvitsee terveen, vapaan palvelimen, jolla seuraava työ ajetaan. Kaikkien kuuden ollessa terveitä aiempi leikkaus mittasi 2% joutokäyntiä. Moottori vetäytyy nyt ja sanoo sen, sen sijaan että käynnistäisi seuraavan työn palvelimella, joka ei voi vastata - muutos, jonka tämä kierros sai aikaan, koska ensimmäinen mittaus näytti sen rakentavan kuolleen palvelimen varaan. Sietokykyvariantissa (yksi työ salatuin RAR-otsakkein, vanhempi kierros) SABnzbdin jono juuttui salattuun työhön ja vain 1 työ 3:sta valmistui koskaan; nzbfast pysäköi sen selkeällä viestillä ja sai loput valmiiksi.</p>
+    <p class="note" style="text-align:start">nzbfast valmistuu ensimmäisenä niistä asiakasohjelmista, jotka toimittavat kaikki kolme hyötykuormaa. ¹ rustnzbin sarake on keskeytys, ei tulos: sen kello pysähtyi ensimmäisenä (138 s versiossa 1.3.4, 125 s nykyisessä 1.3.9:ssä, ajettuna sille parhaan mahdollisuuden antamiseksi), koska se toimitti 35 GB:n työn raakoina hämärrettyinä osina merkinnällä <i>Completed</i> - ei uudelleennimeämistä, ei purkua, molemmissa versioissa (katso seurantaosio alempana). Maalilinjaa, jota se ei ylittänyt, ei voi verrata asiakasohjelmiin, jotka ylittivät sen, joten jokainen tuon sarakkeen solu on merkitty pätemättömäksi eikä nopeaksi. SABnzbd jättää linjan jälleen <b>pimeäksi 63% ajosta</b> sarjamuotoisen jälkikäsittelyn aikana - ainoa tämän taulukon luku, joka on pysynyt vakaana jokaisessa leikkauksessa. NZBGet ei ole koskaan joutilaana mutta maksaa rinnakkaisen purkamisen loppuajassaan. ² Oma joutokäyntiosuutemme on rehellinen ja ajantasainen, ja se on luku, joka liikkui eniten: kaksi kuudesta palveluntarjoajasta ei ollut käytettävissä tällä kierroksella, ja töiden välinen limitys tarvitsee vapaan palvelimen, jolla seuraava työ ajetaan - tämä mittaus tavoitti moottorin rakentamassa seuraavaa työtä kuolleen palvelimen varaan, ja sitä seurannut korjaus tekee jotakin parempaa kuin vetäytymisen: kun yksikään vapaa palvelin ei vastaa, moottori lainaa rajatun siivun yhteyksiä kiireisiltä palvelimilta ja pitää limityksen. Mitattu uudelleen 2. elokuuta 2026 samassa kuolleiden palveluntarjoajien tilassa: kesken ajon syntyneet aukot, joista tämä solu muodostui, ovat poissa (49 s joutokäyntiä töiden välillä silloin, alle 6 s nyt), ja jatkotyö kulkee kokonaan lainatuilla yhteyksillä. Sietokykyvariantissa (yksi työ salatuin RAR-otsakkein, vanhempi kierros) SABnzbdin jono juuttui salattuun työhön ja vain 1 työ 3:sta valmistui koskaan; nzbfast pysäköi sen selkeällä viestillä ja sai loput valmiiksi.</p>
   </div>
 </section>
 
@@ -293,29 +293,46 @@
     store-arkistoon, kerrosten tikkaat, salasanaketju. Tämä kierros arvostelee sen, mitä käyttäjälle jää
     tehtäväksi. <b>auto</b> tarkoittaa, että jokainen hyötykuorma on purettu, tavuidenttinen, käsin
     koskematta; <b>käsin</b> tarkoittaa, että asiakas ilmoitti onnistumisesta mutta jätti sisemmän
-    arkiston tulostehakemistoon sinun itsesi avattavaksi.</p>
+    arkiston tulostehakemistoon sinun itsesi avattavaksi. Ajettu uudelleen 2. elokuuta 2026 nykyisellä
+    käännöksellä, nyt viisi asiakasohjelmaa.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>muoto</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th>muoto</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
       <tbody>
-        <tr><td>store-RAR store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td></tr>
-        <tr><td>pakattu RAR store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td></tr>
-        <tr><td>7z store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td></tr>
-        <tr><td>5 tason tikkaat, 6 hyötykuormaa</td><td class="win">auto · 6/6</td><td class="bad">käsin · 3/6</td><td class="bad">käsin · 1/6</td><td class="bad">käsin · 1/6</td></tr>
-        <tr><td>salasanaketju, 3 salattua tasoa</td><td class="win">auto · 3/3</td><td class="bad">kysyy salasanaa</td><td class="bad">kysyy salasanaa</td><td class="bad">epäonnistui</td></tr>
-        <tr><td><b>automaattisesti valmiiksi, kaikki kymmenen muotoa</b></td><td class="win"><b>8/10</b></td><td class="num">6/10</td><td class="num">2/10</td><td class="num">2/10</td></tr>
+        <tr><td>store-RAR store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td><td class="bad">DNF¹</td></tr>
+        <tr><td>pakattu RAR store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td><td class="bad">DNF¹</td></tr>
+        <tr><td>7z store-RARin sisällä</td><td class="win">auto</td><td>auto</td><td class="bad">käsin</td><td class="bad">käsin</td><td class="bad">DNF¹</td></tr>
+        <tr><td>5 tason tikkaat, 6 hyötykuormaa</td><td class="win">auto · 6/6</td><td class="bad">käsin · 3/6</td><td class="bad">käsin · 1/6</td><td class="bad">käsin · 1/6</td><td class="bad">DNF¹</td></tr>
+        <tr><td>vioittunut kaikilla kolmella tasolla</td><td class="win">auto</td><td class="bad">käsin</td><td class="bad">käsin</td><td class="bad">käsin</td><td class="bad">DNF¹</td></tr>
+        <tr><td>salasanaketju, 3 salattua tasoa</td><td class="win">auto · 3/3</td><td class="bad">luovutti (aikakatkaisu)</td><td class="bad">kysyy salasanaa</td><td class="bad">kysyy salasanaa</td><td class="bad">DNF¹</td></tr>
+        <tr><td><b>automaattisesti valmiiksi, kaikki kymmenen muotoa</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Loopback-testipenkki, koneellisesti tuotettu korpus, kaikki
-    neljä asiakasta samalla koneella, arvostelu sisältötiivisteen perusteella, joten hyötykuorman uudelleen
+    viisi asiakasta samalla koneella, arvostelu sisältötiivisteen perusteella, joten hyötykuorman uudelleen
     nimeävä asiakas saa silti pisteet. Koska sisemmät kerrokset puretaan sisäkkäisyydestään lennossa,
     nzbfast pitää levyllä yhden ~1.5 GB:n kopion siinä missä kirjoita-ja-pura-asiakkaat pitävät ~3 GB, ja
-    valmistuu näissä osuuksissa 1–2 s:ssa 4–8 s:a vastaan. Salasanaketjussa kunkin kerroksen salasana
+    valmistuu näissä osuuksissa 1–4 s:ssa 4–10 s:a vastaan. Salasanaketjussa kunkin kerroksen salasana
     kulkee tiedostossa, jonka sitä ylempi kerros purkaa: nzbfast lukee sen ja avaa kaikki kolme tasoa;
-    muut pysähtyvät odottamaan, että kirjoitat sen. Ne kaksi muotoa, joita se ei saa automaattisesti
-    valmiiksi, arvostellaan tahallaan ankarasti: oletussyvyysrajan ylittävät 10 tason tikkaat ja julkaisu,
-    joka on vioittunut kaikilla kolmella tasolla. Molemmissa se palauttaa enemmän hyötykuormia kuin
-    yksikään muu asiakas, mutta poistuu nollasta poikkeavalla koodilla sen sijaan, että kutsuisi
-    osittaista työtä onnistumiseksi, joten molemmat lasketaan tässä epäonnistumisiksi.</p>
+    muut pysähtyvät odottamaan, että kirjoitat sen. Uutta edellisen leikkauksen jälkeen: kaikilla kolmella
+    tasollaan vioittunut julkaisu valmistuu nyt ilman apua - ulompi PAR2-korjaus, sitten keskikerroksen
+    PAR2-korjaus sen rinnalle pakatuista osista, sitten sisimmän arkiston oma palautustietue, yksi
+    läpikäynti, 4 sekuntia. Ainoa jäljelle jäävä muoto on 10 tason tikkaat, ja se on asetus, ei raja:
+    oletussyvyysrajalla 5 työ päättyy siististi 9:llä hyötykuormalla 11:stä ja syvin kerros jää terveeksi
+    arkistoksi - yhä enemmän kuin yksikään muu asiakas palauttaa - ja sama työ, jossa
+    <code>nested_max_depth</code> on nostettu 10:een, saa kaikki 11 valmiiksi automaattisesti.
+    ¹ Weaver (v0.7.5, sen uusin versio, ensimmäistä kertaa tässä taulukossa) ei saanut valmiiksi yhtäkään
+    kymmenestä osuudesta, ja se, missä se menee vikaan, näkyy sen omasta lokista: jokainen osuus päättyy
+    riviin &quot;not repairable: 2013 damaged slices, only 0 recovery blocks available in NZB&quot;.
+    Tuon rivin molemmat puoliskot kumoutuvat tällä penkillä - neljä muuta asiakasta dekoodaavat ja
+    varmistavat samat artikkelit tavuidenttisesti (korpuksen yEnc kantaa CRC-tarkisteet), joten data,
+    jonka se tuomitsee vioittuneeksi, on tervettä; ja jokainen näistä NZB:istä kantaa postattua 10%
+    PAR2-sarjaa, joten palautuslohkot, jotka se ilmoittaa puuttuviksi, ovat siellä. Se tuomitsee ehjät
+    artikkelit vioittuneiksi eikä sitten löydä korjausdataa, joka olisi pelastanut aidosti
+    vioittuneenkin julkaisun. Kaksi osuutta jää jumiin sen sijaan, että epäonnistuisivat. Tämän sivun
+    oman säännön mukaan asiakas, joka ei koskaan tuota hyötykuormaa, saa punaisen sarakkeen, ei aikaa. SABnzbdin luku siirtyy 6:sta 5:een, koska
+    pelkkien par-tiedostojen varaan rakentuva jälleenrakennusosuus hylätään tällä penkillä mitattuna
+    2 sekunnin jälkeen ilman mitään rakennettua; sen aiempi 390 s:n jälleenrakennus tapahtui eri
+    koneella, ja me arvostelemme sen, mitä tämä kierros mittasi.</p>
   </div>
 </section>
 
@@ -346,11 +363,11 @@
     <div class="tblwrap"><table>
       <thead><tr><th>asiakas</th><th>aika valmiiksi</th><th>yhteydet</th><th>levyn huippu</th><th>vs. nzbfast</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>5 s</b></td><td>8</td><td><b>8.6 GB</b></td><td>lähtötaso</td></tr>
-        <tr><td>Weaver (lämmitetty)</td><td>8 s</td><td>120 (automaattinousu)</td><td>17.9 GB</td><td>1.6× hitaampi</td></tr>
-        <tr><td>NZBGet 26.2</td><td>12 s</td><td>16</td><td>17.6 GB</td><td>2.4× hitaampi</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>14 s</td><td>8</td><td>17.6 GB</td><td>2.8× hitaampi</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>23 s</td><td>8</td><td>18.7 GB</td><td>4.6× hitaampi</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>lähtötaso</td></tr>
+        <tr><td>Weaver (lämmitetty)</td><td>11 s</td><td>120 (automaattinousu)</td><td>17.9 GB</td><td>1.6× hitaampi</td></tr>
+        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>2.0× hitaampi</td></tr>
+        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>3.1× hitaampi</td></tr>
+        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 sama)</td><td>17.6 GB</td><td>8.1× hitaampi</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Mitattu uudelleen 31. heinäkuuta 2026</b>, sama teline, sama aineisto, koneen käyttöjärjestelmäpäivityksen jälkeen. Neljä asiakasohjelmaa liikkui sekunnin tai kolme; SABnzbd ei: se vie nyt 57 s, kun tämän taulukon 24. heinäkuuta leikkaus kirjasi 14 s, toistettuna kahdeksan kertaa kahdella telinevariantilla, putkitus vahvistettuna arvoon 8 rajapinnan takaisinluvulla joka ajolla, ja identtisenä 16 yhteydellä. Sen tulokset tämän sivun muissa kohdissa olevilla palvelinosuuksilla eivät muutu, joten tämä vaikuttaa ominaiselta takaisinkytkennän kautta syötetyille nopeuksille tämän koneen nykyisellä käyttöjärjestelmällä; julkaisemme sen mitä teline mittaa tänään ja testaamme uudelleen seuraavien käyttöjärjestelmä- ja SABnzbd-julkaisujen kanssa.</p>
@@ -387,13 +404,13 @@
       <div class="bar"><span>ennen</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
       <div class="bar me"><span>nyt</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
     </div>
-    <table>
+    <div class="tblwrap"><table>
       <tr><th></th><th class="num">ennen</th><th class="num">nyt</th><th class="num">Muutos</th></tr>
       <tr><td><b>Kirjoitettu levylle</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">puolet</td></tr>
       <tr><td><b>Eniten levyä kerralla</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">46 % vähemmän</td></tr>
       <tr><td><b>Tauko latauksen jälkeen</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">poistunut</td></tr>
       <tr><td>Kokonaisaika</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">5,6 % nopeampi</td></tr>
-    </table>
+    </table></div>
     <p>Eniten kerralla käytettyä levytilaa on nyt 89,6 Gt, tasan pyytämäsi tiedoston koko. Salatun latauksen aikana ei ole enää hetkeä, jolloin nzbfast tarvitsisi tilaa toiselle kopiolle.</p>
     <h3>Miltä se näyttää</h3>
     <div class="shot" style="background:transparent;padding:10px">
@@ -439,29 +456,29 @@
       <thead><tr><th>muoto</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">Tehopöytäkone, 32 ydintä</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.20</b></td><td>0.21</td><td>0.22</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 pientä tiedostoa</td><td><b>0.47</b></td><td>1.96</td><td>2.51</td><td>6.40</td><td>13.67</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>solidi</td><td class="no">1.69</td><td><b>1.62</b></td><td>2.34</td><td>5.29</td><td>11.48</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>toistuva</td><td class="no">0.20</td><td><b>0.15</b></td><td>0.24</td><td>0.69</td><td>1.86</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>suuri, 4 osaa</td><td><b>1.39</b></td><td>1.49</td><td>1.66</td><td>5.41</td><td class="no">väärä tuloste²</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>salattu</td><td><b>1.42</b></td><td>1.66</td><td>1.60</td><td>6.88</td><td class="no">ei salausta³</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>128 MiB sanakirja</td><td class="no">1.30</td><td><b>1.22</b></td><td>1.52</td><td>4.03</td><td class="no">ei suurta sanakirjaa⁴</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
+        <tr><td>400 pientä tiedostoa</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>solidi</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>toistuva</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>suuri, 4 osaa</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">väärä tuloste²</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>salattu</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">ei salausta³</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>128 MiB sanakirja</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">ei suurta sanakirjaa⁴</td><td class="no">ei tuettu¹</td></tr>
         <tr><td colspan="7" class="grp">Vanhempi pöytäkone, 20 ydintä</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.26</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.24</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
         <tr><td>400 pientä tiedostoa</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>solidi</td><td><b>2.31</b></td><td>2.32</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>toistuva</td><td class="no">0.24</td><td><b>0.20</b></td><td>0.30</td><td>0.85</td><td>2.18</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>suuri, 4 osaa</td><td><b>1.97</b></td><td>2.29</td><td>2.27</td><td>6.85</td><td class="no">väärä tuloste²</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>salattu</td><td><b>1.98</b></td><td>2.51</td><td>2.26</td><td>9.61</td><td class="no">ei salausta³</td><td class="no">ei tuettu¹</td></tr>
-        <tr><td>128 MiB sanakirja</td><td><b>1.78</b></td><td>1.81</td><td>1.98</td><td>5.29</td><td class="no">ei suurta sanakirjaa⁴</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>solidi</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>toistuva</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>suuri, 4 osaa</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">väärä tuloste²</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>salattu</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">ei salausta³</td><td class="no">ei tuettu¹</td></tr>
+        <tr><td>128 MiB sanakirja</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">ei suurta sanakirjaa⁴</td><td class="no">ei tuettu¹</td></tr>
         <tr><td colspan="7" class="grp">Kannettava, 14 ydintä / 20 säiettä, Windows⁵</td></tr>
-        <tr><td>store, 1 GB</td><td><b>0.34</b></td><td>0.62</td><td>0.72</td><td class="no">ei CLI:tä⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 pientä tiedostoa</td><td><b>1.00</b></td><td>5.54</td><td>11.38</td><td class="no">ei CLI:tä⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>solidi</td><td><b>5.16</b></td><td>5.52</td><td>9.54</td><td class="no">ei CLI:tä⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>toistuva</td><td><b>0.35</b></td><td>0.53</td><td>0.52</td><td class="no">ei CLI:tä⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>suuri, 4 osaa</td><td><b>2.64</b></td><td>2.85</td><td><b>2.64</b></td><td class="no">ei CLI:tä⁵</td><td class="no">väärä tuloste²</td><td>4.21</td></tr>
-        <tr><td>salattu</td><td><b>2.59</b></td><td>2.96</td><td>2.71</td><td class="no">ei CLI:tä⁵</td><td class="no">ei salausta³</td><td>4.13</td></tr>
-        <tr><td>128 MiB sanakirja</td><td class="no">2.41</td><td>2.37</td><td><b>2.34</b></td><td class="no">ei CLI:tä⁵</td><td class="no">ei suurta sanakirjaa⁴</td><td>2.51</td></tr>
+        <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">ei CLI:tä⁵</td><td>0.81</td><td>0.76</td></tr>
+        <tr><td>400 pientä tiedostoa</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">ei CLI:tä⁵</td><td>16.72</td><td>5.45</td></tr>
+        <tr><td>solidi</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">ei CLI:tä⁵</td><td>15.14</td><td>5.79</td></tr>
+        <tr><td>toistuva</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">ei CLI:tä⁵</td><td>1.13</td><td>0.65</td></tr>
+        <tr><td>suuri, 4 osaa</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">ei CLI:tä⁵</td><td class="no">väärä tuloste²</td><td>4.21</td></tr>
+        <tr><td>salattu</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">ei CLI:tä⁵</td><td class="no">ei salausta³</td><td>4.13</td></tr>
+        <tr><td>128 MiB sanakirja</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">ei CLI:tä⁵</td><td class="no">ei suurta sanakirjaa⁴</td><td>2.51</td></tr>
         <tr><td colspan="7" class="grp">Kannettava, Apple M5 Max⁶</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">ei kilpailutettu⁶</td><td class="no">ei kilpailutettu⁶</td><td class="no">ei kilpailutettu⁶</td></tr>
         <tr><td>400 pientä tiedostoa</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">ei kilpailutettu⁶</td><td class="no">ei kilpailutettu⁶</td><td class="no">ei kilpailutettu⁶</td></tr>
@@ -500,27 +517,27 @@
       </tr></thead>
       <tbody>
         <tr><td rowspan="4">ei mitään<br><span class="note">puhdas tarkistus</span></td>
-            <td>pöytäkone, 32 ydintä</td><td><b>0.12</b></td><td>0.32</td><td>0.92</td><td>3.05</td><td>2.85</td><td class="no">vain Windows</td></tr>
-        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.17</b></td><td>0.37</td><td>1.07</td><td>3.68</td><td>3.18</td><td class="no">vain Windows</td></tr>
-        <tr><td>kannettava, 14 ydintä</td><td><b>0.22</b></td><td>0.40</td><td>1.04</td><td>3.81</td><td>2.92</td><td>1.33</td></tr>
+            <td>pöytäkone, 32 ydintä</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">vain Windows</td></tr>
+        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">vain Windows</td></tr>
+        <tr><td>kannettava, 14 ydintä</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
         <tr><td>kannettava, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">ei kilpailutettu</td><td>2.32</td><td class="no">vain Windows</td></tr>
 
         <tr><td rowspan="4">3 lohkoa<br><span class="note">muutama kuollut artikkeli</span></td>
-            <td>pöytäkone, 32 ydintä</td><td><b>0.23</b></td><td>0.54</td><td>1.16</td><td>3.60</td><td>4.50</td><td class="no">vain Windows</td></tr>
-        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.31</b></td><td>0.62</td><td>1.41</td><td>4.42</td><td>5.14</td><td class="no">vain Windows</td></tr>
-        <tr><td>kannettava, 14 ydintä</td><td><b>0.54</b></td><td>0.78</td><td>1.44</td><td>5.00</td><td>5.02</td><td>1.73</td></tr>
+            <td>pöytäkone, 32 ydintä</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">vain Windows</td></tr>
+        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">vain Windows</td></tr>
+        <tr><td>kannettava, 14 ydintä</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
         <tr><td>kannettava, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">ei kilpailutettu</td><td>3.64</td><td class="no">vain Windows</td></tr>
 
         <tr><td rowspan="4">101 lohkoa</td>
-            <td>pöytäkone, 32 ydintä</td><td><b>0.51</b></td><td>0.90</td><td>2.12</td><td>5.64</td><td>4.94</td><td class="no">vain Windows</td></tr>
-        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.75</b></td><td>1.16</td><td>2.63</td><td>7.58</td><td>5.70</td><td class="no">vain Windows</td></tr>
-        <tr><td>kannettava, 14 ydintä</td><td><b>1.18</b></td><td>1.43</td><td>2.74</td><td>10.9</td><td>5.72</td><td>2.65</td></tr>
+            <td>pöytäkone, 32 ydintä</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">vain Windows</td></tr>
+        <tr><td>pöytäkone, 20 ydintä</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">vain Windows</td></tr>
+        <tr><td>kannettava, 14 ydintä</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
         <tr><td>kannettava, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">ei kilpailutettu</td><td>4.17</td><td class="no">vain Windows</td></tr>
 
         <tr><td rowspan="4">1 500 lohkoa<br><span class="note">91 % palautusdatasta käytetty</span></td>
-            <td>pöytäkone, 32 ydintä</td><td><b>1.23</b></td><td>3.23</td><td>5.71</td><td>68.7</td><td>7.62</td><td class="no">vain Windows</td></tr>
-        <tr><td>pöytäkone, 20 ydintä</td><td><b>2.02</b></td><td>5.53</td><td>8.15</td><td>85.9</td><td>11.39</td><td class="no">vain Windows</td></tr>
-        <tr><td>kannettava, 14 ydintä</td><td><b>2.60</b></td><td>6.41</td><td>9.57</td><td>402</td><td>14.4</td><td>5.46</td></tr>
+            <td>pöytäkone, 32 ydintä</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">vain Windows</td></tr>
+        <tr><td>pöytäkone, 20 ydintä</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">vain Windows</td></tr>
+        <tr><td>kannettava, 14 ydintä</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
         <tr><td>kannettava, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">ei kilpailutettu</td><td>6.91</td><td class="no">vain Windows</td></tr>
       </tbody>
     </table></div>
@@ -531,26 +548,27 @@
 
     <p class="note" style="text-align:start"><b>Kevyt vaurio on se tapaus, jolla on merkitystä.</b> Kourallinen epäonnistuneita artikkeleita on paljon tyypillisempi kuin 101 kuollutta lohkoa, saati 1 500. Suurin osa kevyestä korjauksesta ei ole lainkaan Reed–Solomon-matematiikkaa, vaan gigatavun lukemista ja MD5:n laskemista, ja siksi kolmen lohkon rivi seuraa puhtaan tarkistuksen riviä eikä korjausrivejä.</p>
 
-    <p class="note" style="text-align:start"><b>Raskain rivi oli ennen se, jonka hävisimme, ja tämän sivun edellinen versio sanoi, että korjaus olisi ”eri algoritmi eikä viritysvaihe”. Tämä on se algoritmi.</b> Tuo viimeinen taso vaurioittaa 1 500 lohkoa kaikissa 21 osassa ja kuluttaa noin 91 % palautusdatasta, ja siinä Reed–Solomon-laskenta, ei tiivistäminen tai levy, muodostaa lähes koko työn. Julkaistu käännös laskee nyt raskaimmat korjaukset lukuteoreettisella muunnoksella klassisen Galois'n kunnan taittelun sijaan - sama matematiikka, arvioituna muodossa joka skaalautuu paljon paremmin suurilla lohkomäärillä - ja jokainen raskas rivi kääntyi: 2.6× viritettyä käännöstä edellä 20-ytimisellä pöytäkoneella, joka oli lähin tappiomme, ja 2.5× kannettavalla, joka oli pahin. Jokainen ajo varmistetaan jälkikäteen tiedostotiivisteitä vastaan, ja varmistuksessa kaatunut korjaus ajettaisiin uudelleen klassisella polulla; tämän sivun kaikilla osuuksilla yksikään ei kaatunut. Kevyt vaurio ajaa yhä klassista polkua, ja siksi muut rivit liikkuivat tuskin lainkaan.</p>
+    <p class="note" style="text-align:start"><b>Raskain rivi oli ennen se, jonka hävisimme, ja tämän sivun edellinen versio sanoi, että korjaus olisi ”eri algoritmi eikä viritysvaihe”. Tämä on se algoritmi.</b> Tuo viimeinen taso vaurioittaa 1 500 lohkoa kaikissa 21 osassa ja kuluttaa noin 91 % palautusdatasta, ja siinä Reed–Solomon-laskenta, ei tiivistäminen tai levy, muodostaa lähes koko työn. Julkaistu käännös laskee nyt raskaimmat korjaukset lukuteoreettisella muunnoksella klassisen Galois'n kunnan taittelun sijaan - sama matematiikka, arvioituna muodossa joka skaalautuu paljon paremmin suurilla lohkomäärillä - ja jokainen raskas rivi kääntyi: 2.7× viritettyä käännöstä edellä 20-ytimisellä pöytäkoneella, joka oli lähin tappiomme, ja 2.7× kannettavalla, joka oli pahin. Kevyt vaurio ajaa yhä klassista polkua, ja siksi muut rivit liikkuivat tuskin lainkaan. Windows-kannettavalla se on samalla 2.2× MultiParia edellä. Muunnos kannattaa vasta noin 512 vaurioituneen lohkon yläpuolella, sen alle jakelu ei sitä valitse.</p>
 
-    <p class="note" style="text-align:start"><b>Nopeampi polku kannattaa vain jos se ei voi olla väärässä.</b> Molemmat polut laskevat saman suureen ja ovat rakenteeltaan bitilleen identtisiä, ja jokainen tämän sivun korjaus oli ehdollistettu sille, että uudelleen rakennetut tiedostot vastaavat vahingoittumatonta sarjaa: 228 ajastettua korjausta tämän kierroksen koneilla, nolla poikkeamaa. Toimitettu käännös ei nojaa tuohon historiaan. Jokainen korjaus tarkistaa oman tuloksensa tiedostojen tiivisteitä vastaan, ja epäonnistunut tehtäisiin automaattisesti uudelleen klassisella polulla, kirjattaisiin poikkeama lokiin ja pidettäisiin klassinen polku tuon ajon loppuajan. Asetus on hallintapaneelissa nimellä <b>Nopea PAR-tila</b>, jos et halua sitä lainkaan, ja koneet joilla on siihen liian vähän muistia kieltäytyvät siitä itse sen sijaan että yrittäisivät ja epäonnistuisivat.</p>
+    <p class="note" style="text-align:start"><b>Nopeampi polku kannattaa vain jos se ei voi olla väärässä.</b> Molemmat polut laskevat saman suureen ja ovat rakenteeltaan bitilleen identtisiä, ja jokainen tämän sivun korjaus oli ehdollistettu sille, että uudelleen rakennetut tiedostot vastaavat vahingoittumatonta sarjaa: 228 ajastettua korjausta tämän kierroksen koneilla, nolla poikkeamaa. Toimitettu käännös ei nojaa tuohon historiaan. Jokainen korjaus tarkistaa oman tuloksensa tiedostojen tiivisteitä vastaan, ja epäonnistunut tehtäisiin automaattisesti uudelleen klassisella polulla, kirjattaisiin poikkeama lokiin ja pidettäisiin klassinen polku tuon ajon loppuajan. Asetus on hallintapaneelissa nimellä <b>Nopea PAR-tila</b>, jos et halua sitä lainkaan, ja koneet joilla on siihen liian vähän muistia kieltäytyvät siitä itse sen sijaan että yrittäisivät ja epäonnistuisivat. Mitattu uudelleen 2. elokuuta nykyisellä käännöksellä: molemmat pöytäkoneet osuvat parin prosentin päähän tästä taulukosta, ja <b>nopea PAR-tila</b> pois päältä 20-ytiminen palaa täsmälleen siihen tappioon jonka se ennen julkaisi, mikä kertoo että etu on menetelmässä eikä olosuhteissa.</p>
 
     <p class="note" style="text-align:start"><b>Kannettavan rivi kaipasi korjausta, ja se on meitä vastaan.</b> Windows siirtää pitkäkestoisen taustatyön tehokkuusytimilleen muutaman sekunnin jälkeen. Palvelinprosessimme kytkeytyy siitä irti käynnistyessään eikä mikään muu työkalu voi tehdä niin, joten tämän sivun aiempi versio julkaisi niiden kuristetut ajat kuin ne olisivat työkalujen omia. Kun se kone ajetaan uudelleen jokainen työkalu korkealle prioriteetille nostettuna, koko kenttä siirtyy: raskaimmalla vauriotasolla <code>par2-turbo</code> menee 22.4 sekunnista arvoon 6.41 ja <code>rarpar</code> 59.2 sekunnista arvoon 14.4, ja yhden tämän sivun version ajan se muutti rivin meidän omastamme riviksi jonka hävisimme. Koko kannettavan rivi on nyt mitattu näin - korjaus jää voimaan, vaikka rivi on sittemmin voitettu takaisin yllä kuvatulla algoritmimuutoksella, koska kentän ajat sillä koneella ovat rehellisiä vain kuristus poistettuna.</p>
 
     <h3 style="margin:44px 0 4px">RAR-palautustietueet: korjaus ilman PAR2:ta</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Kun PAR2 ei kata vauriota, itse RAR-tiedoston sisällä oleva palautustietue on viimeinen puolustuslinja. Versioon 1.0.8 asti meidän toteutuksemme epäonnistui jokaisessa yli noin 13 MB:n arkistossa, joten tätä osuutta ei voinut ajaa lainkaan. Vaurio on kolme 3 000 tavun reikää 20 %:n, 50 %:n ja 80 %:n kohdalla suojatusta alueesta. Molemmat työkalut tuottivat tulosteen, joka on tavulleen sama kuin ehjä tiedosto, ja meidän on tavulleen sama kuin se, minkä <code>rar r</code> itse kirjoittaa. Paras kolmesta, 32-ytiminen pöytäkone.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Kun PAR2 ei kata vauriota, itse RAR-tiedoston sisällä oleva palautustietue on viimeinen puolustuslinja. Versioon 1.0.8 asti meidän toteutuksemme epäonnistui jokaisessa yli noin 13 MB:n arkistossa, joten tätä osuutta ei voinut ajaa lainkaan. Vaurio on kolme 3 000 tavun reikää 20 %:n, 50 %:n ja 80 %:n kohdalla suojatusta alueesta. Molemmat työkalut tuottivat tulosteen, joka on tavulleen sama kuin ehjä tiedosto, ja meidän on tavulleen sama kuin se, minkä <code>rar r</code> itse kirjoittaa. Paras kolmesta, 32-ytiminen pöytäkone. Molemmat työkalut ajettiin uudelleen yhdessä 2. elokuuta.</p>
     <div class="tblwrap"><table>
       <thead><tr><th>arkisto</th><th>nzbfast</th><th>rar 7.23 -korjaus</th><th></th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.09</b></td><td>0.30</td><td>3.4× nopeampi</td></tr>
-        <tr><td>32 MB</td><td><b>0.11</b></td><td>0.50</td><td>4.6× nopeampi</td></tr>
-        <tr><td>128 MB</td><td><b>0.23</b></td><td>1.13</td><td>5.0× nopeampi</td></tr>
-        <tr><td>512 MB</td><td><b>0.77</b></td><td>2.53</td><td>3.3× nopeampi</td></tr>
-        <tr><td>2 GB</td><td><b>2.68</b></td><td>6.56</td><td>2.4× nopeampi</td></tr>
+        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× nopeampi</td></tr>
+        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× nopeampi</td></tr>
+        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× nopeampi</td></tr>
+        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× nopeampi</td></tr>
+        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× nopeampi</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Tämän sivun aiempi versio näytti 512 MB:n rivin tappiona ja selitti sen hintana siitä, että osa käydään läpi paloissa sen sijaan että se pidettäisiin kokonaan muistissa. Selitys piti silloin paikkansa ja on nyt vanhentunut: kustannus oli bittisarjainen CRC64 korjauspolulla, korvattuna taulukkopohjaisella, ja tappio lähti sen mukana. Leikkauspistettä ei enää ole, ja rajattu työjoukko säilyi. 2 GB:n rivi on tässä, koska osat, joita palvelinprosessi oikeasti kohtaa, ovat 8–20 GB eivätkä 512 MB, eikä osuus, joka päättyy alle todellisen alueen, ole kummoinen koe.</p>
-    <p class="note" style="text-align:start">M5 Max toistaa kaavan, ajettuna 31. heinäkuuta samalla aineistolla ja samoin ehdoin: 0.050 / 0.066 / 0.171 / 0.581 s vastaan <code>rar r</code>:n 0.211 / 0.335 / 0.751 / 1.735 välillä 16 MB - 512 MB - 3.0&times;:sta 5.1&times;:een nopeampi; 2 GB:n kokoa ei ajettu tuolla koneella.</p>
+    <p class="note" style="text-align:start"><b>Mikä muuttui tässä versiossa, ja vertailukohta joka sen osoittaa.</b> Vaurioituneiden lohkojen selvittämisestä oli tullut tämän korjauksen suurin vaihe - suurempi kuin itse korjauslaskenta - ja se ajoi yhdellä säikeellä lukien 64 kt jokaisesta ryhmästä läpi tiedoston, kerran ryhmää kohden. Nyt se tekee yhden peräkkäisen läpiajon tiedostojärjestyksessä ja laskee sirpalekohtaiset tarkistussummat rinnakkain, ja korjattu levynide kloonataan kopioimisen sijaan siellä missä tiedostojärjestelmä siihen pystyy. Pelkkä tunnistus putosi 512 Mt:n arkistossa noin 300 millisekunnista 18 millisekuntiin, ja se selittää suurimman osan yllä tapahtuneesta muutoksesta. Vertailukohta on sarake meidän vieressämme: <code>rar r</code> ajettiin uudelleen samoilla kierroksilla samalla koneella ja palasi muutaman prosentin päähän aiemmista ajoistaan, joten eron muutos on meidän eikä mittauksen.</p>
+    <p class="note" style="text-align:start">M5 Max toistaa kaavan, ajettuna 31. heinäkuuta samalla aineistolla ja samoin ehdoin: 0.050 / 0.066 / 0.171 / 0.581 s vastaan <code>rar r</code>:n 0.211 / 0.335 / 0.751 / 1.735 välillä 16 MB - 512 MB - 3.0&times;:sta 5.1&times;:een nopeampi; 2 GB:n kokoa ei ajettu tuolla koneella. Nämä luvut ovat yllä kuvattua tunnistuksen uudelleenkirjoitusta vanhemmat, joten ne kuuluvat vanhemmalle käännökselle ja ovat tässä toisena koneena eivätkä nykyisenä lukuna.</p>
     <p class="note" style="text-align:start">Weaverin <code>rarpar</code> puuttuu vain tästä taulukosta, eikä omasta valinnastaan: se ei toteuta tätä korjausta. Pyydettäessä korjaamaan yhtä näistä arkistoista se vastaa <i>”embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data”</i> ja jättää tiedoston vaurioituneeksi. Se on mukana jokaisessa muussa tämän sivun vertailussa: kaikissa neljässä yllä olevassa PAR2-osuudessa, kaikissa seitsemässä sitä ylempänä olevassa purkumuodossa ja aivan alla olevassa palautusosien osuudessa, joka on täsmälleen se työ, jonka se sanoo tekevänsä, ja jonka se voittaa.</p>
 
     <h3 style="margin:44px 0 4px">Palautusosat: kokonaan puuttuvien <code>.rev</code>-tiedostojen uudelleenrakennus</h3>
@@ -700,21 +718,21 @@
     tarjoiltuna RAM:ista (Eurooppa M1 Ultra) ja ~35&nbsp;GB:n tiivistenimetty 4K-julkaisu
     tavanomaisten 6 palveluntarjoajan yli.</p>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>9.68 GB RAM:ista</th><th class="num">aika valmiiksi</th><th class="num">suoritin</th><th class="num">huippu-RSS</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table>
+    </table></div>
 
-    <table>
+    <div class="tblwrap"><table>
       <tr><th>~35 GB, 6 palveluntarjoajaa</th><th class="num">aika valmiiksi</th><th class="num">suoritin</th><th class="num">huippu-RSS</th></tr>
       <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
       <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
       <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
       <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table>
+    </table></div>
 
     <p>Mikä liikkui: NZBGetin esijulkaisu leikkaa suoritinkustannuksensa noin kolmanneksella ja
     huippumuistinsa jopa puolella valmistumisaikojen pysyessä ennallaan - aitoa tehokkuustyötä
