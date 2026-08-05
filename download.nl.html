@@ -56,7 +56,8 @@
         <p>De NzbFast-app: sleep naar Programma's en klaar. Universal (Apple Silicon en
         Intel), dashboard in een eigen venster, .nzb-dubbelklik, starten bij inloggen.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · app + engine</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Download de Mac-app</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">draagbare .zip</a></p>
+        <p class="meta">Nog niet door Apple genotariseerd, dus de eerste start kost twee extra klikken; de DMG loodst je erdoorheen, met een volledige handleiding op de schijf zelf.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Download de Mac-app</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">draagbare .zip</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">beschikbaar</span></h3>
@@ -64,14 +65,14 @@
         optioneel starten met Windows en .nzb-dubbelklik. Volledig statisch, geen runtime
         te installeren; hij kan ook je bestaande SABnzbd-config overnemen.</p>
         <p class="meta">Windows 10/11 x64 · ~8 MB installer</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Download de installer</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">draagbare .zip</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Download de installer</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">draagbare .zip</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">beschikbaar</span></h3>
         <p>Statische musl-builds voor x86_64 en arm64: seedboxes, VPS'en, elke NAS met SSH,
         Raspberry Pi 4/5. Geen glibc-versieroulette.</p>
         <p class="meta">x86_64 · arm64 · systemd-unit meegeleverd</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">beschikbaar</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">beschikbaar</span></h3>
+        <p>In <b>Community Applications</b>: zoek <code>nzbfast</code> op het tabblad Apps en klik op Install. Het template vult poort 6789, de drie paden en de Unraid-gebruikers-ID’s in, dus je hoeft niets met de hand in te typen.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">stapsgewijze handleiding →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">beschikbaar</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Deze knoppen verwijzen naar de huidige versie. Werkt een link niet meer, of wil je een oudere build, de checksums of de release-notities, dan staat alles op de <a href="https://github.com/nzbfast/nzbfast/releases">GitHub-releasespagina</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>Downloads verifiëren:</b> elke release levert sha256-sommen naast de artifacts op de releasespagina. macOS-zips behouden de executable-bits; de builds zijn nog niet ondertekend, dus macOS vraagt om bevestiging bij de eerste start: rechtsklik op de app en kies Open.</div>
+    <div class="callout" style="margin-top:26px"><b>Downloads verifiëren:</b> elke release levert sha256-sommen naast de artifacts op de releasespagina. macOS-zips behouden de executable-bits; de builds zijn nog niet ondertekend, dus macOS vraagt om bevestiging bij de eerste start: rechtsklik op de app en kies Open (macOS 14 en ouder), of sta hem toe via Systeeminstellingen → Privacy en beveiliging → Open toch (macOS 15 en nieuwer).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Platformnotities</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / ARM-NAS:</b> gebruik de Linux arm64-build. De SIMD-decode van de engine heeft NEON-kernels; een Pi 5 verzadigt gigabit met marge over.</li>
-      <li><b>Unraid:</b> installeer via Community Apps zodra het template gepubliceerd is (met de Docker-image eronder); tot die tijd voeg je de image handmatig toe.</li>
+      <li><b>Unraid:</b> in Community Apps: zoek <code>nzbfast</code> op het tabblad Apps en installeer (Docker-image eronder). <a href="unraid.html">Stapsgewijze handleiding →</a></li>
       <li><b>TrueNAS SCALE:</b> draai de Docker-image als custom app.</li>
       <li><b>FreeBSD / overige:</b> <code>cargo build --release</code> vanaf de broncode werkt naar verwachting (rustls, geen OpenSSL); officieel niet getest. PAR2-herstel en RAR-uitpakken zijn native op alle platforms.</li>
       <li><b>Telefoons:</b> niets te installeren: het dashboard heeft een volwaardige telefoonweergave, en nzb360/LunaSea verbinden via de NZBGet-compatibele API.</li>

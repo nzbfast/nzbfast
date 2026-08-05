@@ -56,7 +56,8 @@
         <p>Aplicația NzbFast: trage în Applications și gata. Universală (Apple Silicon și
         Intel), panou în propria fereastră, dublu-clic pe .nzb, pornire la autentificare.</p>
         <p class="meta">macOS 12+ · DMG ~16 MB · aplicație + motor</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Descarcă aplicația Mac</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">.zip portabil</a></p>
+        <p class="meta">Încă nenotarizată de Apple, așa că prima lansare cere două clicuri în plus; DMG-ul te ghidează, iar un ghid complet se află chiar pe disc.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Descarcă aplicația Mac</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">.zip portabil</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">disponibil</span></h3>
@@ -64,14 +65,14 @@
         pornire opțională odată cu Windows și dublu-clic pe .nzb. Complet static, fără runtime
         de instalat; poate adopta și configurația ta SABnzbd existentă.</p>
         <p class="meta">Windows 10/11 x64 · installer ~8 MB</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Descarcă installerul</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">.zip portabil</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Descarcă installerul</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">.zip portabil</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">disponibil</span></h3>
         <p>Build-uri musl statice pentru x86_64 și arm64: seedbox-uri, VPS-uri, orice NAS cu SSH,
         Raspberry Pi 4/5. Fără ruletă de versiuni glibc.</p>
         <p class="meta">x86_64 · arm64 · unitate systemd inclusă</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">disponibil</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">disponibil</span></h3>
+        <p>În <b>Community Applications</b>: caută <code>nzbfast</code> în fila Apps și dă clic pe Install. Șablonul completează portul 6789, cele trei căi și ID-urile de utilizator Unraid, așa că nu rămâne nimic de scris de mână.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">ghid pas cu pas →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">disponibil</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Aceste butoane trimit către versiunea curentă. Dacă un link nu mai funcționează sau doriți o versiune mai veche, sumele de control ori notele de lansare, toate se află pe <a href="https://github.com/nzbfast/nzbfast/releases">pagina de lansări GitHub</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>Verificarea descărcărilor:</b> fiecare release vine cu sume sha256 lângă artefacte pe pagina de release-uri. Zip-urile macOS păstrează biții de execuție; build-urile nu sunt încă semnate, așa că macOS cere confirmare înainte de prima lansare: clic dreapta pe aplicație și alege Deschide.</div>
+    <div class="callout" style="margin-top:26px"><b>Verificarea descărcărilor:</b> fiecare release vine cu sume sha256 lângă artefacte pe pagina de release-uri. Zip-urile macOS păstrează biții de execuție; build-urile nu sunt încă semnate, așa că macOS cere confirmare înainte de prima lansare: clic dreapta pe aplicație și alege Deschide (macOS 14 și anterioare), sau permite-o din System Settings → Privacy &amp; Security → Open Anyway (macOS 15 și ulterioare).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Note despre platforme</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / NAS ARM:</b> folosește build-ul Linux arm64. Decodarea SIMD a motorului are kernele NEON; un Pi 5 saturează gigabitul cu marjă.</li>
-      <li><b>Unraid:</b> instalează din Community Apps odată ce șablonul este publicat (cu imaginea Docker dedesubt); până atunci, adaugă imaginea manual.</li>
+      <li><b>Unraid:</b> în Community Apps: caută <code>nzbfast</code> în fila Apps și instalează (cu imaginea Docker dedesubt). <a href="unraid.html">Ghid pas cu pas →</a></li>
       <li><b>TrueNAS SCALE:</b> rulează imaginea Docker ca aplicație personalizată.</li>
       <li><b>FreeBSD / altele:</b> <code>cargo build --release</code> din sursă ar trebui să funcționeze (rustls, fără OpenSSL); netestat oficial. Repararea PAR2 și dezarhivarea RAR sunt native pe toate platformele.</li>
       <li><b>Telefoane:</b> nimic de instalat: panoul are un aspect de telefon de primă clasă, iar nzb360/LunaSea se conectează prin API-ul compatibil NZBGet.</li>

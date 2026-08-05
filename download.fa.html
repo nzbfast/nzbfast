@@ -56,7 +56,8 @@
         <p>اپ NzbFast: به Applications بکشید و شروع کنید. یونیورسال (Apple Silicon و
         Intel)، داشبورد در پنجرهٔ خودش، دوکلیک ‎.nzb، شروع هنگام ورود.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · اپ + موتور</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">دانلود اپ مک</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">‎.zip قابل حمل</a></p>
+        <p class="meta">هنوز توسط Apple تأیید محضری نشده است، بنابراین اولین اجرا دو کلیک اضافی می‌خواهد؛ فایل DMG شما را راهنمایی می‌کند و راهنمای کامل روی خود دیسک است.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">دانلود اپ مک</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">‎.zip قابل حمل</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">در دسترس</span></h3>
@@ -64,14 +65,14 @@
         شروع-با-Windows اختیاری و دوکلیک ‎.nzb راه‌اندازی می‌کند. کاملاً ایستا، بدون زمان‌اجرا
         برای نصب؛ می‌تواند پیکربندی موجود SABnzbd شما را هم بپذیرد.</p>
         <p class="meta">Windows 10/11 x64 · ~8 MB نصاب</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">دانلود نصاب</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">‎.zip قابل حمل</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">دانلود نصاب</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">‎.zip قابل حمل</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">در دسترس</span></h3>
         <p>بیلدهای ایستای musl برای x86_64 و arm64: سیدباکس‌ها، VPSها، هر NAS با SSH،
         Raspberry Pi 4/5. بدون رولت نسخهٔ glibc.</p>
         <p class="meta">x86_64 · arm64 · واحد systemd گنجانده شده</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">در دسترس</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">در دسترس</span></h3>
+        <p>در <b>Community Applications</b>: در زبانهٔ Apps عبارت <code>nzbfast</code> را جست‌وجو کنید و Install را بزنید. قالب پورت 6789، سه مسیر و شناسه‌های کاربری Unraid را پر می‌کند، پس چیزی برای نوشتن دستی نمی‌ماند.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">راهنمای گام‌به‌گام →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">در دسترس</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">این دکمه‌ها به نسخهٔ فعلی اشاره می‌کنند. اگر پیوندی از کار افتاد، یا نسخهٔ قدیمی‌تر، جمع‌های کنترلی یا یادداشت‌های انتشار را می‌خواهید، همه در <a href="https://github.com/nzbfast/nzbfast/releases">صفحهٔ انتشارهای GitHub</a> موجود است.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>تأیید دانلودها:</b> هر انتشار جمع‌های sha256 را کنار مصنوعات در صفحهٔ انتشارها عرضه می‌کند. زیپ‌های macOS بیت‌های اجرایی را حفظ می‌کنند؛ نسخه‌ها هنوز امضا نشده‌اند، بنابراین macOS پیش از اولین اجرا می‌پرسد: روی برنامه راست‌کلیک کنید و «باز کردن» را انتخاب کنید.</div>
+    <div class="callout" style="margin-top:26px"><b>تأیید دانلودها:</b> هر انتشار جمع‌های sha256 را کنار مصنوعات در صفحهٔ انتشارها عرضه می‌کند. زیپ‌های macOS بیت‌های اجرایی را حفظ می‌کنند؛ نسخه‌ها هنوز امضا نشده‌اند، بنابراین macOS پیش از اولین اجرا می‌پرسد: روی برنامه راست‌کلیک کنید و «باز کردن» را انتخاب کنید (macOS 14 و پیش‌تر)؛ یا آن را از System Settings → Privacy &amp; Security → Open Anyway (macOS 15 و پس از آن) مجاز کنید.</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>یادداشت‌های پلتفرم</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / ARM NAS:</b> از بیلد Linux arm64 استفاده کنید. رمزگشایی SIMD موتور هسته‌های NEON دارد؛ یک Pi 5 گیگابیت را با فضای مانور اشباع می‌کند.</li>
-      <li><b>Unraid:</b> پس از انتشار قالب از Community Apps نصب کنید (تصویر Docker در زیر)؛ تا آن زمان، تصویر را دستی اضافه کنید.</li>
+      <li><b>Unraid:</b> در Community Apps: در زبانهٔ Apps عبارت <code>nzbfast</code> را جست‌وجو کنید و نصب کنید (تصویر Docker در زیر). <a href="unraid.html">راهنمای گام‌به‌گام →</a></li>
       <li><b>TrueNAS SCALE:</b> تصویر Docker را به‌عنوان یک اپ سفارشی اجرا کنید.</li>
       <li><b>FreeBSD / سایر:</b> <code>cargo build --release</code> از منبع انتظار می‌رود کار کند (rustls، بدون OpenSSL)؛ رسماً آزموده نشده. تعمیر PAR2 و باز کردن RAR روی هر پلتفرم بومی‌اند.</li>
       <li><b>گوشی‌ها:</b> چیزی برای نصب نیست: داشبورد یک چیدمان گوشی درجه‌یک دارد، و nzb360/LunaSea از طریق API سازگار با NZBGet متصل می‌شوند.</li>

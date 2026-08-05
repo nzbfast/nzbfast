@@ -56,7 +56,8 @@
         <p>NzbFast-appen: dra till Program och kör. Universell (Apple Silicon och
         Intel), instrumentpanel i sitt eget fönster, .nzb-dubbelklick, Starta vid inloggning.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · app + motor</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Ladda ner Mac-appen</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">portabel .zip</a></p>
+        <p class="meta">Ännu inte notariserad av Apple, så första starten kräver två extra klick; DMG:n guidar dig, och en fullständig guide ligger på själva skivan.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Ladda ner Mac-appen</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">portabel .zip</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">tillgänglig</span></h3>
@@ -64,14 +65,14 @@
         valfri starta-med-Windows och .nzb-dubbelklick. Helt statisk, ingen runtime
         att installera; den kan även adoptera din befintliga SABnzbd-konfig.</p>
         <p class="meta">Windows 10/11 x64 · ~8 MB installer</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Ladda ner installeraren</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">portabel .zip</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Ladda ner installeraren</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">portabel .zip</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">tillgänglig</span></h3>
         <p>Statiska musl-byggen för x86_64 och arm64: seedboxar, VPS:er, valfri NAS med SSH,
         Raspberry Pi 4/5. Ingen glibc-versionsrysk roulett.</p>
         <p class="meta">x86_64 · arm64 · systemd-enhet inkluderad</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">tillgänglig</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">tillgänglig</span></h3>
+        <p>I <b>Community Applications</b>: sök efter <code>nzbfast</code> i Apps-fliken och klicka på Install. Mallen fyller i port 6789, de tre sökvägarna och Unraid-användar-ID:na, så det finns inget att skriva för hand.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">steg-för-steg-guide →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">tillgänglig</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Knapparna pekar på den aktuella versionen. Om en länk slutar fungera, eller om du vill ha en äldre version, kontrollsummorna eller versionsinformationen, finns allt på <a href="https://github.com/nzbfast/nzbfast/releases">GitHubs releasesida</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>Verifiera nedladdningar:</b> varje utgåva levererar sha256-summor bredvid artefakterna på utgåvesidan. macOS-zip:ar bevarar körbarhetsbitar; utgåvorna är ännu inte signerade, så macOS frågar före första starten: högerklicka på appen och välj Öppna.</div>
+    <div class="callout" style="margin-top:26px"><b>Verifiera nedladdningar:</b> varje utgåva levererar sha256-summor bredvid artefakterna på utgåvesidan. macOS-zip:ar bevarar körbarhetsbitar; utgåvorna är ännu inte signerade, så macOS frågar före första starten: högerklicka på appen och välj Öppna (macOS 14 och tidigare), eller tillåt den under Systeminställningar → Integritet &amp; säkerhet → Öppna ändå (macOS 15 och senare).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Plattformsnoter</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / ARM NAS:</b> använd Linux arm64-bygget. Motorns SIMD-avkodning har NEON-kärnor; en Pi 5 mättar gigabit med marginal.</li>
-      <li><b>Unraid:</b> installera från Community Apps när mallen är publicerad (Docker-image under huven); tills dess, lägg till imagen manuellt.</li>
+      <li><b>Unraid:</b> i Community Apps: sök efter <code>nzbfast</code> i Apps-fliken och installera (Docker-image under huven). <a href="unraid.html">Steg-för-steg-guide →</a></li>
       <li><b>TrueNAS SCALE:</b> kör Docker-imagen som en custom app.</li>
       <li><b>FreeBSD / övrigt:</b> <code>cargo build --release</code> från källkod förväntas fungera (rustls, ingen OpenSSL); officiellt otestat. PAR2-reparation och RAR-uppackning är native på alla plattformar.</li>
       <li><b>Telefoner:</b> inget att installera: instrumentpanelen har en förstklassig telefonlayout, och nzb360/LunaSea ansluter via det NZBGet-kompatibla API:et.</li>

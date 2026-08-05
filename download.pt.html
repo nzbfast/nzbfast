@@ -56,7 +56,8 @@
         <p>O app NzbFast: arraste para Aplicativos e pronto. Universal (Apple Silicon e
         Intel), painel em sua própria janela, duplo clique em .nzb, iniciar ao fazer login.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · app + motor</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Baixar o app do Mac</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">.zip portátil</a></p>
+        <p class="meta">Ainda não autenticada pela Apple, por isso a primeira abertura pede dois cliques extra; o DMG mostra o caminho, e há um guia completo no próprio disco.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Baixar o app do Mac</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">.zip portátil</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">disponível</span></h3>
@@ -64,14 +65,14 @@
         opção de iniciar com o Windows e duplo clique em .nzb. Totalmente estático, sem runtime
         para instalar; também pode adotar sua configuração existente do SABnzbd.</p>
         <p class="meta">Windows 10/11 x64 · instalador de ~8 MB</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Baixar o instalador</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">.zip portátil</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Baixar o instalador</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">.zip portátil</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">disponível</span></h3>
         <p>Builds musl estáticos para x86_64 e arm64: seedboxes, VPSes, qualquer NAS com SSH,
         Raspberry Pi 4/5. Sem roleta de versão do glibc.</p>
         <p class="meta">x86_64 · arm64 · unidade systemd incluída</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">disponível</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">disponível</span></h3>
+        <p>Em <b>Community Applications</b>: procure <code>nzbfast</code> na aba Apps e clique em Install. O template preenche a porta 6789, os três caminhos e os IDs de usuário do Unraid, então não há nada para escrever à mão.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">guia passo a passo →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">disponível</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Estes botões apontam para a versão atual. Se algum link falhar, ou se quiser uma versão anterior, as somas de verificação ou as notas de lançamento, está tudo na <a href="https://github.com/nzbfast/nzbfast/releases">página de versões do GitHub</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>Verificando os downloads:</b> cada versão traz somas sha256 ao lado dos artefatos na página de versões. Os zips do macOS preservam os bits de execução; as builds ainda não são assinadas, então o macOS pergunta antes da primeira abertura: clique com o botão direito no app e escolha Abrir.</div>
+    <div class="callout" style="margin-top:26px"><b>Verificando os downloads:</b> cada versão traz somas sha256 ao lado dos artefatos na página de versões. Os zips do macOS preservam os bits de execução; as builds ainda não são assinadas, então o macOS pergunta antes da primeira abertura: clique com o botão direito no app e escolha Abrir (macOS 14 e anteriores), ou permita-o em Ajustes do Sistema → Privacidade &amp; Segurança → Abrir Assim Mesmo (macOS 15 e posteriores).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Notas por plataforma</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / NAS ARM:</b> use o build Linux arm64. A decodificação SIMD do motor tem kernels NEON; um Pi 5 satura gigabit com folga.</li>
-      <li><b>Unraid:</b> instale pelo Community Apps quando o template for publicado (imagem Docker por baixo); até lá, adicione a imagem manualmente.</li>
+      <li><b>Unraid:</b> no Community Apps: procure <code>nzbfast</code> na aba Apps e instale (imagem Docker por baixo). <a href="unraid.html">Guia passo a passo →</a></li>
       <li><b>TrueNAS SCALE:</b> rode a imagem Docker como um app personalizado.</li>
       <li><b>FreeBSD / outros:</b> espera-se que <code>cargo build --release</code> a partir do código funcione (rustls, sem OpenSSL); oficialmente sem testes. O reparo PAR2 e a extração RAR são nativos em todas as plataformas.</li>
       <li><b>Celulares:</b> nada para instalar: o painel tem um layout de celular de primeira classe, e o nzb360/LunaSea conectam pela API compatível com o NZBGet.</li>

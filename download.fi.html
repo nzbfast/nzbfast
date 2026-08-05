@@ -56,7 +56,8 @@
         <p>NzbFast-sovellus: vedä Ohjelmiin ja mene. Universaali (Apple Silicon ja
         Intel), koontinäyttö omassa ikkunassaan, .nzb-kaksoisnapsautus, käynnistys kirjautumisessa.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · sovellus + moottori</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Lataa Mac-sovellus</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">siirrettävä .zip</a></p>
+        <p class="meta">Ei vielä Applen notarisoima, joten ensimmäinen käynnistys vaatii kaksi lisänapsautusta; DMG opastaa niiden läpi, ja täydellinen opas on itse levyllä.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Lataa Mac-sovellus</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">siirrettävä .zip</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">saatavilla</span></h3>
@@ -64,14 +65,14 @@
         valinnaisen Windowsin-kanssa-käynnistyksen ja .nzb-kaksoisnapsautuksen. Täysin staattinen, ei asennettavaa
         ajoympäristöä; se voi myös omaksua olemassa olevan SABnzbd-määrityksesi.</p>
         <p class="meta">Windows 10/11 x64 · ~8 MB asennusohjelma</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Lataa asennusohjelma</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">siirrettävä .zip</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Lataa asennusohjelma</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">siirrettävä .zip</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">saatavilla</span></h3>
         <p>Staattiset musl-koonnit x86_64:lle ja arm64:lle: seedboxit, VPS:t, mikä tahansa NAS SSH:lla,
         Raspberry Pi 4/5. Ei glibc-versioruletttia.</p>
         <p class="meta">x86_64 · arm64 · systemd-yksikkö mukana</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">saatavilla</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">saatavilla</span></h3>
+        <p>Kohdassa <b>Community Applications</b>: hae <code>nzbfast</code> Apps-välilehdeltä ja napsauta Install. Malli täyttää portin 6789, kolme polkua ja Unraidin käyttäjätunnukset, joten mitään ei tarvitse kirjoittaa käsin.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">vaiheittainen opas →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">saatavilla</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Painikkeet osoittavat nykyiseen julkaisuun. Jos linkki lakkaa toimimasta tai haluat vanhemman version, tarkistussummat tai julkaisutiedot, ne kaikki löytyvät <a href="https://github.com/nzbfast/nzbfast/releases">GitHubin julkaisusivulta</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>Latausten varmistaminen:</b> jokainen julkaisu toimittaa sha256-summat artefaktien vieressä julkaisusivulla. macOS-zipit säilyttävät suoritusbitit; julkaisuja ei ole vielä allekirjoitettu, joten macOS kysyy ennen ensimmäistä käynnistystä: napsauta sovellusta hiiren kakkospainikkeella ja valitse Avaa.</div>
+    <div class="callout" style="margin-top:26px"><b>Latausten varmistaminen:</b> jokainen julkaisu toimittaa sha256-summat artefaktien vieressä julkaisusivulla. macOS-zipit säilyttävät suoritusbitit; julkaisuja ei ole vielä allekirjoitettu, joten macOS kysyy ennen ensimmäistä käynnistystä: napsauta sovellusta hiiren kakkospainikkeella ja valitse Avaa (macOS 14 ja vanhemmat), tai salli se kohdassa Järjestelmäasetukset → Tietosuoja &amp; turvallisuus → Avaa silti (macOS 15 ja uudemmat).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Alustahuomiot</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / ARM NAS:</b> käytä Linuxin arm64-koontia. Moottorin SIMD-dekoodauksella on NEON-ytimet; Pi 5 kyllästää gigabitin pelivaralla.</li>
-      <li><b>Unraid:</b> asenna Community Apps -sovelluksista, kun malli on julkaistu (Docker-kuva alla); siihen asti lisää kuva käsin.</li>
+      <li><b>Unraid:</b> Community Apps -sovelluksista: hae <code>nzbfast</code> Apps-välilehdeltä ja asenna (Docker-kuva alla). <a href="unraid.html">Vaiheittainen opas →</a></li>
       <li><b>TrueNAS SCALE:</b> aja Docker-kuva mukautettuna sovelluksena.</li>
       <li><b>FreeBSD / muut:</b> <code>cargo build --release</code> lähdekoodista odotetaan toimivan (rustls, ei OpenSSL:ää); virallisesti testaamaton. PAR2-korjaus ja RAR-purku ovat natiiveja kaikilla alustoilla.</li>
       <li><b>Puhelimet:</b> ei mitään asennettavaa: koontinäytöllä on ensiluokkainen puhelinasettelu, ja nzb360/LunaSea yhdistyvät NZBGet-yhteensopivan API:n kautta.</li>

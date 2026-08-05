@@ -56,7 +56,8 @@
         <p>NzbFast uygulaması: Applications'a sürükle ve başla. Evrensel (Apple Silicon ve
         Intel), kendi penceresinde panel, .nzb çift tıklama, Girişte Başlat.</p>
         <p class="meta">macOS 12+ · ~16 MB DMG · uygulama + motor</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos.dmg">Mac uygulamasını indir</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-macos-universal.zip">taşınabilir .zip</a></p>
+        <p class="meta">Henüz Apple tarafından noterlenmedi, bu yüzden ilk açılış iki fazladan tık ister; DMG size yol gösterir, tam kılavuz da diskin üzerindedir.</p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos.dmg">Mac uygulamasını indir</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-macos-universal.zip">taşınabilir .zip</a></p>
       </div>
       <div class="card">
         <h3>🪟 Windows <span class="tag now">mevcut</span></h3>
@@ -64,14 +65,14 @@
         isteğe bağlı Windows ile başlat ve .nzb çift tıklama kurar. Tamamen statik, kurulacak
         çalışma zamanı yok; mevcut SABnzbd yapılandırmanı da benimseyebilir.</p>
         <p class="meta">Windows 10/11 x64 · ~8 MB kurucu</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64-setup.exe">Kurucuyu indir</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-windows-x64.zip">taşınabilir .zip</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64-setup.exe">Kurucuyu indir</a> <a class="btn ghost" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-windows-x64.zip">taşınabilir .zip</a></p>
       </div>
       <div class="card">
         <h3>🐧 Linux <span class="tag now">mevcut</span></h3>
         <p>x86_64 ve arm64 için statik musl yapıları: seedbox'lar, VPS'ler, SSH'li herhangi bir NAS,
         Raspberry Pi 4/5. glibc sürüm ruleti yok.</p>
         <p class="meta">x86_64 · arm64 · systemd birimi dahil</p>
-        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.15-linux-arm64.tar.gz">arm64</a></p>
+        <p class="get"><a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-x64.tar.gz">x86_64</a> <a class="btn" href="https://github.com/nzbfast/nzbfast/releases/latest/download/nzbfast-1.0.16-linux-arm64.tar.gz">arm64</a></p>
       </div>
       <div class="card">
         <h3>🐳 Docker <span class="tag now">mevcut</span></h3>
@@ -79,6 +80,11 @@
         <pre class="cmd">docker run -d -p 6789:6789 \
   -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
   nzbfast/nzbfast</pre>
+      </div>
+      <div class="card">
+        <h3>🧡 Unraid <span class="tag now">mevcut</span></h3>
+        <p><b>Community Applications</b> içinde: Apps sekmesinde <code>nzbfast</code> araması yapın ve Install’a tıklayın. Şablon 6789 portunu, üç yolu ve Unraid kullanıcı kimliklerini doldurur; elle yazılacak bir şey kalmaz.</p>
+        <p class="meta">Community Apps · amd64 · <a href="unraid.html">adım adım kılavuz →</a></p>
       </div>
       <div class="card">
         <h3>📦 Synology <span class="tag now">mevcut</span></h3>
@@ -99,7 +105,7 @@
       <p class="note nzbfast-releases-fallback" style="text-align:center;margin-top:20px">Bu düğmeler güncel sürüme işaret eder. Bir bağlantı çalışmazsa ya da daha eski bir sürümü, sağlama toplamlarını veya sürüm notlarını isterseniz, hepsi <a href="https://github.com/nzbfast/nzbfast/releases">GitHub sürümler sayfasında</a>.</p>
     </div>
 
-    <div class="callout" style="margin-top:26px"><b>İndirmeleri doğrulama:</b> her sürüm, sürümler sayfasında yapıtların yanında sha256 toplamlarıyla gönderilir. macOS zip’leri çalıştırılabilir bitleri korur; sürümler henüz imzalanmadığı için macOS ilk açılıştan önce sorar: uygulamaya sağ tıklayıp Aç’ı seçin.</div>
+    <div class="callout" style="margin-top:26px"><b>İndirmeleri doğrulama:</b> her sürüm, sürümler sayfasında yapıtların yanında sha256 toplamlarıyla gönderilir. macOS zip’leri çalıştırılabilir bitleri korur; sürümler henüz imzalanmadığı için macOS ilk açılıştan önce sorar: uygulamaya sağ tıklayıp Aç’ı seçin (macOS 14 ve öncesi), ya da Sistem Ayarları → Gizlilik &amp; Güvenlik → Yine de Aç yolundan izin verin (macOS 15 ve sonrası).</div>
   </div>
 </section>
 
@@ -121,7 +127,7 @@
     <h2>Platform notları</h2>
     <ul class="plain">
       <li><b>Raspberry Pi / ARM NAS:</b> Linux arm64 yapısını kullan. Motorun SIMD kod çözmesinin NEON çekirdekleri vardır; bir Pi 5 gigabiti payla doyurur.</li>
-      <li><b>Unraid:</b> şablon yayımlandığında Community Apps'ten kur (altında Docker imgesi); o zamana dek imgeyi elle ekle.</li>
+      <li><b>Unraid:</b> Community Apps’te: Apps sekmesinde <code>nzbfast</code> arayıp kurun (altında Docker imgesi). <a href="unraid.html">Adım adım kılavuz →</a></li>
       <li><b>TrueNAS SCALE:</b> Docker imgesini özel bir uygulama olarak çalıştır.</li>
       <li><b>FreeBSD / diğerleri:</b> kaynaktan <code>cargo build --release</code>'in çalışması beklenir (rustls, OpenSSL yok); resmen test edilmedi. PAR2 onarımı ve RAR açma tüm platformlarda yerleşiktir.</li>
       <li><b>Telefonlar:</b> kurulacak bir şey yok: panelin birinci sınıf bir telefon düzeni vardır ve nzb360/LunaSea NZBGet uyumlu API üzerinden bağlanır.</li>
