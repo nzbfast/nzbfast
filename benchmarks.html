@@ -101,34 +101,41 @@
 <section class="alt" id="huge-190">
   <div class="wrap">
     <p class="kicker">Scenario 1 · clean, huge</p>
-    <h2>190.6 GB → single 167.9 GB mkv (Europe, 10 GbE)</h2>
-    <div class="bars">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:20%"></i></span><span class="t">4m 47s</span></div>
-      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:39%"></i></span><span class="t">9m 06s · +90%</span></div>
-      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:82%"></i></span><span class="t">19m 29s · +307%</span></div>
-      <div class="bar"><span>Weaver (warm)</span><span class="trk"><i style="width:100%"></i></span><span class="t">23m 38s · +394%</span></div>
-      <div class="bar"><span>rustnzb 1.3.4</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">no output¹</span></div>
-    </div>
+    <h2>169.7 GB &rarr; a 157 GB file, in half the disk space (Europe, 10 GbE)</h2>
+    <p class="lead">nzbfast finishes this job first, but the number worth looking at is the disk. It
+    writes essentially the payload, once. The clients that stage every archive part to disk and then
+    unpack it pay for the same bytes two and a half to three times over, and need twice the free
+    space to run the job at all.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver (warm)</th><th>rustnzb 1.3.4</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
-        <tr><td>time to usable file</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td><td class="bad">none¹</td></tr>
-        <tr><td>GB on the wire</td><td class="win num">169.7</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">169.8</td><td class="num">186.6</td></tr>
-        <tr><td>CPU time</td><td class="win num">290 s</td><td class="num">764 s</td><td class="num">2,081 s</td><td class="num">1,625 s</td><td class="num">5,745 s</td></tr>
-        <tr><td>peak memory (RSS)</td><td class="num">1.1 GB²</td><td class="num">2.0 GB</td><td class="num">1.8 GB</td><td class="num">2.1 GB</td><td class="win num">0.6 GB</td></tr>
-        <tr><td>peak extra disk</td><td class="win num">156.6 GB (1.0×)</td><td class="num">312.9 GB (2.0×)</td><td class="num">312.8 GB (2.0×)</td><td class="num">317.3 GB (2.0×)</td><td class="num">–¹</td></tr>
+        <tr><td>disk written for a 157 GB file</td><td class="win num">159.0 GB (1.0&times;)</td><td class="num">458.3 GB (2.9&times;)</td><td class="num">387.4 GB (2.4&times;)</td><td class="num">&ndash;</td><td class="num">73.8 GB&sup1;</td></tr>
+        <tr><td>free space needed</td><td class="win num">156.3 GB</td><td class="num">312.7 GB</td><td class="num">313.0 GB</td><td class="num">&ndash;</td><td class="num">70.9 GB&sup1;</td></tr>
+        <tr><td>time to usable file</td><td class="win">3m 14s</td><td class="lose">4m 06s (+27%)</td><td class="lose">7m 40s (+137%)</td><td class="lose">22m 57s (+610%)</td><td class="bad">none&sup1;</td></tr>
+        <tr><td>CPU time</td><td class="win num">312 s</td><td class="num">418 s</td><td class="num">771 s</td><td class="num">&ndash;</td><td class="num">3,822 s</td></tr>
+        <tr><td>peak memory (RSS)</td><td class="num">1.1 GB&sup2;</td><td class="num">1.9 GB</td><td class="num">1.3 GB</td><td class="num">1.9 GB</td><td class="win num">0.5 GB</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">Re-measured 31 July 2026 on the shipping build, all
-    five clients, all providers over TLS; the time matches our 20 July all-time best (284 s) within
-    provider variance. ¹ rustnzb reported <i>done</i> at 5m 48s having pulled 186.6 GB (10% more
-    wire than anyone) but left an <b>empty output directory</b>, its fourth straight failed round on
-    this post. · ² nzbfast's memory follows its <em>configured budget</em>, not the job: the default
-    auto budget peaked at 1.1 GB, and capped at <b>1 GB</b> the same 190 GB job still completes (see
-    the low-memory ladder below). The 2.0× peak-disk column is the practical one: on this job the
-    write-out-and-unpack clients need ~313 GB free where nzbfast needs 157 GB. On the earlier East
-    Coast round (~2.4–3 Gbps line) the same scenario ran 9m 00s vs NZBGet +30% and SABnzbd +111%; re-raced there 31 July on the shipping build it ran 8m 03s vs NZBGet 18m 47s (+133%).
-    The gap holds across line speeds.</p>
+    <div class="bars">
+      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:14%"></i></span><span class="t">3m 14s</span></div>
+      <div class="bar"><span>SABnzbd 5.1.0RC2</span><span class="trk"><i style="width:18%"></i></span><span class="t">4m 06s &middot; +27%</span></div>
+      <div class="bar"><span>NZBGet 26.3</span><span class="trk"><i style="width:33%"></i></span><span class="t">7m 40s &middot; +137%</span></div>
+      <div class="bar"><span>Weaver 0.7.8</span><span class="trk"><i style="width:100%"></i></span><span class="t">22m 57s &middot; +610%</span></div>
+      <div class="bar"><span>rustnzb 1.3.9</span><span class="trk dnf"><i style="width:25%"></i></span><span class="t">no output&sup1;</span></div>
+    </div>
+    <p class="note" style="text-align:start">Measured 6 August 2026 on the shipping build. All five
+    clients ran the same night on the same line, alternating client by client inside each round, so
+    the provider envelope - which moves two to threefold minute to minute - cancels instead of
+    favouring whoever happened to run first. Every leg started only after a live check showed all
+    six servers authenticated, and competitor builds are the current shipping ones.
+    &sup1; rustnzb pulled 186.5 GB, 16.8 GB more than the payload, and left <b>no output file at
+    all</b>; its disk figures are small because nothing was ever produced. This reproduces an
+    identical result recorded against it earlier, and follows from its documented setting of not
+    unpacking as it goes. &middot; &sup2; nzbfast's memory follows its <em>configured budget</em>,
+    not the job: the default auto budget peaked at 1.1 GB, and capped at <b>1 GB</b> the same job
+    still completes (see the low-memory ladder below). On an earlier East Coast round
+    (~2.4-3.0 Gbps line) the same scenario ran 9m 00s against +30% and +111%; the gap holds across
+    line speeds.</p>
   </div>
 </section>
 
