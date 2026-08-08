@@ -748,10 +748,13 @@
     227&ndash;236&nbsp;s, bliver færdigt på 45&ndash;59&nbsp;s under RC2, ved omtrent en femtedel
     af CPU'en. Selve downloadet tager 31&nbsp;s i alle versioner - det, RC2 fjerner, er en
     overflødig fuld par2-verifikation, som de ældre versioner kører, efter at arkivet allerede er
-    udpakket, så det er en ændring i efterbehandlingen, ikke en hurtigere vej på ledningen. Indtil
-    videre er det kun målt på én form, den hvor SABnzbds direkte udpakning slår til; former hvor
-    direkte udpakning ikke kan slå til, såsom header-krypterede arkiver, bliver testet om igen. De
-    stabile tabeller på denne side beholder 5.0.4, indtil 5.1.0 udkommer.</p>
+    udpakket, så det er en ændring i efterbehandlingen, ikke en hurtigere vej på ledningen. Et
+    opfølgende løb på header-krypterede arkiver, hvor direkte udpakning ikke kan slå til, målte
+    samme fald: identiske downloadtider på begge versioner, og efterbehandling der falder fra
+    par2-verifikationen til ingenting. Det, RC2 giver afkald på, er selve kontrollen - på et
+    ubeskadiget sæt verificerer det slet ikke længere dataene, mens nzbfast verificerer hver blok,
+    efterhånden som den ankommer, uden et ekstra gennemløb. De stabile tabeller på denne side
+    beholder 5.0.4, indtil 5.1.0 udkommer.</p>
 
     <p>rustnzb bevæger sig hurtigst af alle - fem udgivelser mellem vores fastlåste 1.3.4 (18. juli) og 1.3.9 (28. juli) - så vi byggede 1.3.9 fra kildekoden og kørte det om samme dag. Dets ændringslog lover rettelser for præcis det, vores tabeller rapporterer (»gøre direkte udpakning pålidelig«, »afvise fuldførte job uden brugbart output«): målt ankommer den slørede 35&nbsp;GB-udgivelse stadig som rå arkivdele markeret <i>færdigt</i>, både på det enkelte job og i køen. Det, der ændrede sig, er omkostning og tempo: tider omkring 10% hurtigere, og den processormættende malen, vi målte på 1.3.4, manglede i hver etape på 1.3.9 - selv om en gentagelse af 1.3.4 samme dag også målte lavt, så den omkostning afhænger af forholdene frem for at være løst af versionen, og vi anfører den intet sted som ét enkelt tal.</p>
 

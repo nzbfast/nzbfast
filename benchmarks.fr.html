@@ -762,11 +762,13 @@
     environ un cinquième du processeur. Le téléchargement lui-même prend 31&nbsp;s dans toutes les
     versions - ce que la RC2 supprime, c’est une vérification par2 complète redondante que les
     versions plus anciennes lancent alors que l’archive est déjà extraite ; c’est donc un changement
-    de post-traitement, pas un chemin réseau plus rapide. Pour l’instant, ce n’est mesuré que sur
-    une seule forme, celle où l’extraction directe de SABnzbd s’enclenche ; les formes où
-    l’extraction directe ne peut pas s’enclencher, comme les archives à en-têtes chiffrés, sont en
-    cours de remesure. Les tableaux stables de cette page conservent la 5.0.4 jusqu’à la sortie de
-    la 5.1.0.</p>
+    de post-traitement, pas un chemin réseau plus rapide. Une manche de suivi sur les archives à
+    en-têtes chiffrés, où l’extraction directe ne peut pas s’enclencher, a mesuré la même baisse :
+    des temps de téléchargement identiques sur les deux versions, et un post-traitement qui tombe
+    de la vérification par2 à rien. Ce que la RC2 abandonne, c’est la vérification elle-même - sur
+    un jeu intact, elle ne vérifie plus du tout les données, alors que nzbfast vérifie chaque bloc
+    à son arrivée, sans passe supplémentaire. Les tableaux stables de cette page conservent la
+    5.0.4 jusqu’à la sortie de la 5.1.0.</p>
 
     <p>rustnzb bouge le plus vite de tous - cinq versions entre notre 1.3.4 figé (18 juillet) et 1.3.9 (28 juillet) - nous avons donc compilé 1.3.9 depuis les sources et l’avons couru le jour même. Son journal des modifications promet des correctifs pour exactement ce que nos tableaux rapportent (« rendre la décompression directe fiable », « rejeter les tâches terminées sans sortie utilisable ») : à la mesure, la release obfusquée de 35&nbsp;GB arrive toujours en volumes bruts marqués <i>terminé</i>, aussi bien sur la tâche isolée que dans la file. Ce qui a changé, c’est le coût et le rythme : des temps environ 10% plus rapides, et le brassage saturant le processeur que nous avions mesuré sur 1.3.4 était absent de toutes les étapes en 1.3.9 - mais une reprise de 1.3.4 le même jour a elle aussi mesuré bas, ce coût dépend donc de l’état plutôt que d’être corrigé par la version, et nous ne le citons nulle part comme un chiffre unique.</p>
 

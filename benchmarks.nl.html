@@ -751,9 +751,12 @@
     ongeveer een vijfde van de CPU. De download zelf duurt in elke versie 31&nbsp;s - wat RC2
     weghaalt is een overbodige volledige par2-verificatie die de oudere versies draaien nadat het
     archief al is uitgepakt, dus dit is een wijziging in de nabewerking, geen sneller pad over de
-    lijn. Vooralsnog is het op één vorm gemeten, de vorm waarin SABnzbds direct unpack aanslaat;
-    vormen waarin direct unpack niet kan aanslaan, zoals archieven met versleutelde headers, worden
-    opnieuw getest. De stabiele tabellen op deze pagina houden 5.0.4 aan tot 5.1.0 verschijnt.</p>
+    lijn. Een vervolgrace op archieven met versleutelde headers, waar direct unpack niet kan
+    aanslaan, mat dezelfde daling: identieke downloadtijden op beide versies, en nabewerking die
+    terugvalt van de par2-verificatie naar niets. Wat RC2 opgeeft is de controle zelf - op een
+    onbeschadigde set verifieert het de data helemaal niet meer, terwijl nzbfast elk blok
+    verifieert zodra het binnenkomt, zonder extra doorgang. De stabiele tabellen op deze pagina
+    houden 5.0.4 aan tot 5.1.0 verschijnt.</p>
 
     <p>rustnzb beweegt het snelst van allemaal - vijf uitgaven tussen ons vastgezette 1.3.4 (18 juli) en 1.3.9 (28 juli) - dus bouwden we 1.3.9 uit de broncode en reden het dezelfde dag opnieuw. Zijn wijzigingslijst belooft oplossingen voor precies wat onze tabellen melden („direct uitpakken betrouwbaar maken”, „voltooide taken zonder bruikbare uitvoer weigeren”): gemeten komt de versluierde release van 35&nbsp;GB nog steeds binnen als ruwe volumes gemarkeerd als <i>klaar</i>, zowel bij de losse taak als in de wachtrij. Wat wel veranderde zijn kosten en tempo: tijden ongeveer 10% sneller, en het processorverzadigende gemaal dat we op 1.3.4 maten ontbrak in elke etappe op 1.3.9 - al mat een herhaling van 1.3.4 dezelfde dag ook laag, dus die kosten hangen af van de omstandigheden in plaats van dat de versie ze heeft verholpen, en we noemen ze nergens als één cijfer.</p>
 

@@ -751,9 +751,11 @@
     lleva 227&ndash;236&nbsp;s termina en 45&ndash;59&nbsp;s con la RC2, con alrededor de una quinta parte de la
     CPU. La descarga en sí tarda 31&nbsp;s en todas las versiones - lo que la RC2 elimina es una verificación par2
     completa redundante que las versiones anteriores ejecutan cuando el archivo ya está extraído, así que es un
-    cambio de post-procesado, no una ruta de red más rápida. De momento está medido en una sola forma, aquella en
-    la que se activa el desempaquetado directo de SABnzbd; las formas en las que el desempaquetado directo no puede
-    activarse, como los archivos con cabeceras cifradas, se están volviendo a probar. Las tablas estables de esta
+    cambio de post-procesado, no una ruta de red más rápida. Una carrera de seguimiento con archivos de cabeceras
+    cifradas, donde el desempaquetado directo no puede activarse, midió la misma caída: tiempos de descarga
+    idénticos en ambas versiones, y un post-procesado que pasa de la verificación par2 a nada. Lo que la RC2
+    sacrifica es la comprobación en sí - en un conjunto sin daños ya no verifica los datos en absoluto, mientras
+    que nzbfast verifica cada bloque según llega, sin ninguna pasada extra. Las tablas estables de esta
     página mantienen la 5.0.4 hasta que salga la 5.1.0.</p>
 
     <p>rustnzb se mueve más rápido que nadie - cinco versiones entre nuestro 1.3.4 fijado (18 de julio) y 1.3.9 (28 de julio) - así que compilamos 1.3.9 desde el código fuente y lo volvimos a correr el mismo día. Su registro de cambios promete correcciones para exactamente lo que informan nuestras tablas («hacer fiable la extracción directa», «rechazar trabajos completados sin salida usable»): medido, la release ofuscada de 35&nbsp;GB sigue llegando como volúmenes en bruto marcados <i>hecho</i>, tanto en el trabajo aislado como en la cola. Lo que sí cambió es el coste y el ritmo: tiempos alrededor de un 10% más rápidos, y el removido que saturaba el procesador que medimos en 1.3.4 estuvo ausente de todas las etapas en 1.3.9 - aunque una repetición de 1.3.4 el mismo día también midió bajo, así que ese coste depende de las condiciones en lugar de estar resuelto por la versión, y no lo citamos en ningún sitio como una cifra única.</p>

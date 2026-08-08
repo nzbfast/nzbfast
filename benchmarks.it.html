@@ -824,9 +824,11 @@
     circa un quinto della CPU. Il download in sé richiede 31&nbsp;s in ogni versione - ciò che la
     RC2 elimina è una verifica par2 completa ridondante che le versioni precedenti eseguono quando
     l'archivio è già estratto, quindi è un cambiamento di post-elaborazione, non un percorso di rete
-    più veloce. Per ora è misurato su una sola forma, quella in cui l'estrazione diretta di SABnzbd
-    si attiva; le forme in cui l'estrazione diretta non può attivarsi, come gli archivi con
-    intestazioni cifrate, sono in corso di rimisurazione. Le tabelle stabili di questa pagina
+    più veloce. Una gara successiva sugli archivi con intestazioni cifrate, dove l'estrazione
+    diretta non può attivarsi, ha misurato lo stesso calo: tempi di download identici su entrambe le
+    versioni, e post-elaborazione che scende dalla verifica par2 a zero. Ciò a cui la RC2 rinuncia è
+    il controllo stesso - su un set integro non verifica più affatto i dati, mentre nzbfast verifica
+    ogni blocco man mano che arriva, senza alcun passaggio in più. Le tabelle stabili di questa pagina
     mantengono la 5.0.4 finché la 5.1.0 non esce come stabile.</p>
 
     <p>rustnzb si muove più in fretta di tutti - cinque release tra il nostro 1.3.4 fissato (18 luglio) e 1.3.9 (28 luglio) - quindi abbiamo compilato 1.3.9 dai sorgenti e l’abbiamo ricorso lo stesso giorno. Il suo registro delle modifiche promette correzioni per esattamente ciò che le nostre tabelle riportano (« rendere affidabile l’estrazione diretta », « rifiutare i lavori completati senza output utilizzabile »): alla misura, la release offuscata da 35&nbsp;GB arriva ancora come volumi grezzi segnati <i>fatto</i>, sia sul lavoro singolo sia in coda. Ciò che è cambiato è il costo e il ritmo: tempi circa il 10% più rapidi, e il rimescolamento che saturava il processore misurato su 1.3.4 era assente da ogni tappa su 1.3.9 - però anche una ripetizione di 1.3.4 in giornata ha misurato basso, quindi quel costo dipende dalle condizioni anziché essere risolto dalla versione, e non lo citiamo da nessuna parte come numero singolo.</p>

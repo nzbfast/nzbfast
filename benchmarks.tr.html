@@ -846,9 +846,11 @@
     45&ndash;59&nbsp;s'de ve yaklaşık beşte biri CPU ile bitiyor. İndirmenin kendisi her
     sürümde 31&nbsp;s sürüyor - RC2'nin kaldırdığı şey, eski sürümlerin arşiv çoktan
     çıkarıldıktan sonra çalıştırdığı gereksiz bir tam par2 doğrulaması; yani bu bir son
-    işleme değişikliği, daha hızlı bir hat yolu değil. Şimdilik yalnızca tek bir biçimde,
-    SABnzbd'nin doğrudan çıkarmasının devreye girdiği biçimde ölçüldü; doğrudan çıkarmanın
-    devreye giremediği biçimler, örneğin başlığı şifreli arşivler, yeniden test ediliyor.
+    işleme değişikliği, daha hızlı bir hat yolu değil. Doğrudan çıkarmanın devreye
+    giremediği başlığı şifreli arşivlerde yapılan bir devam yarışı da aynı düşüşü ölçtü:
+    indirme süreleri iki sürümde de aynı, son işleme ise par2 doğrulamasından sıfıra
+    iniyor. RC2'nin vazgeçtiği şey denetimin kendisi - hasarsız bir sette artık veriyi
+    hiç doğrulamıyor; nzbfast ise her bloğu geldiği anda, ek bir geçiş olmadan doğruluyor.
     Bu sayfadaki kararlı tablolar 5.1.0 çıkana kadar 5.0.4'te kalıyor.</p>
 
     <p>rustnzb hepsinden hızlı ilerliyor - sabitlediğimiz 1.3.4 (18 Temmuz) ile 1.3.9 (28 Temmuz) arasında beş yayım - bu yüzden 1.3.9'u kaynaktan derleyip aynı gün yeniden koştuk. Değişiklik günlüğü tam da tablolarımızın bildirdiği şeyler için düzeltmeler vaat ediyor ("doğrudan çıkarmayı güvenilir kıl", "kullanılabilir çıktısı olmayan tamamlanmış işleri reddet"): ölçüldüğünde, gizlenmiş 35&nbsp;GB'lık yayım hem tek işte hem kuyrukta hâlâ <i>bitti</i> işaretli ham birimler olarak geliyor. Değişen şey maliyet ve tempo: süreler yaklaşık 10% daha hızlı ve 1.3.4'te ölçtüğümüz işlemciyi dolduran öğütme her 1.3.9 ayağında yoktu - gerçi aynı gün yapılan bir 1.3.4 yeniden koşusu da düşük ölçtü, dolayısıyla bu maliyet sürümle giderilmiş olmaktan çok koşullara bağlı ve onu hiçbir yerde tek bir sayı olarak vermiyoruz.</p>
