@@ -758,10 +758,20 @@
     <p>Was sich bewegt hat: NZBGets Vorabversion senkt ihre CPU-Kosten um rund ein Drittel und
     ihren Spitzenspeicher um bis zur Hälfte, bei unveränderten Endzeiten - echte Effizienzarbeit
     (eine korrigierte Warteschleife, behobene Data Races, aktualisierte Entpack-Werkzeuge). SABnzbds
-    RC liegt auf beiden Etappen im Rauschen von 5.0.4; seine Performance-Änderungen zielen auf
-    Wiederholungen und das Parsen header-verschlüsselter Posts, Pfade, die diese Etappen nicht
-    beanspruchen. <b>Die Zeit bis zur benutzbaren Datei, die Kennzahl, mit der diese Seite führt,
-    hat sich bei keinem der beiden Clients auf keiner der beiden Etappen bewegt.</b></p>
+    5.1.0RC1 liegt auf beiden Etappen im Rauschen von 5.0.4 - mit Stand vom 31. Juli hatte sich
+    die Zeit bis zur benutzbaren Datei, die Kennzahl, mit der diese Seite führt, also bei keinem
+    der beiden Clients auf keiner der beiden Etappen bewegt.</p>
+
+    <p><b>Eine dieser Zahlen hat sich inzwischen bewegt.</b> Am 7. August haben wir SABnzbds
+    5.1.0RC2 neu gefahren, dieselbe Maschine, dieselbe Verschränkung: ein 34.5&nbsp;GB großer
+    verschleierter Job, der 5.0.4 und RC1 227&ndash;236&nbsp;s kostet, ist unter RC2 in
+    45&ndash;59&nbsp;s fertig, bei rund einem Fünftel der CPU. Der Download selbst dauert in
+    jeder Version 31&nbsp;s - was RC2 entfernt, ist eine redundante vollständige par2-Prüfung,
+    die die älteren Versionen laufen lassen, nachdem das Archiv bereits entpackt ist; es ist
+    also eine Änderung an der Nachbearbeitung, kein schnellerer Pfad auf der Leitung. Bislang
+    ist das nur auf einer Form gemessen, der, bei der SABnzbds Direct Unpack greift; Formen,
+    bei denen Direct Unpack nicht greifen kann, etwa header-verschlüsselte Archive, werden
+    gerade neu getestet. Die Stable-Tabellen dieser Seite behalten 5.0.4, bis 5.1.0 erscheint.</p>
 
     <p>rustnzb bewegt sich am schnellsten von allen - fünf Releases zwischen unserem festgesetzten 1.3.4 (18. Juli) und 1.3.9 (28. Juli) - also haben wir 1.3.9 aus dem Quellcode gebaut und am selben Tag neu gefahren. Sein Änderungsprotokoll verspricht Korrekturen für genau das, was unsere Tabellen berichten („direktes Entpacken zuverlässig machen“, „abgeschlossene Jobs ohne brauchbare Ausgabe ablehnen“): gemessen kommt das verschleierte 35-GB-Release weiterhin als rohe Volumes an, markiert als <i>fertig</i>, sowohl beim Einzeljob als auch in der Warteschlange. Was sich geändert hat, sind Kosten und Tempo: Laufzeiten rund 10% schneller, und der prozessorsättigende Leerlauf, den wir auf 1.3.4 maßen, fehlte in jeder 1.3.9-Etappe - allerdings maß auch ein Wiederholungslauf von 1.3.4 am selben Tag niedrig, diese Kosten sind also zustandsabhängig statt versionsbedingt behoben, und wir nennen sie nirgends als einzelne Zahl.</p>
 

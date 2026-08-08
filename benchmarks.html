@@ -920,10 +920,19 @@
 
     <p>What moved: NZBGet's pre-release cuts its CPU cost by roughly a third and its peak
     memory by up to half, at unchanged finish times - genuine efficiency work (a spin-loop
-    fix, data-race fixes, updated unpack tools). SABnzbd's RC measures within noise of
-    5.0.4 on both legs; its performance changes target retry and header-encrypted parsing,
-    paths these legs don't exercise. <b>Time to a usable file, the metric this page leads
-    with, did not move for either client on either leg.</b></p>
+    fix, data-race fixes, updated unpack tools). SABnzbd's 5.1.0RC1 measures within noise
+    of 5.0.4 on both legs, so as of 31 July, time to a usable file, the metric this page
+    leads with, had not moved for either client on either leg.</p>
+
+    <p><b>One of those numbers has since moved.</b> We re-raced SABnzbd's 5.1.0RC2 on
+    7 August, same box, same interleaving: a 34.5&nbsp;GB obfuscated job that takes
+    5.0.4 and RC1 227&ndash;236&nbsp;s finishes in 45&ndash;59&nbsp;s under RC2, at
+    about a fifth of the CPU. The download itself takes 31&nbsp;s in every version - what RC2 removes is
+    a redundant full par2 verify that the older versions run after the archive is
+    already extracted, so this is a post-processing change, not a faster wire path. So
+    far it is measured on one shape only, the one where SABnzbd's direct unpack engages;
+    shapes where direct unpack cannot engage, such as header-encrypted archives, are
+    being re-tested. The stable tables on this page keep 5.0.4 until 5.1.0 ships.</p>
 
     <p>rustnzb moves fastest of all - five releases between our pinned 1.3.4 (18 July) and
     1.3.9 (28 July) - so we built 1.3.9 from source and re-raced it the same day. Its

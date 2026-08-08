@@ -744,10 +744,20 @@
     <p>Mikä liikkui: NZBGetin esijulkaisu leikkaa suoritinkustannuksensa noin kolmanneksella ja
     huippumuistinsa jopa puolella valmistumisaikojen pysyessä ennallaan - aitoa tehokkuustyötä
     (pyörityssilmukan korjaus, kilpa-ajotilanteiden korjauksia, päivitetyt purkutyökalut).
-    SABnzbdin RC mittaa 5.0.4:n kanssa kohinan rajoissa molemmilla osuuksilla; sen
-    suorituskykymuutokset kohdistuvat uudelleenyrityksiin ja otsakesalattujen jäsentämiseen,
-    polkuihin joita nämä osuudet eivät koettele. <b>Aika käyttökelpoiseen tiedostoon, se mittari
-    jolla tämä sivu johtaa, ei liikkunut kummallakaan asiakkaalla kummallakaan osuudella.</b></p>
+    SABnzbdin 5.1.0RC1 mittaa 5.0.4:n kanssa kohinan rajoissa molemmilla osuuksilla, joten
+    31. heinäkuuta aika käyttökelpoiseen tiedostoon, se mittari jolla tämä sivu johtaa, ei ollut
+    liikkunut kummallakaan asiakkaalla kummallakaan osuudella.</p>
+
+    <p><b>Yksi näistä luvuista on sittemmin liikkunut.</b> Ajoimme SABnzbdin 5.1.0RC2:n
+    uudelleen 7. elokuuta, sama kone, sama lomitus: 34.5&nbsp;GB:n hämärretty työ, joka vie
+    5.0.4:ltä ja RC1:ltä 227&ndash;236&nbsp;s, valmistuu RC2:lla 45&ndash;59&nbsp;s:ssa, noin
+    viidenneksellä suorittimesta. Itse lataus kestää 31&nbsp;s jokaisessa versiossa - RC2
+    poistaa turhan täyden par2-varmistuksen, jonka vanhemmat versiot ajavat arkiston jo
+    purkauduttua, joten kyse on jälkikäsittelymuutoksesta, ei nopeammasta siirtopolusta.
+    Toistaiseksi se on mitattu vain yhdellä muodolla, sillä jossa SABnzbdin suora purku
+    kytkeytyy; muotoja joissa suora purku ei voi kytkeytyä, kuten otsakesalatut arkistot,
+    testataan parhaillaan uudelleen. Tämän sivun vakaat taulukot pitävät 5.0.4:n kunnes 5.1.0
+    julkaistaan.</p>
 
     <p>rustnzb liikkuu nopeimmin kaikista - viisi julkaisua kiinnitetyn 1.3.4:n (18. heinäkuuta) ja 1.3.9:n (28. heinäkuuta) välillä - joten käänsimme 1.3.9:n lähdekoodista ja ajoimme sen uudelleen samana päivänä. Sen muutosloki lupaa korjauksia juuri siihen, mitä taulukkomme raportoivat (”tee suorasta purusta luotettava”, ”hylkää valmistuneet työt ilman käyttökelpoista tulosta”): mitattuna hämärretty 35&nbsp;GB:n julkaisu saapuu yhä raakoina osina merkinnällä <i>valmis</i>, sekä yksittäisessä työssä että jonossa. Mikä muuttui, on kustannus ja tahti: ajat noin 10% nopeampia, ja suorittimen kyllästävä jauhanta, jonka mittasimme versiossa 1.3.4, puuttui jokaiselta 1.3.9:n osuudelta - joskin saman päivän 1.3.4:n uusinta-ajo mittasi myös matalalta, joten tuo kustannus riippuu olosuhteista eikä ole version korjaama, emmekä esitä sitä missään yhtenä lukuna.</p>
 

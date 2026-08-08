@@ -737,11 +737,20 @@
 
     <p>Vad som rörde sig: NZBGets förhandsversion skär sin CPU-kostnad med ungefär en tredjedel och
     sitt toppminne med upp till hälften, vid oförändrade sluttider - äkta effektiviseringsarbete (en
-    fix för en spinnloop, rättade datakapplöpningar, uppdaterade uppackningsverktyg). SABnzbds RC
-    mäter inom bruset från 5.0.4 på båda etapperna; dess prestandaändringar riktar sig mot omförsök
-    och tolkning av krypterade headers, vägar som de här etapperna inte belastar. <b>Tiden till en
-    användbar fil, måttet den här sidan leder med, rörde sig inte för någon av klienterna på någon
-    av etapperna.</b></p>
+    fix för en spinnloop, rättade datakapplöpningar, uppdaterade uppackningsverktyg). SABnzbds 5.1.0RC1
+    mäter inom bruset från 5.0.4 på båda etapperna, så per den 31 juli hade tiden till en användbar
+    fil, måttet den här sidan leder med, inte rört sig för någon av klienterna på någon av
+    etapperna.</p>
+
+    <p><b>Ett av de talen har sedan dess rört sig.</b> Vi körde om SABnzbds 5.1.0RC2 den 7 augusti,
+    samma maskin, samma sammanflätning: ett obfuskerat jobb på 34.5&nbsp;GB som tar 5.0.4 och RC1
+    227&ndash;236&nbsp;s blir klart på 45&ndash;59&nbsp;s under RC2, till ungefär en femtedel av
+    CPU-kostnaden. Själva nedladdningen tar 31&nbsp;s i varje version - det RC2 tar bort är en
+    överflödig fullständig par2-verifiering som de äldre versionerna kör efter att arkivet redan är
+    uppackat, så det här är en ändring i efterbehandlingen, inte en snabbare väg över tråden. Än så
+    länge är det mätt på bara en form, den där SABnzbds direkta uppackning kopplar in; former där
+    direkt uppackning inte kan koppla in, som arkiv med krypterade headers, testas om just nu. De
+    stabila tabellerna på den här sidan behåller 5.0.4 tills 5.1.0 släpps.</p>
 
     <p>rustnzb rör sig snabbast av alla - fem utgåvor mellan vårt fastlåsta 1.3.4 (18 juli) och 1.3.9 (28 juli) - så vi byggde 1.3.9 från källkod och körde om det samma dag. Dess ändringslogg lovar rättningar för precis det våra tabeller rapporterar (”göra direkt uppackning pålitlig”, ”avvisa slutförda jobb utan användbar utdata”): mätt kommer den obfuskerade 35&nbsp;GB-utgåvan fortfarande fram som råa volymer märkta <i>klart</i>, både på det enskilda jobbet och i kön. Det som ändrades är kostnad och takt: tider omkring 10% snabbare, och det processormättande malandet vi mätte på 1.3.4 saknades i varje etapp på 1.3.9 - fast en omkörning av 1.3.4 samma dag också mätte lågt, så den kostnaden beror på förhållandena snarare än att vara åtgärdad av versionen, och vi anger den ingenstans som ett enda tal.</p>
 

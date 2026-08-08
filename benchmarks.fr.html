@@ -752,11 +752,21 @@
     <p>Ce qui a bougé : la préversion de NZBGet réduit son coût processeur d’environ un tiers et son
     pic de mémoire jusqu’à la moitié, à temps de fin inchangés - du vrai travail d’efficacité (une
     correction de boucle d’attente active, des corrections de courses de données, des outils
-    d’extraction mis à jour). La RC de SABnzbd se mesure dans le bruit de la 5.0.4 sur les deux
-    manches ; ses changements de performance visent les nouvelles tentatives et l’analyse des
-    en-têtes chiffrés, des chemins que ces manches ne sollicitent pas. <b>Le temps jusqu’à un
-    fichier utilisable, la métrique en tête de cette page, n’a bougé pour aucun des deux clients sur
-    aucune des deux manches.</b></p>
+    d’extraction mis à jour). La 5.1.0RC1 de SABnzbd se mesure dans le bruit de la 5.0.4 sur les
+    deux manches ; au 31 juillet, le temps jusqu’à un fichier utilisable, la métrique en tête de
+    cette page, n’avait donc bougé pour aucun des deux clients sur aucune des deux manches.</p>
+
+    <p><b>Un de ces chiffres a bougé depuis.</b> Nous avons refait courir la 5.1.0RC2 de SABnzbd le
+    7 août, même machine, même entrelacement : une tâche obfusquée de 34.5&nbsp;GB qui prend
+    227&ndash;236&nbsp;s à la 5.0.4 et à la RC1 se termine en 45&ndash;59&nbsp;s sous RC2, pour
+    environ un cinquième du processeur. Le téléchargement lui-même prend 31&nbsp;s dans toutes les
+    versions - ce que la RC2 supprime, c’est une vérification par2 complète redondante que les
+    versions plus anciennes lancent alors que l’archive est déjà extraite ; c’est donc un changement
+    de post-traitement, pas un chemin réseau plus rapide. Pour l’instant, ce n’est mesuré que sur
+    une seule forme, celle où l’extraction directe de SABnzbd s’enclenche ; les formes où
+    l’extraction directe ne peut pas s’enclencher, comme les archives à en-têtes chiffrés, sont en
+    cours de remesure. Les tableaux stables de cette page conservent la 5.0.4 jusqu’à la sortie de
+    la 5.1.0.</p>
 
     <p>rustnzb bouge le plus vite de tous - cinq versions entre notre 1.3.4 figé (18 juillet) et 1.3.9 (28 juillet) - nous avons donc compilé 1.3.9 depuis les sources et l’avons couru le jour même. Son journal des modifications promet des correctifs pour exactement ce que nos tableaux rapportent (« rendre la décompression directe fiable », « rejeter les tâches terminées sans sortie utilisable ») : à la mesure, la release obfusquée de 35&nbsp;GB arrive toujours en volumes bruts marqués <i>terminé</i>, aussi bien sur la tâche isolée que dans la file. Ce qui a changé, c’est le coût et le rythme : des temps environ 10% plus rapides, et le brassage saturant le processeur que nous avions mesuré sur 1.3.4 était absent de toutes les étapes en 1.3.9 - mais une reprise de 1.3.4 le même jour a elle aussi mesuré bas, ce coût dépend donc de l’état plutôt que d’être corrigé par la version, et nous ne le citons nulle part comme un chiffre unique.</p>
 

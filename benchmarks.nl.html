@@ -740,11 +740,20 @@
 
     <p>Wat er bewoog: de pre-release van NZBGet verlaagt z'n CPU-kosten met ongeveer een derde en
     z'n piekgeheugen met tot de helft, bij ongewijzigde eindtijden - echt efficiëntiewerk (een
-    oplossing voor een spin-loop, herstelde dataraces, bijgewerkte uitpakgereedschappen). De RC van
-    SABnzbd meet op beide legs binnen de ruis van 5.0.4; z'n prestatiewijzigingen richten zich op
-    opnieuw proberen en op het parseren van versleutelde headers, paden die deze legs niet raken.
-    <b>De tijd tot een bruikbaar bestand, de maatstaf waar deze pagina mee opent, bewoog voor geen
-    van beide clients op geen van beide legs.</b></p>
+    oplossing voor een spin-loop, herstelde dataraces, bijgewerkte uitpakgereedschappen). SABnzbds
+    5.1.0RC1 meet op beide legs binnen de ruis van 5.0.4, dus op 31 juli was de tijd tot een
+    bruikbaar bestand, de maatstaf waar deze pagina mee opent, voor geen van beide clients op geen
+    van beide legs bewogen.</p>
+
+    <p><b>Eén van die cijfers is inmiddels wel bewogen.</b> We reden SABnzbds 5.1.0RC2 op
+    7 augustus opnieuw, zelfde machine, zelfde afwisseling: een versluierde taak van 34.5&nbsp;GB
+    die 5.0.4 en RC1 227&ndash;236&nbsp;s kost, is onder RC2 klaar in 45&ndash;59&nbsp;s, tegen
+    ongeveer een vijfde van de CPU. De download zelf duurt in elke versie 31&nbsp;s - wat RC2
+    weghaalt is een overbodige volledige par2-verificatie die de oudere versies draaien nadat het
+    archief al is uitgepakt, dus dit is een wijziging in de nabewerking, geen sneller pad over de
+    lijn. Vooralsnog is het op één vorm gemeten, de vorm waarin SABnzbds direct unpack aanslaat;
+    vormen waarin direct unpack niet kan aanslaan, zoals archieven met versleutelde headers, worden
+    opnieuw getest. De stabiele tabellen op deze pagina houden 5.0.4 aan tot 5.1.0 verschijnt.</p>
 
     <p>rustnzb beweegt het snelst van allemaal - vijf uitgaven tussen ons vastgezette 1.3.4 (18 juli) en 1.3.9 (28 juli) - dus bouwden we 1.3.9 uit de broncode en reden het dezelfde dag opnieuw. Zijn wijzigingslijst belooft oplossingen voor precies wat onze tabellen melden („direct uitpakken betrouwbaar maken”, „voltooide taken zonder bruikbare uitvoer weigeren”): gemeten komt de versluierde release van 35&nbsp;GB nog steeds binnen als ruwe volumes gemarkeerd als <i>klaar</i>, zowel bij de losse taak als in de wachtrij. Wat wel veranderde zijn kosten en tempo: tijden ongeveer 10% sneller, en het processorverzadigende gemaal dat we op 1.3.4 maten ontbrak in elke etappe op 1.3.9 - al mat een herhaling van 1.3.4 dezelfde dag ook laag, dus die kosten hangen af van de omstandigheden in plaats van dat de versie ze heeft verholpen, en we noemen ze nergens als één cijfer.</p>
 

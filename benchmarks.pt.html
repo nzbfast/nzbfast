@@ -743,10 +743,19 @@
     <p>O que mexeu: a pré-versão do NZBGet corta cerca de um terço do seu custo de CPU e até metade do
     seu pico de memória, com tempos de conclusão inalterados - trabalho de eficiência genuíno (correção
     de um laço de espera ativa, correções de corrida de dados, ferramentas de desempacotamento
-    atualizadas). O RC do SABnzbd fica dentro do ruído face à 5.0.4 nos dois legs; as suas mudanças de
-    desempenho miram a repetição de pedidos e a leitura de cabeçalhos cifrados, caminhos que estes legs
-    não exercitam. <b>O tempo até um arquivo utilizável, a métrica com que esta página abre, não mexeu
-    para nenhum dos clientes em nenhum dos legs.</b></p>
+    atualizadas). A 5.1.0RC1 do SABnzbd fica dentro do ruído face à 5.0.4 nos dois legs, então em
+    31 de julho o tempo até um arquivo utilizável, a métrica com que esta página abre, não tinha mexido
+    para nenhum dos clientes em nenhum dos legs.</p>
+
+    <p><b>Um desses números mexeu desde então.</b> Recorremos a 5.1.0RC2 do SABnzbd em 7 de agosto,
+    mesma máquina, mesmo intercalamento: um trabalho ofuscado de 34,5&nbsp;GB que leva
+    227&ndash;236&nbsp;s na 5.0.4 e na RC1 termina em 45&ndash;59&nbsp;s sob a RC2, com cerca de um
+    quinto da CPU. O download em si leva 31&nbsp;s em todas as versões - o que a RC2 remove é uma
+    verificação par2 completa redundante que as versões mais antigas rodam depois de o arquivo já estar
+    extraído, então esta é uma mudança de pós-processamento, não um caminho de rede mais rápido. Por
+    enquanto está medido em apenas uma forma, aquela em que a extração direta do SABnzbd engata; formas
+    em que a extração direta não pode engatar, como arquivos com cabeçalhos cifrados, estão sendo
+    retestadas. As tabelas estáveis desta página mantêm a 5.0.4 até a 5.1.0 sair.</p>
 
     <p>O rustnzb se move mais rápido do que todos - cinco versões entre o nosso 1.3.4 fixado (18 de julho) e o 1.3.9 (28 de julho) - por isso compilamos o 1.3.9 a partir do código-fonte e o recorremos no mesmo dia. O registro de mudanças promete correções para exatamente o que as nossas tabelas relatam («tornar a extração direta confiável», «rejeitar trabalhos concluídos sem saída utilizável»): medido, a release ofuscada de 35&nbsp;GB continua chegando como volumes brutos marcados <i>pronto</i>, tanto no trabalho isolado quanto na fila. O que mudou foi custo e ritmo: tempos cerca de 10% mais rápidos, e o remoer que saturava o processador que medimos no 1.3.4 esteve ausente de todas as etapas no 1.3.9 - embora uma repetição do 1.3.4 no mesmo dia também tenha medido baixo, então esse custo depende das condições em vez de ter sido resolvido pela versão, e não o citamos em lugar nenhum como um número único.</p>
 

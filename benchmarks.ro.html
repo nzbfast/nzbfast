@@ -751,10 +751,20 @@
     <p>Ce s-a mișcat: pre-versiunea NZBGet își taie costul de CPU cu circa o treime și memoria de
     vârf cu până la jumătate, la timpi de final neschimbați - muncă reală de eficiență (o corecție
     la o buclă de așteptare activă, corecții de curse de date, unelte de dezarhivare actualizate).
-    RC-ul SABnzbd se măsoară în limita zgomotului față de 5.0.4 pe ambele probe; schimbările sale de
-    performanță vizează reîncercarea și analiza antetelor criptate, căi pe care aceste probe nu le
-    solicită. <b>Timpul până la un fișier utilizabil, măsura cu care se deschide această pagină, nu
-    s-a mișcat pentru niciunul dintre clienți, pe niciuna dintre probe.</b></p>
+    5.1.0RC1 al SABnzbd se măsoară în limita zgomotului față de 5.0.4 pe ambele probe, așa că,
+    la 31 iulie, timpul până la un fișier utilizabil, măsura cu care se deschide această pagină,
+    nu se mișcase pentru niciunul dintre clienți, pe niciuna dintre probe.</p>
+
+    <p><b>Una dintre acele cifre s-a mișcat între timp.</b> Am recurs 5.1.0RC2 al SABnzbd pe
+    7 august, aceeași mașină, aceeași intercalare: o sarcină ofuscată de 34.5&nbsp;GB, care îi ia
+    lui 5.0.4 și RC1 227&ndash;236&nbsp;s, se termină în 45&ndash;59&nbsp;s sub RC2, la aproximativ
+    o cincime din CPU. Descărcarea în sine durează 31&nbsp;s în fiecare versiune - ceea ce elimină
+    RC2 este o verificare par2 completă redundantă, pe care versiunile mai vechi o rulează după ce
+    arhiva este deja extrasă, deci aceasta este o schimbare de post-procesare, nu o cale de transfer
+    mai rapidă. Deocamdată este măsurată pe o singură formă, cea în care se activează extragerea
+    directă a SABnzbd; formele în care extragerea directă nu se poate activa, cum ar fi arhivele cu
+    anteturi criptate, sunt în curs de retestare. Tabelele stabile de pe această pagină păstrează
+    5.0.4 până la lansarea lui 5.1.0.</p>
 
     <p>rustnzb se mișcă cel mai repede dintre toți - cinci lansări între 1.3.4 fixat de noi (18 iulie) și 1.3.9 (28 iulie) - așa că am compilat 1.3.9 din sursă și l-am recurs în aceeași zi. Jurnalul său de modificări promite corecturi exact pentru ceea ce raportează tabelele noastre („fă extragerea directă fiabilă”, „respinge sarcinile finalizate fără ieșire utilizabilă”): măsurat, lansarea ofuscată de 35&nbsp;GB tot sosește ca volume brute marcate <i>gata</i>, atât la sarcina izolată, cât și în coadă. Ce s-a schimbat sunt costul și ritmul: timpi cu circa 10% mai rapizi, iar măcinarea care satura procesorul, măsurată pe 1.3.4, a lipsit din fiecare etapă pe 1.3.9 - deși o reluare a lui 1.3.4 în aceeași zi a măsurat tot jos, deci acel cost depinde de condiții, nu este rezolvat de versiune, și nu îl cităm nicăieri ca o cifră unică.</p>
 

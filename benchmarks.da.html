@@ -739,10 +739,19 @@
     <p>Hvad der flyttede sig: NZBGets forhåndsudgivelse skærer sin CPU-omkostning med omtrent en
     tredjedel og sit maksimale hukommelsesforbrug med op til halvdelen ved uændrede sluttider -
     ægte effektiviseringsarbejde (en rettelse af en spin-løkke, rettelser af datakapløb, opdaterede
-    udpakningsværktøjer). SABnzbds RC måler inden for støjen af 5.0.4 på begge ben; dens
-    ydelsesændringer sigter mod genforsøg og parsing af header-krypterede poster, og de veje bliver
-    ikke brugt af disse ben. <b>Tid til en brugbar fil, det mål denne side leder med, flyttede sig
-    ikke for nogen af klienterne på nogen af benene.</b></p>
+    udpakningsværktøjer). SABnzbds 5.1.0RC1 måler inden for støjen af 5.0.4 på begge ben, så
+    pr. 31. juli havde tiden til en brugbar fil, det mål denne side leder med, ikke flyttet sig
+    for nogen af klienterne på nogen af benene.</p>
+
+    <p><b>Et af de tal har siden flyttet sig.</b> Vi kørte SABnzbds 5.1.0RC2 om den 7. august,
+    samme maskine, samme fletning: et 34.5&nbsp;GB sløret job, som tager 5.0.4 og RC1
+    227&ndash;236&nbsp;s, bliver færdigt på 45&ndash;59&nbsp;s under RC2, ved omtrent en femtedel
+    af CPU'en. Selve downloadet tager 31&nbsp;s i alle versioner - det, RC2 fjerner, er en
+    overflødig fuld par2-verifikation, som de ældre versioner kører, efter at arkivet allerede er
+    udpakket, så det er en ændring i efterbehandlingen, ikke en hurtigere vej på ledningen. Indtil
+    videre er det kun målt på én form, den hvor SABnzbds direkte udpakning slår til; former hvor
+    direkte udpakning ikke kan slå til, såsom header-krypterede arkiver, bliver testet om igen. De
+    stabile tabeller på denne side beholder 5.0.4, indtil 5.1.0 udkommer.</p>
 
     <p>rustnzb bevæger sig hurtigst af alle - fem udgivelser mellem vores fastlåste 1.3.4 (18. juli) og 1.3.9 (28. juli) - så vi byggede 1.3.9 fra kildekoden og kørte det om samme dag. Dets ændringslog lover rettelser for præcis det, vores tabeller rapporterer (»gøre direkte udpakning pålidelig«, »afvise fuldførte job uden brugbart output«): målt ankommer den slørede 35&nbsp;GB-udgivelse stadig som rå arkivdele markeret <i>færdigt</i>, både på det enkelte job og i køen. Det, der ændrede sig, er omkostning og tempo: tider omkring 10% hurtigere, og den processormættende malen, vi målte på 1.3.4, manglede i hver etape på 1.3.9 - selv om en gentagelse af 1.3.4 samme dag også målte lavt, så den omkostning afhænger af forholdene frem for at være løst af versionen, og vi anfører den intet sted som ét enkelt tal.</p>
 

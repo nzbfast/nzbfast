@@ -737,11 +737,20 @@
 
     <p>Hva som flyttet seg: NZBGets forhåndsutgave kutter CPU-kostnaden sin med omtrent en tredel og
     topp-minnet med opptil halvparten, ved uendrede sluttider - ekte effektiviseringsarbeid (en
-    rettelse av en ventesløyfe, rettelser av datakappløp, oppdaterte utpakkingsverktøy). SABnzbds RC
-    måler innenfor støyen fra 5.0.4 på begge etappene; ytelsesendringene der er rettet mot nye forsøk
-    og parsing av header-krypterte poster, veier disse etappene ikke bruker. <b>Tid til en brukbar
-    fil, målingen denne siden leder med, flyttet seg ikke for noen av klientene på noen av
-    etappene.</b></p>
+    rettelse av en ventesløyfe, rettelser av datakappløp, oppdaterte utpakkingsverktøy). SABnzbds
+    5.1.0RC1 måler innenfor støyen fra 5.0.4 på begge etappene, så per 31. juli hadde tiden til en
+    brukbar fil, målingen denne siden leder med, ikke flyttet seg for noen av klientene på noen av
+    etappene.</p>
+
+    <p><b>Ett av disse tallene har flyttet seg siden.</b> Vi kjørte SABnzbds 5.1.0RC2 om igjen
+    7. august, samme maskin, samme fletting: en tilslørt jobb på 34.5&nbsp;GB som tar 5.0.4 og RC1
+    227&ndash;236&nbsp;s, blir ferdig på 45&ndash;59&nbsp;s under RC2, til omtrent en femtedel av
+    CPU-en. Selve nedlastingen tar 31&nbsp;s i hver versjon - det RC2 fjerner er en overflødig full
+    par2-verifisering som de eldre versjonene kjører etter at arkivet allerede er pakket ut, så
+    dette er en endring i etterbehandlingen, ikke en raskere vei over linjen. Så langt er den målt
+    på bare én form, den der SABnzbds direkte utpakking slår inn; former der direkte utpakking ikke
+    kan slå inn, som header-krypterte arkiver, testes på nytt. De stabile tabellene på denne siden
+    beholder 5.0.4 til 5.1.0 kommer.</p>
 
     <p>rustnzb beveger seg raskest av alle - fem utgivelser mellom vår fastlåste 1.3.4 (18. juli) og 1.3.9 (28. juli) - så vi bygde 1.3.9 fra kildekoden og kjørte den om samme dag. Endringsloggen lover rettinger for nøyaktig det tabellene våre rapporterer («gjøre direkte utpakking pålitelig», «avvise fullførte jobber uten brukbart resultat»): målt kommer den tilslørte 35&nbsp;GB-utgivelsen fortsatt fram som rå arkivdeler merket <i>ferdig</i>, både på den enkeltstående jobben og i køen. Det som endret seg er kostnad og tempo: tider rundt 10% raskere, og den prosessormettende malingen vi målte på 1.3.4 manglet i hver etappe på 1.3.9 - selv om en gjentakelse av 1.3.4 samme dag også målte lavt, så den kostnaden avhenger av forholdene heller enn å være løst av versjonen, og vi oppgir den ingen steder som ett enkelt tall.</p>
 
