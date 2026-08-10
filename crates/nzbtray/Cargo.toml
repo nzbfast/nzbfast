@@ -9,14 +9,14 @@ repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Plain-HTTP only (the daemon is always 127.0.0.1) - no TLS stack.
-ureq = { version = "2", default-features = false }
+ureq = { version = "3", default-features = false }
 serde_json = "1"
 # Launcher handshake: the tray proves the listener on a port is the daemon
 # whose runtime.json it just read, BEFORE handing over the stored API key.
 # Same crate the daemon and nzbkit already use, so nothing new enters the
 # tree - see probe_body::proof_matches.
-sha2 = "0.10"
-windows-sys = { version = "0.59", features = [
+sha2 = "0.11"
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
@@ -34,4 +34,4 @@ windows-sys = { version = "0.59", features = [
 # JSON parser and hash have to be reachable off Windows too. Dev-only:
 # nothing is added to what actually ships.
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
