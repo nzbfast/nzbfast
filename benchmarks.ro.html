@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmark-uri - nzbfast</title>
-<meta name="description" content="nzbfast vs SABnzbd, NZBGet, rustnzb și alți clienți: 8 scenarii pe hardware identic. Rezultate oneste, inclusiv probele pe care nzbfast nu le câștigă, cu pași de reproducere.">
+<meta name="description" content="nzbfast măsurat față de alți patru clienți Usenet pe hardware identic: timpul până la un fișier utilizabil, plus discul, spațiul liber și memoria pe care le costă fiecare job. Fiecare tabel numește versiunile față de care a rulat. Inclusiv probele pe care nzbfast nu le câștigă.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Benchmark-uri</h1>
-  <p class="sub">Cinci clienți, opt scenarii, hardware și provideri identici, rulări
-  intercalate ca variația providerilor să se anuleze. Măsura este <b>timpul până la un fișier utilizabil</b>:
-  descărcat, verificat, extras. Include probele pe care nu le câștigăm.</p>
+  <p class="sub">Cinci clienți, opt scenarii, hardware și provideri identici, rulări intercalate ca variația providerilor să se anuleze. Măsura este <b>timpul până la un fișier utilizabil</b> - descărcat, verificat, extras - măsurat împreună cu discul, spațiul liber și memoria pe care jobul te costă. Fiecare tabel numește versiunile față de care a rulat și ziua în care a rulat. Include probele pe care nu le câștigăm.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">Pe această pagină</p>
-  <nav aria-label="Pe această pagină" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Configurația</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ce publică de fapt usenet</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arhive stocate: o coadă de sarcini</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arhive criptate: jumătate din scriere</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → un fișier de 157 GB, în jumătate din spațiul pe disc (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Timp până la fișierul utilizabil, după dimensiunea jobului</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K cu nume de tip hash → mkv utilizabil (Coasta de Est)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Menținerea liniei aprinse de-a lungul unei cozi (Coasta de Est, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Probele pe care nu le câștigăm</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Scara de memorie redusă: 190 GB în ~1.1 GB de RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Zece forme imbricate: cine termină fără tine</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Plafonul clientului: 9.68 GB servite din RAM, și îl poți reconstrui</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Benchmark-urile mai tehnice, pentru cei care vor mai multe date</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ce poate face fiecare client</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motorul saturează linii reale</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Cât costă mașina un job</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Urmărim următoarele versiuni</a></nav>
+  <nav aria-label="Pe această pagină" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Configurația</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Cât te costă un job</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ce publică de fapt usenet</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arhive stocate: o coadă de sarcini</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arhive criptate: jumătate din scriere</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → un fișier de 157 GB, în jumătate din spațiul pe disc (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Timp până la fișierul utilizabil, după dimensiunea jobului</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K cu nume de tip hash → mkv utilizabil (Coasta de Est)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Menținerea liniei aprinse de-a lungul unei cozi (Coasta de Est, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Probele pe care nu le câștigăm</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Scara de memorie redusă: 190 GB în ~1.1 GB de RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Zece forme imbricate: cine termină fără tine</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Plafonul clientului: 9.68 GB servite din RAM, și îl poți reconstrui</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Benchmark-urile mai tehnice, pentru cei care vor mai multe date</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ce poate face fiecare client</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motorul saturează linii reale</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Cât costă mașina un job</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Urmărim următoarele versiuni</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>Stare finală:</b> un fișier verificat, extras, utilizabil, nu „descărcare terminată”. Asta e ce aștepți de fapt.</li>
       <li><b>Reproductibilitate:</b> fiecare afirmație este datată și măsurată la fel: timp scurs + contoare de octeți pe interfață + RSS de vârf pe arborele de procese, rezoluție 1-2 s. Acolo unde o probă rulează pe un NZB postat public, îl numim, ca să îl poți rula și tu.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">Citește asta întâi</p>
+    <h2>Cât te costă un job și ce nu poate muta o schimbare de post-procesare</h2>
+    <p class="lead">Clienții se schimbă, iar o schimbare în ce face un client <em>după</em> descărcare poate muta un timp final fără ca drumul lui prin rețea să se miște deloc. Asta s-a întâmplat în august 2026, motiv pentru care fiecare tabel din pagină numește acum versiunile față de care a rulat și ziua în care a rulat. Ce nu poate muta o notă de versiune este restul notei de plată: octeții scriși pe discul tău, spațiul liber pe care jobul îl cere înainte să pornească, memoria pe care o ține cât rulează și dacă datele au fost vreodată verificate.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Lansare ofuscată de 34.5 GB, fiecare client în cea mai nouă versiune a lui</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>timp până la fișierul utilizabil</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">niciun fișier utilizabil&sup1;</td></tr>
+        <tr><td>memorie de vârf (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>disc scris</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>spațiu liber necesar</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.3.9 pe 7 august 2026: M3 Ultra de pe coasta de est, șase provideri, totul pe TLS, două rulări per client, cu ordinea inversată la a doua ca variația liniei să se anuleze. &sup1; rustnzb a mutat 36 GB pe fir, a raportat jobul terminat și a lăsat o parte de arhivă de 1 GB fără niciun video extras, așa că celulele lui aparent ieftine sunt costul de a nu termina.</p>
+
+    <p><b>Patru costuri pe care un timp final nu le arată.</b></p>
+    <ul class="plain">
+      <li><b>Disc scris.</b> O singură trecere scrie conținutul o dată: 159.0 GB pentru un fișier de 157 GB, față de 387.4 GB și 458.3 GB la clienții care pun fiecare parte de arhivă pe disc și apoi o dezarhivează. Același job, aceeași noapte, versiunile curente ale tuturor trei.</li>
+      <li><b>Spațiu liber.</b> Acel job de 190 GB cere 156.3 GB liberi aici și 312.7&ndash;313.0 GB pe un client care scrie și apoi dezarhivează. Este diferența dintre un job care rulează și un job care nici nu pornește.</li>
+      <li><b>Memorie de vârf (RSS).</b> 232&ndash;248 MB față de 1.8&ndash;2.0 GB la lansarea din tabelul de mai sus, iar plafonul este o setare, nu un efect secundar: același job de 190 GB se termină într-un buget de 1 GB, iar un profil de NAS închide jobul de 35 GB în 0.4 GB.</li>
+      <li><b>Dacă a fost verificat.</b> nzbfast verifică fiecare bloc față de datele PAR2 postate pe măsură ce sosește și repară în aceeași trecere, deci linia de sosire este un fișier verificat. Un client care nu face nicio trecere de verificare pe un set nedeteriorat își răscumpără cronometrul nerăspunzând la întrebare.</li>
+    </ul>
+    <p>Alte două se văd doar când ceva merge prost. Omoară procesul la 15.6 GB dintr-un job de 35 GB: nzbfast repornește și îl termină în 57 s fără să redescarce niciun octet. Iar pe un banc unde fiecare conexiune amuțește definitiv după 25 de corpuri de articol fără să se închidă vreodată, adică ce face un NAT de operator unei descărcări lungi, termină în 26 s acolo unde ceilalți patru clienți iau între 74 și 275 s.</p>
+    <div class="callout">La o descărcare nedeteriorată, cea mai rapidă post-procesare posibilă este niciuna. Noi egalăm acel timp verificând fiecare bloc pe măsură ce sosește: <b>la fel de rapid ca sărirea verificării, pentru că nu o sărim niciodată.</b></div>
   </div>
 </section>
 
@@ -137,7 +163,7 @@
     mașină, măsurate din nou pe 31 iulie 2026 pe versiunea publicată (Europa, 10 GbE, tot peste TLS),
     dacă nu se specifică altfel:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Job</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (la cald)</th></tr></thead>
+      <thead><tr><th>Job</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (la cald)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (rundă mai veche)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB 4K obfuscat</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -146,6 +172,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4 și Weaver v0.7.5 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
     <p class="note" style="text-align:start">rustnzb a rulat fiecare probă și nu a livrat un fișier
     utilizabil la niciuna, așa că nu are coloană aici; detaliile sunt în secțiunea de costuri de mai jos.
     Weaver este măsurat după protocolul său cel mai favorabil, la cald (serviciu permanent, job de
@@ -164,7 +191,7 @@
     <h2>35 GB 4K cu nume de tip hash → mkv utilizabil (Coasta de Est)</h2>
     <p class="lead">Fiecare fișier din postare este un hash hexazecimal; sarcina utilă își primește numele real abia din metadatele PAR2. Reluat pe 31 iulie 2026 pe versiunea livrată, toți cei cinci clienți, totul peste TLS (defectul de bancă din spatele semnalului de finalizare al SABnzbd - API-ul său de istoric returnează 10 poziții implicit - este remediat, deci fiecare cifră de mai jos este actuală):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (la cald)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (la cald)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>timp până la fișierul utilizabil</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">niciun fișier utilizabil³</td></tr>
         <tr><td>timp de procesor</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -172,6 +199,7 @@
         <tr><td>vârf de disc suplimentar</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
     <p class="note" style="text-align:start">³ rustnzb a descărcat în 97 s, a marcat sarcina drept <i>gata</i> și a livrat volumele ofuscate brute: fără redenumire, fără extragere - atât pe 1.3.4 cât și pe 1.3.9 († cifra sa de disc este doar descărcarea). nzbfast a deofuscat din metadatele PAR2 și a extras în flux, zero blocuri recitite; intervalul de 76&ndash;83 s reprezintă prima și ultima sa etapă din rundă. Față de varianta din 23 iulie a acestui tabel, versiunea livrată este aici mai rapidă cu 3.4× mai puțină memorie (1.55 → 0.45 GB): lucrul într-o singură trecere de la sfârșitul lui iulie, măsurat pe aceeași mașină și pe același corpus.</p>
   </div>
 </section>
@@ -187,6 +215,8 @@
     tot peste TLS, câte o probă instrumentată per client și per job. Aceasta este promisiunea unei
     singure treceri măsurată, nu doar afirmată: vârful de disc al nzbfast este chiar conținutul, iar
     I/O-ul său înseamnă scrierea fiecărui octet o singură dată.</p>
+
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfuscat (conținut 32 GB)</th><th>timp</th><th>CPU</th><th>CPU-s/GB</th><th>memorie de vârf (RSS)</th><th>vârf de disc suplimentar</th><th>I/O pe disc</th></tr></thead>
@@ -385,6 +415,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 identic)</td><td>17.6 GB</td><td>8.1× mai lent</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. Acest banc nu a fost refăcut față de SABnzbd 5.1; când 5.1.0 iese ca versiune stabilă refacem cursa întregului tabel în loc să edităm o celulă.</p>
     <p class="note" style="text-align:start"><b>Remăsurat pe 31 iulie 2026</b>, același banc, același corpus, după o actualizare a sistemului de operare pe mașină. Patru clienți s-au mișcat cu una până la trei secunde; SABnzbd nu: acum ia 57 s acolo unde varianta din 24 iulie a acestui tabel consemna 14 s, reprodus de opt ori pe două variante de banc, canalizarea confirmată la 8 prin recitirea API-ului la fiecare rulare și identică la 16 conexiuni. Rezultatele sale pe etapele de fermă din alte părți ale acestei pagini nu sunt afectate, deci pare specific ratelor alimentate prin bucla locală pe sistemul de operare actual al acestei mașini; publicăm ce măsoară bancul astăzi și vom testa din nou la următoarele versiuni de sistem și de SABnzbd.</p>
 
     <p class="note" style="text-align:start"><b>Timpul până la final</b> curge de la pornirea jobului până când toate cele patru videoclipuri sunt pe disc, verificate și extrase. <b>Vârful de disc</b> este cel mai mult disc pe care clientul l-a ocupat în orice moment, eșantionat de două ori pe secundă, și este coloana care contează cel mai mult aici: o singură trecere are nevoie de circa 1× conținutul, restul de circa 2×. Toți cinci au terminat ținând aceiași 8.6 GB după ce au făcut curat, exact de aceea vârful este cifra interesantă. Fiecare client a produs toate cele patru payload-uri identice sha256 cu sursa. Fiecare este prezentat la numărul de conexiuni care l-a făcut pe <i>el</i> cel mai rapid (pe fiecare s-au încercat 8, 16 și 32; nzbfast a rămas constant la toate trei, deci mai multe conexiuni nu l-ar fi ajutat).</p>
@@ -403,7 +434,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>nzbfast este de 1,51x mai rapid decât NZBGet și de 2,55x mai rapid decât SABnzbd</b> pe cea mai răspândită formă de pe usenet.</p>
+    <p><b>nzbfast este de 1,51x mai rapid decât NZBGet 26.2 și de 2,55x mai rapid decât SABnzbd 5.0.4</b> pe cea mai răspândită formă de pe usenet.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2 și SABnzbd 5.0.4 pe 27 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
     <p>Fiecare client a fost testat cu 8, 16 și 32 de conexiuni per server și este prezentat la propriul său optim, fiindcă un concurent nu trebuie să piardă niciodată din cauza unei configurări proaste. Util de știut dacă vă reglați instalarea: <b>NZBGet a devenit de aproximativ două ori mai lent la 32 de conexiuni</b>, iar SABnzbd s-a comportat la fel în testele noastre anterioare. Mai multe conexiuni nu înseamnă mai multă viteză. nzbfast a rămas constant pe tot intervalul, deci acea setare nu vă va înșela.</p>
     <p class="note">Verificăm de asemenea că fiecare client a produs efectiv fișierele, în loc să îl credem pe cuvânt când raportează succes. În testele noastre, un client a raportat trei descărcări finalizate în aproximativ o secundă fiecare fără să fi scris absolut nimic.</p>
   </div>
@@ -662,8 +694,8 @@
     <p class="kicker">Dovada de transport</p>
     <h2>Motorul saturează linii reale</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps agregat</b> pe o linie de 10 GbE măsurată la 8.2 Gbps (Europa M1 Ultra, 4 provideri, 14,000 de articole, 0 erori, 0 reconectări).</li>
-      <li><b>9.16-9.27 Gbps</b> tic-uri de transport constante pe aceeași linie, ≈98% din goodput-ul TCP practic.</li>
+      <li><b>9.0-9.3 Gbps</b> printr-o flotă de cinci provideri pe o linie de 10 GbE al cărei plafon hardware măsoară el însuși 9.8 Gbps, cu mediane susținute de 9.5-9.9 (M1 Ultra Europa, 9 august 2026). Ce rămâne este pornirea flotei reci pe un job de 33 de secunde, nu viteza.</li>
+      <li><b>4.8-4.9 Gbps susținut</b> pe o legătură prin cablu de ~5 Gbps de cealaltă parte a Atlanticului, eșantionat în fiecare secundă pe tot jobul (8 august 2026). Două clase de legătură, ambele la viteza pe care o dă hardware-ul însuși.</li>
       <li><b>5.44 Gbps susținut</b> pe tot parcursul unui job complet de 20.4 GB <i>inclusiv</i> verificarea în flux.</li>
       <li><b>Pipelining replicat la fiecare RTT</b>: +64% la 63 ms Starlink, +170-177% la 14 ms datacenter, +270% la 31 ms Coasta de Est. Învinge degradarea ferestrei de congestie TCP, nu doar latența.</li>
       <li><b>Dovadă de contrapresiune</b>: limitează etapa de scriere de 4× sub rețea și intrarea se blochează la plafon ±1% în 2 s, RAM-ul <i>scade</i>, zero swap-uri. Un disc lent nu poate umfla niciodată memoria.</li>
@@ -716,6 +748,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, niciun fișier utilizabil</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
     <div class="callout"><b>Regulă permanentă: fiecare afirmație de performanță citează condițiile în care a rulat</b>, inclusiv rezultatele negative și pașii greșiți.</div>
   </div>
 </section>
@@ -793,7 +826,7 @@
   <p class="fine">Date de benchmark: rundele competitive din 19&ndash;31 iulie 2026. Versiuni de
   client: SABnzbd 5.0.4, NZBGet 26.2 (fork nzbget.com), rustnzb 1.3.4, Weaver v0.7.5 oficial
   arm64 (proba plafonului clientului a folosit compilarea sa din sursă din 23 iulie <code>410c114</code>;
-  nu raportează niciun șir de versiune propriu).
+  nu raportează niciun șir de versiune propriu). În plus, probele pe versiuni curente din 6 până în 9 august 2026, față de SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.3.9; orice tabel care numește 5.0.4, 26.2, v0.7.5 sau 1.3.4 este fixat pe acele versiuni și se refac cursele, nu se editează, când ies următoarele versiuni stabile.
   Dacă o versiune mai nouă a oricărui client schimbă semnificativ un rezultat, vom rerula și
   actualiza - secțiunea „Urmărim următoarele versiuni” de mai sus este exact această promisiune,
   ținută din timp.

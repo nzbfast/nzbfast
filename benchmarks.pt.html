@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast vs SABnzbd, NZBGet, rustnzb e outros clientes: 8 cenários em hardware idêntico. Resultados honestos, incluindo os legs que o nzbfast não vence, com passos de reprodução.">
+<meta name="description" content="nzbfast medido contra outros quatro clientes de Usenet em hardware idêntico: tempo até um arquivo utilizável, mais o disco, o espaço livre e a memória que cada trabalho custa. Cada tabela nomeia as versões contra as quais correu. Inclui os legs que o nzbfast não vence.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Benchmarks</h1>
-  <p class="sub">Cinco clientes, oito cenários, hardware e provedores idênticos, execuções
-  intercaladas para que a deriva dos provedores se cancele. A métrica é <b>tempo até um arquivo utilizável</b>:
-  baixado, verificado, extraído. Inclui os legs que não vencemos.</p>
+  <p class="sub">Cinco clientes, oito cenários, hardware e provedores idênticos, execuções intercaladas para que a deriva dos provedores se cancele. A métrica é <b>tempo até um arquivo utilizável</b> - baixado, verificado, extraído - medido junto com o disco, o espaço livre e a memória que o trabalho custa a você. Cada tabela nomeia as versões contra as quais correu e o dia em que rodou. Inclui os legs que não vencemos.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">Nesta página</p>
-  <nav aria-label="Nesta página" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O setup</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O que a usenet realmente publica</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arquivos armazenados: uma fila de tarefas</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arquivos cifrados: metade da escrita</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169,7 GB → um arquivo de 157 GB, na metade do espaço em disco (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tempo até arquivo utilizável, por tamanho do trabalho</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">4K de 35 GB com nome de hash → mkv utilizável (costa leste)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Manter a linha acesa ao longo de uma fila (costa leste, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Os legs que não vencemos</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">A escada de pouca memória: 190 GB em ~1,1 GB de RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Dez formas aninhadas: quem termina sem você</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Teto do cliente: 9.68 GB servidos da RAM, e você pode refazê-lo</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Os benchmarks mais técnicos, para quem gosta de mais dados</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O que cada cliente consegue fazer</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O motor satura linhas reais</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Quanto um trabalho custa à máquina</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Acompanhando as próximas versões</a></nav>
+  <nav aria-label="Nesta página" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O setup</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O que um trabalho custa a você</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O que a usenet realmente publica</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arquivos armazenados: uma fila de tarefas</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Arquivos cifrados: metade da escrita</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169,7 GB → um arquivo de 157 GB, na metade do espaço em disco (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tempo até arquivo utilizável, por tamanho do trabalho</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">4K de 35 GB com nome de hash → mkv utilizável (costa leste)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Manter a linha acesa ao longo de uma fila (costa leste, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Os legs que não vencemos</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">A escada de pouca memória: 190 GB em ~1,1 GB de RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Dez formas aninhadas: quem termina sem você</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Teto do cliente: 9.68 GB servidos da RAM, e você pode refazê-lo</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Os benchmarks mais técnicos, para quem gosta de mais dados</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O que cada cliente consegue fazer</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">O motor satura linhas reais</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Quanto um trabalho custa à máquina</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Acompanhando as próximas versões</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>Estado final:</b> um arquivo verificado, extraído e utilizável, não "download concluído". É por isso que você de fato espera.</li>
       <li><b>Reprodutibilidade:</b> cada afirmação é datada e medida do mesmo jeito: tempo decorrido + contadores de bytes da interface + pico de RSS da árvore de processos, com resolução de 1-2 s. Quando um leg usa um NZB público, dizemos qual é, para que você mesmo possa executá-lo.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">Leia isto primeiro</p>
+    <h2>O que um trabalho custa a você, e o que uma mudança de pós-processamento não consegue mover</h2>
+    <p class="lead">Os clientes mudam, e uma mudança no que um cliente faz <em>depois</em> do download pode mover um tempo final sem que seu caminho de rede se mexa. Foi o que aconteceu em agosto de 2026, e é por isso que cada tabela desta página agora nomeia as versões contra as quais correu e o dia em que rodou. O que uma nota de versão não consegue mover é o resto da conta: os bytes gravados no seu disco, o espaço livre que o trabalho exige antes mesmo de começar, a memória que ele segura enquanto roda e se os dados chegaram a ser conferidos.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Lançamento ofuscado de 34.5 GB, cada cliente na sua build mais recente</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>tempo até arquivo utilizável</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">nenhum arquivo utilizável&sup1;</td></tr>
+        <tr><td>pico de memória (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>disco gravado</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>espaço livre necessário</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Medido contra</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 e rustnzb 1.3.9 em 7 de agosto de 2026: M3 Ultra da costa leste, seis provedores, tudo em TLS, duas execuções por cliente com a ordem invertida na segunda para que a deriva da linha se cancele. &sup1; o rustnzb moveu 36 GB pelo fio, deu o trabalho por concluído e deixou uma parte de arquivo de 1 GB sem nenhum vídeo extraído, então suas células de aparência econômica são o custo de não terminar.</p>
+
+    <p><b>Quatro custos que um tempo final não mostra.</b></p>
+    <ul class="plain">
+      <li><b>Disco gravado.</b> Uma passagem grava a carga útil uma vez: 159.0 GB para um arquivo de 157 GB, contra 387.4 GB e 458.3 GB dos clientes que despejam cada parte do arquivo no disco e depois a extraem. Mesmo trabalho, mesma noite, builds atuais dos três.</li>
+      <li><b>Espaço livre.</b> Aquele trabalho de 190 GB precisa de 156.3 GB livres aqui e de 312.7&ndash;313.0 GB num cliente que grava e depois extrai. É a diferença entre um trabalho que roda e um trabalho que nem começa.</li>
+      <li><b>Pico de memória (RSS).</b> 232&ndash;248 MB contra 1.8&ndash;2.0 GB no lançamento da tabela acima, e o teto é um ajuste e não um efeito colateral: o mesmo trabalho de 190 GB termina dentro de um orçamento de 1 GB, e um perfil de NAS conclui o trabalho de 35 GB em 0.4 GB.</li>
+      <li><b>Se chegou a ser conferido.</b> O nzbfast verifica cada bloco contra os dados PAR2 postados conforme eles chegam e repara na mesma passagem, então a linha de chegada é um arquivo verificado. Um cliente que não faz passagem de verificação nenhuma num conjunto intacto compra de volta o próprio relógio deixando a pergunta sem resposta.</li>
+    </ul>
+    <p>Outros dois só aparecem quando algo dá errado. Mate o processo aos 15.6 GB de um trabalho de 35 GB e o nzbfast reinicia e o termina em 57 s sem rebaixar um único byte. E numa bancada em que cada conexão emudece para sempre depois de 25 corpos de artigo sem nunca fechar, que é o que um NAT de operadora faz com um download longo, ele termina em 26 s onde os outros quatro clientes levam de 74 a 275 s.</p>
+    <div class="callout">Num download intacto, o pós-processamento mais rápido possível é nenhum. Nós igualamos esse tempo conferindo cada bloco conforme ele chega: <b>tão rápido quanto pular a conferência, porque nunca a pulamos.</b></div>
   </div>
 </section>
 
@@ -136,7 +162,7 @@
     de novo em 31 de julho de 2026 na versão distribuída (Europa, 10 GbE, tudo sobre TLS), salvo indicação
     em contrário:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Trabalho</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (aquecido)</th></tr></thead>
+      <thead><tr><th>Trabalho</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (aquecido)</th></tr></thead>
       <tbody>
         <tr><td>REMUX de 7,4 GB (rodada mais antiga)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>4K ofuscado de 35 GB</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -145,6 +171,7 @@
         <tr><td>190,6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2, SABnzbd 5.0.4 e Weaver v0.7.5 em 31 de julho de 2026, e fixado nessas builds. O SABnzbd 5.1 elimina a passagem de verificação pós-download que boa parte do resultado dele aqui paga; nas builds atuais a diferença fica mais perto dos +43% medidos no topo desta página. Voltamos a correr estes números quando o 5.1.0 sair como estável, em vez de editá-los.</p>
     <p class="note" style="text-align:start">O rustnzb rodou todos os legs e não entregou um arquivo utilizável
     em nenhum deles, por isso não tem coluna aqui; os detalhes estão na seção de custo abaixo. O Weaver é medido
     sob o seu protocolo de melhor caso aquecido (daemon permanente, trabalho de aquecimento descartado, conexões
@@ -162,7 +189,7 @@
     <h2>4K de 35 GB com nome de hash → mkv utilizável (costa leste)</h2>
     <p class="lead">Cada arquivo do post é um hash hexadecimal; a carga útil só recupera o nome real a partir dos metadados PAR2. Recorrido em 31 de julho de 2026 sobre a versão distribuída, os cinco clientes, tudo por TLS (a falha de bancada por trás do sinal de conclusão do SABnzbd - a API de histórico devolve 10 posições por padrão - está corrigida, portanto cada número abaixo é atual):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (aquecido)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (aquecido)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>tempo até arquivo utilizável</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">nenhum arquivo utilizável³</td></tr>
         <tr><td>tempo de CPU</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -170,6 +197,7 @@
         <tr><td>pico de disco extra</td><td class="win num">31,8 GB (1,0×)</td><td class="num">62,8 GB (2,0×)</td><td class="num">63,6 GB (2,0×)</td><td class="num">64,4 GB (2,0×)</td><td class="num">35,4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 e rustnzb 1.3.4 em 31 de julho de 2026, e fixado nessas builds. O SABnzbd 5.1 elimina a passagem de verificação pós-download que boa parte do resultado dele aqui paga; nas builds atuais a diferença fica mais perto dos +43% medidos no topo desta página. Voltamos a correr estes números quando o 5.1.0 sair como estável, em vez de editá-los.</p>
     <p class="note" style="text-align:start">³ o rustnzb baixou em 97 s, marcou o trabalho como <i>pronto</i> e entregou os volumes ofuscados brutos: sem renomear, sem extrair - tanto no 1.3.4 quanto no 1.3.9 († o número de disco é apenas o download). O nzbfast desofuscou a partir dos metadados PAR2 e extraiu durante a transferência, zero blocos relidos; a faixa de 76&ndash;83 s são a primeira e a última etapa da rodada. Frente à versão de 23 de julho desta tabela, a versão distribuída é aqui mais rápida com 3,4× menos memória (1,55 → 0,45 GB): o trabalho de passagem única do fim de julho, medido na mesma máquina e no mesmo corpus.</p>
   </div>
 </section>
@@ -185,6 +213,8 @@
     sobre TLS, um leg instrumentado por cliente e por trabalho. É a promessa de passagem única medida em vez de
     afirmada: o pico de disco do nzbfast é a própria carga útil, e a sua E/S equivale a escrever cada byte uma
     única vez.</p>
+
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 e rustnzb 1.3.4 em 31 de julho de 2026, e fixado nessas builds. O SABnzbd 5.1 elimina a passagem de verificação pós-download que boa parte do resultado dele aqui paga; nas builds atuais a diferença fica mais perto dos +43% medidos no topo desta página. Voltamos a correr estes números quando o 5.1.0 sair como estável, em vez de editá-los.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB ofuscado (carga útil de 32 GB)</th><th>tempo</th><th>CPU</th><th>CPU-s/GB</th><th>pico de memória (RSS)</th><th>pico de disco extra</th><th>E/S de disco</th></tr></thead>
@@ -377,6 +407,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 idêntico)</td><td>17.6 GB</td><td>8.1× mais lento</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 e rustnzb 1.3.4 em 31 de julho de 2026, e fixado nessas builds. Esta bancada não foi refeita contra o SABnzbd 5.1; quando o 5.1.0 sair como estável voltamos a correr a tabela inteira em vez de editar uma célula.</p>
     <p class="note" style="text-align:start"><b>Remedido em 31 de julho de 2026</b>, mesma bancada, mesmo corpus, depois de uma atualização do sistema operacional na máquina. Quatro clientes se moveram um ou três segundos; o SABnzbd não: agora leva 57 s onde a versão de 24 de julho desta tabela registrava 14 s, reproduzido oito vezes em duas variantes da bancada, o enfileiramento confirmado em 8 por releitura da API em todas as execuções, e idêntico com 16 conexões. Os resultados dele nas etapas de fazenda em outras partes desta página não são afetados, então isto parece específico das taxas alimentadas por laço local no sistema operacional atual desta máquina; publicamos o que a bancada mede hoje e testaremos de novo nas próximas versões do sistema e do SABnzbd.</p>
 
     <p class="note" style="text-align:start"><b>Tempo até terminar</b> vai do início do trabalho até os quatro vídeos estarem no disco, verificados e extraídos. <b>Pico de disco</b> é o máximo de disco que o cliente ocupou em qualquer instante, amostrado duas vezes por segundo, e é a coluna que mais importa aqui: a passagem única precisa de cerca de 1× o conteúdo, todo o resto de cerca de 2×. Os cinco terminaram ocupando os mesmos 8.6 GB depois de arrumar a casa, e é exatamente por isso que o pico é o número interessante. Todos os clientes produziram os quatro payloads sha256-idênticos à origem. Cada um aparece no número de conexões que deixou <i>ele</i> mais rápido (8, 16 e 32 foram testados em cada um; o nzbfast ficou plano nos três, então mais conexões não teriam ajudado).</p>
@@ -395,7 +426,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>O nzbfast é 1,51x mais rápido do que o NZBGet e 2,55x mais rápido do que o SABnzbd</b> na forma mais comum da usenet.</p>
+    <p><b>O nzbfast é 1,51x mais rápido do que o NZBGet 26.2 e 2,55x mais rápido do que o SABnzbd 5.0.4</b> na forma mais comum da usenet.</p>
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2 e SABnzbd 5.0.4 em 27 de julho de 2026, e fixado nessas builds. O SABnzbd 5.1 elimina a passagem de verificação pós-download que boa parte do resultado dele aqui paga; nas builds atuais a diferença fica mais perto dos +43% medidos no topo desta página. Voltamos a correr estes números quando o 5.1.0 sair como estável, em vez de editá-los.</p>
     <p>Cada cliente foi testado com 8, 16 e 32 ligações por servidor e aparece no seu próprio melhor resultado, porque um concorrente nunca deve perder por estar mal configurado. Vale a pena saber se ajusta a sua instalação: <b>o NZBGet tornou-se cerca de duas vezes mais lento com 32 ligações</b>, e o SABnzbd comportou-se do mesmo modo nos nossos testes anteriores. Mais ligações não é mais velocidade. O nzbfast manteve-se estável em toda a gama, por isso essa definição não o vai apanhar desprevenido.</p>
     <p class="note">Verificamos também que cada cliente produziu realmente os ficheiros, em vez de acreditar nele quando diz que terminou. Nos nossos testes, um cliente comunicou três descargas concluídas em cerca de um segundo cada uma sem ter escrito absolutamente nada.</p>
   </div>
@@ -654,8 +686,8 @@
     <p class="kicker">Prova de transporte</p>
     <h2>O motor satura linhas reais</h2>
     <ul class="plain">
-      <li><b>8,31 Gbps agregados</b> em uma linha de 10 GbE medida em 8,2 Gbps (M1 Ultra da Europa, 4 provedores, 14.000 artigos, 0 erros, 0 reconexões).</li>
-      <li><b>9,16-9,27 Gbps</b> de tiques de transporte estáveis na mesma linha, ≈98% do goodput prático do TCP.</li>
+      <li><b>9.0-9.3 Gbps</b> através de uma frota de cinco provedores numa linha de 10 GbE cujo próprio teto de hardware mede 9.8 Gbps, com medianas sustentadas de 9.5-9.9 (M1 Ultra da Europa, 9 de agosto de 2026). O que sobra é a subida de uma frota fria num trabalho de 33 segundos, não a taxa.</li>
+      <li><b>4.8-4.9 Gbps sustentados</b> num enlace de cabo de ~5 Gbps do outro lado do Atlântico, amostrados a cada segundo ao longo de todo o trabalho (8 de agosto de 2026). Duas classes de enlace, ambas na taxa que o próprio hardware entrega.</li>
       <li><b>5,44 Gbps sustentados</b> ao longo de um trabalho completo de 20,4 GB <i>incluindo</i> a verificação no fluxo.</li>
       <li><b>Pipeline replicado em todo RTT</b>: +64% em Starlink de 63 ms, +170-177% em datacenter de 14 ms, +270% na costa leste de 31 ms. Ele derrota a degradação da janela de congestionamento do TCP, não só a latência.</li>
       <li><b>Prova de contrapressão</b>: limite a etapa de escrita 4× abaixo da rede e a entrada trava no teto ±1% em 2 s, a RAM <i>cai</i>, zero swaps. Um disco lento nunca pode inflar a memória.</li>
@@ -707,6 +739,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, sem arquivo utilizável</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Medido contra</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 e rustnzb 1.3.4 em 31 de julho de 2026, e fixado nessas builds. O SABnzbd 5.1 elimina a passagem de verificação pós-download que boa parte do resultado dele aqui paga; nas builds atuais a diferença fica mais perto dos +43% medidos no topo desta página. Voltamos a correr estes números quando o 5.1.0 sair como estável, em vez de editá-los.</p>
     <div class="callout">Regra permanente: <b>cada afirmação de desempenho cita as condições em que
     rodou</b>, resultados negativos e caminhos errados incluídos.</div>
   </div>
@@ -785,7 +818,7 @@
   <p class="fine">Dados de benchmark: rodadas competitivas de 19&ndash;31 de julho de 2026. Versões dos
   clientes: SABnzbd 5.0.4, NZBGet 26.2 (fork nzbget.com), rustnzb 1.3.4, Weaver v0.7.5 oficial arm64
   (o leg de teto do cliente usou a compilação da fonte <code>410c114</code>, de 23 de julho; ele não
-  informa nenhuma versão própria).
+  informa nenhuma versão própria). Mais os legs em builds atuais de 6 a 9 de agosto de 2026, contra SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 e rustnzb 1.3.9; toda tabela que nomeia 5.0.4, 26.2, v0.7.5 ou 1.3.4 está fixada nessas builds e volta a correr, não é editada, quando as próximas estáveis saírem.
   Se uma versão mais nova de qualquer cliente mudar materialmente um resultado, vamos refazer e
   atualizar - a seção "Acompanhando as próximas versões" acima é essa promessa sendo cumprida de
   antemão. Os legs de provedor de destaque (35, 77 e 190 GB) e a rodada de custo instrumentada foram

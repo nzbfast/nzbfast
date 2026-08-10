@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kıyaslamalar - nzbfast</title>
-<meta name="description" content="nzbfast vs SABnzbd, NZBGet, rustnzb ve diğer istemciler: özdeş donanımda 8 senaryo. nzbfast'in kazanamadığı ayaklar dahil dürüst sonuçlar, yeniden üretim adımlarıyla.">
+<meta name="description" content="nzbfast, özdeş donanımda dört başka Usenet istemcisine karşı ölçüldü: kullanılabilir dosyaya geçen süre, ayrıca her işin maliyeti olan disk, boş alan ve bellek. Her tablo, karşısında koştuğu sürümleri adlandırır. nzbfast'in kazanamadığı ayaklar dahil.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Kıyaslamalar</h1>
-  <p class="sub">Beş istemci, sekiz senaryo, özdeş donanım ve sağlayıcılar; sağlayıcı
-  kayması birbirini götürsün diye iç içe çalıştırmalar. Ölçüt, <b>kullanılabilir bir
-  dosyaya geçen süre</b>: indirildi, doğrulandı, çıkarıldı. Kazanamadığımız ayaklar da dahil.</p>
+  <p class="sub">Beş istemci, sekiz senaryo, özdeş donanım ve sağlayıcılar; sağlayıcı kayması birbirini götürsün diye iç içe çalıştırmalar. Ölçüt, <b>kullanılabilir bir dosyaya geçen süre</b> - indirildi, doğrulandı, çıkarıldı - ve bununla birlikte işin size mal olduğu disk, boş alan ve bellek. Her tablo, karşısında koştuğu sürümleri ve koştuğu günü adlandırır. Kazanamadığımız ayaklar da dahil.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">Bu sayfada</p>
-  <nav aria-label="Bu sayfada" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Kurulum</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Usenet'e gerçekte ne gönderiliyor</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Depolanmış arşivler: bir iş kuyruğu</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Şifreli arşivler: yarı yarıya yazma</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → yarısı kadar disk alanıyla 157 GB'lık bir dosya (Avrupa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">İş boyutuna göre kullanılabilir dosyaya süre</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash adlı 4K → kullanılabilir mkv (Doğu Yakası)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Bir kuyruk boyunca hattı yanık tutmak (Doğu Yakası, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Kazanamadığımız ayaklar</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Az bellek merdiveni: ~1.1 GB RAM&#x27;de 190 GB</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">On iç içe biçim: kim sensiz bitiriyor</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">İstemci tavanı: RAM'den sunulan 9.68 GB, üstelik yeniden kurabilirsiniz</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Daha fazla veri sevenler için daha teknik kıyaslamalar</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Her istemci ne yapabilir</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motor gerçek hatları doyurur</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Bir iş makineye neye mal oluyor</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Sonraki sürümleri izlemek</a></nav>
+  <nav aria-label="Bu sayfada" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Kurulum</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Bir iş size neye mal olur</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Usenet'e gerçekte ne gönderiliyor</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Depolanmış arşivler: bir iş kuyruğu</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Şifreli arşivler: yarı yarıya yazma</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → yarısı kadar disk alanıyla 157 GB'lık bir dosya (Avrupa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">İş boyutuna göre kullanılabilir dosyaya süre</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash adlı 4K → kullanılabilir mkv (Doğu Yakası)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Bir kuyruk boyunca hattı yanık tutmak (Doğu Yakası, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Kazanamadığımız ayaklar</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Az bellek merdiveni: ~1.1 GB RAM&#x27;de 190 GB</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">On iç içe biçim: kim sensiz bitiriyor</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">İstemci tavanı: RAM'den sunulan 9.68 GB, üstelik yeniden kurabilirsiniz</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Daha fazla veri sevenler için daha teknik kıyaslamalar</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Her istemci ne yapabilir</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motor gerçek hatları doyurur</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Bir iş makineye neye mal oluyor</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Sonraki sürümleri izlemek</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>Son durum:</b> doğrulanmış, çıkarılmış, kullanılabilir bir dosya, "indirme bitti" değil. Asıl beklediğin şey budur.</li>
       <li><b>Yeniden üretilebilirlik:</b> her iddia tarihlidir ve aynı yöntemle ölçülür: geçen süre + arayüz bayt sayaçları + süreç ağacı zirve RSS, 1-2 s çözünürlük. Bir ayak herkese açık olarak gönderilmiş bir NZB üzerinde çalışıyorsa, kendiniz de çalıştırabilesiniz diye onu adıyla belirtiyoruz.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">Önce bunu okuyun</p>
+    <h2>Bir iş size neye mal olur ve bir işlem sonrası değişikliğinin oynatamayacağı şeyler</h2>
+    <p class="lead">İstemciler değişmeye devam ediyor ve bir istemcinin indirme <em>sonrasında</em> yaptığı işteki bir değişiklik, ağ yolu hiç kıpırdamadan bitiş süresini oynatabiliyor. Ağustos 2026'da tam olarak bu oldu; bu yüzden bu sayfadaki her tablo artık karşısında koştuğu sürümleri ve koştuğu günü adlandırıyor. Bir sürüm notunun oynatamayacağı şey ise faturanın geri kalanı: diskinize yazılan baytlar, işin daha başlamadan önce talep ettiği boş alan, çalışırken tuttuğu bellek ve verinin hiç kontrol edilip edilmediği.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>34.5 GB'lık şaşırtılmış yayın, her istemci en yeni yapısıyla</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>kullanılabilir dosyaya süre</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">kullanılabilir dosya yok&sup1;</td></tr>
+        <tr><td>zirve bellek (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>yazılan disk</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>gereken boş alan</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.3.9, 7 Ağustos 2026: doğu yakası M3 Ultra, altı sağlayıcı, tamamı TLS, istemci başına iki çalıştırma ve ikincisinde hat kayması birbirini götürsün diye ters sıra. &sup1; rustnzb hat üzerinde 36 GB taşıdı, işi bitti diye bildirdi ve hiç video çıkarmadan 1 GB'lık bir arşiv parçası bıraktı; yani ucuz görünen hücreleri, işi bitirmemenin bedeli.</p>
+
+    <p><b>Bitiş süresinin göstermediği dört maliyet.</b></p>
+    <ul class="plain">
+      <li><b>Yazılan disk.</b> Tek geçiş yükü bir kez yazar: 157 GB'lık bir dosya için 159.0 GB; her arşiv parçasını diske indirip sonra açan istemcilerde ise 387.4 GB ve 458.3 GB. Aynı iş, aynı gece, üçünün de güncel yapıları.</li>
+      <li><b>Boş alan.</b> O 190 GB'lık iş burada 156.3 GB boş alan ister, yazıp sonra açan bir istemcide ise 312.7&ndash;313.0 GB. Bu, çalışan bir işle hiç başlamayan bir iş arasındaki farktır.</li>
+      <li><b>Zirve bellek (RSS).</b> Yukarıdaki tablodaki yayında 232&ndash;248 MB'a karşı 1.8&ndash;2.0 GB ve tavan bir yan etki değil bir ayardır: aynı 190 GB'lık iş 1 GB'lık bütçe içinde tamamlanır, bir NAS profili de 35 GB'lık işi 0.4 GB'ta bitirir.</li>
+      <li><b>Kontrol edilip edilmediği.</b> nzbfast her bloğu geldiği anda gönderilmiş PAR2 verisine karşı doğrular ve aynı geçişte onarır; yani bitiş çizgisi doğrulanmış bir dosyadır. Hasarsız bir kümede hiç doğrulama geçişi yapmayan bir istemci, soruyu yanıtlamayarak saatini geri satın alır.</li>
+    </ul>
+    <p>İki tanesi ise ancak bir şeyler ters gittiğinde ortaya çıkar. 35 GB'lık bir işin 15.6 GB'ında süreci öldürün: nzbfast yeniden başlar ve tek bayt yeniden indirmeden işi 57 s'de bitirir. Ve her bağlantının 25 makale gövdesinden sonra hiç kapanmadan kalıcı olarak sustuğu bir düzenekte - operatör NAT'ının uzun bir indirmeye yaptığı şey - 26 s'de biter; diğer dört istemci 74 ila 275 s alır.</p>
+    <div class="callout">Hasarsız bir indirmede mümkün olan en hızlı işlem sonrası, hiç olmayanıdır. Biz o süreyi yakalarken her bloğu geldiği anda kontrol ediyoruz: <b>kontrolü atlamak kadar hızlı, çünkü onu asla atlamıyoruz.</b></div>
   </div>
 </section>
 
@@ -148,7 +174,7 @@
     iş ne kadar büyükse, o kadar önde iner. Aynı makinede sıralı çalıştırmalar; aksi belirtilmedikçe
     31 Temmuz 2026'da dağıtılan derleme üzerinde yeniden ölçüldü (Avrupa, 10 GbE, hepsi TLS):</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>İş</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (sıcak)</th></tr></thead>
+      <thead><tr><th>İş</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (sıcak)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (eski tur)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB gizlenmiş 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -157,6 +183,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4 ve Weaver v0.7.5, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
     <p class="note" style="text-align:start">rustnzb her ayağı çalıştırdı ve hiçbirinde
     kullanılabilir bir dosya teslim etmedi, bu yüzden burada bir sütunu yok; ayrıntılar aşağıdaki
     maliyet bölümünde. Weaver kendi sıcak en iyi durum protokolüyle ölçüldü (kalıcı arka plan
@@ -175,7 +202,7 @@
     <h2>35 GB hash adlı 4K → kullanılabilir mkv (Doğu Yakası)</h2>
     <p class="lead">Gönderideki her dosya onaltılık bir özet; yük gerçek adını yalnızca PAR2 üstverisinden alıyor. 31 Temmuz 2026'da dağıtılan sürümle yeniden koşuldu, beş istemcinin tamamı, hepsi TLS üzerinden (SABnzbd'nin tamamlanma sinyalinin ardındaki düzenek hatası - geçmiş API'si öntanımlı olarak 10 yuva döndürüyor - giderildi, dolayısıyla aşağıdaki her sayı güncel):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (sıcak)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (sıcak)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>kullanılabilir dosyaya süre</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">kullanılabilir dosya yok³</td></tr>
         <tr><td>CPU süresi</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -183,6 +210,7 @@
         <tr><td>zirve ek disk</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
     <p class="note" style="text-align:start">³ rustnzb 97 saniyede indirdi, işi <i>bitti</i> olarak işaretledi ve ham gizlenmiş birimleri teslim etti: yeniden adlandırma yok, çıkarma yok - hem 1.3.4'te hem 1.3.9'da († disk rakamı yalnızca indirmedir). nzbfast PAR2 üstverisinden gizlemeyi çözdü ve indirme sırasında çıkardı, sıfır geri okunan blok; 76&ndash;83 s aralığı turun ilk ve son ayağıdır. Bu tablonun 23 Temmuz kesitine karşı dağıtılan sürüm burada 3.4× daha az bellekle daha hızlı (1.55 → 0.45 GB): temmuz sonunun tek geçiş çalışması, aynı makinede ve aynı derlemde ölçüldü.</p>
   </div>
 </section>
@@ -197,6 +225,8 @@
     toplam disk G/Ç trafiği. Aynı kutu, aynı altı sağlayıcı, hepsi TLS, iş başına istemci başına
     tek ölçümlü ayak. Bu, tek geçiş iddiasının ileri sürülmesi değil ölçülmesidir: nzbfast'in zirve
     diski yükün kendisidir ve G/Ç'si her baytı bir kez yazmaya eşittir.</p>
+
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB gizlenmiş (yük 32 GB)</th><th>süre</th><th>CPU</th><th>CPU-s/GB</th><th>zirve bellek (RSS)</th><th>zirve ek disk</th><th>disk G/Ç</th></tr></thead>
@@ -408,6 +438,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 aynı)</td><td>17.6 GB</td><td>8.1× daha yavaş</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. Bu düzenek SABnzbd 5.1'e karşı yeniden koşturulmadı; 5.1.0 kararlı olarak çıktığında bir hücreyi düzenlemek yerine tablonun tamamını yeniden koşturacağız.</p>
     <p class="note" style="text-align:start"><b>31 Temmuz 2026'da yeniden ölçüldü</b>, aynı düzenek, aynı derlem, makinede bir işletim sistemi güncellemesinden sonra. Dört istemci bir ila üç saniye oynadı; SABnzbd oynamadı: bu tablonun 24 Temmuz kesitinin 14 s kaydettiği yerde artık 57 s alıyor, iki düzenek türevinde sekiz kez yinelendi, ardışık düzen her koşuda API geri okumasıyla 8 olarak doğrulandı ve 16 bağlantıda da aynı. Bu sayfanın başka yerlerindeki çiftlik ayaklarındaki sonuçları etkilenmiyor, dolayısıyla bu, bu makinenin şu anki işletim sisteminde geri döngüyle beslenen hızlara özgü görünüyor; düzeneğin bugün ölçtüğünü yayımlıyoruz ve bir sonraki işletim sistemi ve SABnzbd sürümlerinde yeniden sınayacağız.</p>
 
     <p class="note" style="text-align:start"><b>Bitirme süresi</b>, işin başlatılmasından dört
@@ -453,8 +484,9 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x daha yavaş</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x daha yavaş</span></div>
     </div>
-    <p><b>nzbfast, NZBGet'ten 1,51 kat, SABnzbd'den 2,55 kat daha hızlı</b> ve bu usenet'teki en
+    <p><b>nzbfast, NZBGet 26.2'ten 1,51 kat, SABnzbd 5.0.4'den 2,55 kat daha hızlı</b> ve bu usenet'teki en
     yaygın biçimde.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2 ve SABnzbd 5.0.4, 27 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
     <p>Her istemci sunucu başına 8, 16 ve 32 bağlantıyla denendi ve kendi en iyi ayarıyla
     gösteriliyor, çünkü bir rakip asla kötü yapılandırma yüzünden kaybetmemeli. Kendi kurulumunuzu
     ayarlıyorsanız bilmeye değer: <b>NZBGet 32 bağlantıda yaklaşık iki kat yavaşladı</b>, SABnzbd de
@@ -747,8 +779,8 @@
     <p class="kicker">Taşıma kanıtı</p>
     <h2>Motor gerçek hatları doyurur</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps toplam</b>, ölçülen 8.2 Gbps'lik bir 10 GbE hatta (Avrupa M1 Ultra, 4 sağlayıcı, 14,000 makale, 0 hata, 0 yeniden bağlanma).</li>
-      <li><b>9.16-9.27 Gbps</b> aynı hatta düzenli taşıma tikleri, pratik TCP goodput'unun ≈%98'i.</li>
+      <li>Donanım tavanı kendisi 9.8 Gbps ölçülen bir 10 GbE hattında, beş sağlayıcılık bir filo üzerinden <b>9.0-9.3 Gbps</b>; sürdürülen ortancalar 9.5-9.9 (Avrupa M1 Ultra, 9 Ağustos 2026). Geriye kalan, 33 saniyelik bir işte soğuk filonun ısınması; hız değil.</li>
+      <li>Atlantik'in öbür yakasındaki ~5 Gbps'lik bir kablo hattında <b>4.8-4.9 Gbps sürdürülen</b> hız, iş boyunca saniyede bir örneklendi (8 Ağustos 2026). İki hat sınıfı, ikisi de donanımın kendi verdiği hızda.</li>
       <li><b>5.44 Gbps sürekli</b>, akış içi doğrulama <i>dahil</i> tam bir 20.4 GB'lık iş boyunca.</li>
       <li><b>Her RTT'de yinelenen işlem hatlama</b>: 63 ms Starlink'te +%64, 14 ms veri merkezinde +%170-177, 31 ms Doğu Yakası'nda +%270. Yalnızca gecikmeyi değil, TCP tıkanıklık penceresi düşüşünü yener.</li>
       <li><b>Geri basınç kanıtı</b>: yazma aşamasını ağın 4× altına sınırla ve giriş 2 sn içinde sınıra ±%1 kilitlenir, RAM <i>düşer</i>, sıfır takas. Yavaş bir disk belleği asla şişiremez.</li>
@@ -799,6 +831,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, kullanılabilir dosya yok</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
     <div class="callout">Kalıcı kural: <b>her performans iddiası, altında çalıştığı koşulları
     anar</b>; olumsuz sonuçlar ve yanlış dönüşler dahil.</div>
   </div>
@@ -878,7 +911,7 @@
   <p class="fine">Kıyaslama verisi: 19&ndash;31 Temmuz 2026 rekabet turları. İstemci
   sürümleri: SABnzbd 5.0.4, NZBGet 26.2 (nzbget.com çatalı), rustnzb 1.3.4, Weaver v0.7.5 resmi
   arm64 (istemci tavanı ayağı onun 23 Temmuz tarihli <code>410c114</code> kaynak derlemesini
-  kullandı; kendine ait bir sürüm dizesi bildirmiyor).
+  kullandı; kendine ait bir sürüm dizesi bildirmiyor). Ayrıca 6-9 Ağustos 2026 tarihli güncel yapı ayakları: SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.3.9. 5.0.4, 26.2, v0.7.5 veya 1.3.4 adını anan her tablo o yapılara sabitlenmiştir ve sonraki kararlı sürümler çıktığında düzenlenmez, yeniden koşturulur.
   Herhangi bir istemcinin daha yeni bir sürümü bir sonucu esaslı biçimde değiştirirse, yeniden
   çalıştırıp güncelleriz - yukarıdaki "Sonraki sürümleri izlemek" bölümü, bu sözün önceden
   tutulmuş hâlidir.

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>قياس الأداء - nzbfast</title>
-<meta name="description" content="‏nzbfast مقابل SABnzbd وNZBGet وrustnzb وعملاء آخرين: 8 سيناريوهات على عتاد متطابق. نتائج صادقة تشمل الأشواط التي لا يفوز بها nzbfast، مع خطوات إعادة الإنتاج.">
+<meta name="description" content="‏nzbfast مقيسًا مقابل أربعة عملاء يوزنت آخرين على عتاد متطابق: الزمن حتى ملف قابل للاستخدام، إضافة إلى القرص والمساحة الحرّة والذاكرة التي تكلّفها كل مهمة. كل جدول يسمّي الإصدارات التي جرى القياس مقابلها. يشمل الأشواط التي لا يفوز بها nzbfast.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>قياس الأداء</h1>
-  <p class="sub">خمسة عملاء، وثمانية سيناريوهات، وعتاد ومزوّدون متطابقون، وأشواط
-  متداخلة كي يُلغى انجراف المزوّدين. المقياس هو <b>الزمن حتى ملف قابل للاستخدام</b>:
-  مُنزَّل، متحقَّق منه، مستخرَج. يشمل الأشواط التي لا نفوز بها.</p>
+  <p class="sub">خمسة عملاء، وثمانية سيناريوهات، وعتاد ومزوّدون متطابقون، وأشواط متداخلة كي يُلغى انجراف المزوّدين. المقياس هو <b>الزمن حتى ملف قابل للاستخدام</b> - مُنزَّل، متحقَّق منه، مستخرَج - مقيسًا إلى جانب القرص والمساحة الحرّة والذاكرة التي تكلّفك المهمة. كل جدول يسمّي الإصدارات التي جرى القياس مقابلها واليوم الذي جرى فيه. يشمل الأشواط التي لا نفوز بها.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">في هذه الصفحة</p>
-  <nav aria-label="في هذه الصفحة" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الإعداد</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يُنشر فعلياً على يوزنت</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المخزَّنة: طابور مهام</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المشفَّرة: نصف الكتابة</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → ملف بحجم 157 GB، في نصف مساحة القرص (أوروبا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الزمن حتى ملف قابل للاستخدام، حسب حجم المهمة</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB بأسماء تجزئة 4K → ملف mkv قابل للاستخدام (الساحل الشرقي)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">إبقاء الخط مضيئًا عبر قائمة انتظار (الساحل الشرقي، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأشواط التي لا نفوز بها</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سلّم الذاكرة المنخفضة: 190 GB في ~1.1 GB من RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">عشرة أشكال متداخلة: من يُنهي المهمة من دونك</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف العميل: ‏9.68 GB تُقدَّم من الذاكرة، ويمكنك إعادة بنائها</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">القياسات الأكثر تقنية، لمن يحب مزيدًا من البيانات</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يستطيعه كل عميل</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">المحرّك يُشبِع الخطوط الحقيقية</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفه المهمة على الجهاز</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">تتبّع الإصدارات القادمة</a></nav>
+  <nav aria-label="في هذه الصفحة" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الإعداد</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفك المهمة</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يُنشر فعلياً على يوزنت</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المخزَّنة: طابور مهام</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المشفَّرة: نصف الكتابة</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → ملف بحجم 157 GB، في نصف مساحة القرص (أوروبا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الزمن حتى ملف قابل للاستخدام، حسب حجم المهمة</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB بأسماء تجزئة 4K → ملف mkv قابل للاستخدام (الساحل الشرقي)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">إبقاء الخط مضيئًا عبر قائمة انتظار (الساحل الشرقي، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأشواط التي لا نفوز بها</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سلّم الذاكرة المنخفضة: 190 GB في ~1.1 GB من RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">عشرة أشكال متداخلة: من يُنهي المهمة من دونك</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف العميل: ‏9.68 GB تُقدَّم من الذاكرة، ويمكنك إعادة بنائها</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">القياسات الأكثر تقنية، لمن يحب مزيدًا من البيانات</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يستطيعه كل عميل</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">المحرّك يُشبِع الخطوط الحقيقية</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفه المهمة على الجهاز</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">تتبّع الإصدارات القادمة</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>الحالة النهائية:</b> ملف متحقَّق منه، مستخرَج، قابل للاستخدام، لا "انتهى التنزيل". هذا ما تنتظره فعلًا.</li>
       <li><b>قابلية إعادة الإنتاج:</b> كل ادّعاء مؤرَّخ ومقيس بالطريقة نفسها: الزمن المنقضي + عدّادات بايتات الواجهة + ذروة RSS لشجرة العمليات، بدقّة 1-2 s. وحيث يجري شوط على ملف NZB منشور للعموم، نذكر اسمه كي تستطيع تشغيله بنفسك.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">اقرأ هذا أولًا</p>
+    <h2>ما تكلّفك المهمة، وما لا يستطيع تغيير المعالجة اللاحقة أن يزحزحه</h2>
+    <p class="lead">العملاء يتغيّرون، وتغيير في ما يفعله العميل <em>بعد</em> التنزيل قد يزحزح زمن الانتهاء دون أن يتحرّك مساره الشبكي إطلاقًا. هذا ما حدث في أغسطس 2026، ولذلك صار كل جدول في هذه الصفحة يسمّي الإصدارات التي جرى القياس مقابلها واليوم الذي جرى فيه. أما ما لا تستطيع ملاحظة إصدار أن تزحزحه فهو بقية الفاتورة: البايتات المكتوبة على قرصك، والمساحة الحرّة التي تطلبها المهمة قبل أن تبدأ أصلًا، والذاكرة التي تحتجزها أثناء عملها، وما إذا كانت البيانات قد فُحصت أصلًا.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>إصدار مُعمّى بحجم 34.5 GB، كل عميل في أحدث بناء له</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">لا ملف قابل للاستخدام&sup1;</td></tr>
+        <tr><td>ذروة الذاكرة (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>ما كُتب على القرص</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>المساحة الحرّة المطلوبة</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> SABnzbd 5.1.0RC2 وNZBGet 26.3-testing وWeaver 0.7.8 وrustnzb 1.3.9 في 7 أغسطس 2026: ‏M3 Ultra على الساحل الشرقي، ستة مزوّدين، كل شيء عبر TLS، شوطان لكل عميل مع عكس الترتيب في الثاني كي يُلغى انجراف الخط. &sup1; نقل rustnzb ‏36 GB عبر السلك، وأعلن انتهاء المهمة، وترك جزء أرشيف بحجم 1 GB دون أي فيديو مستخرَج، فخلاياه التي تبدو زهيدة هي ثمن عدم الإتمام.</p>
+
+    <p><b>أربع تكاليف لا يظهرها زمن الانتهاء.</b></p>
+    <ul class="plain">
+      <li><b>ما كُتب على القرص.</b> تمريرة واحدة تكتب الحمولة مرة واحدة: 159.0 GB لملف بحجم 157 GB، مقابل 387.4 GB و458.3 GB لدى العملاء الذين ينزلون كل جزء أرشيف على القرص ثم يفكّونه. المهمة نفسها، والليلة نفسها، والبناءات الحالية للثلاثة جميعًا.</li>
+      <li><b>المساحة الحرّة.</b> تلك المهمة البالغة 190 GB تحتاج هنا إلى 156.3 GB حرّة وإلى 312.7&ndash;313.0 GB لدى عميل يكتب ثم يفكّ. هذا هو الفارق بين مهمة تعمل ومهمة لا تبدأ أصلًا.</li>
+      <li><b>ذروة الذاكرة (RSS).</b> ‏232&ndash;248 MB مقابل 1.8&ndash;2.0 GB على الإصدار المذكور في الجدول أعلاه، والسقف إعداد لا أثر جانبي: المهمة نفسها البالغة 190 GB تكتمل ضمن ميزانية 1 GB، وملف تعريف NAS ينهي مهمة 35 GB في 0.4 GB.</li>
+      <li><b>هل فُحصت أصلًا.</b> يتحقّق nzbfast من كل كتلة مقابل بيانات PAR2 المنشورة أثناء وصولها ويصلح في التمريرة نفسها، فخط النهاية ملف متحقَّق منه. والعميل الذي لا يجري أي تمريرة تحقّق على مجموعة سليمة يشتري ساعته من جديد بعدم الإجابة عن السؤال.</li>
+    </ul>
+    <p>واثنتان أخريان لا تظهران إلا حين يسوء شيء ما. اقتل العملية بعد 15.6 GB من مهمة بحجم 35 GB: يعيد nzbfast التشغيل وينهيها في 57 ثانية دون إعادة تنزيل بايت واحد. وعلى منصّة يصمت فيها كل اتصال نهائيًا بعد 25 جسم مقالة دون أن يُغلق أبدًا، وهو ما يفعله NAT المشغّل بتنزيل طويل، ينتهي في 26 ثانية حيث يستغرق العملاء الأربعة الآخرون من 74 إلى 275 ثانية.</p>
+    <div class="callout">في تنزيل سليم، أسرع معالجة لاحقة ممكنة هي ألّا تكون هناك معالجة أصلًا. نحن نساوي ذلك الزمن بينما نفحص كل كتلة عند وصولها: <b>بسرعة تخطّي الفحص، لأننا لا نتخطّاه أبدًا.</b></div>
   </div>
 </section>
 
@@ -133,7 +159,7 @@
     ازداد تقدّمها في الوصول. أشواط تسلسلية على الجهاز نفسه، أُعيد قياسها في 31 يوليو 2026 على
     البناء المنشور (أوروبا، 10 GbE، كلها عبر TLS) ما لم يُذكر خلاف ذلك:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>المهمة</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>‏Weaver (مُسخَّن)</th></tr></thead>
+      <thead><tr><th>المهمة</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>‏Weaver v0.7.5 (مُسخَّن)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (جولة أقدم)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB مموّه 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -142,6 +168,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ وعلى البناءات الحالية يقترب الفارق من +43% المقيسة في أعلى هذه الصفحة. نعيد سباق هذه الأرقام حين يصدر 5.1.0 نسخةً مستقرّة بدل تعديلها.</p>
     <p class="note" style="text-align:start">شغّل rustnzb كل شوط ولم يسلّم ملفًا قابلًا للاستخدام في
     أيٍّ منها، فلا عمود له هنا؛ والتفاصيل في قسم التكلفة أدناه. ويُقاس Weaver وفق بروتوكول أفضل
     حالاته مُسخَّنًا (خدمة دائمة، ومهمة تسخين مُهمَلة، والاتصالات مرفوعة إلى 120 قبل بدء الساعة).
@@ -158,7 +185,7 @@
     <h2>35 GB بأسماء تجزئة 4K → ملف mkv قابل للاستخدام (الساحل الشرقي)</h2>
     <p class="lead">كل ملف في المنشور هو تلبيدة ست عشرية؛ ولا تستعيد الحمولة اسمها الحقيقي إلا من بيانات PAR2 الوصفية. أُعيد السباق في 31 يوليو 2026 على النسخة الموزَّعة، بالعملاء الخمسة جميعًا، وكله عبر TLS (عُولج خلل المنصة وراء إشارة إتمام SABnzbd - إذ تُرجع واجهة سجله عشر خانات افتراضيًا - ولذلك كل رقم أدناه محدَّث):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (مُسخَّن)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (مُسخَّن)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">لا ملف قابل للاستخدام³</td></tr>
         <tr><td>زمن المعالج</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -166,6 +193,7 @@
         <tr><td>ذروة القرص الإضافي</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ وعلى البناءات الحالية يقترب الفارق من +43% المقيسة في أعلى هذه الصفحة. نعيد سباق هذه الأرقام حين يصدر 5.1.0 نسخةً مستقرّة بدل تعديلها.</p>
     <p class="note" style="text-align:start">³ نزّل rustnzb في 97 ثانية، ووسم المهمة بأنها <i>منتهية</i>، وسلّم الأجزاء المموَّهة الخام: بلا إعادة تسمية وبلا استخراج - في 1.3.4 و1.3.9 على السواء († رقم قرصه هو التنزيل وحده). أما nzbfast فقد أزال التمويه من بيانات PAR2 الوصفية واستخرج أثناء التنزيل، بصفر كتل أُعيدت قراءتها؛ والمدى 76&ndash;83 ثانية هو أول مرحلة له وآخر مرحلة في الجولة. وبالمقارنة مع نسخة 23 يوليو من هذا الجدول، فالنسخة الموزَّعة أسرع هنا وبذاكرة أقل بمقدار 3.4× (1.55 → 0.45 GB): عمل المرور الواحد من أواخر يوليو، مقيسًا على الجهاز نفسه والمجموعة نفسها.</p>
   </div>
 </section>
@@ -180,6 +208,8 @@
     القرص. الجهاز نفسه، والمزوّدون الستة أنفسهم، وكلها عبر TLS، وشوط مُجهَّز واحد لكل عميل لكل مهمة.
     هذا هو ادّعاء التمريرة الواحدة مقيسًا لا مُدّعى: ذروة قرص nzbfast هي الحمولة نفسها، ودخله وخرجه
     يساويان كتابة كل بايت مرة واحدة.</p>
+
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ وعلى البناءات الحالية يقترب الفارق من +43% المقيسة في أعلى هذه الصفحة. نعيد سباق هذه الأرقام حين يصدر 5.1.0 نسخةً مستقرّة بدل تعديلها.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB مموّه (حمولة 32 GB)</th><th>الزمن</th><th>المعالج</th><th>ثانية معالج/GB</th><th>ذروة الذاكرة (RSS)</th><th>ذروة القرص الإضافي</th><th>دخل/خرج القرص</th></tr></thead>
@@ -373,6 +403,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 مطابق)</td><td>17.6 GB</td><td>‏8.1× أبطأ</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. لم تُعَد هذه المنصّة مقابل SABnzbd 5.1؛ وحين يصدر 5.1.0 نسخةً مستقرّة نعيد سباق الجدول كله بدل تعديل خلية واحدة.</p>
     <p class="note" style="text-align:start"><b>أُعيد القياس في 31 يوليو 2026</b>، بالمنصة نفسها والمجموعة نفسها، بعد تحديث نظام التشغيل على الجهاز. تحرك أربعة عملاء ثانيةً أو ثلاثًا؛ أما SABnzbd فلا: صار يستغرق 57 ثانية حيث سجلت نسخة 24 يوليو من هذا الجدول 14 ثانية، وقد أُعيد إنتاجه ثماني مرات عبر صيغتين للمنصة، وتأكد خط الأنابيب عند 8 بإعادة القراءة من الواجهة في كل تشغيلة، وكان مطابقًا عند 16 اتصالًا. ونتائجه في مراحل المزرعة في مواضع أخرى من هذه الصفحة غير متأثرة، فهذا يبدو خاصًا بالمعدلات المغذَّاة عبر الحلقة المحلية على نظام التشغيل الحالي لهذا الجهاز؛ وننشر ما تقيسه المنصة اليوم وسنعيد الاختبار مع إصدارَي نظام التشغيل وSABnzbd القادمين.</p>
 
     <p class="note" style="text-align:start"><b>زمن الإنهاء</b> يمتد من بدء المهمة حتى تكون الفيديوهات الأربعة كلها على القرص، متحقَّقًا منها ومستخرَجة. <b>ذروة القرص</b> هي أكبر مساحة شغلها العميل في أي لحظة، بأخذ عيّنة مرتين في الثانية، وهي العمود الأهم هنا: تحتاج التمريرة الواحدة إلى نحو ضعف واحد من حجم المحتوى، وكل ما عداها إلى ضعفين. انتهى الخمسة جميعًا وهم يحتفظون بالـ 8.6 GB نفسها بعد أن رتّبوا خلفهم، ولهذا بالضبط تكون الذروة هي الرقم المثير للاهتمام. أنتج كل عميل الحمولات الأربع كلها مطابقةً بـ sha256 للمصدر. ويظهر كلٌّ منها عند عدد الاتصالات الذي جعله <i>هو</i> الأسرع (جُرّبت 8 و16 و32 على كل منها؛ وكان nzbfast مستويًا عند الثلاثة، فما كانت زيادة الاتصالات لتفيده).</p>
@@ -391,7 +422,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>nzbfast أسرع من NZBGet بمقدار 1.51 مرة ومن SABnzbd بمقدار 2.55 مرة</b> في الشكل الأكثر شيوعاً على يوزنت.</p>
+    <p><b>nzbfast أسرع من NZBGet 26.2 بمقدار 1.51 مرة ومن SABnzbd 5.0.4 بمقدار 2.55 مرة</b> في الشكل الأكثر شيوعاً على يوزنت.</p>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 في 27 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ وعلى البناءات الحالية يقترب الفارق من +43% المقيسة في أعلى هذه الصفحة. نعيد سباق هذه الأرقام حين يصدر 5.1.0 نسخةً مستقرّة بدل تعديلها.</p>
     <p>جُرّب كل عميل عند 8 و16 و32 اتصالاً لكل خادم، ويظهر عند أفضل إعداد له هو، لأن المنافس يجب ألا يخسر أبداً بسبب سوء الإعداد. ومما يستحق المعرفة إن كنت تضبط تثبيتك بنفسك: <b>صار NZBGet أبطأ بنحو الضعف عند 32 اتصالاً</b>، وتصرّف SABnzbd بالمثل في اختباراتنا السابقة. زيادة الاتصالات ليست زيادة في السرعة. أما nzbfast فبقي ثابتاً عبر المدى كله، فلن يخدعك هذا الإعداد.</p>
     <p class="note">نتحقق أيضاً من أن كل عميل أنتج الملفات فعلاً، بدلاً من تصديقه حين يبلّغ عن النجاح. في اختباراتنا أبلغ أحد العملاء عن ثلاث تنزيلات مكتملة في نحو ثانية لكل منها، ولم يكن قد كتب شيئاً على الإطلاق.</p>
   </div>
@@ -651,8 +683,8 @@
     <p class="kicker">إثبات النقل</p>
     <h2>المحرّك يُشبِع الخطوط الحقيقية</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps إجمالية</b> على خط 10 GbE مقيس بـ 8.2 Gbps (أوروبا M1 Ultra، 4 مزوّدين، 14,000 مقالة، 0 خطأ، 0 إعادة اتصال).</li>
-      <li><b>9.16-9.27 Gbps</b> نبضات نقل ثابتة على الخط نفسه، ≈98% من إنتاجية TCP العملية.</li>
+      <li><b>9.0-9.3 Gbps</b> عبر أسطول من خمسة مزوّدين على خط 10 GbE يقيس سقفه العتادي نفسه 9.8 Gbps، بوسيط مستدام 9.5-9.9 (‏M1 Ultra أوروبا، 9 أغسطس 2026). ما يتبقّى هو إقلاع أسطول بارد في مهمة من 33 ثانية، لا المعدّل نفسه.</li>
+      <li><b>4.8-4.9 Gbps مستدامة</b> على وصلة كابل بنحو 5 Gbps على الضفة الأخرى من الأطلسي، بأخذ عيّنة كل ثانية على امتداد المهمة كلها (8 أغسطس 2026). صنفان من الوصلات، وكلاهما عند المعدّل الذي يقدّمه العتاد نفسه.</li>
       <li><b>5.44 Gbps مُستدامة</b> عبر مهمة كاملة بحجم 20.4 GB <i>بما في ذلك</i> التحقق أثناء التنزيل.</li>
       <li><b>التسلسل بالأنابيب متكرّر عند كل RTT</b>: +64% عند 63 ms على Starlink، +170-177% عند 14 ms في مركز بيانات، +270% عند 31 ms على الساحل الشرقي. يهزم اضمحلال نافذة ازدحام TCP، لا الكمون فحسب.</li>
       <li><b>إثبات الضغط العكسي</b>: حُدّ مرحلة الكتابة بـ 4 أضعاف دون الشبكة فيُقفَل الدخل عند الحد ±1% خلال 2 s، وتنخفض RAM، بصفر مبادلة. قرص بطيء لا يمكنه أبدًا تضخيم الذاكرة.</li>
@@ -701,6 +733,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">‏18×، بلا ملف قابل للاستخدام</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ وعلى البناءات الحالية يقترب الفارق من +43% المقيسة في أعلى هذه الصفحة. نعيد سباق هذه الأرقام حين يصدر 5.1.0 نسخةً مستقرّة بدل تعديلها.</p>
     <div class="callout"><b>قاعدة ثابتة: كل ادّعاء أداء يذكر الظروف التي جرى فيها</b>، بما في ذلك النتائج السلبية والمنعطفات الخاطئة.</div>
   </div>
 </section>
@@ -776,7 +809,7 @@
   <p class="fine">بيانات قياس الأداء: الأشواط التنافسية 19&ndash;31 يوليو 2026. إصدارات
   العملاء: SABnzbd 5.0.4، NZBGet 26.2 (فرع nzbget.com)، rustnzb 1.3.4، Weaver v0.7.5 الرسمي
   لمعمارية arm64 (استخدم شوط سقف العميل بناءه من المصدر في 23 يوليو <code>410c114</code>؛ وهو
-  لا يعلن سلسلة إصدار خاصة به).
+  لا يعلن سلسلة إصدار خاصة به). يضاف إلى ذلك أشواط البناءات الحالية من 6 إلى 9 أغسطس 2026، مقابل SABnzbd 5.1.0RC2 وNZBGet 26.3-testing وWeaver 0.7.8 وrustnzb 1.3.9؛ وكل جدول يسمّي 5.0.4 أو 26.2 أو v0.7.5 أو 1.3.4 مثبّت على تلك البناءات ويُعاد سباقه، لا تعديله، حين تصدر النسخ المستقرّة التالية.
   إن غيّرت نسخة أحدث من أي عميل نتيجةً تغييرًا جوهريًا، فسنعيد التشغيل ونحدّث - وقسم
   "تتبّع الإصدارات القادمة" أعلاه هو ذلك الوعد يُنفَّذ سلفًا.
   أما أشواط المزوّدين الرئيسية (35 و77 و190 GB) وجولة التكلفة المُجهَّزة بالعدّادات فقد أُعيد

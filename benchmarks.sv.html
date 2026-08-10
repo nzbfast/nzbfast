@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast vs SABnzbd, NZBGet, rustnzb och andra klienter: 8 scenarier på identisk hårdvara. Ärliga resultat inklusive de etapper nzbfast inte vinner, med reproduktionssteg.">
+<meta name="description" content="nzbfast mätt mot fyra andra Usenet-klienter på identisk hårdvara: tid till en användbar fil, plus disken, det lediga utrymmet och minnet varje jobb kostar. Varje tabell namnger de versioner den kördes mot. Inklusive de etapper nzbfast inte vinner.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Benchmarks</h1>
-  <p class="sub">Fem klienter, åtta scenarier, identisk hårdvara och providers, körningar
-  sammanflätade så att providerdrift tar ut sig. Måttet är <b>tid till en användbar fil</b>:
-  nedladdad, verifierad, uppackad. Inklusive de etapper vi inte vinner.</p>
+  <p class="sub">Fem klienter, åtta scenarier, identisk hårdvara och providers, körningar sammanflätade så att providerdrift tar ut sig. Måttet är <b>tid till en användbar fil</b> - nedladdad, verifierad, uppackad - mätt tillsammans med disken, det lediga utrymmet och minnet jobbet kostar dig. Varje tabell namnger de versioner den kördes mot och dagen den kördes. Inklusive de etapper vi inte vinner.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">På den här sidan</p>
-  <nav aria-label="På den här sidan" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Uppställningen</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad usenet faktiskt publicerar</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lagrade arkiv: en jobbkö</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Krypterade arkiv: hälften så mycket skrivning</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → en 157 GB-fil, på halva diskutrymmet (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tid till användbar fil, per jobbstorlek</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hashnamnad 4K → användbar mkv (östkusten)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Att hålla linjen tänd genom en kö (östkusten, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De etapper vi inte vinner</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lågminnesstegen: 190 GB i ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tio nästlade former: vem blir klar utan dig</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Klienttaket: 9.68 GB serverade ur RAM, och du kan bygga om det</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De mer tekniska mätningarna, för den som vill ha mer data</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad varje klient kan göra</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motorn mättar riktiga linjer</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad ett jobb kostar maskinen</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vi följer nästa releaser</a></nav>
+  <nav aria-label="På den här sidan" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Uppställningen</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad ett jobb kostar dig</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad usenet faktiskt publicerar</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lagrade arkiv: en jobbkö</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Krypterade arkiv: hälften så mycket skrivning</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → en 157 GB-fil, på halva diskutrymmet (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tid till användbar fil, per jobbstorlek</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hashnamnad 4K → användbar mkv (östkusten)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Att hålla linjen tänd genom en kö (östkusten, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De etapper vi inte vinner</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Lågminnesstegen: 190 GB i ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tio nästlade former: vem blir klar utan dig</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Klienttaket: 9.68 GB serverade ur RAM, och du kan bygga om det</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De mer tekniska mätningarna, för den som vill ha mer data</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad varje klient kan göra</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Motorn mättar riktiga linjer</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vad ett jobb kostar maskinen</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Vi följer nästa releaser</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>Sluttillstånd:</b> en verifierad, uppackad, användbar fil, inte "nedladdning klar". Det är det du faktiskt väntar på.</li>
       <li><b>Reproducerbarhet:</b> varje påstående är daterat och uppmätt på samma sätt: förfluten tid + gränssnittsbyte-räknare + toppar-RSS för processträdet, 1-2 s upplösning. Där en etapp körs på en publikt postad NZB namnger vi den, så att du kan köra den själv.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">Läs det här först</p>
+    <h2>Vad ett jobb kostar dig, och vad en ändrad efterbearbetning inte kan flytta</h2>
+    <p class="lead">Klienter ändrar sig, och en ändring i vad en klient gör <em>efter</em> nedladdningen kan flytta en sluttid utan att dess nätverksväg rör sig alls. Det hände i augusti 2026, och därför namnger varje tabell på den här sidan nu de versioner den kördes mot och dagen den kördes. Vad en release-notis inte kan flytta är resten av notan: de byte som skrivs till din disk, det lediga utrymme jobbet kräver innan det ens startar, minnet det håller medan det kör, och om datat någonsin kontrollerades.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Obfuskerad 34.5 GB-release, varje klient i sitt nyaste bygge</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>tid till användbar fil</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">ingen användbar fil&sup1;</td></tr>
+        <tr><td>toppminne (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>disk skriven</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>ledigt utrymme som krävs</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 och rustnzb 1.3.9 den 7 augusti 2026: M3 Ultra på östkusten, sex providers, allt över TLS, två körningar per klient med omvänd ordning i den andra så att linjedrift tar ut sig. &sup1; rustnzb flyttade 36 GB över tråden, rapporterade jobbet klart och lämnade en 1 GB arkivdel utan någon uppackad video, så dess snålt utseende celler är priset för att inte bli klar.</p>
+
+    <p><b>Fyra kostnader som en sluttid inte visar.</b></p>
+    <ul class="plain">
+      <li><b>Disk skriven.</b> En passage skriver nyttolasten en gång: 159.0 GB för en 157 GB-fil, mot 387.4 GB och 458.3 GB från de klienter som lägger varje arkivdel på disk och sedan packar upp den. Samma jobb, samma natt, aktuella byggen av alla tre.</li>
+      <li><b>Ledigt utrymme.</b> Det där 190 GB-jobbet behöver 156.3 GB ledigt här och 312.7&ndash;313.0 GB på en klient som skriver ut och packar upp. Det är skillnaden mellan ett jobb som kör och ett jobb som inte ens startar.</li>
+      <li><b>Toppminne (RSS).</b> 232&ndash;248 MB mot 1.8&ndash;2.0 GB på releasen i tabellen ovan, och taket är en inställning snarare än en bieffekt: samma 190 GB-jobb går igenom inom en budget på 1 GB, och en NAS-profil klarar 35 GB-jobbet på 0.4 GB.</li>
+      <li><b>Om det ens kontrollerades.</b> nzbfast verifierar varje block mot de postade PAR2-datan medan det kommer in och reparerar i samma passage, så mållinjen är en verifierad fil. En klient som inte kör någon verifieringspassage alls på en oskadad uppsättning köper tillbaka sin klocka genom att inte svara på frågan.</li>
+    </ul>
+    <p>Två till syns bara när något går fel. Döda processen 15.6 GB in i ett 35 GB-jobb, så startar nzbfast om och blir klar på 57 s utan att ladda ner en enda byte igen. Och på en rigg där varje anslutning tystnar permanent efter 25 artikelkroppar utan att någonsin stängas, vilket är vad en operatörs-NAT gör med en lång nedladdning, blir den klar på 26 s där de andra fyra klienterna tar 74 till 275 s.</p>
+    <div class="callout">På en oskadad nedladdning är den snabbast möjliga efterbearbetningen ingen alls. Vi matchar den tiden och kontrollerar samtidigt varje block medan det kommer in: <b>lika snabbt som att hoppa över kontrollen, för vi hoppar aldrig över den.</b></div>
   </div>
 </section>
 
@@ -135,7 +161,7 @@
     desto längre fram landar det. Sekventiella körningar på samma maskin, ommätta den 31 juli 2026 på
     det levererade bygget (Europa, 10 GbE, allt över TLS) om inget annat anges:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Jobb</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (uppvärmd)</th></tr></thead>
+      <thead><tr><th>Jobb</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (uppvärmd)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (äldre omgång)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB obfuskerad 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -144,6 +170,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4 och Weaver v0.7.5 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
     <p class="note" style="text-align:left">rustnzb körde varje etapp och levererade en användbar fil på
     ingen av dem, så den har ingen kolumn här; detaljerna står i kostnadsavsnittet nedan. Weaver mäts
     enligt sitt uppvärmda bästafallsprotokoll (beständig daemon, förkastat uppvärmningsjobb,
@@ -161,7 +188,7 @@
     <h2>35 GB hashnamnad 4K → användbar mkv (östkusten)</h2>
     <p class="lead">Varje fil i inlägget är en hexadecimal hash; nyttolasten får sitt riktiga namn först ur PAR2-metadatan. Omkörd 31 juli 2026 på den levererade bygget, alla fem klienter, allt över TLS (riggfelet bakom SABnzbds färdigsignal - dess historik-API returnerar 10 platser som standard - är åtgärdat, så varje siffra nedan är aktuell):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (uppvärmd)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (uppvärmd)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>tid till användbar fil</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">ingen användbar fil³</td></tr>
         <tr><td>processortid</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -169,6 +196,7 @@
         <tr><td>extra toppdisk</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
     <p class="note" style="text-align:start">³ rustnzb laddade ned på 97 s, markerade jobbet som <i>klart</i> och levererade de råa obfuskerade volymerna: ingen omdöpning, ingen uppackning - både på 1.3.4 och på 1.3.9 († dess disksiffra är enbart nedladdningen). nzbfast avobfuskerade ur PAR2-metadatan och packade upp under tiden, noll återlästa block; spannet 76&ndash;83 s är dess första och sista etapp i omgången. Mot den 23 juli-versionen av den här tabellen är det levererade bygget här snabbare med 3.4× mindre minne (1.55 → 0.45 GB): enpassarbetet från slutet av juli, mätt på samma maskin och samma korpus.</p>
   </div>
 </section>
@@ -183,6 +211,8 @@
     disk-I/O. Samma maskin, samma sex providers, allt över TLS, en instrumenterad etapp per klient och
     jobb. Det här är enpass-påståendet uppmätt i stället för påstått: nzbfasts toppdisk är nyttolasten
     själv, och dess I/O motsvarar att skriva varje byte en gång.</p>
+
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfuskerad (nyttolast 32 GB)</th><th>tid</th><th>CPU</th><th>CPU-s/GB</th><th>toppminne (RSS)</th><th>extra toppdisk</th><th>disk-I/O</th></tr></thead>
@@ -374,6 +404,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 identiskt)</td><td>17.6 GB</td><td>8.1× långsammare</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. Den här riggen har inte körts om mot SABnzbd 5.1; när 5.1.0 släpps som stabil kör vi om hela tabellen i stället för att redigera en cell.</p>
     <p class="note" style="text-align:start"><b>Ommätt 31 juli 2026</b>, samma rigg, samma korpus, efter en operativsystemuppdatering på maskinen. Fyra klienter rörde sig en till tre sekunder; SABnzbd gjorde det inte: det tar nu 57 s där den 24 juli-versionen av den här tabellen noterade 14 s, återskapat åtta gånger över två riggvarianter, rörledningsdjupet bekräftat till 8 via API-återläsning vid varje körning, och identiskt vid 16 anslutningar. Dess resultat på farmetapperna på andra ställen på den här sidan påverkas inte, så detta verkar specifikt för hastigheter matade över loopback på maskinens nuvarande operativsystem; vi publicerar vad riggen mäter i dag och testar om vid nästa operativsystems- och SABnzbd-utgåva.</p>
 
     <p class="note" style="text-align:start"><b>Tid till klart</b> löper från att jobbet startas till att alla fyra videofilerna ligger på disk, verifierade och uppackade. <b>Toppdisk</b> är det mesta disk klienten någonsin upptog i ett enskilt ögonblick, avläst två gånger i sekunden, och det är den kolumn som betyder mest här: enpass behöver ungefär 1× innehållet, allt annat ungefär 2×. Alla fem slutade med samma 8.6 GB kvar när de hade städat, vilket är precis därför toppen är den intressanta siffran. Varje klient producerade alla fyra nyttolasterna sha256-identiska med källan. Var och en visas vid det antal anslutningar som gjorde <i>den</i> snabbast (8, 16 och 32 prövades på var och en; nzbfast låg stabilt vid alla tre, så fler anslutningar hade inte hjälpt den).</p>
@@ -392,7 +423,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>nzbfast är 1,51x snabbare än NZBGet och 2,55x snabbare än SABnzbd</b> på den absolut vanligaste formen på usenet.</p>
+    <p><b>nzbfast är 1,51x snabbare än NZBGet 26.2 och 2,55x snabbare än SABnzbd 5.0.4</b> på den absolut vanligaste formen på usenet.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2 och SABnzbd 5.0.4 den 27 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
     <p>Varje klient testades med 8, 16 och 32 anslutningar per server och redovisas på sitt eget bästa värde, eftersom en konkurrent aldrig ska förlora på grund av dålig konfiguration. Värt att veta om du finjusterar själv: <b>NZBGet blev ungefär dubbelt så långsam vid 32 anslutningar</b>, och SABnzbd betedde sig likadant i våra tidigare tester. Fler anslutningar är inte mer hastighet. nzbfast låg stabilt över hela intervallet, så den inställningen kommer inte att överraska dig.</p>
     <p class="note">Vi kontrollerar också att varje klient faktiskt producerade filerna, i stället för att tro den på dess ord när den rapporterar att den lyckats. I våra tester rapporterade en klient tre slutförda nedladdningar på ungefär en sekund vardera utan att ha skrivit någonting alls.</p>
   </div>
@@ -652,8 +684,8 @@
     <p class="kicker">Transportbevis</p>
     <h2>Motorn mättar riktiga linjer</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps aggregat</b> på en uppmätt-8.2 Gbps 10 GbE-linje (Europa M1 Ultra, 4 providers, 14,000 artiklar, 0 fel, 0 återanslutningar).</li>
-      <li><b>9.16-9.27 Gbps</b> stabila transporttickar på samma linje, ≈98 % av praktisk TCP-goodput.</li>
+      <li><b>9.0-9.3 Gbps</b> genom en flotta på fem providers på en 10 GbE-linje vars eget hårdvarutak mäter 9.8 Gbps, med uthållna medianer på 9.5-9.9 (M1 Ultra Europa, 9 augusti 2026). Det som återstår är uppstarten av en kall flotta på ett 33-sekundersjobb, inte hastigheten.</li>
+      <li><b>4.8-4.9 Gbps uthållet</b> på en kabellänk på ~5 Gbps på andra sidan Atlanten, samplat varje sekund genom hela jobbet (8 augusti 2026). Två länkklasser, båda på den hastighet hårdvaran själv levererar.</li>
       <li><b>5.44 Gbps ihållande</b> genom ett fullständigt 20.4 GB-jobb <i>inklusive</i> verifiering i strömmen.</li>
       <li><b>Pipelining replikerad vid varje RTT</b>: +64 % vid 63 ms Starlink, +170-177 % vid 14 ms datacenter, +270 % vid 31 ms östkusten. Den besegrar TCP:s congestion-fönster-avtynande, inte bara latens.</li>
       <li><b>Backpressure-bevis</b>: begränsa skrivsteget 4× under nätverket och input låser till taket ±1 % inom 2 s, RAM <i>faller</i>, noll swappar. En långsam disk kan aldrig blåsa upp minnet.</li>
@@ -703,6 +735,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, ingen användbar fil</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
     <div class="callout"><b>Stående regel: varje prestandapåstående anger de förhållanden det kördes under</b>, negativa resultat och felsteg inräknade.</div>
   </div>
 </section>
@@ -780,7 +813,7 @@
   <p class="fine">Benchmark-data: konkurrensomgångar 19&ndash;31 juli 2026. Klientversioner:
   SABnzbd 5.0.4, NZBGet 26.2 (nzbget.com-fork), rustnzb 1.3.4, Weaver v0.7.5 officiell arm64
   (klienttaksetappen använde dess källkodsbygge <code>410c114</code> från 23 juli; den rapporterar ingen
-  egen versionssträng).
+  egen versionssträng). Plus etapperna på aktuella byggen 6 till 9 augusti 2026, mot SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 och rustnzb 1.3.9; varje tabell som namnger 5.0.4, 26.2, v0.7.5 eller 1.3.4 är fastnaglad vid de byggena och körs om, redigeras inte, när nästa stabila släpps.
   Om en nyare version av någon klient väsentligt ändrar ett resultat kör vi om och uppdaterar -
   avsnittet "Vi följer nästa releaser" ovan är det löftet infriat i förväg.
   Rubriketapperna mot providers (35, 77 och 190 GB) och den instrumenterade kostnadsomgången mättes om

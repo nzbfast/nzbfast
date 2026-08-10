@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Benchmarks - nzbfast</title>
-<meta name="description" content="nzbfast vs SABnzbd, NZBGet, rustnzb en andere clients: 8 scenario's op identieke hardware. Eerlijke resultaten, inclusief de legs die nzbfast niet wint, met reproductiestappen.">
+<meta name="description" content="nzbfast gemeten tegen vier andere Usenet-clients op identieke hardware: tijd tot een bruikbaar bestand, plus de schijf, vrije ruimte en het geheugen die elke taak kost. Elke tabel noemt de versies waartegen hij liep. Inclusief de legs die nzbfast niet wint.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>Benchmarks</h1>
-  <p class="sub">Vijf clients, acht scenario's, identieke hardware en providers, runs
-  afwisselend uitgevoerd zodat providerdrift wegvalt. De maatstaf is <b>tijd tot een bruikbaar bestand</b>:
-  gedownload, geverifieerd, uitgepakt. Inclusief de legs die we niet winnen.</p>
+  <p class="sub">Vijf clients, acht scenario's, identieke hardware en providers, runs afwisselend uitgevoerd zodat providerdrift wegvalt. De maatstaf is <b>tijd tot een bruikbaar bestand</b> - gedownload, geverifieerd, uitgepakt - gemeten naast de schijf, de vrije ruimte en het geheugen die de taak je kost. Elke tabel noemt de versies waartegen hij liep en de dag waarop hij liep. Inclusief de legs die we niet winnen.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">Op deze pagina</p>
-  <nav aria-label="Op deze pagina" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De opzet</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat usenet werkelijk plaatst</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Opgeslagen archieven: een wachtrij</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Versleutelde archieven: half zoveel schrijven</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → een bestand van 157 GB, in de helft van de schijfruimte (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tijd tot bruikbaar bestand, per taakgrootte</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-benoemd 4K → bruikbare mkv (oostkust VS)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De lijn brandend houden over een wachtrij (oostkust VS, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De legs die we niet winnen</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De low-memory-ladder: 190 GB in ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tien geneste vormen: wie is klaar zonder jou</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Clientplafond: 9.68 GB uit RAM geserveerd, en u kunt het nabouwen</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De technischere benchmarks, voor wie meer data wil</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat elke client kan</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De engine verzadigt echte lijnen</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat een taak de machine kost</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De volgende releases volgen</a></nav>
+  <nav aria-label="Op deze pagina" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De opzet</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat een taak je kost</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat usenet werkelijk plaatst</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Opgeslagen archieven: een wachtrij</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Versleutelde archieven: half zoveel schrijven</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → een bestand van 157 GB, in de helft van de schijfruimte (Europa, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tijd tot bruikbaar bestand, per taakgrootte</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-benoemd 4K → bruikbare mkv (oostkust VS)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De lijn brandend houden over een wachtrij (oostkust VS, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De legs die we niet winnen</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De low-memory-ladder: 190 GB in ~1.1 GB RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tien geneste vormen: wie is klaar zonder jou</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Clientplafond: 9.68 GB uit RAM geserveerd, en u kunt het nabouwen</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De technischere benchmarks, voor wie meer data wil</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat elke client kan</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De engine verzadigt echte lijnen</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Wat een taak de machine kost</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">De volgende releases volgen</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>Eindtoestand:</b> een geverifieerd, uitgepakt, bruikbaar bestand, niet "download klaar". Daar wacht je namelijk echt op.</li>
       <li><b>Reproduceerbaarheid:</b> elke claim is gedateerd en op dezelfde manier gemeten: verstreken tijd + interface-bytetellers + piek-RSS van de processtructuur, resolutie van 1-2 s. Waar een leg op een publiek geplaatste NZB draait, noemen we die erbij zodat u hem zelf kunt draaien.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">Lees dit eerst</p>
+    <h2>Wat een taak je kost, en wat een verandering in nabewerking niet kan verschuiven</h2>
+    <p class="lead">Clients blijven veranderen, en een verandering in wat een client <em>na</em> de download doet kan een eindtijd verschuiven zonder dat zijn netwerkpad ook maar beweegt. Dat gebeurde in augustus 2026, en daarom noemt elke tabel op deze pagina nu de versies waartegen hij liep en de dag waarop hij liep. Wat een release-notitie niet kan verschuiven is de rest van de rekening: de bytes die naar je schijf worden geschreven, de vrije ruimte die de taak eist voordat hij überhaupt start, het geheugen dat hij vasthoudt terwijl hij loopt, en of de data ooit is gecontroleerd.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Geobfusceerde release van 34.5 GB, elke client in zijn nieuwste build</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>tijd tot bruikbaar bestand</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">geen bruikbaar bestand&sup1;</td></tr>
+        <tr><td>piekgeheugen (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>schijf geschreven</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>benodigde vrije ruimte</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.3.9 op 7 augustus 2026: M3 Ultra oostkust, zes providers, alles over TLS, twee runs per client met de volgorde omgedraaid bij de tweede zodat lijndrift wegvalt. &sup1; rustnzb verplaatste 36 GB over de lijn, meldde de taak als klaar en liet een archiefdeel van 1 GB achter zonder uitgepakte video; zijn zuinig ogende cellen zijn de prijs van niet afmaken.</p>
+
+    <p><b>Vier kosten die een eindtijd niet laat zien.</b></p>
+    <ul class="plain">
+      <li><b>Schijf geschreven.</b> Eén doorgang schrijft de payload één keer: 159.0 GB voor een bestand van 157 GB, tegen 387.4 GB en 458.3 GB bij de clients die elk archiefdeel eerst wegschrijven en het daarna uitpakken. Zelfde taak, zelfde nacht, actuele builds van alle drie.</li>
+      <li><b>Vrije ruimte.</b> Die taak van 190 GB heeft hier 156.3 GB vrij nodig en 312.7&ndash;313.0 GB op een client die eerst schrijft en dan uitpakt. Dat is het verschil tussen een taak die loopt en een taak die niet eens start.</li>
+      <li><b>Piekgeheugen (RSS).</b> 232&ndash;248 MB tegen 1.8&ndash;2.0 GB op de release uit de tabel hierboven, en het plafond is een instelling in plaats van een bijwerking: dezelfde taak van 190 GB komt binnen een budget van 1 GB rond, en een NAS-profiel doet de taak van 35 GB in 0.4 GB.</li>
+      <li><b>Of het is gecontroleerd.</b> nzbfast verifieert elk blok tegen de geposte PAR2-data terwijl het binnenkomt en repareert in dezelfde doorgang, dus de finish is een geverifieerd bestand. Een client die op een onbeschadigde set helemaal geen verificatiedoorgang draait, koopt zijn klok terug door de vraag niet te beantwoorden.</li>
+    </ul>
+    <p>Twee andere komen pas boven als er iets misgaat. Sloop het proces na 15.6 GB van een taak van 35 GB: nzbfast start opnieuw en maakt hem af in 57 s zonder één byte opnieuw te downloaden. En op een opstelling waar elke verbinding na 25 artikelbodies permanent stilvalt zonder ooit te sluiten, wat een carrier-grade NAT met een lange download doet, is hij klaar in 26 s waar de andere vier clients 74 tot 275 s nodig hebben.</p>
+    <div class="callout">Bij een onbeschadigde download is de snelst mogelijke nabewerking helemaal geen nabewerking. Wij evenaren die tijd en controleren daarbij elk blok terwijl het binnenkomt: <b>zo snel als de controle overslaan, omdat we hem nooit overslaan.</b></div>
   </div>
 </section>
 
@@ -136,7 +162,7 @@
     hoe verder hij vooruit ligt. Sequentiële runs op dezelfde machine, op 31 juli 2026 opnieuw gemeten op de
     uitgeleverde build (Europa, 10 GbE, alles over TLS) tenzij anders vermeld:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Taak</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (warm)</th></tr></thead>
+      <thead><tr><th>Taak</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (warm)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (oudere ronde)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB geobfusceerd 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -145,6 +171,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4 en Weaver v0.7.5 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
     <p class="note" style="text-align:start">rustnzb draaide elke leg en leverde op geen enkele een
     bruikbaar bestand, dus het heeft hier geen kolom; de details staan in de kostensectie hieronder.
     Weaver is gemeten volgens z'n warme optimale protocol (permanente daemon, weggegooide opwarmtaak,
@@ -162,7 +189,7 @@
     <h2>35 GB hash-benoemd 4K → bruikbare mkv (oostkust VS)</h2>
     <p class="lead">Elk bestand in de post is een hexadecimale hash; de payload krijgt zijn echte naam pas uit de PAR2-metadata. Opnieuw gereden op 31 juli 2026 op de uitgeleverde build, alle vijf clients, alles over TLS (de bankfout achter het voltooiingssignaal van SABnzbd - zijn geschiedenis-API geeft standaard 10 plaatsen terug - is verholpen, dus elk cijfer hieronder is actueel):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (warm)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (warm)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>tijd tot bruikbaar bestand</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">geen bruikbaar bestand³</td></tr>
         <tr><td>processortijd</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -170,6 +197,7 @@
         <tr><td>piek aan extra schijf</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
     <p class="note" style="text-align:start">³ rustnzb downloadde in 97 s, markeerde de taak als <i>klaar</i> en leverde de ruwe versluierde volumes: geen hernoeming, geen uitpakken - zowel op 1.3.4 als op 1.3.9 († zijn schijfcijfer is alleen de download). nzbfast onthulde de namen uit de PAR2-metadata en pakte tijdens het binnenhalen uit, nul teruggelezen blokken; het bereik van 76&ndash;83 s zijn zijn eerste en zijn laatste etappe van de ronde. Tegenover de versie van 23 juli van deze tabel is de uitgeleverde build hier sneller met 3.4× minder geheugen (1.55 → 0.45 GB): het werk in één doorgang van eind juli, gemeten op dezelfde machine en hetzelfde corpus.</p>
   </div>
 </section>
@@ -184,6 +212,8 @@
     bemonsterd) en het totale I/O-verkeer. Dezelfde machine, dezelfde zes providers, alles over TLS, één
     geïnstrumenteerde leg per client per taak. Dit is de one-pass-belofte gemeten in plaats van beweerd:
     de schijfpiek van nzbfast is de payload zelf, en z'n I/O staat gelijk aan elke byte één keer schrijven.</p>
+
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB geobfusceerd (payload 32 GB)</th><th>tijd</th><th>CPU</th><th>CPU-s/GB</th><th>piekgeheugen (RSS)</th><th>piek aan extra schijf</th><th>schijf-I/O</th></tr></thead>
@@ -375,6 +405,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 identiek)</td><td>17.6 GB</td><td>8.1× trager</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. Deze opstelling is niet opnieuw gedraaid tegen SABnzbd 5.1; zodra 5.1.0 als stable verschijnt laten we de hele tabel opnieuw lopen in plaats van één cel te bewerken.</p>
     <p class="note" style="text-align:start"><b>Opnieuw gemeten op 31 juli 2026</b>, dezelfde opstelling, hetzelfde corpus, na een besturingssysteemupdate op de machine. Vier clients bewogen een seconde of drie; SABnzbd niet: het doet er nu 57 s over waar de versie van 24 juli van deze tabel 14 s noteerde, acht keer herhaald over twee varianten van de opstelling, de pijplijndiepte bij elke run via de API bevestigd op 8, en gelijk bij 16 verbindingen. Zijn resultaten op de farm-etappes elders op deze pagina zijn niet geraakt, dus dit lijkt eigen aan via de lokale lus gevoede snelheden op het huidige besturingssysteem van deze machine; we publiceren wat de opstelling vandaag meet en testen opnieuw bij de volgende versies van het besturingssysteem en van SABnzbd.</p>
 
     <p class="note" style="text-align:start"><b>Tijd tot klaar</b> loopt van het starten van de taak tot alle vier de video's geverifieerd en uitgepakt op schijf staan. <b>Piek op schijf</b> is de meeste schijfruimte die de client op enig moment innam, twee keer per seconde bemonsterd, en dat is hier de kolom die er het meest toe doet: one-pass heeft ongeveer 1× de content nodig, al het andere ongeveer 2×. Alle vijf eindigden met dezelfde 8.6 GB nadat ze hadden opgeruimd, en precies daarom is de piek het interessante getal. Elke client leverde alle vier de payloads sha256-identiek aan de bron. Elk staat vermeld bij het aantal verbindingen waarbij <i>hij</i> het snelst was (8, 16 en 32 zijn bij elk geprobeerd; nzbfast bleef bij alle drie vlak, dus meer verbindingen zouden hem niet geholpen hebben).</p>
@@ -393,7 +424,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>nzbfast is 1,51x sneller dan NZBGet en 2,55x sneller dan SABnzbd</b> op de meest voorkomende vorm op usenet.</p>
+    <p><b>nzbfast is 1,51x sneller dan NZBGet 26.2 en 2,55x sneller dan SABnzbd 5.0.4</b> op de meest voorkomende vorm op usenet.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2 en SABnzbd 5.0.4 op 27 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
     <p>Elke client is getest met 8, 16 en 32 verbindingen per server en staat vermeld op zijn eigen beste instelling, want een concurrent hoort nooit te verliezen door een slechte configuratie. Handig om te weten als u zelf afstelt: <b>NZBGet werd ongeveer twee keer zo traag bij 32 verbindingen</b>, en SABnzbd gedroeg zich in onze eerdere tests hetzelfde. Meer verbindingen is niet meer snelheid. nzbfast bleef over het hele bereik vlak, dus die instelling zal u niet verrassen.</p>
     <p class="note">We controleren ook of elke client de bestanden werkelijk heeft geproduceerd, in plaats van hem op zijn woord te geloven wanneer hij succes meldt. In onze tests meldde een client drie voltooide downloads van elk ongeveer een seconde en had helemaal niets geschreven.</p>
   </div>
@@ -653,8 +685,8 @@
     <p class="kicker">Transportbewijs</p>
     <h2>De engine verzadigt echte lijnen</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps totaal</b> op een op-8.2 Gbps-gemeten 10 GbE-lijn (Europa M1 Ultra, 4 providers, 14,000 artikelen, 0 fouten, 0 reconnects).</li>
-      <li><b>9.16-9.27 Gbps</b> stabiele transport-ticks op dezelfde lijn, ≈98% van de praktische TCP-goodput.</li>
+      <li><b>9.0-9.3 Gbps</b> door een vloot van vijf providers op een 10 GbE-lijn waarvan het eigen hardwareplafond op 9.8 Gbps uitkomt, met volgehouden medianen van 9.5-9.9 (M1 Ultra Europa, 9 augustus 2026). Wat overblijft is het opstarten van een koude vloot op een taak van 33 seconden, niet de snelheid.</li>
+      <li><b>4.8-4.9 Gbps volgehouden</b> op een kabelverbinding van ~5 Gbps aan de andere kant van de Atlantische Oceaan, elke seconde bemonsterd over de hele taak (8 augustus 2026). Twee klassen verbinding, allebei op de snelheid die de hardware zelf levert.</li>
       <li><b>5.44 Gbps</b> volgehouden door een volledige taak van 20.4 GB <i>inclusief</i> in-stream-verificatie.</li>
       <li><b>Pipelining gerepliceerd bij elke RTT</b>: +64% bij 63 ms Starlink, +170-177% bij 14 ms datacenter, +270% bij 31 ms oostkust VS. Het verslaat de degradatie van het TCP-congestievenster, niet alleen latency.</li>
       <li><b>Backpressure-bewijs</b>: begrens de schrijffase 4× onder het netwerk en de invoer klemt zich binnen 2 s op de limiet vast ±1%, RAM <i>daalt</i>, nul swaps. Een trage schijf kan het geheugen nooit laten opzwellen.</li>
@@ -706,6 +738,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, geen bruikbaar bestand</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
     <div class="callout"><b>Vaste regel: elke prestatieclaim vermeldt de omstandigheden waaronder hij draaide</b>, inclusief negatieve resultaten en doodlopende wegen.</div>
   </div>
 </section>
@@ -783,7 +816,7 @@
   <p class="fine">Benchmarkdata: competitieve rondes van 19&ndash;31 juli 2026. Clientversies:
   SABnzbd 5.0.4, NZBGet 26.2 (nzbget.com-fork), rustnzb 1.3.4, Weaver v0.7.5 officieel arm64 (de leg met
   het clientplafond gebruikte z'n bronbuild van 23 juli, <code>410c114</code>; het geeft zelf geen
-  versienummer op).
+  versienummer op). Plus de legs op actuele builds van 6 tot 9 augustus 2026, tegen SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.3.9; elke tabel die 5.0.4, 26.2, v0.7.5 of 1.3.4 noemt is vastgezet op die builds en wordt opnieuw gelopen, niet bewerkt, zodra de volgende stables verschijnen.
   Als een nieuwere versie van een client een resultaat wezenlijk verandert, draaien we opnieuw en werken
   we bij - de sectie "De volgende releases volgen" hierboven is die belofte die vooruitlopend wordt
   nagekomen.

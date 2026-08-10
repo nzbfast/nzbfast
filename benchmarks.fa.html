@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>محک‌ها - nzbfast</title>
-<meta name="description" content="nzbfast در برابر SABnzbd، NZBGet، rustnzb و کلاینت‌های دیگر: 8 سناریو روی سخت‌افزار یکسان. نتایج صادقانه از جمله لِگ‌هایی که nzbfast در آنها نمی‌برد، همراه با گام‌های بازتولید.">
+<meta name="description" content="‏nzbfast در برابر چهار کلاینت دیگر یوزنت روی سخت‌افزار یکسان اندازه‌گیری شد: زمان تا یک فایل قابل‌استفاده، به‌علاوهٔ دیسک، فضای آزاد و حافظه‌ای که هر کار هزینه می‌کند. هر جدول نسخه‌هایی را که در برابرشان اجرا شده نام می‌برد. شامل لِگ‌هایی که nzbfast در آنها نمی‌برد.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -44,14 +44,12 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>محک‌ها</h1>
-  <p class="sub">پنج کلاینت، هشت سناریو، سخت‌افزار و ارائه‌دهنده‌های یکسان، اجراها
-  درهم‌تنیده تا رانش ارائه‌دهنده خنثی شود. معیار <b>زمان تا یک فایل قابل‌استفاده</b> است:
-  دانلودشده، تأییدشده، استخراج‌شده. شامل لِگ‌هایی که در آنها نمی‌بریم.</p>
+  <p class="sub">پنج کلاینت، هشت سناریو، سخت‌افزار و ارائه‌دهنده‌های یکسان، اجراها درهم‌تنیده تا رانش ارائه‌دهنده خنثی شود. معیار <b>زمان تا یک فایل قابل‌استفاده</b> است - دانلودشده، تأییدشده، استخراج‌شده - و در کنار آن دیسک، فضای آزاد و حافظه‌ای که کار برای شما هزینه می‌کند. هر جدول نسخه‌هایی را که در برابرشان اجرا شده و روزی را که اجرا شده نام می‌برد. شامل لِگ‌هایی که در آنها نمی‌بریم.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">در این صفحه</p>
-  <nav aria-label="در این صفحه" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">راه‌اندازی</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">آنچه واقعاً در یوزنت منتشر می‌شود</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های ذخیره‌شده: یک صف کار</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های رمزگذاری‌شده: نصف نوشتن</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB ← یک فایل 157 GB، در نصف فضای دیسک (اروپا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">زمان تا فایل قابل‌استفاده، بر اساس اندازهٔ کار</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">روشن نگه داشتن خط در سراسر یک صف (ساحل شرقی، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">لِگ‌هایی که در آنها نمی‌بریم</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">نردبان حافظهٔ کم: 190 GB در ~1.1 GB از RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ده شکل تودرتو: چه کسی بدون شما تمام می‌کند</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف کلاینت: ‏9.68 GB از RAM، و خودتان می‌توانید بازسازی‌اش کنید</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">محک‌های فنی‌تر، برای کسانی که داده بیشتر می‌خواهند</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">هر کلاینت چه می‌تواند بکند</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">موتور خط‌های واقعی را اشباع می‌کند</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">یک کار چه هزینه‌ای برای ماشین دارد</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">رصد انتشارهای بعدی</a></nav>
+  <nav aria-label="در این صفحه" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">راه‌اندازی</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">یک کار چه هزینه‌ای دارد</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">آنچه واقعاً در یوزنت منتشر می‌شود</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های ذخیره‌شده: یک صف کار</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">بایگانی‌های رمزگذاری‌شده: نصف نوشتن</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB ← یک فایل 157 GB، در نصف فضای دیسک (اروپا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">زمان تا فایل قابل‌استفاده، بر اساس اندازهٔ کار</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">روشن نگه داشتن خط در سراسر یک صف (ساحل شرقی، ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">لِگ‌هایی که در آنها نمی‌بریم</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">نردبان حافظهٔ کم: 190 GB در ~1.1 GB از RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ده شکل تودرتو: چه کسی بدون شما تمام می‌کند</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف کلاینت: ‏9.68 GB از RAM، و خودتان می‌توانید بازسازی‌اش کنید</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">محک‌های فنی‌تر، برای کسانی که داده بیشتر می‌خواهند</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">هر کلاینت چه می‌تواند بکند</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">موتور خط‌های واقعی را اشباع می‌کند</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">یک کار چه هزینه‌ای برای ماشین دارد</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">رصد انتشارهای بعدی</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -63,6 +61,34 @@
       <li><b>حالت پایانی:</b> یک فایل تأییدشده، استخراج‌شده و قابل‌استفاده، نه «دانلود تمام شد». آن چیزی است که واقعاً منتظرش می‌مانید.</li>
       <li><b>بازتولیدپذیری:</b> هر ادعا تاریخ‌دار است و به یک روش سنجیده می‌شود: زمان سپری‌شده + شمارنده‌های بایت رابط + اوج RSS درخت-فرایند، با تفکیک 1-2 s. هرجا یک لِگ روی یک NZB منتشرشدهٔ عمومی اجرا شود، نامش را می‌آوریم تا خودتان بتوانید اجرایش کنید.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="what-holds">
+  <div class="wrap">
+    <p class="kicker">اول این را بخوانید</p>
+    <h2>یک کار چه هزینه‌ای برای شما دارد، و تغییر پردازش پس از دانلود چه چیزی را نمی‌تواند جابه‌جا کند</h2>
+    <p class="lead">کلاینت‌ها تغییر می‌کنند، و تغییر در کاری که یک کلاینت <em>پس از</em> دانلود انجام می‌دهد می‌تواند زمان پایان را جابه‌جا کند بدون آنکه مسیر شبکه‌اش ذره‌ای تکان بخورد. همین در اوت 2026 رخ داد، و به همین دلیل اکنون هر جدول این صفحه نسخه‌هایی را که در برابرشان اجرا شده و روزی را که اجرا شده نام می‌برد. آنچه یادداشت انتشار نمی‌تواند جابه‌جا کند بقیهٔ صورت‌حساب است: بایت‌هایی که روی دیسک شما نوشته می‌شود، فضای آزادی که کار پیش از شروع طلب می‌کند، حافظه‌ای که در حین اجرا نگه می‌دارد، و اینکه آیا داده اصلاً بررسی شده است یا نه.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>انتشار مبهم‌سازی‌شدهٔ 34.5 GB، هر کلاینت در تازه‌ترین بیلد خود</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <tbody>
+        <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">بدون فایل قابل‌استفاده&sup1;</td></tr>
+        <tr><td>اوج حافظه (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
+        <tr><td>دیسک نوشته‌شده</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
+        <tr><td>فضای آزاد موردنیاز</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> SABnzbd 5.1.0RC2، NZBGet 26.3-testing، Weaver 0.7.8 و rustnzb 1.3.9 در 7 اوت 2026: ‏M3 Ultra ساحل شرقی، شش ارائه‌دهنده، همه روی TLS، دو اجرا برای هر کلاینت با ترتیب معکوس در اجرای دوم تا رانش خط خنثی شود. &sup1; ‏rustnzb ‏36 GB روی سیم جابه‌جا کرد، کار را تمام‌شده اعلام کرد و یک قطعهٔ آرشیو 1 GB بدون هیچ ویدئوی استخراج‌شده باقی گذاشت؛ پس سلول‌های به‌ظاهر کم‌هزینه‌اش بهای تمام‌نکردن است.</p>
+
+    <p><b>چهار هزینه که زمان پایان نشان نمی‌دهد.</b></p>
+    <ul class="plain">
+      <li><b>دیسک نوشته‌شده.</b> یک گذر، محموله را یک بار می‌نویسد: 159.0 GB برای فایلی 157 GB، در برابر 387.4 GB و 458.3 GB در کلاینت‌هایی که هر قطعهٔ آرشیو را روی دیسک می‌گذارند و سپس باز می‌کنند. همان کار، همان شب، بیلدهای فعلی هر سه.</li>
+      <li><b>فضای آزاد.</b> آن کار 190 GB اینجا به 156.3 GB فضای آزاد نیاز دارد و روی کلاینتی که می‌نویسد و بعد باز می‌کند به 312.7&ndash;313.0 GB. این تفاوت میان کاری است که اجرا می‌شود و کاری که اصلاً شروع نمی‌شود.</li>
+      <li><b>اوج حافظه (RSS).</b> ‏232&ndash;248 MB در برابر 1.8&ndash;2.0 GB روی انتشار جدول بالا، و سقف یک تنظیم است نه یک عارضه: همان کار 190 GB درون بودجهٔ 1 GB به پایان می‌رسد و یک پروفایل NAS کار 35 GB را در 0.4 GB تمام می‌کند.</li>
+      <li><b>اینکه اصلاً بررسی شده یا نه.</b> ‏nzbfast هر بلوک را همان‌طور که می‌رسد در برابر دادهٔ PAR2 منتشرشده تأیید می‌کند و در همان گذر ترمیم می‌کند، پس خط پایان یک فایل تأییدشده است. کلاینتی که روی مجموعه‌ای سالم هیچ گذر تأییدی اجرا نمی‌کند، ساعتش را با پاسخ‌ندادن به این پرسش پس می‌خرد.</li>
+    </ul>
+    <p>دو مورد دیگر تنها وقتی چیزی خراب شود دیده می‌شوند. فرایند را در 15.6 GB از کاری 35 GB بکشید: ‏nzbfast دوباره راه می‌افتد و آن را در 57 ثانیه بدون دانلود دوبارهٔ حتی یک بایت تمام می‌کند. و روی دستگاهی که در آن هر اتصال پس از 25 بدنهٔ مقاله برای همیشه خاموش می‌شود بی‌آنکه هرگز بسته شود، یعنی همان کاری که NAT اپراتور با یک دانلود طولانی می‌کند، در 26 ثانیه تمام می‌کند، جایی که چهار کلاینت دیگر 74 تا 275 ثانیه می‌گیرند.</p>
+    <div class="callout">در یک دانلود سالم، سریع‌ترین پردازش پس از دانلود آن است که اصلاً انجام نشود. ما همان زمان را می‌گیریم و در عین حال هر بلوک را هنگام رسیدن بررسی می‌کنیم: <b>به سرعتِ ردکردن بررسی، چون هرگز از آن نمی‌گذریم.</b></div>
   </div>
 </section>
 
@@ -134,7 +160,7 @@
     جلوتر فرود می‌آید. اجراهای متوالی روی همان ماشین، جز آنجا که خلافش گفته شده در 31 ژوئیهٔ 2026
     روی ساخت منتشرشده دوباره سنجیده شد (اروپا، 10 GbE، همه با TLS):</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>کار</th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>‏Weaver (گرم)</th></tr></thead>
+      <thead><tr><th>کار</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>‏Weaver v0.7.5 (گرم)</th></tr></thead>
       <tbody>
         <tr><td>7.4 GB REMUX (دور قدیمی‌تر)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
         <tr><td>35 GB مبهم 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
@@ -143,6 +169,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2، SABnzbd 5.0.4 و Weaver v0.7.5 در 31 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. ‏SABnzbd 5.1 گذر تأیید پس از دانلود را که بخش بزرگی از نتیجهٔ آن در اینجا بهایش را می‌پردازد کنار می‌گذارد؛ روی بیلدهای فعلی فاصله به +43% اندازه‌گیری‌شده در بالای همین صفحه نزدیک‌تر است. این اعداد را وقتی 5.1.0 به‌صورت پایدار منتشر شود دوباره اجرا می‌کنیم، نه اینکه ویرایششان کنیم.</p>
     <p class="note" style="text-align:start">rustnzb هر لِگ را اجرا کرد و در هیچ‌کدام فایل
     قابل‌استفاده‌ای تحویل نداد، پس اینجا ستونی ندارد؛ جزئیاتش در بخش هزینه در پایین است. ‏Weaver
     زیر قرارداد بهترین حالت گرمش سنجیده می‌شود (سرویس ماندگار، یک کار گرم‌کردنِ دورریز، اتصال‌ها
@@ -160,7 +187,7 @@
     <h2>35 GB 4K با نام هش ← mkv قابل‌استفاده (ساحل شرقی)</h2>
     <p class="lead">هر فایل در این پست یک درهم‌ساز شانزده‌شانزدهی است؛ بار داده تنها از فراداده‌های PAR2 نام واقعی‌اش را بازمی‌یابد. در ۳۱ ژوئیهٔ ۲۰۲۶ روی نسخهٔ منتشرشده بازاجرا شد، هر پنج کارخواه، همه روی TLS (نقص چیدمان پشت سیگنال پایان SABnzbd - رابط تاریخچه‌اش به‌طور پیش‌فرض ۱۰ جایگاه برمی‌گرداند - برطرف شده است، پس هر عدد زیر به‌روز است):</p>
         <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (گرم)</th><th>rustnzb</th></tr></thead>
+      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (گرم)</th><th>rustnzb 1.3.4</th></tr></thead>
       <tbody>
         <tr><td>زمان تا فایل قابل‌استفاده</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">بدون فایل قابل‌استفاده³</td></tr>
         <tr><td>زمان پردازنده</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
@@ -168,6 +195,7 @@
         <tr><td>اوج دیسک اضافی</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2، SABnzbd 5.0.4، Weaver v0.7.5 و rustnzb 1.3.4 در 31 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. ‏SABnzbd 5.1 گذر تأیید پس از دانلود را که بخش بزرگی از نتیجهٔ آن در اینجا بهایش را می‌پردازد کنار می‌گذارد؛ روی بیلدهای فعلی فاصله به +43% اندازه‌گیری‌شده در بالای همین صفحه نزدیک‌تر است. این اعداد را وقتی 5.1.0 به‌صورت پایدار منتشر شود دوباره اجرا می‌کنیم، نه اینکه ویرایششان کنیم.</p>
     <p class="note" style="text-align:start">³ rustnzb در ۹۷ ثانیه دانلود کرد، کار را <i>انجام‌شده</i> علامت زد و بخش‌های مبهم‌شدهٔ خام را تحویل داد: بدون تغییر نام، بدون استخراج - هم روی ۱.۳.۴ و هم روی ۱.۳.۹ († رقم دیسکش تنها دانلود است). nzbfast ابهام را از فراداده‌های PAR2 گشود و حین دانلود استخراج کرد، صفر بلوک بازخوانی‌شده؛ بازهٔ 76&ndash;83 ثانیه نخستین و آخرین مرحلهٔ آن در این دور است. در برابر نسخهٔ ۲۳ ژوئیهٔ این جدول، نسخهٔ منتشرشده اینجا سریع‌تر است و ۳.۴ برابر حافظهٔ کمتری می‌گیرد (1.55 → 0.45 GB): کار تک‌گذر اواخر ژوئیه، سنجیده روی همان دستگاه و همان پیکره.</p>
   </div>
 </section>
@@ -182,6 +210,8 @@
     ترافیک ورودی/خروجی. همان ماشین، همان شش ارائه‌دهنده، همه با TLS، یک لِگ ابزارگذاری‌شده برای هر
     کلاینت در هر کار. این همان ادعای تک‌گذر است که سنجیده شده نه ادعا شده: اوج دیسک nzbfast خودِ
     محتواست، و ورودی/خروجی‌اش برابر است با یک بار نوشتن هر بایت.</p>
+
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2، SABnzbd 5.0.4، Weaver v0.7.5 و rustnzb 1.3.4 در 31 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. ‏SABnzbd 5.1 گذر تأیید پس از دانلود را که بخش بزرگی از نتیجهٔ آن در اینجا بهایش را می‌پردازد کنار می‌گذارد؛ روی بیلدهای فعلی فاصله به +43% اندازه‌گیری‌شده در بالای همین صفحه نزدیک‌تر است. این اعداد را وقتی 5.1.0 به‌صورت پایدار منتشر شود دوباره اجرا می‌کنیم، نه اینکه ویرایششان کنیم.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB مبهم (محتوا 32 GB)</th><th>زمان</th><th>پردازنده</th><th>ثانیهٔ پردازنده/GB</th><th>اوج حافظه (RSS)</th><th>اوج دیسک اضافی</th><th>ورودی/خروجی دیسک</th></tr></thead>
@@ -376,6 +406,7 @@
         <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 یکسان)</td><td>17.6 GB</td><td>‏8.1× کندتر</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2، SABnzbd 5.0.4، Weaver v0.7.5 و rustnzb 1.3.4 در 31 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. این دستگاه در برابر SABnzbd 5.1 دوباره اجرا نشده است؛ وقتی 5.1.0 به‌صورت پایدار منتشر شود کل جدول را دوباره اجرا می‌کنیم، نه اینکه یک سلول را ویرایش کنیم.</p>
     <p class="note" style="text-align:start"><b>بازسنجی‌شده در ۳۱ ژوئیهٔ ۲۰۲۶</b>، همان چیدمان، همان پیکره، پس از یک به‌روزرسانی سیستم‌عامل روی دستگاه. چهار کارخواه یک تا سه ثانیه جابه‌جا شدند؛ SABnzbd نه: اکنون ۵۷ ثانیه می‌گیرد آنجا که نسخهٔ ۲۴ ژوئیهٔ این جدول ۱۴ ثانیه ثبت کرده بود، هشت بار روی دو گونهٔ چیدمان بازتولید شد، عمق خط لوله در هر اجرا با بازخوانی از رابط برنامه‌نویسی روی ۸ تأیید شد، و با ۱۶ اتصال یکسان بود. نتایجش در مرحله‌های مزرعه در جاهای دیگر این صفحه دست‌نخورده‌اند، پس این ویژهٔ نرخ‌های تغذیه‌شده از حلقهٔ محلی روی سیستم‌عامل کنونی این دستگاه به نظر می‌رسد؛ آنچه را چیدمان امروز می‌سنجد منتشر می‌کنیم و با انتشارهای بعدی سیستم‌عامل و SABnzbd دوباره می‌آزماییم.</p>
 
     <p class="note" style="text-align:start"><b>زمان تا پایان</b> از آغاز کار تا وقتی است که هر چهار ویدئو روی دیسک، تأییدشده و استخراج‌شده باشند. <b>اوج دیسک</b> بیشترین فضایی است که کلاینت در هر لحظه اشغال کرده، با نمونه‌برداری دو بار در ثانیه، و همین ستون اینجا از همه مهم‌تر است: تک‌گذر حدود 1× اندازهٔ محتوا می‌خواهد و بقیه حدود 2×. هر پنج کلاینت پس از مرتب‌کردن، در پایان همان 8.6 GB را نگه داشتند و دقیقاً به همین دلیل اوج، عدد جالب ماجراست. هر کلاینت هر چهار محموله را sha256-یکسان با منبع تولید کرد. هرکدام با همان تعداد اتصالی نشان داده شده که <i>خودش</i> را سریع‌ترین کرده است (روی هرکدام 8، 16 و 32 آزموده شد؛ nzbfast در هر سه یکنواخت بود، پس اتصال بیشتر کمکی به آن نمی‌کرد).</p>
@@ -394,7 +425,8 @@
       <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
-    <p><b>nzbfast ۱٫۵۱ برابر سریع‌تر از NZBGet و ۲٫۵۵ برابر سریع‌تر از SABnzbd است</b>، آن هم در رایج‌ترین شکل یوزنت.</p>
+    <p><b>nzbfast ۱٫۵۱ برابر سریع‌تر از NZBGet 26.2 و ۲٫۵۵ برابر سریع‌تر از SABnzbd 5.0.4 است</b>، آن هم در رایج‌ترین شکل یوزنت.</p>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2 و SABnzbd 5.0.4 در 27 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. ‏SABnzbd 5.1 گذر تأیید پس از دانلود را که بخش بزرگی از نتیجهٔ آن در اینجا بهایش را می‌پردازد کنار می‌گذارد؛ روی بیلدهای فعلی فاصله به +43% اندازه‌گیری‌شده در بالای همین صفحه نزدیک‌تر است. این اعداد را وقتی 5.1.0 به‌صورت پایدار منتشر شود دوباره اجرا می‌کنیم، نه اینکه ویرایششان کنیم.</p>
     <p>هر کلاینت با ۸، ۱۶ و ۳۲ اتصال به ازای هر سرور آزموده شد و با بهترین حالت خودش نشان داده می‌شود، چون یک رقیب هرگز نباید به سبب پیکربندی بد ببازد. اگر خودتان تنظیم می‌کنید دانستنش می‌ارزد: <b>NZBGet با ۳۲ اتصال حدود دو برابر کندتر شد</b> و SABnzbd در آزمون‌های پیشین ما همین رفتار را داشت. اتصال بیشتر یعنی سرعت بیشتر نیست. nzbfast در سراسر این بازه یکنواخت ماند، پس این تنظیم غافلگیرتان نمی‌کند.</p>
     <p class="note">همچنین بررسی می‌کنیم که هر کلاینت واقعاً فایل‌ها را تولید کرده باشد، به‌جای آنکه وقتی موفقیت گزارش می‌دهد حرفش را باور کنیم. در آزمون‌های ما یک کلاینت سه دانلود کامل‌شده هرکدام در حدود یک ثانیه گزارش داد و اصلاً چیزی ننوشته بود.</p>
   </div>
@@ -654,8 +686,8 @@
     <p class="kicker">اثبات انتقال</p>
     <h2>موتور خط‌های واقعی را اشباع می‌کند</h2>
     <ul class="plain">
-      <li><b>8.31 Gbps تجمیعی</b> روی یک خط 10 GbE با سنجش-8.2 Gbps (اروپا M1 Ultra، 4 ارائه‌دهنده، 14,000 مقاله، 0 خطا، 0 اتصال مجدد).</li>
-      <li><b>9.16-9.27 Gbps</b> تیک‌های انتقال پایدار روی همان خط، ≈98% از goodput عملی TCP.</li>
+      <li><b>9.0-9.3 Gbps</b> از میان ناوگانی از پنج ارائه‌دهنده روی خط 10 GbE که سقف سخت‌افزاری خودش 9.8 Gbps اندازه‌گیری می‌شود، با میانه‌های پایدار 9.5-9.9 (‏M1 Ultra اروپا، 9 اوت 2026). آنچه می‌ماند راه‌اندازی ناوگان سرد در کاری 33 ثانیه‌ای است، نه خود نرخ.</li>
+      <li><b>4.8-4.9 Gbps پایدار</b> روی یک لینک کابلی حدود 5 Gbps در آن سوی اقیانوس اطلس، با نمونه‌برداری هر ثانیه در سراسر کار (8 اوت 2026). دو ردهٔ لینک، هر دو با نرخی که خود سخت‌افزار می‌دهد.</li>
       <li><b>5.44 Gbps پایدار</b> در سراسر یک کار کامل 20.4 GB <i>شامل</i> تأیید در جریان.</li>
       <li><b>خط‌لوله‌سازی در هر RTT بازتولید شد</b>: +64% در Starlink با 63 ms، +170-177% در دیتاسنتر با 14 ms، +270% در ساحل شرقی با 31 ms. تحلیل پنجرهٔ ازدحام TCP را شکست می‌دهد، نه فقط تأخیر را.</li>
       <li><b>اثبات فشار برگشتی</b>: مرحلهٔ نوشتن را 4× زیر شبکه سقف بگذارید و ورودی ظرف 2 s به سقف ±1% قفل می‌شود، RAM <i>افت می‌کند</i>، صفر swap. یک دیسک کند هرگز نمی‌تواند حافظه را باد کند.</li>
@@ -705,6 +737,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×، بدون فایل قابل‌استفاده</td></tr>
       </tbody>
     </table></div>
+    <p class="note" style="text-align:start"><b>اندازه‌گیری در برابر</b> NZBGet 26.2، SABnzbd 5.0.4، Weaver v0.7.5 و rustnzb 1.3.4 در 31 ژوئیهٔ 2026، و میخ‌شده به همان بیلدها. ‏SABnzbd 5.1 گذر تأیید پس از دانلود را که بخش بزرگی از نتیجهٔ آن در اینجا بهایش را می‌پردازد کنار می‌گذارد؛ روی بیلدهای فعلی فاصله به +43% اندازه‌گیری‌شده در بالای همین صفحه نزدیک‌تر است. این اعداد را وقتی 5.1.0 به‌صورت پایدار منتشر شود دوباره اجرا می‌کنیم، نه اینکه ویرایششان کنیم.</p>
     <div class="callout"><b>قاعدهٔ پابرجا: هر ادعای کارایی شرایطی را که تحت آن اجرا شده ذکر می‌کند</b>، از جمله نتایج منفی و مسیرهای اشتباه.</div>
   </div>
 </section>
@@ -777,7 +810,7 @@
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
   </div>
-  <p class="fine">دادهٔ محک: دورهای رقابتی 19&ndash;31 ژوئیهٔ 2026. نسخه‌های کلاینت: SABnzbd 5.0.4، NZBGet 26.2 (فورک nzbget.com)، rustnzb 1.3.4، Weaver v0.7.5 رسمی arm64 (لِگ سقف کلاینت از بیلد 23 ژوئیهٔ منبعش <code>410c114</code> استفاده کرد؛ خودش هیچ رشتهٔ نسخه‌ای گزارش نمی‌کند). اگر نسخهٔ جدیدتری از هر کلاینت نتیجه‌ای را به‌طور اساسی تغییر دهد، دوباره اجرا و به‌روزرسانی می‌کنیم؛ بخش «رصد انتشارهای بعدی» در بالا همین قول است که پیشاپیش عمل شده. لِگ‌های شاخص ارائه‌دهنده (35، 77 و 190 GB) و دور هزینهٔ ابزارگذاری‌شده <b>در 31 ژوئیهٔ 2026 روی ساخت منتشرشده</b> دوباره سنجیده شدند، با هر کلاینت و هر لِگ روی TLS، و جای اعداد 20&ndash;24 ژوئیه را گرفتند نه آنکه به آنها افزوده شوند. چند لِگ قدیمی‌ترِ باقی‌مانده (دور صف، نردبان حافظهٔ کم، سطرهای ساحل شرقی) پیش از کارهای موتور در اواخر ژوئیه‌اند و ساخت فعلی را دست‌کم می‌گیرند نه آنکه بزرگ‌نمایی کنند. همچنین فایل‌های آزمایشی‌ای آماده می‌کنیم که بتوانیم NZBهایشان را منتشر کنیم، تا لِگ‌های ارائه‌دهنده هم مستقلاً بازتولیدپذیر شوند، همان‌طور که لِگ‌های سقف کلاینت و اجزا هم‌اکنون هستند.</p>
+  <p class="fine">دادهٔ محک: دورهای رقابتی 19&ndash;31 ژوئیهٔ 2026. نسخه‌های کلاینت: SABnzbd 5.0.4، NZBGet 26.2 (فورک nzbget.com)، rustnzb 1.3.4، Weaver v0.7.5 رسمی arm64 (لِگ سقف کلاینت از بیلد 23 ژوئیهٔ منبعش <code>410c114</code> استفاده کرد؛ خودش هیچ رشتهٔ نسخه‌ای گزارش نمی‌کند). به‌علاوهٔ لِگ‌های بیلدهای فعلی از 6 تا 9 اوت 2026، در برابر SABnzbd 5.1.0RC2، NZBGet 26.3-testing، Weaver 0.7.8 و rustnzb 1.3.9؛ هر جدولی که 5.0.4، 26.2، v0.7.5 یا 1.3.4 را نام می‌برد به همان بیلدها میخ شده و وقتی نسخه‌های پایدار بعدی منتشر شوند دوباره اجرا می‌شود، نه ویرایش. اگر نسخهٔ جدیدتری از هر کلاینت نتیجه‌ای را به‌طور اساسی تغییر دهد، دوباره اجرا و به‌روزرسانی می‌کنیم؛ بخش «رصد انتشارهای بعدی» در بالا همین قول است که پیشاپیش عمل شده. لِگ‌های شاخص ارائه‌دهنده (35، 77 و 190 GB) و دور هزینهٔ ابزارگذاری‌شده <b>در 31 ژوئیهٔ 2026 روی ساخت منتشرشده</b> دوباره سنجیده شدند، با هر کلاینت و هر لِگ روی TLS، و جای اعداد 20&ndash;24 ژوئیه را گرفتند نه آنکه به آنها افزوده شوند. چند لِگ قدیمی‌ترِ باقی‌مانده (دور صف، نردبان حافظهٔ کم، سطرهای ساحل شرقی) پیش از کارهای موتور در اواخر ژوئیه‌اند و ساخت فعلی را دست‌کم می‌گیرند نه آنکه بزرگ‌نمایی کنند. همچنین فایل‌های آزمایشی‌ای آماده می‌کنیم که بتوانیم NZBهایشان را منتشر کنیم، تا لِگ‌های ارائه‌دهنده هم مستقلاً بازتولیدپذیر شوند، همان‌طور که لِگ‌های سقف کلاینت و اجزا هم‌اکنون هستند.</p>
 </div></footer>
 
 </body>
