@@ -21,16 +21,28 @@ body{margin:0;font:16px/1.62 -apple-system,BlinkMacSystemFont,system-ui,"Segoe U
   background-size:0 0}
 a{color:var(--acc);text-decoration:none}
 a:hover{text-decoration:underline}
+/* Prose carries unbreakable tokens - config keys, slash-joined option lists
+   like ArticleCache/DirectWrite/DirectUnpack/ParQuick - that are wider than a
+   phone column and drag the whole document sideways. Break the word instead.
+   Not on td/th on purpose: tables set their own min-width inside a .tblwrap
+   scroller, so breaking there would reflow columns rather than fix anything. */
+p,li,figcaption,.callout{overflow-wrap:break-word}
 .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
 
 /* header - hairline, mono nav */
 header{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 90%,transparent);
   backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
-header .wrap{display:flex;align-items:center;gap:20px;height:56px}
-.logo{display:flex;align-items:center;gap:9px;font-weight:800;font-size:18px;color:var(--fg);letter-spacing:-.01em}
+/* The header wraps on its own, at whatever width it stops fitting: a
+   breakpoint can't know that, because the nav needs ~792px in English and
+   ~900px in French, and a Windows or Linux box renders both wider again.
+   `min-height` (not `height`) lets a wrapped header grow; the auto margin
+   lives on the logo, not the nav, so the nav is pushed to the end while
+   both share a line and falls back to the start once it drops to its own. */
+header .wrap{display:flex;align-items:center;flex-wrap:wrap;gap:6px 20px;min-height:56px;padding-block:9px}
+.logo{display:flex;align-items:center;gap:9px;font-weight:800;font-size:18px;color:var(--fg);letter-spacing:-.01em;margin-inline-end:auto}
 .logo:hover{text-decoration:none;opacity:.72}
 .logo .bolt{color:var(--acc)}
-nav{display:flex;gap:2px;margin-inline-start:auto;align-items:center}
+nav{display:flex;flex-wrap:wrap;gap:2px;align-items:center}
 nav a{color:var(--dim);font:600 12px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;padding:9px 12px;border-radius:0}
 nav a:hover{color:var(--fg);text-decoration:none}
 nav a.on{color:var(--acc)}
@@ -74,8 +86,11 @@ p.lead{color:var(--dim);font-size:17px;max-width:720px;margin:0 0 34px}
 .kicker::before{content:"// "}
 
 /* cards - hairline, hard corners, numbered */
-.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:0;border:1px solid var(--line)}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px}
+/* the `min(...,100%)` in every auto-fit track below is load-bearing: a bare
+   minmax(340px,1fr) keeps a 340px column on a 272px-wide phone and pushes the
+   whole document sideways. Above the track width it costs nothing. */
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:0;border:1px solid var(--line)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:18px}
 .grid3 .card{border:0;border-inline-end:1px solid var(--line);border-top:1px solid var(--line);border-radius:0;background:transparent}
 .grid3 .card:nth-child(-n+3){border-top:0}
 .card{background:var(--card);border:1px solid var(--line);border-radius:0;padding:24px}
@@ -131,7 +146,7 @@ tbody tr:hover{background:color-mix(in srgb,var(--card2) 70%,transparent)}
 .pipe pre em{color:var(--ok);font-style:normal}
 
 /* screenshot strip */
-.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;align-items:start}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:18px;align-items:start}
 .strip figure{margin:0}
 .strip figcaption{font:12.5px/1.5 var(--mono);color:var(--dim);margin-top:10px;text-align:start}
 
@@ -146,7 +161,7 @@ tbody tr:hover{background:color-mix(in srgb,var(--card2) 70%,transparent)}
 .shots figure.phone figcaption{text-align:center}
 
 /* download cards */
-.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:16px}
 .dl .card{display:flex;flex-direction:column;gap:8px}
 .dl h3{display:flex;align-items:center;gap:10px}
 .dl .meta{font:12.5px/1.5 var(--mono);color:var(--dim)}
@@ -180,9 +195,12 @@ footer .fine{margin-top:22px;font-size:11.5px;max-width:760px;line-height:1.7}
   .bar{grid-template-columns:92px 1fr 96px;font-size:12px}
   nav a{padding:8px 8px;font-size:11px}
   /* the nav and the language picker, not the tables, are what used to push the
-     page wider than the viewport. Let them wrap instead. */
-  header .wrap{flex-wrap:wrap;height:auto;gap:6px 12px;padding-block:9px}
-  nav{flex-wrap:wrap;margin-inline-start:0;row-gap:2px}
+     page wider than the viewport. They wrap at every width now (see `header
+     .wrap` above); this only tightens the column gap on a phone and drops the
+     56px floor, so a header that fits one row stays 48px tall as it always has. */
+  header .wrap{gap:6px 12px;min-height:0}
+  /* on a phone a one-row nav sits against the logo rather than the far edge */
+  .logo{margin-inline-end:0}
   select.langsw{max-width:84px;margin-inline-start:0}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
