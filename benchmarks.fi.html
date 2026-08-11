@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Mitattu vastaan</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ja rustnzb 1.3.9 7. elokuuta 2026: itärannikon M3 Ultra, kuusi palveluntarjoajaa, kaikki TLS:llä, kaksi ajoa asiakasta kohti, jälkimmäisessä järjestys käännettynä niin että linjan vaihtelu kumoutuu. &sup1; rustnzb siirsi 36 GB linjaa pitkin, ilmoitti työn valmiiksi ja jätti 1 GB:n arkiston osan ilman purettua videota, joten sen halvalta näyttävät solut ovat hinta siitä, ettei työ valmistunut.</p>
 
+    <p><b>Mistä eromme tässä työssä oikeasti tulee.</b> Ajoimme SABnzbdin 5.1.0-vakaan samana iltana kun se julkaistiin, 10. elokuuta 2026. Sen oma historia jakaa työn lataukseen ja jälkikäsittelyajoon, ja tässä hämärretyssä julkaisussa lataus kestää <b>31 s</b> molemmilla kokeilluilla yhteysasetuksilla, mikä on nzbfastin koko aika samalla aineistolla, samana iltana, samalla linjalla. Emme siis lataa täällä sitä nopeammin emmekä väitä niin: nykyistä vakaata vastaan sen omalla parhaalla asetuksella ero on <b>+19%</b>, ja nuo +19% ovat sen jälkikäsittelyajo sekä käynnistys- ja kyselykulut, ei johto. Mihin jälkikäsittelyn muutos ei yllä, on kierroksen loppuosa: <b>241&ndash;334 MB</b> muistia vastaan 1,380&ndash;1,827 MB, ja <b>32.4 GB</b> levyliikennettä vastaan 65&ndash;99 GB. Nämä ovat ne sarakkeet, joita kannattaa lukea.</p>
+
     <p><b>Neljä kustannusta, joita lopetusaika ei näytä.</b></p>
     <ul class="plain">
       <li><b>Levylle kirjoitettu.</b> Yksi ajo kirjoittaa hyötykuorman kerran: 159.0 GB 157 GB:n tiedostoa varten, kun asiakkaat jotka laskevat jokaisen arkiston osan levylle ja purkavat sen sitten kirjoittavat 387.4 GB ja 458.3 GB. Sama työ, sama yö, kaikkien kolmen nykyiset käännökset.</li>
@@ -88,6 +90,19 @@
       <li><b>Tarkistettiinko se lainkaan.</b> nzbfast varmistaa jokaisen lohkon postattua PAR2-dataa vastaan sitä mukaa kuin se saapuu ja korjaa samalla ajolla, joten maaliviivalla on varmistettu tiedosto. Asiakas, joka ei aja ehjälle joukolle lainkaan varmistusajoa, ostaa kellonsa takaisin jättämällä kysymykseen vastaamatta.</li>
     </ul>
     <p>Kaksi muuta näkyy vasta kun jokin menee pieleen. Tapa prosessi 15.6 GB:n kohdalla 35 GB:n työssä, niin nzbfast käynnistyy uudelleen ja saa sen valmiiksi 57 s:ssa lataamatta yhtään tavua uudelleen. Ja koeasetelmassa, jossa jokainen yhteys vaikenee pysyvästi 25 artikkelirungon jälkeen sulkeutumatta koskaan, mitä operaattorin NAT tekee pitkälle lataukselle, se valmistuu 26 s:ssa siinä missä neljä muuta asiakasta vievät 74&ndash;275 s.</p>
+
+    <p><b>Ja yksi asia, jota asetuksen muutoskaan ei siirrä.</b> Yhteyksien määrä on se asetus, jota kaikki käskevät nostaa, joten 10. elokuuta 2026 ajoimme koko viiden asiakkaan kierroksen kahdesti yhtenä iltana: kerran tilien julkaisemilla palvelinkohtaisilla enimmäismäärillä, 360 soketilla viiden palveluntarjoajan yli, ja kerran 8:lla palvelinta kohti, 40 soketilla. Samat käännökset, samat aineistot, sama linja, ja lopussa kontrolliajo, joka osoittaa ettei linja itse ollut ajautunut kahden pyyhkäisyn välillä. nzbfast liikkuu yhden sekunnin tuon yhdeksänkertaisen muutoksen yli. Jokainen muu asiakas heiluu voimakkaasti, eivätkä ne ole yhtä mieltä siitä kumpi suunta auttaa.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 sokettia &rarr; 40 sokettia</th><th>34.5 GB hämärretty</th><th>6.6 GB REMUX</th><th>mitä se tarkoittaa</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">tasainen: yksi sekunti</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>haluaa soketteja, molemmissa töissä</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>kärsii soketeista isossa työssä</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>vaihtaa suuntaa työn mukaan</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>kärsii soketeista, molemmissa töissä</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 ja rustnzb 1.4.1 10. elokuuta 2026: M1 Ultra Euroopassa, viisi palveluntarjoajaa, kaikki TLS:n yli, molemmat pyyhkäisyt samana iltana, ja sokettiasetus sovellettiin jokaiseen asiakkaaseen eikä vain meidän. &sup2; rustnzb ei tuottanut hämärretystä työstä käyttökelpoista tiedostoa kummallakaan asetuksella, joten sen rivi luetaan herkkyytenä eikä sijoituksena. NZBGet menee toiseen suuntaan tallennettujen arkistojen jonossa alempana tällä sivulla, vanhemmalla käännöksellä ja eri työllä, ja juuri se on pointti: suunta ei ole asetuksen ominaisuus. Kun lopetusaika heiluu näin paljon yhdestä luvusta asetustiedostossa, tuo luku on osa tulosta.</p>
     <div class="callout">Ehjässä latauksessa nopein mahdollinen jälkikäsittely on se, jota ei ole. Me yllämme samaan aikaan ja tarkistamme silti jokaisen lohkon sen saapuessa: <b>yhtä nopeasti kuin tarkistuksen ohittaminen, koska emme koskaan ohita sitä.</b></div>
   </div>
 </section>
@@ -170,7 +185,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4 ja Weaver v0.7.5 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; nykyisillä käännöksillä ero on lähempänä tämän sivun ylälaidassa mitattua +43%. Ajamme nämä luvut uudelleen, kun 5.1.0 julkaistaan vakaana, sen sijaan että muokkaisimme niitä.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4 ja Weaver v0.7.5 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; 5.1.0 on sittemmin julkaistu vakaana ja ajettu: kun jokainen asiakas on omalla parhaalla yhteysasetuksellaan, hämärretyn julkaisun ero on lähempänä tämän sivun ylälaidassa mitattua +19%. Nämä rivit pitävät ne käännökset joita vastaan ne ajettiin sen sijaan että niitä muokattaisiin.</p>
     <p class="note" style="text-align:start">rustnzb ajoi jokaisen osuuden eikä toimittanut käyttökelpoista
     tiedostoa yhdelläkään, joten sillä ei ole tässä saraketta; yksityiskohdat ovat alla olevassa
     kustannusosiossa. Weaver mitataan sen lämpimän parhaan tapauksen protokollalla (pysyvä taustapalvelu,
@@ -196,7 +211,7 @@
         <tr><td>levyn huippulisä</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; nykyisillä käännöksillä ero on lähempänä tämän sivun ylälaidassa mitattua +43%. Ajamme nämä luvut uudelleen, kun 5.1.0 julkaistaan vakaana, sen sijaan että muokkaisimme niitä.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; 5.1.0 on sittemmin julkaistu vakaana ja ajettu: kun jokainen asiakas on omalla parhaalla yhteysasetuksellaan, hämärretyn julkaisun ero on lähempänä tämän sivun ylälaidassa mitattua +19%. Nämä rivit pitävät ne käännökset joita vastaan ne ajettiin sen sijaan että niitä muokattaisiin.</p>
     <p class="note" style="text-align:start">³ rustnzb latasi 97 sekunnissa, merkitsi työn <i>valmiiksi</i> ja toimitti raa'at hämärretyt osat: ei uudelleennimeämistä, ei purkua - sekä versiossa 1.3.4 että 1.3.9 († sen levyluku on pelkkä lataus). nzbfast purki hämäryksen PAR2-metatiedoista ja purki arkiston latauksen aikana, nolla uudelleenluettua lohkoa; väli 76&ndash;83 s on sen kierroksen ensimmäinen ja viimeinen osuus. Tämän taulukon 23. heinäkuuta leikkaukseen verrattuna toimitettu käännös on tässä nopeampi ja käyttää 3.4× vähemmän muistia (1.55 → 0.45 GB): heinäkuun lopun yhden läpiajon työ, mitattuna samalla koneella ja samalla aineistolla.</p>
   </div>
 </section>
@@ -212,7 +227,7 @@
     osuus asiakasta ja työtä kohden. Tässä on yhden läpimenon lupaus mitattuna eikä väitettynä: nzbfastin
     levyhuippu on itse hyötykuorma, ja sen I/O vastaa jokaisen tavun kirjoittamista kerran.</p>
 
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; nykyisillä käännöksillä ero on lähempänä tämän sivun ylälaidassa mitattua +43%. Ajamme nämä luvut uudelleen, kun 5.1.0 julkaistaan vakaana, sen sijaan että muokkaisimme niitä.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; 5.1.0 on sittemmin julkaistu vakaana ja ajettu: kun jokainen asiakas on omalla parhaalla yhteysasetuksellaan, hämärretyn julkaisun ero on lähempänä tämän sivun ylälaidassa mitattua +19%. Nämä rivit pitävät ne käännökset joita vastaan ne ajettiin sen sijaan että niitä muokattaisiin.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB peitelty (hyötykuorma 32 GB)</th><th>aika</th><th>suoritin</th><th>suoritin-s/GB</th><th>huippu-RSS</th><th>levyn huippulisä</th><th>levy-I/O</th></tr></thead>
@@ -427,7 +442,7 @@
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x hitaampi</span></div>
     </div>
     <p><b>nzbfast on 1,51x nopeampi kuin NZBGet 26.2 ja 2,55x nopeampi kuin SABnzbd 5.0.4</b> usenetin selvästi yleisimmässä muodossa.</p>
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2 ja SABnzbd 5.0.4 27. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; nykyisillä käännöksillä ero on lähempänä tämän sivun ylälaidassa mitattua +43%. Ajamme nämä luvut uudelleen, kun 5.1.0 julkaistaan vakaana, sen sijaan että muokkaisimme niitä.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2 ja SABnzbd 5.0.4 27. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; 5.1.0 on sittemmin julkaistu vakaana ja ajettu: kun jokainen asiakas on omalla parhaalla yhteysasetuksellaan, hämärretyn julkaisun ero on lähempänä tämän sivun ylälaidassa mitattua +19%. Nämä rivit pitävät ne käännökset joita vastaan ne ajettiin sen sijaan että niitä muokattaisiin.</p>
     <p>Jokainen asiakas testattiin 8, 16 ja 32 yhteydellä palvelinta kohti ja esitetään omalla parhaallaan, koska kilpailijan ei pidä koskaan hävitä huonon asetuksen takia. Hyvä tietää, jos säädät itse: <b>NZBGet muuttui noin kaksi kertaa hitaammaksi 32 yhteydellä</b>, ja SABnzbd käyttäytyi samoin aiemmissa testeissämme. Enemmän yhteyksiä ei ole enemmän nopeutta. nzbfast pysyi tasaisena koko alueella, joten tuo asetus ei yllätä sinua.</p>
     <p class="note">Tarkistamme myös, että jokainen asiakas todella tuotti tiedostot, sen sijaan että uskoisimme sitä sanasta kun se ilmoittaa onnistuneensa. Testeissämme yksi asiakas ilmoitti kolme valmista latausta noin sekunnissa kukin, eikä ollut kirjoittanut yhtään mitään.</p>
   </div>
@@ -739,7 +754,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, ei käyttökelpoista tiedostoa</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; nykyisillä käännöksillä ero on lähempänä tämän sivun ylälaidassa mitattua +43%. Ajamme nämä luvut uudelleen, kun 5.1.0 julkaistaan vakaana, sen sijaan että muokkaisimme niitä.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ja rustnzb 1.3.4 31. heinäkuuta 2026, ja kiinnitetty noihin käännöksiin. SABnzbd 5.1 poistaa latauksen jälkeisen varmistusajon, jonka suuri osa sen tuloksesta täällä maksaa; 5.1.0 on sittemmin julkaistu vakaana ja ajettu: kun jokainen asiakas on omalla parhaalla yhteysasetuksellaan, hämärretyn julkaisun ero on lähempänä tämän sivun ylälaidassa mitattua +19%. Nämä rivit pitävät ne käännökset joita vastaan ne ajettiin sen sijaan että niitä muokattaisiin.</p>
     <div class="callout">Pysyvä sääntö: <b>jokainen suorituskykyväite kertoo olosuhteet, joissa se
     ajettiin</b>, negatiiviset tulokset ja väärät käänteet mukaan lukien.</div>
   </div>

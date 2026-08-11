@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Măsurat față de</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.3.9 pe 7 august 2026: M3 Ultra de pe coasta de est, șase provideri, totul pe TLS, două rulări per client, cu ordinea inversată la a doua ca variația liniei să se anuleze. &sup1; rustnzb a mutat 36 GB pe fir, a raportat jobul terminat și a lăsat o parte de arhivă de 1 GB fără niciun video extras, așa că celulele lui aparent ieftine sunt costul de a nu termina.</p>
 
+    <p><b>De unde vine de fapt marja noastră la acel job.</b> Am rulat versiunea stabilă 5.1.0 a SABnzbd chiar în seara în care a apărut, 10 august 2026. Propriul ei istoric împarte un job într-o descărcare și o trecere de post-procesare, iar pe această versiune ofuscată descărcarea durează <b>31 s</b> la ambele setări de conexiuni încercate, adică exact tot timpul nzbfast pe același corpus, în aceeași seară, pe aceeași linie. Deci aici nu descărcăm mai repede decât ea și nici nu pretindem asta: față de versiunea stabilă actuală la propriul ei optim, diferența este de <b>+19%</b>, iar acei +19% sunt trecerea ei de post-procesare plus costul de pornire și de interogare, nu firul. Ce nu poate atinge o schimbare de post-procesare este restul rundei: <b>241&ndash;334 MB</b> de memorie față de 1,380&ndash;1,827 MB și <b>32.4 GB</b> de trafic pe disc față de 65&ndash;99 GB. Acestea sunt coloanele de citit.</p>
+
     <p><b>Patru costuri pe care un timp final nu le arată.</b></p>
     <ul class="plain">
       <li><b>Disc scris.</b> O singură trecere scrie conținutul o dată: 159.0 GB pentru un fișier de 157 GB, față de 387.4 GB și 458.3 GB la clienții care pun fiecare parte de arhivă pe disc și apoi o dezarhivează. Același job, aceeași noapte, versiunile curente ale tuturor trei.</li>
@@ -88,6 +90,19 @@
       <li><b>Dacă a fost verificat.</b> nzbfast verifică fiecare bloc față de datele PAR2 postate pe măsură ce sosește și repară în aceeași trecere, deci linia de sosire este un fișier verificat. Un client care nu face nicio trecere de verificare pe un set nedeteriorat își răscumpără cronometrul nerăspunzând la întrebare.</li>
     </ul>
     <p>Alte două se văd doar când ceva merge prost. Omoară procesul la 15.6 GB dintr-un job de 35 GB: nzbfast repornește și îl termină în 57 s fără să redescarce niciun octet. Iar pe un banc unde fiecare conexiune amuțește definitiv după 25 de corpuri de articol fără să se închidă vreodată, adică ce face un NAT de operator unei descărcări lungi, termină în 26 s acolo unde ceilalți patru clienți iau între 74 și 275 s.</p>
+
+    <p><b>Și ceva ce nici o schimbare de setări nu mișcă.</b> Numărul de conexiuni este setarea pe care toată lumea vă spune să o creșteți, așa că pe 10 august 2026 am rulat runda completă cu cinci clienți de două ori într-o singură seară: o dată la maximele per server publicate de conturi, 360 de socketuri pe cinci furnizori, și o dată la 8 per server, 40 de socketuri. Aceleași versiuni, aceleași corpusuri, aceeași linie, cu o cursă de control la final care arată că linia însăși nu se deplasase între cele două treceri. nzbfast se mișcă cu o secundă pe acea schimbare de nouă ori. Toți ceilalți clienți oscilează puternic și nu se pun de acord asupra direcției care ajută.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 de socketuri &rarr; 40 de socketuri</th><th>34.5 GB ofuscat</th><th>6.6 GB REMUX</th><th>ce înseamnă</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">constant: o secundă</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>vrea socketuri, la ambele joburi</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>afectat de socketuri la jobul mare</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>își schimbă direcția după job</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>afectat de socketuri, la ambele joburi</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.4.1 pe 10 august 2026: M1 Ultra în Europa, cinci furnizori, totul prin TLS, ambele treceri în aceeași seară, cu setarea de socketuri aplicată fiecărui client, nu doar al nostru. &sup2; rustnzb nu a livrat niciun fișier utilizabil la jobul ofuscat la niciuna dintre setări, deci rândul lui se citește ca sensibilitate, nu ca o clasare. NZBGet merge în direcția opusă la coada de arhive stocate mai jos în această pagină, o versiune mai veche pe alt job, și exact acesta este punctul: direcția nu este o proprietate a setării. Când un timp final oscilează atât de mult din cauza unui singur număr dintr-un fișier de configurare, acel număr face parte din rezultat.</p>
     <div class="callout">La o descărcare nedeteriorată, cea mai rapidă post-procesare posibilă este niciuna. Noi egalăm acel timp verificând fiecare bloc pe măsură ce sosește: <b>la fel de rapid ca sărirea verificării, pentru că nu o sărim niciodată.</b></div>
   </div>
 </section>
@@ -172,7 +187,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4 și Weaver v0.7.5 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4 și Weaver v0.7.5 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; 5.1.0 a ieșit între timp ca versiune stabilă și a fost pusă în cursă: cu fiecare client la propria lui cea mai bună setare de conexiuni, diferența pe versiunea ofuscată este mai aproape de cei +19% măsurați în capul paginii. Aceste rânduri păstrează versiunile față de care au rulat în loc să fie editate.</p>
     <p class="note" style="text-align:start">rustnzb a rulat fiecare probă și nu a livrat un fișier
     utilizabil la niciuna, așa că nu are coloană aici; detaliile sunt în secțiunea de costuri de mai jos.
     Weaver este măsurat după protocolul său cel mai favorabil, la cald (serviciu permanent, job de
@@ -199,7 +214,7 @@
         <tr><td>vârf de disc suplimentar</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; 5.1.0 a ieșit între timp ca versiune stabilă și a fost pusă în cursă: cu fiecare client la propria lui cea mai bună setare de conexiuni, diferența pe versiunea ofuscată este mai aproape de cei +19% măsurați în capul paginii. Aceste rânduri păstrează versiunile față de care au rulat în loc să fie editate.</p>
     <p class="note" style="text-align:start">³ rustnzb a descărcat în 97 s, a marcat sarcina drept <i>gata</i> și a livrat volumele ofuscate brute: fără redenumire, fără extragere - atât pe 1.3.4 cât și pe 1.3.9 († cifra sa de disc este doar descărcarea). nzbfast a deofuscat din metadatele PAR2 și a extras în flux, zero blocuri recitite; intervalul de 76&ndash;83 s reprezintă prima și ultima sa etapă din rundă. Față de varianta din 23 iulie a acestui tabel, versiunea livrată este aici mai rapidă cu 3.4× mai puțină memorie (1.55 → 0.45 GB): lucrul într-o singură trecere de la sfârșitul lui iulie, măsurat pe aceeași mașină și pe același corpus.</p>
   </div>
 </section>
@@ -216,7 +231,7 @@
     singure treceri măsurată, nu doar afirmată: vârful de disc al nzbfast este chiar conținutul, iar
     I/O-ul său înseamnă scrierea fiecărui octet o singură dată.</p>
 
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; 5.1.0 a ieșit între timp ca versiune stabilă și a fost pusă în cursă: cu fiecare client la propria lui cea mai bună setare de conexiuni, diferența pe versiunea ofuscată este mai aproape de cei +19% măsurați în capul paginii. Aceste rânduri păstrează versiunile față de care au rulat în loc să fie editate.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfuscat (conținut 32 GB)</th><th>timp</th><th>CPU</th><th>CPU-s/GB</th><th>memorie de vârf (RSS)</th><th>vârf de disc suplimentar</th><th>I/O pe disc</th></tr></thead>
@@ -435,7 +450,7 @@
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
     <p><b>nzbfast este de 1,51x mai rapid decât NZBGet 26.2 și de 2,55x mai rapid decât SABnzbd 5.0.4</b> pe cea mai răspândită formă de pe usenet.</p>
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2 și SABnzbd 5.0.4 pe 27 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2 și SABnzbd 5.0.4 pe 27 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; 5.1.0 a ieșit între timp ca versiune stabilă și a fost pusă în cursă: cu fiecare client la propria lui cea mai bună setare de conexiuni, diferența pe versiunea ofuscată este mai aproape de cei +19% măsurați în capul paginii. Aceste rânduri păstrează versiunile față de care au rulat în loc să fie editate.</p>
     <p>Fiecare client a fost testat cu 8, 16 și 32 de conexiuni per server și este prezentat la propriul său optim, fiindcă un concurent nu trebuie să piardă niciodată din cauza unei configurări proaste. Util de știut dacă vă reglați instalarea: <b>NZBGet a devenit de aproximativ două ori mai lent la 32 de conexiuni</b>, iar SABnzbd s-a comportat la fel în testele noastre anterioare. Mai multe conexiuni nu înseamnă mai multă viteză. nzbfast a rămas constant pe tot intervalul, deci acea setare nu vă va înșela.</p>
     <p class="note">Verificăm de asemenea că fiecare client a produs efectiv fișierele, în loc să îl credem pe cuvânt când raportează succes. În testele noastre, un client a raportat trei descărcări finalizate în aproximativ o secundă fiecare fără să fi scris absolut nimic.</p>
   </div>
@@ -748,7 +763,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, niciun fișier utilizabil</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; pe versiunile curente diferența este mai aproape de cei +43% măsurați în capul paginii. Refacem cursa acestor numere când 5.1.0 iese ca versiune stabilă, în loc să le edităm.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 și rustnzb 1.3.4 pe 31 iulie 2026 și fixat pe acele versiuni. SABnzbd 5.1 renunță la trecerea de verificare de după descărcare pe care o bună parte din rezultatul lui de aici o plătește; 5.1.0 a ieșit între timp ca versiune stabilă și a fost pusă în cursă: cu fiecare client la propria lui cea mai bună setare de conexiuni, diferența pe versiunea ofuscată este mai aproape de cei +19% măsurați în capul paginii. Aceste rânduri păstrează versiunile față de care au rulat în loc să fie editate.</p>
     <div class="callout"><b>Regulă permanentă: fiecare afirmație de performanță citează condițiile în care a rulat</b>, inclusiv rezultatele negative și pașii greșiți.</div>
   </div>
 </section>

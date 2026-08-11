@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.3.9, 7 Ağustos 2026: doğu yakası M3 Ultra, altı sağlayıcı, tamamı TLS, istemci başına iki çalıştırma ve ikincisinde hat kayması birbirini götürsün diye ters sıra. &sup1; rustnzb hat üzerinde 36 GB taşıdı, işi bitti diye bildirdi ve hiç video çıkarmadan 1 GB'lık bir arşiv parçası bıraktı; yani ucuz görünen hücreleri, işi bitirmemenin bedeli.</p>
 
+    <p><b>O işteki farkımız aslında nereden geliyor.</b> SABnzbd'nin 5.1.0 kararlı sürümünü çıktığı akşam, 10 Ağustos 2026'da koşturduk. Kendi geçmiş kaydı bir işi indirme ve indirme sonrası geçiş olarak ikiye ayırıyor ve bu belirsizleştirilmiş sürümde indirme, denediğimiz her iki bağlantı ayarında da <b>31 s</b> sürüyor; bu, aynı korpusta, aynı gece, aynı hatta nzbfast'in toplam süresinin tamamı. Yani burada ondan daha hızlı indirmiyoruz ve indirdiğimizi de söylemiyoruz: güncel kararlı sürüme karşı, o kendi en iyi ayarındayken fark <b>+19%</b> ve bu +19%, onun indirme sonrası geçişi artı açılış ve yoklama maliyeti, hat değil. İndirme sonrası bir değişikliğin ulaşamadığı şey turun geri kalanı: <b>241&ndash;334 MB</b> belleğe karşı 1,380&ndash;1,827 MB ve <b>32.4 GB</b> disk trafiğine karşı 65&ndash;99 GB. Okunacak sütunlar bunlar.</p>
+
     <p><b>Bitiş süresinin göstermediği dört maliyet.</b></p>
     <ul class="plain">
       <li><b>Yazılan disk.</b> Tek geçiş yükü bir kez yazar: 157 GB'lık bir dosya için 159.0 GB; her arşiv parçasını diske indirip sonra açan istemcilerde ise 387.4 GB ve 458.3 GB. Aynı iş, aynı gece, üçünün de güncel yapıları.</li>
@@ -88,6 +90,19 @@
       <li><b>Kontrol edilip edilmediği.</b> nzbfast her bloğu geldiği anda gönderilmiş PAR2 verisine karşı doğrular ve aynı geçişte onarır; yani bitiş çizgisi doğrulanmış bir dosyadır. Hasarsız bir kümede hiç doğrulama geçişi yapmayan bir istemci, soruyu yanıtlamayarak saatini geri satın alır.</li>
     </ul>
     <p>İki tanesi ise ancak bir şeyler ters gittiğinde ortaya çıkar. 35 GB'lık bir işin 15.6 GB'ında süreci öldürün: nzbfast yeniden başlar ve tek bayt yeniden indirmeden işi 57 s'de bitirir. Ve her bağlantının 25 makale gövdesinden sonra hiç kapanmadan kalıcı olarak sustuğu bir düzenekte - operatör NAT'ının uzun bir indirmeye yaptığı şey - 26 s'de biter; diğer dört istemci 74 ila 275 s alır.</p>
+
+    <p><b>Bir de ayar değişikliğinin oynatamadığı bir şey.</b> Bağlantı sayısı, herkesin size yükseltmenizi söylediği ayardır; bu yüzden 10 Ağustos 2026'da beş istemcilik turun tamamını bir akşamda iki kez koşturduk: bir kez hesapların yayımlanmış sunucu başına üst sınırlarında, beş sağlayıcıya dağılmış 360 soketle, bir kez de sunucu başına 8, yani 40 soketle. Aynı yapılar, aynı korpuslar, aynı hat ve sonda bir kontrol koşusu: hattın kendisinin iki tarama arasında kaymadığını göstermek için. nzbfast bu dokuz katlık değişimde bir saniye oynuyor. Diğer her istemci sertçe savruluyor ve hangi yönün işe yaradığı konusunda hemfikir değiller.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 soket &rarr; 40 soket</th><th>34.5 GB belirsizleştirilmiş</th><th>6.6 GB REMUX</th><th>bu ne demek</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">düz: bir saniye</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>soket istiyor, iki işte de</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>büyük işte soketlerden zarar görüyor</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>işe göre yön değiştiriyor</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>soketlerden zarar görüyor, iki işte de</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.4.1, 10 Ağustos 2026: Avrupa'da M1 Ultra, beş sağlayıcı, her şey TLS üzerinden, iki tarama da aynı akşam ve soket ayarı yalnızca bizimkine değil her istemciye uygulandı. &sup2; rustnzb belirsizleştirilmiş işte iki ayarda da kullanılabilir dosya vermedi, dolayısıyla satırı bir sıralama değil bir duyarlılık okuması. NZBGet, bu sayfanın aşağısındaki depolanmış arşiv kuyruğunda ters yöne gidiyor; daha eski bir yapı, farklı bir iş, ve asıl mesele de bu: yön, ayarın bir özelliği değil. Bir bitiş süresi bir yapılandırma dosyasındaki tek bir sayı yüzünden bu kadar savruluyorsa, o sayı sonucun parçasıdır.</p>
     <div class="callout">Hasarsız bir indirmede mümkün olan en hızlı işlem sonrası, hiç olmayanıdır. Biz o süreyi yakalarken her bloğu geldiği anda kontrol ediyoruz: <b>kontrolü atlamak kadar hızlı, çünkü onu asla atlamıyoruz.</b></div>
   </div>
 </section>
@@ -183,7 +198,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4 ve Weaver v0.7.5, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4 ve Weaver v0.7.5, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; 5.1.0 o zamandan beri kararlı olarak çıktı ve koşturuldu: her istemci kendi en iyi bağlantı ayarındayken belirsizleştirilmiş sürümdeki fark, bu sayfanın başında ölçülen +19%'a daha yakın. Bu satırlar düzenlenmek yerine karşılarında koştukları yapıları koruyor.</p>
     <p class="note" style="text-align:start">rustnzb her ayağı çalıştırdı ve hiçbirinde
     kullanılabilir bir dosya teslim etmedi, bu yüzden burada bir sütunu yok; ayrıntılar aşağıdaki
     maliyet bölümünde. Weaver kendi sıcak en iyi durum protokolüyle ölçüldü (kalıcı arka plan
@@ -210,7 +225,7 @@
         <tr><td>zirve ek disk</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; 5.1.0 o zamandan beri kararlı olarak çıktı ve koşturuldu: her istemci kendi en iyi bağlantı ayarındayken belirsizleştirilmiş sürümdeki fark, bu sayfanın başında ölçülen +19%'a daha yakın. Bu satırlar düzenlenmek yerine karşılarında koştukları yapıları koruyor.</p>
     <p class="note" style="text-align:start">³ rustnzb 97 saniyede indirdi, işi <i>bitti</i> olarak işaretledi ve ham gizlenmiş birimleri teslim etti: yeniden adlandırma yok, çıkarma yok - hem 1.3.4'te hem 1.3.9'da († disk rakamı yalnızca indirmedir). nzbfast PAR2 üstverisinden gizlemeyi çözdü ve indirme sırasında çıkardı, sıfır geri okunan blok; 76&ndash;83 s aralığı turun ilk ve son ayağıdır. Bu tablonun 23 Temmuz kesitine karşı dağıtılan sürüm burada 3.4× daha az bellekle daha hızlı (1.55 → 0.45 GB): temmuz sonunun tek geçiş çalışması, aynı makinede ve aynı derlemde ölçüldü.</p>
   </div>
 </section>
@@ -226,7 +241,7 @@
     tek ölçümlü ayak. Bu, tek geçiş iddiasının ileri sürülmesi değil ölçülmesidir: nzbfast'in zirve
     diski yükün kendisidir ve G/Ç'si her baytı bir kez yazmaya eşittir.</p>
 
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; 5.1.0 o zamandan beri kararlı olarak çıktı ve koşturuldu: her istemci kendi en iyi bağlantı ayarındayken belirsizleştirilmiş sürümdeki fark, bu sayfanın başında ölçülen +19%'a daha yakın. Bu satırlar düzenlenmek yerine karşılarında koştukları yapıları koruyor.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB gizlenmiş (yük 32 GB)</th><th>süre</th><th>CPU</th><th>CPU-s/GB</th><th>zirve bellek (RSS)</th><th>zirve ek disk</th><th>disk G/Ç</th></tr></thead>
@@ -486,7 +501,7 @@
     </div>
     <p><b>nzbfast, NZBGet 26.2'ten 1,51 kat, SABnzbd 5.0.4'den 2,55 kat daha hızlı</b> ve bu usenet'teki en
     yaygın biçimde.</p>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2 ve SABnzbd 5.0.4, 27 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2 ve SABnzbd 5.0.4, 27 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; 5.1.0 o zamandan beri kararlı olarak çıktı ve koşturuldu: her istemci kendi en iyi bağlantı ayarındayken belirsizleştirilmiş sürümdeki fark, bu sayfanın başında ölçülen +19%'a daha yakın. Bu satırlar düzenlenmek yerine karşılarında koştukları yapıları koruyor.</p>
     <p>Her istemci sunucu başına 8, 16 ve 32 bağlantıyla denendi ve kendi en iyi ayarıyla
     gösteriliyor, çünkü bir rakip asla kötü yapılandırma yüzünden kaybetmemeli. Kendi kurulumunuzu
     ayarlıyorsanız bilmeye değer: <b>NZBGet 32 bağlantıda yaklaşık iki kat yavaşladı</b>, SABnzbd de
@@ -831,7 +846,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, kullanılabilir dosya yok</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; güncel yapılarda fark, bu sayfanın başında ölçülen +43%'e daha yakın. 5.1.0 kararlı olarak çıktığında bu sayıları düzenlemek yerine yeniden koşturuyoruz.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ve rustnzb 1.3.4, 31 Temmuz 2026; ve o yapılara sabitlendi. SABnzbd 5.1, buradaki sonucunun büyük bölümünün ödediği indirme sonrası doğrulama geçişini kaldırıyor; 5.1.0 o zamandan beri kararlı olarak çıktı ve koşturuldu: her istemci kendi en iyi bağlantı ayarındayken belirsizleştirilmiş sürümdeki fark, bu sayfanın başında ölçülen +19%'a daha yakın. Bu satırlar düzenlenmek yerine karşılarında koştukları yapıları koruyor.</p>
     <div class="callout">Kalıcı kural: <b>her performans iddiası, altında çalıştığı koşulları
     anar</b>; olumsuz sonuçlar ve yanlış dönüşler dahil.</div>
   </div>

@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Gemeten tegen</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.3.9 op 7 augustus 2026: M3 Ultra oostkust, zes providers, alles over TLS, twee runs per client met de volgorde omgedraaid bij de tweede zodat lijndrift wegvalt. &sup1; rustnzb verplaatste 36 GB over de lijn, meldde de taak als klaar en liet een archiefdeel van 1 GB achter zonder uitgepakte video; zijn zuinig ogende cellen zijn de prijs van niet afmaken.</p>
 
+    <p><b>Waar onze marge op die taak echt vandaan komt.</b> We hebben SABnzbds 5.1.0-stable laten lopen op de avond dat hij uitkwam, 10 augustus 2026. Zijn eigen geschiedenis splitst een taak in een download en een nabewerkingsronde, en op deze versluierde release duurt de download <b>31 s</b> bij allebei de verbindingsinstellingen die we probeerden, precies de hele looptijd van nzbfast op hetzelfde corpus, dezelfde nacht, dezelfde lijn. We downloaden hier dus niet sneller dan hij en beweren dat ook niet: tegen de huidige stable op zijn eigen beste instelling is het verschil <b>+19%</b>, en die +19% is zijn nabewerkingsronde plus opstart- en pollkosten, niet de lijn. Wat een verandering in nabewerking niet bereikt, is de rest van de ronde: <b>241&ndash;334 MB</b> geheugen tegen 1,380&ndash;1,827 MB, en <b>32.4 GB</b> schijfverkeer tegen 65&ndash;99 GB. Dat zijn de kolommen om te lezen.</p>
+
     <p><b>Vier kosten die een eindtijd niet laat zien.</b></p>
     <ul class="plain">
       <li><b>Schijf geschreven.</b> Eén doorgang schrijft de payload één keer: 159.0 GB voor een bestand van 157 GB, tegen 387.4 GB en 458.3 GB bij de clients die elk archiefdeel eerst wegschrijven en het daarna uitpakken. Zelfde taak, zelfde nacht, actuele builds van alle drie.</li>
@@ -88,6 +90,19 @@
       <li><b>Of het is gecontroleerd.</b> nzbfast verifieert elk blok tegen de geposte PAR2-data terwijl het binnenkomt en repareert in dezelfde doorgang, dus de finish is een geverifieerd bestand. Een client die op een onbeschadigde set helemaal geen verificatiedoorgang draait, koopt zijn klok terug door de vraag niet te beantwoorden.</li>
     </ul>
     <p>Twee andere komen pas boven als er iets misgaat. Sloop het proces na 15.6 GB van een taak van 35 GB: nzbfast start opnieuw en maakt hem af in 57 s zonder één byte opnieuw te downloaden. En op een opstelling waar elke verbinding na 25 artikelbodies permanent stilvalt zonder ooit te sluiten, wat een carrier-grade NAT met een lange download doet, is hij klaar in 26 s waar de andere vier clients 74 tot 275 s nodig hebben.</p>
+
+    <p><b>En iets wat een gewijzigde instelling evenmin verschuift.</b> Het aantal verbindingen is de instelling waarvan iedereen zegt dat u hem moet ophogen, dus op 10 augustus 2026 hebben we de hele ronde met vijf clients twee keer op één avond gedraaid: één keer op de door de accounts gepubliceerde maxima per server, 360 sockets over vijf providers, en één keer op 8 per server, 40 sockets. Dezelfde builds, dezelfde corpora, dezelfde lijn, met een controleloop aan het eind om te laten zien dat de lijn zelf tussen beide passages niet was verlopen. nzbfast beweegt één seconde over die negenvoudige wijziging. Elke andere client slaat flink uit, en ze zijn het er niet over eens welke richting helpt.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 sockets &rarr; 40 sockets</th><th>34.5 GB versluierd</th><th>6.6 GB REMUX</th><th>wat het betekent</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">vlak: één seconde</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>wil sockets, bij beide taken</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>lijdt onder sockets bij de grote taak</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>draait van richting per taak</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>lijdt onder sockets, bij beide taken</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.4.1 op 10 augustus 2026: M1 Ultra in Europa, vijf providers, alles via TLS, beide passages dezelfde avond, met de socketinstelling toegepast op elke client en niet alleen op de onze. &sup2; rustnzb leverde bij geen van beide instellingen een bruikbaar bestand op de versluierde taak, dus zijn regel leest als gevoeligheid en niet als klassering. NZBGet gaat de andere kant op bij de wachtrij met opgeslagen archieven verderop op deze pagina, een oudere build op een andere taak, en dat is precies het punt: de richting is geen eigenschap van de instelling. Waar een eindtijd zo ver uitslaat op één getal in een configuratiebestand, hoort dat getal bij het resultaat.</p>
     <div class="callout">Bij een onbeschadigde download is de snelst mogelijke nabewerking helemaal geen nabewerking. Wij evenaren die tijd en controleren daarbij elk blok terwijl het binnenkomt: <b>zo snel als de controle overslaan, omdat we hem nooit overslaan.</b></div>
   </div>
 </section>
@@ -171,7 +186,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4 en Weaver v0.7.5 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4 en Weaver v0.7.5 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; 5.1.0 is inmiddels als stable verschenen en meegelopen: met elke client op zijn eigen beste verbindingsinstelling ligt het verschil op de versluierde release dichter bij de +19% die boven aan deze pagina is gemeten. Deze regels behouden de builds waartegen ze liepen in plaats van te worden bewerkt.</p>
     <p class="note" style="text-align:start">rustnzb draaide elke leg en leverde op geen enkele een
     bruikbaar bestand, dus het heeft hier geen kolom; de details staan in de kostensectie hieronder.
     Weaver is gemeten volgens z'n warme optimale protocol (permanente daemon, weggegooide opwarmtaak,
@@ -197,7 +212,7 @@
         <tr><td>piek aan extra schijf</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; 5.1.0 is inmiddels als stable verschenen en meegelopen: met elke client op zijn eigen beste verbindingsinstelling ligt het verschil op de versluierde release dichter bij de +19% die boven aan deze pagina is gemeten. Deze regels behouden de builds waartegen ze liepen in plaats van te worden bewerkt.</p>
     <p class="note" style="text-align:start">³ rustnzb downloadde in 97 s, markeerde de taak als <i>klaar</i> en leverde de ruwe versluierde volumes: geen hernoeming, geen uitpakken - zowel op 1.3.4 als op 1.3.9 († zijn schijfcijfer is alleen de download). nzbfast onthulde de namen uit de PAR2-metadata en pakte tijdens het binnenhalen uit, nul teruggelezen blokken; het bereik van 76&ndash;83 s zijn zijn eerste en zijn laatste etappe van de ronde. Tegenover de versie van 23 juli van deze tabel is de uitgeleverde build hier sneller met 3.4× minder geheugen (1.55 → 0.45 GB): het werk in één doorgang van eind juli, gemeten op dezelfde machine en hetzelfde corpus.</p>
   </div>
 </section>
@@ -213,7 +228,7 @@
     geïnstrumenteerde leg per client per taak. Dit is de one-pass-belofte gemeten in plaats van beweerd:
     de schijfpiek van nzbfast is de payload zelf, en z'n I/O staat gelijk aan elke byte één keer schrijven.</p>
 
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; 5.1.0 is inmiddels als stable verschenen en meegelopen: met elke client op zijn eigen beste verbindingsinstelling ligt het verschil op de versluierde release dichter bij de +19% die boven aan deze pagina is gemeten. Deze regels behouden de builds waartegen ze liepen in plaats van te worden bewerkt.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB geobfusceerd (payload 32 GB)</th><th>tijd</th><th>CPU</th><th>CPU-s/GB</th><th>piekgeheugen (RSS)</th><th>piek aan extra schijf</th><th>schijf-I/O</th></tr></thead>
@@ -425,7 +440,7 @@
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
     <p><b>nzbfast is 1,51x sneller dan NZBGet 26.2 en 2,55x sneller dan SABnzbd 5.0.4</b> op de meest voorkomende vorm op usenet.</p>
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2 en SABnzbd 5.0.4 op 27 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2 en SABnzbd 5.0.4 op 27 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; 5.1.0 is inmiddels als stable verschenen en meegelopen: met elke client op zijn eigen beste verbindingsinstelling ligt het verschil op de versluierde release dichter bij de +19% die boven aan deze pagina is gemeten. Deze regels behouden de builds waartegen ze liepen in plaats van te worden bewerkt.</p>
     <p>Elke client is getest met 8, 16 en 32 verbindingen per server en staat vermeld op zijn eigen beste instelling, want een concurrent hoort nooit te verliezen door een slechte configuratie. Handig om te weten als u zelf afstelt: <b>NZBGet werd ongeveer twee keer zo traag bij 32 verbindingen</b>, en SABnzbd gedroeg zich in onze eerdere tests hetzelfde. Meer verbindingen is niet meer snelheid. nzbfast bleef over het hele bereik vlak, dus die instelling zal u niet verrassen.</p>
     <p class="note">We controleren ook of elke client de bestanden werkelijk heeft geproduceerd, in plaats van hem op zijn woord te geloven wanneer hij succes meldt. In onze tests meldde een client drie voltooide downloads van elk ongeveer een seconde en had helemaal niets geschreven.</p>
   </div>
@@ -738,7 +753,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, geen bruikbaar bestand</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; op actuele builds ligt het verschil dichter bij de +43% die boven aan deze pagina is gemeten. We laten deze cijfers opnieuw lopen zodra 5.1.0 als stable verschijnt, in plaats van ze te bewerken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 en rustnzb 1.3.4 op 31 juli 2026, en vastgezet op die builds. SABnzbd 5.1 laat de verificatiedoorgang na het downloaden vervallen waar een groot deel van zijn resultaat hier voor betaalt; 5.1.0 is inmiddels als stable verschenen en meegelopen: met elke client op zijn eigen beste verbindingsinstelling ligt het verschil op de versluierde release dichter bij de +19% die boven aan deze pagina is gemeten. Deze regels behouden de builds waartegen ze liepen in plaats van te worden bewerkt.</p>
     <div class="callout"><b>Vaste regel: elke prestatieclaim vermeldt de omstandigheden waaronder hij draaide</b>, inclusief negatieve resultaten en doodlopende wegen.</div>
   </div>
 </section>

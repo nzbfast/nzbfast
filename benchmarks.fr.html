@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Mesuré face à</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 et rustnzb 1.3.9 le 7 août 2026 : M3 Ultra côte est, six fournisseurs, tout en TLS, deux exécutions par client avec l’ordre inversé à la seconde pour que la dérive de la ligne s’annule. &sup1; rustnzb a fait passer 36 GB sur le fil, a déclaré la tâche terminée et a laissé une pièce d’archive de 1 GB sans aucune vidéo extraite : ses cellules d’apparence économe sont le coût de ne pas finir.</p>
 
+    <p><b>D'où vient réellement notre écart sur cette tâche.</b> Nous avons fait courir la version stable 5.1.0 de SABnzbd le soir de sa sortie, le 10 août 2026. Son propre historique sépare une tâche en un téléchargement et une passe de post-traitement, et sur cette version obfusquée le téléchargement prend <b>31 s</b> aux deux réglages de connexions essayés, soit exactement le temps total de nzbfast sur le même corpus, la même nuit, la même ligne. Nous ne téléchargeons donc pas plus vite qu'elle ici et nous ne le prétendons pas : face à la stable actuelle réglée à son propre optimum, l'écart est de <b>+19%</b>, et ces +19% sont sa passe de post-traitement plus le coût de démarrage et d'interrogation, pas le fil. Ce qu'un changement de post-traitement ne peut pas atteindre, c'est le reste de la manche : <b>241&ndash;334 MB</b> de mémoire contre 1,380&ndash;1,827 MB, et <b>32.4 GB</b> de trafic disque contre 65&ndash;99 GB. Ce sont ces colonnes qu'il faut lire.</p>
+
     <p><b>Quatre coûts qu’un temps final ne montre pas.</b></p>
     <ul class="plain">
       <li><b>Disque écrit.</b> Une passe écrit la charge utile une fois : 159.0 GB pour un fichier de 157 GB, contre 387.4 GB et 458.3 GB chez les clients qui déposent chaque partie d’archive sur le disque puis la décompressent. Même tâche, même nuit, versions actuelles des trois.</li>
@@ -88,6 +90,19 @@
       <li><b>Le fait qu’elles aient été vérifiées.</b> nzbfast vérifie chaque bloc face aux données PAR2 postées au fur et à mesure qu’il arrive et répare dans la même passe : la ligne d’arrivée est donc un fichier vérifié. Un client qui ne fait aucune passe de vérification sur un jeu intact rachète son chronomètre en ne répondant pas à la question.</li>
     </ul>
     <p>Deux autres n’apparaissent que quand quelque chose tourne mal. Tuez le processus après 15.6 GB d’une tâche de 35 GB : nzbfast redémarre et la termine en 57 s sans retélécharger un seul octet. Et sur un banc où chaque connexion devient définitivement muette après 25 corps d’article sans jamais se fermer, ce que fait un NAT d’opérateur à un long téléchargement, il termine en 26 s là où les quatre autres clients mettent de 74 à 275 s.</p>
+
+    <p><b>Et un point qu'un changement de réglage ne déplace pas non plus.</b> Le nombre de connexions est le réglage qu'on vous dit toujours d'augmenter : le 10 août 2026, nous avons donc fait courir deux fois la manche complète à cinq clients dans la même soirée, une fois aux maxima par serveur publiés par les comptes, 360 sockets répartis sur cinq fournisseurs, et une fois à 8 par serveur, 40 sockets. Mêmes versions, mêmes corpus, même ligne, avec une manche de contrôle à la fin pour montrer que la ligne elle-même n'avait pas dérivé entre les deux passages. nzbfast bouge d'une seconde sur ce facteur neuf. Tous les autres clients bougent fortement, et ils ne s'accordent pas sur le sens qui aide.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 sockets &rarr; 40 sockets</th><th>34.5 GB obfusqué</th><th>6.6 GB REMUX</th><th>ce que ça veut dire</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">stable : une seconde</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>réclame des sockets, les deux tâches</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>pénalisé par les sockets sur la grosse tâche</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>change de sens selon la tâche</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>pénalisé par les sockets, les deux tâches</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 et rustnzb 1.4.1 le 10 août 2026 : M1 Ultra en Europe, cinq fournisseurs, tout en TLS, les deux passages le même soir, le réglage de sockets appliqué à tous les clients et pas seulement au nôtre. &sup2; rustnzb n'a livré aucun fichier utilisable sur la tâche obfusquée à l'un comme à l'autre réglage : sa ligne se lit comme une sensibilité, pas comme un classement. NZBGet part dans l'autre sens sur la file d'archives stockées plus bas dans cette page, une version plus ancienne sur une autre tâche, et c'est bien le propos : le sens n'est pas une propriété du réglage. Quand un temps final varie autant sur un seul nombre dans un fichier de configuration, ce nombre fait partie du résultat.</p>
     <div class="callout">Sur un téléchargement intact, le post-traitement le plus rapide possible est celui qui n’a pas lieu. Nous égalons ce temps tout en vérifiant chaque bloc à son arrivée : <b>aussi rapide que sauter la vérification, parce que nous ne la sautons jamais.</b></div>
   </div>
 </section>
@@ -172,7 +187,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4 et Weaver v0.7.5 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; sur les versions actuelles l’écart est plus proche des +43% mesurés en haut de cette page. Nous refaisons courir ces chiffres quand 5.1.0 sortira en version stable plutôt que de les corriger.</p>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4 et Weaver v0.7.5 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; la 5.1.0 est depuis sortie en version stable et a été mise en course : chaque client réglé à son propre optimum de connexions, l'écart sur la version obfusquée est plus proche des +19% mesurés en haut de cette page. Ces lignes conservent les versions face auxquelles elles ont couru plutôt que d'être corrigées.</p>
     <p class="note" style="text-align:start">rustnzb a joué toutes les manches et n’a livré de fichier
     utilisable sur aucune : il n’a donc pas de colonne ici, et les détails sont dans la section sur le coût
     ci-dessous. Weaver est mesuré selon son protocole de meilleur cas à chaud (démon persistant, tâche de
@@ -199,7 +214,7 @@
         <tr><td>pic de disque supplémentaire</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; sur les versions actuelles l’écart est plus proche des +43% mesurés en haut de cette page. Nous refaisons courir ces chiffres quand 5.1.0 sortira en version stable plutôt que de les corriger.</p>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; la 5.1.0 est depuis sortie en version stable et a été mise en course : chaque client réglé à son propre optimum de connexions, l'écart sur la version obfusquée est plus proche des +19% mesurés en haut de cette page. Ces lignes conservent les versions face auxquelles elles ont couru plutôt que d'être corrigées.</p>
     <p class="note" style="text-align:start">³ rustnzb a téléchargé en 97 s, a marqué la tâche <i>terminée</i> et a livré les volumes obfusqués bruts : aucun renommage, aucune extraction - sur 1.3.4 comme sur 1.3.9 († son chiffre de disque ne couvre que le téléchargement). nzbfast a déobfusqué depuis les métadonnées PAR2 et extrait au fil de l’eau, zéro bloc relu ; la plage de 76&ndash;83 s correspond à sa première et à sa dernière étape de la série. Face à la version du 23 juillet de ce tableau, la build livrée est plus rapide ici avec 3.4× moins de mémoire (1.55 → 0.45 GB) : le travail en une passe de fin juillet, mesuré sur la même machine et le même corpus.</p>
   </div>
 </section>
@@ -216,7 +231,7 @@
     seule passe mesurée plutôt qu’affirmée : le pic de disque de nzbfast, c’est la charge utile elle-même,
     et ses E/S reviennent à écrire chaque octet une seule fois.</p>
 
-    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; sur les versions actuelles l’écart est plus proche des +43% mesurés en haut de cette page. Nous refaisons courir ces chiffres quand 5.1.0 sortira en version stable plutôt que de les corriger.</p>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; la 5.1.0 est depuis sortie en version stable et a été mise en course : chaque client réglé à son propre optimum de connexions, l'écart sur la version obfusquée est plus proche des +19% mesurés en haut de cette page. Ces lignes conservent les versions face auxquelles elles ont couru plutôt que d'être corrigées.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfusqué (charge utile 32 GB)</th><th>temps</th><th>processeur</th><th>s-proc/GB</th><th>pic de mémoire (RSS)</th><th>pic de disque supplémentaire</th><th>E/S disque</th></tr></thead>
@@ -435,7 +450,7 @@
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
     <p><b>nzbfast est 1,51x plus rapide que NZBGet 26.2 et 2,55x plus rapide que SABnzbd 5.0.4</b> sur la forme la plus répandue de usenet.</p>
-    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2 et SABnzbd 5.0.4 le 27 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; sur les versions actuelles l’écart est plus proche des +43% mesurés en haut de cette page. Nous refaisons courir ces chiffres quand 5.1.0 sortira en version stable plutôt que de les corriger.</p>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2 et SABnzbd 5.0.4 le 27 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; la 5.1.0 est depuis sortie en version stable et a été mise en course : chaque client réglé à son propre optimum de connexions, l'écart sur la version obfusquée est plus proche des +19% mesurés en haut de cette page. Ces lignes conservent les versions face auxquelles elles ont couru plutôt que d'être corrigées.</p>
     <p>Chaque client a été testé à 8, 16 et 32 connexions par serveur et figure à son propre optimum, car un concurrent ne doit jamais perdre pour cause de mauvaise configuration. Bon à savoir si vous réglez votre installation : <b>NZBGet est devenu environ deux fois plus lent à 32 connexions</b>, et SABnzbd s'est comporté de même lors de nos tests précédents. Plus de connexions ne signifie pas plus de vitesse. nzbfast est resté stable sur toute la plage, ce réglage ne vous piégera donc pas.</p>
     <p class="note">Nous vérifions aussi que chaque client a réellement produit les fichiers, au lieu de le croire sur parole quand il annonce avoir réussi. Lors de nos tests, un client a annoncé trois téléchargements terminés en une seconde chacun sans avoir rien écrit du tout.</p>
   </div>
@@ -748,7 +763,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, aucun fichier utilisable</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; sur les versions actuelles l’écart est plus proche des +43% mesurés en haut de cette page. Nous refaisons courir ces chiffres quand 5.1.0 sortira en version stable plutôt que de les corriger.</p>
+    <p class="note" style="text-align:start"><b>Mesuré face à</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 et rustnzb 1.3.4 le 31 juillet 2026, et épinglé à ces versions. SABnzbd 5.1 supprime la passe de vérification post-téléchargement qu’une grande partie de son résultat ici paie ; la 5.1.0 est depuis sortie en version stable et a été mise en course : chaque client réglé à son propre optimum de connexions, l'écart sur la version obfusquée est plus proche des +19% mesurés en haut de cette page. Ces lignes conservent les versions face auxquelles elles ont couru plutôt que d'être corrigées.</p>
     <div class="callout"><b>Règle permanente : chaque affirmation de performance cite les conditions dans lesquelles elle a tourné</b>, résultats négatifs et fausses pistes compris.</div>
   </div>
 </section>

@@ -80,6 +80,8 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Mätt mot</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 och rustnzb 1.3.9 den 7 augusti 2026: M3 Ultra på östkusten, sex providers, allt över TLS, två körningar per klient med omvänd ordning i den andra så att linjedrift tar ut sig. &sup1; rustnzb flyttade 36 GB över tråden, rapporterade jobbet klart och lämnade en 1 GB arkivdel utan någon uppackad video, så dess snålt utseende celler är priset för att inte bli klar.</p>
 
+    <p><b>Var vår marginal på det jobbet faktiskt ligger.</b> Vi körde SABnzbds 5.1.0-stabila samma kväll som den släpptes, den 10 augusti 2026. Dess egen historik delar ett jobb i en nedladdning och en efterbearbetningsomgång, och på den här förvanskade utgåvan tar nedladdningen <b>31 s</b> vid båda anslutningsinställningarna vi provade, vilket är hela nzbfasts tid på samma korpus, samma kväll, samma linje. Vi laddar alltså inte ner snabbare än den här, och vi påstår det inte heller: mot den nuvarande stabila på dess eget bästa värde är avståndet <b>+19%</b>, och de +19% är dess efterbearbetningsomgång plus start- och pollningskostnad, inte tråden. Det en ändring i efterbearbetningen inte når är resten av omgången: <b>241&ndash;334 MB</b> minne mot 1,380&ndash;1,827 MB, och <b>32.4 GB</b> disktrafik mot 65&ndash;99 GB. Det är de kolumnerna att läsa.</p>
+
     <p><b>Fyra kostnader som en sluttid inte visar.</b></p>
     <ul class="plain">
       <li><b>Disk skriven.</b> En passage skriver nyttolasten en gång: 159.0 GB för en 157 GB-fil, mot 387.4 GB och 458.3 GB från de klienter som lägger varje arkivdel på disk och sedan packar upp den. Samma jobb, samma natt, aktuella byggen av alla tre.</li>
@@ -88,6 +90,19 @@
       <li><b>Om det ens kontrollerades.</b> nzbfast verifierar varje block mot de postade PAR2-datan medan det kommer in och reparerar i samma passage, så mållinjen är en verifierad fil. En klient som inte kör någon verifieringspassage alls på en oskadad uppsättning köper tillbaka sin klocka genom att inte svara på frågan.</li>
     </ul>
     <p>Två till syns bara när något går fel. Döda processen 15.6 GB in i ett 35 GB-jobb, så startar nzbfast om och blir klar på 57 s utan att ladda ner en enda byte igen. Och på en rigg där varje anslutning tystnar permanent efter 25 artikelkroppar utan att någonsin stängas, vilket är vad en operatörs-NAT gör med en lång nedladdning, blir den klar på 26 s där de andra fyra klienterna tar 74 till 275 s.</p>
+
+    <p><b>Och en sak som en ändrad inställning inte heller flyttar.</b> Antalet anslutningar är inställningen alla säger åt dig att höja, så den 10 augusti 2026 körde vi hela femklientsomgången två gånger på en kväll: en gång på kontonas publicerade maxvärden per server, 360 socketar över fem leverantörer, och en gång på 8 per server, 40 socketar. Samma byggen, samma korpusar, samma linje, med ett kontrollpass i slutet som visar att linjen själv inte hade drivit mellan de två svepen. nzbfast rör sig en sekund över den niofaldiga ändringen. Alla andra klienter slår kraftigt, och de är inte överens om vilken riktning som hjälper.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 socketar &rarr; 40 socketar</th><th>34.5 GB förvanskad</th><th>6.6 GB REMUX</th><th>vad det betyder</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">stabil: en sekund</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>vill ha socketar, båda jobben</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>skadas av socketar på det stora jobbet</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>byter riktning med jobbet</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>skadas av socketar, båda jobben</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 och rustnzb 1.4.1 den 10 augusti 2026: M1 Ultra i Europa, fem leverantörer, allt över TLS, båda svepen samma kväll, med socketinställningen tillämpad på varje klient och inte bara på vår. &sup2; rustnzb levererade ingen användbar fil på det förvanskade jobbet vid någon av inställningarna, så dess rad läses som känslighet och inte som placering. NZBGet går åt andra hållet på kön med lagrade arkiv längre ner på den här sidan, ett äldre bygge på ett annat jobb, och det är just poängen: riktningen är ingen egenskap hos inställningen. Där en sluttid svänger så här mycket på ett enda tal i en konfigurationsfil är det talet en del av resultatet.</p>
     <div class="callout">På en oskadad nedladdning är den snabbast möjliga efterbearbetningen ingen alls. Vi matchar den tiden och kontrollerar samtidigt varje block medan det kommer in: <b>lika snabbt som att hoppa över kontrollen, för vi hoppar aldrig över den.</b></div>
   </div>
 </section>
@@ -170,7 +185,7 @@
         <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4 och Weaver v0.7.5 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4 och Weaver v0.7.5 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; 5.1.0 har sedan dess släppts som stabil och körts: med varje klient på sin egen bästa anslutningsinställning ligger avståndet på den förvanskade utgåvan närmare de +19% som mäts högst upp på den här sidan. De här raderna behåller de byggen de kördes mot i stället för att redigeras.</p>
     <p class="note" style="text-align:left">rustnzb körde varje etapp och levererade en användbar fil på
     ingen av dem, så den har ingen kolumn här; detaljerna står i kostnadsavsnittet nedan. Weaver mäts
     enligt sitt uppvärmda bästafallsprotokoll (beständig daemon, förkastat uppvärmningsjobb,
@@ -196,7 +211,7 @@
         <tr><td>extra toppdisk</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; 5.1.0 har sedan dess släppts som stabil och körts: med varje klient på sin egen bästa anslutningsinställning ligger avståndet på den förvanskade utgåvan närmare de +19% som mäts högst upp på den här sidan. De här raderna behåller de byggen de kördes mot i stället för att redigeras.</p>
     <p class="note" style="text-align:start">³ rustnzb laddade ned på 97 s, markerade jobbet som <i>klart</i> och levererade de råa obfuskerade volymerna: ingen omdöpning, ingen uppackning - både på 1.3.4 och på 1.3.9 († dess disksiffra är enbart nedladdningen). nzbfast avobfuskerade ur PAR2-metadatan och packade upp under tiden, noll återlästa block; spannet 76&ndash;83 s är dess första och sista etapp i omgången. Mot den 23 juli-versionen av den här tabellen är det levererade bygget här snabbare med 3.4× mindre minne (1.55 → 0.45 GB): enpassarbetet från slutet av juli, mätt på samma maskin och samma korpus.</p>
   </div>
 </section>
@@ -212,7 +227,7 @@
     jobb. Det här är enpass-påståendet uppmätt i stället för påstått: nzbfasts toppdisk är nyttolasten
     själv, och dess I/O motsvarar att skriva varje byte en gång.</p>
 
-    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; 5.1.0 har sedan dess släppts som stabil och körts: med varje klient på sin egen bästa anslutningsinställning ligger avståndet på den förvanskade utgåvan närmare de +19% som mäts högst upp på den här sidan. De här raderna behåller de byggen de kördes mot i stället för att redigeras.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfuskerad (nyttolast 32 GB)</th><th>tid</th><th>CPU</th><th>CPU-s/GB</th><th>toppminne (RSS)</th><th>extra toppdisk</th><th>disk-I/O</th></tr></thead>
@@ -424,7 +439,7 @@
       <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
     </div>
     <p><b>nzbfast är 1,51x snabbare än NZBGet 26.2 och 2,55x snabbare än SABnzbd 5.0.4</b> på den absolut vanligaste formen på usenet.</p>
-    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2 och SABnzbd 5.0.4 den 27 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2 och SABnzbd 5.0.4 den 27 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; 5.1.0 har sedan dess släppts som stabil och körts: med varje klient på sin egen bästa anslutningsinställning ligger avståndet på den förvanskade utgåvan närmare de +19% som mäts högst upp på den här sidan. De här raderna behåller de byggen de kördes mot i stället för att redigeras.</p>
     <p>Varje klient testades med 8, 16 och 32 anslutningar per server och redovisas på sitt eget bästa värde, eftersom en konkurrent aldrig ska förlora på grund av dålig konfiguration. Värt att veta om du finjusterar själv: <b>NZBGet blev ungefär dubbelt så långsam vid 32 anslutningar</b>, och SABnzbd betedde sig likadant i våra tidigare tester. Fler anslutningar är inte mer hastighet. nzbfast låg stabilt över hela intervallet, så den inställningen kommer inte att överraska dig.</p>
     <p class="note">Vi kontrollerar också att varje klient faktiskt producerade filerna, i stället för att tro den på dess ord när den rapporterar att den lyckats. I våra tester rapporterade en klient tre slutförda nedladdningar på ungefär en sekund vardera utan att ha skrivit någonting alls.</p>
   </div>
@@ -735,7 +750,7 @@
         <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">18×, ingen användbar fil</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; på aktuella byggen ligger avståndet närmare de +43% som mäts högst upp på den här sidan. Vi kör om de här siffrorna när 5.1.0 släpps som stabil i stället för att redigera dem.</p>
+    <p class="note" style="text-align:start"><b>Mätt mot</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 och rustnzb 1.3.4 den 31 juli 2026, och fastnaglat vid de byggena. SABnzbd 5.1 tar bort verifieringspassagen efter nedladdningen som en stor del av dess resultat här betalar för; 5.1.0 har sedan dess släppts som stabil och körts: med varje klient på sin egen bästa anslutningsinställning ligger avståndet på den förvanskade utgåvan närmare de +19% som mäts högst upp på den här sidan. De här raderna behåller de byggen de kördes mot i stället för att redigeras.</p>
     <div class="callout"><b>Stående regel: varje prestandapåstående anger de förhållanden det kördes under</b>, negativa resultat och felsteg inräknade.</div>
   </div>
 </section>

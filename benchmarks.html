@@ -93,6 +93,17 @@
     cancels. &sup1; rustnzb moved 36 GB of wire, reported the job done, and left a 1 GB archive
     part with no video extracted, so its cheap-looking cells are the cost of not finishing.</p>
 
+    <p><b>Where our margin on that job actually is.</b> We raced SABnzbd's 5.1.0 stable on the
+    evening it shipped, 10 August 2026. Its own history splits a job into a download and a
+    post-processing pass, and on this obfuscated release the download is <b>31 s</b> at both
+    connection settings we tried, which is nzbfast's entire wall on the same fixture, the same
+    night, the same line. We do not out-download it here and we do not claim to: against the
+    current stable at its own best setting the gap is <b>+19%</b>, and that +19% is its
+    post-processing pass plus start-up and polling overhead, not the wire. What a post-processing
+    change cannot reach is the rest of the round: <b>241&ndash;334 MB</b> of memory against
+    1,380&ndash;1,827 MB, and <b>32.4 GB</b> of disk traffic against 65&ndash;99 GB. Those are the
+    columns to read.</p>
+
     <p><b>Four costs a finish time doesn't show.</b></p>
     <ul class="plain">
       <li><b>Disk written.</b> One pass writes the payload once: 159.0 GB for a 157 GB file,
@@ -114,6 +125,32 @@
     every connection goes permanently silent after 25 article bodies without ever closing, which is
     what a carrier-grade NAT does to a long download, it finishes in 26 s where the other four
     clients take 74 to 275 s.</p>
+
+    <p><b>And one a settings change cannot move either.</b> Connection count is the setting people
+    are told to raise, so on 10 August 2026 we ran the whole five-client round twice in one evening:
+    once at the accounts' published per-server maxima, 360 sockets across five providers, and once
+    at 8 per server, 40 sockets. Same builds, same fixtures, same line, with a control leg at the
+    end to show the line itself had not drifted between the two sweeps. nzbfast moves by one second
+    across that ninefold change. Every other client swings hard, and they do not agree on which
+    direction helps.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>360 sockets &rarr; 40 sockets</th><th>34.5 GB obfuscated</th><th>6.6 GB REMUX</th><th>what it means</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">flat: one second</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>wants sockets, both jobs</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>hurt by sockets on the big job</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>flips direction by job</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>hurt by sockets, both jobs</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>Measured against</b> SABnzbd 5.1.0, NZBGet
+    26.3-testing, Weaver 0.7.8 and rustnzb 1.4.1 on 10 August 2026: Europe M1 Ultra, five
+    providers, all TLS, both sweeps the same evening, with the socket setting applied to every
+    client rather than only to ours. &sup2; rustnzb delivered no usable file on the obfuscated job
+    at either setting, so its row reads as sensitivity and not as a standing. NZBGet moves the
+    other way on the stored-archive queue further down this page, an older build on a different
+    job, and that is the point: the direction is not a property of the setting. Where a finish time
+    swings this far on one number in a settings file, that number is part of the result.</p>
     <div class="callout">On an undamaged download the fastest possible post-processing is none at
     all. We match that wall while checking every block as it arrives: <b>as fast as skipping the
     check, because we never skip it.</b></div>
@@ -212,9 +249,10 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Measured against</b> NZBGet 26.2, SABnzbd 5.0.4 and
     Weaver v0.7.5 on 31 July 2026, and pinned to those builds. SABnzbd 5.1 drops the post-download
-    verify pass that much of its result here pays for; on current builds the gap is nearer the +43%
-    measured at the top of this page. We re-race these numbers when 5.1.0 ships as a stable rather
-    than editing them.</p>
+    verify pass that much of its result here pays for; 5.1.0 has since shipped as a stable and
+    been raced: with every client at its own best connection setting, the obfuscated-release gap
+    is nearer the +19% measured at the top of this page. These rows keep the builds they ran
+    against rather than being edited.</p>
     <p class="note" style="text-align:start">rustnzb ran every leg and delivered a usable file on
     none of them, so it has no column here; the details are in the cost section below. Weaver is
     measured under its warm best-case protocol (persistent daemon, discarded warm-up job,
@@ -245,9 +283,10 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Measured against</b> NZBGet 26.2, SABnzbd 5.0.4,
     Weaver v0.7.5 and rustnzb 1.3.4 on 31 July 2026, and pinned to those builds. SABnzbd 5.1 drops
-    the post-download verify pass that much of its result here pays for; on current builds the gap
-    is nearer the +43% measured at the top of this page. We re-race these numbers when 5.1.0 ships
-    as a stable rather than editing them.</p>
+    the post-download verify pass that much of its result here pays for; 5.1.0 has since shipped
+    as a stable and been raced: with every client at its own best connection setting, the
+    obfuscated-release gap is nearer the +19% measured at the top of this page. These rows keep
+    the builds they ran against rather than being edited.</p>
     <p class="note" style="text-align:start">³ rustnzb downloaded in 97 s, marked the job
     <i>done</i>, and shipped the raw obfuscated volumes: no rename, no extraction - on 1.3.4
     and on 1.3.9 alike († its disk figure is the download alone). nzbfast deobfuscated from
@@ -270,9 +309,10 @@
     and its I/O equals writing each byte once.</p>
     <p class="note" style="text-align:start"><b>Measured against</b> NZBGet 26.2, SABnzbd 5.0.4,
     Weaver v0.7.5 and rustnzb 1.3.4 on 31 July 2026, and pinned to those builds. SABnzbd 5.1 drops
-    the post-download verify pass that much of its result here pays for; on current builds the gap
-    is nearer the +43% measured at the top of this page. We re-race these numbers when 5.1.0 ships
-    as a stable rather than editing them.</p>
+    the post-download verify pass that much of its result here pays for; 5.1.0 has since shipped
+    as a stable and been raced: with every client at its own best connection setting, the
+    obfuscated-release gap is nearer the +19% measured at the top of this page. These rows keep
+    the builds they ran against rather than being edited.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>35 GB obfuscated (payload 32 GB)</th><th>time</th><th>CPU</th><th>CPU-s/GB</th><th>peak memory (RSS)</th><th>peak extra disk</th><th>disk I/O</th></tr></thead>
@@ -574,9 +614,10 @@
     single most common shape on usenet.</p>
     <p class="note" style="text-align:start"><b>Measured against</b> NZBGet 26.2 and SABnzbd 5.0.4
     on 27 July 2026, and pinned to those builds. SABnzbd 5.1 drops the post-download verify pass
-    that much of its result here pays for; on current builds the gap is nearer the +43% measured at
-    the top of this page. We re-race these numbers when 5.1.0 ships as a stable rather than editing
-    them.</p>
+    that much of its result here pays for; 5.1.0 has since shipped as a stable and been raced:
+    with every client at its own best connection setting, the obfuscated-release gap is nearer
+    the +19% measured at the top of this page. These rows keep the builds they ran against
+    rather than being edited.</p>
     <p>Every client was checked at 8, 16 and 32 connections per server and is shown at its
     own best, because a competitor should never lose for being badly configured. Worth
     knowing if you tune your own setup: <b>NZBGet got about twice as slow at 32
@@ -965,9 +1006,10 @@
     </table></div>
     <p class="note" style="text-align:start"><b>Measured against</b> NZBGet 26.2, Weaver v0.7.5,
     SABnzbd 5.0.4 and rustnzb 1.3.4 on 31 July 2026, and pinned to those builds. SABnzbd 5.1 drops
-    the post-download verify pass that much of its result here pays for; on current builds the gap
-    is nearer the +43% measured at the top of this page. We re-race these numbers when 5.1.0 ships
-    as a stable rather than editing them.</p>
+    the post-download verify pass that much of its result here pays for; 5.1.0 has since shipped
+    as a stable and been raced: with every client at its own best connection setting, the
+    obfuscated-release gap is nearer the +19% measured at the top of this page. These rows keep
+    the builds they ran against rather than being edited.</p>
     <div class="callout">Standing rule: <b>every performance claim cites the conditions it ran
     under</b>, negative results and wrong turns included.</div>
   </div>
