@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why damaged posts matter - nzbfast</title>
+<meta name="description" content="What a missing article is, why asking a server for one costs between 79 ms and 2.2 seconds, and why the useful fix is to stop asking rather than to ask faster.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html" class="on">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.html" style="color:inherit">Explained</a> &middot; two</p>
+  <h1>Why damaged posts matter</h1>
+  <p class="sub">A download that goes perfectly is the easy case, and every client handles it
+  competently. The interesting differences appear when part of the post is missing, which happens
+  far more often than the clean case would suggest. This is what is actually going on, and why it
+  costs so much time.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The shape of the problem</p>
+    <h2>What a missing article is</h2>
+    <p class="lead">A Usenet post is not one file. It is thousands of small articles, each stored
+    independently on each provider's servers, and the NZB you download is a list of their names.
+    A 6.5 GB release is roughly 9,000 of them.</p>
+
+    <p>Articles go missing for ordinary reasons. Providers keep them for a fixed retention period
+    and then delete them. Some providers never received a particular article in the first place,
+    because propagation between servers is imperfect. Occasionally an upload was incomplete when it
+    was posted, and part of it never existed anywhere. Whatever the cause, the effect is the same:
+    your client asks for an article, and the answer is a refusal rather than data.</p>
+
+    <p>This is normal enough that the people who post to Usenet plan for it. Almost every release
+    ships with <b>parity data</b> alongside it, usually PAR2 files, which is extra redundant
+    information calculated from the original. If some of the payload is missing, parity can
+    reconstruct it, provided you have enough of it. A typical post carries around 10% parity, so a
+    post can lose a fair fraction of itself and still be perfectly recoverable.</p>
+
+    <div class="callout">
+      <p>So a damaged post is not usually a broken download. It is a download that requires some
+      arithmetic before it is complete. The question is only how long a client takes to work that
+      out, and that is where they differ by a factor of two or more.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The expensive part</p>
+    <h2>Asking for something nobody has</h2>
+    <p class="lead">When a server does not have an article it returns a refusal, and the client
+    then tries the next server on your list. That is the correct thing to do, because the second
+    provider very often does have it. The cost appears when nobody has it.</p>
+
+    <p>In that case the client walks your entire provider list, one server at a time, and gets
+    refused by every one of them before it can conclude the article is genuinely gone. The walk is
+    serial, and refusals are slower than people assume. We measured them directly, on an idle line,
+    with no payload moving at all:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>provider</th><th class="num">time to answer a normal request</th><th class="num">time to refuse a missing article</th></tr></thead>
+      <tbody>
+        <tr><td>Provider A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Provider B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Provider C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Provider D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Provider E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Two things stand out. First, the spread is enormous: <b>a refusal costs anywhere between
+    79 ms and 2.2 seconds</b> depending on which provider is answering, a difference of nearly
+    thirtyfold. Second, one provider refuses in essentially the time it takes to ask, while another
+    takes more than two hundred times its own normal response time to say no. That is not network
+    latency, it is work happening on their side, and asking in fewer round trips barely helps.</p>
+
+    <p>Add it up and a full walk across five providers, for a single article that no longer exists,
+    costs about <b>5 seconds</b>. Now consider that a damaged post has many such articles, and that
+    a client which processes them in sequence pays that cost repeatedly while your connection sits
+    idle. The download is not slow because the data is arriving slowly. It has stopped arriving at
+    all, and the client is waiting to be told what it already has enough information to work out.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The fix</p>
+    <h2>Stop asking, and repair instead</h2>
+    <p class="lead">The insight is not to make refusals faster, because we do not control the
+    providers. It is to notice when the answer no longer matters.</p>
+
+    <p>At any moment during a download, the client knows two things: how many pieces are still
+    unaccounted for, and how much parity data it already holds. If the parity in hand is enough to
+    rebuild everything still outstanding, then the answer to "does anybody have this article?"
+    cannot change the outcome. Whether it is a slow yes or a slow no, the file gets rebuilt either
+    way. Continuing the walk buys nothing except delay.</p>
+
+    <p>So the current build stops asking at that point and goes straight to repair. The
+    reconstruction itself is quick and always was: about <b>2.3 seconds</b> on a 6.5 GB post, and
+    that figure is the same in every version we have measured. The time saved is entirely the
+    waiting that no longer happens.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>6.5 GB post, 60 missing articles</th><th class="num">time to a verified file</th></tr></thead>
+      <tbody>
+        <tr><td>waiting for every provider to refuse</td><td class="num">23 s</td></tr>
+        <tr><td><b>stopping once parity covers the gap</b></td><td class="win">13 s</td></tr>
+        <tr><td>of which, the actual repair arithmetic</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>The same change does nothing at all on an undamaged post, which is the clearest evidence
+    that it is doing what we think: with no missing articles there is no walk to cut short, and the
+    two builds finish a clean 6.5 GB job in an identical 7 seconds.</p>
+
+    <p><b>It is a trade, not a free win.</b> Repairing early means holding the parity data in
+    memory instead of discarding it and fetching more later, so peak memory (RSS) on a heavily
+    damaged post rises from about 0.8 GB to about 1.3 GB, and we pull roughly 400 MB more from the
+    providers. On an undamaged post memory is unchanged at 0.24 GB. We think that is the right
+    trade for most people, since the memory is only spent in the case where it buys you ten
+    seconds, but it is a real cost and there is a setting for it.</p>
+
+    <p class="note" style="text-align:start">Provider names are withheld in the refusal table
+    deliberately. The figures are a property of one measurement on one evening from one location,
+    and a provider that indexes differently, or that we happened to reach on a bad night, should
+    not be labelled slow on the strength of a single round. What matters for the argument is the
+    shape: refusals vary enormously, and the total is large enough to dominate a damaged download.
+    The per-provider figures and the raw probe output are in our internal record, and the
+    end-to-end numbers they explain are on the <a href="benchmarks.html#damaged">benchmarks
+    page</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Refusal timings measured 11 August 2026 from London across five providers, one
+  connection each, on an idle line with no payload transferred. End-to-end damaged-post figures
+  from the same evening's six-client round; see the benchmarks page for the full tables, the client
+  versions and the legs we lose.</p>
+</div></footer>
+
+</body>
+</html>

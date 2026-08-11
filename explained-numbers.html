@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What the numbers mean - nzbfast</title>
+<meta name="description" content="A reader's guide to the measured columns: time to a usable file, peak memory, processor seconds, peak disk and volume I/O, and what a good or bad value looks like.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html" class="on">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.html" style="color:inherit">Explained</a> &middot; four</p>
+  <h1>What the numbers mean</h1>
+  <p class="sub">Five columns appear across most of our tables. Here is what each one measures,
+  why it is worth publishing, and roughly what a good or bad value looks like on a machine you
+  actually own.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The headline</p>
+    <h2>Time to a usable file</h2>
+    <p class="lead">The clock starts when the job is added and stops when the finished payload
+    exists on disk, verified and extracted. Not when the download completes, and not when the
+    client says it is done.</p>
+
+    <p>This is the only number that corresponds to something you experience. A client can finish
+    downloading quickly and then spend a minute checking and unpacking, and from where you are
+    sitting that minute is part of the wait. Measuring the download alone would flatter clients
+    that do their work afterwards, which is most of them.</p>
+
+    <p>It is also why our architecture looks unusual in these tables. We verify each piece as it
+    arrives and unpack while the download is still running, so when the last article lands there is
+    very little left to do. Other clients stage the whole post to disk, then verify it, then unpack
+    it, as three phases in sequence. On an easy job the difference is modest. On a large or damaged
+    one it is most of the result.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The one people misread</p>
+    <h2>Peak memory (RSS)</h2>
+    <p class="lead">The largest amount of memory the program held at any moment during the job.
+    RSS stands for resident set size, which is simply the memory actually in RAM rather than
+    promised or reserved.</p>
+
+    <p>Higher is not automatically worse, and lower is not automatically better. Memory is being
+    spent to avoid doing something more expensive, usually reading the same data from disk twice.
+    The question worth asking is whether the spending buys anything and whether it is bounded.</p>
+
+    <p><b>Bounded is the important word.</b> A client whose memory grows with the size of the job
+    will eventually meet a job it cannot finish on your machine, and the failure arrives as
+    swapping or a killed process rather than a polite message. We hold a budget and stay inside it,
+    which is why we can put a 190 GB job through a machine with about 1.1 GB of memory available to
+    us. A figure like 9.3 GB on a 190 GB job is not merely large, it is a different shape: it
+    scales with the work.</p>
+
+    <p>Where our own memory rises, we try to say what it bought. On heavily damaged posts the
+    current build holds parity data in memory in order to repair immediately rather than fetch more
+    later, which takes peak memory from about 0.8 GB to about 1.3 GB and saves about ten seconds.
+    On an undamaged post that spending does not happen and the figure is 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The energy proxy</p>
+    <h2>Processor seconds (CPU time)</h2>
+    <p class="lead">The total processor time consumed across the whole program, added up across
+    every core. It is a measure of work done rather than time elapsed, so it can be much larger
+    than the clock.</p>
+
+    <p>If a job takes 100 seconds and reports 1,600 processor seconds, roughly sixteen cores were
+    busy for the whole run. That matters for three practical reasons: it is heat, it is electricity,
+    and on a machine doing anything else at the same time it is contention. A client that finishes
+    in a reasonable time while saturating every core has not been efficient, it has been
+    expensive.</p>
+
+    <p>This column is where the widest differences on the whole site appear, wider than any finish
+    time. For byte-identical output on the same damaged post, we have measured a thirtyfold spread
+    in processor seconds between clients. It is worth checking before you assume two clients that
+    finish within a few seconds of each other are doing comparable amounts of work.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The two disk columns</p>
+    <h2>Peak disk, and volume I/O</h2>
+    <p class="lead">Peak disk is the most extra space the job needed at any one moment. Volume I/O
+    is the total amount of data read and written to get there. They answer different questions.</p>
+
+    <p><b>Peak disk is a hard constraint.</b> It decides whether the job can run at all. Most
+    clients write the complete post to disk and then unpack a second copy alongside it, so they
+    need roughly twice the payload in free space. For a 190 GB job that is about 313 GB free before
+    you start, against about 157 GB for us, because we unpack while downloading and never
+    materialise the archive volumes. If your disk cannot hold twice the job, that difference is not
+    a percentage, it is whether the download happens.</p>
+
+    <p><b>Volume I/O is wear and time.</b> Writing the post, reading it back to verify, reading it
+    again to unpack and writing the output is four passes over the data. Doing it in one pass is
+    roughly a third of the traffic, which on a solid-state disk is drive lifetime, and on a slower
+    disk is often the actual bottleneck rather than the network.</p>
+
+    <p class="note" style="text-align:start">A note on how we read these two, because it caught us
+    out and might catch you out reading our tables. Both figures come from counters that cover the
+    whole disk, not a single program. That makes them an excellent check on whether a benchmark was
+    contaminated by something else running, and it means a number that looks impossible usually is:
+    a 6.5 GB job reporting 144 GB of disk traffic is not a client behaving strangely, it is two
+    jobs sharing a machine.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Reading a table</p>
+    <h2>Three habits worth having</h2>
+    <ul class="plain">
+      <li><b>Read across a row before comparing columns.</b> Most of our tables put the same client
+      under several conditions. The interesting information is usually how a client's number
+      changes between an easy job and a hard one, not where it sits on any single job.</li>
+      <li><b>Check what the finish line was.</b> A time is only comparable to another time if both
+      clients reached the same state. We hash every output against a known-good copy for exactly
+      this reason, and a client that did not get there is marked rather than timed.</li>
+      <li><b>Prefer ranges to averages when a spread is wide.</b> Where we publish a range instead
+      of a single figure it is deliberate: it means the individual runs disagreed enough that an
+      average would misrepresent them, and we would rather show that than hide it.</li>
+    </ul>
+
+    <p>The tables themselves, with the build and date beside each one, are on the
+    <a href="benchmarks.html">benchmarks page</a>, including the legs we lose.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

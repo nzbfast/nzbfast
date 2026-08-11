@@ -34,6 +34,7 @@
     <a href="features.html">Features</a>
     <a href="indexer.html">Indexer</a>
     <a href="benchmarks.html" class="on">Benchmarks</a>
+    <a href="explained.html">Explained</a>
     <a href="MANUAL.html">Docs</a>
     <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
     <a class="cta" href="download.html">Download</a>
@@ -53,7 +54,7 @@
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">On this page</p>
-  <nav aria-label="On this page" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The setup</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What a job costs you</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What usenet actually posts</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Stored archives: a queue of jobs</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Encrypted archives: half the writing</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → a 157 GB file, in half the disk space (Europe, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Time to usable file, by job size</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-named 4K → usable mkv (East Coast)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Keeping the line lit across a queue (East Coast, ~43 GB)</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The legs we don&#x27;t win</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The low-memory ladder: 190 GB in ~1.1 GB of RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ten nested shapes: who finishes without you</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Client ceiling: 9.68 GB served from RAM, and you can rebuild it</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The more technical benchmarks, for people who like more data</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What each client can do</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The engine saturates real lines</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What a job costs the machine</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tracking the next releases</a></nav>
+  <nav aria-label="On this page" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The setup</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What a job costs you</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What usenet actually posts</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Stored archives: a queue of jobs</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Encrypted archives: half the writing</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → a 157 GB file, in half the disk space (Europe, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Time to usable file, by job size</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB hash-named 4K → usable mkv (East Coast)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Keeping the line lit across a queue (East Coast, ~43 GB)</a><a href="#damaged" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">When the post has holes in it</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The legs we don&#x27;t win</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The low-memory ladder: 190 GB in ~1.1 GB of RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Ten nested shapes: who finishes without you</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Client ceiling: 9.68 GB served from RAM, and you can rebuild it</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The more technical benchmarks, for people who like more data</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What each client can do</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">The engine saturates real lines</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">What a job costs the machine</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">Tracking the next releases</a></nav>
 </div>
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
@@ -379,8 +380,9 @@
     superlinearly (94 → 315 → 809 GB, 3.0× → 5.1× ours) because its encrypted-at-rest store
     re-reads and re-writes nearly everything, which is also why the time it takes scales the way it
     does. And the disk column is a hard constraint, not a preference: the 190 GB job needs ~313 GB
-    free on every write-out-and-unpack client, 157 GB on nzbfast. A damaged post from the same
-    morning: 7 GB with 20 dead articles, repaired and extracted in 26 s end to end.</p>
+    free on every write-out-and-unpack client, 157 GB on nzbfast. Damaged posts have their own
+    round now, re-measured on the current build: see <a href="#damaged">when the post has holes in
+    it</a>.</p>
   </div>
 </section>
 
@@ -420,6 +422,88 @@
     borrowed connections. In the resilience variant (one job with encrypted
     RAR headers, older round), SABnzbd's queue wedged on the encrypted job and only 1 of 3
     jobs ever completed; nzbfast parked it with a clear message and finished the rest.</p>
+  </div>
+</section>
+
+<section id="damaged">
+  <div class="wrap">
+    <p class="kicker">Scenario 5 &middot; damaged post</p>
+    <h2>When the post has holes in it: 6.5 GB with 60 dead articles</h2>
+    <p class="lead">Every scenario above assumes the post arrives whole. Plenty do not - articles
+    expire, a server quietly drops them, an upload lands incomplete - and that is the case this
+    engine was designed around. It is also where the gap between clients is widest. Measured
+    11 August 2026 on the 10 GbE machine, all six arms raced in one alternating round, three
+    repetitions each, 20 connections per server, five providers. The same 6.5 GB REMUX in three
+    states: 60 dead articles, 5 dead articles, and undamaged as the control. Every leg's output was
+    hashed against the known-good file, and 53 of the 56 legs came back byte-identical to it.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>time to a verified, usable file</th><th class="num">60 dead articles</th><th class="num">5 dead articles</th><th class="num">undamaged</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.0.24</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="win">7 s</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">30 s</td><td class="num">18&ndash;21 s</td><td class="num">12 s</td></tr>
+        <tr><td>SABnzbd 5.1.0</td><td class="num">34 s</td><td class="num">23 s</td><td class="num">14&ndash;20 s</td></tr>
+        <tr><td>rustnzb 1.4.4</td><td class="num">102 s</td><td class="num">45 s</td><td class="num">17&ndash;19 s</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="bad">did not finish¹</td><td class="num">194 s</td><td class="num">32&ndash;65 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Read across the row rather than down the column. On an undamaged post the spread is
+    ordinary: we finish a 6.5 GB job in 7 s against NZBGet's 12, about 1.7&times;. Put 60 dead
+    articles in the same post and the spread widens to <b>2.3&times;</b>, and every client except
+    ours spends most of the extra time doing nothing at all. Damage is not a corner case that
+    costs everyone equally; it is the case that separates the designs.</p>
+
+    <p><b>What the waiting actually is.</b> When an article is missing, a client asks the next
+    server, then the next, until every server has refused it. That walk is serial and it is slow
+    for reasons outside anyone's control: a refusal takes between 79 ms and 2.2 s depending which
+    backbone answers, and a full walk across five of them comes to about 5 s. Do that for the
+    tail of a damaged post and the download sits at zero while the clock runs. Most of NZBGet's
+    30 s and our own older 23 s is exactly this, not repair arithmetic - the repair itself takes
+    about 2.3 s in every version we have measured.</p>
+
+    <p><b>What this release changed.</b> Today's build stops asking. Once the parity data already
+    in hand covers what is still missing, there is nothing to be gained by finishing the walk, so
+    it repairs immediately instead. Both versions below were raced in this same round, so this is
+    a before and after rather than two numbers from different days:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th class="num">60 dead articles</th><th class="num">5 dead articles</th><th class="num">undamaged</th></tr></thead>
+      <tbody>
+        <tr><td>nzbfast 1.0.23 (yesterday's build)</td><td class="num">23 s</td><td class="num">16 s</td><td class="num">7 s</td></tr>
+        <tr><td><b>nzbfast 1.0.24 (this release)</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="num">7 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>A heavily damaged post finishes in a little over half the time it did yesterday, and an
+    undamaged one is unchanged at 7 s, which is the point: the change only does anything when
+    articles are actually missing. We confirmed that directly rather than inferring it, by running
+    the same new build with the behaviour switched off - it returns to 23&ndash;25 s, landing on
+    the older version almost exactly.</p>
+
+    <p><b>What it costs, because it is not free.</b> Repairing early means holding recovery data in
+    memory rather than fetching it later, so on a heavily damaged post peak memory (RSS) rises from
+    about 0.8 GB to about 1.3 GB, and we pull roughly 400 MB more from the servers. On an
+    undamaged post nothing changes: peak memory is 0.24 GB either way, the same as the older build.
+    If your constraint is the smallest possible memory footprint on damaged posts specifically,
+    that trade is now going the other way for us, and the setting is in the dashboard.</p>
+
+    <p class="note" style="text-align:start">¹ Weaver did not finish any of the three legs at 60
+    dead articles, in 20 minutes each. It is not a slow result but a stalled one: it completed 1 of
+    the 73 files in the post within the first second, then made no further progress for the
+    remaining 18&nbsp;minutes while holding connections open, and left partial volumes on disk. The
+    column is marked as a non-finish rather than timed, on the same rule we apply to every client
+    here. It is specific to heavy damage - at 5 dead articles it completed correctly in 194 s, and
+    undamaged in 32 s - so this is one shape it cannot currently get through rather than a general
+    failure. <b>NZBGet's 5-article column is quoted as a range on purpose.</b> At this connection
+    setting its three legs were tight (18, 21, 18 s), but at higher connection counts we have
+    repeatedly measured the same client splitting into two clusters on this fixture, roughly 18 s
+    and 28 s with nothing between, so a single averaged number would misrepresent it either way.
+    We have not established the cause and do not claim one. <b>rustnzb's 102 s</b> arrives with
+    every byte correct, and the cost sits in processor time rather than reliability: about 1,630
+    CPU-seconds against a 102 s clock, roughly sixteen cores busy for the whole leg, where the same
+    output costs us 52 CPU-seconds. Client versions and the full per-leg figures are in the
+    footer note.</p>
   </div>
 </section>
 
@@ -1100,6 +1184,7 @@
       <a href="features.html">Features</a> ·
       <a href="indexer.html">Indexer</a> ·
       <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
       <a href="download.html">Download</a> ·
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
@@ -1110,7 +1195,12 @@
   version string of its own). Plus the current-builds legs of 6 to 9 August 2026, racing SABnzbd
   5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 and rustnzb 1.3.9; every table that names 5.0.4,
   26.2, v0.7.5 or 1.3.4 is pinned to those builds and gets re-raced, not edited, when the next
-  stables ship.
+  stables ship. The damaged-post round is newer than the rest of this page and stands on its
+  own: <b>11 August 2026</b>, nzbfast 1.0.24 and 1.0.23 raced beside SABnzbd 5.1.0 stable,
+  NZBGet 26.3-testing, rustnzb 1.4.4 and Weaver 0.7.8, six arms in one alternating round of 56
+  legs at 20 connections per server. Each of the 53 legs that finished produced a file
+  byte-identical to the known-good original, checked by size and MD5 on every leg rather than
+  on a sample.
   If a newer version of any client materially changes a result, we'll re-run and update - the
   "Tracking the next releases" section above is that promise being kept ahead of time.
   The headline provider legs (35, 77 and 190 GB) and the instrumented cost round were re-measured

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Explained - nzbfast</title>
+<meta name="description" content="The reasoning behind the numbers: what actually happens when a post has missing articles, how we run the benchmarks and judge a result, and what each measured column means.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained.html">
+<link rel="alternate" hreflang="x-default" href="explained.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html" class="on">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>Explained</h1>
+  <p class="sub">The benchmarks page is a table of results. This is the reasoning underneath it:
+  what actually goes wrong with a Usenet post and why it costs time, how we run a round and what
+  makes a result count, and what each column we publish is really measuring. Written for people
+  who want to check our thinking rather than take the numbers on trust.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <a class="card" href="explained-onepass.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">One</p>
+        <h2 style="margin-top:2px">How one-pass downloading works</h2>
+        <p>The architecture the rest of the site keeps referring to. What happens to the bytes,
+        why it is a different thing from direct unpack, which archive shapes survive it, and what
+        removing the write-and-read-back cycle is worth in disk, processor time and memory.</p>
+      </a>
+      <a class="card" href="explained-damaged.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Two</p>
+        <h2 style="margin-top:2px">Why damaged posts matter</h2>
+        <p>Posts arrive with holes in them more often than people expect, and that is where clients
+        differ most. What a missing article is, why asking for one is expensive, and why the fix is
+        to stop asking rather than to ask faster.</p>
+      </a>
+      <a class="card" href="explained-method.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Three</p>
+        <h2 style="margin-top:2px">How we test, in full</h2>
+        <p>The machines, the fixtures, the settings each client gets, and the rules that decide
+        whether a leg counts at all. Includes the checks that exist because we got something wrong
+        once and would rather not repeat it.</p>
+      </a>
+      <a class="card" href="explained-numbers.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Four</p>
+        <h2 style="margin-top:2px">What the numbers mean</h2>
+        <p>Time to a usable file, peak memory, processor seconds, peak disk, volume I/O. What each
+        one is, why we publish it, and what a good or bad value actually looks like on a machine
+        you own.</p>
+      </a>
+      <div class="card">
+        <p class="kicker">And the raw data</p>
+        <h2 style="margin-top:2px">The tables themselves</h2>
+        <p>Every measured result lives on the <a href="benchmarks.html">benchmarks page</a>, with
+        the build and the date beside each table, including the legs we lose. These pages explain
+        it; that page is the evidence.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

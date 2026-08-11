@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How one-pass downloading works - nzbfast</title>
+<meta name="description" content="What one-pass actually does, why it is not the same thing as direct unpack, which archive shapes it handles, and why removing the write-and-read-back cycle saves disk, processor time and memory.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html" class="on">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.html" style="color:inherit">Explained</a> &middot; one</p>
+  <h1>How one-pass downloading works</h1>
+  <p class="sub">Most of what makes this client fast is not a faster network path. It is that the
+  data only moves once. This is what that means in practice, why it is a different thing from
+  direct unpack, which archive shapes survive it, and what removing the write-and-read-back cycle
+  is actually worth on a real machine.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The starting point</p>
+    <h2>What a Usenet download traditionally does</h2>
+    <p class="lead">A post is thousands of small encoded articles that together form a set of
+    archive volumes, which in turn contain the file you actually want. Getting from one to the
+    other has traditionally been four separate jobs, each finishing before the next begins.</p>
+
+    <ol>
+      <li><b>Download and decode.</b> Fetch every article, decode it, and write the reassembled
+      archive volumes to disk. For a 60 GB release that is 60 GB written.</li>
+      <li><b>Verify.</b> Read all 60 GB back off the disk to check it against the parity data, and
+      repair it if anything is wrong.</li>
+      <li><b>Unpack.</b> Read the volumes again, and write the extracted payload alongside them.
+      Now 120 GB is on the disk.</li>
+      <li><b>Clean up.</b> Delete the volumes, leaving the payload.</li>
+    </ol>
+
+    <p>Every stage is correct, and the result is right. But the payload has been written twice,
+    read at least twice, and at the high-water mark the disk had to hold two complete copies of a
+    job you only wanted one copy of. The clock you experience is all four stages in sequence, which
+    is why a client can report a fast download and still keep you waiting.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The change</p>
+    <h2>Doing it once instead</h2>
+    <p class="lead">One-pass means the bytes go from the network to their final destination
+    without ever becoming an archive file on your disk. There is no stage two or three, because
+    the work of both happens while stage one is still running.</p>
+
+    <p>In practice, as each article arrives it is decoded in memory and handed straight to two
+    things at once. The verifier checks it against the parity data immediately, so correctness is
+    established as the data lands rather than by re-reading it later. The extractor treats the
+    incoming bytes as a position within the archive, works out which part of which payload file
+    they belong to, and writes them there.</p>
+
+    <p>The archive volumes are never assembled. They exist as a structure the extractor understands
+    while the download is in flight, and the only thing that reaches your disk is the file you
+    wanted. When the last article arrives there is essentially nothing left to do, which is why our
+    finish times sit close to the download time itself rather than a download plus a tail.</p>
+
+    <div class="callout">
+      <p>The measurable consequence: for the same job we write about half as much, read far less
+      back, and need roughly the payload's own size in free space rather than twice it. On a
+      190 GB release that is about 157 GB of free space against about 313 GB, and roughly a third
+      of the disk traffic.</p>
+    </div>
+
+    <p>Two things make this harder than it sounds, and they are the reason it is uncommon. Articles
+    do not arrive in order, so the extractor has to cope with bytes landing at arbitrary positions
+    rather than as a stream from the beginning. And a compressed archive cannot be decompressed
+    from the middle, so any part of the work that genuinely requires order has to be recognised and
+    handled differently rather than assumed away.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The comparison people ask about</p>
+    <h2>Why this is not direct unpack</h2>
+    <p class="lead">Direct unpack is a good feature and the clients that have it are better for
+    having it. It is also solving a different part of the problem, and the difference shows up
+    exactly where it matters.</p>
+
+    <p>Direct unpack starts extracting before the download has finished, so stage three overlaps
+    stage one instead of following it. What it does not do is remove stage one. <b>The archive
+    volumes are still written to your disk in full</b>, because the unpacker is a conventional one
+    reading conventional files; direct unpack simply starts it earlier. The two copies still exist,
+    the two writes still happen, and the free space requirement is unchanged.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>write the volumes to disk</th><th class="num">free space needed</th><th class="num">times the payload is written</th></tr></thead>
+      <tbody>
+        <tr><td>Download, then unpack</td><td>yes, then read back</td><td class="num">~2&times; the job</td><td class="num">2</td></tr>
+        <tr><td>Direct unpack</td><td>yes, read back sooner</td><td class="num">~2&times; the job</td><td class="num">2</td></tr>
+        <tr><td><b>One-pass</b></td><td class="win">never written</td><td class="win">~1&times; the job</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>The second difference is what happens when the shape is not simple. Because direct unpack
+    hands work to a conventional unpacker as volumes appear, it needs the situation to be
+    straightforward: the volumes present in a usable order, no repair pending, nothing that has to
+    be unlocked first, and an archive whose contents are not themselves archives. When any of that
+    fails, the sensible thing for it to do is stand down and fall back to unpacking at the end,
+    which is what happens. You get a correct result and the ordinary timing.</p>
+
+    <p>Because our extractor is built around out-of-order bytes from the start, those situations
+    are not exceptions to it. That is the real distinction: not that we start earlier, but that we
+    are not relying on conditions which frequently do not hold.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">What actually survives it</p>
+    <h2>The shapes it copes with</h2>
+    <p class="lead">A design like this is only worth having if it applies to the posts you actually
+    encounter, rather than to a clean best case. The current position: <b>no container format is
+    handled on disk only.</b> RAR, 7z and zip all go through the one-pass path.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>shape</th><th>one-pass</th><th>notes</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, stored (no compression)</td><td class="yes">yes</td><td>the common case for media releases</td></tr>
+        <tr><td>RAR, compressed</td><td class="yes">yes</td><td>including a compressed archive as the outer layer</td></tr>
+        <tr><td>RAR 1.5, 3, 4 and 5</td><td class="yes">yes</td><td>all four generations of the format</td></tr>
+        <tr><td>7z</td><td class="yes">yes</td><td>including deflate-compressed contents</td></tr>
+        <tr><td>zip</td><td class="yes">yes</td><td>including bzip2 and LZMA contents</td></tr>
+        <tr><td>Encrypted contents</td><td class="yes">yes</td><td>with a password, including encrypted zip</td></tr>
+        <tr><td>Encrypted headers</td><td class="yes">yes</td><td>where the file names are hidden too</td></tr>
+        <tr><td>Password chains</td><td class="yes">yes</td><td>each layer's password packed in the layer above it</td></tr>
+        <tr><td>Nested archives</td><td class="yes">yes</td><td>denested on the fly, to a configurable depth</td></tr>
+        <tr><td>Damaged at several layers</td><td class="yes">yes</td><td>repair at each level, still one pass</td></tr>
+        <tr><td>Numerically split sets</td><td class="yes">yes</td><td><code>name.001</code> style splits</td></tr>
+        <tr><td>Self-extracting archives</td><td class="no">disk pass</td><td>the archive does not begin at the start of the file</td></tr>
+        <tr><td>Spanned zip (<code>.z01</code>)</td><td class="no">disk pass</td><td>and some rarer zip variants</td></tr>
+        <tr><td>Resumed jobs</td><td class="no">disk pass</td><td>a job continued after a restart finishes conventionally</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>The three declines are honest ones and they behave the same way: the job completes
+    correctly, using the conventional path, and you get the ordinary two-copy timing for that
+    download. Nothing fails; it just stops being fast in the way the rest of this page describes.
+    Self-extracting archives are declined for a structural reason rather than a lack of effort, in
+    that identifying an archive from its first bytes cannot work when the first bytes are a
+    program.</p>
+
+    <p>The nested and encrypted rows are the ones worth taking seriously, because they are where
+    most clients hand the job back to you. On a generated corpus of ten nested shapes, graded by
+    content hash so that a client which renames the payload still gets credit, <b>we completed 9 of
+    10 without intervention</b>; the next best client completed 5, and two others completed 2. The
+    one we do not complete automatically is a ten-level ladder, which finishes cleanly at the
+    default depth limit of five with the deepest layer left as a healthy archive, and completes
+    fully if you raise the limit. Those legs are on the
+    <a href="benchmarks.html#nested">benchmarks page</a> with the full grid.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Why it is worth doing</p>
+    <h2>What removing the round trip actually buys</h2>
+
+    <p><b>It is faster, for an unglamorous reason.</b> Writing 60 GB and reading it back is not
+    free even on a fast solid-state drive, and on anything slower it is often the real bottleneck
+    rather than the network. Removing a write and two reads removes that time from your clock
+    entirely. The gain is largest exactly where people notice most: big jobs, and machines whose
+    disk is not the fastest part of them.</p>
+
+    <p><b>It halves the wear.</b> Solid-state drives have a finite number of writes in them, and a
+    downloader that writes every payload twice is spending that budget at double rate for no
+    benefit you receive. Over a few hundred terabytes of downloading, which is an ordinary year for
+    an active user, the difference is a meaningful fraction of a drive's life.</p>
+
+    <p><b>It changes what fits.</b> Free space is not a performance characteristic, it is a
+    yes-or-no. A job needing twice its own size in headroom either runs or it does not. Needing
+    roughly the payload's size means jobs complete on machines and volumes where the conventional
+    approach simply stops, and it is why a 190 GB release fits in about 157 GB of free space here
+    rather than about 313 GB.</p>
+
+    <p><b>It costs less processor time.</b> Not moving data through the disk twice removes the work
+    of doing so, and verifying during the download means no second pass over the payload to check
+    it. Our processor cost holds flat at about 1.7 processor-seconds per gigabyte from a 35 GB job
+    to a 190 GB one, which is the useful property: the cost per gigabyte does not grow as the job
+    does.</p>
+
+    <p><b>It runs in less memory, and bounded memory.</b> Because bytes are consumed as they arrive
+    rather than accumulated, the working set is a budget you set rather than a function of the job
+    size. That is what allows a 190 GB release to be processed on a machine with roughly 1.1 GB
+    available. The distinction that matters is not the number but the shape: memory that grows with
+    the job will eventually meet a job your machine cannot finish, and it fails by swapping or
+    being killed rather than by telling you.</p>
+
+    <div class="callout">
+      <p>Taken together these are less about winning a benchmark than about where the software can
+      run at all. A design that needs half the free space, half the writes and a bounded amount of
+      memory works on a small home server, an older laptop or a NAS, which is where a good deal of
+      this software actually lives.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Every figure on this page is measured and published
+    with the build and date beside it on the <a href="benchmarks.html">benchmarks page</a>,
+    including the legs we lose. The honest counterweight, stated there too: an extractor and
+    repairer built to ride a live download hold more resident memory than a standalone tool run
+    once from a command line, so if your constraint is the smallest possible footprint for a
+    one-shot job on a file you already have, the dedicated tools win that column.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

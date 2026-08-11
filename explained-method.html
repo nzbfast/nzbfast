@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How we test, in full - nzbfast</title>
+<meta name="description" content="The machines, the fixtures, the settings each client gets, and the rules that decide whether a benchmark leg counts at all.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html" class="on">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.html" style="color:inherit">Explained</a> &middot; three</p>
+  <h1>How we test, in full</h1>
+  <p class="sub">We publish comparisons against other people's software, so the method has to be
+  checkable. This is all of it: the machines, the content, the settings each client gets, and the
+  rules that decide whether a run counts as a result or gets thrown away.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">The rig</p>
+    <h2>Same machine, same line, same content</h2>
+    <p class="lead">Every client in a comparison runs on one machine, against the same providers,
+    on the same content, within the same round. Nothing is carried over from a previous day.</p>
+
+    <ul class="plain">
+      <li><b>The machines.</b> An Apple M1 Ultra on a 10 GbE line in Europe, and an M3 Ultra on a
+      slower line in the United States. Comparisons never mix the two: a table is one machine.</li>
+      <li><b>The line matters more than the processor.</b> On a 10 GbE line most clients can
+      saturate the connection on an easy job, which is why the interesting scenarios are the ones
+      where something other than raw bandwidth decides the outcome.</li>
+      <li><b>Providers.</b> Five commercial providers, the same set for every client, over TLS. We
+      exclude one provider from these rounds because it restricts how many locations may connect at
+      once, which would make a shared test machine unfair to whoever ran second.</li>
+      <li><b>Connections.</b> Every client gets the same number per provider in a given round, and
+      the round says which. More is not automatically better; we have measured our own client
+      holding the same finish time across a ninefold change in connection count.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The rule that decides everything</p>
+    <h2>A client is judged on the file, not on its own status message</h2>
+    <p class="lead">This is the single most important thing on this page. Every leg ends by finding
+    the largest file the client produced, anywhere in its output, and hashing it against a
+    known-good copy. Size and MD5, on every leg, not on a sample.</p>
+
+    <p>We do this because a client's own report of success is not reliable evidence. We have
+    measured a client reporting <i>done</i> on a job whose output directory was empty. We have
+    measured another reporting <i>Completed</i> having delivered raw archive volumes it never
+    unpacked. A repair tool in wide use exits with a failure code after a successful repair. None
+    of those clients was lying; status strings simply mean different things to different authors,
+    and a benchmark that trusts them is measuring vocabulary rather than behaviour.</p>
+
+    <p>So the finish line is the same for everyone: <b>the payload exists, at the right size, with
+    the right hash</b>. If a client stops before that, it does not get a time, and the whole column
+    is marked rather than quietly omitted. A slow client that finishes is doing better than a fast
+    one that does not, and the table should say so.</p>
+
+    <div class="callout">
+      <p>The corollary is that a non-finish is a result, not an error on our part. When we publish
+      one we describe the end state in plain terms, including anything that suggests it is specific
+      to that job rather than general, and we say what the client did instead of finishing.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Order and repetition</p>
+    <h2>Why legs alternate, and why single runs are not published</h2>
+    <p class="lead">Provider throughput varies minute to minute, sometimes by a factor of two or
+    three. Any two measurements taken at different times are partly measuring the weather.</p>
+
+    <p>So clients run <b>back to back and interleaved</b>, and the order reverses between
+    repetitions, so that no client is always the one going first into a warm or cold line. A result
+    is the pattern across repetitions, not a best run. When a spread is wide, we publish the range
+    rather than an average that would hide it, and if we do not know why a client's numbers are
+    spread out, we say so instead of inventing a cause.</p>
+
+    <p>Comparisons across different rounds are avoided wherever possible. If a claim requires two
+    numbers, we prefer to re-race both in one round rather than subtract one day's figure from
+    another's, because rig state, provider conditions and client versions all drift. When we
+    compare two of our own builds, both builds run in the same round, alternating, on the same
+    content.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">The unglamorous checks</p>
+    <h2>What runs before and during every leg</h2>
+    <p class="lead">Most of these exist because a silent fault once produced a healthy-looking,
+    publishable, wrong number. Each one now runs automatically and stops the round rather than
+    warning.</p>
+
+    <ul class="plain">
+      <li><b>Every provider answers before the leg starts.</b> A leg run while two providers are
+      down measures an outage, and it looks exactly like a slow client.</li>
+      <li><b>The binary is identified by hash before every leg</b>, not by filename or version
+      string. Two builds of ours reported the same version number while differing by 88 commits;
+      only the hash tells them apart, and tables cite it.</li>
+      <li><b>Every client runs as native code.</b> On Apple machines an incorrectly built helper
+      can silently run under translation, which costs processor time that belongs to our packaging
+      choice rather than to the client's code. We check the running process, not just the file.</li>
+      <li><b>Open-file limits are raised for everyone, identically.</b> macOS starts programs with
+      a limit of 256 open files, which a full set of connections can exceed. A client that hits it
+      tends to vanish without a crash report, which reads exactly like a failure of the software.
+      One competitor's apparent non-finish turned out to be this; raised, the identical job
+      finished in 44 seconds.</li>
+      <li><b>Disk traffic is recorded per leg</b>, which doubles as a check that nothing else was
+      using the machine. Those counters cover the whole disk rather than one program, so if a
+      second job were running, its work would appear inside our measurements. Flat readings across
+      a round are how we know a result belongs to the client it names.</li>
+      <li><b>Each client writes to its own output tree</b>, and the tree is wiped before each leg,
+      so no run can be satisfied by a previous run's file.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Where a client needs particular settings to perform
+    well, it gets them, and the round says which. Examples: request pipelining enabled where a
+    client ships with it off, duplicate checking disabled when the same job is downloaded
+    repeatedly, and unpack helpers taken from the client's own bundle rather than a system copy.
+    The aim is that each client is measured at its best rather than at its defaults, since defaults
+    are a separate argument from capability.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">What we will not do</p>
+    <h2>The limits of these numbers</h2>
+    <ul class="plain">
+      <li><b>We do not publish a figure we have not measured.</b> If a number is derived rather
+      than observed, it is labelled as derived, and we would rather leave a gap than fill it with
+      arithmetic that reads like a measurement.</li>
+      <li><b>We do not quietly update a losing result.</b> A leg we lose stays published until a
+      re-run replaces it, and when a loss turns into a win the change gets an explanation beside
+      the table rather than a silent edit.</li>
+      <li><b>Provider legs are not yet independently reproducible</b>, because the content is not
+      ours to distribute. The component tests, which use generated content, are. We are preparing
+      test files we can publish so the provider legs become checkable too.</li>
+      <li><b>These are our benchmarks of other people's software.</b> Every version is named and
+      dated, and when a client ships a new release we re-run the legs it affects rather than
+      leaving a stale comparison up. If you think a result is wrong, the settings and versions are
+      published so it can be argued with specifically.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>
