@@ -102,7 +102,7 @@
         <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>skades af sockets, begge job</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Målt mod</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 og rustnzb 1.4.1 den 10. august 2026: M1 Ultra i Europa, fem udbydere, alt over TLS, begge gennemløb samme aften, med socketindstillingen anvendt på hver klient og ikke kun på vores. &sup2; rustnzb leverede ingen brugbar fil på det slørede job ved nogen af indstillingerne, så dens række læses som følsomhed og ikke som placering. NZBGet går den anden vej på køen af lagrede arkiver længere nede på siden, et ældre build på et andet job, og det er netop pointen: retningen er ikke en egenskab ved indstillingen. Når en sluttid svinger så meget på ét tal i en konfigurationsfil, er det tal en del af resultatet.</p>
+    <p class="note" style="text-align:start"><b>Målt mod</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 og rustnzb 1.4.1 den 10. august 2026: M1 Ultra i Europa, fem udbydere, alt over TLS, begge gennemløb samme aften, med socketindstillingen anvendt på hver klient og ikke kun på vores. &sup2; rustnzb leverede ingen brugbar fil på det slørede job ved nogen af indstillingerne, så dens række læses som følsomhed og ikke som placering. Dens tider varierer desuden fra gennemløb til gennemløb, hvor de andre ligger stille: tre identiske 6.6 GB-gennemløb ved maksimum målte 91, 53 og 99 s, en spredning på 1.9x, og derfor er hvert rustnzb-tal her et interval og ikke et tal. NZBGet går den anden vej på køen af lagrede arkiver længere nede på siden, et ældre build på et andet job, og det er netop pointen: retningen er ikke en egenskab ved indstillingen. Når en sluttid svinger så meget på ét tal i en konfigurationsfil, er det tal en del af resultatet.</p>
     <div class="callout">På en ubeskadiget download er den hurtigst mulige efterbehandling slet ingen. Vi matcher den tid og kontrollerer samtidig hver blok, mens den ankommer: <b>lige så hurtigt som at springe kontrollen over, fordi vi aldrig springer den over.</b></div>
   </div>
 </section>
@@ -656,6 +656,7 @@
         <tr><td>disk krævet til en N-GB-post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
         <tr><td>fuldførbarheds-dom før download</td><td class="yes">blok-eksakt</td><td class="no">nej</td><td class="half">sundhed %</td><td class="no">nej</td><td class="no">-⁷</td><td class="yes">artikeltjek</td><td class="no">nej</td></tr>
         <tr><td>begrænset hukommelse (swapper aldrig)</td><td class="yes">budgetteret</td><td class="no">9.3 GB @ 190 GB</td><td class="half">cache-indstilling</td><td class="no">nej</td><td class="no">nej</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>hæver sin egen grænse for åbne filer</td><td class="yes">ja, ved opstart</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
         <tr><td>tjek filen på ethvert punkt under download</td><td class="yes">ja</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">sekventiel</td><td class="no">nej</td></tr>
         <tr><td>indbygget indexer + postervæg</td><td class="yes">ja, nøglefri</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="no">nej</td><td class="half">søge-UI</td><td class="half">gruppebrowser</td></tr>
         <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="half">delvis</td><td class="half">NZBGet-kompatibel RPC⁷</td><td class="no">nej</td><td class="no">nej</td></tr>
@@ -675,6 +676,7 @@
     prøvebænk styrer den på, men vi har ikke prøvet telefon-fjernbetjeningerne mod den.
     Usenapp/Newsbin er kommercielle læsere til én platform med downloader-funktioner; de er
     med, fordi folk spørger, ikke fordi de konkurrerer på hastighed.</p>
+    <p class="note" style="text-align:start">⁸ macOS starter et program med en grænse på 256 åbne filer, og et fuldt sæt forbindelser fordelt på flere servere kan passere den. nzbfast hæver sin egen grænse ved opstart på macOS og Linux: den beder om 65,536, går ned, indtil systemet siger ja, går aldrig over systemets hårde grænse og fortsætter med det, den havde, hvis hvert trin afvises. Windows har ingen grænse pr. proces af den slags. De øvrige kolonner er <b>ikke vurderet</b> snarere end bekræftet fraværende: vi har ikke læst nogen anden klients opstartskode. Værd at vide på grund af måden, det fejler på: et program, der løber tør for åbne filer midt i et job, har tendens til at forsvinde i stedet for at melde en fejl.</p>
   </div>
 </section>
 

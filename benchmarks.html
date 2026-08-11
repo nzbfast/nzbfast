@@ -147,7 +147,10 @@
     26.3-testing, Weaver 0.7.8 and rustnzb 1.4.1 on 10 August 2026: Europe M1 Ultra, five
     providers, all TLS, both sweeps the same evening, with the socket setting applied to every
     client rather than only to ours. &sup2; rustnzb delivered no usable file on the obfuscated job
-    at either setting, so its row reads as sensitivity and not as a standing. NZBGet moves the
+    at either setting, so its row reads as sensitivity and not as a standing. Its walls also vary
+    rep to rep where the others hold steady: three identical 6.6 GB reps at the maxima measured 91,
+    53 and 99 s, a 1.9x spread, so every rustnzb figure here is a range rather than a number.
+    NZBGet moves the
     other way on the stored-archive queue further down this page, an older build on a different
     job, and that is the point: the direction is not a property of the setting. Where a finish time
     swings this far on one number in a settings file, that number is part of the result.</p>
@@ -884,6 +887,7 @@
         <tr><td>disk needed for an N-GB post</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
         <tr><td>pre-download completability verdict</td><td class="yes">block-exact</td><td class="no">no</td><td class="half">health %</td><td class="no">no</td><td class="no">-⁷</td><td class="yes">article check</td><td class="no">no</td></tr>
         <tr><td>bounded memory (never swap)</td><td class="yes">budgeted</td><td class="no">9.3 GB @ 190 GB</td><td class="half">cache setting</td><td class="no">no</td><td class="no">no</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>raises its own open-file limit</td><td class="yes">yes, at startup</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
         <tr><td>check the file at any point while downloading</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">sequential</td><td class="no">no</td></tr>
         <tr><td>built-in indexer + poster wall</td><td class="yes">yes, keyless</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td class="half">search UI</td><td class="half">group browser</td></tr>
         <tr><td>Sonarr/Radarr drop-in</td><td class="yes">SAB API + Newznab</td><td class="yes">native</td><td class="yes">native</td><td class="half">partial</td><td class="half">NZBGet-compat RPC⁷</td><td class="no">no</td><td class="no">no</td></tr>
@@ -903,6 +907,14 @@
     it, but we have not tried the phone remotes against it.
     Usenapp/Newsbin are single-platform commercial readers with downloader features; they're
     listed because people ask, not because they compete on speed.</p>
+    <p class="note" style="text-align:start">⁸ macOS starts a program with a limit of 256 open
+    files, and a full set of connections across several servers can pass it. nzbfast raises its own
+    limit at startup on macOS and Linux: it asks for 65,536, steps down until the system agrees,
+    never goes above the system's hard limit, and carries on with whatever it had if every step is
+    refused. Windows has no per-process limit of this kind. The other columns are <b>not
+    assessed</b> rather than confirmed absences: we have not read any other client's startup code.
+    Worth knowing because of how it fails: a program that runs out of open files part-way through a
+    job tends to disappear rather than report an error.</p>
   </div>
 </section>
 

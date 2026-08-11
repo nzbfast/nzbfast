@@ -102,7 +102,7 @@
         <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>soketlerden zarar görüyor, iki işte de</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.4.1, 10 Ağustos 2026: Avrupa'da M1 Ultra, beş sağlayıcı, her şey TLS üzerinden, iki tarama da aynı akşam ve soket ayarı yalnızca bizimkine değil her istemciye uygulandı. &sup2; rustnzb belirsizleştirilmiş işte iki ayarda da kullanılabilir dosya vermedi, dolayısıyla satırı bir sıralama değil bir duyarlılık okuması. NZBGet, bu sayfanın aşağısındaki depolanmış arşiv kuyruğunda ters yöne gidiyor; daha eski bir yapı, farklı bir iş, ve asıl mesele de bu: yön, ayarın bir özelliği değil. Bir bitiş süresi bir yapılandırma dosyasındaki tek bir sayı yüzünden bu kadar savruluyorsa, o sayı sonucun parçasıdır.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.4.1, 10 Ağustos 2026: Avrupa'da M1 Ultra, beş sağlayıcı, her şey TLS üzerinden, iki tarama da aynı akşam ve soket ayarı yalnızca bizimkine değil her istemciye uygulandı. &sup2; rustnzb belirsizleştirilmiş işte iki ayarda da kullanılabilir dosya vermedi, dolayısıyla satırı bir sıralama değil bir duyarlılık okuması. Süreleri ayrıca tekrardan tekrara değişiyor, diğerleri sabit dururken: en üst sınırlarda üç özdeş 6.6 GB tekrarı 91, 53 ve 99 s ölçtü, 1.9x'lik bir yayılım; rustnzb'ye ait her sayının burada tek bir değer değil bir aralık olmasının sebebi bu. NZBGet, bu sayfanın aşağısındaki depolanmış arşiv kuyruğunda ters yöne gidiyor; daha eski bir yapı, farklı bir iş, ve asıl mesele de bu: yön, ayarın bir özelliği değil. Bir bitiş süresi bir yapılandırma dosyasındaki tek bir sayı yüzünden bu kadar savruluyorsa, o sayı sonucun parçasıdır.</p>
     <div class="callout">Hasarsız bir indirmede mümkün olan en hızlı işlem sonrası, hiç olmayanıdır. Biz o süreyi yakalarken her bloğu geldiği anda kontrol ediyoruz: <b>kontrolü atlamak kadar hızlı, çünkü onu asla atlamıyoruz.</b></div>
   </div>
 </section>
@@ -751,6 +751,7 @@
         <tr><td>N-GB gönderi için gereken disk</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
         <tr><td>indirme öncesi tamamlanabilirlik kararı</td><td class="yes">blok kesinlikli</td><td class="no">hayır</td><td class="half">sağlık %</td><td class="no">hayır</td><td class="no">-⁷</td><td class="yes">makale denetimi</td><td class="no">hayır</td></tr>
         <tr><td>sınırlı bellek (asla takas)</td><td class="yes">bütçeli</td><td class="no">9.3 GB @ 190 GB</td><td class="half">önbellek ayarı</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>kendi açık dosya sınırını yükseltir</td><td class="yes">evet, açılışta</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
         <tr><td>indirirken dosyayı herhangi bir noktada kontrol et</td><td class="yes">evet</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">sıralı</td><td class="no">hayır</td></tr>
         <tr><td>gömülü dizinleyici + poster duvarı</td><td class="yes">evet, anahtarsız</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="no">hayır</td><td class="half">arama arayüzü</td><td class="half">grup tarayıcısı</td></tr>
         <tr><td>Sonarr/Radarr tak-çalıştır</td><td class="yes">SAB API + Newznab</td><td class="yes">yerel</td><td class="yes">yerel</td><td class="half">kısmi</td><td class="half">NZBGet uyumlu RPC⁷</td><td class="no">hayır</td><td class="no">hayır</td></tr>
@@ -770,6 +771,7 @@
     böyle sürüyor, ama telefon uzaktan kumandalarını ona karşı denemedik.
     Usenapp/Newsbin, indirici özellikleri olan tek platformlu ticari okuyuculardır; hızda
     yarıştıkları için değil, insanlar sorduğu için listelendiler.</p>
+    <p class="note" style="text-align:start">⁸ macOS bir programı 256 açık dosya sınırıyla başlatır ve birkaç sunucuya yayılmış tam bir bağlantı takımı bunu aşabilir. nzbfast macOS ve Linux'ta kendi sınırını açılışta yükseltir: 65,536 ister, sistem kabul edene kadar aşağı iner, sistemin sert sınırını asla aşmaz ve her adım reddedilirse elindekiyle devam eder. Windows'ta bu türden bir süreç başına sınır yoktur. Diğer sütunlar doğrulanmış yokluklar değil, <b>değerlendirilmemiş</b>: başka hiçbir istemcinin açılış kodunu okumadık. Nasıl başarısız olduğu için bilmeye değer: bir işin ortasında açık dosyası tükenen bir program, hata bildirmek yerine ortadan kaybolma eğilimindedir.</p>
   </div>
 </section>
 
