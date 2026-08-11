@@ -50,17 +50,17 @@ ureq = "2"
 # Update-manifest binary verification (auto-update): sha256 for payload
 # integrity, ed25519 for manifest authenticity (a signature the update
 # origin cannot forge without the offline signing key).
-sha2 = "0.10"
+sha2 = "0.11"
 # §129 4a webhook signing (X-NzbFast-Signature). Already in the lockfile
 # via nzbkit's RAR5 crypto - no new dependency tree.
-hmac = "0.12"
-ed25519-dalek = "2"
+hmac = "0.13"
+ed25519-dalek = "3"
 hex = "0.4"
 # OS entropy for the first-run API key. That key is the only thing
 # standing between a LAN and the daemon's full control API, so it must
 # come from the platform CSPRNG - not from RandomState (see fresh_secret,
 # which is fine for a capability URL and is NOT used here).
-getrandom = "0.2"
+getrandom = "0.4"
 # IMDb datasets ratings file is gzip'd TSV (keyless nightly download),
 # and serve/webasset.rs gzips the embedded pages at respond time - so
 # this is unconditional now (nzbkit already depends on it regardless,
@@ -124,7 +124,7 @@ trash = "5.2.6"
 # version nzbtray already links, so the windows build gains no new
 # dependency. libc has no statvfs on windows.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     # GetLocalTime, for the quota ledger's local-midnight rollover.
@@ -151,7 +151,7 @@ ffi = []
 # in examples/update_sign.rs so the daemon and the release pipeline use
 # the exact same ed25519 implementation. getrandom seeds keygen.
 [dev-dependencies]
-getrandom = "0.2"
+getrandom = "0.4"
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying
