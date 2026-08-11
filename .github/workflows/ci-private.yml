@@ -133,10 +133,10 @@ jobs:
             /usr/share/swift \
             /usr/local/share/powershell
           df -h / | tail -1
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -343,13 +343,13 @@ jobs:
       # short of space, and `rm` on a 2x runner is not free.
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No toolchain step: rust-toolchain.toml pins the version and
       # rustup installs it for the msvc host on the first cargo
       # invocation. Same as the Windows jobs in pr-check.yml and
       # nightly.yml; an explicit `rustup default stable` would be
       # overridden by that pin anyway.
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: |
             ~/.cargo/registry

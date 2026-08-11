@@ -36,7 +36,7 @@ jobs:
   windows-installer:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust + windows-gnu target
         shell: bash
@@ -94,13 +94,13 @@ jobs:
       # digest and needs its own attestation - see the Phase C block.
       - name: Attest installer provenance
         if: ${{ github.repository == 'nzbfast/nzbfast' }}
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: packaging/windows/out/nzbfast-*-windows-x64-setup.exe
 
       - name: Upload UNSIGNED installer
         id: upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nzbfast-setup-unsigned
           path: packaging/windows/out/nzbfast-*-windows-x64-setup.exe
@@ -134,13 +134,13 @@ jobs:
       #   # attestation - this is the digest users actually download.
       #   - name: Attest SIGNED installer provenance
       #     if: ${{ inputs.sign }}
-      #     uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+      #     uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       #     with:
       #       subject-path: packaging/windows/out-signed/*.exe
       #
       #   - name: Upload SIGNED installer
       #     if: ${{ inputs.sign }}
-      #     uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      #     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       #     with:
       #       name: nzbfast-setup-signed
       #       path: packaging/windows/out-signed/*.exe
