@@ -140,7 +140,7 @@
         <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>wants sockets, both jobs</td></tr>
         <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>hurt by sockets on the big job</td></tr>
         <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>flips direction by job</td></tr>
-        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s</td><td>hurt by sockets, both jobs</td></tr>
+        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s&sup3;</td><td>hurt by sockets, both jobs</td></tr>
       </tbody>
     </table></div>
     <p class="note" style="text-align:start"><b>Measured against</b> SABnzbd 5.1.0, NZBGet
@@ -153,7 +153,7 @@
     NZBGet moves the
     other way on the stored-archive queue further down this page, an older build on a different
     job, and that is the point: the direction is not a property of the setting. Where a finish time
-    swings this far on one number in a settings file, that number is part of the result.</p>
+    swings this far on one number in a settings file, that number is part of the result. &sup3; The extractor in rustnzb's column was ours to package and we packaged it wrong: until 11 August our rig put an x86_64 <code>unrar</code> on its path, so on this Apple Silicon box its extraction ran translated while every other client's ran native. We measured it rather than guess: it costs 2.6x on the extractor but only a few CPU-seconds, and no separable time. Re-raced on a native extractor the same job comes back at 16-19 seconds against the 18-19 shown. The obfuscated column never reaches an extractor at all, so it is unchanged.</p>
     <div class="callout">On an undamaged download the fastest possible post-processing is none at
     all. We match that wall while checking every block as it arrives: <b>as fast as skipping the
     check, because we never skip it.</b></div>
