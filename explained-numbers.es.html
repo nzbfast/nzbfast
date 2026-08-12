@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qué significan las cifras - nzbfast</title>
+<meta name="description" content="Una guía de lectura de las columnas medidas: tiempo hasta un archivo utilizable, memoria máxima, segundos de procesador, pico de disco y E/S del volumen, y qué aspecto tiene un valor bueno o malo.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.es.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.es.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.es.html" class="home">Inicio</a>
+    <a href="features.es.html">Funciones</a>
+    <a href="indexer.es.html">Indexador</a>
+    <a href="benchmarks.es.html">Benchmarks</a>
+    <a href="explained.es.html" class="on">Explicaciones</a>
+    <a href="MANUAL.html">Manual</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.es.html">Descargar</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html" selected>Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.es.html" style="color:inherit">Explicaciones</a> &middot; cuatro</p>
+  <h1>Qué significan las cifras</h1>
+  <p class="sub">Cinco columnas aparecen en la mayoría de nuestras tablas. Esto es lo que mide cada una, por qué merece publicarse, y más o menos qué aspecto tiene un valor bueno o malo en una máquina que tengas tú de verdad.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">La cifra principal</p>
+    <h2>Tiempo hasta un archivo utilizable</h2>
+    <p class="lead">El reloj arranca cuando se añade el trabajo y se para cuando el contenido terminado existe en el disco, verificado y extraído. No cuando acaba la descarga, y no cuando el cliente se declara listo.</p>
+
+    <p>Es la única cifra que se corresponde con algo que tú vives. Un cliente puede terminar de descargar rápido y luego pasar un minuto comprobando y desempaquetando, y desde donde estás sentado ese minuto forma parte de la espera. Medir solo la descarga favorecería a los clientes que hacen su trabajo después, que son casi todos.</p>
+
+    <p>También es la razón de que nuestra arquitectura parezca rara en estas tablas. Verificamos cada pieza según llega y desempaquetamos mientras la descarga sigue en marcha, así que cuando aterriza el último artículo queda muy poco por hacer. Los demás clientes depositan primero todo el post en el disco, luego lo verifican, luego lo desempaquetan, en tres fases seguidas. En un trabajo fácil la diferencia es modesta. En uno grande o dañado es casi todo el resultado.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">La que se lee mal</p>
+    <h2>Memoria máxima (RSS)</h2>
+    <p class="lead">La mayor cantidad de memoria que el programa mantuvo en cualquier momento del trabajo. RSS son las siglas de resident set size, es decir, sencillamente la memoria que está de verdad en la RAM y no prometida o reservada.</p>
+
+    <p>Más alto no es automáticamente peor, y más bajo no es automáticamente mejor. La memoria se gasta para evitar algo más caro, normalmente leer dos veces los mismos datos del disco. La pregunta que vale la pena hacerse es si ese gasto compra algo y si está acotado.</p>
+
+    <p><b>Acotado es la palabra importante.</b> Un cliente cuya memoria crece con el tamaño del trabajo acabará encontrándose con un trabajo que no puede terminar en tu máquina, y el fallo llega como intercambio a disco o como proceso matado, no como un mensaje cortés. Nosotros mantenemos un presupuesto y nos quedamos dentro, y por eso podemos pasar un trabajo de 190 GB por una máquina donde tenemos alrededor de 1.1 GB de memoria disponible. Una cifra como 9.3 GB en un trabajo de 190 GB no es solo grande, es de otra forma: crece con el trabajo.</p>
+
+    <p>Donde sube nuestra propia memoria, intentamos decir qué compró. En posts muy dañados la compilación actual mantiene los datos de paridad en memoria para reparar de inmediato en vez de buscar más después, lo que lleva la memoria máxima de unos 0.8 GB a unos 1.3 GB y ahorra unos diez segundos. En un post intacto ese gasto no ocurre y la cifra es 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">El indicador de consumo</p>
+    <h2>Segundos de procesador (tiempo de CPU)</h2>
+    <p class="lead">El tiempo de procesador total consumido por todo el programa, sumado en todos los núcleos. Es una medida del trabajo hecho más que del tiempo transcurrido, así que puede ser mucho mayor que el reloj.</p>
+
+    <p>Si un trabajo tarda 100 segundos y reporta 1,600 segundos de procesador, aproximadamente dieciséis núcleos estuvieron ocupados durante toda la ejecución. Eso importa por tres razones prácticas: es calor, es electricidad, y en una máquina que hace algo más al mismo tiempo es competencia por los recursos. Un cliente que termina en un tiempo razonable saturando todos los núcleos no ha sido eficiente, ha sido caro.</p>
+
+    <p>En esta columna aparecen las diferencias más amplias de todo el sitio, más amplias que en cualquier tiempo de llegada. Para una salida idéntica byte a byte en el mismo post dañado, hemos medido una dispersión de treinta veces en segundos de procesador entre clientes. Vale la pena comprobarlo antes de dar por hecho que dos clientes que terminan con pocos segundos de diferencia están haciendo una cantidad de trabajo comparable.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Las dos columnas de disco</p>
+    <h2>Pico de disco y E/S del volumen</h2>
+    <p class="lead">El pico de disco es el máximo espacio adicional que el trabajo necesitó en un instante dado. La E/S del volumen es la cantidad total de datos leídos y escritos para llegar ahí. Responden a preguntas distintas.</p>
+
+    <p><b>El pico de disco es una restricción dura.</b> Decide si el trabajo puede ejecutarse siquiera. La mayoría de los clientes escriben el post completo en el disco y luego desempaquetan una segunda copia al lado, así que necesitan aproximadamente el doble del contenido en espacio libre. Para un trabajo de 190 GB eso son unos 313 GB libres antes de empezar, frente a unos 157 GB en nuestro caso, porque desempaquetamos mientras descargamos y nunca materializamos los volúmenes del archivo. Si tu disco no aguanta el doble del trabajo, esa diferencia no es un porcentaje, es si la descarga ocurre o no.</p>
+
+    <p><b>La E/S del volumen es desgaste y tiempo.</b> Escribir el post, releerlo para verificarlo, releerlo otra vez para desempaquetarlo y escribir la salida son cuatro pasadas sobre los datos. Hacerlo en una sola pasada es aproximadamente un tercio del tráfico, que en un disco de estado sólido es vida útil, y en un disco más lento suele ser el auténtico cuello de botella en lugar de la red.</p>
+
+    <p class="note" style="text-align:start">Una nota sobre cómo leemos estos dos, porque nos pilló a nosotros y podría pillarte a ti leyendo nuestras tablas. Ambas cifras vienen de contadores que cubren todo el disco, no un solo programa. Eso los convierte en un control excelente de si un benchmark se contaminó con otra cosa en ejecución, y significa que un número que parece imposible normalmente lo es: un trabajo de 6.5 GB que reporta 144 GB de tráfico de disco no es un cliente comportándose de forma extraña, son dos trabajos compartiendo una máquina.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Leer una tabla</p>
+    <h2>Tres hábitos que conviene tener</h2>
+    <ul class="plain">
+      <li><b>Lee una fila entera antes de comparar columnas.</b> La mayoría de nuestras tablas ponen al mismo cliente en varias condiciones. La información interesante suele ser cómo cambia la cifra de un cliente entre un trabajo fácil y uno difícil, no dónde se sitúa en un trabajo aislado.</li>
+      <li><b>Comprueba cuál era la meta.</b> Un tiempo solo es comparable con otro si ambos clientes llegaron al mismo estado. Calculamos el hash de cada salida contra una copia de referencia exactamente por eso, y un cliente que no llegó ahí se marca en vez de cronometrarse.</li>
+      <li><b>Prefiere los rangos a las medias cuando la dispersión es amplia.</b> Donde publicamos un rango en lugar de una cifra única es deliberado: significa que las ejecuciones individuales discrepaban lo bastante como para que una media las tergiversara, y preferimos enseñarlo a esconderlo.</li>
+    </ul>
+
+    <p>Las tablas en sí, con la compilación y la fecha junto a cada una, están en la <a href="benchmarks.es.html">página de benchmarks</a>, incluidas las vueltas que perdemos.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - el descargador de Usenet de una sola pasada.</div>
+    <div>
+      <a href="index.es.html">Inicio</a> ·
+      <a href="features.es.html">Funciones</a> ·
+      <a href="indexer.es.html">Indexador</a> ·
+      <a href="benchmarks.es.html">Benchmarks</a> ·
+      <a href="explained.es.html">Explicaciones</a> ·
+      <a href="download.es.html">Descargar</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

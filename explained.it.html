@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spiegazioni - nzbfast</title>
+<meta name="description" content="Il ragionamento dietro i numeri: cosa succede davvero quando a un post mancano degli articoli, come conduciamo i benchmark e giudichiamo un risultato, e cosa misura ogni colonna pubblicata.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained.it.html">
+<link rel="alternate" hreflang="fr" href="explained.fr.html">
+<link rel="alternate" hreflang="de" href="explained.de.html">
+<link rel="alternate" hreflang="it" href="explained.it.html">
+<link rel="alternate" hreflang="es" href="explained.es.html">
+<link rel="alternate" hreflang="nl" href="explained.nl.html">
+<link rel="alternate" hreflang="pt" href="explained.pt.html">
+<link rel="alternate" hreflang="sv" href="explained.sv.html">
+<link rel="alternate" hreflang="da" href="explained.da.html">
+<link rel="alternate" hreflang="nb" href="explained.nb.html">
+<link rel="alternate" hreflang="fi" href="explained.fi.html">
+<link rel="alternate" hreflang="tr" href="explained.tr.html">
+<link rel="alternate" hreflang="ro" href="explained.ro.html">
+<link rel="alternate" hreflang="he" href="explained.he.html">
+<link rel="alternate" hreflang="ar" href="explained.ar.html">
+<link rel="alternate" hreflang="fa" href="explained.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained.it.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.it.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.it.html" class="home">Home</a>
+    <a href="features.it.html">Funzionalità</a>
+    <a href="indexer.it.html">Indexer</a>
+    <a href="benchmarks.it.html">Benchmark</a>
+    <a href="explained.it.html" class="on">Spiegazioni</a>
+    <a href="MANUAL.html">Documentazione</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.it.html">Scarica</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained.html">English</option><option value="explained.fr.html">Français</option><option value="explained.de.html">Deutsch</option><option value="explained.it.html" selected>Italiano</option><option value="explained.es.html">Español</option><option value="explained.nl.html">Nederlands</option><option value="explained.pt.html">Português</option><option value="explained.sv.html">Svenska</option><option value="explained.da.html">Dansk</option><option value="explained.nb.html">Norsk</option><option value="explained.fi.html">Suomi</option><option value="explained.tr.html">Türkçe</option><option value="explained.ro.html">Română</option><option value="explained.he.html">עברית</option><option value="explained.ar.html">العربية</option><option value="explained.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>Spiegazioni</h1>
+  <p class="sub">La pagina dei benchmark è una tabella di risultati. Qui c'è il ragionamento che le sta sotto: cosa va storto davvero in un post Usenet e perché costa tempo, come conduciamo una tornata di misure e cosa rende valido un risultato, e cosa misura realmente ogni colonna che pubblichiamo. Scritto per chi vuole verificare il nostro ragionamento invece di prendere i numeri sulla fiducia.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <a class="card" href="explained-onepass.it.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Uno</p>
+        <h2 style="margin-top:2px">Come funziona lo scaricamento a passata unica</h2>
+        <p>L'architettura a cui il resto del sito continua a rimandare. Cosa succede ai byte, perché è una cosa diversa dallo scompattamento diretto, quali forme di archivio le sopravvivono, e quanto vale eliminare il ciclo scrivi-e-rileggi in termini di disco, tempo di processore e memoria.</p>
+      </a>
+      <a class="card" href="explained-damaged.it.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Due</p>
+        <h2 style="margin-top:2px">Perché i post danneggiati contano</h2>
+        <p>I post arrivano bucati più spesso di quanto ci si aspetti, ed è lì che i client differiscono di più. Cos'è un articolo mancante, perché chiederlo costa caro, e perché la soluzione è smettere di chiedere invece di chiedere più in fretta.</p>
+      </a>
+      <a class="card" href="explained-method.it.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Tre</p>
+        <h2 style="margin-top:2px">Come collaudiamo, per esteso</h2>
+        <p>Le macchine, i materiali di prova, le impostazioni che riceve ogni client, e le regole che decidono se una prova conta. Comprese le verifiche che esistono perché una volta abbiamo sbagliato e preferiamo non ripeterlo.</p>
+      </a>
+      <a class="card" href="explained-numbers.it.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Quattro</p>
+        <h2 style="margin-top:2px">Cosa significano i numeri</h2>
+        <p>Tempo per arrivare a un file utilizzabile, memoria di picco, secondi di processore, picco di disco, I/O del volume. Cos'è ciascuno, perché lo pubblichiamo, e che aspetto ha davvero un valore buono o cattivo su una macchina che possiedi.</p>
+      </a>
+      <div class="card">
+        <p class="kicker">E i dati grezzi</p>
+        <h2 style="margin-top:2px">Le tabelle vere e proprie</h2>
+        <p>Ogni risultato misurato si trova nella <a href="benchmarks.it.html">pagina dei benchmark</a>, con la build e la data accanto a ogni tabella, comprese le prove che perdiamo. Queste pagine lo spiegano; quella pagina è la prova.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - il downloader Usenet a passata unica.</div>
+    <div>
+      <a href="index.it.html">Home</a> ·
+      <a href="features.it.html">Funzionalità</a> ·
+      <a href="indexer.it.html">Indexer</a> ·
+      <a href="benchmarks.it.html">Benchmark</a> ·
+      <a href="explained.it.html">Spiegazioni</a> ·
+      <a href="download.it.html">Scarica</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

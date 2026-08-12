@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hvad tallene betyder - nzbfast</title>
+<meta name="description" content="En læseguide til de målte kolonner: tid til en brugbar fil, spidsbelastning af hukommelse, processorsekunder, disktop og volumen-I/O, og hvordan en god eller dårlig værdi ser ud.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.da.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.da.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.da.html" class="home">Hjem</a>
+    <a href="features.da.html">Funktioner</a>
+    <a href="indexer.da.html">Indexer</a>
+    <a href="benchmarks.da.html">Benchmarks</a>
+    <a href="explained.da.html" class="on">Forklaret</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.da.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html" selected>Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.da.html" style="color:inherit">Forklaret</a> &middot; fire</p>
+  <h1>Hvad tallene betyder</h1>
+  <p class="sub">Fem kolonner går igen i de fleste af vores tabeller. Her står, hvad hver enkelt måler, hvorfor den er værd at offentliggøre, og nogenlunde hvordan en god eller dårlig værdi ser ud på en maskine, du rent faktisk selv har.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Hovedtallet</p>
+    <h2>Tid til en brugbar fil</h2>
+    <p class="lead">Uret starter, når opgaven tilføjes, og stopper, når det færdige indhold ligger på disken, verificeret og udpakket. Ikke når downloadet er færdigt, og ikke når klienten erklærer sig færdig.</p>
+
+    <p>Det er det eneste tal, der svarer til noget, du selv oplever. En klient kan blive hurtigt færdig med at downloade og derefter bruge et minut på at kontrollere og pakke ud, og fra hvor du sidder, er det minut en del af ventetiden. At måle downloadet alene ville favorisere de klienter, der laver arbejdet bagefter, altså de fleste.</p>
+
+    <p>Det er også derfor, vores arkitektur ser usædvanlig ud i disse tabeller. Vi verificerer hvert stykke, efterhånden som det ankommer, og pakker ud, mens downloadet stadig kører, så når den sidste artikel lander, er der meget lidt tilbage. Andre klienter lægger først hele opslaget på disk, verificerer det så og pakker det så ud, i tre led efter hinanden. På en let opgave er forskellen beskeden. På en stor eller beskadiget er den det meste af resultatet.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Den, folk læser forkert</p>
+    <h2>Spidsbelastning af hukommelse (RSS)</h2>
+    <p class="lead">Den største mængde hukommelse, programmet holdt på noget tidspunkt under opgaven. RSS står for resident set size, altså ganske enkelt den hukommelse, der faktisk ligger i RAM, snarere end lovet eller reserveret.</p>
+
+    <p>Højere er ikke automatisk værre, og lavere er ikke automatisk bedre. Hukommelse bliver brugt for at undgå noget dyrere, som regel at læse de samme data fra disken to gange. Spørgsmålet, der er værd at stille, er, om forbruget køber noget, og om det er afgrænset.</p>
+
+    <p><b>Afgrænset er det vigtige ord.</b> En klient, hvis hukommelse vokser med opgavens størrelse, møder før eller siden en opgave, den ikke kan gennemføre på din maskine, og fejlen kommer som swap eller en dræbt proces frem for en høflig besked. Vi holder et budget og bliver inden for det, og derfor kan vi køre en opgave på 190 GB gennem en maskine, hvor omkring 1.1 GB hukommelse er til rådighed for os. Et tal som 9.3 GB på en opgave på 190 GB er ikke bare stort, det har en anden form: det vokser med arbejdet.</p>
+
+    <p>Hvor vores egen hukommelse stiger, prøver vi at sige, hvad den købte. På hårdt beskadigede opslag holder det nuværende build paritetsdata i hukommelsen for at reparere med det samme frem for at hente mere senere, hvilket tager spidsbelastningen fra omkring 0.8 GB til omkring 1.3 GB og sparer omkring ti sekunder. På et ubeskadiget opslag sker det forbrug ikke, og tallet er 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Energimålet</p>
+    <h2>Processorsekunder (CPU-tid)</h2>
+    <p class="lead">Den samlede processortid, hele programmet har brugt, lagt sammen på tværs af alle kerner. Det er et mål for udført arbejde snarere end forløbet tid, så det kan være meget større end uret.</p>
+
+    <p>Hvis en opgave tager 100 sekunder og rapporterer 1,600 processorsekunder, var omkring seksten kerner optaget hele kørslen igennem. Det betyder noget af tre praktiske grunde: det er varme, det er strøm, og på en maskine, der laver noget andet samtidig, er det kamp om ressourcerne. En klient, der bliver færdig på rimelig tid, mens den mætter hver eneste kerne, har ikke været effektiv, den har været dyr.</p>
+
+    <p>Det er i denne kolonne, de bredeste forskelle på hele sitet dukker op, bredere end ved nogen sluttid. For byte-identisk output på det samme beskadigede opslag har vi målt en tredivedobbelt spredning i processorsekunder mellem klienter. Det er værd at tjekke, før man antager, at to klienter, der bliver færdige med få sekunders mellemrum, udfører sammenlignelige mængder arbejde.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De to diskkolonner</p>
+    <h2>Disktop og volumen-I/O</h2>
+    <p class="lead">Disktop er den største ekstra plads, opgaven havde brug for på ét enkelt tidspunkt. Volumen-I/O er den samlede mængde data, der blev læst og skrevet for at nå dertil. De besvarer forskellige spørgsmål.</p>
+
+    <p><b>Disktop er en hård begrænsning.</b> Den afgør, om opgaven overhovedet kan køre. De fleste klienter skriver hele opslaget til disk og pakker så en kopi nummer to ud ved siden af, så de skal bruge omtrent det dobbelte af indholdet i ledig plads. For en opgave på 190 GB er det omkring 313 GB ledigt, før du går i gang, mod omkring 157 GB for os, fordi vi pakker ud undervejs og aldrig materialiserer arkivbindene. Hvis din disk ikke kan rumme det dobbelte af opgaven, er den forskel ikke en procentsats, men om downloadet finder sted.</p>
+
+    <p><b>Volumen-I/O er slid og tid.</b> At skrive opslaget, læse det tilbage for at verificere, læse det igen for at pakke ud og skrive output er fire gennemløb af data. At gøre det i ét gennemløb er omtrent en tredjedel af trafikken, hvilket på en SSD er levetid, og på en langsommere disk ofte den egentlige flaskehals frem for netværket.</p>
+
+    <p class="note" style="text-align:start">En bemærkning om, hvordan vi læser disse to, for den snød os og kan snyde dig, når du læser vores tabeller. Begge tal kommer fra tællere, der dækker hele disken, ikke ét enkelt program. Det gør dem til en fremragende kontrol af, om en måling blev forurenet af noget andet, der kørte, og det betyder, at et tal, der ser umuligt ud, som regel er det: en opgave på 6.5 GB, der rapporterer 144 GB disktrafik, er ikke en klient, der opfører sig mærkeligt, det er to opgaver, der deler en maskine.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">At læse en tabel</p>
+    <h2>Tre vaner, der er værd at have</h2>
+    <ul class="plain">
+      <li><b>Læs en hel række, før du sammenligner kolonner.</b> De fleste af vores tabeller sætter den samme klient under flere betingelser. Det interessante er som regel, hvordan en klients tal ændrer sig mellem en let og en svær opgave, ikke hvor det ligger på en enkelt opgave.</li>
+      <li><b>Tjek, hvad målstregen var.</b> En tid kan kun sammenlignes med en anden tid, hvis begge klienter nåede samme tilstand. Vi hasher hvert output mod en kendt korrekt kopi netop af den grund, og en klient, der ikke nåede dertil, bliver markeret frem for taget tid på.</li>
+      <li><b>Foretræk intervaller frem for gennemsnit, når spredningen er stor.</b> Hvor vi offentliggør et interval i stedet for ét enkelt tal, er det bevidst: det betyder, at de enkelte kørsler afveg nok til, at et gennemsnit ville give et forkert billede, og det viser vi hellere end at skjule det.</li>
+    </ul>
+
+    <p>Selve tabellerne, med build og dato ved siden af hver enkelt, står på <a href="benchmarks.da.html">benchmarksiden</a>, inklusive de omgange, vi taber.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - one-pass Usenet-downloaderen.</div>
+    <div>
+      <a href="index.da.html">Hjem</a> ·
+      <a href="features.da.html">Funktioner</a> ·
+      <a href="indexer.da.html">Indexer</a> ·
+      <a href="benchmarks.da.html">Benchmarks</a> ·
+      <a href="explained.da.html">Forklaret</a> ·
+      <a href="download.da.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

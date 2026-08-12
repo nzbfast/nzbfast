@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>چگونه آزمایش می‌کنیم، به‌طور کامل - nzbfast</title>
+<meta name="description" content="ماشین‌ها، مواد آزمون، تنظیماتی که هر برنامه می‌گیرد، و قاعده‌هایی که تعیین می‌کنند یک دور محک اصلاً به حساب می‌آید یا نه.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.fa.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.fa.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fa.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fa.html" class="home">خانه</a>
+    <a href="features.fa.html">ویژگی‌ها</a>
+    <a href="indexer.fa.html">ایندکسر</a>
+    <a href="benchmarks.fa.html">محک‌ها</a>
+    <a href="explained.fa.html" class="on">توضیحات</a>
+    <a href="MANUAL.html">مستندات</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fa.html">دانلود</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html" selected>فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fa.html" style="color:inherit">توضیحات</a> &middot; سه</p>
+  <h1>چگونه آزمایش می‌کنیم، به‌طور کامل</h1>
+  <p class="sub">ما مقایسه‌هایی با نرم‌افزار دیگران منتشر می‌کنیم، پس روش باید وارسی‌پذیر باشد. این تمام آن است: ماشین‌ها، محتوا، تنظیماتی که هر برنامه می‌گیرد، و قاعده‌هایی که تعیین می‌کنند یک اجرا نتیجه به حساب می‌آید یا دور ریخته می‌شود.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">بستر آزمون</p>
+    <h2>همان ماشین، همان خط، همان محتوا</h2>
+    <p class="lead">هر برنامه در یک مقایسه روی یک ماشین اجرا می‌شود، در برابر همان ارائه‌دهنده‌ها، روی همان محتوا، در همان دور. هیچ چیز از روز پیش منتقل نمی‌شود.</p>
+
+    <ul class="plain">
+      <li><b>ماشین‌ها.</b> یک Apple M1 Ultra روی خط 10 GbE در اروپا، و یک M3 Ultra روی خطی کندتر در ایالات متحده. مقایسه‌ها هرگز این دو را با هم نمی‌آمیزند: هر جدول یک ماشین است.</li>
+      <li><b>خط بیش از پردازنده اهمیت دارد.</b> روی خط 10 GbE بیشتر برنامه‌ها می‌توانند در کاری آسان اتصال را اشباع کنند، و به همین دلیل سناریوهای جالب آن‌هایی هستند که چیزی جز پهنای باند خام نتیجه را تعیین می‌کند.</li>
+      <li><b>ارائه‌دهنده‌ها.</b> پنج ارائه‌دهندهٔ تجاری، همان مجموعه برای هر برنامه، روی TLS. یک ارائه‌دهنده را از این دورها کنار می‌گذاریم چون محدود می‌کند چند مکان هم‌زمان می‌توانند وصل شوند، و همین یک ماشین آزمون مشترک را برای کسی که دوم اجرا می‌شود ناعادلانه می‌کرد.</li>
+      <li><b>اتصال‌ها.</b> هر برنامه در یک دور معین همان تعداد را به ازای هر ارائه‌دهنده می‌گیرد، و دور می‌گوید کدام. بیشتر خودبه‌خود بهتر نیست؛ ما اندازه گرفته‌ایم که برنامهٔ خودمان در سراسر تغییری نُه‌برابری در تعداد اتصال همان زمان پایان را نگه می‌دارد.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">قاعده‌ای که همه‌چیز را تعیین می‌کند</p>
+    <h2>دربارهٔ یک برنامه بر پایهٔ فایل داوری می‌شود، نه بر پایهٔ پیام وضعیت خودش</h2>
+    <p class="lead">این تنها مهم‌ترین چیز در این صفحه است. هر دور با یافتن بزرگ‌ترین فایلی که برنامه تولید کرده، هرجای خروجی‌اش که باشد، و درهم‌سازی آن در برابر نسخه‌ای معلوم‌الصحه پایان می‌یابد. اندازه و MD5، در هر دور، نه روی نمونه.</p>
+
+    <p>این کار را می‌کنیم چون گزارش موفقیتِ خودِ یک برنامه شاهد قابل اتکایی نیست. برنامه‌ای را اندازه گرفته‌ایم که برای کاری با پوشهٔ خروجی خالی <i>done</i> گزارش می‌داد. دیگری را اندازه گرفته‌ایم که <i>Completed</i> گزارش می‌داد در حالی که جلدهای خام بایگانی را تحویل داده بود و هرگز بازشان نکرده بود. ابزار ترمیمی پرکاربرد پس از ترمیم موفق با کد خطا خارج می‌شود. هیچ‌کدام از این برنامه‌ها دروغ نمی‌گفتند؛ رشته‌های وضعیت برای نویسندگان مختلف صرفاً معناهای مختلفی دارند، و محکی که به آن‌ها اعتماد کند واژگان را می‌سنجد نه رفتار را.</p>
+
+    <p>پس خط پایان برای همه یکی است: <b>محتوا وجود دارد، با اندازهٔ درست، با درهم‌سازی درست</b>. اگر برنامه‌ای پیش از آن بایستد زمانی نمی‌گیرد، و کل ستون به‌جای حذف خاموش نشانه‌گذاری می‌شود. برنامهٔ کندی که تمام می‌کند بهتر عمل کرده تا برنامهٔ تندی که تمام نمی‌کند، و جدول باید این را بگوید.</p>
+
+    <div class="callout">
+      <p>نتیجهٔ منطقی‌اش این است که تمام‌نکردن یک نتیجه است، نه خطایی از سوی ما. وقتی چنین چیزی منتشر می‌کنیم وضعیت پایانی را با واژه‌های ساده وصف می‌کنیم، از جمله هر چیزی که نشان دهد ویژهٔ همان کار است نه عمومی، و می‌گوییم برنامه به‌جای تمام‌کردن چه کرد.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">ترتیب و تکرار</p>
+    <h2>چرا دورها یک‌درمیان‌اند، و چرا اجراهای تکی منتشر نمی‌شوند</h2>
+    <p class="lead">توان‌گذر ارائه‌دهنده‌ها دقیقه‌به‌دقیقه تغییر می‌کند، گاهی به اندازهٔ دو یا سه برابر. هر دو اندازه‌گیری که در زمان‌های متفاوت گرفته شوند تا حدی هوا را می‌سنجند.</p>
+
+    <p>پس برنامه‌ها <b>پشت سر هم و درهم‌بافته</b> اجرا می‌شوند، و ترتیب میان تکرارها وارونه می‌شود تا هیچ برنامه‌ای همیشه اولین کسی نباشد که وارد خطی گرم یا سرد می‌شود. نتیجه الگوی سراسر تکرارهاست، نه بهترین اجرا. وقتی پراکندگی زیاد است بازه را منتشر می‌کنیم نه میانگینی که آن را پنهان کند، و اگر ندانیم چرا اعداد یک برنامه پراکنده‌اند، همین را می‌گوییم نه اینکه علتی بتراشیم.</p>
+
+    <p>تا جای ممکن از مقایسه میان دورهای متفاوت پرهیز می‌کنیم. اگر ادعایی به دو عدد نیاز داشته باشد، ترجیح می‌دهیم هر دو را در یک دور از نو مسابقه دهیم تا اینکه عدد یک روز را از عدد روز دیگر کم کنیم، چون وضعیت بستر، شرایط ارائه‌دهنده‌ها و نسخه‌های برنامه همه دستخوش تغییرند. وقتی دو نسخهٔ خودمان را مقایسه می‌کنیم، هر دو در یک دور، یک‌درمیان، روی همان محتوا اجرا می‌شوند.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">وارسی‌های بی‌زرق‌وبرق</p>
+    <h2>پیش از هر دور و در حین آن چه اجرا می‌شود</h2>
+    <p class="lead">بیشترشان از آن رو هستند که خرابی‌ای خاموش یک بار عددی سالم‌نما، انتشارپذیر و نادرست تولید کرد. حالا هرکدام خودکار اجرا می‌شوند و به‌جای هشدار دادن، دور را متوقف می‌کنند.</p>
+
+    <ul class="plain">
+      <li><b>هر ارائه‌دهنده پیش از آغاز دور پاسخ می‌دهد.</b> دوری که هنگام از کار افتادن دو ارائه‌دهنده اجرا شود یک قطعی را می‌سنجد، و دقیقاً شبیه برنامه‌ای کند به نظر می‌رسد.</li>
+      <li><b>فایل اجرایی پیش از هر دور با درهم‌سازی شناسایی می‌شود</b>، نه با نام فایل یا رشتهٔ نسخه. دو نسخهٔ ما با وجود 88 دگرش اختلاف، شمارهٔ نسخهٔ یکسانی گزارش می‌کردند؛ تنها درهم‌سازی آن‌ها را از هم جدا می‌کند، و جدول‌ها آن را می‌آورند.</li>
+      <li><b>هر برنامه به‌صورت کد بومی اجرا می‌شود.</b> روی ماشین‌های Apple یک کمکی که نادرست ساخته شده ممکن است خاموشانه زیر لایهٔ ترجمه اجرا شود، و این زمان پردازنده‌ای هزینه می‌کند که به انتخاب بسته‌بندی ما مربوط است نه به کد برنامه. ما فرایند در حال اجرا را وارسی می‌کنیم، نه فقط فایل را.</li>
+      <li><b>سقف فایل‌های باز برای همه، یکسان، بالا برده می‌شود.</b> macOS برنامه‌ها را با سقف 256 فایل باز آغاز می‌کند، که مجموعهٔ کامل اتصال‌ها می‌تواند از آن بگذرد. برنامه‌ای که به آن بخورد معمولاً بدون گزارش فروپاشی ناپدید می‌شود، که دقیقاً مثل نقص نرم‌افزار خوانده می‌شود. تمام‌نکردنِ ظاهریِ یکی از رقبا همین از آب درآمد؛ با بالا بردن سقف، همان کار در 44 ثانیه تمام شد.</li>
+      <li><b>ترافیک دیسک برای هر دور ثبت می‌شود</b>، که هم‌زمان وارسی‌ای است بر اینکه چیز دیگری از ماشین استفاده نمی‌کرده. آن شمارنده‌ها به‌جای یک برنامه کل دیسک را پوشش می‌دهند، پس اگر کار دومی در جریان بود، کارِ آن درون اندازه‌گیری‌های ما پیدا می‌شد. خوانش‌های صاف در سراسر یک دور همان چیزی است که به ما می‌گوید یک نتیجه به برنامه‌ای تعلق دارد که نامش را می‌برد.</li>
+      <li><b>هر برنامه در درخت خروجی خودش می‌نویسد</b>، و درخت پیش از هر دور پاک می‌شود، تا هیچ اجرایی با فایل اجرای پیشین سیراب نشود.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">جایی که برنامه‌ای برای عملکرد خوب به تنظیماتی خاص نیاز دارد، آن‌ها را می‌گیرد، و دور می‌گوید کدام‌ها. نمونه‌ها: روشن‌کردن خط‌لولهٔ درخواست‌ها جایی که برنامه آن را خاموش عرضه می‌کند، خاموش‌کردن بررسی تکراری‌ها وقتی همان کار بارها دانلود می‌شود، و برداشتن کمکی‌های بازکردن از بستهٔ خودِ برنامه به‌جای نسخهٔ سیستم. هدف این است که هر برنامه در بهترین حالتش سنجیده شود نه در تنظیمات پیش‌فرضش، چون تنظیمات پیش‌فرض بحثی جدا از توانایی است.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">کاری که نخواهیم کرد</p>
+    <h2>مرزهای این اعداد</h2>
+    <ul class="plain">
+      <li><b>عددی را که نسنجیده‌ایم منتشر نمی‌کنیم.</b> اگر عددی به‌جای مشاهده استنتاج شده باشد، برچسب استنتاجی می‌خورد، و ترجیح می‌دهیم جای خالی بگذاریم تا آن را با حسابی پر کنیم که مثل اندازه‌گیری خوانده می‌شود.</li>
+      <li><b>نتیجهٔ بازنده را بی‌سروصدا به‌روز نمی‌کنیم.</b> دوری که می‌بازیم منتشر می‌ماند تا اجرای دوباره‌ای جایش را بگیرد، و وقتی باخت به برد بدل شود، تغییر به‌جای ویرایشی خاموش، توضیحی کنار جدول می‌گیرد.</li>
+      <li><b>دورهای ارائه‌دهنده هنوز به‌طور مستقل بازتولیدپذیر نیستند</b>، چون محتوا از آنِ ما نیست که پخشش کنیم. آزمون‌های مؤلفه‌ای، که از محتوای تولیدشده استفاده می‌کنند، هستند. داریم فایل‌های آزمونی آماده می‌کنیم که بتوانیم منتشر کنیم تا دورهای ارائه‌دهنده هم وارسی‌پذیر شوند.</li>
+      <li><b>این‌ها محک‌های ما از نرم‌افزار دیگران است.</b> هر نسخه نام و تاریخ دارد، و وقتی برنامه‌ای انتشار تازه‌ای می‌دهد، به‌جای رها کردن مقایسه‌ای کهنه، دورهایی را که تحت تأثیرند از نو اجرا می‌کنیم. اگر فکر می‌کنی نتیجه‌ای نادرست است، تنظیمات و نسخه‌ها منتشر شده‌اند تا بتوان مشخصاً بر سرش بحث کرد.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - دانلودر تک‌گذر Usenet.</div>
+    <div>
+      <a href="index.fa.html">خانه</a> ·
+      <a href="features.fa.html">ویژگی‌ها</a> ·
+      <a href="indexer.fa.html">ایندکسر</a> ·
+      <a href="benchmarks.fa.html">محک‌ها</a> ·
+      <a href="explained.fa.html">توضیحات</a> ·
+      <a href="download.fa.html">دانلود</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

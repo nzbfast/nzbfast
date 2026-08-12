@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cum funcționează descărcarea într-o singură trecere - nzbfast</title>
+<meta name="description" content="Ce face de fapt o singură trecere, de ce nu este același lucru cu dezarhivarea directă, ce forme de arhivă gestionează, și de ce eliminarea ciclului scrie-și-citește-înapoi economisește disc, timp de procesor și memorie.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.ro.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ro.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ro.html" class="home">Acasă</a>
+    <a href="features.ro.html">Funcții</a>
+    <a href="indexer.ro.html">Indexer</a>
+    <a href="benchmarks.ro.html">Benchmark-uri</a>
+    <a href="explained.ro.html" class="on">Explicații</a>
+    <a href="MANUAL.html">Documentație</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ro.html">Descarcă</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html" selected>Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.ro.html" style="color:inherit">Explicații</a> &middot; unu</p>
+  <h1>Cum funcționează descărcarea într-o singură trecere</h1>
+  <p class="sub">Cea mai mare parte din ce face rapid acest client nu este o cale de rețea mai iute. Este faptul că datele se mișcă o singură dată. Iată ce înseamnă asta în practică, de ce este altceva decât dezarhivarea directă, ce forme de arhivă îi supraviețuiesc, și cât valorează cu adevărat, pe o mașină reală, eliminarea ciclului scrie-și-citește-înapoi.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Punctul de plecare</p>
+    <h2>Ce face în mod tradițional o descărcare Usenet</h2>
+    <p class="lead">O postare înseamnă mii de articole mici codificate care împreună formează un set de volume de arhivă, care la rândul lor conțin fișierul pe care îl vrei de fapt. A ajunge de la unul la celălalt au fost în mod tradițional patru sarcini separate, fiecare terminându-se înainte ca următoarea să înceapă.</p>
+
+    <ol>
+      <li><b>Descarcă și decodifică.</b> Adu fiecare articol, decodifică-l, și scrie pe disc volumele de arhivă reasamblate. Pentru o lansare de 60 GB asta înseamnă 60 GB scriși.</li>
+      <li><b>Verifică.</b> Citește înapoi toți cei 60 GB de pe disc pentru a-i confrunta cu datele de paritate, și repară-i dacă ceva nu e în regulă.</li>
+      <li><b>Dezarhivează.</b> Citește volumele din nou, și scrie conținutul extras lângă ele. Acum pe disc sunt 120 GB.</li>
+      <li><b>Curăță.</b> Șterge volumele, lăsând conținutul.</li>
+    </ol>
+
+    <p>Fiecare etapă este corectă, iar rezultatul este bun. Dar conținutul a fost scris de două ori, citit cel puțin de două ori, iar la vârf discul a trebuit să țină două copii complete ale unei sarcini din care voiai o singură copie. Cronometrul pe care îl trăiești sunt toate cele patru etape la rând, motiv pentru care un client poate raporta o descărcare rapidă și totuși să te țină în așteptare.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Schimbarea</p>
+    <h2>Să o facem o singură dată în schimb</h2>
+    <p class="lead">O singură trecere înseamnă că octeții merg de la rețea la destinația lor finală fără să devină vreodată un fișier de arhivă pe discul tău. Nu există etapa doi sau trei, fiindcă munca amândurora se petrece în timp ce etapa unu încă rulează.</p>
+
+    <p>În practică, fiecare articol este decodificat în memorie pe măsură ce sosește și predat direct la două lucruri deodată. Verificatorul îl confruntă imediat cu datele de paritate, deci corectitudinea se stabilește pe măsură ce datele aterizează, nu recitindu-le mai târziu. Extractorul tratează octeții care sosesc ca pe o poziție în interiorul arhivei, calculează cărei părți a cărui fișier de conținut îi aparțin, și îi scrie acolo.</p>
+
+    <p>Volumele arhivei nu sunt niciodată asamblate. Ele există ca o structură pe care extractorul o înțelege cât timp descărcarea este în zbor, iar singurul lucru care ajunge pe discul tău este fișierul pe care îl voiai. Când sosește ultimul articol nu mai rămâne practic nimic de făcut, motiv pentru care timpii noștri de sosire stau aproape de timpul de descărcare însuși, nu de o descărcare plus o coadă.</p>
+
+    <div class="callout">
+      <p>Consecința măsurabilă: pentru aceeași sarcină scriem cam pe jumătate, citim înapoi mult mai puțin, și avem nevoie de aproximativ dimensiunea proprie a conținutului în spațiu liber, nu de dublul ei. La o lansare de 190 GB asta înseamnă circa 157 GB spațiu liber față de circa 313 GB, și aproximativ o treime din traficul pe disc.</p>
+    </div>
+
+    <p>Două lucruri fac asta mai greu decât pare, și ele sunt motivul pentru care este neobișnuit. Articolele nu sosesc în ordine, deci extractorul trebuie să se descurce cu octeți care aterizează în poziții arbitrare, nu ca un flux de la început. Iar o arhivă comprimată nu poate fi decomprimată de la mijloc, deci orice parte a muncii care cere cu adevărat ordine trebuie recunoscută și tratată altfel, nu presupusă rezolvată.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Comparația despre care ni se cere</p>
+    <h2>De ce asta nu este dezarhivare directă</h2>
+    <p class="lead">Dezarhivarea directă este o funcție bună și clienții care o au sunt mai buni cu ea. Rezolvă însă altă parte a problemei, iar diferența se vede exact acolo unde contează.</p>
+
+    <p>Dezarhivarea directă începe să extragă înainte ca descărcarea să se fi încheiat, așa că etapa trei se suprapune peste etapa unu în loc să o urmeze. Ce nu face este să elimine etapa unu. <b>Volumele arhivei sunt tot scrise integral pe discul tău</b>, fiindcă dezarhivatorul este unul convențional care citește fișiere convenționale; dezarhivarea directă doar îl pornește mai devreme. Cele două copii tot există, cele două scrieri tot se petrec, iar necesarul de spațiu liber rămâne neschimbat.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>scrie volumele pe disc</th><th class="num">spațiu liber necesar</th><th class="num">de câte ori se scrie conținutul</th></tr></thead>
+      <tbody>
+        <tr><td>Descarcă, apoi dezarhivează</td><td>da, apoi recitire</td><td class="num">~2&times; sarcina</td><td class="num">2</td></tr>
+        <tr><td>Dezarhivare directă</td><td>da, recitit mai devreme</td><td class="num">~2&times; sarcina</td><td class="num">2</td></tr>
+        <tr><td><b>O singură trecere</b></td><td class="win">nu se scriu niciodată</td><td class="win">~1&times; sarcina</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>A doua diferență este ce se întâmplă când forma nu este simplă. Fiindcă dezarhivarea directă predă munca unui dezarhivator convențional pe măsură ce apar volumele, are nevoie ca situația să fie neîncurcată: volumele prezente într-o ordine utilizabilă, nicio reparație în așteptare, nimic de deblocat mai întâi, și o arhivă al cărei conținut să nu fie el însuși arhive. Când ceva din asta lipsește, lucrul înțelept este să se retragă și să revină la dezarhivarea de la final, și asta se și întâmplă. Obții un rezultat corect și timpii obișnuiți.</p>
+
+    <p>Fiindcă extractorul nostru este construit de la bun început în jurul octeților în dezordine, situațiile acelea nu sunt excepții pentru el. Aceasta este distincția reală: nu că pornim mai devreme, ci că nu ne bazăm pe condiții care adesea nu se împlinesc.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Ce îi supraviețuiește cu adevărat</p>
+    <h2>Formele pe care le duce</h2>
+    <p class="lead">Un asemenea proiect merită doar dacă se aplică postărilor pe care le întâlnești cu adevărat, nu unui caz ideal curat. Poziția actuală: <b>niciun format de container nu este tratat doar pe disc.</b> RAR, 7z și zip trec toate prin calea cu o singură trecere.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>formă</th><th>o singură trecere</th><th>note</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, stocat (fără comprimare)</td><td class="yes">da</td><td>cazul obișnuit la lansările multimedia</td></tr>
+        <tr><td>RAR, comprimat</td><td class="yes">da</td><td>inclusiv o arhivă comprimată ca strat exterior</td></tr>
+        <tr><td>RAR 1.5, 3, 4 și 5</td><td class="yes">da</td><td>toate cele patru generații ale formatului</td></tr>
+        <tr><td>7z</td><td class="yes">da</td><td>inclusiv conținut comprimat cu deflate</td></tr>
+        <tr><td>zip</td><td class="yes">da</td><td>inclusiv conținut bzip2 și LZMA</td></tr>
+        <tr><td>Conținut criptat</td><td class="yes">da</td><td>cu parolă, inclusiv zip criptat</td></tr>
+        <tr><td>Antete criptate</td><td class="yes">da</td><td>acolo unde și numele fișierelor sunt ascunse</td></tr>
+        <tr><td>Lanțuri de parole</td><td class="yes">da</td><td>parola fiecărui strat împachetată în stratul de deasupra</td></tr>
+        <tr><td>Arhive imbricate</td><td class="yes">da</td><td>dezimbricate din mers, până la o adâncime configurabilă</td></tr>
+        <tr><td>Deteriorat pe mai multe straturi</td><td class="yes">da</td><td>reparație la fiecare nivel, tot o singură trecere</td></tr>
+        <tr><td>Seturi împărțite numeric</td><td class="yes">da</td><td>împărțiri în stil <code>name.001</code></td></tr>
+        <tr><td>Arhive autoextractibile</td><td class="no">trecere pe disc</td><td>arhiva nu începe la începutul fișierului</td></tr>
+        <tr><td>Zip împărțit (<code>.z01</code>)</td><td class="no">trecere pe disc</td><td>și câteva variante de zip mai rare</td></tr>
+        <tr><td>Sarcini reluate</td><td class="no">trecere pe disc</td><td>o sarcină continuată după o repornire se încheie în mod convențional</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Cele trei refuzuri sunt oneste și se comportă la fel: sarcina se încheie corect, pe calea convențională, iar pentru acea descărcare obții timpii obișnuiți cu două copii. Nimic nu eșuează; doar încetează să fie rapid în felul descris în restul acestei pagini. Arhivele autoextractibile sunt refuzate dintr-un motiv structural, nu din lipsă de efort: identificarea unei arhive după primii ei octeți nu poate funcționa când primii octeți sunt un program.</p>
+
+    <p>Rândurile imbricat și criptat sunt cele care merită luate în serios, fiindcă acolo îți dau înapoi sarcina cei mai mulți clienți. Pe un corpus generat de zece forme imbricate, notat după amprenta conținutului astfel încât un client care redenumește conținutul să primească totuși credit, <b>am finalizat 9 din 10 fără intervenție</b>; următorul cel mai bun client a finalizat 5, iar alți doi au finalizat 2. Cea pe care nu o finalizăm automat este o scară cu zece niveluri, care se încheie curat la limita implicită de adâncime cinci, lăsând stratul cel mai adânc ca arhivă sănătoasă, și se finalizează complet dacă ridici limita. Rundele acelea sunt pe <a href="benchmarks.ro.html#nested">pagina de benchmark-uri</a> cu grila întreagă.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De ce merită făcut</p>
+    <h2>Ce aduce cu adevărat eliminarea drumului dus-întors</h2>
+
+    <p><b>Este mai rapid, dintr-un motiv lipsit de strălucire.</b> A scrie 60 GB și a-i citi înapoi nu este gratis nici măcar pe un disc SSD rapid, iar pe orice altceva mai lent este adesea adevăratul gât de sticlă în locul rețelei. Eliminarea unei scrieri și a două citiri scoate acel timp din cronometrul tău cu totul. Câștigul este cel mai mare tocmai acolo unde se observă cel mai mult: sarcini mari, și mașini al căror disc nu este partea lor cea mai rapidă.</p>
+
+    <p><b>Înjumătățește uzura.</b> Discurile SSD au în ele un număr finit de scrieri, iar un descărcător care scrie fiecare conținut de două ori cheltuiește bugetul acela în ritm dublu fără vreun beneficiu pentru tine. Pe parcursul câtorva sute de terabytes descărcați, ceea ce este un an obișnuit pentru un utilizator activ, diferența reprezintă o parte însemnată din viața unui disc.</p>
+
+    <p><b>Schimbă ce încape.</b> Spațiul liber nu este o caracteristică de performanță, este un da sau nu. O sarcină care are nevoie de dublul propriei dimensiuni ca marjă ori rulează, ori nu. A avea nevoie de aproximativ dimensiunea conținutului înseamnă că sarcinile se încheie pe mașini și volume unde abordarea convențională pur și simplu se oprește, și de aceea o lansare de 190 GB încape aici în circa 157 GB spațiu liber, nu în circa 313 GB.</p>
+
+    <p><b>Costă mai puțin timp de procesor.</b> A nu trece datele prin disc de două ori elimină munca de a o face, iar verificarea în timpul descărcării înseamnă nicio a doua trecere peste conținut pentru a-l controla. Costul nostru de procesor rămâne plat la aproximativ 1.7 secunde de procesor pe gigabyte, de la o sarcină de 35 GB la una de 190 GB, și aceasta este proprietatea utilă: costul pe gigabyte nu crește odată cu sarcina.</p>
+
+    <p><b>Rulează în mai puțină memorie, și în memorie mărginită.</b> Fiindcă octeții sunt consumați pe măsură ce sosesc și nu adunați, setul de lucru este un buget pe care îl stabilești tu, nu o funcție a dimensiunii sarcinii. Asta permite ca o lansare de 190 GB să fie procesată pe o mașină cu aproximativ 1.1 GB disponibili. Distincția care contează nu este numărul, ci forma: memoria care crește odată cu sarcina va întâlni până la urmă o sarcină pe care mașina ta nu o poate termina, și cedează prin folosirea spațiului de swap sau prin a fi ucisă, nu prin a-ți spune.</p>
+
+    <div class="callout">
+      <p>Luate împreună, acestea țin mai puțin de câștigarea unui benchmark și mai mult de unde poate rula programul, pur și simplu. Un proiect care are nevoie de jumătate din spațiul liber, jumătate din scrieri și o cantitate mărginită de memorie funcționează pe un mic server de casă, pe un laptop mai vechi sau pe un NAS, și tocmai acolo trăiește o bună parte din acest software.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Fiecare cifră de pe această pagină este măsurată și publicată cu versiunea și data alături pe <a href="benchmarks.ro.html">pagina de benchmark-uri</a>, inclusiv rundele pe care le pierdem. Contraponderea onestă, spusă și acolo: un extractor și un reparator construiți să însoțească o descărcare în curs țin mai multă memorie rezidentă decât un instrument de sine stătător rulat o dată din linia de comandă, deci dacă restricția ta este cea mai mică amprentă posibilă pentru o sarcină unică pe un fișier pe care îl ai deja, uneltele dedicate câștigă coloana aceea.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - descărcătorul Usenet într-o singură trecere.</div>
+    <div>
+      <a href="index.ro.html">Acasă</a> ·
+      <a href="features.ro.html">Funcții</a> ·
+      <a href="indexer.ro.html">Indexer</a> ·
+      <a href="benchmarks.ro.html">Benchmark-uri</a> ·
+      <a href="explained.ro.html">Explicații</a> ·
+      <a href="download.ro.html">Descarcă</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

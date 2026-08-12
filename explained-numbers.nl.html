@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wat de cijfers betekenen - nzbfast</title>
+<meta name="description" content="Een leeswijzer bij de gemeten kolommen: tijd tot een bruikbaar bestand, piekgeheugen, processorseconden, piekschijfgebruik en volume-I/O, en hoe een goede of slechte waarde eruitziet.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.nl.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nl.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nl.html" class="home">Home</a>
+    <a href="features.nl.html">Functies</a>
+    <a href="indexer.nl.html">Indexer</a>
+    <a href="benchmarks.nl.html">Benchmarks</a>
+    <a href="explained.nl.html" class="on">Uitgelegd</a>
+    <a href="MANUAL.html">Documentatie</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nl.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html" selected>Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.nl.html" style="color:inherit">Uitgelegd</a> &middot; vier</p>
+  <h1>Wat de cijfers betekenen</h1>
+  <p class="sub">Vijf kolommen komen in de meeste van onze tabellen voor. Hier staat wat elk ervan meet, waarom het de moeite van publiceren waard is, en ruwweg hoe een goede of slechte waarde eruitziet op een machine die je echt zelf hebt.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Het hoofdcijfer</p>
+    <h2>Tijd tot een bruikbaar bestand</h2>
+    <p class="lead">De klok begint wanneer de taak wordt toegevoegd en stopt wanneer de afgeronde inhoud op schijf staat, geverifieerd en uitgepakt. Niet wanneer de download klaar is, en niet wanneer de client zegt dat hij klaar is.</p>
+
+    <p>Dit is het enige cijfer dat overeenkomt met iets dat jij meemaakt. Een client kan snel klaar zijn met downloaden en daarna een minuut besteden aan controleren en uitpakken, en vanaf jouw stoel hoort die minuut bij het wachten. Alleen de download meten zou clients bevoordelen die hun werk achteraf doen, en dat zijn de meeste.</p>
+
+    <p>Het is ook waarom onze architectuur er in deze tabellen ongewoon uitziet. Wij verifiëren elk stuk zodra het binnenkomt en pakken uit terwijl de download nog loopt, dus als het laatste artikel landt is er nauwelijks nog iets te doen. Andere clients zetten eerst de hele post op schijf, verifiëren die daarna en pakken die daarna uit, in drie opeenvolgende fasen. Bij een makkelijke taak is het verschil bescheiden. Bij een grote of beschadigde taak is het bijna het hele resultaat.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Degene die verkeerd gelezen wordt</p>
+    <h2>Piekgeheugen (RSS)</h2>
+    <p class="lead">De grootste hoeveelheid geheugen die het programma op enig moment tijdens de taak vasthield. RSS staat voor resident set size, oftewel simpelweg het geheugen dat werkelijk in het RAM zit in plaats van toegezegd of gereserveerd.</p>
+
+    <p>Hoger is niet automatisch slechter, en lager is niet automatisch beter. Geheugen wordt uitgegeven om iets duurders te vermijden, meestal dezelfde gegevens twee keer van schijf lezen. De vraag die telt is of die uitgave iets oplevert en of ze begrensd is.</p>
+
+    <p><b>Begrensd is het belangrijke woord.</b> Een client waarvan het geheugen meegroeit met de omvang van de taak komt uiteindelijk een taak tegen die hij op jouw machine niet kan afmaken, en de storing komt als wisselbestandgebruik of een afgeschoten proces in plaats van een beleefde melding. Wij houden een budget aan en blijven daarbinnen, en daarom kunnen we een taak van 190 GB door een machine halen waar ongeveer 1.1 GB geheugen voor ons beschikbaar is. Een cijfer als 9.3 GB bij een taak van 190 GB is niet alleen groot, het heeft een andere vorm: het schaalt mee met het werk.</p>
+
+    <p>Waar ons eigen geheugen stijgt, proberen we te zeggen wat het opleverde. Bij zwaar beschadigde posts houdt de huidige build pariteitsgegevens in het geheugen om meteen te repareren in plaats van later meer op te halen, wat het piekgeheugen van ongeveer 0.8 GB naar ongeveer 1.3 GB brengt en zo'n tien seconden bespaart. Bij een onbeschadigde post gebeurt die uitgave niet en is het cijfer 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De energie-indicator</p>
+    <h2>Processorseconden (CPU-tijd)</h2>
+    <p class="lead">De totale processortijd die het hele programma verbruikte, opgeteld over alle kernen. Het is een maat voor verricht werk in plaats van verstreken tijd, dus het kan veel groter zijn dan de klok.</p>
+
+    <p>Als een taak 100 seconden duurt en 1,600 processorseconden meldt, waren ongeveer zestien kernen de hele run bezig. Dat telt om drie praktische redenen: het is warmte, het is stroom, en op een machine die tegelijk iets anders doet is het concurrentie om rekenkracht. Een client die in redelijke tijd klaar is terwijl hij elke kern volbelast is niet efficiënt geweest, hij is duur geweest.</p>
+
+    <p>In deze kolom staan de breedste verschillen van de hele site, breder dan bij welke eindtijd ook. Bij byte-identieke uitvoer op dezelfde beschadigde post hebben we een spreiding van dertig keer in processorseconden tussen clients gemeten. Het loont dit te controleren voordat je aanneemt dat twee clients die binnen enkele seconden van elkaar klaar zijn een vergelijkbare hoeveelheid werk doen.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De twee schijfkolommen</p>
+    <h2>Piekschijfgebruik en volume-I/O</h2>
+    <p class="lead">Piekschijfgebruik is de grootste extra ruimte die de taak op enig moment nodig had. Volume-I/O is de totale hoeveelheid gegevens die daarvoor is gelezen en geschreven. Ze beantwoorden verschillende vragen.</p>
+
+    <p><b>Piekschijfgebruik is een harde grens.</b> Het bepaalt of de taak überhaupt kan draaien. De meeste clients schrijven de volledige post naar schijf en pakken er dan een tweede kopie naast uit, dus hebben ze ruwweg twee keer de inhoud aan vrije ruimte nodig. Voor een taak van 190 GB is dat ongeveer 313 GB vrij voordat je begint, tegen ongeveer 157 GB bij ons, omdat wij uitpakken tijdens het downloaden en de archiefvolumes nooit materialiseren. Als je schijf niet het dubbele van de taak aankan, is dat verschil geen percentage, maar de vraag of de download plaatsvindt.</p>
+
+    <p><b>Volume-I/O is slijtage en tijd.</b> De post schrijven, hem teruglezen om te verifiëren, hem nog eens lezen om uit te pakken en de uitvoer schrijven is vier keer over de gegevens heen. Het in één keer doen is ruwweg een derde van het verkeer, wat op een SSD levensduur is, en op een tragere schijf vaak het werkelijke knelpunt in plaats van het netwerk.</p>
+
+    <p class="note" style="text-align:start">Een noot over hoe wij deze twee lezen, want ze heeft ons te pakken gehad en kan jou te pakken krijgen bij het lezen van onze tabellen. Beide cijfers komen van tellers die de hele schijf beslaan, niet één programma. Dat maakt ze een uitstekende controle op de vraag of een benchmark vervuild is door iets anders dat draaide, en het betekent dat een getal dat onmogelijk lijkt dat meestal ook is: een taak van 6.5 GB die 144 GB schijfverkeer meldt is geen client die zich vreemd gedraagt, het zijn twee taken die een machine delen.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Een tabel lezen</p>
+    <h2>Drie gewoonten die het waard zijn</h2>
+    <ul class="plain">
+      <li><b>Lees een rij helemaal door voordat je kolommen vergelijkt.</b> De meeste van onze tabellen zetten dezelfde client onder meerdere omstandigheden. De interessante informatie is meestal hoe het cijfer van een client verandert tussen een makkelijke en een moeilijke taak, niet waar het bij één enkele taak staat.</li>
+      <li><b>Controleer wat de eindstreep was.</b> Een tijd is alleen vergelijkbaar met een andere tijd als beide clients dezelfde toestand bereikten. Wij hashen elke uitvoer tegen een bekend goede kopie precies om die reden, en een client die er niet kwam wordt gemarkeerd in plaats van geklokt.</li>
+      <li><b>Kies bereiken boven gemiddelden als de spreiding groot is.</b> Waar we een bereik publiceren in plaats van één cijfer is dat bewust: het betekent dat de afzonderlijke runs genoeg uiteenliepen dat een gemiddelde ze verkeerd zou weergeven, en dat laten we liever zien dan dat we het verbergen.</li>
+    </ul>
+
+    <p>De tabellen zelf, met de build en de datum naast elk ervan, staan op de <a href="benchmarks.nl.html">benchmarkpagina</a>, inclusief de runs die we verliezen.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - de one-pass Usenet-downloader.</div>
+    <div>
+      <a href="index.nl.html">Home</a> ·
+      <a href="features.nl.html">Functies</a> ·
+      <a href="indexer.nl.html">Indexer</a> ·
+      <a href="benchmarks.nl.html">Benchmarks</a> ·
+      <a href="explained.nl.html">Uitgelegd</a> ·
+      <a href="download.nl.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

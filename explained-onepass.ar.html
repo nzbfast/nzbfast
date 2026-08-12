@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>كيف يعمل التنزيل بتمريرة واحدة - nzbfast</title>
+<meta name="description" content="ما الذي تفعله التمريرة الواحدة فعلًا، ولماذا ليست الشيء نفسه كفك الضغط المباشر، وأي أشكال الأرشيف تعالجها، ولماذا يوفّر إلغاءُ دورة الكتابة ثم إعادة القراءة قرصًا ووقت معالج وذاكرة.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.ar.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ar.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ar.html" class="home">الرئيسية</a>
+    <a href="features.ar.html">الميزات</a>
+    <a href="indexer.ar.html">المفهرِس</a>
+    <a href="benchmarks.ar.html">قياس الأداء</a>
+    <a href="explained.ar.html" class="on">شرح</a>
+    <a href="MANUAL.html">الدليل</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ar.html">تنزيل</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html" selected>العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.ar.html" style="color:inherit">شرح</a> &middot; واحد</p>
+  <h1>كيف يعمل التنزيل بتمريرة واحدة</h1>
+  <p class="sub">معظم ما يجعل هذا البرنامج سريعًا ليس مسارًا شبكيًا أسرع. بل أن البيانات تتحرك مرة واحدة فقط. وهذا ما يعنيه ذلك عمليًا، ولماذا هو شيء مختلف عن فك الضغط المباشر، وأي أشكال الأرشيف تنجو منه، وكم يساوي فعلًا على جهاز حقيقي إلغاءُ دورة الكتابة ثم إعادة القراءة.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">نقطة البداية</p>
+    <h2>ما الذي يفعله تنزيل Usenet تقليديًا</h2>
+    <p class="lead">المنشور آلاف المقالات الصغيرة المرمَّزة التي تشكّل معًا مجموعة مجلدات أرشيف، وهي بدورها تحتوي الملف الذي تريده فعلًا. والانتقال من الأول إلى الثاني كان تقليديًا أربع مهام منفصلة، تنتهي كل واحدة قبل أن تبدأ التالية.</p>
+
+    <ol>
+      <li><b>نزّل وفكّ الترميز.</b> اجلب كل مقالة، وفكّ ترميزها، واكتب مجلدات الأرشيف المعاد تجميعها على القرص. ولإصدار بحجم 60 GB يعني ذلك 60 GB مكتوبة.</li>
+      <li><b>تحقّق.</b> أعد قراءة الـ 60 GB كلها من القرص لمطابقتها ببيانات التماثل، وأصلحها إن كان شيء خاطئًا.</li>
+      <li><b>فُكّ الضغط.</b> اقرأ المجلدات مرة أخرى، واكتب المحتوى المستخرج بجانبها. الآن على القرص 120 GB.</li>
+      <li><b>نظّف.</b> احذف المجلدات، ليبقى المحتوى.</li>
+    </ol>
+
+    <p>كل مرحلة صحيحة، والنتيجة سليمة. لكن المحتوى كُتب مرتين، وقُرئ مرتين على الأقل، وعند الذروة اضطر القرص أن يحمل نسختين كاملتين من مهمة لم ترد منها إلا نسخة واحدة. والساعة التي تعيشها هي المراحل الأربع بالتتابع، ولهذا يستطيع برنامج أن يعلن تنزيلًا سريعًا ويبقيك منتظرًا.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">التغيير</p>
+    <h2>فعلها مرة واحدة بدلًا من ذلك</h2>
+    <p class="lead">التمريرة الواحدة تعني أن البايتات تذهب من الشبكة إلى وجهتها النهائية دون أن تصير قط ملف أرشيف على قرصك. لا توجد مرحلة ثانية ولا ثالثة، لأن عمل كلتيهما يجري بينما المرحلة الأولى لا تزال تعمل.</p>
+
+    <p>عمليًا، تُفكّ ترميز كل مقالة في الذاكرة فور وصولها وتُسلَّم مباشرةً إلى أمرين في آن واحد. المتحقِّق يطابقها فورًا ببيانات التماثل، فتثبت الصحة والبيانات تهبط، لا بإعادة قراءتها لاحقًا. والمستخرِج يعامل البايتات الواردة كموضع داخل الأرشيف، ويحسب إلى أي جزء من أي ملف محتوى تنتمي، ويكتبها هناك.</p>
+
+    <p>ولا تُجمَّع مجلدات الأرشيف أبدًا. إنها موجودة كبنية يفهمها المستخرِج والتنزيل في الجو، والشيء الوحيد الذي يبلغ قرصك هو الملف الذي أردته. وحين تصل المقالة الأخيرة لا يبقى في الجوهر ما يُفعل، ولهذا تقع أزمنة إنهائنا قريبةً من زمن التنزيل نفسه لا من تنزيل يتبعه ذيل.</p>
+
+    <div class="callout">
+      <p>النتيجة القابلة للقياس: للمهمة نفسها نكتب نحو النصف، ونعيد قراءة أقل بكثير، ونحتاج تقريبًا حجم المحتوى نفسه مساحةً حرة لا ضِعفه. وفي إصدار بحجم 190 GB يعني ذلك نحو 157 GB مساحة حرة مقابل نحو 313 GB، ونحو ثلث حركة القرص.</p>
+    </div>
+
+    <p>أمران يجعلان هذا أصعب مما يبدو، وهما سبب ندرته. المقالات لا تصل بالترتيب، فعلى المستخرِج أن يتدبّر بايتات تهبط في مواضع اعتباطية لا كتيار من البداية. والأرشيف المضغوط لا يمكن فك ضغطه من منتصفه، فأي جزء من العمل يقتضي الترتيب حقًا لا بد أن يُعرَف ويُعالَج على نحو آخر بدل تجاوزه بافتراض.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">المقارنة التي يسأل عنها الناس</p>
+    <h2>لماذا ليس هذا فكّ ضغط مباشرًا</h2>
+    <p class="lead">فكّ الضغط المباشر ميزة جيدة، والبرامج التي تملكها أفضل حالًا بها. وهو أيضًا يحل جزءًا آخر من المشكلة، والفارق يظهر تحديدًا حيث يهم.</p>
+
+    <p>يبدأ فكّ الضغط المباشر بالاستخراج قبل انتهاء التنزيل، فتتداخل المرحلة الثالثة مع الأولى بدل أن تتبعها. أما ما لا يفعله فهو إلغاء المرحلة الأولى. <b>فمجلدات الأرشيف ما زالت تُكتب كاملةً على قرصك</b>، لأن فاكّ الضغط تقليدي يقرأ ملفات تقليدية؛ وفكّ الضغط المباشر يكتفي بتشغيله أبكر. النسختان ما زالتا موجودتين، والكتابتان ما زالتا تحدثان، وحاجة المساحة الحرة لم تتغير.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>كتابة المجلدات على القرص</th><th class="num">المساحة الحرة اللازمة</th><th class="num">عدد مرات كتابة المحتوى</th></tr></thead>
+      <tbody>
+        <tr><td>نزّل ثم فُكّ الضغط</td><td>نعم، ثم إعادة قراءة</td><td class="num">~2&times; المهمة</td><td class="num">2</td></tr>
+        <tr><td>فكّ ضغط مباشر</td><td>نعم، تُقرأ أبكر</td><td class="num">~2&times; المهمة</td><td class="num">2</td></tr>
+        <tr><td><b>تمريرة واحدة</b></td><td class="win">لا تُكتب أبدًا</td><td class="win">~1&times; المهمة</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>والفارق الثاني هو ما يحدث حين لا يكون الشكل بسيطًا. فلأن فكّ الضغط المباشر يسلّم العمل إلى فاكّ ضغط تقليدي كلما ظهرت المجلدات، فإنه يحتاج وضعًا خاليًا من التعقيد: المجلدات حاضرة بترتيب صالح، ولا إصلاح معلّق، ولا شيء يجب فتحه أولًا، وأرشيف محتواه ليس أرشيفات بدوره. وحين يتخلّف أي من ذلك، فالصواب أن ينسحب ويعود إلى فك الضغط في النهاية، وهذا ما يحدث. فتحصل على نتيجة صحيحة وعلى التوقيت المعتاد.</p>
+
+    <p>ولأن مستخرِجنا مبنيّ منذ البداية حول بايتات غير مرتبة، فتلك الأوضاع ليست استثناءات عنده. وهذا هو الفرق الحقيقي: ليس أننا نبدأ أبكر، بل أننا لا نعتمد على شروط كثيرًا ما لا تتحقق.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">ما الذي ينجو منه فعلًا</p>
+    <h2>الأشكال التي يتحمّلها</h2>
+    <p class="lead">تصميم كهذا لا يستحق إلا إذا انطبق على المنشورات التي تصادفها فعلًا، لا على حالة مثالية نظيفة. الوضع الحالي: <b>لا صيغة حاوية تُعالَج على القرص وحده.</b> فـ RAR و7z وzip كلها تمرّ عبر مسار التمريرة الواحدة.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>الشكل</th><th>تمريرة واحدة</th><th>ملاحظات</th></tr></thead>
+      <tbody>
+        <tr><td>RAR، مخزَّن (بلا ضغط)</td><td class="yes">نعم</td><td>الحالة الشائعة في إصدارات الوسائط</td></tr>
+        <tr><td>RAR، مضغوط</td><td class="yes">نعم</td><td>بما في ذلك أرشيف مضغوط كطبقة خارجية</td></tr>
+        <tr><td>RAR 1.5 و3 و4 و5</td><td class="yes">نعم</td><td>أجيال الصيغة الأربعة كلها</td></tr>
+        <tr><td>7z</td><td class="yes">نعم</td><td>بما في ذلك المحتوى المضغوط بـ deflate</td></tr>
+        <tr><td>zip</td><td class="yes">نعم</td><td>بما في ذلك محتوى bzip2 وLZMA</td></tr>
+        <tr><td>محتوى مشفَّر</td><td class="yes">نعم</td><td>بكلمة سر، بما في ذلك zip المشفَّر</td></tr>
+        <tr><td>ترويسات مشفَّرة</td><td class="yes">نعم</td><td>حيث تكون أسماء الملفات مخفية أيضًا</td></tr>
+        <tr><td>سلاسل كلمات السر</td><td class="yes">نعم</td><td>كلمة سر كل طبقة معبّأة في الطبقة التي فوقها</td></tr>
+        <tr><td>أرشيفات متداخلة</td><td class="yes">نعم</td><td>تُفكّ من التداخل أثناء العمل، حتى عمق قابل للضبط</td></tr>
+        <tr><td>تالف في عدة طبقات</td><td class="yes">نعم</td><td>إصلاح في كل مستوى، وما زالت تمريرة واحدة</td></tr>
+        <tr><td>مجموعات مقسَّمة رقميًا</td><td class="yes">نعم</td><td>تقسيمات على نمط <code>name.001</code></td></tr>
+        <tr><td>أرشيفات ذاتية الاستخراج</td><td class="no">تمريرة قرص</td><td>الأرشيف لا يبدأ عند بداية الملف</td></tr>
+        <tr><td>zip مقسَّم (<code>.z01</code>)</td><td class="no">تمريرة قرص</td><td>وبعض أنواع zip الأندر</td></tr>
+        <tr><td>مهام مستأنَفة</td><td class="no">تمريرة قرص</td><td>المهمة التي تستكمل بعد إعادة تشغيل تنتهي بالطريقة التقليدية</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>الرفضات الثلاثة صادقة وتتصرف على النحو نفسه: تكتمل المهمة صحيحةً عبر المسار التقليدي، وتحصل لذلك التنزيل على التوقيت المعتاد ذي النسختين. لا شيء يفشل؛ إنما يكفّ عن كونه سريعًا بالمعنى الذي يصفه بقية هذه الصفحة. والأرشيفات ذاتية الاستخراج تُرفَض لسبب بنيوي لا لقلة جهد، إذ إن تمييز أرشيف من بايتاته الأولى لا يمكن أن يعمل حين تكون البايتات الأولى برنامجًا.</p>
+
+    <p>صفّا التداخل والتشفير هما اللذان يستحقان الأخذ بجدية، لأنهما حيث ترد إليك معظم البرامج المهمة. فعلى مجموعة مولَّدة من عشرة أشكال متداخلة، مصحَّحة ببصمة المحتوى كي ينال البرنامج الذي يعيد تسمية المحتوى تقديرَه أيضًا، <b>أنجزنا 9 من 10 دون تدخل</b>؛ وأنجز البرنامج التالي 5، وأنجز اثنان آخران 2. والشكل الذي لا ننجزه تلقائيًا سُلَّم من عشرة مستويات، ينتهي نظيفًا عند حد العمق الافتراضي خمسة تاركًا أعمق طبقة أرشيفًا سليمًا، ويكتمل تمامًا إن رفعت الحد. وتلك الجولات في <a href="benchmarks.ar.html#nested">صفحة قياس الأداء</a> مع الشبكة الكاملة.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">لماذا يستحق الأمر</p>
+    <h2>ما الذي يجنيه إلغاء الرحلة ذهابًا وإيابًا فعلًا</h2>
+
+    <p><b>إنه أسرع، لسبب غير بهيّ.</b> فكتابة 60 GB وإعادة قراءتها ليست مجانية حتى على قرص صلب الحالة سريع، وعلى أي شيء أبطأ كثيرًا ما تكون عنق الزجاجة الحقيقي بدل الشبكة. وإزالة كتابة وقراءتين تزيل ذلك الوقت من ساعتك كلها. والمكسب أكبر ما يكون تحديدًا حيث يلاحظه الناس أكثر: المهام الكبيرة، والأجهزة التي ليس قرصها أسرع أجزائها.</p>
+
+    <p><b>يقلّص التآكل إلى النصف.</b> فأقراص الحالة الصلبة فيها عدد منتهٍ من الكتابات، والمنزِّل الذي يكتب كل محتوى مرتين ينفق تلك الميزانية بضعف السرعة دون فائدة تعود عليك. وعبر بضع مئات من التيرابايتات من التنزيل، وهي سنة عادية لمستخدم نشط، يكون الفارق جزءًا معتبَرًا من عمر القرص.</p>
+
+    <p><b>يغيّر ما الذي يتّسع.</b> فالمساحة الحرة ليست خاصية أداء، بل نعم أو لا. والمهمة التي تحتاج ضعف حجمها متسعًا إما أن تعمل أو لا. والاحتياج إلى نحو حجم المحتوى يعني أن مهامًا تكتمل على أجهزة وأقراص يتوقف عندها النهج التقليدي ببساطة، ولهذا يتّسع إصدار بحجم 190 GB هنا في نحو 157 GB من المساحة الحرة بدل نحو 313 GB.</p>
+
+    <p><b>يكلّف وقت معالجة أقل.</b> فعدم تمرير البيانات عبر القرص مرتين يزيل عملَ ذلك، والتحقق أثناء التنزيل يعني ألا تمريرة ثانية على المحتوى لفحصه. وتبقى كلفة معالجتنا مستوية عند نحو 1.7 ثانية معالج لكل غيغابايت، من مهمة 35 GB إلى مهمة 190 GB، وهذه هي الخاصية المفيدة: الكلفة لكل غيغابايت لا تنمو بنمو المهمة.</p>
+
+    <p><b>يعمل بذاكرة أقل، وبذاكرة محدودة.</b> لأن البايتات تُستهلك فور وصولها بدل أن تتراكم، فمجموعة العمل ميزانية تحددها أنت لا دالةٌ في حجم المهمة. وهذا ما يتيح معالجة إصدار بحجم 190 GB على جهاز يتوفر فيه نحو 1.1 GB. والتمييز المهم ليس الرقم بل الشكل: الذاكرة التي تنمو مع المهمة ستصادف في النهاية مهمة لا يستطيع جهازك إنهاءها، وتفشل بالتبديل إلى القرص أو بأن تُقتل لا بأن تخبرك.</p>
+
+    <div class="callout">
+      <p>ومجتمعةً، هذه الأمور تتعلق بمكان قدرة البرنامج على العمل أصلًا أكثر مما تتعلق بالفوز في قياس. فالتصميم الذي يحتاج نصف المساحة الحرة ونصف الكتابات وقدرًا محدودًا من الذاكرة يعمل على خادوم منزلي صغير أو حاسوب محمول أقدم أو جهاز NAS، وهناك يعيش قسم كبير من هذا البرنامج فعلًا.</p>
+    </div>
+
+    <p class="note" style="text-align:start">كل رقم في هذه الصفحة مقيس ومنشور بجانبه الإصدار والتاريخ في <a href="benchmarks.ar.html">صفحة قياس الأداء</a>، بما في ذلك الجولات التي نخسرها. والثِّقل المقابل الصادق، وهو مذكور هناك أيضًا: المستخرِج والمصلِح المبنيّان لمرافقة تنزيل جارٍ يحجزان ذاكرة مقيمة أكثر من أداة مستقلة تُشغَّل مرة واحدة من سطر الأوامر، فإن كان قيدك أصغر أثر ممكن لمهمة واحدة على ملف تملكه سلفًا، فالأدوات المخصصة تكسب ذلك العمود.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - أداة تنزيل Usenet ذات التمريرة الواحدة.</div>
+    <div>
+      <a href="index.ar.html">الرئيسية</a> ·
+      <a href="features.ar.html">الميزات</a> ·
+      <a href="indexer.ar.html">المفهرِس</a> ·
+      <a href="benchmarks.ar.html">قياس الأداء</a> ·
+      <a href="explained.ar.html">شرح</a> ·
+      <a href="download.ar.html">تنزيل</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

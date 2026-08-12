@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slik virker nedlasting i én omgang - nzbfast</title>
+<meta name="description" content="Hva én omgang faktisk gjør, hvorfor det ikke er det samme som direkte utpakking, hvilke arkivformer den takler, og hvorfor fjerningen av skriv-og-les-tilbake-runden sparer diskplass, prosessortid og minne.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.nb.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nb.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nb.html" class="home">Hjem</a>
+    <a href="features.nb.html">Funksjoner</a>
+    <a href="indexer.nb.html">Indekserer</a>
+    <a href="benchmarks.nb.html">Ytelsestester</a>
+    <a href="explained.nb.html" class="on">Forklart</a>
+    <a href="MANUAL.html">Dokumentasjon</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nb.html">Last ned</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html" selected>Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.nb.html" style="color:inherit">Forklart</a> &middot; én</p>
+  <h1>Slik virker nedlasting i én omgang</h1>
+  <p class="sub">Det meste av det som gjør denne klienten rask, er ikke en raskere nettverksvei. Det er at dataene bare flytter seg én gang. Dette er hva det betyr i praksis, hvorfor det er noe annet enn direkte utpakking, hvilke arkivformer som overlever det, og hva fjerningen av skriv-og-les-tilbake-runden faktisk er verdt på en ekte maskin.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Utgangspunktet</p>
+    <h2>Hva en Usenet-nedlasting tradisjonelt gjør</h2>
+    <p class="lead">En post er tusenvis av små kodede artikler som til sammen danner et sett arkivbind, som i sin tur inneholder fila du egentlig vil ha. Å komme fra det ene til det andre har tradisjonelt vært fire atskilte jobber, hver ferdig før den neste begynner.</p>
+
+    <ol>
+      <li><b>Last ned og dekod.</b> Hent hver artikkel, dekod den, og skriv de sammensatte arkivbindene til disk. For en utgivelse på 60 GB blir det 60 GB skrevet.</li>
+      <li><b>Verifiser.</b> Les alle 60 GB tilbake fra disken for å sjekke dem mot paritetsdataene, og reparer dem hvis noe er galt.</li>
+      <li><b>Pakk ut.</b> Les bindene på nytt, og skriv det utpakkede innholdet ved siden av dem. Nå ligger det 120 GB på disken.</li>
+      <li><b>Rydd opp.</b> Slett bindene, slik at innholdet blir igjen.</li>
+    </ol>
+
+    <p>Hvert trinn er korrekt, og resultatet er riktig. Men innholdet er skrevet to ganger, lest minst to ganger, og på det høyeste måtte disken romme to fullstendige kopier av en jobb du bare ville ha én kopi av. Klokka du opplever, er alle fire trinnene etter hverandre, og derfor kan en klient melde om en rask nedlasting og likevel la deg vente.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Endringen</p>
+    <h2>Å gjøre det én gang i stedet</h2>
+    <p class="lead">Én omgang betyr at bytene går fra nettverket til sitt endelige mål uten noen gang å bli en arkivfil på disken din. Det finnes ikke trinn to eller tre, fordi arbeidet i begge skjer mens trinn én fortsatt går.</p>
+
+    <p>I praksis blir hver artikkel dekodet i minnet så snart den kommer, og gitt rett videre til to ting samtidig. Verifikatoren sjekker den umiddelbart mot paritetsdataene, så riktigheten blir fastslått mens dataene lander, ikke ved å lese dem om igjen senere. Utpakkeren behandler de innkommende bytene som en posisjon inne i arkivet, regner ut hvilken del av hvilken innholdsfil de hører til, og skriver dem dit.</p>
+
+    <p>Arkivbindene blir aldri satt sammen. De finnes som en struktur utpakkeren forstår mens nedlastingen er i lufta, og det eneste som når disken din, er fila du ville ha. Når den siste artikkelen kommer, er det praktisk talt ingenting igjen å gjøre, og derfor ligger slutttidene våre nær selve nedlastingstiden i stedet for en nedlasting pluss en hale.</p>
+
+    <div class="callout">
+      <p>Den målbare følgen: for den samme jobben skriver vi omtrent halvparten så mye, leser langt mindre tilbake, og trenger omtrent innholdets egen størrelse i ledig plass i stedet for det dobbelte. På en utgivelse på 190 GB er det omkring 157 GB ledig plass mot omkring 313 GB, og omtrent en tredjedel av disktrafikken.</p>
+    </div>
+
+    <p>To ting gjør dette vanskeligere enn det høres ut som, og de er grunnen til at det er uvanlig. Artikler kommer ikke i rekkefølge, så utpakkeren må takle byte som lander på vilkårlige posisjoner i stedet for som en strøm fra begynnelsen. Og et komprimert arkiv kan ikke pakkes ut fra midten, så enhver del av arbeidet som virkelig krever rekkefølge, må gjenkjennes og håndteres annerledes framfor å antas bort.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Sammenligningen folk spør om</p>
+    <h2>Hvorfor dette ikke er direkte utpakking</h2>
+    <p class="lead">Direkte utpakking er en god funksjon, og klientene som har den, er bedre stilt med den. Den løser også en annen del av problemet, og forskjellen viser seg akkurat der det betyr noe.</p>
+
+    <p>Direkte utpakking begynner å pakke ut før nedlastingen er ferdig, slik at trinn tre overlapper trinn én i stedet for å følge etter. Det den ikke gjør, er å fjerne trinn én. <b>Arkivbindene blir fortsatt skrevet i sin helhet til disken din</b>, for utpakkeren er en vanlig en som leser vanlige filer; direkte utpakking starter den bare tidligere. De to kopiene finnes fortsatt, de to skrivingene skjer fortsatt, og behovet for ledig plass er uendret.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>skrive bindene til disk</th><th class="num">nødvendig ledig plass</th><th class="num">antall ganger innholdet skrives</th></tr></thead>
+      <tbody>
+        <tr><td>Last ned, pakk så ut</td><td>ja, deretter tilbakelesing</td><td class="num">~2&times; jobben</td><td class="num">2</td></tr>
+        <tr><td>Direkte utpakking</td><td>ja, lest tilbake tidligere</td><td class="num">~2&times; jobben</td><td class="num">2</td></tr>
+        <tr><td><b>Én omgang</b></td><td class="win">skrives aldri</td><td class="win">~1&times; jobben</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Den andre forskjellen er hva som skjer når formen ikke er enkel. Fordi direkte utpakking gir arbeidet videre til en vanlig utpakker etter hvert som bindene dukker opp, trenger den at situasjonen er grei: bindene til stede i en brukbar rekkefølge, ingen reparasjon som venter, ingenting som må låses opp først, og et arkiv hvis innhold ikke selv er arkiver. Når noe av det svikter, er det fornuftige å trekke seg og falle tilbake på å pakke ut til slutt, og det er det som skjer. Du får et korrekt resultat og den vanlige tidsbruken.</p>
+
+    <p>Fordi utpakkeren vår er bygd rundt byte i uorden fra starten, er de situasjonene ingen unntak for den. Det er den virkelige forskjellen: ikke at vi begynner tidligere, men at vi ikke støtter oss på vilkår som ofte ikke holder.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Hva som faktisk overlever det</p>
+    <h2>Formene den takler</h2>
+    <p class="lead">En slik konstruksjon er bare verdt å ha hvis den gjelder postene du faktisk møter, og ikke et rent beste tilfelle. Dagens stilling: <b>ingen beholderformat håndteres bare på disk.</b> RAR, 7z og zip går alle gjennom veien med én omgang.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>form</th><th>én omgang</th><th>merknader</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, lagret (uten komprimering)</td><td class="yes">ja</td><td>det vanlige tilfellet for medieutgivelser</td></tr>
+        <tr><td>RAR, komprimert</td><td class="yes">ja</td><td>inkludert et komprimert arkiv som ytterste lag</td></tr>
+        <tr><td>RAR 1.5, 3, 4 og 5</td><td class="yes">ja</td><td>alle fire generasjonene av formatet</td></tr>
+        <tr><td>7z</td><td class="yes">ja</td><td>inkludert deflate-komprimert innhold</td></tr>
+        <tr><td>zip</td><td class="yes">ja</td><td>inkludert bzip2- og LZMA-innhold</td></tr>
+        <tr><td>Kryptert innhold</td><td class="yes">ja</td><td>med passord, inkludert kryptert zip</td></tr>
+        <tr><td>Krypterte hoder</td><td class="yes">ja</td><td>der også filnavnene er skjult</td></tr>
+        <tr><td>Passordkjeder</td><td class="yes">ja</td><td>passordet til hvert lag pakket inn i laget over</td></tr>
+        <tr><td>Nøstede arkiver</td><td class="yes">ja</td><td>løsnøstet underveis, til en innstillbar dybde</td></tr>
+        <tr><td>Skadd i flere lag</td><td class="yes">ja</td><td>reparasjon på hvert nivå, fortsatt én omgang</td></tr>
+        <tr><td>Numerisk delte sett</td><td class="yes">ja</td><td>deling av typen <code>name.001</code></td></tr>
+        <tr><td>Selvutpakkende arkiver</td><td class="no">diskomgang</td><td>arkivet begynner ikke ved starten av fila</td></tr>
+        <tr><td>Oppdelt zip (<code>.z01</code>)</td><td class="no">diskomgang</td><td>og noen sjeldnere zip-varianter</td></tr>
+        <tr><td>Gjenopptatte jobber</td><td class="no">diskomgang</td><td>en jobb som fortsetter etter en omstart, avsluttes på vanlig vis</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>De tre avslagene er ærlige og oppfører seg likt: jobben fullføres korrekt, langs den vanlige veien, og for den nedlastingen får du den vanlige tidsbruken med to kopier. Ingenting svikter; det slutter bare å være raskt på den måten resten av denne siden beskriver. Selvutpakkende arkiver avvises av en strukturell grunn og ikke av mangel på innsats: å kjenne igjen et arkiv på de første bytene kan ikke virke når de første bytene er et program.</p>
+
+    <p>Radene nøstet og kryptert er de det er verdt å ta på alvor, for det er der de fleste klienter gir jobben tilbake til deg. På et generert materiale med ti nøstede former, bedømt på innholdshash slik at en klient som gir innholdet nytt navn likevel får det godskrevet, <b>fullførte vi 9 av 10 uten inngrep</b>; den nest beste klienten fullførte 5, og to andre fullførte 2. Den vi ikke fullfører automatisk, er en stige med ti nivåer, som avsluttes pent ved standard dybdegrense på fem med det dypeste laget igjen som et friskt arkiv, og fullføres helt hvis du hever grensen. De omgangene ligger med hele rutenettet på <a href="benchmarks.nb.html#nested">ytelsestestsiden</a>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Hvorfor det er verdt å gjøre</p>
+    <h2>Hva fjerningen av rundturen faktisk gir</h2>
+
+    <p><b>Det er raskere, av en lite glamorøs grunn.</b> Å skrive 60 GB og lese dem tilbake er ikke gratis selv på en rask SSD, og på noe tregere er det ofte den egentlige flaskehalsen framfor nettverket. Å fjerne én skriving og to lesinger fjerner den tida helt fra klokka di. Gevinsten er størst nettopp der folk merker den mest: store jobber, og maskiner der disken ikke er den raskeste delen.</p>
+
+    <p><b>Det halverer slitasjen.</b> SSD-er har et endelig antall skrivinger i seg, og en nedlaster som skriver hvert innhold to ganger, bruker det budsjettet i dobbelt tempo uten noen nytte for deg. Over et par hundre terabyte nedlasting, som er et vanlig år for en aktiv bruker, er forskjellen en merkbar del av levetiden til en disk.</p>
+
+    <p><b>Det endrer hva som får plass.</b> Ledig plass er ikke en ytelsesegenskap, det er et ja eller nei. En jobb som trenger det dobbelte av sin egen størrelse i slingringsmonn, enten går den eller så går den ikke. Å trenge omtrent innholdets størrelse betyr at jobber blir ferdige på maskiner og volumer der den vanlige framgangsmåten rett og slett stopper, og det er derfor en utgivelse på 190 GB her får plass i omkring 157 GB ledig plass framfor omkring 313 GB.</p>
+
+    <p><b>Det koster mindre prosessortid.</b> Å ikke flytte data gjennom disken to ganger fjerner arbeidet med det, og å verifisere underveis betyr ingen andre omgang over innholdet for å sjekke det. Prosessorkostnaden vår holder seg flat på omkring 1.7 prosessorsekunder per gigabyte, fra en jobb på 35 GB til en på 190 GB, og det er den nyttige egenskapen: kostnaden per gigabyte vokser ikke når jobben gjør det.</p>
+
+    <p><b>Den kjører på mindre minne, og på avgrenset minne.</b> Fordi byte forbrukes etter hvert som de kommer i stedet for å hope seg opp, er arbeidsmengden et budsjett du setter, ikke en funksjon av jobbens størrelse. Det er det som gjør at en utgivelse på 190 GB kan behandles på en maskin med omtrent 1.1 GB tilgjengelig. Det som betyr noe, er ikke tallet, men formen: minne som vokser med jobben, vil før eller siden møte en jobb maskinen din ikke får gjort ferdig, og den svikter ved veksling til disk eller ved å bli drept i stedet for ved å si fra til deg.</p>
+
+    <div class="callout">
+      <p>Til sammen handler dette mindre om å vinne en ytelsestest enn om hvor programvaren i det hele tatt kan kjøre. En konstruksjon som trenger halvparten av den ledige plassen, halvparten av skrivingene og en avgrenset mengde minne, virker på en liten hjemmetjener, en eldre bærbar eller en NAS, og det er der en god del av denne programvaren faktisk bor.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Hvert tall på denne siden er målt og publisert med bygg og dato ved siden av på <a href="benchmarks.nb.html">ytelsestestsiden</a>, inkludert omgangene vi taper. Den ærlige motvekten, som også står der: en utpakker og reparatør bygd for å følge en pågående nedlasting holder mer minne opptatt enn et frittstående verktøy som kjøres én gang fra kommandolinja, så hvis begrensningen din er minst mulig avtrykk for en engangsjobb på ei fil du allerede har, vinner de spesialiserte verktøyene den kolonnen.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - Usenet-nedlasteren i én omgang.</div>
+    <div>
+      <a href="index.nb.html">Hjem</a> ·
+      <a href="features.nb.html">Funksjoner</a> ·
+      <a href="indexer.nb.html">Indekserer</a> ·
+      <a href="benchmarks.nb.html">Ytelsestester</a> ·
+      <a href="explained.nb.html">Forklart</a> ·
+      <a href="download.nb.html">Last ned</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

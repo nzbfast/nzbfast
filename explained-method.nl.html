@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hoe we testen, volledig - nzbfast</title>
+<meta name="description" content="De machines, het testmateriaal, de instellingen die elke client krijgt, en de regels die bepalen of een benchmarkrun überhaupt meetelt.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.nl.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.nl.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nl.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nl.html" class="home">Home</a>
+    <a href="features.nl.html">Functies</a>
+    <a href="indexer.nl.html">Indexer</a>
+    <a href="benchmarks.nl.html">Benchmarks</a>
+    <a href="explained.nl.html" class="on">Uitgelegd</a>
+    <a href="MANUAL.html">Documentatie</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nl.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html" selected>Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.nl.html" style="color:inherit">Uitgelegd</a> &middot; drie</p>
+  <h1>Hoe we testen, volledig</h1>
+  <p class="sub">We publiceren vergelijkingen met andermans software, dus de methode moet controleerbaar zijn. Dit is de hele methode: de machines, de inhoud, de instellingen die elke client krijgt, en de regels die bepalen of een run als resultaat telt of wordt weggegooid.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De testopstelling</p>
+    <h2>Dezelfde machine, dezelfde lijn, dezelfde inhoud</h2>
+    <p class="lead">Elke client in een vergelijking draait op één machine, tegen dezelfde providers, op dezelfde inhoud, binnen dezelfde ronde. Er wordt niets meegenomen van een eerdere dag.</p>
+
+    <ul class="plain">
+      <li><b>De machines.</b> Een Apple M1 Ultra op een 10 GbE-lijn in Europa, en een M3 Ultra op een tragere lijn in de Verenigde Staten. Vergelijkingen mengen die twee nooit: een tabel is één machine.</li>
+      <li><b>De lijn telt zwaarder dan de processor.</b> Op een 10 GbE-lijn kunnen de meeste clients de verbinding bij een makkelijke taak volledig benutten, en daarom zijn de interessante scenario's die waarin iets anders dan pure bandbreedte de uitkomst bepaalt.</li>
+      <li><b>Providers.</b> Vijf commerciële providers, voor elke client dezelfde set, over TLS. We laten één provider buiten deze rondes omdat die beperkt hoeveel locaties tegelijk mogen verbinden, wat een gedeelde testmachine oneerlijk zou maken voor wie als tweede draait.</li>
+      <li><b>Verbindingen.</b> Elke client krijgt in een ronde hetzelfde aantal per provider, en de ronde vermeldt welk. Meer is niet automatisch beter; we hebben onze eigen client gemeten die dezelfde eindtijd vasthield over een negenvoudige verandering van het aantal verbindingen.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De regel die alles bepaalt</p>
+    <h2>Een client wordt beoordeeld op het bestand, niet op zijn eigen statusmelding</h2>
+    <p class="lead">Dit is verreweg het belangrijkste op deze pagina. Elke run eindigt door het grootste bestand te zoeken dat de client heeft geproduceerd, waar dan ook in zijn uitvoer, en dat te hashen tegen een bekend goede kopie. Grootte en MD5, bij elke run, niet steekproefsgewijs.</p>
+
+    <p>We doen dit omdat het eigen succesbericht van een client geen betrouwbaar bewijs is. We hebben een client gemeten die <i>done</i> meldde bij een taak waarvan de uitvoermap leeg was. We hebben er nog een gemeten die <i>Completed</i> meldde na het afleveren van ruwe archiefvolumes die hij nooit had uitgepakt. Een veelgebruikt reparatiehulpmiddel eindigt met een foutcode na een geslaagde reparatie. Geen van die clients loog; statusteksten betekenen bij verschillende auteurs eenvoudigweg iets anders, en een benchmark die erop vertrouwt meet woordkeus in plaats van gedrag.</p>
+
+    <p>De eindstreep is dus voor iedereen dezelfde: <b>de inhoud bestaat, met de juiste grootte en de juiste hash</b>. Stopt een client daarvoor, dan krijgt hij geen tijd, en wordt de hele kolom gemarkeerd in plaats van stilletjes weggelaten. Een trage client die klaarkomt doet het beter dan een snelle die dat niet doet, en de tabel hoort dat te zeggen.</p>
+
+    <div class="callout">
+      <p>Het gevolg is dat niet-halen een resultaat is, geen fout van onze kant. Publiceren we er een, dan beschrijven we de eindtoestand in gewone woorden, inclusief alles wat erop wijst dat het specifiek voor die taak is en niet algemeen, en we zeggen wat de client in plaats van afmaken wél deed.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Volgorde en herhaling</p>
+    <h2>Waarom runs elkaar afwisselen, en waarom losse runs niet worden gepubliceerd</h2>
+    <p class="lead">De doorvoer van providers wisselt van minuut tot minuut, soms met een factor twee of drie. Twee metingen op verschillende momenten meten voor een deel het weer.</p>
+
+    <p>Clients draaien daarom <b>direct achter elkaar en om en om</b>, en de volgorde keert tussen herhalingen om, zodat geen client altijd degene is die als eerste een warme of koude lijn opgaat. Een resultaat is het patroon over de herhalingen heen, niet de beste run. Bij een grote spreiding publiceren we het bereik in plaats van een gemiddelde dat het zou verhullen, en als we niet weten waarom de cijfers van een client uiteenlopen, zeggen we dat in plaats van een oorzaak te verzinnen.</p>
+
+    <p>Vergelijkingen tussen verschillende rondes vermijden we waar mogelijk. Vraagt een bewering om twee cijfers, dan laten we ze liever allebei opnieuw draaien in één ronde dan dat we het cijfer van de ene dag van dat van de andere aftrekken, want de staat van de opstelling, de providercondities en de clientversies verschuiven allemaal. Vergelijken we twee van onze eigen builds, dan draaien beide in dezelfde ronde, om en om, op dezelfde inhoud.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De ongelijke controles</p>
+    <h2>Wat er voor en tijdens elke run draait</h2>
+    <p class="lead">De meeste bestaan omdat een stille storing ooit een gezond ogend, publiceerbaar en verkeerd getal opleverde. Elk ervan draait nu automatisch en zet de ronde stop in plaats van te waarschuwen.</p>
+
+    <ul class="plain">
+      <li><b>Elke provider antwoordt voordat de run begint.</b> Een run die draait terwijl twee providers plat liggen meet een storing, en dat ziet er precies uit als een trage client.</li>
+      <li><b>Het programmabestand wordt voor elke run op hash geïdentificeerd</b>, niet op bestandsnaam of versietekst. Twee builds van ons meldden hetzelfde versienummer terwijl ze 88 commits uiteenliepen; alleen de hash houdt ze uit elkaar, en tabellen vermelden hem.</li>
+      <li><b>Elke client draait als machine-eigen code.</b> Op Apple-machines kan een verkeerd gebouwd hulpprogramma stilletjes onder vertaling draaien, wat processortijd kost die aan onze verpakkingskeuze toebehoort en niet aan de code van de client. We controleren het draaiende proces, niet alleen het bestand.</li>
+      <li><b>De limieten voor open bestanden worden voor iedereen gelijk verhoogd.</b> macOS start programma's met een limiet van 256 open bestanden, die een volledige set verbindingen kan overschrijden. Een client die eraan raakt verdwijnt meestal zonder crashrapport, wat precies leest als een gebrek in de software. Het schijnbare niet-halen van een concurrent bleek dit te zijn; met de limiet omhoog was dezelfde taak in 44 seconden klaar.</li>
+      <li><b>Schijfverkeer wordt per run vastgelegd</b>, wat tegelijk controleert of niets anders de machine gebruikte. Die tellers beslaan de hele schijf in plaats van één programma, dus als er een tweede taak draaide zou het werk daarvan in onze metingen opduiken. Vlakke waarden over een hele ronde zijn hoe we weten dat een resultaat toebehoort aan de client die erbij staat.</li>
+      <li><b>Elke client schrijft naar zijn eigen uitvoerboom</b>, en die boom wordt voor elke run gewist, zodat geen enkele run kan worden bevredigd door het bestand van een eerdere run.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Waar een client bepaalde instellingen nodig heeft om goed te presteren, krijgt hij die, en de ronde vermeldt welke. Voorbeelden: verzoeken bundelen aangezet waar een client het uit levert, dubbelcontrole uitgezet wanneer dezelfde taak herhaaldelijk wordt gedownload, en uitpakhulpjes uit het eigen pakket van de client in plaats van een systeemkopie. Het doel is dat elke client op zijn best wordt gemeten in plaats van op zijn standaardwaarden, want standaardwaarden zijn een discussie los van kunnen.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Wat we niet zullen doen</p>
+    <h2>De grenzen van deze cijfers</h2>
+    <ul class="plain">
+      <li><b>We publiceren geen cijfer dat we niet hebben gemeten.</b> Is een getal afgeleid in plaats van waargenomen, dan staat erbij dat het afgeleid is, en laten we liever een gat vallen dan het te vullen met rekenwerk dat als een meting leest.</li>
+      <li><b>We werken een verliezend resultaat niet stilletjes bij.</b> Een run die we verliezen blijft gepubliceerd tot een herhaling hem vervangt, en wordt een verlies een winst, dan krijgt de verandering een toelichting naast de tabel in plaats van een stille bewerking.</li>
+      <li><b>De runs met providers zijn nog niet onafhankelijk reproduceerbaar</b>, omdat de inhoud niet van ons is om te verspreiden. De componenttests, die gegenereerde inhoud gebruiken, zijn dat wel. We bereiden testbestanden voor die we kunnen publiceren, zodat ook de runs met providers controleerbaar worden.</li>
+      <li><b>Dit zijn onze benchmarks van andermans software.</b> Elke versie wordt genoemd en gedateerd, en brengt een client een nieuwe uitgave uit, dan draaien we de runs die het raakt opnieuw in plaats van een verouderde vergelijking te laten staan. Vind je een resultaat onjuist, dan zijn de instellingen en versies gepubliceerd zodat er gericht over te twisten valt.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - de one-pass Usenet-downloader.</div>
+    <div>
+      <a href="index.nl.html">Home</a> ·
+      <a href="features.nl.html">Functies</a> ·
+      <a href="indexer.nl.html">Indexer</a> ·
+      <a href="benchmarks.nl.html">Benchmarks</a> ·
+      <a href="explained.nl.html">Uitgelegd</a> ·
+      <a href="download.nl.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

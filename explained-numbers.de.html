@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Was die Zahlen bedeuten - nzbfast</title>
+<meta name="description" content="Eine Lesehilfe zu den gemessenen Spalten: Zeit bis zur nutzbaren Datei, Speicherspitze, Prozessorsekunden, Plattenspitze und Volumen-E/A, und wie ein guter oder schlechter Wert aussieht.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.de.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.de.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.de.html" class="home">Startseite</a>
+    <a href="features.de.html">Funktionen</a>
+    <a href="indexer.de.html">Indexer</a>
+    <a href="benchmarks.de.html">Benchmarks</a>
+    <a href="explained.de.html" class="on">Erklärt</a>
+    <a href="MANUAL.html">Doku</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.de.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html" selected>Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.de.html" style="color:inherit">Erklärt</a> &middot; vier</p>
+  <h1>Was die Zahlen bedeuten</h1>
+  <p class="sub">Fünf Spalten tauchen in den meisten unserer Tabellen auf. Hier steht, was jede misst, warum sie veröffentlichenswert ist, und ungefähr wie ein guter oder schlechter Wert auf einer Maschine aussieht, die dir tatsächlich gehört.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Die Kennzahl</p>
+    <h2>Zeit bis zur nutzbaren Datei</h2>
+    <p class="lead">Die Uhr startet, wenn der Auftrag hinzugefügt wird, und stoppt, wenn die fertigen Nutzdaten auf der Platte liegen, geprüft und entpackt. Nicht wenn der Download endet, und nicht wenn der Client sich für fertig erklärt.</p>
+
+    <p>Das ist die einzige Zahl, der etwas entspricht, das du erlebst. Ein Client kann schnell fertig herunterladen und dann eine Minute lang prüfen und entpacken, und von deinem Platz aus gehört diese Minute zur Wartezeit. Nur den Download zu messen würde die Clients begünstigen, die ihre Arbeit hinterher erledigen, also die meisten.</p>
+
+    <p>Es ist auch der Grund, warum unsere Architektur in diesen Tabellen ungewöhnlich aussieht. Wir prüfen jedes Stück bei der Ankunft und entpacken, während der Download noch läuft, sodass beim letzten Artikel kaum noch etwas zu tun ist. Andere Clients legen den ganzen Post erst auf der Platte ab, prüfen ihn dann und entpacken ihn dann, in drei aufeinanderfolgenden Phasen. Bei einem leichten Auftrag ist der Unterschied bescheiden. Bei einem großen oder beschädigten macht er das meiste am Ergebnis aus.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Die, die falsch gelesen wird</p>
+    <h2>Speicherspitze (RSS)</h2>
+    <p class="lead">Die größte Menge Speicher, die das Programm zu irgendeinem Zeitpunkt des Auftrags hielt. RSS steht für resident set size, also schlicht der Speicher, der tatsächlich im RAM liegt, statt zugesagt oder reserviert zu sein.</p>
+
+    <p>Höher ist nicht automatisch schlechter, und niedriger ist nicht automatisch besser. Speicher wird ausgegeben, um etwas Teureres zu vermeiden, meist dieselben Daten zweimal von der Platte zu lesen. Die lohnende Frage ist, ob die Ausgabe etwas einbringt und ob sie begrenzt ist.</p>
+
+    <p><b>Begrenzt ist das wichtige Wort.</b> Ein Client, dessen Speicher mit der Auftragsgröße wächst, trifft irgendwann auf einen Auftrag, den er auf deiner Maschine nicht beenden kann, und der Fehlschlag kommt als Auslagern oder abgeschossener Prozess statt als höfliche Meldung. Wir halten ein Budget und bleiben darin, weshalb wir einen 190 GB-Auftrag durch eine Maschine schicken können, auf der uns rund 1.1 GB Speicher zur Verfügung stehen. Eine Zahl wie 9.3 GB bei einem 190 GB-Auftrag ist nicht bloß groß, sie hat eine andere Gestalt: sie skaliert mit der Arbeit.</p>
+
+    <p>Wo unser eigener Speicher steigt, versuchen wir zu sagen, was er eingebracht hat. Bei schwer beschädigten Posts hält der aktuelle Build Paritätsdaten im Speicher, um sofort zu reparieren, statt später mehr zu holen; das hebt die Speicherspitze von etwa 0.8 GB auf etwa 1.3 GB und spart rund zehn Sekunden. Bei einem unbeschädigten Post findet diese Ausgabe nicht statt, und die Zahl beträgt 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Der Energie-Indikator</p>
+    <h2>Prozessorsekunden (CPU-Zeit)</h2>
+    <p class="lead">Die gesamte Prozessorzeit, die das ganze Programm verbraucht hat, über alle Kerne aufsummiert. Sie misst geleistete Arbeit statt verstrichener Zeit und kann deshalb viel größer sein als die Uhr.</p>
+
+    <p>Wenn ein Auftrag 100 Sekunden dauert und 1,600 Prozessorsekunden meldet, waren ungefähr sechzehn Kerne den ganzen Lauf über beschäftigt. Das zählt aus drei praktischen Gründen: es ist Wärme, es ist Strom, und auf einer Maschine, die gleichzeitig noch etwas anderes tut, ist es Konkurrenz um Rechenzeit. Ein Client, der in vernünftiger Zeit fertig wird und dabei jeden Kern auslastet, war nicht effizient, sondern teuer.</p>
+
+    <p>In dieser Spalte treten die größten Unterschiede der ganzen Website auf, größer als bei jeder Endzeit. Für byte-identische Ausgabe beim selben beschädigten Post haben wir eine dreißigfache Spanne an Prozessorsekunden zwischen Clients gemessen. Das lohnt einen Blick, bevor man annimmt, zwei Clients, die wenige Sekunden auseinander fertig werden, leisteten vergleichbar viel Arbeit.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Die beiden Plattenspalten</p>
+    <h2>Plattenspitze und Volumen-E/A</h2>
+    <p class="lead">Die Plattenspitze ist der größte zusätzliche Platz, den der Auftrag zu einem einzelnen Zeitpunkt brauchte. Volumen-E/A ist die Gesamtmenge an Daten, die dafür gelesen und geschrieben wurde. Sie beantworten verschiedene Fragen.</p>
+
+    <p><b>Die Plattenspitze ist eine harte Schranke.</b> Sie entscheidet, ob der Auftrag überhaupt laufen kann. Die meisten Clients schreiben den kompletten Post auf die Platte und entpacken dann eine zweite Kopie daneben, brauchen also etwa das Doppelte der Nutzdaten an freiem Platz. Für einen 190 GB-Auftrag sind das etwa 313 GB frei, bevor du anfängst, gegenüber etwa 157 GB bei uns, weil wir während des Ladens entpacken und die Archivbände nie materialisieren. Wenn deine Platte nicht das Doppelte des Auftrags fasst, ist dieser Unterschied kein Prozentsatz, sondern die Frage, ob der Download stattfindet.</p>
+
+    <p><b>Volumen-E/A ist Verschleiß und Zeit.</b> Den Post schreiben, ihn zum Prüfen zurücklesen, ihn zum Entpacken nochmals lesen und die Ausgabe schreiben sind vier Durchgänge über die Daten. In einem Durchgang sind es rund ein Drittel des Verkehrs, was auf einer SSD Lebensdauer ist und auf einer langsameren Platte oft der eigentliche Engpass statt des Netzwerks.</p>
+
+    <p class="note" style="text-align:start">Eine Anmerkung dazu, wie wir diese beiden lesen, denn sie hat uns erwischt und könnte dich beim Lesen unserer Tabellen erwischen. Beide Zahlen stammen aus Zählern, die die ganze Platte erfassen, nicht ein einzelnes Programm. Das macht sie zu einer ausgezeichneten Kontrolle, ob ein Benchmark durch etwas anderes Laufendes verunreinigt wurde, und es heißt, dass eine unmöglich wirkende Zahl es meist auch ist: ein 6.5 GB-Auftrag, der 144 GB Plattenverkehr meldet, ist kein seltsam arbeitender Client, sondern sind zwei Aufträge, die sich eine Maschine teilen.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Eine Tabelle lesen</p>
+    <h2>Drei nützliche Gewohnheiten</h2>
+    <ul class="plain">
+      <li><b>Lies eine Zeile durch, bevor du Spalten vergleichst.</b> Die meisten unserer Tabellen setzen denselben Client unter mehrere Bedingungen. Interessant ist meist, wie sich die Zahl eines Clients zwischen einem leichten und einem schweren Auftrag ändert, nicht wo sie bei einem einzelnen Auftrag liegt.</li>
+      <li><b>Prüfe, was die Ziellinie war.</b> Eine Zeit ist nur dann mit einer anderen vergleichbar, wenn beide Clients denselben Zustand erreicht haben. Wir hashen jede Ausgabe gegen eine bekannt gute Kopie genau aus diesem Grund, und ein Client, der nicht dort ankam, wird gekennzeichnet statt gemessen.</li>
+      <li><b>Zieh Bereiche Mittelwerten vor, wenn die Streuung groß ist.</b> Wo wir einen Bereich statt einer einzelnen Zahl veröffentlichen, ist das Absicht: es heißt, dass die einzelnen Läufe genug auseinanderlagen, dass ein Mittelwert sie falsch darstellen würde, und wir zeigen das lieber, als es zu verbergen.</li>
+    </ul>
+
+    <p>Die Tabellen selbst, mit Build und Datum neben jeder, stehen auf der <a href="benchmarks.de.html">Benchmark-Seite</a>, einschließlich der Durchgänge, die wir verlieren.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - der Ein-Pass-Usenet-Downloader.</div>
+    <div>
+      <a href="index.de.html">Startseite</a> ·
+      <a href="features.de.html">Funktionen</a> ·
+      <a href="indexer.de.html">Indexer</a> ·
+      <a href="benchmarks.de.html">Benchmarks</a> ·
+      <a href="explained.de.html">Erklärt</a> ·
+      <a href="download.de.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

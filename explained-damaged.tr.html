@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hasarlı gönderiler neden önemlidir - nzbfast</title>
+<meta name="description" content="Eksik makale nedir, bir sunucudan onu istemek neden 79 ms ile 2.2 saniye arasında bir bedele mal olur, ve neden işe yarar çözüm daha hızlı sormak değil sormayı bırakmaktır.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.tr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.tr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.tr.html" class="home">Ana sayfa</a>
+    <a href="features.tr.html">Özellikler</a>
+    <a href="indexer.tr.html">Dizinleyici</a>
+    <a href="benchmarks.tr.html">Kıyaslamalar</a>
+    <a href="explained.tr.html" class="on">Açıklamalar</a>
+    <a href="MANUAL.html">Belgeler</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.tr.html">İndir</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html" selected>Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.tr.html" style="color:inherit">Açıklamalar</a> &middot; iki</p>
+  <h1>Hasarlı gönderiler neden önemlidir</h1>
+  <p class="sub">Kusursuz giden bir indirme kolay durumdur, ve her istemci onu yetkinlikle halleder. İlginç farklar, gönderinin bir bölümü eksik olduğunda ortaya çıkar; ve bu, temiz durumun düşündürdüğünden çok daha sık olur. Gerçekte olan budur, ve neden bu kadar zamana mal olduğu.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Sorunun biçimi</p>
+    <h2>Eksik makale nedir</h2>
+    <p class="lead">Bir Usenet gönderisi tek bir dosya değildir. Binlerce küçük makaledir; her biri her sağlayıcının sunucularında bağımsız olarak saklanır, ve indirdiğiniz NZB onların adlarının listesidir. 6.5 GB'lik bir sürüm kabaca 9,000 tanesidir.</p>
+
+    <p>Makaleler sıradan nedenlerle kaybolur. Sağlayıcılar onları sabit bir saklama süresince tutar, sonra siler. Bazı sağlayıcılar belirli bir makaleyi baştan hiç almamıştır, çünkü sunucular arası yayılım kusurludur. Ara sıra bir yükleme gönderildiğinde eksiktir, ve bir bölümü hiçbir yerde hiç var olmamıştır. Nedeni ne olursa olsun, sonuç aynıdır: istemciniz bir makale ister, ve yanıt veri değil bir rettir.</p>
+
+    <p>Bu, Usenet'e gönderi yapanların hesaba katacağı kadar olağandır. Neredeyse her sürümün yanında <b>eşlik verisi</b> gelir, genellikle PAR2 dosyaları; yani özgün içerikten hesaplanmış fazladan artıklı bilgi. İçeriğin bir kısmı eksikse, yeterince varsa eşlik onu yeniden kurabilir. Tipik bir gönderi yaklaşık %10 eşlik taşır, dolayısıyla bir gönderi kendisinin epey bir bölümünü yitirebilir ve yine de tam olarak kurtarılabilir.</p>
+
+    <div class="callout">
+      <p>Yani hasarlı bir gönderi genellikle bozuk bir indirme değildir. Tamamlanmadan önce biraz aritmetik gerektiren bir indirmedir. Tek soru, bir istemcinin bunu anlamasının ne kadar sürdüğüdür; ve iki kat ya da daha fazla ayrıştıkları yer tam da burasıdır.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Pahalı kısım</p>
+    <h2>Kimsede olmayan bir şeyi istemek</h2>
+    <p class="lead">Bir sunucuda bir makale yoksa bir ret döndürür, ve istemci o zaman listenizdeki bir sonraki sunucuyu dener. Bu doğru davranıştır, çünkü ikinci sağlayıcıda çoğu zaman vardır. Bedel, kimsede olmadığında ortaya çıkar.</p>
+
+    <p>O durumda istemci tüm sağlayıcı listenizi tek tek dolaşır, ve makalenin gerçekten yok olduğu sonucuna varabilmek için her birinden ret alır. Dolaşım sıralıdır, ve retler sanıldığından yavaştır. Onları doğrudan ölçtük; boştaki bir hatta, hiç içerik hareket etmeden:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>sağlayıcı</th><th class="num">olağan bir isteği yanıtlama süresi</th><th class="num">eksik bir makaleyi reddetme süresi</th></tr></thead>
+      <tbody>
+        <tr><td>Sağlayıcı A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Sağlayıcı B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Sağlayıcı C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Sağlayıcı D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Sağlayıcı E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>İki şey öne çıkıyor. Birincisi, yayılım muazzam: <b>bir ret, hangi sağlayıcının yanıt verdiğine bağlı olarak 79 ms ile 2.2 saniye arasında bir bedele mal oluyor</b>; neredeyse otuz katlık bir fark. İkincisi, bir sağlayıcı esasen sormanın sürdüğü kadar bir sürede reddederken, bir başkası hayır demek için kendi olağan yanıt süresinin iki yüz katından fazlasını harcıyor. Bu ağ gecikmesi değil, onların tarafında olup biten iştir, ve daha az gidiş gelişle sormak neredeyse hiç yardımcı olmuyor.</p>
+
+    <p>Toplayın: artık var olmayan tek bir makale için beş sağlayıcı boyunca tam bir dolaşım yaklaşık <b>5 saniyeye</b> mal oluyor. Şimdi hasarlı bir gönderide bunun gibi çok sayıda makale olduğunu, ve onları sırayla işleyen bir istemcinin bağlantınız boş beklerken bu bedeli defalarca ödediğini düşünün. İndirme, veriler yavaş geldiği için yavaş değildir. Veriler tamamen gelmeyi bırakmıştır, ve istemci, çıkarmaya yetecek bilgiye zaten sahip olduğu şeyin kendisine söylenmesini beklemektedir.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Çözüm</p>
+    <h2>Sormayı bırakın, onun yerine onarın</h2>
+    <p class="lead">Kavrayış, retleri hızlandırmak değildir; çünkü sağlayıcılar bizim denetimimizde değil. Yanıtın artık önemsiz hâle geldiği anı fark etmektir.</p>
+
+    <p>Bir indirmenin herhangi bir anında istemci iki şey bilir: kaç parçanın hâlâ hesapta olmadığını, ve elinde ne kadar eşlik verisi bulunduğunu. Eldeki eşlik, hâlâ eksik olan her şeyi yeniden kurmaya yetiyorsa, «bu makale kimsede var mı?» sorusunun yanıtı sonucu artık değiştiremez. İster yavaş bir evet ister yavaş bir hayır olsun, dosya her hâlükârda yeniden kurulur. Dolaşımı sürdürmek gecikmeden başka bir şey satın almaz.</p>
+
+    <p>Bu yüzden bugünkü yapı o noktada sormayı bırakır ve doğrudan onarıma geçer. Yeniden kurmanın kendisi hızlıdır ve hep öyleydi: yaklaşık <b>2.3 saniye</b>, 6.5 GB'lik bir gönderide; ve bu rakam ölçtüğümüz her sürümde aynıdır. Kazanılan süre, tamamen artık gerçekleşmeyen bekleyiştir.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>6.5 GB gönderi, 60 eksik makale</th><th class="num">doğrulanmış bir dosyaya kadar geçen süre</th></tr></thead>
+      <tbody>
+        <tr><td>her sağlayıcının reddetmesini beklemek</td><td class="num">23 s</td></tr>
+        <tr><td><b>eşlik açığı kapatır kapatmaz durmak</b></td><td class="win">13 s</td></tr>
+        <tr><td>bunun içinde, asıl onarım aritmetiği</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Aynı değişiklik hasarsız bir gönderide hiçbir şey yapmaz; bu da düşündüğümüz şeyi yaptığının en açık kanıtıdır: eksik makale yoksa kısaltılacak bir dolaşım da yoktur, ve iki yapı temiz bir 6.5 GB işini aynı 7 saniyede bitirir.</p>
+
+    <p><b>Bu bir takas, bedava bir kazanç değil.</b> Erken onarmak, eşlik verisini atıp sonra daha fazlasını getirmek yerine bellekte tutmak demektir; dolayısıyla ağır hasarlı bir gönderide tepe bellek (RSS) yaklaşık 0.8 GB'den yaklaşık 1.3 GB'ye çıkar, ve sağlayıcılardan kabaca 400 MB daha fazla çekeriz. Hasarsız bir gönderide bellek 0.24 GB'de değişmez. Bunun çoğu kişi için doğru takas olduğunu düşünüyoruz, çünkü bellek yalnızca size on saniye kazandırdığı durumda harcanıyor; ama gerçek bir bedeldir ve bunun için bir ayar vardır.</p>
+
+    <p class="note" style="text-align:start">Ret tablosunda sağlayıcı adları bilerek gizlenmiştir. Bu rakamlar tek bir akşam, tek bir konumdan yapılan tek bir ölçümün özelliğidir; ve farklı dizinleyen ya da kötü bir gecede denk geldiğimiz bir sağlayıcı, tek bir tura dayanılarak yavaş diye etiketlenmemelidir. Sav açısından önemli olan biçimdir: retler muazzam ölçüde değişir, ve toplam, hasarlı bir indirmeye egemen olacak kadar büyüktür. Sağlayıcı başına rakamlar ve ham yoklama çıktısı iç kayıtlarımızdadır, ve bunların açıkladığı uçtan uca sayılar <a href="benchmarks.tr.html#damaged">kıyaslama sayfasındadır</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - tek geçişli Usenet indiricisi.</div>
+    <div>
+      <a href="index.tr.html">Ana sayfa</a> ·
+      <a href="features.tr.html">Özellikler</a> ·
+      <a href="indexer.tr.html">Dizinleyici</a> ·
+      <a href="benchmarks.tr.html">Kıyaslamalar</a> ·
+      <a href="explained.tr.html">Açıklamalar</a> ·
+      <a href="download.tr.html">İndir</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Ret süreleri 11 Ağustos 2026'da Avrupa'dan beş sağlayıcı üzerinde, her birine bir bağlantı, hiçbir içerik aktarımı olmayan boştaki bir hatta ölçüldü. Hasarlı gönderiye dair uçtan uca rakamlar aynı akşamın altı istemcili turundan geliyor; tam tablolar, istemci sürümleri ve kaybettiğimiz turlar için kıyaslama sayfasına bakın.</p>
+</div></footer>
+
+</body>
+</html>

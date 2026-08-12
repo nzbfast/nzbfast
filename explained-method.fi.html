@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Näin testaamme, kokonaisuudessaan - nzbfast</title>
+<meta name="description" content="Koneet, testiaineistot, asetukset jotka kukin asiakasohjelma saa, ja säännöt jotka ratkaisevat lasketaanko vertailukierros lainkaan.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.fi.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.fi.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fi.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fi.html" class="home">Etusivu</a>
+    <a href="features.fi.html">Ominaisuudet</a>
+    <a href="indexer.fi.html">Indeksoija</a>
+    <a href="benchmarks.fi.html">Vertailut</a>
+    <a href="explained.fi.html" class="on">Selitykset</a>
+    <a href="MANUAL.html">Ohjeet</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fi.html">Lataa</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html" selected>Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fi.html" style="color:inherit">Selitykset</a> &middot; kolme</p>
+  <h1>Näin testaamme, kokonaisuudessaan</h1>
+  <p class="sub">Julkaisemme vertailuja muiden ihmisten ohjelmistoihin, joten menetelmän on oltava tarkistettavissa. Tässä se kokonaan: koneet, sisältö, asetukset jotka kukin asiakasohjelma saa, ja säännöt jotka ratkaisevat lasketaanko ajo tulokseksi vai heitetäänkö se pois.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Koejärjestely</p>
+    <h2>Sama kone, sama yhteys, sama sisältö</h2>
+    <p class="lead">Jokainen vertailun asiakasohjelma ajetaan yhdellä koneella, samoja palveluntarjoajia vasten, samalla sisällöllä, saman kierroksen sisällä. Mitään ei kanneta edelliseltä päivältä.</p>
+
+    <ul class="plain">
+      <li><b>Koneet.</b> Apple M1 Ultra 10 GbE -yhteydessä Euroopassa, ja M3 Ultra hitaammassa yhteydessä Yhdysvalloissa. Vertailut eivät koskaan sekoita näitä kahta: yksi taulukko on yksi kone.</li>
+      <li><b>Yhteys ratkaisee enemmän kuin suoritin.</b> 10 GbE -yhteydessä useimmat asiakasohjelmat pystyvät kyllästämään yhteyden helpossa työssä, ja siksi kiinnostavia ovat ne tilanteet joissa jokin muu kuin pelkkä kaistanleveys ratkaisee lopputuloksen.</li>
+      <li><b>Palveluntarjoajat.</b> Viisi kaupallista palveluntarjoajaa, sama joukko jokaiselle asiakasohjelmalle, TLS:n yli. Jätämme yhden palveluntarjoajan näiden kierrosten ulkopuolelle, koska se rajoittaa kuinka monesta sijainnista saa yhdistää samaan aikaan, mikä tekisi jaetusta testikoneesta epäreilun sille joka ajaa toisena.</li>
+      <li><b>Yhteydet.</b> Jokainen asiakasohjelma saa saman määrän palveluntarjoajaa kohti tietyllä kierroksella, ja kierros kertoo minkä. Enemmän ei ole automaattisesti parempi; olemme mitanneet oman asiakasohjelmamme pitävän saman loppuajan yhdeksänkertaisen yhteysmäärän muutoksen yli.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Sääntö joka ratkaisee kaiken</p>
+    <h2>Asiakasohjelmaa arvioidaan tiedoston perusteella, ei sen oman tilaviestin perusteella</h2>
+    <p class="lead">Tämä on tämän sivun kaikkein tärkein asia. Jokainen kierros päättyy siihen että etsitään suurin asiakasohjelman tuottama tiedosto, mistä tahansa sen tulosteesta, ja lasketaan siitä tiiviste tunnetusti oikeaa kopiota vasten. Koko ja MD5, joka kierroksella, ei otoksena.</p>
+
+    <p>Teemme näin siksi että asiakasohjelman oma ilmoitus onnistumisesta ei ole luotettava todiste. Olemme mitanneet asiakasohjelman ilmoittavan <i>done</i> työstä jonka tulostehakemisto oli tyhjä. Olemme mitanneet toisen ilmoittavan <i>Completed</i> toimitettuaan raakoja arkiston osia joita se ei koskaan purkanut. Laajassa käytössä oleva korjaustyökalu päättyy virhekoodiin onnistuneen korjauksen jälkeen. Kukaan näistä ei valehdellut; tilamerkkijonot yksinkertaisesti tarkoittavat eri tekijöille eri asioita, ja vertailu joka luottaa niihin mittaa sanastoa eikä käyttäytymistä.</p>
+
+    <p>Maaliviiva on siis kaikille sama: <b>sisältö on olemassa, oikean kokoisena, oikealla tiivisteellä</b>. Jos asiakasohjelma pysähtyy ennen sitä, se ei saa aikaa, ja koko sarake merkitään sen sijaan että se jätettäisiin hiljaa pois. Hidas ohjelma joka pääsee maaliin pärjää paremmin kuin nopea joka ei pääse, ja taulukon pitää sanoa se.</p>
+
+    <div class="callout">
+      <p>Tästä seuraa että maaliin pääsemättömyys on tulos, ei meidän virheemme. Kun julkaisemme sellaisen, kuvaamme lopputilan yksinkertaisin sanoin, mukaan lukien kaiken mikä viittaa siihen että se koskee juuri tätä työtä eikä ole yleinen, ja kerromme mitä ohjelma teki maaliin pääsemisen sijaan.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Järjestys ja toisto</p>
+    <h2>Miksi kierrokset vuorottelevat, ja miksi yksittäisiä ajoja ei julkaista</h2>
+    <p class="lead">Palveluntarjoajien läpäisy vaihtelee minuutista toiseen, joskus kaksin- tai kolminkertaisesti. Kaksi eri aikaan otettua mittausta mittaavat osittain säätä.</p>
+
+    <p>Siksi ohjelmat ajetaan <b>peräkkäin ja lomitettuna</b>, ja järjestys kääntyy toistojen välillä, jottei mikään ohjelma ole aina se joka menee ensimmäisenä lämpimälle tai kylmälle yhteydelle. Tulos on toistojen yli näkyvä kuvio, ei paras ajo. Kun hajonta on suuri, julkaisemme vaihteluvälin sen sijaan että keskiarvo peittäisi sen, ja jos emme tiedä miksi ohjelman luvut hajaantuvat, sanomme sen sen sijaan että keksisimme syyn.</p>
+
+    <p>Eri kierrosten välisiä vertailuja vältetään aina kun mahdollista. Jos väite vaatii kaksi lukua, ajamme mieluummin molemmat uudelleen samalla kierroksella kuin vähennämme yhden päivän luvun toisen päivän luvusta, koska koejärjestelyn tila, palveluntarjoajien olosuhteet ja ohjelmaversiot kaikki ajautuvat. Kun vertaamme kahta omaa koontiversiotamme, molemmat ajetaan samalla kierroksella, vuorotellen, samalla sisällöllä.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Kiiltämättömät tarkistukset</p>
+    <h2>Mitä ajetaan ennen jokaista kierrosta ja sen aikana</h2>
+    <p class="lead">Useimmat näistä ovat olemassa siksi että hiljainen vika tuotti kerran terveen näköisen, julkaisukelpoisen ja väärän luvun. Jokainen ajetaan nyt automaattisesti ja pysäyttää kierroksen sen sijaan että varoittaisi.</p>
+
+    <ul class="plain">
+      <li><b>Jokainen palveluntarjoaja vastaa ennen kierroksen alkua.</b> Kierros joka ajetaan kahden palveluntarjoajan ollessa alhaalla mittaa katkoa, ja se näyttää täsmälleen hitaalta ohjelmalta.</li>
+      <li><b>Ohjelmatiedosto tunnistetaan tiivisteestä ennen jokaista kierrosta</b>, ei tiedostonimestä tai versiomerkkijonosta. Kaksi omaa koontiversiotamme ilmoittivat saman versionumeron vaikka niiden välillä oli 88 muutosta; vain tiiviste erottaa ne, ja taulukot mainitsevat sen.</li>
+      <li><b>Jokainen ohjelma ajetaan natiivikoodina.</b> Apple-koneilla väärin käännetty apuohjelma voi ajautua hiljaa käännöskerroksen alla, mikä maksaa suoritinaikaa joka kuuluu meidän paketointivalintaamme eikä ohjelman koodiin. Tarkistamme käynnissä olevan prosessin, emme pelkkää tiedostoa.</li>
+      <li><b>Avoimien tiedostojen rajat nostetaan kaikille samalla tavalla.</b> macOS käynnistää ohjelmat 256 avoimen tiedoston rajalla, jonka täysi yhteysjoukko voi ylittää. Rajaan törmäävä ohjelma katoaa yleensä ilman kaatumisraporttia, mikä näyttää täsmälleen ohjelmiston viasta johtuvalta. Erään kilpailijan näennäinen maaliin pääsemättömyys osoittautui tämän aiheuttamaksi; rajan noston jälkeen sama työ valmistui 44 sekunnissa.</li>
+      <li><b>Levyliikenne tallennetaan kierroskohtaisesti</b>, mikä toimii samalla tarkistuksena ettei mikään muu käyttänyt konetta. Nuo laskurit kattavat koko levyn eikä yhtä ohjelmaa, joten jos toinen työ olisi käynnissä, sen työ näkyisi mittauksissamme. Tasaiset lukemat läpi kierroksen ovat se mistä tiedämme että tulos kuuluu sille ohjelmalle jonka se nimeää.</li>
+      <li><b>Jokainen ohjelma kirjoittaa omaan tulostepuuhunsa</b>, ja puu tyhjennetään ennen jokaista kierrosta, jottei mikään ajo voi tulla tyydytetyksi edellisen ajon tiedostolla.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Kun ohjelma tarvitsee tiettyjä asetuksia suoriutuakseen hyvin, se saa ne, ja kierros kertoo mitkä. Esimerkkejä: pyyntöjen putkitus päällä siellä missä ohjelma toimitetaan se pois päältä, kaksoiskappaleiden tarkistus pois päältä kun sama työ ladataan toistuvasti, ja purkuapuohjelmat otettuna ohjelman omasta paketista järjestelmäkopion sijaan. Tavoitteena on että kukin ohjelma mitataan parhaimmillaan eikä oletusasetuksillaan, sillä oletusasetukset ovat kykyyn nähden erillinen keskustelu.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Mitä emme tee</p>
+    <h2>Näiden lukujen rajat</h2>
+    <ul class="plain">
+      <li><b>Emme julkaise lukua jota emme ole mitanneet.</b> Jos luku on johdettu eikä havaittu, se merkitään johdetuksi, ja jätämme mieluummin aukon kuin täytämme sen laskutoimituksella joka näyttää mittaukselta.</li>
+      <li><b>Emme päivitä hiljaa häviävää tulosta.</b> Kierros jonka häviämme pysyy julkaistuna kunnes uusinta-ajo korvaa sen, ja kun tappio muuttuu voitoksi, muutos saa selityksen taulukon viereen eikä hiljaista muokkausta.</li>
+      <li><b>Palveluntarjoajakierrokset eivät ole vielä riippumattomasti toistettavissa</b>, koska sisältö ei ole meidän jaettavaksemme. Komponenttitestit, jotka käyttävät tuotettua sisältöä, ovat. Valmistelemme julkaistavia testitiedostoja jotta myös palveluntarjoajakierrokset olisivat tarkistettavissa.</li>
+      <li><b>Nämä ovat meidän vertailumme muiden ihmisten ohjelmistoista.</b> Jokainen versio nimetään ja päivätään, ja kun ohjelmasta julkaistaan uusi versio, ajamme uudelleen ne kierrokset joihin se vaikuttaa sen sijaan että jättäisimme vanhentuneen vertailun näkyviin. Jos mielestäsi jokin tulos on väärä, asetukset ja versiot on julkaistu jotta siitä voi kiistellä täsmällisesti.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - yhden läpimenon Usenet-lataaja.</div>
+    <div>
+      <a href="index.fi.html">Etusivu</a> ·
+      <a href="features.fi.html">Ominaisuudet</a> ·
+      <a href="indexer.fi.html">Indeksoija</a> ·
+      <a href="benchmarks.fi.html">Vertailut</a> ·
+      <a href="explained.fi.html">Selitykset</a> ·
+      <a href="download.fi.html">Lataa</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

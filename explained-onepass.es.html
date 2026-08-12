@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cómo funciona la descarga de una sola pasada - nzbfast</title>
+<meta name="description" content="Qué hace realmente la pasada única, por qué no es lo mismo que el desempaquetado directo, qué formas de archivo maneja, y por qué eliminar el ciclo de escribir y volver a leer ahorra disco, tiempo de procesador y memoria.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.es.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.es.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.es.html" class="home">Inicio</a>
+    <a href="features.es.html">Funciones</a>
+    <a href="indexer.es.html">Indexador</a>
+    <a href="benchmarks.es.html">Benchmarks</a>
+    <a href="explained.es.html" class="on">Explicaciones</a>
+    <a href="MANUAL.html">Manual</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.es.html">Descargar</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html" selected>Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.es.html" style="color:inherit">Explicaciones</a> &middot; uno</p>
+  <h1>Cómo funciona la descarga de una sola pasada</h1>
+  <p class="sub">La mayor parte de lo que hace rápido a este cliente no es una ruta de red más veloz. Es que los datos se mueven una sola vez. Esto es lo que eso significa en la práctica, por qué es algo distinto del desempaquetado directo, qué formas de archivo lo sobreviven, y cuánto vale de verdad, en una máquina real, eliminar el ciclo de escribir y volver a leer.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">El punto de partida</p>
+    <h2>Lo que hace tradicionalmente una descarga de Usenet</h2>
+    <p class="lead">Un post son miles de artículos pequeños codificados que juntos forman un conjunto de volúmenes de archivo, los cuales a su vez contienen el fichero que realmente quieres. Ir de lo uno a lo otro han sido tradicionalmente cuatro trabajos separados, cada uno terminando antes de que empiece el siguiente.</p>
+
+    <ol>
+      <li><b>Descargar y descodificar.</b> Traer cada artículo, descodificarlo, y escribir en el disco los volúmenes de archivo recompuestos. Para un lanzamiento de 60 GB eso son 60 GB escritos.</li>
+      <li><b>Verificar.</b> Volver a leer los 60 GB del disco para contrastarlos con los datos de paridad, y repararlos si algo va mal.</li>
+      <li><b>Desempaquetar.</b> Leer los volúmenes otra vez, y escribir el contenido extraído al lado. Ahora hay 120 GB en el disco.</li>
+      <li><b>Limpiar.</b> Borrar los volúmenes, dejando el contenido.</li>
+    </ol>
+
+    <p>Cada etapa es correcta, y el resultado es acertado. Pero el contenido se ha escrito dos veces, se ha leído al menos dos veces, y en el punto más alto el disco tuvo que albergar dos copias completas de un trabajo del que solo querías una copia. El reloj que tú vives son las cuatro etapas seguidas, y por eso un cliente puede informar de una descarga rápida y aun así tenerte esperando.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">El cambio</p>
+    <h2>Hacerlo una sola vez en su lugar</h2>
+    <p class="lead">Una sola pasada significa que los bytes van de la red a su destino final sin llegar nunca a ser un archivo en tu disco. No hay etapa dos ni tres, porque el trabajo de ambas ocurre mientras la etapa uno sigue en marcha.</p>
+
+    <p>En la práctica, según llega cada artículo se descodifica en memoria y se entrega directamente a dos cosas a la vez. El verificador lo contrasta de inmediato con los datos de paridad, así que la corrección queda establecida mientras los datos aterrizan, y no releyéndolos después. El extractor trata los bytes entrantes como una posición dentro del archivo, calcula a qué parte de qué fichero de contenido pertenecen, y los escribe ahí.</p>
+
+    <p>Los volúmenes del archivo no se ensamblan nunca. Existen como una estructura que el extractor entiende mientras la descarga va en vuelo, y lo único que llega a tu disco es el fichero que querías. Cuando llega el último artículo no queda prácticamente nada por hacer, y por eso nuestros tiempos de llegada quedan cerca del propio tiempo de descarga en vez de una descarga más una cola.</p>
+
+    <div class="callout">
+      <p>La consecuencia medible: para el mismo trabajo escribimos aproximadamente la mitad, releemos mucho menos, y necesitamos más o menos el tamaño del propio contenido en espacio libre en vez del doble. En un lanzamiento de 190 GB eso son unos 157 GB de espacio libre frente a unos 313 GB, y aproximadamente un tercio del tráfico de disco.</p>
+    </div>
+
+    <p>Dos cosas lo hacen más difícil de lo que suena, y son la razón de que sea poco común. Los artículos no llegan en orden, así que el extractor tiene que arreglárselas con bytes que aterrizan en posiciones arbitrarias en vez de como un flujo desde el principio. Y un archivo comprimido no se puede descomprimir desde la mitad, así que cualquier parte del trabajo que realmente exija orden hay que reconocerla y tratarla de otra manera en vez de darla por supuesta.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">La comparación que nos preguntan</p>
+    <h2>Por qué esto no es desempaquetado directo</h2>
+    <p class="lead">El desempaquetado directo es una buena función y los clientes que la tienen salen ganando. También resuelve otra parte del problema, y la diferencia se ve exactamente donde importa.</p>
+
+    <p>El desempaquetado directo empieza a extraer antes de que la descarga haya terminado, de modo que la etapa tres se solapa con la etapa uno en vez de seguirla. Lo que no hace es eliminar la etapa uno. <b>Los volúmenes del archivo se siguen escribiendo enteros en tu disco</b>, porque el desempaquetador es uno convencional que lee ficheros convencionales; el desempaquetado directo solo lo arranca antes. Las dos copias siguen existiendo, las dos escrituras siguen ocurriendo, y la necesidad de espacio libre no cambia.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>escribir los volúmenes en el disco</th><th class="num">espacio libre necesario</th><th class="num">veces que se escribe el contenido</th></tr></thead>
+      <tbody>
+        <tr><td>Descargar y luego desempaquetar</td><td>sí, y luego relectura</td><td class="num">~2&times; el trabajo</td><td class="num">2</td></tr>
+        <tr><td>Desempaquetado directo</td><td>sí, releído antes</td><td class="num">~2&times; el trabajo</td><td class="num">2</td></tr>
+        <tr><td><b>Una sola pasada</b></td><td class="win">nunca se escriben</td><td class="win">~1&times; el trabajo</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>La segunda diferencia es qué pasa cuando la forma no es sencilla. Como el desempaquetado directo pasa el trabajo a un desempaquetador convencional según van apareciendo los volúmenes, necesita que la situación sea despejada: los volúmenes presentes en un orden utilizable, ninguna reparación pendiente, nada que haya que desbloquear primero, y un archivo cuyo contenido no sean a su vez archivos. Cuando falla alguna de esas cosas, lo sensato es retirarse y recurrir a desempaquetar al final, y eso es lo que pasa. Obtienes un resultado correcto y los tiempos de siempre.</p>
+
+    <p>Como nuestro extractor está construido desde el principio en torno a bytes fuera de orden, esas situaciones no son excepciones para él. Esa es la verdadera distinción: no que empecemos antes, sino que no dependemos de condiciones que a menudo no se cumplen.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Qué lo sobrevive de verdad</p>
+    <h2>Las formas que aguanta</h2>
+    <p class="lead">Un diseño así solo merece la pena si se aplica a los posts que te encuentras de verdad, y no a un caso ideal limpio. La posición actual: <b>ningún formato contenedor se maneja solo en disco.</b> RAR, 7z y zip pasan todos por la ruta de una sola pasada.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>forma</th><th>una sola pasada</th><th>notas</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, almacenado (sin compresión)</td><td class="yes">sí</td><td>el caso habitual en lanzamientos multimedia</td></tr>
+        <tr><td>RAR, comprimido</td><td class="yes">sí</td><td>incluido un archivo comprimido como capa exterior</td></tr>
+        <tr><td>RAR 1.5, 3, 4 y 5</td><td class="yes">sí</td><td>las cuatro generaciones del formato</td></tr>
+        <tr><td>7z</td><td class="yes">sí</td><td>incluidos los contenidos comprimidos con deflate</td></tr>
+        <tr><td>zip</td><td class="yes">sí</td><td>incluidos los contenidos bzip2 y LZMA</td></tr>
+        <tr><td>Contenidos cifrados</td><td class="yes">sí</td><td>con contraseña, incluido el zip cifrado</td></tr>
+        <tr><td>Cabeceras cifradas</td><td class="yes">sí</td><td>cuando los nombres de fichero también están ocultos</td></tr>
+        <tr><td>Cadenas de contraseñas</td><td class="yes">sí</td><td>la contraseña de cada capa guardada en la de encima</td></tr>
+        <tr><td>Archivos anidados</td><td class="yes">sí</td><td>desanidados al vuelo, hasta una profundidad configurable</td></tr>
+        <tr><td>Dañado en varias capas</td><td class="yes">sí</td><td>reparación en cada nivel, sigue siendo una pasada</td></tr>
+        <tr><td>Conjuntos partidos numéricamente</td><td class="yes">sí</td><td>particiones al estilo <code>name.001</code></td></tr>
+        <tr><td>Archivos autoextraíbles</td><td class="no">pasada en disco</td><td>el archivo no empieza al principio del fichero</td></tr>
+        <tr><td>Zip repartido (<code>.z01</code>)</td><td class="no">pasada en disco</td><td>y algunas variantes de zip más raras</td></tr>
+        <tr><td>Trabajos reanudados</td><td class="no">pasada en disco</td><td>un trabajo continuado tras un reinicio termina de forma convencional</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Las tres negativas son honestas y se comportan igual: el trabajo se completa correctamente, por la vía convencional, y para esa descarga obtienes los tiempos de siempre con dos copias. Nada falla; simplemente deja de ser rápido de la manera que describe el resto de esta página. Los archivos autoextraíbles se rechazan por una razón estructural y no por falta de empeño: identificar un archivo por sus primeros bytes no puede funcionar cuando los primeros bytes son un programa.</p>
+
+    <p>Las filas de anidado y cifrado son las que hay que tomarse en serio, porque ahí es donde la mayoría de los clientes te devuelven el trabajo. Sobre un corpus generado de diez formas anidadas, calificado por hash del contenido para que un cliente que renombre el contenido siga recibiendo el crédito, <b>completamos 9 de 10 sin intervención</b>; el siguiente mejor cliente completó 5, y otros dos completaron 2. La que no completamos automáticamente es una escalera de diez niveles, que acaba limpiamente en el límite de profundidad por omisión de cinco dejando la capa más profunda como un archivo sano, y se completa entera si subes el límite. Esas vueltas están en la <a href="benchmarks.es.html#nested">página de benchmarks</a> con la rejilla completa.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Por qué merece la pena hacerlo</p>
+    <h2>Qué aporta de verdad eliminar el viaje de ida y vuelta</h2>
+
+    <p><b>Es más rápido, por una razón poco vistosa.</b> Escribir 60 GB y volver a leerlos no es gratis ni siquiera en una unidad de estado sólido rápida, y en cualquier cosa más lenta suele ser el auténtico cuello de botella en lugar de la red. Quitar una escritura y dos lecturas quita ese tiempo de tu reloj por completo. La ganancia es mayor justo donde más se nota: trabajos grandes, y máquinas cuyo disco no es su parte más rápida.</p>
+
+    <p><b>Reduce el desgaste a la mitad.</b> Las unidades de estado sólido tienen dentro un número finito de escrituras, y un descargador que escribe cada contenido dos veces gasta ese presupuesto al doble de ritmo sin ningún beneficio para ti. A lo largo de unos cuantos cientos de terabytes descargados, que es un año normal para un usuario activo, la diferencia es una fracción apreciable de la vida de una unidad.</p>
+
+    <p><b>Cambia lo que cabe.</b> El espacio libre no es una característica de rendimiento, es un sí o un no. Un trabajo que necesita el doble de su propio tamaño como margen o se ejecuta o no. Necesitar aproximadamente el tamaño del contenido significa que hay trabajos que se completan en máquinas y volúmenes donde el enfoque convencional simplemente se para, y por eso un lanzamiento de 190 GB cabe aquí en unos 157 GB de espacio libre en vez de en unos 313 GB.</p>
+
+    <p><b>Cuesta menos tiempo de procesador.</b> No mover los datos dos veces por el disco elimina el trabajo de hacerlo, y verificar durante la descarga significa ninguna segunda pasada sobre el contenido para comprobarlo. Nuestro coste de procesador se mantiene plano en unos 1.7 segundos de procesador por gigabyte, desde un trabajo de 35 GB hasta uno de 190 GB, y esa es la propiedad útil: el coste por gigabyte no crece según crece el trabajo.</p>
+
+    <p><b>Se ejecuta con menos memoria, y con memoria acotada.</b> Como los bytes se consumen según llegan en vez de acumularse, el conjunto de trabajo es un presupuesto que fijas tú y no una función del tamaño del trabajo. Eso es lo que permite procesar un lanzamiento de 190 GB en una máquina con aproximadamente 1.1 GB disponibles. La distinción que importa no es el número sino la forma: una memoria que crece con el trabajo acabará encontrándose con un trabajo que tu máquina no puede terminar, y falla intercambiando a disco o siendo matada en vez de avisándote.</p>
+
+    <div class="callout">
+      <p>En conjunto, esto tiene menos que ver con ganar un benchmark que con dónde puede ejecutarse el software siquiera. Un diseño que necesita la mitad del espacio libre, la mitad de las escrituras y una cantidad acotada de memoria funciona en un servidor doméstico pequeño, un portátil más viejo o un NAS, y ahí es donde vive buena parte de este software.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Cada cifra de esta página está medida y publicada con la compilación y la fecha al lado en la <a href="benchmarks.es.html">página de benchmarks</a>, incluidas las vueltas que perdemos. El contrapeso honesto, dicho allí también: un extractor y un reparador construidos para acompañar una descarga en curso mantienen más memoria residente que una herramienta independiente lanzada una vez desde la línea de órdenes, así que si tu restricción es la huella más pequeña posible para un trabajo puntual sobre un fichero que ya tienes, las herramientas dedicadas ganan esa columna.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - el descargador de Usenet de una sola pasada.</div>
+    <div>
+      <a href="index.es.html">Inicio</a> ·
+      <a href="features.es.html">Funciones</a> ·
+      <a href="indexer.es.html">Indexador</a> ·
+      <a href="benchmarks.es.html">Benchmarks</a> ·
+      <a href="explained.es.html">Explicaciones</a> ·
+      <a href="download.es.html">Descargar</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Explicații - nzbfast</title>
+<meta name="description" content="Raționamentul din spatele cifrelor: ce se întâmplă cu adevărat când unei postări îi lipsesc articole, cum rulăm benchmark-urile și cum judecăm un rezultat, și ce măsoară fiecare coloană publicată.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained.ro.html">
+<link rel="alternate" hreflang="fr" href="explained.fr.html">
+<link rel="alternate" hreflang="de" href="explained.de.html">
+<link rel="alternate" hreflang="it" href="explained.it.html">
+<link rel="alternate" hreflang="es" href="explained.es.html">
+<link rel="alternate" hreflang="nl" href="explained.nl.html">
+<link rel="alternate" hreflang="pt" href="explained.pt.html">
+<link rel="alternate" hreflang="sv" href="explained.sv.html">
+<link rel="alternate" hreflang="da" href="explained.da.html">
+<link rel="alternate" hreflang="nb" href="explained.nb.html">
+<link rel="alternate" hreflang="fi" href="explained.fi.html">
+<link rel="alternate" hreflang="tr" href="explained.tr.html">
+<link rel="alternate" hreflang="ro" href="explained.ro.html">
+<link rel="alternate" hreflang="he" href="explained.he.html">
+<link rel="alternate" hreflang="ar" href="explained.ar.html">
+<link rel="alternate" hreflang="fa" href="explained.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained.ro.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ro.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ro.html" class="home">Acasă</a>
+    <a href="features.ro.html">Funcții</a>
+    <a href="indexer.ro.html">Indexer</a>
+    <a href="benchmarks.ro.html">Benchmark-uri</a>
+    <a href="explained.ro.html" class="on">Explicații</a>
+    <a href="MANUAL.html">Documentație</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ro.html">Descarcă</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained.html">English</option><option value="explained.fr.html">Français</option><option value="explained.de.html">Deutsch</option><option value="explained.it.html">Italiano</option><option value="explained.es.html">Español</option><option value="explained.nl.html">Nederlands</option><option value="explained.pt.html">Português</option><option value="explained.sv.html">Svenska</option><option value="explained.da.html">Dansk</option><option value="explained.nb.html">Norsk</option><option value="explained.fi.html">Suomi</option><option value="explained.tr.html">Türkçe</option><option value="explained.ro.html" selected>Română</option><option value="explained.he.html">עברית</option><option value="explained.ar.html">العربية</option><option value="explained.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>Explicații</h1>
+  <p class="sub">Pagina de benchmark-uri este un tabel de rezultate. Acesta este raționamentul de dedesubt: ce merge cu adevărat prost la o postare Usenet și de ce costă timp, cum rulăm o rundă de măsurători și ce face un rezultat valabil, și ce măsoară de fapt fiecare coloană pe care o publicăm. Scris pentru cei care vor să ne verifice gândirea în loc să ia cifrele pe încredere.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <a class="card" href="explained-onepass.ro.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Unu</p>
+        <h2 style="margin-top:2px">Cum funcționează descărcarea într-o singură trecere</h2>
+        <p>Arhitectura la care restul sitului tot trimite. Ce se întâmplă cu octeții, de ce este altceva decât dezarhivarea directă, ce forme de arhivă îi supraviețuiesc, și cât valorează eliminarea ciclului scrie-și-citește-înapoi în spațiu pe disc, timp de procesor și memorie.</p>
+      </a>
+      <a class="card" href="explained-damaged.ro.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Doi</p>
+        <h2 style="margin-top:2px">De ce contează postările deteriorate</h2>
+        <p>Postările sosesc cu goluri mai des decât se așteaptă lumea, și tocmai acolo diferă cel mai mult clienții. Ce este un articol lipsă, de ce cererea lui costă scump, și de ce soluția este să nu mai întrebi, nu să întrebi mai repede.</p>
+      </a>
+      <a class="card" href="explained-method.ro.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Trei</p>
+        <h2 style="margin-top:2px">Cum testăm, în întregime</h2>
+        <p>Mașinile, materialele de test, setările pe care le primește fiecare client, și regulile care hotărăsc dacă o rundă contează măcar. Inclusiv verificările care există fiindcă am greșit o dată și preferăm să nu repetăm.</p>
+      </a>
+      <a class="card" href="explained-numbers.ro.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Patru</p>
+        <h2 style="margin-top:2px">Ce înseamnă cifrele</h2>
+        <p>Timpul până la un fișier utilizabil, memoria de vârf, secundele de procesor, vârful de disc, I/O pe volum. Ce este fiecare, de ce o publicăm, și cum arată cu adevărat o valoare bună sau proastă pe o mașină pe care o ai tu.</p>
+      </a>
+      <div class="card">
+        <p class="kicker">Și datele brute</p>
+        <h2 style="margin-top:2px">Tabelele propriu-zise</h2>
+        <p>Fiecare rezultat măsurat se află pe <a href="benchmarks.ro.html">pagina de benchmark-uri</a>, cu versiunea și data alături de fiecare tabel, inclusiv rundele pe care le pierdem. Aceste pagini explică; pagina aceea este dovada.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - descărcătorul Usenet într-o singură trecere.</div>
+    <div>
+      <a href="index.ro.html">Acasă</a> ·
+      <a href="features.ro.html">Funcții</a> ·
+      <a href="indexer.ro.html">Indexer</a> ·
+      <a href="benchmarks.ro.html">Benchmark-uri</a> ·
+      <a href="explained.ro.html">Explicații</a> ·
+      <a href="download.ro.html">Descarcă</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

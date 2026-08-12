@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warum beschädigte Posts wichtig sind - nzbfast</title>
+<meta name="description" content="Was ein fehlender Artikel ist, warum die Nachfrage bei einem Server zwischen 79 ms und 2.2 Sekunden kostet, und warum die nützliche Lösung darin besteht, mit dem Fragen aufzuhören statt schneller zu fragen.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.de.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.de.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.de.html" class="home">Startseite</a>
+    <a href="features.de.html">Funktionen</a>
+    <a href="indexer.de.html">Indexer</a>
+    <a href="benchmarks.de.html">Benchmarks</a>
+    <a href="explained.de.html" class="on">Erklärt</a>
+    <a href="MANUAL.html">Doku</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.de.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html" selected>Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.de.html" style="color:inherit">Erklärt</a> &middot; zwei</p>
+  <h1>Warum beschädigte Posts wichtig sind</h1>
+  <p class="sub">Ein Download, der glatt läuft, ist der leichte Fall, und jeder Client bewältigt ihn ordentlich. Die interessanten Unterschiede zeigen sich, wenn ein Teil des Posts fehlt, und das kommt weit häufiger vor, als der saubere Fall vermuten lässt. Hier steht, was dabei tatsächlich vorgeht und warum es so viel Zeit kostet.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Die Gestalt des Problems</p>
+    <h2>Was ein fehlender Artikel ist</h2>
+    <p class="lead">Ein Usenet-Post ist keine einzelne Datei. Er besteht aus Tausenden kleiner Artikel, jeder unabhängig auf den Servern jedes Providers abgelegt, und die NZB, die du lädst, ist eine Liste ihrer Namen. Eine 6.5 GB große Veröffentlichung sind rund 9,000 davon.</p>
+
+    <p>Artikel gehen aus alltäglichen Gründen verloren. Provider halten sie eine feste Vorhaltezeit lang und löschen sie dann. Manche Provider haben einen bestimmten Artikel von vornherein nie erhalten, weil die Verbreitung zwischen Servern unvollkommen ist. Gelegentlich war ein Upload beim Posten unvollständig, und ein Teil davon existierte nirgends. Was auch immer die Ursache ist, die Wirkung ist dieselbe: dein Client fragt nach einem Artikel, und die Antwort ist eine Ablehnung statt Daten.</p>
+
+    <p>Das ist so normal, dass die Leute, die ins Usenet posten, damit rechnen. Fast jede Veröffentlichung bringt <b>Paritätsdaten</b> mit, meist PAR2-Dateien, also zusätzliche redundante Information, die aus dem Original berechnet wurde. Fehlt ein Teil der Nutzdaten, kann Parität ihn rekonstruieren, sofern genug davon da ist. Ein typischer Post führt etwa 10% Parität mit, ein Post kann also einen beachtlichen Teil von sich verlieren und bleibt vollständig wiederherstellbar.</p>
+
+    <div class="callout">
+      <p>Ein beschädigter Post ist also meist kein kaputter Download. Er ist ein Download, der vor der Fertigstellung etwas Rechnerei verlangt. Die Frage ist nur, wie lange ein Client braucht, um das herauszufinden, und genau darin unterscheiden sie sich um den Faktor zwei oder mehr.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Der teure Teil</p>
+    <h2>Nach etwas fragen, das niemand hat</h2>
+    <p class="lead">Hat ein Server einen Artikel nicht, gibt er eine Ablehnung zurück, und der Client versucht dann den nächsten Server auf deiner Liste. Das ist richtig so, denn der zweite Provider hat ihn sehr oft. Der Preis zeigt sich, wenn ihn niemand hat.</p>
+
+    <p>Dann geht der Client deine gesamte Providerliste durch, Server für Server, und wird von jedem einzelnen abgewiesen, bevor er schließen kann, dass der Artikel wirklich weg ist. Der Durchgang ist seriell, und Ablehnungen sind langsamer, als man annimmt. Wir haben sie direkt gemessen, auf einer ruhenden Leitung, ohne dass irgendwelche Nutzdaten flossen:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>Provider</th><th class="num">Zeit für die Antwort auf eine normale Anfrage</th><th class="num">Zeit, einen fehlenden Artikel abzulehnen</th></tr></thead>
+      <tbody>
+        <tr><td>Provider A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Provider B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Provider C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Provider D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Provider E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Zwei Dinge stechen hervor. Erstens ist die Spanne enorm: <b>eine Ablehnung kostet irgendetwas zwischen 79 ms und 2.2 Sekunden</b>, je nachdem welcher Provider antwortet, ein Unterschied von fast dem Dreißigfachen. Zweitens lehnt ein Provider praktisch in der Zeit ab, die das Fragen dauert, während ein anderer mehr als das Zweihundertfache seiner eigenen normalen Antwortzeit braucht, um nein zu sagen. Das ist keine Netzwerklatenz, das ist Arbeit auf ihrer Seite, und in weniger Umläufen zu fragen hilft kaum.</p>
+
+    <p>Rechne es zusammen: ein vollständiger Durchgang über fünf Provider kostet für einen einzigen Artikel, den es nicht mehr gibt, etwa <b>5 Sekunden</b>. Nun bedenke, dass ein beschädigter Post viele solcher Artikel hat und dass ein Client, der sie der Reihe nach abarbeitet, diesen Preis wieder und wieder zahlt, während deine Verbindung untätig daliegt. Der Download ist nicht langsam, weil die Daten langsam ankommen. Sie kommen gar nicht mehr an, und der Client wartet darauf, dass man ihm sagt, was er längst selbst erschließen könnte.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Die Lösung</p>
+    <h2>Aufhören zu fragen und stattdessen reparieren</h2>
+    <p class="lead">Die Einsicht besteht nicht darin, Ablehnungen schneller zu machen, denn die Provider kontrollieren wir nicht. Sie besteht darin, den Moment zu bemerken, in dem die Antwort keine Rolle mehr spielt.</p>
+
+    <p>In jedem Augenblick eines Downloads weiß der Client zweierlei: wie viele Stücke noch fehlen und wie viele Paritätsdaten er bereits hält. Reicht die vorhandene Parität, um alles noch Ausstehende neu aufzubauen, dann kann die Antwort auf „hat irgendwer diesen Artikel?“ das Ergebnis nicht mehr ändern. Ob langsames Ja oder langsames Nein, die Datei wird so oder so wiederhergestellt. Den Durchgang fortzusetzen bringt nichts außer Verzögerung.</p>
+
+    <p>Der aktuelle Build hört an dieser Stelle also auf zu fragen und geht direkt zur Reparatur über. Die Rekonstruktion selbst ist schnell und war es immer: etwa <b>2.3 Sekunden</b> bei einem 6.5 GB großen Post, und diese Zahl ist in jeder von uns gemessenen Version gleich. Die eingesparte Zeit ist vollständig das Warten, das nun entfällt.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>Post mit 6.5 GB, 60 fehlende Artikel</th><th class="num">Zeit bis zur geprüften Datei</th></tr></thead>
+      <tbody>
+        <tr><td>auf die Ablehnung jedes Providers warten</td><td class="num">23 s</td></tr>
+        <tr><td><b>aufhören, sobald die Parität die Lücke deckt</b></td><td class="win">13 s</td></tr>
+        <tr><td>davon die eigentliche Reparaturrechnung</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Dieselbe Änderung bewirkt bei einem unbeschädigten Post überhaupt nichts, was der klarste Beleg dafür ist, dass sie tut, was wir denken: ohne fehlende Artikel gibt es keinen Durchgang abzukürzen, und beide Builds beenden einen sauberen 6.5 GB-Auftrag in identischen 7 Sekunden.</p>
+
+    <p><b>Es ist ein Tausch, kein Gratisgewinn.</b> Früh zu reparieren heißt, die Paritätsdaten im Speicher zu halten, statt sie zu verwerfen und später mehr zu holen, also steigt die Speicherspitze (RSS) bei einem schwer beschädigten Post von etwa 0.8 GB auf etwa 1.3 GB, und wir ziehen rund 400 MB mehr von den Providern. Bei einem unbeschädigten Post bleibt der Speicher unverändert bei 0.24 GB. Wir halten das für die meisten Leute für den richtigen Tausch, da der Speicher nur in dem Fall ausgegeben wird, in dem er dir zehn Sekunden bringt, aber es ist ein echter Preis, und es gibt eine Einstellung dafür.</p>
+
+    <p class="note" style="text-align:start">Die Providernamen bleiben in der Ablehnungstabelle bewusst ungenannt. Diese Zahlen sind das Ergebnis einer Messung an einem Abend von einem Ort, und ein Provider, der anders indexiert oder den wir zufällig an einem schlechten Abend erwischt haben, sollte nicht aufgrund einer einzigen Runde als langsam abgestempelt werden. Für das Argument zählt die Gestalt: Ablehnungen schwanken enorm, und die Summe ist groß genug, um einen beschädigten Download zu beherrschen. Die Zahlen je Provider und die rohe Messausgabe liegen in unseren internen Aufzeichnungen, und die Ende-zu-Ende-Zahlen, die sie erklären, stehen auf der <a href="benchmarks.de.html#damaged">Benchmark-Seite</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - der Ein-Pass-Usenet-Downloader.</div>
+    <div>
+      <a href="index.de.html">Startseite</a> ·
+      <a href="features.de.html">Funktionen</a> ·
+      <a href="indexer.de.html">Indexer</a> ·
+      <a href="benchmarks.de.html">Benchmarks</a> ·
+      <a href="explained.de.html">Erklärt</a> ·
+      <a href="download.de.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Ablehnungszeiten gemessen am 11. August 2026 aus Europa über fünf Provider, je eine Verbindung, auf einer ruhenden Leitung ohne jede Nutzdatenübertragung. Die Ende-zu-Ende-Zahlen zum beschädigten Post stammen aus der Sechs-Client-Runde desselben Abends; die vollständigen Tabellen, die Clientversionen und die Durchgänge, die wir verlieren, stehen auf der Benchmark-Seite.</p>
+</div></footer>
+
+</body>
+</html>

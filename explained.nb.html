@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forklart - nzbfast</title>
+<meta name="description" content="Resonnementet bak tallene: hva som faktisk skjer når det mangler artikler i en post, hvordan vi kjører ytelsestestene og bedømmer et resultat, og hva hver målte kolonne betyr.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained.nb.html">
+<link rel="alternate" hreflang="fr" href="explained.fr.html">
+<link rel="alternate" hreflang="de" href="explained.de.html">
+<link rel="alternate" hreflang="it" href="explained.it.html">
+<link rel="alternate" hreflang="es" href="explained.es.html">
+<link rel="alternate" hreflang="nl" href="explained.nl.html">
+<link rel="alternate" hreflang="pt" href="explained.pt.html">
+<link rel="alternate" hreflang="sv" href="explained.sv.html">
+<link rel="alternate" hreflang="da" href="explained.da.html">
+<link rel="alternate" hreflang="nb" href="explained.nb.html">
+<link rel="alternate" hreflang="fi" href="explained.fi.html">
+<link rel="alternate" hreflang="tr" href="explained.tr.html">
+<link rel="alternate" hreflang="ro" href="explained.ro.html">
+<link rel="alternate" hreflang="he" href="explained.he.html">
+<link rel="alternate" hreflang="ar" href="explained.ar.html">
+<link rel="alternate" hreflang="fa" href="explained.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained.nb.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nb.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nb.html" class="home">Hjem</a>
+    <a href="features.nb.html">Funksjoner</a>
+    <a href="indexer.nb.html">Indekserer</a>
+    <a href="benchmarks.nb.html">Ytelsestester</a>
+    <a href="explained.nb.html" class="on">Forklart</a>
+    <a href="MANUAL.html">Dokumentasjon</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nb.html">Last ned</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained.html">English</option><option value="explained.fr.html">Français</option><option value="explained.de.html">Deutsch</option><option value="explained.it.html">Italiano</option><option value="explained.es.html">Español</option><option value="explained.nl.html">Nederlands</option><option value="explained.pt.html">Português</option><option value="explained.sv.html">Svenska</option><option value="explained.da.html">Dansk</option><option value="explained.nb.html" selected>Norsk</option><option value="explained.fi.html">Suomi</option><option value="explained.tr.html">Türkçe</option><option value="explained.ro.html">Română</option><option value="explained.he.html">עברית</option><option value="explained.ar.html">العربية</option><option value="explained.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>Forklart</h1>
+  <p class="sub">Ytelsestestsiden er en tabell med resultater. Dette er resonnementet under den: hva som faktisk går galt med en Usenet-post og hvorfor det koster tid, hvordan vi kjører en måleomgang og hva som gjør et resultat gyldig, og hva hver kolonne vi publiserer egentlig måler. Skrevet for dem som vil etterprøve tankegangen vår i stedet for å ta tallene på tro.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <a class="card" href="explained-onepass.nb.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Én</p>
+        <h2 style="margin-top:2px">Slik virker nedlasting i én omgang</h2>
+        <p>Arkitekturen resten av nettstedet stadig viser til. Hva som skjer med bytene, hvorfor dette er noe annet enn direkte utpakking, hvilke arkivformer som overlever den, og hva det er verdt i diskplass, prosessortid og minne å fjerne skriv-og-les-tilbake-runden.</p>
+      </a>
+      <a class="card" href="explained-damaged.nb.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">To</p>
+        <h2 style="margin-top:2px">Hvorfor skadde poster betyr noe</h2>
+        <p>Poster kommer med hull i seg oftere enn folk venter, og det er der klientene skiller seg mest. Hva en manglende artikkel er, hvorfor det er dyrt å be om den, og hvorfor løsningen er å slutte å spørre framfor å spørre raskere.</p>
+      </a>
+      <a class="card" href="explained-method.nb.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Tre</p>
+        <h2 style="margin-top:2px">Slik tester vi, fullt ut</h2>
+        <p>Maskinene, testmaterialet, innstillingene hver klient får, og reglene som avgjør om en omgang i det hele tatt teller. Inkludert kontrollene som finnes fordi vi tok feil én gang og helst slipper å gjenta det.</p>
+      </a>
+      <a class="card" href="explained-numbers.nb.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Fire</p>
+        <h2 style="margin-top:2px">Hva tallene betyr</h2>
+        <p>Tid til en brukbar fil, toppminne, prosessorsekunder, disktopp, volum-I/O. Hva hver av dem er, hvorfor vi publiserer den, og hvordan en god eller dårlig verdi faktisk ser ut på en maskin du selv eier.</p>
+      </a>
+      <div class="card">
+        <p class="kicker">Og rådataene</p>
+        <h2 style="margin-top:2px">Selve tabellene</h2>
+        <p>Hvert målte resultat ligger på <a href="benchmarks.nb.html">ytelsestestsiden</a>, med bygg og dato ved siden av hver tabell, inkludert omgangene vi taper. Disse sidene forklarer det; den siden er beviset.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - Usenet-nedlasteren i én omgang.</div>
+    <div>
+      <a href="index.nb.html">Hjem</a> ·
+      <a href="features.nb.html">Funksjoner</a> ·
+      <a href="indexer.nb.html">Indekserer</a> ·
+      <a href="benchmarks.nb.html">Ytelsestester</a> ·
+      <a href="explained.nb.html">Forklart</a> ·
+      <a href="download.nb.html">Last ned</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

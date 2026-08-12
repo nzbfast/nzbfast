@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comment nous testons, en détail - nzbfast</title>
+<meta name="description" content="Les machines, les jeux de test, les réglages accordés à chaque client, et les règles qui décident si une manche de benchmark compte.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.fr.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.fr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fr.html" class="home">Accueil</a>
+    <a href="features.fr.html">Fonctionnalités</a>
+    <a href="indexer.fr.html">Indexeur</a>
+    <a href="benchmarks.fr.html">Benchmarks</a>
+    <a href="explained.fr.html" class="on">Explications</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fr.html">Télécharger</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html" selected>Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fr.html" style="color:inherit">Explications</a> &middot; trois</p>
+  <h1>Comment nous testons, en détail</h1>
+  <p class="sub">Nous publions des comparaisons avec les logiciels d'autres personnes, la méthode doit donc être vérifiable. La voici en entier : les machines, le contenu, les réglages accordés à chaque client, et les règles qui décident si une exécution compte comme un résultat ou part à la poubelle.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Le banc d'essai</p>
+    <h2>Même machine, même ligne, même contenu</h2>
+    <p class="lead">Chaque client d'une comparaison tourne sur une seule machine, face aux mêmes fournisseurs, sur le même contenu, dans la même série. Rien n'est repris d'un jour précédent.</p>
+
+    <ul class="plain">
+      <li><b>Les machines.</b> Un Apple M1 Ultra sur une ligne 10 GbE en Europe, et un M3 Ultra sur une ligne plus lente aux États-Unis. Les comparaisons ne mélangent jamais les deux : un tableau, c'est une machine.</li>
+      <li><b>La ligne compte plus que le processeur.</b> Sur une ligne 10 GbE la plupart des clients savent saturer la connexion sur une tâche facile, c'est pourquoi les scénarios intéressants sont ceux où autre chose que la bande passante brute décide de l'issue.</li>
+      <li><b>Fournisseurs.</b> Cinq fournisseurs commerciaux, le même ensemble pour chaque client, en TLS. Nous excluons un fournisseur de ces séries parce qu'il limite le nombre de sites pouvant se connecter en même temps, ce qui rendrait une machine de test partagée injuste envers celui qui passe en second.</li>
+      <li><b>Connexions.</b> Chaque client reçoit le même nombre par fournisseur dans une série donnée, et la série indique lequel. Plus n'est pas automatiquement mieux ; nous avons mesuré notre propre client tenant le même temps de fin sur un facteur neuf de variation du nombre de connexions.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">La règle qui décide de tout</p>
+    <h2>Un client est jugé sur le fichier, pas sur son propre message d'état</h2>
+    <p class="lead">C'est la chose la plus importante de cette page. Chaque manche se termine en cherchant le plus gros fichier produit par le client, où que ce soit dans sa sortie, et en le hachant contre une copie de référence. Taille et MD5, à chaque manche, pas sur un échantillon.</p>
+
+    <p>Nous faisons cela parce que le rapport de succès d'un client n'est pas une preuve fiable. Nous avons mesuré un client annonçant <i>done</i> sur une tâche dont le dossier de sortie était vide. Nous en avons mesuré un autre annonçant <i>Completed</i> après avoir livré des volumes d'archive bruts qu'il n'avait jamais décompactés. Un outil de réparation très répandu se termine avec un code d'échec après une réparation réussie. Aucun de ces clients ne mentait ; les chaînes d'état veulent simplement dire des choses différentes selon les auteurs, et un benchmark qui leur fait confiance mesure du vocabulaire plutôt que du comportement.</p>
+
+    <p>La ligne d'arrivée est donc la même pour tous : <b>le contenu existe, à la bonne taille, avec la bonne empreinte</b>. Si un client s'arrête avant, il n'obtient pas de temps, et toute la colonne est signalée plutôt que discrètement omise. Un client lent qui termine fait mieux qu'un rapide qui ne termine pas, et le tableau doit le dire.</p>
+
+    <div class="callout">
+      <p>Le corollaire est qu'une non-arrivée est un résultat, pas une erreur de notre part. Quand nous en publions une, nous décrivons l'état final en termes simples, y compris tout ce qui suggère qu'elle est propre à cette tâche plutôt que générale, et nous disons ce que le client a fait au lieu de terminer.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ordre et répétition</p>
+    <h2>Pourquoi les manches alternent, et pourquoi les exécutions uniques ne sont pas publiées</h2>
+    <p class="lead">Le débit des fournisseurs varie d'une minute à l'autre, parfois d'un facteur deux ou trois. Deux mesures prises à des moments différents mesurent en partie la météo.</p>
+
+    <p>Les clients tournent donc <b>coup sur coup et en alternance</b>, et l'ordre s'inverse entre les répétitions, pour qu'aucun client ne soit toujours celui qui entre le premier sur une ligne chaude ou froide. Un résultat est la tendance sur l'ensemble des répétitions, pas la meilleure exécution. Quand la dispersion est large, nous publions la fourchette plutôt qu'une moyenne qui la masquerait, et si nous ignorons pourquoi les chiffres d'un client sont dispersés, nous le disons au lieu d'inventer une cause.</p>
+
+    <p>Les comparaisons entre séries différentes sont évitées autant que possible. Si une affirmation demande deux chiffres, nous préférons refaire courir les deux dans une même série plutôt que de soustraire le chiffre d'un jour à celui d'un autre, car l'état du banc, les conditions des fournisseurs et les versions des clients dérivent tous. Quand nous comparons deux de nos propres versions, les deux tournent dans la même série, en alternance, sur le même contenu.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Les contrôles ingrats</p>
+    <h2>Ce qui tourne avant et pendant chaque manche</h2>
+    <p class="lead">La plupart existent parce qu'une panne silencieuse a produit un jour un chiffre sain d'apparence, publiable et faux. Chacun tourne désormais automatiquement et arrête la série au lieu d'avertir.</p>
+
+    <ul class="plain">
+      <li><b>Chaque fournisseur répond avant le début de la manche.</b> Une manche exécutée pendant que deux fournisseurs sont en panne mesure une panne, et cela ressemble exactement à un client lent.</li>
+      <li><b>Le binaire est identifié par son empreinte avant chaque manche</b>, pas par son nom de fichier ni sa chaîne de version. Deux de nos versions annonçaient le même numéro tout en différant de 88 commits ; seule l'empreinte les distingue, et les tableaux la citent.</li>
+      <li><b>Chaque client tourne en code natif.</b> Sur les machines Apple, un utilitaire mal construit peut tourner silencieusement en traduction, ce qui coûte du temps processeur qui relève de notre choix d'empaquetage et non du code du client. Nous vérifions le processus en cours, pas seulement le fichier.</li>
+      <li><b>Les limites de fichiers ouverts sont relevées pour tous, à l'identique.</b> macOS lance les programmes avec une limite de 256 fichiers ouverts, qu'un jeu complet de connexions peut dépasser. Un client qui l'atteint a tendance à disparaître sans rapport de plantage, ce qui se lit exactement comme une défaillance du logiciel. La non-arrivée apparente d'un concurrent s'est révélée être cela ; limite relevée, la tâche identique s'est terminée en 44 secondes.</li>
+      <li><b>Le trafic disque est enregistré par manche</b>, ce qui sert aussi à vérifier que rien d'autre n'utilisait la machine. Ces compteurs couvrent tout le disque plutôt qu'un seul programme, donc si une deuxième tâche tournait, son travail apparaîtrait dans nos mesures. Des relevés plats sur toute une série sont ce qui nous dit qu'un résultat appartient bien au client qu'il nomme.</li>
+      <li><b>Chaque client écrit dans sa propre arborescence de sortie</b>, et cette arborescence est effacée avant chaque manche, pour qu'aucune exécution ne puisse être satisfaite par le fichier d'une exécution précédente.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Là où un client a besoin de réglages particuliers pour bien fonctionner, il les reçoit, et la série indique lesquels. Exemples : le pipelining des requêtes activé là où un client le livre désactivé, la détection de doublons désactivée quand la même tâche est téléchargée à répétition, et les utilitaires de décompactage pris dans le paquet du client plutôt qu'une copie système. Le but est que chaque client soit mesuré au mieux de ses capacités plutôt qu'à ses réglages par défaut, car les valeurs par défaut sont un débat distinct de la capacité.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ce que nous ne ferons pas</p>
+    <h2>Les limites de ces chiffres</h2>
+    <ul class="plain">
+      <li><b>Nous ne publions pas un chiffre que nous n'avons pas mesuré.</b> Si un nombre est déduit plutôt qu'observé, il est étiqueté comme déduit, et nous préférons laisser un trou que le combler par un calcul qui se lit comme une mesure.</li>
+      <li><b>Nous ne corrigeons pas discrètement un résultat perdant.</b> Une manche que nous perdons reste publiée jusqu'à ce qu'une nouvelle exécution la remplace, et quand une défaite devient une victoire, le changement reçoit une explication à côté du tableau plutôt qu'une modification silencieuse.</li>
+      <li><b>Les manches avec fournisseurs ne sont pas encore reproductibles de façon indépendante</b>, parce que le contenu ne nous appartient pas et ne peut être distribué. Les tests de composants, qui utilisent du contenu généré, le sont. Nous préparons des fichiers de test publiables pour que les manches avec fournisseurs deviennent vérifiables elles aussi.</li>
+      <li><b>Ce sont nos benchmarks des logiciels d'autres personnes.</b> Chaque version est nommée et datée, et quand un client sort une nouvelle version nous refaisons courir les manches concernées plutôt que de laisser une comparaison périmée en ligne. Si vous pensez qu'un résultat est faux, les réglages et les versions sont publiés pour qu'on puisse le contester précisément.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - le téléchargeur Usenet en une passe.</div>
+    <div>
+      <a href="index.fr.html">Accueil</a> ·
+      <a href="features.fr.html">Fonctionnalités</a> ·
+      <a href="indexer.fr.html">Indexeur</a> ·
+      <a href="benchmarks.fr.html">Benchmarks</a> ·
+      <a href="explained.fr.html">Explications</a> ·
+      <a href="download.fr.html">Télécharger</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waarom beschadigde posts ertoe doen - nzbfast</title>
+<meta name="description" content="Wat een ontbrekend artikel is, waarom er bij een server naar vragen tussen 79 ms en 2.2 seconden kost, en waarom de nuttige oplossing is te stoppen met vragen in plaats van sneller te vragen.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.nl.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nl.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nl.html" class="home">Home</a>
+    <a href="features.nl.html">Functies</a>
+    <a href="indexer.nl.html">Indexer</a>
+    <a href="benchmarks.nl.html">Benchmarks</a>
+    <a href="explained.nl.html" class="on">Uitgelegd</a>
+    <a href="MANUAL.html">Documentatie</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nl.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html" selected>Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.nl.html" style="color:inherit">Uitgelegd</a> &middot; twee</p>
+  <h1>Waarom beschadigde posts ertoe doen</h1>
+  <p class="sub">Een download die vlekkeloos verloopt is het makkelijke geval, en elke client handelt dat vaardig af. De interessante verschillen komen boven wanneer een deel van de post ontbreekt, en dat gebeurt veel vaker dan het schone geval doet vermoeden. Dit is wat er werkelijk aan de hand is, en waarom het zoveel tijd kost.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De vorm van het probleem</p>
+    <h2>Wat een ontbrekend artikel is</h2>
+    <p class="lead">Een Usenet-post is niet één bestand. Het zijn duizenden kleine artikelen, elk apart opgeslagen op de servers van elke provider, en de NZB die je downloadt is een lijst van hun namen. Een release van 6.5 GB bestaat uit ruwweg 9,000 daarvan.</p>
+
+    <p>Artikelen raken zoek om gewone redenen. Providers bewaren ze een vaste bewaartermijn en verwijderen ze daarna. Sommige providers hebben een bepaald artikel om te beginnen nooit ontvangen, omdat de verspreiding tussen servers onvolmaakt is. Af en toe was een upload onvolledig toen hij werd geplaatst, en heeft een deel ervan nergens ooit bestaan. Wat de oorzaak ook is, het gevolg is hetzelfde: je client vraagt om een artikel, en het antwoord is een weigering in plaats van gegevens.</p>
+
+    <p>Dit is gewoon genoeg dat de mensen die op Usenet plaatsen er rekening mee houden. Bijna elke release komt met <b>pariteitsgegevens</b> ernaast, meestal PAR2-bestanden, oftewel extra overtollige informatie berekend uit het origineel. Ontbreekt er een deel van de inhoud, dan kan pariteit het herbouwen, mits je er genoeg van hebt. Een typische post draagt zo'n 10% pariteit met zich mee, dus een post kan een flink deel van zichzelf kwijtraken en toch volledig te redden zijn.</p>
+
+    <div class="callout">
+      <p>Een beschadigde post is dus meestal geen kapotte download. Het is een download die wat rekenwerk vergt voordat hij compleet is. De enige vraag is hoe lang een client erover doet om dat uit te vogelen, en juist daar verschillen ze met een factor twee of meer.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Het dure deel</p>
+    <h2>Vragen om iets dat niemand heeft</h2>
+    <p class="lead">Wanneer een server een artikel niet heeft, geeft hij een weigering terug, en de client probeert dan de volgende server op je lijst. Dat is de juiste zet, want de tweede provider heeft het heel vaak wel. De kosten verschijnen wanneer niemand het heeft.</p>
+
+    <p>In dat geval loopt de client je hele providerlijst af, server voor server, en wordt door elk van hen geweigerd voordat hij kan concluderen dat het artikel echt weg is. Dat aflopen gebeurt op volgorde, en weigeringen zijn trager dan mensen aannemen. We hebben ze rechtstreeks gemeten, op een rustende lijn, zonder dat er ook maar iets aan inhoud bewoog:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>provider</th><th class="num">tijd om een gewoon verzoek te beantwoorden</th><th class="num">tijd om een ontbrekend artikel te weigeren</th></tr></thead>
+      <tbody>
+        <tr><td>Provider A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Provider B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Provider C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Provider D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Provider E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Twee dingen springen eruit. Ten eerste is de spreiding enorm: <b>een weigering kost ergens tussen 79 ms en 2.2 seconden</b>, afhankelijk van welke provider antwoordt, een verschil van bijna dertig keer. Ten tweede weigert de ene provider in ongeveer de tijd die het kost om te vragen, terwijl een andere meer dan tweehonderd keer zijn eigen normale antwoordtijd nodig heeft om nee te zeggen. Dat is geen netwerkvertraging, dat is werk dat aan hun kant gebeurt, en in minder heen-en-weer vragen helpt nauwelijks.</p>
+
+    <p>Tel het op: een volledige gang langs vijf providers kost, voor één enkel artikel dat niet meer bestaat, ongeveer <b>5 seconden</b>. Bedenk nu dat een beschadigde post veel van zulke artikelen heeft, en dat een client die ze op volgorde afhandelt die kosten telkens opnieuw betaalt terwijl je verbinding stilligt. De download is niet traag omdat de gegevens langzaam binnenkomen. Ze komen helemaal niet meer binnen, en de client wacht tot hem verteld wordt wat hij zelf al kan afleiden.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De oplossing</p>
+    <h2>Stoppen met vragen, en in plaats daarvan repareren</h2>
+    <p class="lead">Het inzicht is niet om weigeringen sneller te maken, want de providers hebben wij niet in de hand. Het is om op te merken wanneer het antwoord er niet meer toe doet.</p>
+
+    <p>Op elk moment tijdens een download weet de client twee dingen: hoeveel stukken nog vermist zijn, en hoeveel pariteitsgegevens hij al heeft. Is de pariteit in handen genoeg om alles wat nog openstaat te herbouwen, dan kan het antwoord op de vraag of iemand dit artikel heeft de uitkomst niet meer veranderen. Of het nu een traag ja of een traag nee is, het bestand wordt hoe dan ook herbouwd. Doorgaan met aflopen koopt niets dan vertraging.</p>
+
+    <p>De huidige build stopt op dat punt dus met vragen en gaat rechtstreeks over op repareren. Het herbouwen zelf is snel en was dat altijd al: ongeveer <b>2.3 seconden</b> bij een post van 6.5 GB, en dat cijfer is in elke versie die we hebben gemeten hetzelfde. De gewonnen tijd is volledig het wachten dat niet meer plaatsvindt.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>post van 6.5 GB, 60 ontbrekende artikelen</th><th class="num">tijd tot een geverifieerd bestand</th></tr></thead>
+      <tbody>
+        <tr><td>wachten tot elke provider weigert</td><td class="num">23 s</td></tr>
+        <tr><td><b>stoppen zodra pariteit het gat dekt</b></td><td class="win">13 s</td></tr>
+        <tr><td>waarvan het eigenlijke reparatierekenwerk</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Dezelfde verandering doet helemaal niets bij een onbeschadigde post, en dat is het duidelijkste bewijs dat ze doet wat wij denken: zonder ontbrekende artikelen valt er geen gang in te korten, en de twee builds maken een schone taak van 6.5 GB af in een identieke 7 seconden.</p>
+
+    <p><b>Het is een ruil, geen gratis winst.</b> Vroeg repareren betekent de pariteitsgegevens in het geheugen houden in plaats van ze weg te gooien en later meer op te halen, dus stijgt het piekgeheugen (RSS) bij een zwaar beschadigde post van ongeveer 0.8 GB naar ongeveer 1.3 GB, en halen we ruwweg 400 MB meer bij de providers op. Bij een onbeschadigde post blijft het geheugen onveranderd op 0.24 GB. Wij denken dat dat voor de meeste mensen de juiste ruil is, aangezien het geheugen alleen wordt uitgegeven in het geval waarin het je tien seconden oplevert, maar het is een echte kostenpost en er is een instelling voor.</p>
+
+    <p class="note" style="text-align:start">De providernamen worden in de weigeringstabel bewust weggelaten. Die cijfers zijn de eigenschap van één meting op één avond vanaf één plek, en een provider die anders indexeert, of die we toevallig op een slechte avond troffen, hoort op grond van één ronde niet als traag te worden bestempeld. Wat voor het betoog telt is de vorm: weigeringen lopen enorm uiteen, en het totaal is groot genoeg om een beschadigde download te overheersen. De cijfers per provider en de ruwe meetuitvoer staan in onze interne administratie, en de cijfers van begin tot eind die ze verklaren staan op de <a href="benchmarks.nl.html#damaged">benchmarkpagina</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - de one-pass Usenet-downloader.</div>
+    <div>
+      <a href="index.nl.html">Home</a> ·
+      <a href="features.nl.html">Functies</a> ·
+      <a href="indexer.nl.html">Indexer</a> ·
+      <a href="benchmarks.nl.html">Benchmarks</a> ·
+      <a href="explained.nl.html">Uitgelegd</a> ·
+      <a href="download.nl.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Weigeringstijden gemeten op 11 augustus 2026 vanuit Europa over vijf providers, één verbinding elk, op een rustende lijn zonder enige inhoudsoverdracht. De cijfers van begin tot eind bij een beschadigde post komen uit de ronde met zes clients van diezelfde avond; zie de benchmarkpagina voor de volledige tabellen, de clientversies en de runs die we verliezen.</p>
+</div></footer>
+
+</body>
+</html>

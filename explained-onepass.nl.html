@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hoe one-pass downloaden werkt - nzbfast</title>
+<meta name="description" content="Wat one-pass werkelijk doet, waarom het niet hetzelfde is als direct uitpakken, welke archiefvormen het aankan, en waarom het schrappen van de schrijf-en-teruglees-cyclus schijf, processortijd en geheugen bespaart.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.nl.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.nl.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.nl.html" class="home">Home</a>
+    <a href="features.nl.html">Functies</a>
+    <a href="indexer.nl.html">Indexer</a>
+    <a href="benchmarks.nl.html">Benchmarks</a>
+    <a href="explained.nl.html" class="on">Uitgelegd</a>
+    <a href="MANUAL.html">Documentatie</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.nl.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html" selected>Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.nl.html" style="color:inherit">Uitgelegd</a> &middot; een</p>
+  <h1>Hoe one-pass downloaden werkt</h1>
+  <p class="sub">Het meeste van wat deze client snel maakt is geen sneller netwerkpad. Het is dat de gegevens maar één keer bewegen. Dit is wat dat in de praktijk betekent, waarom het iets anders is dan direct uitpakken, welke archiefvormen het overleven, en wat het schrappen van de schrijf-en-teruglees-cyclus op een echte machine werkelijk waard is.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Het vertrekpunt</p>
+    <h2>Wat een Usenet-download van oudsher doet</h2>
+    <p class="lead">Een post bestaat uit duizenden kleine gecodeerde artikelen die samen een reeks archiefvolumes vormen, die op hun beurt het bestand bevatten dat je eigenlijk wilt. Van het een naar het ander komen waren van oudsher vier afzonderlijke taken, elk afgerond voordat de volgende begint.</p>
+
+    <ol>
+      <li><b>Downloaden en decoderen.</b> Elk artikel ophalen, decoderen, en de weer samengestelde archiefvolumes naar schijf schrijven. Voor een release van 60 GB is dat 60 GB geschreven.</li>
+      <li><b>Verifiëren.</b> Alle 60 GB weer van de schijf lezen om ze tegen de pariteitsgegevens te controleren, en ze repareren als er iets mis is.</li>
+      <li><b>Uitpakken.</b> De volumes nogmaals lezen, en de uitgepakte inhoud ernaast schrijven. Nu staat er 120 GB op de schijf.</li>
+      <li><b>Opruimen.</b> De volumes verwijderen, zodat de inhoud overblijft.</li>
+    </ol>
+
+    <p>Elke fase is correct, en de uitkomst klopt. Maar de inhoud is twee keer geschreven, minstens twee keer gelezen, en op het hoogste punt moest de schijf twee volledige kopieën bevatten van een taak waarvan je er maar één wilde. De klok die jij meemaakt is alle vier de fasen op een rij, en daarom kan een client een snelle download melden en je toch laten wachten.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De verandering</p>
+    <h2>Het in plaats daarvan één keer doen</h2>
+    <p class="lead">One-pass betekent dat de bytes van het netwerk naar hun eindbestemming gaan zonder ooit een archiefbestand op je schijf te worden. Er is geen fase twee of drie, want het werk van allebei gebeurt terwijl fase één nog loopt.</p>
+
+    <p>In de praktijk wordt elk artikel zodra het binnenkomt in het geheugen gedecodeerd en meteen aan twee dingen tegelijk doorgegeven. De verificateur controleert het onmiddellijk tegen de pariteitsgegevens, zodat de juistheid vaststaat terwijl de gegevens landen in plaats van door ze later terug te lezen. De uitpakker behandelt de binnenkomende bytes als een positie binnen het archief, rekent uit bij welk deel van welk inhoudsbestand ze horen, en schrijft ze daar.</p>
+
+    <p>De archiefvolumes worden nooit samengesteld. Ze bestaan als een structuur die de uitpakker begrijpt terwijl de download onderweg is, en het enige dat je schijf bereikt is het bestand dat je wilde. Als het laatste artikel aankomt is er vrijwel niets meer te doen, en daarom liggen onze eindtijden dicht bij de downloadtijd zelf in plaats van bij een download plus een staart.</p>
+
+    <div class="callout">
+      <p>Het meetbare gevolg: voor dezelfde taak schrijven we ongeveer de helft, lezen we veel minder terug, en hebben we ruwweg de eigen omvang van de inhoud aan vrije ruimte nodig in plaats van het dubbele. Bij een release van 190 GB is dat ongeveer 157 GB vrije ruimte tegen ongeveer 313 GB, en ruwweg een derde van het schijfverkeer.</p>
+    </div>
+
+    <p>Twee dingen maken dit lastiger dan het klinkt, en zij zijn de reden dat het ongewoon is. Artikelen komen niet op volgorde binnen, dus de uitpakker moet omgaan met bytes die op willekeurige posities landen in plaats van als een stroom vanaf het begin. En een gecomprimeerd archief laat zich niet vanaf het midden uitpakken, dus elk deel van het werk dat echt volgorde vereist moet worden herkend en anders behandeld in plaats van weggeredeneerd.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">De vergelijking waar men naar vraagt</p>
+    <h2>Waarom dit geen direct uitpakken is</h2>
+    <p class="lead">Direct uitpakken is een goede functie en de clients die haar hebben zijn er beter mee af. Ze lost ook een ander deel van het probleem op, en het verschil komt precies daar boven waar het ertoe doet.</p>
+
+    <p>Direct uitpakken begint met uitpakken voordat de download klaar is, zodat fase drie fase één overlapt in plaats van erop te volgen. Wat het niet doet is fase één schrappen. <b>De archiefvolumes worden nog steeds volledig naar je schijf geschreven</b>, want de uitpakker is een gewone die gewone bestanden leest; direct uitpakken start hem alleen eerder. De twee kopieën bestaan nog steeds, de twee schrijfacties gebeuren nog steeds, en de behoefte aan vrije ruimte is onveranderd.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>de volumes naar schijf schrijven</th><th class="num">benodigde vrije ruimte</th><th class="num">hoe vaak de inhoud wordt geschreven</th></tr></thead>
+      <tbody>
+        <tr><td>Downloaden, dan uitpakken</td><td>ja, daarna teruglezen</td><td class="num">~2&times; de taak</td><td class="num">2</td></tr>
+        <tr><td>Direct uitpakken</td><td>ja, eerder teruggelezen</td><td class="num">~2&times; de taak</td><td class="num">2</td></tr>
+        <tr><td><b>One-pass</b></td><td class="win">nooit geschreven</td><td class="win">~1&times; de taak</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Het tweede verschil is wat er gebeurt als de vorm niet eenvoudig is. Omdat direct uitpakken het werk aan een gewone uitpakker overdraagt naarmate volumes verschijnen, heeft het een ongecompliceerde situatie nodig: de volumes aanwezig in een bruikbare volgorde, geen reparatie in behandeling, niets dat eerst ontgrendeld moet worden, en een archief waarvan de inhoud niet zelf archieven zijn. Zodra daar iets van misgaat, is het verstandige om terug te treden en alsnog aan het eind uit te pakken, en dat is wat er gebeurt. Je krijgt een correcte uitkomst en het gewone tijdsverloop.</p>
+
+    <p>Omdat onze uitpakker vanaf het begin rond bytes buiten volgorde is gebouwd, zijn die situaties voor hem geen uitzonderingen. Dat is het werkelijke onderscheid: niet dat wij eerder beginnen, maar dat wij niet leunen op voorwaarden die vaak niet gelden.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Wat het werkelijk overleeft</p>
+    <h2>De vormen die het aankan</h2>
+    <p class="lead">Zo'n ontwerp is alleen de moeite waard als het geldt voor de posts die je werkelijk tegenkomt, en niet voor een schoon ideaalgeval. De huidige stand: <b>geen enkel containerformaat wordt alleen op schijf afgehandeld.</b> RAR, 7z en zip gaan allemaal via het one-pass-pad.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>vorm</th><th>one-pass</th><th>opmerkingen</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, opgeslagen (zonder compressie)</td><td class="yes">ja</td><td>het gewone geval bij mediareleases</td></tr>
+        <tr><td>RAR, gecomprimeerd</td><td class="yes">ja</td><td>inclusief een gecomprimeerd archief als buitenste laag</td></tr>
+        <tr><td>RAR 1.5, 3, 4 en 5</td><td class="yes">ja</td><td>alle vier de generaties van het formaat</td></tr>
+        <tr><td>7z</td><td class="yes">ja</td><td>inclusief met deflate gecomprimeerde inhoud</td></tr>
+        <tr><td>zip</td><td class="yes">ja</td><td>inclusief bzip2- en LZMA-inhoud</td></tr>
+        <tr><td>Versleutelde inhoud</td><td class="yes">ja</td><td>met een wachtwoord, inclusief versleutelde zip</td></tr>
+        <tr><td>Versleutelde kopteksten</td><td class="yes">ja</td><td>waar ook de bestandsnamen verborgen zijn</td></tr>
+        <tr><td>Wachtwoordketens</td><td class="yes">ja</td><td>het wachtwoord van elke laag verpakt in de laag erboven</td></tr>
+        <tr><td>Geneste archieven</td><td class="yes">ja</td><td>gaandeweg ontnest, tot een instelbare diepte</td></tr>
+        <tr><td>Op meerdere lagen beschadigd</td><td class="yes">ja</td><td>reparatie op elk niveau, nog steeds één keer erdoorheen</td></tr>
+        <tr><td>Numeriek gesplitste sets</td><td class="yes">ja</td><td>splitsingen in de stijl <code>name.001</code></td></tr>
+        <tr><td>Zelfuitpakkende archieven</td><td class="no">schijfronde</td><td>het archief begint niet aan het begin van het bestand</td></tr>
+        <tr><td>Verdeelde zip (<code>.z01</code>)</td><td class="no">schijfronde</td><td>en enkele zeldzamere zip-varianten</td></tr>
+        <tr><td>Hervatte taken</td><td class="no">schijfronde</td><td>een na een herstart voortgezette taak eindigt op de gewone manier</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>De drie weigeringen zijn eerlijke en gedragen zich hetzelfde: de taak wordt correct afgerond, via het gewone pad, en je krijgt voor die download het gewone tijdsverloop met twee kopieën. Er faalt niets; het houdt alleen op snel te zijn op de manier die de rest van deze pagina beschrijft. Zelfuitpakkende archieven worden om een structurele reden geweigerd en niet uit gebrek aan inspanning: een archief herkennen aan zijn eerste bytes kan niet werken wanneer de eerste bytes een programma zijn.</p>
+
+    <p>De rijen genest en versleuteld zijn die je serieus moet nemen, want daar geven de meeste clients de taak aan jou terug. Op een gegenereerd corpus van tien geneste vormen, beoordeeld op inhoudshash zodat een client die de inhoud hernoemt toch krediet krijgt, <b>rondden we er 9 van de 10 af zonder ingrijpen</b>; de op één na beste client rondde er 5 af, en twee andere rondden er 2 af. Degene die wij niet automatisch afronden is een ladder van tien niveaus, die netjes eindigt bij de standaard dieptegrens van vijf met de diepste laag als een gezond archief, en volledig doorloopt als je de grens verhoogt. Die runs staan met het volledige raster op de <a href="benchmarks.nl.html#nested">benchmarkpagina</a>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Waarom het de moeite waard is</p>
+    <h2>Wat het schrappen van de omweg werkelijk oplevert</h2>
+
+    <p><b>Het is sneller, om een weinig glansrijke reden.</b> 60 GB schrijven en teruglezen is zelfs op een snelle SSD niet gratis, en op alles wat trager is is het vaak het werkelijke knelpunt in plaats van het netwerk. Eén schrijfactie en twee leesacties weghalen haalt die tijd volledig van je klok. De winst is het grootst precies waar men het meest merkt: grote taken, en machines waarvan de schijf niet het snelste onderdeel is.</p>
+
+    <p><b>Het halveert de slijtage.</b> SSD's hebben een eindig aantal schrijfacties in zich, en een downloader die elke inhoud twee keer schrijft besteedt dat budget in dubbel tempo zonder dat jij er iets voor terugkrijgt. Over een paar honderd terabyte downloaden, wat voor een actieve gebruiker een gewoon jaar is, is het verschil een merkbaar deel van de levensduur van een schijf.</p>
+
+    <p><b>Het verandert wat past.</b> Vrije ruimte is geen prestatie-eigenschap, het is een ja of nee. Een taak die het dubbele van zijn eigen omvang aan speling nodig heeft draait wel of niet. Ruwweg de omvang van de inhoud nodig hebben betekent dat taken slagen op machines en volumes waar de gewone aanpak eenvoudigweg ophoudt, en daarom past een release van 190 GB hier in ongeveer 157 GB vrije ruimte in plaats van in ongeveer 313 GB.</p>
+
+    <p><b>Het kost minder processortijd.</b> Gegevens niet twee keer door de schijf halen schrapt het werk daarvoor, en verifiëren tijdens de download betekent geen tweede ronde over de inhoud om die te controleren. Onze processorkosten blijven vlak op ongeveer 1.7 processorseconden per gigabyte, van een taak van 35 GB tot een van 190 GB, en dat is de nuttige eigenschap: de kosten per gigabyte groeien niet mee met de taak.</p>
+
+    <p><b>Het draait in minder geheugen, en in begrensd geheugen.</b> Omdat bytes worden verbruikt zodra ze binnenkomen in plaats van opgehoopt, is de werkverzameling een budget dat jij instelt en geen functie van de taakomvang. Dat is wat het mogelijk maakt een release van 190 GB te verwerken op een machine met ruwweg 1.1 GB beschikbaar. Wat telt is niet het getal maar de vorm: geheugen dat meegroeit met de taak komt uiteindelijk een taak tegen die jouw machine niet kan afmaken, en het faalt door wisselbestandgebruik of door te worden afgeschoten in plaats van door het je te vertellen.</p>
+
+    <div class="callout">
+      <p>Bij elkaar gaat dit minder over het winnen van een benchmark dan over waar de software überhaupt kan draaien. Een ontwerp dat de helft van de vrije ruimte, de helft van de schrijfacties en een begrensde hoeveelheid geheugen nodig heeft werkt op een kleine thuisserver, een oudere laptop of een NAS, en daar leeft een flink deel van dit soort software ook echt.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Elk cijfer op deze pagina is gemeten en gepubliceerd met de build en de datum ernaast op de <a href="benchmarks.nl.html">benchmarkpagina</a>, inclusief de runs die we verliezen. Het eerlijke tegenwicht, daar ook vermeld: een uitpakker en hersteller gebouwd om met een lopende download mee te rijden houden meer geheugen bezet dan een losstaand hulpmiddel dat één keer vanaf de opdrachtregel draait, dus als jouw randvoorwaarde de kleinst mogelijke voetafdruk is voor een eenmalige taak op een bestand dat je al hebt, winnen de gespecialiseerde hulpmiddelen die kolom.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - de one-pass Usenet-downloader.</div>
+    <div>
+      <a href="index.nl.html">Home</a> ·
+      <a href="features.nl.html">Functies</a> ·
+      <a href="indexer.nl.html">Indexer</a> ·
+      <a href="benchmarks.nl.html">Benchmarks</a> ·
+      <a href="explained.nl.html">Uitgelegd</a> ·
+      <a href="download.nl.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

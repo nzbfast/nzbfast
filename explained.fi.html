@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Selitykset - nzbfast</title>
+<meta name="description" content="Lukujen taustalla oleva päättely: mitä oikeasti tapahtuu, kun postauksesta puuttuu artikkeleita, miten ajamme vertailut ja arvioimme tuloksen, ja mitä kukin mitattu sarake tarkoittaa.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained.fi.html">
+<link rel="alternate" hreflang="fr" href="explained.fr.html">
+<link rel="alternate" hreflang="de" href="explained.de.html">
+<link rel="alternate" hreflang="it" href="explained.it.html">
+<link rel="alternate" hreflang="es" href="explained.es.html">
+<link rel="alternate" hreflang="nl" href="explained.nl.html">
+<link rel="alternate" hreflang="pt" href="explained.pt.html">
+<link rel="alternate" hreflang="sv" href="explained.sv.html">
+<link rel="alternate" hreflang="da" href="explained.da.html">
+<link rel="alternate" hreflang="nb" href="explained.nb.html">
+<link rel="alternate" hreflang="fi" href="explained.fi.html">
+<link rel="alternate" hreflang="tr" href="explained.tr.html">
+<link rel="alternate" hreflang="ro" href="explained.ro.html">
+<link rel="alternate" hreflang="he" href="explained.he.html">
+<link rel="alternate" hreflang="ar" href="explained.ar.html">
+<link rel="alternate" hreflang="fa" href="explained.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained.fi.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fi.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fi.html" class="home">Etusivu</a>
+    <a href="features.fi.html">Ominaisuudet</a>
+    <a href="indexer.fi.html">Indeksoija</a>
+    <a href="benchmarks.fi.html">Vertailut</a>
+    <a href="explained.fi.html" class="on">Selitykset</a>
+    <a href="MANUAL.html">Ohjeet</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fi.html">Lataa</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained.html">English</option><option value="explained.fr.html">Français</option><option value="explained.de.html">Deutsch</option><option value="explained.it.html">Italiano</option><option value="explained.es.html">Español</option><option value="explained.nl.html">Nederlands</option><option value="explained.pt.html">Português</option><option value="explained.sv.html">Svenska</option><option value="explained.da.html">Dansk</option><option value="explained.nb.html">Norsk</option><option value="explained.fi.html" selected>Suomi</option><option value="explained.tr.html">Türkçe</option><option value="explained.ro.html">Română</option><option value="explained.he.html">עברית</option><option value="explained.ar.html">العربية</option><option value="explained.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>Selitykset</h1>
+  <p class="sub">Vertailusivu on taulukollinen tuloksia. Tämä on sen alla oleva päättely: mikä Usenet-postauksessa oikeasti menee pieleen ja miksi se maksaa aikaa, miten ajamme mittauskierroksen ja mikä tekee tuloksesta pätevän, ja mitä kukin julkaisemamme sarake todella mittaa. Kirjoitettu niille, jotka haluavat tarkistaa päättelymme sen sijaan että uskoisivat luvut sellaisenaan.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <a class="card" href="explained-onepass.fi.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Yksi</p>
+        <h2 style="margin-top:2px">Näin yhden läpimenon lataus toimii</h2>
+        <p>Arkkitehtuuri, johon muu sivusto viittaa jatkuvasti. Mitä tavuille tapahtuu, miksi tämä on eri asia kuin suora purku, mitkä arkistomuodot selviävät siitä, ja mitä kirjoita-ja-lue-takaisin-kierroksen poistaminen on levyn, suoritinajan ja muistin kannalta arvoltaan.</p>
+      </a>
+      <a class="card" href="explained-damaged.fi.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Kaksi</p>
+        <h2 style="margin-top:2px">Miksi vaurioituneilla postauksilla on väliä</h2>
+        <p>Postaukset saapuvat aukkoisina useammin kuin luullaan, ja juuri siinä asiakasohjelmat eroavat eniten. Mikä puuttuva artikkeli on, miksi sen pyytäminen tulee kalliiksi, ja miksi ratkaisu on lakata kysymästä eikä kysyä nopeammin.</p>
+      </a>
+      <a class="card" href="explained-method.fi.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Kolme</p>
+        <h2 style="margin-top:2px">Näin testaamme, kokonaisuudessaan</h2>
+        <p>Koneet, testiaineistot, asetukset jotka kukin asiakasohjelma saa, ja säännöt jotka ratkaisevat lasketaanko kierros lainkaan. Mukaan lukien tarkistukset, jotka ovat olemassa siksi että erehdyimme kerran emmekä halua toistaa sitä.</p>
+      </a>
+      <a class="card" href="explained-numbers.fi.html" style="text-decoration:none;color:inherit;display:block">
+        <p class="kicker">Neljä</p>
+        <h2 style="margin-top:2px">Mitä luvut tarkoittavat</h2>
+        <p>Aika käyttökelpoiseen tiedostoon, muistin huippukäyttö, suoritinsekunnit, levyn huippukäyttö, taltion I/O. Mikä kukin niistä on, miksi julkaisemme sen, ja miltä hyvä tai huono arvo oikeasti näyttää omistamallasi koneella.</p>
+      </a>
+      <div class="card">
+        <p class="kicker">Ja raakadata</p>
+        <h2 style="margin-top:2px">Itse taulukot</h2>
+        <p>Jokainen mitattu tulos on <a href="benchmarks.fi.html">vertailusivulla</a>, koontiversio ja päivämäärä kunkin taulukon vieressä, mukaan lukien häviämämme kierrokset. Nämä sivut selittävät sen; tuo sivu on todiste.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - yhden läpimenon Usenet-lataaja.</div>
+    <div>
+      <a href="index.fi.html">Etusivu</a> ·
+      <a href="features.fi.html">Ominaisuudet</a> ·
+      <a href="indexer.fi.html">Indeksoija</a> ·
+      <a href="benchmarks.fi.html">Vertailut</a> ·
+      <a href="explained.fi.html">Selitykset</a> ·
+      <a href="download.fi.html">Lataa</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

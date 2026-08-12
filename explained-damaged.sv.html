@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Varför skadade poster spelar roll - nzbfast</title>
+<meta name="description" content="Vad en saknad artikel är, varför det kostar mellan 79 ms och 2.2 sekunder att fråga en server efter en, och varför den användbara lösningen är att sluta fråga snarare än att fråga snabbare.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.sv.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.sv.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.sv.html" class="home">Hem</a>
+    <a href="features.sv.html">Funktioner</a>
+    <a href="indexer.sv.html">Indexerare</a>
+    <a href="benchmarks.sv.html">Benchmarks</a>
+    <a href="explained.sv.html" class="on">Förklarat</a>
+    <a href="MANUAL.html">Dokumentation</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.sv.html">Ladda ner</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html" selected>Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.sv.html" style="color:inherit">Förklarat</a> &middot; två</p>
+  <h1>Varför skadade poster spelar roll</h1>
+  <p class="sub">En nedladdning som går perfekt är det lätta fallet, och varje klient hanterar det kompetent. De intressanta skillnaderna dyker upp när en del av posten saknas, vilket sker långt oftare än det rena fallet låter ana. Det här är vad som faktiskt pågår, och varför det kostar så mycket tid.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Problemets form</p>
+    <h2>Vad en saknad artikel är</h2>
+    <p class="lead">En Usenet-post är inte en fil. Den är tusentals små artiklar, var och en lagrad självständigt på varje leverantörs servrar, och NZB-filen du laddar ned är en lista över deras namn. En utgåva på 6.5 GB är ungefär 9,000 av dem.</p>
+
+    <p>Artiklar försvinner av vardagliga skäl. Leverantörer behåller dem under en fast lagringstid och raderar dem sedan. Vissa leverantörer tog aldrig emot en viss artikel från början, eftersom spridningen mellan servrar är ofullkomlig. Ibland var en uppladdning ofullständig när den publicerades, och en del av den fanns aldrig någonstans. Vad orsaken än är blir följden densamma: din klient ber om en artikel, och svaret är ett avslag i stället för data.</p>
+
+    <p>Det är så normalt att de som publicerar på Usenet räknar med det. Nästan varje utgåva följs av <b>paritetsdata</b>, vanligen PAR2-filer, alltså extra redundant information beräknad ur originalet. Saknas en del av innehållet kan pariteten återskapa det, förutsatt att du har tillräckligt. En typisk post bär omkring 10% paritet, så en post kan förlora en rejäl bit av sig själv och ändå vara fullt räddningsbar.</p>
+
+    <div class="callout">
+      <p>En skadad post är alltså oftast inte en trasig nedladdning. Det är en nedladdning som kräver lite räknande innan den är komplett. Frågan är bara hur lång tid en klient tar på sig att lista ut det, och där skiljer de sig med en faktor två eller mer.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Den dyra delen</p>
+    <h2>Att fråga efter något ingen har</h2>
+    <p class="lead">När en server inte har en artikel svarar den med ett avslag, och klienten prövar då nästa server i din lista. Det är rätt sak att göra, för den andra leverantören har den mycket ofta. Kostnaden dyker upp när ingen har den.</p>
+
+    <p>I det fallet går klienten igenom hela din leverantörslista, en server i taget, och får avslag av var och en innan den kan sluta sig till att artikeln verkligen är borta. Genomgången är sekventiell, och avslag är långsammare än folk antar. Vi mätte dem direkt, på en vilande lina, utan att något innehåll rörde sig alls:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>leverantör</th><th class="num">tid att besvara en vanlig begäran</th><th class="num">tid att avslå en saknad artikel</th></tr></thead>
+      <tbody>
+        <tr><td>Leverantör A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Leverantör B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Leverantör C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Leverantör D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Leverantör E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Två saker sticker ut. För det första är spridningen enorm: <b>ett avslag kostar någonstans mellan 79 ms och 2.2 sekunder</b> beroende på vilken leverantör som svarar, en skillnad på nästan trettio gånger. För det andra avslår en leverantör i stort sett på den tid det tar att fråga, medan en annan tar mer än tvåhundra gånger sin egen normala svarstid på att säga nej. Det är inte nätverksfördröjning, det är arbete som sker på deras sida, och att fråga i färre vändor hjälper knappt.</p>
+
+    <p>Lägg ihop det: en fullständig genomgång av fem leverantörer kostar, för en enda artikel som inte längre finns, omkring <b>5 sekunder</b>. Betänk nu att en skadad post har många sådana artiklar, och att en klient som behandlar dem i följd betalar den kostnaden gång på gång medan din förbindelse står stilla. Nedladdningen är inte långsam för att data kommer långsamt. Data har slutat komma helt, och klienten väntar på att få veta det den redan har nog med information för att räkna ut.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Lösningen</p>
+    <h2>Sluta fråga, och reparera i stället</h2>
+    <p class="lead">Insikten är inte att göra avslagen snabbare, för leverantörerna rår vi inte över. Den är att märka när svaret inte längre spelar någon roll.</p>
+
+    <p>I varje ögonblick under en nedladdning vet klienten två saker: hur många bitar som fortfarande saknas, och hur mycket paritetsdata den redan har. Räcker pariteten den håller för att bygga upp allt som återstår, kan svaret på frågan om någon har den här artikeln inte längre ändra utfallet. Vare sig det är ett långsamt ja eller ett långsamt nej byggs filen upp ändå. Att fortsätta genomgången köper inget annat än fördröjning.</p>
+
+    <p>Nuvarande bygge slutar alltså fråga vid den punkten och går rakt på reparation. Själva återuppbyggnaden är snabb och har alltid varit det: omkring <b>2.3 sekunder</b> på en post på 6.5 GB, och den siffran är densamma i varje version vi mätt. Den sparade tiden är helt och hållet väntan som inte längre sker.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>post på 6.5 GB, 60 saknade artiklar</th><th class="num">tid till en verifierad fil</th></tr></thead>
+      <tbody>
+        <tr><td>vänta på att varje leverantör avslår</td><td class="num">23 s</td></tr>
+        <tr><td><b>sluta så snart pariteten täcker luckan</b></td><td class="win">13 s</td></tr>
+        <tr><td>varav själva reparationsräkningen</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Samma ändring gör ingenting alls på en oskadad post, vilket är det tydligaste beviset på att den gör det vi tror: utan saknade artiklar finns ingen genomgång att korta av, och de två byggena avslutar ett rent jobb på 6.5 GB på identiska 7 sekunder.</p>
+
+    <p><b>Det är en avvägning, inte en gratis vinst.</b> Att reparera tidigt innebär att hålla paritetsdata i minnet i stället för att kasta dem och hämta mer senare, så toppminnet (RSS) på en svårt skadad post stiger från omkring 0.8 GB till omkring 1.3 GB, och vi drar ned ungefär 400 MB mer från leverantörerna. På en oskadad post är minnet oförändrat på 0.24 GB. Vi tycker att det är rätt avvägning för de flesta, eftersom minnet bara används i det fall där det ger dig tio sekunder, men det är en verklig kostnad och det finns en inställning för den.</p>
+
+    <p class="note" style="text-align:start">Leverantörsnamnen utelämnas medvetet i avslagstabellen. Siffrorna tillhör en mätning en kväll från en plats, och en leverantör som indexerar på annat sätt, eller som vi råkade nå en dålig kväll, ska inte stämplas som långsam på grundval av en enda omgång. Det som betyder något för resonemanget är formen: avslag varierar enormt, och summan är stor nog att dominera en skadad nedladdning. Siffrorna per leverantör och den råa mätutskriften finns i våra interna anteckningar, och siffrorna från början till slut som de förklarar finns på <a href="benchmarks.sv.html#damaged">benchmarksidan</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - enpass-nedladdaren för Usenet.</div>
+    <div>
+      <a href="index.sv.html">Hem</a> ·
+      <a href="features.sv.html">Funktioner</a> ·
+      <a href="indexer.sv.html">Indexerare</a> ·
+      <a href="benchmarks.sv.html">Benchmarks</a> ·
+      <a href="explained.sv.html">Förklarat</a> ·
+      <a href="download.sv.html">Ladda ner</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Avslagstider mätta den 11 augusti 2026 från Europa över fem leverantörer, en anslutning var, på en vilande lina utan någon innehållsöverföring alls. Siffrorna från början till slut för skadad post kommer från samma kvälls omgång med sex klienter; se benchmarksidan för de fullständiga tabellerna, klientversionerna och de omgångar vi förlorar.</p>
+</div></footer>
+
+</body>
+</html>

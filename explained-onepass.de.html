@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wie das Laden in einem Durchgang funktioniert - nzbfast</title>
+<meta name="description" content="Was ein Durchgang tatsächlich tut, warum das nicht dasselbe ist wie direktes Entpacken, welche Archivformen er bewältigt, und warum der Wegfall des Schreib-und-Rücklese-Zyklus Platte, Prozessorzeit und Speicher spart.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.de.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.de.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.de.html" class="home">Startseite</a>
+    <a href="features.de.html">Funktionen</a>
+    <a href="indexer.de.html">Indexer</a>
+    <a href="benchmarks.de.html">Benchmarks</a>
+    <a href="explained.de.html" class="on">Erklärt</a>
+    <a href="MANUAL.html">Doku</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.de.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html" selected>Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.de.html" style="color:inherit">Erklärt</a> &middot; eins</p>
+  <h1>Wie das Laden in einem Durchgang funktioniert</h1>
+  <p class="sub">Das meiste, was diesen Client schnell macht, ist kein schnellerer Netzwerkpfad. Es ist, dass die Daten sich nur einmal bewegen. Hier steht, was das in der Praxis bedeutet, warum es etwas anderes ist als direktes Entpacken, welche Archivformen es überstehen, und was der Wegfall des Schreib-und-Rücklese-Zyklus auf einer echten Maschine tatsächlich wert ist.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Der Ausgangspunkt</p>
+    <h2>Was ein Usenet-Download herkömmlich tut</h2>
+    <p class="lead">Ein Post besteht aus Tausenden kleiner kodierter Artikel, die zusammen einen Satz Archivbände bilden, welche wiederum die Datei enthalten, die du eigentlich willst. Von einem zum anderen zu kommen waren herkömmlich vier getrennte Aufgaben, jede abgeschlossen, bevor die nächste beginnt.</p>
+
+    <ol>
+      <li><b>Laden und dekodieren.</b> Jeden Artikel holen, dekodieren und die wieder zusammengesetzten Archivbände auf die Platte schreiben. Bei einer 60 GB-Veröffentlichung sind das 60 GB geschrieben.</li>
+      <li><b>Prüfen.</b> Alle 60 GB von der Platte zurücklesen, um sie gegen die Paritätsdaten zu kontrollieren, und reparieren, falls etwas nicht stimmt.</li>
+      <li><b>Entpacken.</b> Die Bände nochmals lesen und die entpackten Nutzdaten daneben schreiben. Nun liegen 120 GB auf der Platte.</li>
+      <li><b>Aufräumen.</b> Die Bände löschen, die Nutzdaten bleiben übrig.</li>
+    </ol>
+
+    <p>Jede Stufe ist korrekt, und das Ergebnis stimmt. Aber die Nutzdaten wurden zweimal geschrieben, mindestens zweimal gelesen, und im Höchststand musste die Platte zwei vollständige Kopien eines Auftrags fassen, von dem du nur eine Kopie wolltest. Die Uhr, die du erlebst, sind alle vier Stufen nacheinander, und deshalb kann ein Client einen schnellen Download melden und dich trotzdem warten lassen.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Die Änderung</p>
+    <h2>Es stattdessen einmal tun</h2>
+    <p class="lead">Ein Durchgang heißt, dass die Bytes vom Netzwerk an ihr endgültiges Ziel gehen, ohne je zu einer Archivdatei auf deiner Platte zu werden. Es gibt keine Stufe zwei oder drei, weil die Arbeit von beiden geschieht, während Stufe eins noch läuft.</p>
+
+    <p>In der Praxis wird jeder Artikel bei seiner Ankunft im Speicher dekodiert und sofort an zwei Dinge zugleich übergeben. Der Prüfer kontrolliert ihn unverzüglich gegen die Paritätsdaten, sodass die Korrektheit feststeht, während die Daten landen, statt durch späteres Zurücklesen. Der Entpacker behandelt die eingehenden Bytes als Position innerhalb des Archivs, ermittelt, zu welchem Teil welcher Nutzdatendatei sie gehören, und schreibt sie dorthin.</p>
+
+    <p>Die Archivbände werden nie zusammengesetzt. Sie bestehen als eine Struktur, die der Entpacker versteht, während der Download im Flug ist, und das Einzige, was deine Platte erreicht, ist die gewünschte Datei. Wenn der letzte Artikel ankommt, bleibt im Grunde nichts mehr zu tun, weshalb unsere Endzeiten nahe an der Downloadzeit selbst liegen statt an einem Download plus Nachlauf.</p>
+
+    <div class="callout">
+      <p>Die messbare Folge: für denselben Auftrag schreiben wir etwa halb so viel, lesen weit weniger zurück und brauchen ungefähr die Größe der Nutzdaten an freiem Platz statt das Doppelte. Bei einer 190 GB-Veröffentlichung sind das etwa 157 GB freier Platz gegenüber etwa 313 GB, und rund ein Drittel des Plattenverkehrs.</p>
+    </div>
+
+    <p>Zwei Dinge machen das schwieriger, als es klingt, und sie sind der Grund, warum es selten ist. Artikel kommen nicht der Reihe nach an, der Entpacker muss also mit Bytes zurechtkommen, die an beliebigen Positionen landen, statt als Strom von Anfang an. Und ein komprimiertes Archiv lässt sich nicht ab der Mitte dekomprimieren, also muss jeder Teil der Arbeit, der wirklich Reihenfolge verlangt, erkannt und anders behandelt statt wegangenommen werden.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Der Vergleich, nach dem gefragt wird</p>
+    <h2>Warum das kein direktes Entpacken ist</h2>
+    <p class="lead">Direktes Entpacken ist eine gute Funktion, und die Clients, die sie haben, sind damit besser dran. Es löst auch einen anderen Teil des Problems, und der Unterschied zeigt sich genau dort, wo es darauf ankommt.</p>
+
+    <p>Direktes Entpacken beginnt zu entpacken, bevor der Download fertig ist, sodass Stufe drei Stufe eins überlappt, statt ihr zu folgen. Was es nicht tut, ist Stufe eins zu entfernen. <b>Die Archivbände werden weiterhin vollständig auf deine Platte geschrieben</b>, denn der Entpacker ist ein herkömmlicher, der herkömmliche Dateien liest; direktes Entpacken startet ihn bloß früher. Die zwei Kopien gibt es weiterhin, die zwei Schreibvorgänge finden weiterhin statt, und der Bedarf an freiem Platz ist unverändert.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>Bände auf die Platte schreiben</th><th class="num">benötigter freier Platz</th><th class="num">wie oft die Nutzdaten geschrieben werden</th></tr></thead>
+      <tbody>
+        <tr><td>Laden, dann entpacken</td><td>ja, dann zurücklesen</td><td class="num">~2&times; der Auftrag</td><td class="num">2</td></tr>
+        <tr><td>Direktes Entpacken</td><td>ja, früher zurückgelesen</td><td class="num">~2&times; der Auftrag</td><td class="num">2</td></tr>
+        <tr><td><b>Ein Durchgang</b></td><td class="win">nie geschrieben</td><td class="win">~1&times; der Auftrag</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Der zweite Unterschied ist, was passiert, wenn die Form nicht einfach ist. Weil direktes Entpacken die Arbeit einem herkömmlichen Entpacker übergibt, sobald Bände auftauchen, braucht es eine unkomplizierte Lage: die Bände in brauchbarer Reihenfolge vorhanden, keine Reparatur ausstehend, nichts, das zuerst entsperrt werden muss, und ein Archiv, dessen Inhalt nicht selbst Archive sind. Fällt eines davon weg, ist das Vernünftige, zurückzutreten und auf Entpacken am Ende zurückzufallen, und genau das geschieht. Du bekommst ein korrektes Ergebnis und den gewöhnlichen Zeitverlauf.</p>
+
+    <p>Weil unser Entpacker von Anfang an um Bytes außer der Reihe herum gebaut ist, sind diese Lagen für ihn keine Ausnahmen. Das ist der eigentliche Unterschied: nicht dass wir früher anfangen, sondern dass wir uns nicht auf Bedingungen verlassen, die häufig nicht gelten.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Was es tatsächlich übersteht</p>
+    <h2>Die Formen, mit denen es zurechtkommt</h2>
+    <p class="lead">Ein solcher Entwurf lohnt nur, wenn er für die Posts gilt, die dir tatsächlich begegnen, und nicht für einen sauberen Idealfall. Der aktuelle Stand: <b>kein Containerformat wird nur auf der Platte behandelt.</b> RAR, 7z und zip gehen alle den Weg des einen Durchgangs.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>Form</th><th>ein Durchgang</th><th>Anmerkungen</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, gespeichert (ohne Kompression)</td><td class="yes">ja</td><td>der Normalfall bei Medienveröffentlichungen</td></tr>
+        <tr><td>RAR, komprimiert</td><td class="yes">ja</td><td>auch ein komprimiertes Archiv als äußere Schicht</td></tr>
+        <tr><td>RAR 1.5, 3, 4 und 5</td><td class="yes">ja</td><td>alle vier Generationen des Formats</td></tr>
+        <tr><td>7z</td><td class="yes">ja</td><td>auch mit deflate-komprimiertem Inhalt</td></tr>
+        <tr><td>zip</td><td class="yes">ja</td><td>auch mit bzip2- und LZMA-Inhalt</td></tr>
+        <tr><td>Verschlüsselter Inhalt</td><td class="yes">ja</td><td>mit Passwort, auch verschlüsseltes zip</td></tr>
+        <tr><td>Verschlüsselte Kopfdaten</td><td class="yes">ja</td><td>wenn auch die Dateinamen verborgen sind</td></tr>
+        <tr><td>Passwortketten</td><td class="yes">ja</td><td>das Passwort jeder Schicht steckt in der darüberliegenden</td></tr>
+        <tr><td>Verschachtelte Archive</td><td class="yes">ja</td><td>im Lauf entschachtelt, bis zu einer einstellbaren Tiefe</td></tr>
+        <tr><td>Auf mehreren Ebenen beschädigt</td><td class="yes">ja</td><td>Reparatur auf jeder Ebene, weiterhin ein Durchgang</td></tr>
+        <tr><td>Numerisch geteilte Sätze</td><td class="yes">ja</td><td>Teilungen im Stil <code>name.001</code></td></tr>
+        <tr><td>Selbstentpackende Archive</td><td class="no">Plattendurchgang</td><td>das Archiv beginnt nicht am Dateianfang</td></tr>
+        <tr><td>Verteiltes zip (<code>.z01</code>)</td><td class="no">Plattendurchgang</td><td>und einige seltenere zip-Varianten</td></tr>
+        <tr><td>Fortgesetzte Aufträge</td><td class="no">Plattendurchgang</td><td>ein nach einem Neustart fortgesetzter Auftrag endet herkömmlich</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Die drei Absagen sind ehrliche und verhalten sich gleich: der Auftrag wird korrekt fertig, über den herkömmlichen Weg, und du bekommst für diesen Download den gewöhnlichen Zeitverlauf mit zwei Kopien. Nichts schlägt fehl; es hört bloß auf, auf die Art schnell zu sein, die der Rest dieser Seite beschreibt. Selbstentpackende Archive werden aus einem strukturellen Grund abgelehnt und nicht aus Mangel an Mühe: ein Archiv an seinen ersten Bytes zu erkennen kann nicht funktionieren, wenn die ersten Bytes ein Programm sind.</p>
+
+    <p>Die Zeilen zu verschachtelt und verschlüsselt sind die, die man ernst nehmen sollte, denn dort geben die meisten Clients dir den Auftrag zurück. Auf einem erzeugten Korpus von zehn verschachtelten Formen, bewertet per Inhalts-Hash, damit ein Client, der die Nutzdaten umbenennt, dennoch angerechnet bekommt, <b>haben wir 9 von 10 ohne Eingriff abgeschlossen</b>; der nächstbeste Client schaffte 5, und zwei weitere schafften 2. Die eine, die wir nicht automatisch abschließen, ist eine zehnstufige Leiter, die an der voreingestellten Tiefengrenze von fünf sauber endet und die tiefste Schicht als gesundes Archiv zurücklässt, und vollständig durchläuft, wenn du die Grenze anhebst. Diese Durchgänge stehen mit dem vollen Raster auf der <a href="benchmarks.de.html#nested">Benchmark-Seite</a>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Warum es sich lohnt</p>
+    <h2>Was der Wegfall des Umwegs tatsächlich einbringt</h2>
+
+    <p><b>Es ist schneller, aus einem unspektakulären Grund.</b> 60 GB zu schreiben und zurückzulesen ist selbst auf einer schnellen SSD nicht umsonst, und auf allem Langsameren ist es oft der eigentliche Engpass statt des Netzwerks. Ein Schreiben und zwei Lesevorgänge zu streichen nimmt diese Zeit vollständig von deiner Uhr. Der Gewinn ist genau dort am größten, wo man ihn am meisten bemerkt: bei großen Aufträgen und auf Maschinen, deren Platte nicht ihr schnellster Teil ist.</p>
+
+    <p><b>Es halbiert den Verschleiß.</b> SSDs haben eine endliche Zahl von Schreibvorgängen in sich, und ein Downloader, der jede Nutzlast zweimal schreibt, verbraucht dieses Budget in doppeltem Tempo, ohne dass du etwas davon hast. Über ein paar hundert Terabyte Download hinweg, was für einen aktiven Nutzer ein gewöhnliches Jahr ist, macht der Unterschied einen spürbaren Anteil an der Lebensdauer einer Platte aus.</p>
+
+    <p><b>Es ändert, was hineinpasst.</b> Freier Platz ist keine Leistungseigenschaft, er ist ein Ja oder Nein. Ein Auftrag, der das Doppelte seiner eigenen Größe an Luft braucht, läuft entweder oder nicht. Nur etwa die Größe der Nutzdaten zu brauchen heißt, dass Aufträge auf Maschinen und Datenträgern fertig werden, auf denen der herkömmliche Ansatz schlicht aufhört, und deshalb passt eine 190 GB-Veröffentlichung hier in etwa 157 GB freien Platz statt in etwa 313 GB.</p>
+
+    <p><b>Es kostet weniger Prozessorzeit.</b> Daten nicht zweimal durch die Platte zu bewegen erspart die Arbeit dafür, und während des Downloads zu prüfen heißt keinen zweiten Durchgang über die Nutzdaten zur Kontrolle. Unser Prozessoraufwand bleibt flach bei etwa 1.7 Prozessorsekunden je Gigabyte, von einem 35 GB-Auftrag bis zu einem mit 190 GB, und das ist die nützliche Eigenschaft: die Kosten je Gigabyte wachsen nicht mit dem Auftrag.</p>
+
+    <p><b>Es läuft mit weniger Speicher, und mit begrenztem Speicher.</b> Weil Bytes bei ihrer Ankunft verbraucht statt angehäuft werden, ist der Arbeitsbereich ein Budget, das du setzt, und keine Funktion der Auftragsgröße. Das erlaubt, eine 190 GB-Veröffentlichung auf einer Maschine mit rund 1.1 GB verfügbar zu verarbeiten. Wichtig ist nicht die Zahl, sondern die Gestalt: Speicher, der mit dem Auftrag wächst, trifft irgendwann auf einen Auftrag, den deine Maschine nicht beenden kann, und er scheitert durch Auslagern oder Abgeschossenwerden statt dadurch, dass er es dir sagt.</p>
+
+    <div class="callout">
+      <p>Zusammengenommen geht es hier weniger darum, einen Benchmark zu gewinnen, als darum, wo die Software überhaupt laufen kann. Ein Entwurf, der den halben freien Platz, die halben Schreibvorgänge und eine begrenzte Menge Speicher braucht, funktioniert auf einem kleinen Heimserver, einem älteren Laptop oder einem NAS, und genau dort lebt ein guter Teil dieser Software tatsächlich.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Jede Zahl auf dieser Seite ist gemessen und mit Build und Datum daneben auf der <a href="benchmarks.de.html">Benchmark-Seite</a> veröffentlicht, einschließlich der Durchgänge, die wir verlieren. Das ehrliche Gegengewicht, dort ebenfalls genannt: ein Entpacker und Reparierer, gebaut um einen laufenden Download zu begleiten, halten mehr Speicher belegt als ein eigenständiges Werkzeug, das einmal von der Kommandozeile läuft; wenn deine Randbedingung also der kleinstmögliche Fußabdruck für einen einmaligen Auftrag an einer Datei ist, die du schon hast, gewinnen die spezialisierten Werkzeuge diese Spalte.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - der Ein-Pass-Usenet-Downloader.</div>
+    <div>
+      <a href="index.de.html">Startseite</a> ·
+      <a href="features.de.html">Funktionen</a> ·
+      <a href="indexer.de.html">Indexer</a> ·
+      <a href="benchmarks.de.html">Benchmarks</a> ·
+      <a href="explained.de.html">Erklärt</a> ·
+      <a href="download.de.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Näin yhden läpimenon lataus toimii - nzbfast</title>
+<meta name="description" content="Mitä yksi läpimeno oikeasti tekee, miksi se ei ole sama asia kuin suora purku, mitkä arkistomuodot se hoitaa, ja miksi kirjoita-ja-lue-takaisin-kierroksen poistaminen säästää levyä, suoritinaikaa ja muistia.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.fi.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fi.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fi.html" class="home">Etusivu</a>
+    <a href="features.fi.html">Ominaisuudet</a>
+    <a href="indexer.fi.html">Indeksoija</a>
+    <a href="benchmarks.fi.html">Vertailut</a>
+    <a href="explained.fi.html" class="on">Selitykset</a>
+    <a href="MANUAL.html">Ohjeet</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fi.html">Lataa</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html" selected>Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fi.html" style="color:inherit">Selitykset</a> &middot; yksi</p>
+  <h1>Näin yhden läpimenon lataus toimii</h1>
+  <p class="sub">Suurin osa siitä mikä tekee tästä ohjelmasta nopean ei ole nopeampi verkkoreitti. Se on että data liikkuu vain kerran. Tässä kerrotaan mitä se käytännössä tarkoittaa, miksi se on eri asia kuin suora purku, mitkä arkistomuodot selviävät siitä, ja mitä kirjoita-ja-lue-takaisin-kierroksen poistaminen oikealla koneella todella on arvoltaan.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Lähtökohta</p>
+    <h2>Mitä Usenet-lataus perinteisesti tekee</h2>
+    <p class="lead">Postaus on tuhansia pieniä koodattuja artikkeleita, jotka yhdessä muodostavat joukon arkiston osia, jotka puolestaan sisältävät sen tiedoston jonka oikeasti haluat. Yhdestä toiseen pääseminen on perinteisesti ollut neljä erillistä työtä, joista kukin päättyy ennen kuin seuraava alkaa.</p>
+
+    <ol>
+      <li><b>Lataa ja pura koodaus.</b> Nouda jokainen artikkeli, pura sen koodaus, ja kirjoita uudelleen kootut arkiston osat levylle. 60 GB:n julkaisussa se on 60 GB kirjoitettuna.</li>
+      <li><b>Tarkista.</b> Lue kaikki 60 GB takaisin levyltä pariteettidataa vasten, ja korjaa jos jokin on vialla.</li>
+      <li><b>Pura.</b> Lue osat uudelleen, ja kirjoita purettu sisältö niiden viereen. Nyt levyllä on 120 GB.</li>
+      <li><b>Siivoa.</b> Poista osat, jolloin sisältö jää jäljelle.</li>
+    </ol>
+
+    <p>Jokainen vaihe on oikein, ja tulos on oikea. Mutta sisältö on kirjoitettu kahdesti, luettu vähintään kahdesti, ja huipussaan levyn oli mahduttava kaksi täydellistä kopiota työstä josta halusit vain yhden kopion. Kello jonka koet on kaikki neljä vaihetta peräkkäin, ja siksi ohjelma voi ilmoittaa nopeasta latauksesta ja silti pitää sinua odottamassa.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Muutos</p>
+    <h2>Sen tekeminen sen sijaan kerran</h2>
+    <p class="lead">Yksi läpimeno tarkoittaa että tavut kulkevat verkosta lopulliseen määränpäähänsä tulematta koskaan arkistotiedostoksi levyllesi. Vaihetta kaksi tai kolme ei ole, koska molempien työ tapahtuu vaiheen yksi vielä käydessä.</p>
+
+    <p>Käytännössä jokaisen artikkelin koodaus puretaan muistissa heti sen saapuessa ja se annetaan suoraan kahdelle asialle yhtä aikaa. Tarkistin vertaa sitä välittömästi pariteettidataan, joten oikeellisuus todetaan datan laskeutuessa eikä lukemalla se myöhemmin uudelleen. Purkaja käsittelee saapuvia tavuja sijaintina arkiston sisällä, laskee mihin osaan mitäkin sisältötiedostoa ne kuuluvat, ja kirjoittaa ne sinne.</p>
+
+    <p>Arkiston osia ei koskaan koota. Ne ovat olemassa rakenteena jonka purkaja ymmärtää latauksen ollessa lennossa, ja ainoa asia joka pääsee levyllesi on haluamasi tiedosto. Kun viimeinen artikkeli saapuu, tehtävää ei käytännössä ole jäljellä, ja siksi meidän loppuaikamme ovat lähellä itse latausaikaa eivätkä lataus plus häntä.</p>
+
+    <div class="callout">
+      <p>Mitattava seuraus: samaan työhön kirjoitamme noin puolet vähemmän, luemme takaisin paljon vähemmän, ja tarvitsemme suunnilleen sisällön oman koon verran vapaata tilaa kaksinkertaisen sijaan. 190 GB:n julkaisussa se on noin 157 GB vapaata tilaa vastaan noin 313 GB, ja suunnilleen kolmasosa levyliikenteestä.</p>
+    </div>
+
+    <p>Kaksi asiaa tekee tästä vaikeampaa kuin miltä kuulostaa, ja ne ovat syy siihen että tämä on harvinaista. Artikkelit eivät saavu järjestyksessä, joten purkajan on tultava toimeen mielivaltaisiin kohtiin laskeutuvien tavujen kanssa eikä alusta alkavan virran kanssa. Ja pakattua arkistoa ei voi purkaa keskeltä, joten jokainen työn osa joka aidosti vaatii järjestystä on tunnistettava ja käsiteltävä toisin eikä oletettava pois.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Vertailu jota kysytään</p>
+    <h2>Miksi tämä ei ole suora purku</h2>
+    <p class="lead">Suora purku on hyvä ominaisuus ja ne ohjelmat joilla se on ovat sen kanssa parempia. Se myös ratkaisee eri osan ongelmasta, ja ero näkyy juuri siellä missä sillä on merkitystä.</p>
+
+    <p>Suora purku alkaa purkaa ennen kuin lataus on päättynyt, joten vaihe kolme menee päällekkäin vaiheen yksi kanssa sen sijaan että seuraisi sitä. Mitä se ei tee, on poistaa vaihetta yksi. <b>Arkiston osat kirjoitetaan yhä kokonaisuudessaan levyllesi</b>, koska purkaja on tavanomainen ja lukee tavanomaisia tiedostoja; suora purku vain käynnistää sen aiemmin. Kaksi kopiota on yhä olemassa, kaksi kirjoitusta tapahtuu yhä, eikä vapaan tilan tarve muutu.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>kirjoita osat levylle</th><th class="num">tarvittava vapaa tila</th><th class="num">montako kertaa sisältö kirjoitetaan</th></tr></thead>
+      <tbody>
+        <tr><td>Lataa, sitten pura</td><td>kyllä, sitten takaisinluku</td><td class="num">~2&times; työ</td><td class="num">2</td></tr>
+        <tr><td>Suora purku</td><td>kyllä, luetaan takaisin aiemmin</td><td class="num">~2&times; työ</td><td class="num">2</td></tr>
+        <tr><td><b>Yksi läpimeno</b></td><td class="win">ei kirjoiteta koskaan</td><td class="win">~1&times; työ</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Toinen ero on se mitä tapahtuu kun muoto ei ole yksinkertainen. Koska suora purku antaa työn tavanomaiselle purkajalle osien ilmaantuessa, se tarvitsee tilanteen olevan mutkaton: osat läsnä käyttökelpoisessa järjestyksessä, ei korjausta odottamassa, ei mitään avattavaa ensin, ja arkisto jonka sisältö ei itse ole arkistoja. Kun jokin näistä pettää, järkevintä on vetäytyä ja palata purkamaan lopuksi, ja niin tapahtuu. Saat oikean tuloksen ja tavanomaisen ajoituksen.</p>
+
+    <p>Koska purkajamme on rakennettu alusta asti epäjärjestyksessä olevien tavujen ympärille, nuo tilanteet eivät ole sille poikkeuksia. Se on todellinen ero: ei se että aloitamme aiemmin, vaan ettemme nojaa ehtoihin jotka usein eivät päde.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Mikä siitä oikeasti selviää</p>
+    <h2>Muodot jotka se kestää</h2>
+    <p class="lead">Tällainen rakenne kannattaa vain jos se pätee niihin postauksiin joita oikeasti kohtaat eikä siistiin parhaaseen tapaukseen. Nykyinen tilanne: <b>mitään säiliömuotoa ei käsitellä pelkästään levyllä.</b> RAR, 7z ja zip kulkevat kaikki yhden läpimenon reittiä.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>muoto</th><th>yksi läpimeno</th><th>huomautuksia</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, tallennettu (ei pakkausta)</td><td class="yes">kyllä</td><td>tavallinen tapaus mediajulkaisuissa</td></tr>
+        <tr><td>RAR, pakattu</td><td class="yes">kyllä</td><td>mukaan lukien pakattu arkisto uloimpana kerroksena</td></tr>
+        <tr><td>RAR 1.5, 3, 4 ja 5</td><td class="yes">kyllä</td><td>kaikki neljä muodon sukupolvea</td></tr>
+        <tr><td>7z</td><td class="yes">kyllä</td><td>mukaan lukien deflate-pakattu sisältö</td></tr>
+        <tr><td>zip</td><td class="yes">kyllä</td><td>mukaan lukien bzip2- ja LZMA-sisältö</td></tr>
+        <tr><td>Salattu sisältö</td><td class="yes">kyllä</td><td>salasanalla, mukaan lukien salattu zip</td></tr>
+        <tr><td>Salatut otsakkeet</td><td class="yes">kyllä</td><td>kun myös tiedostonimet on piilotettu</td></tr>
+        <tr><td>Salasanaketjut</td><td class="yes">kyllä</td><td>kunkin kerroksen salasana pakattuna sen yläpuoliseen kerrokseen</td></tr>
+        <tr><td>Sisäkkäiset arkistot</td><td class="yes">kyllä</td><td>puretaan sisäkkäisyydestä lennossa, säädettävään syvyyteen asti</td></tr>
+        <tr><td>Vaurioitunut usealla kerroksella</td><td class="yes">kyllä</td><td>korjaus joka tasolla, yhä yksi läpimeno</td></tr>
+        <tr><td>Numeerisesti jaetut sarjat</td><td class="yes">kyllä</td><td><code>name.001</code>-tyyliset jaot</td></tr>
+        <tr><td>Itsepurkautuvat arkistot</td><td class="no">levyläpimeno</td><td>arkisto ei ala tiedoston alusta</td></tr>
+        <tr><td>Jaettu zip (<code>.z01</code>)</td><td class="no">levyläpimeno</td><td>ja joitakin harvinaisempia zip-muunnelmia</td></tr>
+        <tr><td>Jatketut työt</td><td class="no">levyläpimeno</td><td>uudelleenkäynnistyksen jälkeen jatkettu työ päättyy tavanomaisesti</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Nämä kolme kieltäytymistä ovat rehellisiä ja käyttäytyvät samoin: työ valmistuu oikein tavanomaista reittiä, ja saat tuolle lataukselle tavanomaisen kahden kopion ajoituksen. Mikään ei epäonnistu; se vain lakkaa olemasta nopea sillä tavalla kuin tämän sivun loppuosa kuvaa. Itsepurkautuvat arkistot torjutaan rakenteellisesta syystä eikä vaivannäön puutteesta: arkiston tunnistaminen sen ensimmäisistä tavuista ei voi toimia kun ensimmäiset tavut ovat ohjelma.</p>
+
+    <p>Sisäkkäisyys- ja salausrivit ovat ne jotka kannattaa ottaa vakavasti, koska juuri niissä useimmat ohjelmat antavat työn takaisin sinulle. Tuotetulla kymmenen sisäkkäisen muodon aineistolla, arvosteltuna sisällön tiivisteen perusteella jotta sisällön uudelleennimeävä ohjelma saa silti pisteet, <b>saimme valmiiksi 9 muotoa 10:stä ilman puuttumista</b>; seuraavaksi paras ohjelma sai valmiiksi 5, ja kaksi muuta sai valmiiksi 2. Se jota emme saa automaattisesti valmiiksi on kymmenen tason tikapuut, jotka päättyvät siististi oletussyvyysrajaan viisi jättäen syvimmän kerroksen terveeksi arkistoksi, ja valmistuvat kokonaan jos nostat rajaa. Nuo kierrokset ovat <a href="benchmarks.fi.html#nested">vertailusivulla</a> täyden taulukon kanssa.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Miksi se kannattaa tehdä</p>
+    <h2>Mitä edestakaisen matkan poistaminen oikeasti tuottaa</h2>
+
+    <p><b>Se on nopeampaa, epäglamurööristä syystä.</b> 60 GB:n kirjoittaminen ja takaisin lukeminen ei ole ilmaista edes nopealla SSD-levyllä, ja millä tahansa hitaammalla se on usein varsinainen pullonkaula verkon sijaan. Yhden kirjoituksen ja kahden luvun poistaminen poistaa tuon ajan kellostasi kokonaan. Hyöty on suurin juuri siellä missä sen huomaa eniten: suurissa töissä, ja koneissa joiden levy ei ole niiden nopein osa.</p>
+
+    <p><b>Se puolittaa kulumisen.</b> SSD-levyissä on rajallinen määrä kirjoituksia, ja lataaja joka kirjoittaa jokaisen sisällön kahdesti kuluttaa tuota budjettia kaksinkertaista vauhtia ilman että saat siitä mitään. Muutaman sadan teratavun latausmäärällä, mikä on aktiiviselle käyttäjälle tavallinen vuosi, ero on merkittävä osuus levyn eliniästä.</p>
+
+    <p><b>Se muuttaa sen mikä mahtuu.</b> Vapaa tila ei ole suorituskykyominaisuus, se on kyllä tai ei. Työ joka vaatii kaksinkertaisen oman kokonsa pelivaraa joko ajautuu tai ei. Suunnilleen sisällön koon tarvitseminen tarkoittaa että työt valmistuvat koneilla ja taltioilla joilla tavanomainen lähestymistapa yksinkertaisesti pysähtyy, ja siksi 190 GB:n julkaisu mahtuu täällä noin 157 GB:n vapaaseen tilaan eikä noin 313 GB:hen.</p>
+
+    <p><b>Se maksaa vähemmän suoritinaikaa.</b> Datan siirtämättä jättäminen levyn läpi kahdesti poistaa siihen kuluvan työn, ja latauksen aikana tarkistaminen tarkoittaa ettei sisällön yli tarvita toista läpimenoa sen tarkistamiseksi. Suoritinkustannuksemme pysyy tasaisena noin 1.7 suoritinsekunnissa gigatavua kohti, 35 GB:n työstä 190 GB:n työhön, ja se on hyödyllinen ominaisuus: kustannus gigatavua kohti ei kasva työn kasvaessa.</p>
+
+    <p><b>Se toimii pienemmällä muistilla, ja rajatulla muistilla.</b> Koska tavut kulutetaan niiden saapuessa eikä kerätä kasaan, työjoukko on budjetti jonka asetat eikä työn koon funktio. Juuri se sallii 190 GB:n julkaisun käsittelyn koneella jolla on käytettävissä suunnilleen 1.1 GB. Merkitsevä ero ei ole luku vaan muoto: muisti joka kasvaa työn mukana kohtaa ennen pitkää työn jota koneesi ei saa valmiiksi, ja se pettää sivuttamalla tai tulemalla tapetuksi eikä kertomalla sinulle.</p>
+
+    <div class="callout">
+      <p>Yhdessä nämä koskevat vähemmän vertailun voittamista kuin sitä missä ohjelmisto ylipäätään voi ajautua. Rakenne joka tarvitsee puolet vapaasta tilasta, puolet kirjoituksista ja rajatun määrän muistia toimii pienellä kotipalvelimella, vanhemmalla kannettavalla tai NAS-laitteella, ja juuri siellä hyvä osa tästä ohjelmistosta oikeasti elää.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Jokainen tämän sivun luku on mitattu ja julkaistu koontiversio ja päivämäärä vieressään <a href="benchmarks.fi.html">vertailusivulla</a>, mukaan lukien häviämämme kierrokset. Rehellinen vastapaino, joka on todettu sielläkin: purkaja ja korjaaja jotka on rakennettu kulkemaan käynnissä olevan latauksen mukana pitävät enemmän muistia varattuna kuin erillinen työkalu joka ajetaan kerran komentoriviltä, joten jos rajoitteesi on pienin mahdollinen jalanjälki kertaluonteiseen työhön tiedostolle joka sinulla jo on, erikoistuneet työkalut voittavat sen sarakkeen.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - yhden läpimenon Usenet-lataaja.</div>
+    <div>
+      <a href="index.fi.html">Etusivu</a> ·
+      <a href="features.fi.html">Ominaisuudet</a> ·
+      <a href="indexer.fi.html">Indeksoija</a> ·
+      <a href="benchmarks.fi.html">Vertailut</a> ·
+      <a href="explained.fi.html">Selitykset</a> ·
+      <a href="download.fi.html">Lataa</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

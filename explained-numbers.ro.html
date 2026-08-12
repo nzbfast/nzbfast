@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ce înseamnă cifrele - nzbfast</title>
+<meta name="description" content="Un ghid de lectură pentru coloanele măsurate: timpul până la un fișier utilizabil, memoria de vârf, secundele de procesor, vârful de disc și I/O pe volum, și cum arată o valoare bună sau proastă.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.ro.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ro.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ro.html" class="home">Acasă</a>
+    <a href="features.ro.html">Funcții</a>
+    <a href="indexer.ro.html">Indexer</a>
+    <a href="benchmarks.ro.html">Benchmark-uri</a>
+    <a href="explained.ro.html" class="on">Explicații</a>
+    <a href="MANUAL.html">Documentație</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ro.html">Descarcă</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html" selected>Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.ro.html" style="color:inherit">Explicații</a> &middot; patru</p>
+  <h1>Ce înseamnă cifrele</h1>
+  <p class="sub">Cinci coloane apar în majoritatea tabelelor noastre. Iată ce măsoară fiecare, de ce merită publicată, și cam cum arată o valoare bună sau proastă pe o mașină pe care chiar o ai.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Cifra principală</p>
+    <h2>Timpul până la un fișier utilizabil</h2>
+    <p class="lead">Cronometrul pornește când sarcina este adăugată și se oprește când conținutul finit există pe disc, verificat și extras. Nu când se termină descărcarea, și nu când clientul se declară gata.</p>
+
+    <p>Este singura cifră care corespunde cu ceva ce trăiești tu. Un client poate termina descărcarea repede și apoi să petreacă un minut verificând și dezarhivând, iar de unde stai tu acel minut face parte din așteptare. Măsurarea doar a descărcării ar avantaja clienții care își fac treaba după aceea, adică pe cei mai mulți.</p>
+
+    <p>Este și motivul pentru care arhitectura noastră pare neobișnuită în aceste tabele. Verificăm fiecare bucată pe măsură ce sosește și dezarhivăm în timp ce descărcarea încă rulează, așa că atunci când aterizează ultimul articol mai rămâne foarte puțin de făcut. Ceilalți clienți depun mai întâi toată postarea pe disc, apoi o verifică, apoi o dezarhivează, în trei etape succesive. La o sarcină ușoară diferența este modestă. La una mare sau deteriorată este cea mai mare parte a rezultatului.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Cea pe care lumea o citește greșit</p>
+    <h2>Memoria de vârf (RSS)</h2>
+    <p class="lead">Cea mai mare cantitate de memorie pe care programul a ținut-o în orice moment al sarcinii. RSS vine de la resident set size, adică pur și simplu memoria aflată efectiv în RAM, nu promisă sau rezervată.</p>
+
+    <p>Mai mult nu înseamnă automat mai rău, iar mai puțin nu înseamnă automat mai bine. Memoria se cheltuiește pentru a evita ceva mai scump, de obicei citirea acelorași date de pe disc de două ori. Întrebarea care merită pusă este dacă acea cheltuială cumpără ceva și dacă este mărginită.</p>
+
+    <p><b>Mărginită este cuvântul important.</b> Un client a cărui memorie crește odată cu dimensiunea sarcinii va întâlni până la urmă o sarcină pe care nu o poate termina pe mașina ta, iar eșecul vine ca folosire a spațiului de swap sau ca proces ucis, nu ca mesaj politicos. Noi ținem un buget și rămânem în el, motiv pentru care putem trece o sarcină de 190 GB printr-o mașină pe care ne sunt disponibili aproximativ 1.1 GB de memorie. O cifră ca 9.3 GB la o sarcină de 190 GB nu este doar mare, are altă formă: crește odată cu munca.</p>
+
+    <p>Acolo unde propria noastră memorie urcă, încercăm să spunem ce a cumpărat. La postările grav deteriorate, versiunea actuală ține datele de paritate în memorie pentru a repara imediat în loc să aducă mai multe ulterior, ceea ce duce memoria de vârf de la aproximativ 0.8 GB la aproximativ 1.3 GB și economisește vreo zece secunde. La o postare nedeteriorată acea cheltuială nu are loc și cifra este 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Indicatorul de consum</p>
+    <h2>Secunde de procesor (timp CPU)</h2>
+    <p class="lead">Timpul total de procesor consumat de întregul program, însumat pe toate nucleele. Este o măsură a muncii făcute, nu a timpului scurs, deci poate fi mult mai mare decât cronometrul.</p>
+
+    <p>Dacă o sarcină durează 100 de secunde și raportează 1,600 de secunde de procesor, aproximativ șaisprezece nuclee au fost ocupate pe toată durata rulării. Contează din trei motive practice: este căldură, este electricitate, iar pe o mașină care face altceva în același timp este concurență pentru resurse. Un client care termină într-un timp rezonabil saturând fiecare nucleu nu a fost eficient, a fost scump.</p>
+
+    <p>În această coloană apar cele mai mari diferențe de pe tot situl, mai mari decât la orice timp de sosire. Pentru o ieșire identică octet cu octet pe aceeași postare deteriorată, am măsurat o împrăștiere de treizeci de ori în secundele de procesor între clienți. Merită verificat înainte de a presupune că doi clienți care termină la câteva secunde unul de altul fac o cantitate comparabilă de muncă.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Cele două coloane de disc</p>
+    <h2>Vârful de disc și I/O pe volum</h2>
+    <p class="lead">Vârful de disc este spațiul suplimentar maxim de care a avut nevoie sarcina într-un singur moment. I/O pe volum este cantitatea totală de date citite și scrise pentru a ajunge acolo. Răspund la întrebări diferite.</p>
+
+    <p><b>Vârful de disc este o constrângere dură.</b> Decide dacă sarcina poate rula, pur și simplu. Majoritatea clienților scriu postarea completă pe disc și apoi dezarhivează o a doua copie alături, deci au nevoie de aproximativ dublul conținutului în spațiu liber. Pentru o sarcină de 190 GB asta înseamnă aproximativ 313 GB liberi înainte să începi, față de aproximativ 157 GB la noi, fiindcă dezarhivăm în timp ce descărcăm și nu materializăm niciodată volumele arhivei. Dacă discul tău nu poate ține dublul sarcinii, acea diferență nu este un procent, este dacă descărcarea are loc sau nu.</p>
+
+    <p><b>I/O pe volum înseamnă uzură și timp.</b> Scrierea postării, recitirea ei pentru verificare, recitirea ei încă o dată pentru dezarhivare și scrierea ieșirii înseamnă patru treceri peste date. A o face într-o singură trecere înseamnă aproximativ o treime din trafic, ceea ce pe un disc SSD înseamnă durată de viață, iar pe un disc mai lent este adesea adevăratul gât de sticlă în locul rețelei.</p>
+
+    <p class="note" style="text-align:start">O notă despre cum citim aceste două cifre, fiindcă ne-a prins pe picior greșit și te-ar putea prinde și pe tine citind tabelele noastre. Ambele vin din contoare care acoperă tot discul, nu un singur program. Asta le face un control excelent pentru a vedea dacă o măsurătoare a fost contaminată de altceva care rula, și înseamnă că un număr care pare imposibil de obicei chiar este: o sarcină de 6.5 GB care raportează 144 GB de trafic pe disc nu este un client care se comportă ciudat, sunt două sarcini care împart o mașină.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Cum se citește un tabel</p>
+    <h2>Trei obiceiuri care merită</h2>
+    <ul class="plain">
+      <li><b>Citește un rând întreg înainte de a compara coloane.</b> Majoritatea tabelelor noastre pun același client în mai multe condiții. Informația interesantă este de obicei cum se schimbă cifra unui client între o sarcină ușoară și una grea, nu unde se situează la o singură sarcină.</li>
+      <li><b>Verifică unde era linia de sosire.</b> Un timp este comparabil cu alt timp doar dacă ambii clienți au ajuns în aceeași stare. Calculăm amprenta fiecărei ieșiri față de o copie de referință exact din acest motiv, iar un client care nu a ajuns acolo este marcat, nu cronometrat.</li>
+      <li><b>Preferă intervalele mediilor când împrăștierea este mare.</b> Acolo unde publicăm un interval în loc de o singură cifră este intenționat: înseamnă că rulările individuale au diferit destul cât o medie să le denatureze, și preferăm să arătăm asta decât să o ascundem.</li>
+    </ul>
+
+    <p>Tabelele propriu-zise, cu versiunea și data alături de fiecare, se află pe <a href="benchmarks.ro.html">pagina de benchmark-uri</a>, inclusiv rundele pe care le pierdem.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - descărcătorul Usenet într-o singură trecere.</div>
+    <div>
+      <a href="index.ro.html">Acasă</a> ·
+      <a href="features.ro.html">Funcții</a> ·
+      <a href="indexer.ro.html">Indexer</a> ·
+      <a href="benchmarks.ro.html">Benchmark-uri</a> ·
+      <a href="explained.ro.html">Explicații</a> ·
+      <a href="download.ro.html">Descarcă</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

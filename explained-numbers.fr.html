@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ce que signifient les chiffres - nzbfast</title>
+<meta name="description" content="Guide de lecture des colonnes mesurées : temps jusqu'à un fichier utilisable, mémoire de pointe, secondes processeur, pic disque et E/S du volume, et à quoi ressemble une bonne ou une mauvaise valeur.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.fr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fr.html" class="home">Accueil</a>
+    <a href="features.fr.html">Fonctionnalités</a>
+    <a href="indexer.fr.html">Indexeur</a>
+    <a href="benchmarks.fr.html">Benchmarks</a>
+    <a href="explained.fr.html" class="on">Explications</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fr.html">Télécharger</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html" selected>Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fr.html" style="color:inherit">Explications</a> &middot; quatre</p>
+  <h1>Ce que signifient les chiffres</h1>
+  <p class="sub">Cinq colonnes reviennent dans la plupart de nos tableaux. Voici ce que mesure chacune, pourquoi elle mérite d'être publiée, et à peu près à quoi ressemble une bonne ou une mauvaise valeur sur une machine que vous possédez vraiment.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Le chiffre principal</p>
+    <h2>Temps jusqu'à un fichier utilisable</h2>
+    <p class="lead">Le chronomètre démarre quand la tâche est ajoutée et s'arrête quand le contenu fini existe sur le disque, vérifié et extrait. Pas quand le téléchargement se termine, et pas quand le client se déclare prêt.</p>
+
+    <p>C'est le seul chiffre qui corresponde à quelque chose que vous vivez. Un client peut finir de télécharger vite puis passer une minute à vérifier et à décompacter, et de là où vous êtes cette minute fait partie de l'attente. Ne mesurer que le téléchargement flatterait les clients qui font leur travail après coup, c'est-à-dire la plupart.</p>
+
+    <p>C'est aussi pourquoi notre architecture paraît inhabituelle dans ces tableaux. Nous vérifions chaque morceau à son arrivée et décompactons pendant que le téléchargement tourne encore, si bien qu'au dernier article il ne reste presque rien à faire. Les autres clients déposent d'abord tout le post sur le disque, puis le vérifient, puis le décompactent, en trois phases successives. Sur une tâche facile l'écart est modeste. Sur une tâche volumineuse ou endommagée, il fait l'essentiel du résultat.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Celui qu'on lit de travers</p>
+    <h2>Mémoire de pointe (RSS)</h2>
+    <p class="lead">La plus grande quantité de mémoire détenue par le programme à un moment quelconque de la tâche. RSS signifie resident set size, c'est-à-dire simplement la mémoire réellement en RAM plutôt que promise ou réservée.</p>
+
+    <p>Plus haut n'est pas automatiquement pire, et plus bas n'est pas automatiquement mieux. La mémoire est dépensée pour éviter quelque chose de plus coûteux, en général lire deux fois les mêmes données depuis le disque. La question à poser est de savoir si cette dépense achète quelque chose et si elle est bornée.</p>
+
+    <p><b>Bornée est le mot important.</b> Un client dont la mémoire croît avec la taille de la tâche finira par rencontrer une tâche qu'il ne peut pas terminer sur votre machine, et la panne arrive sous forme de swap ou de processus tué plutôt que de message poli. Nous tenons un budget et restons dedans, ce qui nous permet de faire passer une tâche de 190 GB sur une machine où environ 1.1 GB de mémoire nous est disponible. Un chiffre comme 9.3 GB sur une tâche de 190 GB n'est pas seulement grand, il est d'une autre nature : il croît avec le travail.</p>
+
+    <p>Là où notre propre mémoire monte, nous essayons de dire ce qu'elle a acheté. Sur les posts lourdement endommagés, la version actuelle garde les données de parité en mémoire pour réparer tout de suite au lieu d'en chercher davantage ensuite, ce qui fait passer la mémoire de pointe d'environ 0.8 GB à environ 1.3 GB et fait gagner une dizaine de secondes. Sur un post intact cette dépense n'a pas lieu et le chiffre est de 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">L'indicateur d'énergie</p>
+    <h2>Secondes processeur (temps CPU)</h2>
+    <p class="lead">Le temps processeur total consommé par l'ensemble du programme, additionné sur tous les cœurs. C'est une mesure du travail accompli plutôt que du temps écoulé, elle peut donc être bien plus grande que le chronomètre.</p>
+
+    <p>Si une tâche prend 100 secondes et rapporte 1,600 secondes processeur, à peu près seize cœurs ont été occupés pendant toute la durée. Cela compte pour trois raisons pratiques : c'est de la chaleur, c'est de l'électricité, et sur une machine qui fait autre chose en même temps c'est de la contention. Un client qui finit en un temps raisonnable en saturant tous les cœurs n'a pas été efficace, il a été coûteux.</p>
+
+    <p>C'est dans cette colonne qu'apparaissent les écarts les plus larges de tout le site, plus larges que n'importe quel temps de fin. Pour une sortie identique octet pour octet sur le même post endommagé, nous avons mesuré un écart de trente fois en secondes processeur entre clients. Cela vaut la peine d'être vérifié avant de supposer que deux clients qui terminent à quelques secondes l'un de l'autre font une quantité de travail comparable.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Les deux colonnes disque</p>
+    <h2>Pic disque et E/S du volume</h2>
+    <p class="lead">Le pic disque est l'espace supplémentaire maximal dont la tâche a eu besoin à un instant donné. Les E/S du volume sont la quantité totale de données lues et écrites pour y parvenir. Ils répondent à des questions différentes.</p>
+
+    <p><b>Le pic disque est une contrainte dure.</b> Il décide si la tâche peut tourner, tout court. La plupart des clients écrivent le post complet sur le disque puis décompactent une seconde copie à côté, il leur faut donc environ deux fois le contenu en espace libre. Pour une tâche de 190 GB, cela fait environ 313 GB de libre avant de commencer, contre environ 157 GB chez nous, parce que nous décompactons pendant le téléchargement et ne matérialisons jamais les volumes d'archive. Si votre disque ne peut pas contenir deux fois la tâche, cet écart n'est pas un pourcentage, c'est la différence entre télécharger et ne pas télécharger.</p>
+
+    <p><b>Les E/S du volume, c'est de l'usure et du temps.</b> Écrire le post, le relire pour le vérifier, le relire encore pour le décompacter et écrire la sortie fait quatre passages sur les données. Le faire en une passe représente environ un tiers du trafic, ce qui sur un disque SSD est de la durée de vie, et sur un disque plus lent est souvent le vrai goulot d'étranglement plutôt que le réseau.</p>
+
+    <p class="note" style="text-align:start">Une remarque sur la façon de lire ces deux chiffres, parce qu'elle nous a pris au dépourvu et pourrait vous prendre au dépourvu en lisant nos tableaux. Les deux proviennent de compteurs qui couvrent tout le disque, pas un seul programme. Cela en fait un excellent contrôle pour savoir si un benchmark a été pollué par autre chose en cours d'exécution, et cela signifie qu'un chiffre qui paraît impossible l'est généralement : une tâche de 6.5 GB annonçant 144 GB de trafic disque n'est pas un client au comportement étrange, ce sont deux tâches qui se partagent une machine.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Lire un tableau</p>
+    <h2>Trois habitudes à prendre</h2>
+    <ul class="plain">
+      <li><b>Lisez une ligne en entier avant de comparer des colonnes.</b> La plupart de nos tableaux placent le même client dans plusieurs conditions. L'information intéressante est en général la façon dont le chiffre d'un client change entre une tâche facile et une tâche difficile, pas l'endroit où il se situe sur une tâche isolée.</li>
+      <li><b>Vérifiez quelle était la ligne d'arrivée.</b> Un temps n'est comparable à un autre que si les deux clients ont atteint le même état. Nous hachons chaque sortie contre une copie de référence exactement pour cette raison, et un client qui n'y est pas parvenu est signalé plutôt que chronométré.</li>
+      <li><b>Préférez les fourchettes aux moyennes quand la dispersion est large.</b> Là où nous publions une fourchette au lieu d'un chiffre unique, c'est délibéré : cela veut dire que les exécutions individuelles divergeaient assez pour qu'une moyenne les trahisse, et nous préférons le montrer plutôt que le cacher.</li>
+    </ul>
+
+    <p>Les tableaux eux-mêmes, avec la version et la date à côté de chacun, sont sur la <a href="benchmarks.fr.html">page des benchmarks</a>, y compris les manches que nous perdons.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - le téléchargeur Usenet en une passe.</div>
+    <div>
+      <a href="index.fr.html">Accueil</a> ·
+      <a href="features.fr.html">Fonctionnalités</a> ·
+      <a href="indexer.fr.html">Indexeur</a> ·
+      <a href="benchmarks.fr.html">Benchmarks</a> ·
+      <a href="explained.fr.html">Explications</a> ·
+      <a href="download.fr.html">Télécharger</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

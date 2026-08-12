@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Come funziona lo scaricamento a passata unica - nzbfast</title>
+<meta name="description" content="Cosa fa davvero la passata unica, perché non è la stessa cosa dello scompattamento diretto, quali forme di archivio gestisce, e perché eliminare il ciclo scrivi-e-rileggi fa risparmiare disco, tempo di processore e memoria.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.it.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.it.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.it.html" class="home">Home</a>
+    <a href="features.it.html">Funzionalità</a>
+    <a href="indexer.it.html">Indexer</a>
+    <a href="benchmarks.it.html">Benchmark</a>
+    <a href="explained.it.html" class="on">Spiegazioni</a>
+    <a href="MANUAL.html">Documentazione</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.it.html">Scarica</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html" selected>Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.it.html" style="color:inherit">Spiegazioni</a> &middot; uno</p>
+  <h1>Come funziona lo scaricamento a passata unica</h1>
+  <p class="sub">Gran parte di ciò che rende veloce questo client non è un percorso di rete più rapido. È che i dati si muovono una volta sola. Ecco cosa significa in pratica, perché è una cosa diversa dallo scompattamento diretto, quali forme di archivio le sopravvivono, e quanto vale davvero, su una macchina reale, eliminare il ciclo scrivi-e-rileggi.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Il punto di partenza</p>
+    <h2>Cosa fa tradizionalmente uno scaricamento Usenet</h2>
+    <p class="lead">Un post è fatto di migliaia di piccoli articoli codificati che insieme formano un insieme di volumi d'archivio, i quali a loro volta contengono il file che vuoi davvero. Passare dall'uno all'altro sono tradizionalmente quattro lavori distinti, ciascuno concluso prima che inizi il successivo.</p>
+
+    <ol>
+      <li><b>Scaricare e decodificare.</b> Recuperare ogni articolo, decodificarlo, e scrivere su disco i volumi d'archivio ricomposti. Per un rilascio da 60 GB sono 60 GB scritti.</li>
+      <li><b>Verificare.</b> Rileggere tutti i 60 GB dal disco per controllarli contro i dati di parità, e ripararli se qualcosa non va.</li>
+      <li><b>Scompattare.</b> Rileggere i volumi, e scrivere il contenuto estratto accanto a essi. Ora sul disco ci sono 120 GB.</li>
+      <li><b>Pulire.</b> Cancellare i volumi, lasciando il contenuto.</li>
+    </ol>
+
+    <p>Ogni fase è corretta, e il risultato è giusto. Ma il contenuto è stato scritto due volte, letto almeno due volte, e al colmo il disco ha dovuto tenere due copie complete di un lavoro di cui volevi una copia sola. Il cronometro che vivi sono tutte e quattro le fasi in sequenza, ed è per questo che un client può dichiarare uno scaricamento veloce e tenerti comunque in attesa.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Il cambiamento</p>
+    <h2>Farlo una volta sola, invece</h2>
+    <p class="lead">Passata unica significa che i byte vanno dalla rete alla loro destinazione finale senza mai diventare un file d'archivio sul tuo disco. Non esistono la fase due e la fase tre, perché il lavoro di entrambe avviene mentre la fase uno è ancora in corso.</p>
+
+    <p>In pratica, ogni articolo appena arriva viene decodificato in memoria e consegnato subito a due cose insieme. Il verificatore lo controlla immediatamente contro i dati di parità, così la correttezza si stabilisce mentre i dati atterrano anziché rileggendoli dopo. L'estrattore tratta i byte in arrivo come una posizione dentro l'archivio, calcola a quale parte di quale file di contenuto appartengono, e li scrive lì.</p>
+
+    <p>I volumi d'archivio non vengono mai assemblati. Esistono come una struttura che l'estrattore comprende mentre lo scaricamento è in volo, e l'unica cosa che raggiunge il tuo disco è il file che volevi. Quando arriva l'ultimo articolo non resta praticamente nulla da fare, ed è per questo che i nostri tempi di arrivo stanno vicini al tempo di scaricamento stesso anziché a uno scaricamento più una coda.</p>
+
+    <div class="callout">
+      <p>La conseguenza misurabile: per lo stesso lavoro scriviamo circa la metà, rileggiamo molto meno, e ci serve all'incirca la dimensione del contenuto in spazio libero anziché il doppio. Su un rilascio da 190 GB sono circa 157 GB di spazio libero contro circa 313 GB, e all'incirca un terzo del traffico su disco.</p>
+    </div>
+
+    <p>Due cose rendono la faccenda più difficile di quanto sembri, e sono il motivo per cui è raro. Gli articoli non arrivano in ordine, quindi l'estrattore deve cavarsela con byte che atterrano in posizioni arbitrarie anziché come flusso dall'inizio. E un archivio compresso non si può decomprimere dal mezzo, perciò ogni parte del lavoro che richiede davvero l'ordine va riconosciuta e trattata in altro modo anziché data per scontata.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Il confronto che ci chiedono</p>
+    <h2>Perché questo non è scompattamento diretto</h2>
+    <p class="lead">Lo scompattamento diretto è una buona funzione e i client che ce l'hanno ne guadagnano. Risolve però un'altra parte del problema, e la differenza salta fuori esattamente dove conta.</p>
+
+    <p>Lo scompattamento diretto comincia a estrarre prima che lo scaricamento sia finito, così la fase tre si sovrappone alla fase uno invece di seguirla. Quello che non fa è eliminare la fase uno. <b>I volumi d'archivio vengono comunque scritti per intero sul tuo disco</b>, perché lo scompattatore è uno convenzionale che legge file convenzionali; lo scompattamento diretto si limita ad avviarlo prima. Le due copie esistono ancora, le due scritture avvengono ancora, e il fabbisogno di spazio libero è immutato.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>scrivere i volumi su disco</th><th class="num">spazio libero necessario</th><th class="num">quante volte il contenuto viene scritto</th></tr></thead>
+      <tbody>
+        <tr><td>Scaricare, poi scompattare</td><td>sì, poi rilettura</td><td class="num">~2&times; il lavoro</td><td class="num">2</td></tr>
+        <tr><td>Scompattamento diretto</td><td>sì, riletto prima</td><td class="num">~2&times; il lavoro</td><td class="num">2</td></tr>
+        <tr><td><b>Passata unica</b></td><td class="win">mai scritti</td><td class="win">~1&times; il lavoro</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>La seconda differenza è cosa succede quando la forma non è semplice. Poiché lo scompattamento diretto passa il lavoro a uno scompattatore convenzionale via via che i volumi compaiono, gli serve che la situazione sia lineare: volumi presenti in un ordine utilizzabile, nessuna riparazione in sospeso, niente da sbloccare prima, e un archivio i cui contenuti non siano a loro volta archivi. Quando una di queste cose viene a mancare, la cosa sensata da fare è ritirarsi e ripiegare sullo scompattamento alla fine, ed è quello che accade. Ottieni un risultato corretto e i tempi ordinari.</p>
+
+    <p>Poiché il nostro estrattore è costruito fin dall'inizio attorno a byte fuori ordine, quelle situazioni non sono eccezioni per lui. È questa la vera distinzione: non che partiamo prima, ma che non ci affidiamo a condizioni che spesso non si verificano.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Cosa le sopravvive davvero</p>
+    <h2>Le forme che regge</h2>
+    <p class="lead">Un progetto così vale la pena solo se si applica ai post che incontri davvero, e non a un caso ideale pulito. La posizione attuale: <b>nessun formato contenitore viene gestito solo su disco.</b> RAR, 7z e zip passano tutti per il percorso a passata unica.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>forma</th><th>passata unica</th><th>note</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, memorizzato (senza compressione)</td><td class="yes">sì</td><td>il caso comune per i rilasci multimediali</td></tr>
+        <tr><td>RAR, compresso</td><td class="yes">sì</td><td>compreso un archivio compresso come strato esterno</td></tr>
+        <tr><td>RAR 1.5, 3, 4 e 5</td><td class="yes">sì</td><td>tutte e quattro le generazioni del formato</td></tr>
+        <tr><td>7z</td><td class="yes">sì</td><td>compresi i contenuti compressi con deflate</td></tr>
+        <tr><td>zip</td><td class="yes">sì</td><td>compresi i contenuti bzip2 e LZMA</td></tr>
+        <tr><td>Contenuti cifrati</td><td class="yes">sì</td><td>con una password, compreso lo zip cifrato</td></tr>
+        <tr><td>Intestazioni cifrate</td><td class="yes">sì</td><td>quando anche i nomi dei file sono nascosti</td></tr>
+        <tr><td>Catene di password</td><td class="yes">sì</td><td>la password di ogni strato riposta in quello sopra</td></tr>
+        <tr><td>Archivi annidati</td><td class="yes">sì</td><td>disannidati al volo, fino a una profondità configurabile</td></tr>
+        <tr><td>Danneggiato su più strati</td><td class="yes">sì</td><td>riparazione a ogni livello, sempre in una passata</td></tr>
+        <tr><td>Insiemi divisi numericamente</td><td class="yes">sì</td><td>divisioni in stile <code>name.001</code></td></tr>
+        <tr><td>Archivi autoestraenti</td><td class="no">passata su disco</td><td>l'archivio non comincia all'inizio del file</td></tr>
+        <tr><td>Zip suddiviso (<code>.z01</code>)</td><td class="no">passata su disco</td><td>e alcune varianti di zip più rare</td></tr>
+        <tr><td>Lavori ripresi</td><td class="no">passata su disco</td><td>un lavoro proseguito dopo un riavvio finisce in modo convenzionale</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>I tre rifiuti sono onesti e si comportano tutti allo stesso modo: il lavoro si conclude correttamente, per la via convenzionale, e per quello scaricamento ottieni i tempi ordinari a due copie. Nulla fallisce; smette soltanto di essere veloce nel modo descritto nel resto di questa pagina. Gli archivi autoestraenti vengono rifiutati per un motivo strutturale e non per scarso impegno: identificare un archivio dai suoi primi byte non può funzionare quando i primi byte sono un programma.</p>
+
+    <p>Le righe annidato e cifrato sono quelle da prendere sul serio, perché è lì che la maggior parte dei client ti restituisce il lavoro. Su un corpus generato di dieci forme annidate, valutato per hash del contenuto così che un client che rinomina il contenuto riceva comunque il credito, <b>ne abbiamo completate 9 su 10 senza intervento</b>; il client successivo ne ha completate 5, e altri due ne hanno completate 2. Quella che non completiamo automaticamente è una scala a dieci livelli, che si chiude pulita al limite di profondità predefinito di cinque lasciando lo strato più profondo come archivio sano, e si completa del tutto se alzi il limite. Quelle prove sono nella <a href="benchmarks.it.html#nested">pagina dei benchmark</a> con la griglia completa.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Perché vale la pena farlo</p>
+    <h2>Cosa porta davvero eliminare il viaggio di ritorno</h2>
+
+    <p><b>È più veloce, per un motivo poco affascinante.</b> Scrivere 60 GB e rileggerli non è gratis nemmeno su un disco a stato solido veloce, e su qualsiasi cosa più lenta è spesso il vero collo di bottiglia anziché la rete. Togliere una scrittura e due letture toglie quel tempo dal tuo cronometro per intero. Il guadagno è massimo esattamente dove più si nota: lavori grandi, e macchine il cui disco non è la loro parte più veloce.</p>
+
+    <p><b>Dimezza l'usura.</b> I dischi a stato solido hanno dentro un numero finito di scritture, e uno scaricatore che scrive ogni contenuto due volte consuma quel budget a velocità doppia senza alcun beneficio per te. Su qualche centinaio di terabyte scaricati, che è un anno ordinario per un utente attivo, la differenza è una frazione significativa della vita di un disco.</p>
+
+    <p><b>Cambia cosa ci sta.</b> Lo spazio libero non è una caratteristica di prestazione, è un sì o un no. Un lavoro che richiede il doppio della propria dimensione come margine o gira o non gira. Averne bisogno all'incirca quanto il contenuto significa che i lavori si concludono su macchine e volumi dove l'approccio convenzionale semplicemente si ferma, ed è per questo che un rilascio da 190 GB qui sta in circa 157 GB di spazio libero anziché in circa 313 GB.</p>
+
+    <p><b>Costa meno tempo di processore.</b> Non far passare i dati due volte per il disco elimina il lavoro necessario a farlo, e verificare durante lo scaricamento significa nessuna seconda passata sul contenuto per controllarlo. Il nostro costo di processore resta piatto a circa 1.7 secondi di processore per gigabyte, da un lavoro da 35 GB a uno da 190 GB, ed è questa la proprietà utile: il costo per gigabyte non cresce al crescere del lavoro.</p>
+
+    <p><b>Gira con meno memoria, e con memoria limitata.</b> Poiché i byte vengono consumati appena arrivano anziché accumulati, l'insieme di lavoro è un budget che imposti tu e non una funzione della dimensione del lavoro. È questo che permette di elaborare un rilascio da 190 GB su una macchina con all'incirca 1.1 GB disponibili. La distinzione che conta non è il numero ma la forma: una memoria che cresce col lavoro prima o poi incontrerà un lavoro che la tua macchina non può finire, e fallisce con lo scambio su disco o venendo uccisa anziché avvisandoti.</p>
+
+    <div class="callout">
+      <p>Nell'insieme queste cose riguardano meno il vincere un benchmark che il dove il software può girare del tutto. Un progetto che richiede metà dello spazio libero, metà delle scritture e una quantità limitata di memoria funziona su un piccolo server domestico, un portatile più vecchio o un NAS, ed è proprio lì che vive buona parte di questo software.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Ogni cifra di questa pagina è misurata e pubblicata con la build e la data accanto nella <a href="benchmarks.it.html">pagina dei benchmark</a>, comprese le prove che perdiamo. Il contrappeso onesto, dichiarato anche lì: un estrattore e un riparatore costruiti per accompagnare uno scaricamento in corso tengono più memoria residente di uno strumento a sé stante lanciato una volta da riga di comando, quindi se il tuo vincolo è l'impronta più piccola possibile per un lavoro singolo su un file che hai già, gli strumenti dedicati vincono quella colonna.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - il downloader Usenet a passata unica.</div>
+    <div>
+      <a href="index.it.html">Home</a> ·
+      <a href="features.it.html">Funzionalità</a> ·
+      <a href="indexer.it.html">Indexer</a> ·
+      <a href="benchmarks.it.html">Benchmark</a> ·
+      <a href="explained.it.html">Spiegazioni</a> ·
+      <a href="download.it.html">Scarica</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

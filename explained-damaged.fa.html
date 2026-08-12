@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>چرا پست‌های آسیب‌دیده اهمیت دارند - nzbfast</title>
+<meta name="description" content="مقالهٔ گم‌شده چیست، چرا درخواست آن از یک کارساز بین 79 ms و 2.2 ثانیه هزینه دارد، و چرا راه‌حل کارساز این است که پرسیدن را کنار بگذاریم نه اینکه تندتر بپرسیم.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.fa.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fa.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fa.html" class="home">خانه</a>
+    <a href="features.fa.html">ویژگی‌ها</a>
+    <a href="indexer.fa.html">ایندکسر</a>
+    <a href="benchmarks.fa.html">محک‌ها</a>
+    <a href="explained.fa.html" class="on">توضیحات</a>
+    <a href="MANUAL.html">مستندات</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fa.html">دانلود</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html" selected>فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fa.html" style="color:inherit">توضیحات</a> &middot; دو</p>
+  <h1>چرا پست‌های آسیب‌دیده اهمیت دارند</h1>
+  <p class="sub">دانلودی که بی‌نقص پیش می‌رود حالت آسان است، و هر برنامه‌ای آن را با کفایت از پس برمی‌آید. تفاوت‌های جالب وقتی پیدا می‌شوند که بخشی از پست کم باشد، و این خیلی بیشتر از آنچه حالت تمیز نشان می‌دهد رخ می‌دهد. این چیزی است که واقعاً می‌گذرد، و اینکه چرا این‌قدر وقت می‌برد.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">شکل مسئله</p>
+    <h2>مقالهٔ گم‌شده چیست</h2>
+    <p class="lead">یک پست Usenet یک فایل نیست. هزاران مقالهٔ کوچک است، هرکدام مستقل روی کارسازهای هر ارائه‌دهنده ذخیره شده، و NZB‌ای که دانلود می‌کنی فهرست نام‌های آن‌هاست. یک انتشار 6.5 GB تقریباً 9,000 تای آن‌هاست.</p>
+
+    <p>مقاله‌ها به دلایل معمولی گم می‌شوند. ارائه‌دهنده‌ها آن‌ها را برای دورهٔ نگه‌داری ثابتی نگه می‌دارند و بعد پاک می‌کنند. برخی ارائه‌دهنده‌ها مقالهٔ خاصی را از همان اول هرگز دریافت نکرده‌اند، چون انتشار میان کارسازها ناقص است. گاهی بارگذاری هنگام انتشار ناتمام بوده، و بخشی از آن هیچ‌جا هرگز وجود نداشته. علت هرچه باشد، اثر یکی است: برنامهٔ تو مقاله‌ای می‌خواهد، و پاسخ به‌جای داده یک رد است.</p>
+
+    <p>این آن‌قدر عادی است که کسانی که در Usenet پست می‌گذارند حسابش را می‌کنند. تقریباً هر انتشاری همراه با <b>دادهٔ توازن</b> می‌آید، معمولاً فایل‌های PAR2، یعنی اطلاعات افزونهٔ اضافی که از روی اصل محاسبه شده. اگر بخشی از محتوا کم باشد، توازن می‌تواند بازسازی‌اش کند، به شرط آنکه به قدر کافی داشته باشی. یک پست معمولی حدود 10% توازن به همراه دارد، پس پست می‌تواند سهم قابل توجهی از خودش را از دست بدهد و همچنان کاملاً بازیافتنی بماند.</p>
+
+    <div class="callout">
+      <p>پس پست آسیب‌دیده معمولاً دانلودی خراب نیست. دانلودی است که پیش از کامل شدن اندکی حساب لازم دارد. تنها پرسش این است که یک برنامه چقدر طول می‌کشد تا این را دریابد، و درست همان‌جاست که به اندازهٔ دو برابر یا بیشتر فرق می‌کنند.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">بخش گران</p>
+    <h2>خواستن چیزی که هیچ‌کس ندارد</h2>
+    <p class="lead">وقتی کارسازی مقاله‌ای را ندارد، یک رد برمی‌گرداند، و برنامه آنگاه کارساز بعدی فهرست تو را می‌آزماید. این کار درستی است، چون ارائه‌دهندهٔ دوم خیلی وقت‌ها آن را دارد. هزینه وقتی پیدا می‌شود که هیچ‌کس آن را نداشته باشد.</p>
+
+    <p>در آن صورت برنامه تمام فهرست ارائه‌دهنده‌های تو را می‌پیماید، هر بار یک کارساز، و پیش از آنکه بتواند نتیجه بگیرد مقاله واقعاً رفته است، از تک‌تکشان رد می‌گیرد. این پیمایش پیاپی است، و ردها کندتر از آن‌اند که مردم گمان می‌کنند. آن‌ها را مستقیم اندازه گرفتیم، روی خطی بی‌کار، بی‌آنکه هیچ محتوایی جابه‌جا شود:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>ارائه‌دهنده</th><th class="num">زمان پاسخ به یک درخواست عادی</th><th class="num">زمان رد کردن یک مقالهٔ گم‌شده</th></tr></thead>
+      <tbody>
+        <tr><td>ارائه‌دهندهٔ A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>ارائه‌دهندهٔ B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>ارائه‌دهندهٔ C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>ارائه‌دهندهٔ D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>ارائه‌دهندهٔ E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>دو چیز به چشم می‌آید. نخست اینکه پراکندگی عظیم است: <b>یک رد بسته به اینکه کدام ارائه‌دهنده پاسخ می‌دهد جایی بین 79 ms و 2.2 ثانیه هزینه دارد</b>، تفاوتی نزدیک به سی برابر. دوم اینکه یک ارائه‌دهنده اساساً در همان زمانی که پرسیدن می‌برد رد می‌کند، حال آنکه دیگری بیش از دویست برابر زمان پاسخ عادی خودش طول می‌دهد تا نه بگوید. این تأخیر شبکه نیست، کاری است که در سمت آن‌ها می‌گذرد، و پرسیدن با رفت‌وبرگشت کمتر به‌سختی کمکی می‌کند.</p>
+
+    <p>جمع بزن: یک پیمایش کامل روی پنج ارائه‌دهنده، برای یک مقالهٔ واحد که دیگر وجود ندارد، حدود <b>5 ثانیه</b> هزینه دارد. حالا در نظر بگیر که پست آسیب‌دیده مقاله‌های بسیاری از این دست دارد، و برنامه‌ای که آن‌ها را پیاپی پردازش می‌کند این هزینه را بارها می‌پردازد در حالی که اتصال تو بی‌کار نشسته است. دانلود کند نیست چون داده کند می‌رسد. داده اصلاً رسیدن را متوقف کرده، و برنامه منتظر است چیزی به او گفته شود که خودش به قدر کافی اطلاعات دارد تا استنتاجش کند.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">راه‌حل</p>
+    <h2>پرسیدن را کنار بگذار، و به‌جایش ترمیم کن</h2>
+    <p class="lead">بصیرت این نیست که ردها را تندتر کنیم، چون ارائه‌دهنده‌ها در اختیار ما نیستند. این است که لحظه‌ای را دریابیم که پاسخ دیگر اهمیتی ندارد.</p>
+
+    <p>در هر لحظه از دانلود، برنامه دو چیز می‌داند: چند تکه هنوز به حساب نیامده، و چقدر دادهٔ توازن از پیش در دست دارد. اگر توازنِ در دست برای بازسازی همهٔ آنچه مانده کافی باشد، آنگاه پاسخ به «آیا کسی این مقاله را دارد؟» دیگر نمی‌تواند نتیجه را عوض کند. چه بلهٔ کند باشد چه نهِ کند، فایل به هر حال بازسازی می‌شود. ادامهٔ پیمایش چیزی جز تأخیر نمی‌خرد.</p>
+
+    <p>پس نسخهٔ کنونی در آن نقطه پرسیدن را بس می‌کند و یک‌راست به ترمیم می‌رود. خودِ بازسازی سریع است و همیشه بوده: حدود <b>2.3 ثانیه</b> روی پستی 6.5 GB، و آن عدد در هر نسخه‌ای که سنجیده‌ایم یکی است. زمان صرفه‌جویی‌شده تماماً انتظاری است که دیگر رخ نمی‌دهد.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>پست 6.5 GB، 60 مقالهٔ گم‌شده</th><th class="num">زمان تا فایل وارسی‌شده</th></tr></thead>
+      <tbody>
+        <tr><td>انتظار برای رد هر ارائه‌دهنده</td><td class="num">23 s</td></tr>
+        <tr><td><b>ایستادن به‌محض آنکه توازن شکاف را بپوشاند</b></td><td class="win">13 s</td></tr>
+        <tr><td>که از آن، خودِ حساب ترمیم</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>همین تغییر روی پست آسیب‌ندیده هیچ کاری نمی‌کند، و این روشن‌ترین شاهد است که کار مورد نظر ما را می‌کند: بی مقالهٔ گم‌شده پیمایشی نیست که کوتاه شود، و هر دو نسخه کاری تمیز 6.5 GB را در 7 ثانیهٔ یکسان تمام می‌کنند.</p>
+
+    <p><b>این یک معامله است، نه بردی مجانی.</b> ترمیم زودهنگام یعنی نگه داشتن دادهٔ توازن در حافظه به‌جای دور انداختن و آوردن بیشتر در آینده، پس اوج حافظه (RSS) روی پستی به‌شدت آسیب‌دیده از حدود 0.8 GB به حدود 1.3 GB می‌رسد، و تقریباً 400 MB بیشتر از ارائه‌دهنده‌ها می‌کشیم. روی پست آسیب‌ندیده حافظه بی‌تغییر در 0.24 GB می‌ماند. فکر می‌کنیم برای بیشتر مردم این معاملهٔ درستی است، چون حافظه تنها در حالتی خرج می‌شود که ده ثانیه برایت می‌خرد، اما هزینه‌ای واقعی است و برایش تنظیمی هست.</p>
+
+    <p class="note" style="text-align:start">نام ارائه‌دهنده‌ها در جدول رد عمداً پوشیده مانده است. این اعداد ویژگی یک اندازه‌گیری در یک شب از یک مکان‌اند، و ارائه‌دهنده‌ای که به‌گونهٔ دیگری نمایه می‌کند، یا که اتفاقاً در شبی بد به آن رسیدیم، نباید بر پایهٔ یک دور به کندی متهم شود. آنچه برای استدلال اهمیت دارد شکل ماجراست: ردها به‌شدت متغیرند، و مجموع آن‌قدر بزرگ هست که بر دانلودی آسیب‌دیده چیره شود. اعداد به تفکیک ارائه‌دهنده و خروجی خام کاوش در سوابق داخلی ماست، و اعداد سرتاسری‌ای که آن‌ها را توضیح می‌دهند در <a href="benchmarks.fa.html#damaged">صفحهٔ محک‌ها</a> است.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - دانلودر تک‌گذر Usenet.</div>
+    <div>
+      <a href="index.fa.html">خانه</a> ·
+      <a href="features.fa.html">ویژگی‌ها</a> ·
+      <a href="indexer.fa.html">ایندکسر</a> ·
+      <a href="benchmarks.fa.html">محک‌ها</a> ·
+      <a href="explained.fa.html">توضیحات</a> ·
+      <a href="download.fa.html">دانلود</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">زمان‌های رد در 11 اوت 2026 از اروپا روی پنج ارائه‌دهنده، هرکدام یک اتصال، روی خطی بی‌کار و بدون هیچ انتقال محتوایی اندازه‌گیری شد. اعداد سرتاسری پست آسیب‌دیده از دور شش‌برنامه‌ای همان شب می‌آید؛ برای جدول‌های کامل، نسخه‌های برنامه‌ها و دورهایی که می‌بازیم صفحهٔ محک‌ها را ببینید.</p>
+</div></footer>
+
+</body>
+</html>

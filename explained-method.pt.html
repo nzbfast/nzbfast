@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Como testamos, por inteiro - nzbfast</title>
+<meta name="description" content="As máquinas, o material de ensaio, as definições que cada cliente recebe, e as regras que decidem se uma volta de benchmark conta sequer.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.pt.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.pt.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.pt.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.pt.html" class="home">Início</a>
+    <a href="features.pt.html">Recursos</a>
+    <a href="indexer.pt.html">Indexador</a>
+    <a href="benchmarks.pt.html">Benchmarks</a>
+    <a href="explained.pt.html" class="on">Explicações</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.pt.html">Baixar</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html" selected>Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.pt.html" style="color:inherit">Explicações</a> &middot; três</p>
+  <h1>Como testamos, por inteiro</h1>
+  <p class="sub">Publicamos comparações com software de outras pessoas, portanto o método tem de ser conferível. É este, por inteiro: as máquinas, o conteúdo, as definições que cada cliente recebe, e as regras que decidem se uma execução conta como resultado ou vai para o lixo.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">A bancada</p>
+    <h2>Mesma máquina, mesma linha, mesmo conteúdo</h2>
+    <p class="lead">Cada cliente de uma comparação corre numa só máquina, contra os mesmos fornecedores, sobre o mesmo conteúdo, dentro da mesma ronda. Nada é aproveitado de um dia anterior.</p>
+
+    <ul class="plain">
+      <li><b>As máquinas.</b> Um Apple M1 Ultra numa linha de 10 GbE na Europa, e um M3 Ultra numa linha mais lenta nos Estados Unidos. As comparações nunca misturam as duas: uma tabela é uma máquina.</li>
+      <li><b>A linha conta mais do que o processador.</b> Numa linha de 10 GbE a maioria dos clientes consegue saturar a ligação numa tarefa fácil, e é por isso que os cenários interessantes são aqueles em que algo que não a largura de banda bruta decide o desfecho.</li>
+      <li><b>Fornecedores.</b> Cinco fornecedores comerciais, o mesmo conjunto para cada cliente, por TLS. Excluímos um fornecedor destas rondas porque limita quantos locais podem ligar-se ao mesmo tempo, o que tornaria uma máquina de teste partilhada injusta para quem corresse em segundo.</li>
+      <li><b>Ligações.</b> Cada cliente recebe o mesmo número por fornecedor numa dada ronda, e a ronda diz qual. Mais não é automaticamente melhor; medimos o nosso próprio cliente a manter o mesmo tempo de chegada ao longo de uma variação de nove vezes no número de ligações.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">A regra que decide tudo</p>
+    <h2>Um cliente é julgado pelo ficheiro, não pela sua própria mensagem de estado</h2>
+    <p class="lead">Esta é a coisa mais importante desta página. Cada volta termina procurando o maior ficheiro que o cliente produziu, em qualquer ponto da sua saída, e calculando o seu resumo criptográfico contra uma cópia de referência. Tamanho e MD5, em todas as voltas, não por amostragem.</p>
+
+    <p>Fazemo-lo porque o relatório de sucesso de um cliente não é prova fiável. Medimos um cliente a comunicar <i>done</i> numa tarefa cuja pasta de saída estava vazia. Medimos outro a comunicar <i>Completed</i> tendo entregado volumes de arquivo em bruto que nunca desempacotou. Uma ferramenta de reparação muito usada termina com um código de erro após uma reparação bem-sucedida. Nenhum desses clientes estava a mentir; as cadeias de estado significam simplesmente coisas diferentes para autores diferentes, e um benchmark que confia nelas mede vocabulário em vez de comportamento.</p>
+
+    <p>Portanto a meta é a mesma para todos: <b>o conteúdo existe, com o tamanho certo e o resumo certo</b>. Se um cliente parar antes disso, não recebe tempo, e a coluna inteira é assinalada em vez de omitida em silêncio. Um cliente lento que termina está a sair-se melhor do que um rápido que não termina, e a tabela deve dizê-lo.</p>
+
+    <div class="callout">
+      <p>O corolário é que uma não chegada é um resultado, não um erro nosso. Quando publicamos uma, descrevemos o estado final em termos simples, incluindo tudo o que sugira que é específica daquela tarefa e não geral, e dizemos o que o cliente fez em vez de terminar.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ordem e repetição</p>
+    <h2>Porque as voltas se alternam, e porque não se publicam execuções únicas</h2>
+    <p class="lead">O débito dos fornecedores varia de minuto a minuto, por vezes num fator de dois ou três. Duas medições feitas em momentos diferentes medem em parte o tempo que fazia.</p>
+
+    <p>Por isso os clientes correm <b>seguidos e intercalados</b>, e a ordem inverte-se entre repetições, para que nenhum cliente seja sempre o que entra primeiro numa linha quente ou fria. Um resultado é o padrão ao longo das repetições, não a melhor corrida. Quando a dispersão é grande, publicamos o intervalo em vez de uma média que a esconderia, e se não soubermos porque os números de um cliente estão dispersos, dizemo-lo em vez de inventar uma causa.</p>
+
+    <p>Evitam-se comparações entre rondas diferentes sempre que possível. Se uma afirmação exige dois números, preferimos voltar a correr ambos numa só ronda a subtrair o valor de um dia ao de outro, porque o estado da bancada, as condições dos fornecedores e as versões dos clientes derivam todos. Quando comparamos duas compilações nossas, ambas correm na mesma ronda, alternadamente, sobre o mesmo conteúdo.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">As verificações pouco vistosas</p>
+    <h2>O que corre antes e durante cada volta</h2>
+    <p class="lead">A maioria existe porque uma falha silenciosa produziu um dia um número de aspeto saudável, publicável e errado. Cada uma corre agora automaticamente e interrompe a ronda em vez de avisar.</p>
+
+    <ul class="plain">
+      <li><b>Todos os fornecedores respondem antes de a volta começar.</b> Uma volta corrida enquanto dois fornecedores estão em baixo mede uma avaria, e parece exatamente um cliente lento.</li>
+      <li><b>O binário é identificado por resumo criptográfico antes de cada volta</b>, não por nome de ficheiro nem cadeia de versão. Duas compilações nossas indicavam o mesmo número de versão diferindo em 88 commits; só o resumo as distingue, e as tabelas citam-no.</li>
+      <li><b>Todos os clientes correm como código nativo.</b> Em máquinas Apple, um auxiliar mal construído pode correr em silêncio sob tradução, o que custa tempo de processador que pertence à nossa escolha de empacotamento e não ao código do cliente. Verificamos o processo em execução, não apenas o ficheiro.</li>
+      <li><b>Os limites de ficheiros abertos são elevados para todos, de forma idêntica.</b> O macOS arranca os programas com um limite de 256 ficheiros abertos, que um conjunto completo de ligações pode exceder. Um cliente que lhe toca tende a desaparecer sem relatório de falha, o que se lê exatamente como um defeito do software. A aparente não chegada de um concorrente veio a ser isto; com o limite elevado, a tarefa idêntica terminou em 44 segundos.</li>
+      <li><b>O tráfego de disco é registado por volta</b>, o que serve também de verificação de que mais nada estava a usar a máquina. Esses contadores cobrem o disco inteiro e não um único programa, portanto se estivesse a correr uma segunda tarefa, o trabalho dela apareceria dentro das nossas medições. Leituras planas ao longo de uma ronda são como sabemos que um resultado pertence ao cliente que nomeia.</li>
+      <li><b>Cada cliente escreve na sua própria árvore de saída</b>, e a árvore é apagada antes de cada volta, para que nenhuma execução possa ser satisfeita pelo ficheiro de uma execução anterior.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Onde um cliente precisa de definições específicas para render bem, recebe-as, e a ronda diz quais. Exemplos: encadeamento de pedidos ligado onde um cliente o traz desligado, verificação de duplicados desligada quando a mesma tarefa é descarregada repetidamente, e auxiliares de desempacotamento tirados do próprio pacote do cliente em vez de uma cópia do sistema. O objetivo é que cada cliente seja medido no seu melhor e não nas suas predefinições, já que as predefinições são uma discussão separada da capacidade.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">O que não faremos</p>
+    <h2>Os limites destes números</h2>
+    <ul class="plain">
+      <li><b>Não publicamos um valor que não tenhamos medido.</b> Se um número é deduzido em vez de observado, é rotulado como deduzido, e preferimos deixar uma lacuna a preenchê-la com aritmética que se lê como uma medição.</li>
+      <li><b>Não atualizamos discretamente um resultado perdedor.</b> Uma volta que perdemos fica publicada até que uma nova execução a substitua, e quando uma derrota se torna vitória a mudança leva uma explicação ao lado da tabela em vez de uma edição silenciosa.</li>
+      <li><b>As voltas com fornecedores ainda não são reproduzíveis de forma independente</b>, porque o conteúdo não é nosso para distribuir. Os testes de componentes, que usam conteúdo gerado, são. Estamos a preparar ficheiros de teste publicáveis para que também as voltas com fornecedores passem a ser conferíveis.</li>
+      <li><b>Estes são os nossos benchmarks de software de outras pessoas.</b> Cada versão é nomeada e datada, e quando um cliente lança uma nova versão voltamos a correr as voltas que ela afeta em vez de deixar de pé uma comparação desatualizada. Se achares que um resultado está errado, as definições e as versões estão publicadas para que se possa contestar em concreto.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - o baixador da Usenet de passagem única.</div>
+    <div>
+      <a href="index.pt.html">Início</a> ·
+      <a href="features.pt.html">Recursos</a> ·
+      <a href="indexer.pt.html">Indexador</a> ·
+      <a href="benchmarks.pt.html">Benchmarks</a> ·
+      <a href="explained.pt.html">Explicações</a> ·
+      <a href="download.pt.html">Baixar</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

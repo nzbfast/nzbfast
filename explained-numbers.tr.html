@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sayılar ne anlama gelir - nzbfast</title>
+<meta name="description" content="Ölçülen sütunlar için bir okuma kılavuzu: kullanılabilir dosyaya kadar geçen süre, tepe bellek, işlemci saniyesi, tepe disk ve birim G/Ç, ve iyi ya da kötü bir değerin nasıl göründüğü.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.tr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.tr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.tr.html" class="home">Ana sayfa</a>
+    <a href="features.tr.html">Özellikler</a>
+    <a href="indexer.tr.html">Dizinleyici</a>
+    <a href="benchmarks.tr.html">Kıyaslamalar</a>
+    <a href="explained.tr.html" class="on">Açıklamalar</a>
+    <a href="MANUAL.html">Belgeler</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.tr.html">İndir</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html">Suomi</option><option value="explained-numbers.tr.html" selected>Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.tr.html" style="color:inherit">Açıklamalar</a> &middot; dört</p>
+  <h1>Sayılar ne anlama gelir</h1>
+  <p class="sub">Tablolarımızın çoğunda beş sütun geçer. İşte her birinin ne ölçtüğü, neden yayımlanmaya değer olduğu, ve gerçekten sahip olduğunuz bir makinede iyi ya da kötü bir değerin kabaca nasıl göründüğü.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ana sayı</p>
+    <h2>Kullanılabilir dosyaya kadar geçen süre</h2>
+    <p class="lead">Saat, iş eklendiğinde başlar ve bitmiş içerik diskte doğrulanmış ve çıkarılmış olarak var olduğunda durur. İndirme bittiğinde değil, ve istemci bitti dediğinde değil.</p>
+
+    <p>Bu, yaşadığınız bir şeye karşılık gelen tek sayıdır. Bir istemci indirmeyi hızlıca bitirip sonra bir dakikayı denetlemeye ve açmaya harcayabilir, ve oturduğunuz yerden o dakika beklemenin parçasıdır. Yalnızca indirmeyi ölçmek, işini sonradan yapan istemcileri kayırırdı, ki çoğu öyledir.</p>
+
+    <p>Mimarimizin bu tablolarda alışılmadık görünmesinin nedeni de budur. Her parçayı geldikçe doğrular ve indirme sürerken açarız, böylece son makale indiğinde yapacak neredeyse bir şey kalmaz. Diğer istemciler önce tüm gönderiyi diske alır, sonra doğrular, sonra açar; ardışık üç aşama olarak. Kolay bir işte fark mütevazıdır. Büyük ya da hasarlı bir işte sonucun çoğudur.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Yanlış okunanı</p>
+    <h2>Tepe bellek (RSS)</h2>
+    <p class="lead">Programın iş boyunca herhangi bir anda tuttuğu en büyük bellek miktarı. RSS, resident set size'ın kısaltmasıdır; yani vaat edilmiş ya da ayrılmış değil, gerçekten RAM'de bulunan bellek.</p>
+
+    <p>Daha yüksek otomatik olarak daha kötü, daha düşük de otomatik olarak daha iyi değildir. Bellek, daha pahalı bir şeyden kaçınmak için harcanır; genellikle aynı veriyi diskten iki kez okumaktan. Sorulmaya değer soru, bu harcamanın bir şey satın alıp almadığı ve sınırlı olup olmadığıdır.</p>
+
+    <p><b>Sınırlı önemli sözcüktür.</b> Belleği işin boyutuyla birlikte büyüyen bir istemci er ya da geç makinenizde bitiremeyeceği bir işle karşılaşır, ve arıza kibar bir ileti olarak değil, takas ya da öldürülmüş süreç olarak gelir. Biz bir bütçe tutar ve içinde kalırız; 190 GB'lik bir işi, bize yaklaşık 1.1 GB bellek kalan bir makineden geçirebilmemizin nedeni budur. 9.3 GB gibi bir rakam, 190 GB'lik bir işte yalnızca büyük değildir; biçimi farklıdır: işle birlikte ölçeklenir.</p>
+
+    <p>Kendi belleğimizin yükseldiği yerde, ne satın aldığını söylemeye çalışırız. Ağır hasarlı gönderilerde bugünkü yapı, sonradan daha fazlasını getirmek yerine hemen onarmak için eşlik verisini bellekte tutar; bu da tepe belleği yaklaşık 0.8 GB'den yaklaşık 1.3 GB'ye çıkarır ve on saniye kadar kazandırır. Hasarsız bir gönderide bu harcama olmaz ve rakam 0.24 GB'dir.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Enerji göstergesi</p>
+    <h2>İşlemci saniyesi (CPU zamanı)</h2>
+    <p class="lead">Programın tamamının tükettiği toplam işlemci zamanı, tüm çekirdekler üzerinden toplanmış olarak. Geçen süreyi değil yapılan işi ölçer, bu yüzden saatten çok daha büyük olabilir.</p>
+
+    <p>Bir iş 100 saniye sürüyor ve 1,600 işlemci saniyesi bildiriyorsa, kabaca on altı çekirdek koşu boyunca meşguldü. Bu üç pratik nedenle önemlidir: ısıdır, elektriktir, ve aynı anda başka bir şey yapan bir makinede kaynak çekişmesidir. Her çekirdeği doyururken makul bir sürede biten bir istemci verimli olmamıştır, pahalı olmuştur.</p>
+
+    <p>Tüm sitedeki en geniş farklar bu sütunda ortaya çıkar; herhangi bir bitiş süresindekinden daha geniş. Aynı hasarlı gönderide bayt bayt özdeş çıktı için, istemciler arasında işlemci saniyelerinde otuz kat yayılım ölçtük. Birkaç saniye arayla biten iki istemcinin karşılaştırılabilir miktarda iş yaptığını varsaymadan önce buna bakmaya değer.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">İki disk sütunu</p>
+    <h2>Tepe disk ve birim G/Ç</h2>
+    <p class="lead">Tepe disk, işin herhangi bir anda gerek duyduğu en fazla ek alandır. Birim G/Ç ise oraya varmak için okunan ve yazılan toplam veri miktarıdır. Farklı sorulara yanıt verirler.</p>
+
+    <p><b>Tepe disk katı bir kısıttır.</b> İşin çalışıp çalışamayacağına karar verir. Çoğu istemci gönderinin tamamını diske yazar ve sonra yanına ikinci bir kopya açar, yani boş alanda içeriğin kabaca iki katına ihtiyaç duyar. 190 GB'lik bir iş için bu, başlamadan önce yaklaşık 313 GB boş alan demektir; bizde yaklaşık 157 GB, çünkü indirirken açarız ve arşiv birimlerini hiç maddileştirmeyiz. Diskiniz işin iki katını tutamıyorsa, bu fark bir yüzde değildir; indirmenin gerçekleşip gerçekleşmemesidir.</p>
+
+    <p><b>Birim G/Ç aşınma ve zamandır.</b> Gönderiyi yazmak, doğrulamak için geri okumak, açmak için yeniden okumak ve çıktıyı yazmak, veri üzerinde dört geçiştir. Bunu tek geçişte yapmak trafiğin kabaca üçte biridir; katı hâl diskinde bu ömür demektir, daha yavaş bir diskte ise çoğu zaman ağ yerine asıl darboğaz demektir.</p>
+
+    <p class="note" style="text-align:start">Bu ikisini nasıl okuduğumuza dair bir not, çünkü bizi yanılttı ve tablolarımızı okurken sizi de yanıltabilir. Her iki rakam da tek bir programı değil, diskin tamamını kapsayan sayaçlardan gelir. Bu onları, bir ölçümün aynı anda çalışan başka bir şeyle kirlenip kirlenmediğine dair mükemmel bir denetim yapar, ve imkânsız görünen bir sayının genellikle öyle olduğu anlamına gelir: 6.5 GB'lik bir iş 144 GB disk trafiği bildiriyorsa, bu tuhaf davranan bir istemci değildir; bir makineyi paylaşan iki iştir.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Bir tabloyu okumak</p>
+    <h2>Edinmeye değer üç alışkanlık</h2>
+    <ul class="plain">
+      <li><b>Sütunları karşılaştırmadan önce bir satırı boydan boya okuyun.</b> Tablolarımızın çoğu aynı istemciyi birkaç koşul altına yerleştirir. İlginç bilgi genellikle bir istemcinin sayısının kolay bir işle zor bir iş arasında nasıl değiştiğidir; tek bir işte nerede durduğu değil.</li>
+      <li><b>Bitiş çizgisinin ne olduğunu denetleyin.</b> Bir süre, ancak her iki istemci de aynı duruma ulaştıysa başka bir süreyle karşılaştırılabilir. Her çıktının özetini bilinen doğru bir kopyaya karşı tam da bu nedenle alırız, ve oraya varamayan bir istemci süre alınmak yerine işaretlenir.</li>
+      <li><b>Yayılım genişken ortalamalar yerine aralıkları yeğleyin.</b> Tek bir rakam yerine aralık yayımladığımız yerde bu bilinçlidir: tek tek koşuların, bir ortalamanın onları yanlış temsil edeceği kadar ayrıştığı anlamına gelir, ve bunu gizlemektense göstermeyi yeğleriz.</li>
+    </ul>
+
+    <p>Tabloların kendisi, her birinin yanında yapı ve tarihiyle, <a href="benchmarks.tr.html">kıyaslama sayfasındadır</a>; kaybettiğimiz turlar dâhil.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - tek geçişli Usenet indiricisi.</div>
+    <div>
+      <a href="index.tr.html">Ana sayfa</a> ·
+      <a href="features.tr.html">Özellikler</a> ·
+      <a href="indexer.tr.html">Dizinleyici</a> ·
+      <a href="benchmarks.tr.html">Kıyaslamalar</a> ·
+      <a href="explained.tr.html">Açıklamalar</a> ·
+      <a href="download.tr.html">İndir</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

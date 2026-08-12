@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mitä luvut tarkoittavat - nzbfast</title>
+<meta name="description" content="Lukuopas mitattuihin sarakkeisiin: aika käyttökelpoiseen tiedostoon, muistin huippukäyttö, suoritinsekunnit, levyn huippukäyttö ja taltion I/O, ja miltä hyvä tai huono arvo näyttää.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="fr" href="explained-numbers.fr.html">
+<link rel="alternate" hreflang="de" href="explained-numbers.de.html">
+<link rel="alternate" hreflang="it" href="explained-numbers.it.html">
+<link rel="alternate" hreflang="es" href="explained-numbers.es.html">
+<link rel="alternate" hreflang="nl" href="explained-numbers.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-numbers.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-numbers.sv.html">
+<link rel="alternate" hreflang="da" href="explained-numbers.da.html">
+<link rel="alternate" hreflang="nb" href="explained-numbers.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-numbers.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-numbers.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-numbers.ro.html">
+<link rel="alternate" hreflang="he" href="explained-numbers.he.html">
+<link rel="alternate" hreflang="ar" href="explained-numbers.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-numbers.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-numbers.fi.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fi.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fi.html" class="home">Etusivu</a>
+    <a href="features.fi.html">Ominaisuudet</a>
+    <a href="indexer.fi.html">Indeksoija</a>
+    <a href="benchmarks.fi.html">Vertailut</a>
+    <a href="explained.fi.html" class="on">Selitykset</a>
+    <a href="MANUAL.html">Ohjeet</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fi.html">Lataa</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-numbers.html">English</option><option value="explained-numbers.fr.html">Français</option><option value="explained-numbers.de.html">Deutsch</option><option value="explained-numbers.it.html">Italiano</option><option value="explained-numbers.es.html">Español</option><option value="explained-numbers.nl.html">Nederlands</option><option value="explained-numbers.pt.html">Português</option><option value="explained-numbers.sv.html">Svenska</option><option value="explained-numbers.da.html">Dansk</option><option value="explained-numbers.nb.html">Norsk</option><option value="explained-numbers.fi.html" selected>Suomi</option><option value="explained-numbers.tr.html">Türkçe</option><option value="explained-numbers.ro.html">Română</option><option value="explained-numbers.he.html">עברית</option><option value="explained-numbers.ar.html">العربية</option><option value="explained-numbers.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fi.html" style="color:inherit">Selitykset</a> &middot; neljä</p>
+  <h1>Mitä luvut tarkoittavat</h1>
+  <p class="sub">Viisi saraketta toistuu useimmissa taulukoissamme. Tässä kerrotaan, mitä kukin niistä mittaa, miksi se kannattaa julkaista, ja suunnilleen miltä hyvä tai huono arvo näyttää koneella, joka sinulla oikeasti on.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Päätunnusluku</p>
+    <h2>Aika käyttökelpoiseen tiedostoon</h2>
+    <p class="lead">Kello käynnistyy, kun työ lisätään, ja pysähtyy, kun valmis sisältö on levyllä, tarkistettuna ja purettuna. Ei silloin, kun lataus päättyy, eikä silloin, kun ohjelma ilmoittaa olevansa valmis.</p>
+
+    <p>Tämä on ainoa luku, joka vastaa jotain, minkä itse koet. Ohjelma voi ladata nopeasti valmiiksi ja käyttää sitten minuutin tarkistamiseen ja purkamiseen, ja sinun paikaltasi katsottuna tuo minuutti kuuluu odotukseen. Pelkän latauksen mittaaminen suosisi niitä ohjelmia, jotka tekevät työnsä jälkikäteen, eli useimpia.</p>
+
+    <p>Se on myös syy siihen, miksi arkkitehtuurimme näyttää näissä taulukoissa poikkeukselliselta. Tarkistamme jokaisen palan sitä mukaa kuin se saapuu ja puramme latauksen vielä käydessä, joten viimeisen artikkelin saapuessa tehtävää on hyvin vähän. Muut ohjelmat vievät ensin koko postauksen levylle, tarkistavat sen sitten ja purkavat sen sitten, kolmena peräkkäisenä vaiheena. Helpossa työssä ero on vaatimaton. Suuressa tai vaurioituneessa se on suurin osa tuloksesta.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Se, joka luetaan väärin</p>
+    <h2>Muistin huippukäyttö (RSS)</h2>
+    <p class="lead">Suurin muistimäärä, jonka ohjelma piti hallussaan millä tahansa hetkellä työn aikana. RSS tulee sanoista resident set size, eli yksinkertaisesti se muisti, joka on todella keskusmuistissa eikä vain luvattu tai varattu.</p>
+
+    <p>Suurempi ei ole automaattisesti huonompi, eikä pienempi automaattisesti parempi. Muistia käytetään jotta vältyttäisiin jostain kalliimmalta, yleensä samojen tietojen lukemiselta levyltä kahdesti. Kysymys, joka kannattaa esittää, on ostaako tämä kulutus jotain ja onko se rajattu.</p>
+
+    <p><b>Rajattu on tärkeä sana.</b> Ohjelma, jonka muistinkäyttö kasvaa työn koon mukana, kohtaa ennen pitkää työn, jota se ei saa koneellasi valmiiksi, ja vika tulee sivutuksena tai tapettuna prosessina eikä kohteliaana viestinä. Me pidämme budjetin ja pysymme sen sisällä, minkä vuoksi voimme ajaa 190 GB:n työn koneella, jolla meillä on käytössä noin 1.1 GB muistia. Luku kuten 9.3 GB 190 GB:n työssä ei ole vain suuri, se on eri muotoinen: se skaalautuu työn mukana.</p>
+
+    <p>Siellä missä oma muistinkäyttömme nousee, yritämme kertoa mitä se osti. Pahoin vaurioituneissa postauksissa nykyinen koontiversio pitää pariteettitiedot muistissa korjatakseen heti sen sijaan että hakisi lisää myöhemmin, mikä nostaa muistin huippukäytön noin 0.8 GB:stä noin 1.3 GB:hen ja säästää kymmenkunta sekuntia. Vahingoittumattomassa postauksessa tuota kulutusta ei tapahdu ja luku on 0.24 GB.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Energian mittari</p>
+    <h2>Suoritinsekunnit (CPU-aika)</h2>
+    <p class="lead">Koko ohjelman kuluttama suoritinaika yhteensä, laskettuna yhteen kaikilta ytimiltä. Se mittaa tehtyä työtä eikä kulunutta aikaa, joten se voi olla paljon kelloa suurempi.</p>
+
+    <p>Jos työ kestää 100 sekuntia ja ilmoittaa 1,600 suoritinsekuntia, noin kuusitoista ydintä oli varattuna koko ajon ajan. Sillä on merkitystä kolmesta käytännön syystä: se on lämpöä, se on sähköä, ja koneella joka tekee samaan aikaan jotain muuta se on kilpailua resursseista. Ohjelma joka valmistuu kohtuullisessa ajassa kyllästämällä jokaisen ytimen ei ole ollut tehokas, se on ollut kallis.</p>
+
+    <p>Tässä sarakkeessa näkyvät koko sivuston suurimmat erot, suuremmat kuin missään loppuajassa. Tavulleen samalle tulosteelle samasta vaurioituneesta postauksesta olemme mitanneet kolmikymmenkertaisen hajonnan suoritinsekunneissa ohjelmien välillä. Tämä kannattaa tarkistaa ennen kuin olettaa, että kaksi muutaman sekunnin päässä toisistaan valmistuvaa ohjelmaa tekevät vertailukelpoisen määrän työtä.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Kaksi levysaraketta</p>
+    <h2>Levyn huippukäyttö ja taltion I/O</h2>
+    <p class="lead">Levyn huippukäyttö on suurin lisätila, jonka työ tarvitsi yhtenä hetkenä. Taltion I/O on kokonaismäärä tietoa, joka luettiin ja kirjoitettiin sinne pääsemiseksi. Ne vastaavat eri kysymyksiin.</p>
+
+    <p><b>Levyn huippukäyttö on kova rajoite.</b> Se ratkaisee, voiko työ ylipäätään ajaa. Useimmat ohjelmat kirjoittavat koko postauksen levylle ja purkavat sitten toisen kopion sen viereen, joten ne tarvitsevat noin kaksinkertaisen sisällön verran vapaata tilaa. 190 GB:n työssä se on noin 313 GB vapaana ennen aloitusta, meillä noin 157 GB, koska puramme latauksen aikana emmekä koskaan materialisoi arkiston osia. Jos levysi ei vedä kaksinkertaista työtä, tuo ero ei ole prosenttiluku, vaan kysymys siitä tapahtuuko lataus.</p>
+
+    <p><b>Taltion I/O on kulumista ja aikaa.</b> Postauksen kirjoittaminen, sen takaisin lukeminen tarkistusta varten, sen lukeminen uudelleen purkua varten ja tulosteen kirjoittaminen on neljä läpikäyntiä samasta datasta. Yhdellä läpimenolla se on noin kolmasosa liikenteestä, mikä SSD-levyllä on käyttöikää, ja hitaammalla levyllä usein varsinainen pullonkaula verkon sijaan.</p>
+
+    <p class="note" style="text-align:start">Huomautus siitä, miten luemme nämä kaksi, sillä se yllätti meidät ja voi yllättää sinut taulukoitamme lukiessa. Molemmat luvut tulevat laskureista, jotka kattavat koko levyn, eivät yhtä ohjelmaa. Se tekee niistä erinomaisen tarkistuksen sille, saastuttiko mittausta jokin muu samaan aikaan ajossa ollut, ja se tarkoittaa että mahdottomalta näyttävä luku yleensä on sitä: 6.5 GB:n työ joka ilmoittaa 144 GB levyliikennettä ei ole oudosti käyttäytyvä ohjelma, vaan kaksi työtä samalla koneella.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Taulukon lukeminen</p>
+    <h2>Kolme hyvää tapaa</h2>
+    <ul class="plain">
+      <li><b>Lue rivi kokonaan ennen kuin vertailet sarakkeita.</b> Useimmat taulukoistamme asettavat saman ohjelman useisiin olosuhteisiin. Kiinnostava tieto on yleensä se, miten ohjelman luku muuttuu helpon ja vaikean työn välillä, ei se missä se sijoittuu yhdessä yksittäisessä työssä.</li>
+      <li><b>Tarkista mikä maaliviiva oli.</b> Aika on verrattavissa toiseen aikaan vain jos molemmat ohjelmat saavuttivat saman tilan. Laskemme jokaisesta tulosteesta tiivisteen tunnetusti oikeaa kopiota vasten juuri tästä syystä, ja ohjelma joka ei päässyt sinne merkitään eikä ajasteta.</li>
+      <li><b>Suosi vaihteluvälejä keskiarvojen sijaan kun hajonta on suuri.</b> Siellä missä julkaisemme vaihteluvälin yksittäisen luvun sijaan, se on tarkoituksellista: se tarkoittaa että yksittäiset ajot poikkesivat toisistaan niin paljon että keskiarvo antaisi niistä väärän kuvan, ja näytämme sen mieluummin kuin piilotamme.</li>
+    </ul>
+
+    <p>Itse taulukot, koontiversio ja päivämäärä kunkin vieressä, ovat <a href="benchmarks.fi.html">vertailusivulla</a>, mukaan lukien häviämämme kierrokset.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - yhden läpimenon Usenet-lataaja.</div>
+    <div>
+      <a href="index.fi.html">Etusivu</a> ·
+      <a href="features.fi.html">Ominaisuudet</a> ·
+      <a href="indexer.fi.html">Indeksoija</a> ·
+      <a href="benchmarks.fi.html">Vertailut</a> ·
+      <a href="explained.fi.html">Selitykset</a> ·
+      <a href="download.fi.html">Lataa</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

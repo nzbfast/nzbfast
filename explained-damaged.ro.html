@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>De ce contează postările deteriorate - nzbfast</title>
+<meta name="description" content="Ce este un articol lipsă, de ce cererea lui de la un server costă între 79 ms și 2.2 secunde, și de ce soluția utilă este să nu mai întrebi, nu să întrebi mai repede.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.ro.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ro.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ro.html" class="home">Acasă</a>
+    <a href="features.ro.html">Funcții</a>
+    <a href="indexer.ro.html">Indexer</a>
+    <a href="benchmarks.ro.html">Benchmark-uri</a>
+    <a href="explained.ro.html" class="on">Explicații</a>
+    <a href="MANUAL.html">Documentație</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ro.html">Descarcă</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html" selected>Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.ro.html" style="color:inherit">Explicații</a> &middot; doi</p>
+  <h1>De ce contează postările deteriorate</h1>
+  <p class="sub">O descărcare care merge perfect este cazul ușor, și orice client îl gestionează competent. Diferențele interesante apar când lipsește o parte din postare, ceea ce se întâmplă mult mai des decât ar sugera cazul curat. Iată ce se petrece de fapt, și de ce costă atât de mult timp.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Forma problemei</p>
+    <h2>Ce este un articol lipsă</h2>
+    <p class="lead">O postare Usenet nu este un singur fișier. Sunt mii de articole mici, fiecare stocat independent pe serverele fiecărui furnizor, iar NZB-ul pe care îl descarci este lista numelor lor. O lansare de 6.5 GB înseamnă aproximativ 9,000 dintre ele.</p>
+
+    <p>Articolele dispar din motive obișnuite. Furnizorii le păstrează o perioadă de retenție fixă și apoi le șterg. Unii furnizori nu au primit deloc un anumit articol de la bun început, fiindcă propagarea între servere este imperfectă. Uneori o încărcare era incompletă când a fost publicată, iar o parte din ea nu a existat nicăieri vreodată. Oricare ar fi cauza, efectul este același: clientul tău cere un articol, iar răspunsul este un refuz, nu date.</p>
+
+    <p>Este destul de obișnuit încât cei care publică pe Usenet să țină cont. Aproape fiecare lansare vine însoțită de <b>date de paritate</b>, de obicei fișiere PAR2, adică informație redundantă suplimentară calculată din original. Dacă lipsește o parte din conținut, paritatea o poate reconstrui, cu condiția să ai destulă. O postare tipică poartă în jur de 10% paritate, deci o postare poate pierde o bună parte din sine și rămâne perfect recuperabilă.</p>
+
+    <div class="callout">
+      <p>Așadar o postare deteriorată nu este de obicei o descărcare stricată. Este o descărcare care cere puțină aritmetică înainte de a fi completă. Întrebarea este doar cât îi ia unui client să își dea seama, și tocmai acolo diferă printr-un factor de doi sau mai mult.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Partea costisitoare</p>
+    <h2>Să ceri ceva ce nu are nimeni</h2>
+    <p class="lead">Când un server nu are un articol, întoarce un refuz, iar clientul încearcă atunci următorul server din lista ta. Este lucrul corect de făcut, fiindcă al doilea furnizor îl are foarte des. Costul apare când nu îl are nimeni.</p>
+
+    <p>În acel caz clientul parcurge întreaga ta listă de furnizori, câte un server pe rând, și este refuzat de fiecare dintre ei înainte de a putea conchide că articolul chiar a dispărut. Parcurgerea este secvențială, iar refuzurile sunt mai lente decât presupune lumea. Le-am măsurat direct, pe o linie în repaus, fără niciun conținut în mișcare:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>furnizor</th><th class="num">timp de răspuns la o cerere normală</th><th class="num">timp de refuz al unui articol lipsă</th></tr></thead>
+      <tbody>
+        <tr><td>Furnizorul A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Furnizorul B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Furnizorul C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Furnizorul D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Furnizorul E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Două lucruri sar în ochi. Întâi, împrăștierea este uriașă: <b>un refuz costă undeva între 79 ms și 2.2 secunde</b>, în funcție de furnizorul care răspunde, o diferență de aproape treizeci de ori. Apoi, un furnizor refuză practic în timpul necesar întrebării, în vreme ce altul are nevoie de peste două sute de ori propriul timp normal de răspuns ca să spună nu. Nu este latență de rețea, este muncă ce se petrece la ei, iar întrebatul în mai puține dus-întors abia dacă ajută.</p>
+
+    <p>Adună: o parcurgere completă a cinci furnizori costă, pentru un singur articol care nu mai există, cam <b>5 secunde</b>. Gândește-te acum că o postare deteriorată are multe astfel de articole, și că un client care le tratează în ordine plătește acel cost în mod repetat în timp ce conexiunea ta stă degeaba. Descărcarea nu este lentă fiindcă datele sosesc încet. Au încetat cu totul să mai sosească, iar clientul așteaptă să i se spună ceea ce are deja destule informații ca să deducă.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Soluția</p>
+    <h2>Nu mai întreba, repară în schimb</h2>
+    <p class="lead">Ideea nu este să facem refuzurile mai rapide, fiindcă nu controlăm furnizorii. Este să observăm momentul în care răspunsul nu mai contează.</p>
+
+    <p>În orice clipă a unei descărcări clientul știe două lucruri: câte bucăți lipsesc încă și câte date de paritate deține deja. Dacă paritatea din mână ajunge să reconstruiască tot ce a rămas în suspensie, atunci răspunsul la «are cineva articolul ăsta?» nu mai poate schimba rezultatul. Fie că este un da lent, fie un nu lent, fișierul se reconstruiește oricum. Continuarea parcurgerii nu cumpără nimic în afară de întârziere.</p>
+
+    <p>Așa că versiunea actuală încetează să mai întrebe în acel punct și trece direct la reparare. Reconstrucția în sine este rapidă și a fost mereu: aproximativ <b>2.3 secunde</b> pe o postare de 6.5 GB, iar cifra aceea este aceeași în toate versiunile pe care le-am măsurat. Timpul economisit este în întregime așteptarea care nu mai are loc.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>postare de 6.5 GB, 60 de articole lipsă</th><th class="num">timpul până la un fișier verificat</th></tr></thead>
+      <tbody>
+        <tr><td>așteptarea refuzului de la fiecare furnizor</td><td class="num">23 s</td></tr>
+        <tr><td><b>oprirea de îndată ce paritatea acoperă golul</b></td><td class="win">13 s</td></tr>
+        <tr><td>din care, aritmetica de reparare propriu-zisă</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Aceeași schimbare nu face absolut nimic pe o postare nedeteriorată, ceea ce este dovada cea mai limpede că face ce credem noi: fără articole lipsă nu există parcurgere de scurtat, iar cele două versiuni termină o sarcină curată de 6.5 GB în identice 7 secunde.</p>
+
+    <p><b>Este un compromis, nu un câștig gratuit.</b> A repara devreme înseamnă a ține datele de paritate în memorie în loc să le arunci și să aduci altele mai târziu, deci memoria de vârf (RSS) pe o postare grav deteriorată urcă de la aproximativ 0.8 GB la aproximativ 1.3 GB, și tragem cam 400 MB în plus de la furnizori. Pe o postare nedeteriorată memoria rămâne neschimbată la 0.24 GB. Credem că este compromisul potrivit pentru cei mai mulți, întrucât memoria se cheltuiește doar în cazul în care îți câștigă zece secunde, dar este un cost real și există o setare pentru el.</p>
+
+    <p class="note" style="text-align:start">Numele furnizorilor sunt trecute sub tăcere în tabelul refuzurilor în mod deliberat. Cifrele sunt proprietatea unei singure măsurători, într-o seară, dintr-un singur loc, iar un furnizor care indexează altfel, sau pe care s-a întâmplat să îl prindem într-o seară proastă, nu ar trebui etichetat drept lent pe baza unei singure runde. Ce contează pentru argument este forma: refuzurile variază enorm, iar totalul este destul de mare cât să domine o descărcare deteriorată. Cifrele pe furnizor și ieșirea brută a sondelor sunt în evidența noastră internă, iar numerele de la un capăt la altul pe care le explică se află pe <a href="benchmarks.ro.html#damaged">pagina de benchmark-uri</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - descărcătorul Usenet într-o singură trecere.</div>
+    <div>
+      <a href="index.ro.html">Acasă</a> ·
+      <a href="features.ro.html">Funcții</a> ·
+      <a href="indexer.ro.html">Indexer</a> ·
+      <a href="benchmarks.ro.html">Benchmark-uri</a> ·
+      <a href="explained.ro.html">Explicații</a> ·
+      <a href="download.ro.html">Descarcă</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Timpi de refuz măsurați la 11 august 2026 din Europa la cinci furnizori, câte o conexiune fiecare, pe o linie în repaus, fără niciun transfer de conținut. Cifrele de la un capăt la altul pentru postarea deteriorată provin din runda cu șase clienți din aceeași seară; vezi pagina de benchmark-uri pentru tabelele complete, versiunile clienților și rundele pe care le pierdem.</p>
+</div></footer>
+
+</body>
+</html>

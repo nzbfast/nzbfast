@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comment fonctionne le téléchargement en une passe - nzbfast</title>
+<meta name="description" content="Ce que fait vraiment la passe unique, pourquoi ce n'est pas la même chose que le décompactage direct, quelles formes d'archives elle prend en charge, et pourquoi supprimer le cycle écriture-puis-relecture économise du disque, du temps processeur et de la mémoire.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.fr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fr.html" class="home">Accueil</a>
+    <a href="features.fr.html">Fonctionnalités</a>
+    <a href="indexer.fr.html">Indexeur</a>
+    <a href="benchmarks.fr.html">Benchmarks</a>
+    <a href="explained.fr.html" class="on">Explications</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fr.html">Télécharger</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html" selected>Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html">Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fr.html" style="color:inherit">Explications</a> &middot; un</p>
+  <h1>Comment fonctionne le téléchargement en une passe</h1>
+  <p class="sub">L'essentiel de ce qui rend ce client rapide n'est pas un chemin réseau plus rapide. C'est que les données ne se déplacent qu'une fois. Voici ce que cela veut dire en pratique, en quoi c'est autre chose que le décompactage direct, quelles formes d'archives y survivent, et ce que vaut réellement, sur une vraie machine, la suppression du cycle écriture-puis-relecture.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Le point de départ</p>
+    <h2>Ce que fait traditionnellement un téléchargement Usenet</h2>
+    <p class="lead">Un post, ce sont des milliers de petits articles encodés qui forment ensemble un jeu de volumes d'archive, lesquels contiennent à leur tour le fichier que vous voulez vraiment. Passer de l'un à l'autre a traditionnellement représenté quatre tâches distinctes, chacune s'achevant avant que la suivante ne commence.</p>
+
+    <ol>
+      <li><b>Télécharger et décoder.</b> Récupérer chaque article, le décoder, et écrire sur le disque les volumes d'archive réassemblés. Pour une sortie de 60 GB, cela fait 60 GB écrits.</li>
+      <li><b>Vérifier.</b> Relire les 60 GB depuis le disque pour les contrôler face aux données de parité, et les réparer si quelque chose cloche.</li>
+      <li><b>Décompacter.</b> Relire les volumes, et écrire le contenu extrait à côté. Il y a maintenant 120 GB sur le disque.</li>
+      <li><b>Nettoyer.</b> Supprimer les volumes, ne laissant que le contenu.</li>
+    </ol>
+
+    <p>Chaque étape est correcte, et le résultat est juste. Mais le contenu a été écrit deux fois, lu au moins deux fois, et au pic le disque a dû contenir deux copies complètes d'une tâche dont vous ne vouliez qu'une seule copie. Le chronomètre que vous vivez, ce sont les quatre étapes à la suite, et c'est pourquoi un client peut annoncer un téléchargement rapide tout en vous faisant attendre.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Le changement</p>
+    <h2>Le faire une seule fois à la place</h2>
+    <p class="lead">Une passe unique signifie que les octets vont du réseau à leur destination finale sans jamais devenir un fichier d'archive sur votre disque. Il n'y a pas d'étape deux ni trois, parce que le travail des deux se fait pendant que l'étape une tourne encore.</p>
+
+    <p>En pratique, chaque article est décodé en mémoire dès son arrivée et remis d'un coup à deux choses à la fois. Le vérificateur le contrôle immédiatement face aux données de parité, si bien que la justesse est établie au moment où les données atterrissent plutôt qu'en les relisant plus tard. L'extracteur traite les octets entrants comme une position dans l'archive, détermine à quelle partie de quel fichier de contenu ils appartiennent, et les écrit là.</p>
+
+    <p>Les volumes d'archive ne sont jamais assemblés. Ils existent comme une structure que l'extracteur comprend pendant que le téléchargement est en vol, et la seule chose qui atteint votre disque est le fichier que vous vouliez. Quand le dernier article arrive, il ne reste pour ainsi dire rien à faire, et c'est pourquoi nos temps de fin sont proches du temps de téléchargement lui-même plutôt que d'un téléchargement suivi d'une traîne.</p>
+
+    <div class="callout">
+      <p>La conséquence mesurable : pour la même tâche nous écrivons environ deux fois moins, relisons bien moins, et avons besoin à peu près de la taille du contenu en espace libre plutôt que du double. Sur une sortie de 190 GB, cela fait environ 157 GB d'espace libre contre environ 313 GB, et à peu près un tiers du trafic disque.</p>
+    </div>
+
+    <p>Deux choses rendent cela plus difficile qu'il n'y paraît, et ce sont elles qui expliquent que ce soit rare. Les articles n'arrivent pas dans l'ordre, l'extracteur doit donc composer avec des octets qui atterrissent à des positions arbitraires plutôt qu'en flux depuis le début. Et une archive compressée ne peut pas être décompressée à partir du milieu, donc toute partie du travail qui exige réellement l'ordre doit être reconnue et traitée autrement plutôt qu'écartée par hypothèse.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">La comparaison qu'on nous demande</p>
+    <h2>Pourquoi ce n'est pas du décompactage direct</h2>
+    <p class="lead">Le décompactage direct est une bonne fonctionnalité et les clients qui en disposent s'en portent mieux. Il résout aussi une autre partie du problème, et la différence se voit exactement là où elle compte.</p>
+
+    <p>Le décompactage direct commence à extraire avant la fin du téléchargement, de sorte que l'étape trois chevauche l'étape une au lieu de la suivre. Ce qu'il ne fait pas, c'est supprimer l'étape une. <b>Les volumes d'archive sont toujours écrits en entier sur votre disque</b>, parce que le décompacteur est un décompacteur classique qui lit des fichiers classiques ; le décompactage direct se contente de le démarrer plus tôt. Les deux copies existent toujours, les deux écritures ont toujours lieu, et le besoin d'espace libre est inchangé.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>écrire les volumes sur le disque</th><th class="num">espace libre nécessaire</th><th class="num">nombre d'écritures du contenu</th></tr></thead>
+      <tbody>
+        <tr><td>Télécharger, puis décompacter</td><td>oui, puis relecture</td><td class="num">~2&times; la tâche</td><td class="num">2</td></tr>
+        <tr><td>Décompactage direct</td><td>oui, relu plus tôt</td><td class="num">~2&times; la tâche</td><td class="num">2</td></tr>
+        <tr><td><b>Une passe</b></td><td class="win">jamais écrits</td><td class="win">~1&times; la tâche</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>La deuxième différence, c'est ce qui arrive quand la forme n'est pas simple. Comme le décompactage direct confie le travail à un décompacteur classique au fur et à mesure que les volumes apparaissent, il lui faut une situation sans complication : des volumes présents dans un ordre exploitable, aucune réparation en attente, rien à déverrouiller d'abord, et une archive dont le contenu n'est pas lui-même une archive. Dès que l'une de ces conditions manque, la chose sensée à faire est de se retirer et de revenir à un décompactage à la fin, et c'est ce qui se passe. Vous obtenez un résultat correct et le calendrier ordinaire.</p>
+
+    <p>Parce que notre extracteur est bâti dès le départ autour d'octets hors séquence, ces situations ne sont pas des exceptions pour lui. Voilà la vraie distinction : non pas que nous commencions plus tôt, mais que nous ne dépendions pas de conditions qui souvent ne sont pas réunies.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Ce qui y survit vraiment</p>
+    <h2>Les formes qu'il encaisse</h2>
+    <p class="lead">Une conception pareille ne vaut la peine que si elle s'applique aux posts que vous rencontrez vraiment, et non à un cas idéal bien propre. La position actuelle : <b>aucun format de conteneur n'est traité uniquement sur disque.</b> RAR, 7z et zip passent tous par le chemin en une passe.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>forme</th><th>une passe</th><th>remarques</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, stocké (sans compression)</td><td class="yes">oui</td><td>le cas courant pour les sorties multimédia</td></tr>
+        <tr><td>RAR, compressé</td><td class="yes">oui</td><td>y compris une archive compressée comme couche extérieure</td></tr>
+        <tr><td>RAR 1.5, 3, 4 et 5</td><td class="yes">oui</td><td>les quatre générations du format</td></tr>
+        <tr><td>7z</td><td class="yes">oui</td><td>y compris les contenus compressés en deflate</td></tr>
+        <tr><td>zip</td><td class="yes">oui</td><td>y compris les contenus bzip2 et LZMA</td></tr>
+        <tr><td>Contenus chiffrés</td><td class="yes">oui</td><td>avec un mot de passe, y compris le zip chiffré</td></tr>
+        <tr><td>En-têtes chiffrés</td><td class="yes">oui</td><td>quand les noms de fichiers sont cachés aussi</td></tr>
+        <tr><td>Chaînes de mots de passe</td><td class="yes">oui</td><td>le mot de passe de chaque couche rangé dans celle du dessus</td></tr>
+        <tr><td>Archives imbriquées</td><td class="yes">oui</td><td>désimbriquées à la volée, jusqu'à une profondeur configurable</td></tr>
+        <tr><td>Endommagé à plusieurs niveaux</td><td class="yes">oui</td><td>réparation à chaque niveau, toujours en une passe</td></tr>
+        <tr><td>Jeux découpés numériquement</td><td class="yes">oui</td><td>découpages de type <code>name.001</code></td></tr>
+        <tr><td>Archives auto-extractibles</td><td class="no">passe disque</td><td>l'archive ne commence pas au début du fichier</td></tr>
+        <tr><td>Zip réparti (<code>.z01</code>)</td><td class="no">passe disque</td><td>et quelques variantes de zip plus rares</td></tr>
+        <tr><td>Tâches reprises</td><td class="no">passe disque</td><td>une tâche poursuivie après un redémarrage se termine de façon classique</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Les trois refus sont honnêtes et se comportent tous de la même façon : la tâche s'achève correctement, par le chemin classique, et vous obtenez pour ce téléchargement le calendrier ordinaire à deux copies. Rien n'échoue ; cela cesse simplement d'être rapide à la manière décrite dans le reste de cette page. Les archives auto-extractibles sont refusées pour une raison structurelle et non par manque d'efforts : identifier une archive à ses premiers octets ne peut pas fonctionner quand les premiers octets sont un programme.</p>
+
+    <p>Les lignes imbriqué et chiffré sont celles qu'il faut prendre au sérieux, car c'est là que la plupart des clients vous rendent la tâche. Sur un corpus généré de dix formes imbriquées, noté par empreinte de contenu pour qu'un client qui renomme le contenu reçoive quand même le crédit, <b>nous en avons terminé 9 sur 10 sans intervention</b> ; le client suivant en a terminé 5, et deux autres en ont terminé 2. Celle que nous ne terminons pas automatiquement est une échelle à dix niveaux, qui se termine proprement à la limite de profondeur par défaut de cinq en laissant la couche la plus profonde sous forme d'archive saine, et se termine entièrement si vous relevez la limite. Ces manches sont sur la <a href="benchmarks.fr.html#nested">page des benchmarks</a> avec la grille complète.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Pourquoi cela vaut la peine</p>
+    <h2>Ce que rapporte vraiment la suppression de l'aller-retour</h2>
+
+    <p><b>C'est plus rapide, pour une raison peu glorieuse.</b> Écrire 60 GB et les relire n'est pas gratuit, même sur un disque SSD rapide, et sur tout ce qui est plus lent c'est souvent le vrai goulot d'étranglement plutôt que le réseau. Supprimer une écriture et deux lectures retire entièrement ce temps de votre chronomètre. Le gain est le plus grand exactement là où on le remarque le plus : les grosses tâches, et les machines dont le disque n'est pas la partie la plus rapide.</p>
+
+    <p><b>Cela divise l'usure par deux.</b> Les disques SSD ont un nombre fini d'écritures en eux, et un téléchargeur qui écrit chaque contenu deux fois dépense ce budget à double vitesse sans aucun bénéfice pour vous. Sur quelques centaines de téraoctets téléchargés, ce qui est une année ordinaire pour un utilisateur actif, la différence représente une fraction significative de la vie d'un disque.</p>
+
+    <p><b>Cela change ce qui rentre.</b> L'espace libre n'est pas une caractéristique de performance, c'est un oui ou non. Une tâche qui exige deux fois sa propre taille en marge tourne ou ne tourne pas. N'avoir besoin que d'à peu près la taille du contenu signifie que des tâches aboutissent sur des machines et des volumes où l'approche classique s'arrête net, et c'est pourquoi une sortie de 190 GB tient ici dans environ 157 GB d'espace libre plutôt que dans environ 313 GB.</p>
+
+    <p><b>Cela coûte moins de temps processeur.</b> Ne pas faire passer les données deux fois par le disque supprime le travail que cela demande, et vérifier pendant le téléchargement veut dire aucune seconde passe sur le contenu pour le contrôler. Notre coût processeur reste plat à environ 1.7 seconde-processeur par gigaoctet, d'une tâche de 35 GB à une de 190 GB, et c'est la propriété utile : le coût par gigaoctet n'augmente pas quand la tâche grandit.</p>
+
+    <p><b>Cela tourne avec moins de mémoire, et une mémoire bornée.</b> Comme les octets sont consommés à leur arrivée plutôt qu'accumulés, l'espace de travail est un budget que vous fixez et non une fonction de la taille de la tâche. C'est ce qui permet de traiter une sortie de 190 GB sur une machine disposant d'environ 1.1 GB. La distinction qui compte n'est pas le chiffre mais la forme : une mémoire qui croît avec la tâche finira par rencontrer une tâche que votre machine ne peut pas terminer, et elle échoue en swappant ou en se faisant tuer plutôt qu'en vous prévenant.</p>
+
+    <div class="callout">
+      <p>Pris ensemble, ces points concernent moins le fait de gagner un benchmark que celui de savoir où le logiciel peut tourner tout court. Une conception qui demande la moitié de l'espace libre, la moitié des écritures et une quantité bornée de mémoire fonctionne sur un petit serveur domestique, un portable plus ancien ou un NAS, et c'est bien là que vit une bonne partie de ce type de logiciel.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Chaque chiffre de cette page est mesuré et publié avec la version et la date à côté, sur la <a href="benchmarks.fr.html">page des benchmarks</a>, y compris les manches que nous perdons. Le contrepoids honnête, indiqué là-bas aussi : un extracteur et un réparateur bâtis pour accompagner un téléchargement en cours occupent plus de mémoire résidente qu'un outil autonome lancé une fois en ligne de commande ; donc si votre contrainte est l'empreinte la plus petite possible pour une tâche unique sur un fichier que vous avez déjà, les outils dédiés gagnent cette colonne.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - le téléchargeur Usenet en une passe.</div>
+    <div>
+      <a href="index.fr.html">Accueil</a> ·
+      <a href="features.fr.html">Fonctionnalités</a> ·
+      <a href="indexer.fr.html">Indexeur</a> ·
+      <a href="benchmarks.fr.html">Benchmarks</a> ·
+      <a href="explained.fr.html">Explications</a> ·
+      <a href="download.fr.html">Télécharger</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

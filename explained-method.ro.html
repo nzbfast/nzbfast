@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cum testăm, în întregime - nzbfast</title>
+<meta name="description" content="Mașinile, materialele de test, setările pe care le primește fiecare client, și regulile care hotărăsc dacă o rundă de benchmark contează măcar.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.ro.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.ro.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.ro.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.ro.html" class="home">Acasă</a>
+    <a href="features.ro.html">Funcții</a>
+    <a href="indexer.ro.html">Indexer</a>
+    <a href="benchmarks.ro.html">Benchmark-uri</a>
+    <a href="explained.ro.html" class="on">Explicații</a>
+    <a href="MANUAL.html">Documentație</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.ro.html">Descarcă</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html" selected>Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.ro.html" style="color:inherit">Explicații</a> &middot; trei</p>
+  <h1>Cum testăm, în întregime</h1>
+  <p class="sub">Publicăm comparații cu programele altor oameni, așa că metoda trebuie să poată fi verificată. Iat-o în întregime: mașinile, conținutul, setările pe care le primește fiecare client, și regulile care hotărăsc dacă o rulare contează ca rezultat sau este aruncată.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Standul</p>
+    <h2>Aceeași mașină, aceeași linie, același conținut</h2>
+    <p class="lead">Fiecare client dintr-o comparație rulează pe o singură mașină, către aceiași furnizori, pe același conținut, în aceeași rundă. Nimic nu este preluat dintr-o zi anterioară.</p>
+
+    <ul class="plain">
+      <li><b>Mașinile.</b> Un Apple M1 Ultra pe o linie de 10 GbE în Europa, și un M3 Ultra pe o linie mai lentă în Statele Unite. Comparațiile nu le amestecă niciodată pe cele două: un tabel este o mașină.</li>
+      <li><b>Linia contează mai mult decât procesorul.</b> Pe o linie de 10 GbE majoritatea clienților pot satura conexiunea la o sarcină ușoară, motiv pentru care scenariile interesante sunt cele în care altceva decât lățimea de bandă brută decide rezultatul.</li>
+      <li><b>Furnizori.</b> Cinci furnizori comerciali, același set pentru fiecare client, peste TLS. Excludem un furnizor din aceste runde fiindcă limitează câte locații se pot conecta simultan, ceea ce ar face o mașină de test partajată nedreaptă față de cine rulează al doilea.</li>
+      <li><b>Conexiuni.</b> Fiecare client primește același număr per furnizor într-o rundă dată, iar runda spune care. Mai multe nu înseamnă automat mai bine; am măsurat propriul nostru client păstrând același timp de sosire de-a lungul unei variații de nouă ori a numărului de conexiuni.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Regula care hotărăște totul</p>
+    <h2>Un client este judecat după fișier, nu după propriul mesaj de stare</h2>
+    <p class="lead">Acesta este cel mai important lucru de pe pagină. Fiecare rundă se încheie găsind cel mai mare fișier produs de client, oriunde în ieșirea lui, și calculându-i amprenta față de o copie de referință. Dimensiune și MD5, la fiecare rundă, nu pe un eșantion.</p>
+
+    <p>Facem asta fiindcă raportul de succes al unui client nu este o dovadă de încredere. Am măsurat un client raportând <i>done</i> la o sarcină al cărei director de ieșire era gol. Am măsurat altul raportând <i>Completed</i> după ce livrase volume de arhivă brute pe care nu le dezarhivase niciodată. Un instrument de reparare foarte folosit iese cu un cod de eroare după o reparare reușită. Niciunul dintre acei clienți nu mințea; șirurile de stare pur și simplu înseamnă lucruri diferite pentru autori diferiți, iar un benchmark care se încrede în ele măsoară vocabular, nu comportament.</p>
+
+    <p>Așadar linia de sosire este aceeași pentru toți: <b>conținutul există, la dimensiunea corectă, cu amprenta corectă</b>. Dacă un client se oprește înainte, nu primește timp, iar întreaga coloană este marcată în loc să fie omisă în tăcere. Un client lent care termină se descurcă mai bine decât unul rapid care nu termină, iar tabelul trebuie să spună asta.</p>
+
+    <div class="callout">
+      <p>Corolarul este că o neterminare este un rezultat, nu o eroare de partea noastră. Când publicăm una, descriem starea finală în termeni simpli, inclusiv orice sugerează că este specifică acelei sarcini și nu generală, și spunem ce a făcut clientul în loc să termine.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ordine și repetare</p>
+    <h2>De ce rundele alternează, și de ce rulările unice nu se publică</h2>
+    <p class="lead">Debitul furnizorilor variază de la minut la minut, uneori cu un factor de doi sau trei. Două măsurători luate la momente diferite măsoară în parte vremea.</p>
+
+    <p>Așadar clienții rulează <b>unul după altul și întrepătruns</b>, iar ordinea se inversează între repetări, astfel încât niciun client să nu fie mereu cel care intră primul pe o linie caldă sau rece. Un rezultat este tiparul de-a lungul repetărilor, nu cea mai bună rulare. Când împrăștierea este mare, publicăm intervalul în locul unei medii care ar ascunde-o, iar dacă nu știm de ce cifrele unui client sunt împrăștiate, o spunem în loc să inventăm o cauză.</p>
+
+    <p>Comparațiile între runde diferite se evită oriunde este posibil. Dacă o afirmație cere două cifre, preferăm să le realergăm pe amândouă într-o singură rundă decât să scădem cifra unei zile din a alteia, fiindcă starea standului, condițiile furnizorilor și versiunile clienților derivă toate. Când comparăm două versiuni proprii, ambele rulează în aceeași rundă, alternând, pe același conținut.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Verificările nespectaculoase</p>
+    <h2>Ce rulează înainte și în timpul fiecărei runde</h2>
+    <p class="lead">Cele mai multe există fiindcă o defecțiune tăcută a produs cândva un număr cu aspect sănătos, publicabil și greșit. Fiecare rulează acum automat și oprește runda în loc să avertizeze.</p>
+
+    <ul class="plain">
+      <li><b>Fiecare furnizor răspunde înainte ca runda să înceapă.</b> O rundă rulată în timp ce doi furnizori sunt căzuți măsoară o pană, și arată exact ca un client lent.</li>
+      <li><b>Executabilul este identificat prin amprentă înaintea fiecărei runde</b>, nu după numele fișierului sau șirul de versiune. Două versiuni ale noastre raportau același număr de versiune deși difereau prin 88 de comiteri; doar amprenta le deosebește, iar tabelele o citează.</li>
+      <li><b>Fiecare client rulează ca fiind cod nativ.</b> Pe mașinile Apple un ajutor construit greșit poate rula tăcut sub traducere, ceea ce costă timp de procesor care ține de alegerea noastră de împachetare, nu de codul clientului. Verificăm procesul care rulează, nu doar fișierul.</li>
+      <li><b>Limitele de fișiere deschise sunt ridicate pentru toți, identic.</b> macOS pornește programele cu o limită de 256 de fișiere deschise, pe care un set complet de conexiuni o poate depăși. Un client care o atinge tinde să dispară fără raport de blocare, ceea ce se citește exact ca o defecțiune a programului. Aparenta neterminare a unui concurent s-a dovedit a fi tocmai asta; cu limita ridicată, sarcina identică s-a încheiat în 44 de secunde.</li>
+      <li><b>Traficul pe disc este înregistrat pe rundă</b>, ceea ce servește totodată drept verificare că nimic altceva nu folosea mașina. Contoarele acelea acoperă întregul disc, nu un singur program, așa că dacă ar rula o a doua sarcină, munca ei ar apărea în măsurătorile noastre. Citirile plate de-a lungul unei runde sunt felul în care știm că un rezultat aparține clientului pe care îl numește.</li>
+      <li><b>Fiecare client scrie în propriul arbore de ieșire</b>, iar arborele este șters înaintea fiecărei runde, astfel încât nicio rulare să nu poată fi satisfăcută de fișierul unei rulări anterioare.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Acolo unde un client are nevoie de setări anume pentru a se descurca bine, le primește, iar runda spune care. Exemple: înlănțuirea cererilor activată acolo unde un client vine cu ea oprită, verificarea duplicatelor dezactivată când aceeași sarcină este descărcată în mod repetat, și ajutoarele de dezarhivare luate din pachetul propriu al clientului în locul unei copii de sistem. Scopul este ca fiecare client să fie măsurat la potențialul lui maxim, nu la setările implicite, întrucât setările implicite sunt o discuție separată de capacitate.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ce nu vom face</p>
+    <h2>Limitele acestor cifre</h2>
+    <ul class="plain">
+      <li><b>Nu publicăm o cifră pe care nu am măsurat-o.</b> Dacă un număr este dedus și nu observat, este etichetat ca dedus, și preferăm să lăsăm un gol decât să îl umplem cu o aritmetică ce se citește ca o măsurătoare.</li>
+      <li><b>Nu actualizăm pe tăcute un rezultat pierdut.</b> O rundă pe care o pierdem rămâne publicată până când o reluare o înlocuiește, iar când o înfrângere devine victorie, schimbarea primește o explicație lângă tabel în locul unei editări tăcute.</li>
+      <li><b>Rundele cu furnizori nu sunt încă reproductibile independent</b>, fiindcă nu al nostru este conținutul, ca să îl distribuim. Testele pe componente, care folosesc conținut generat, sunt. Pregătim fișiere de test pe care le putem publica, astfel încât și rundele cu furnizori să devină verificabile.</li>
+      <li><b>Acestea sunt benchmark-urile noastre asupra programelor altor oameni.</b> Fiecare versiune este numită și datată, iar când un client lansează o versiune nouă realergăm rundele pe care le afectează în loc să lăsăm sus o comparație învechită. Dacă socotești că un rezultat este greșit, setările și versiunile sunt publicate ca să se poată contesta punctual.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - descărcătorul Usenet într-o singură trecere.</div>
+    <div>
+      <a href="index.ro.html">Acasă</a> ·
+      <a href="features.ro.html">Funcții</a> ·
+      <a href="indexer.ro.html">Indexer</a> ·
+      <a href="benchmarks.ro.html">Benchmark-uri</a> ·
+      <a href="explained.ro.html">Explicații</a> ·
+      <a href="download.ro.html">Descarcă</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

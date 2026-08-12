@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hvorfor beskadigede opslag betyder noget - nzbfast</title>
+<meta name="description" content="Hvad en manglende artikel er, hvorfor det koster mellem 79 ms og 2.2 sekunder at bede en server om en, og hvorfor den brugbare løsning er at holde op med at spørge frem for at spørge hurtigere.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.da.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.da.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.da.html" class="home">Hjem</a>
+    <a href="features.da.html">Funktioner</a>
+    <a href="indexer.da.html">Indexer</a>
+    <a href="benchmarks.da.html">Benchmarks</a>
+    <a href="explained.da.html" class="on">Forklaret</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.da.html">Download</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html" selected>Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.da.html" style="color:inherit">Forklaret</a> &middot; to</p>
+  <h1>Hvorfor beskadigede opslag betyder noget</h1>
+  <p class="sub">Et download, der går perfekt, er det lette tilfælde, og enhver klient klarer det kompetent. De interessante forskelle dukker op, når en del af opslaget mangler, og det sker langt oftere, end det rene tilfælde lader ane. Her står, hvad der faktisk foregår, og hvorfor det koster så meget tid.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Problemets form</p>
+    <h2>Hvad en manglende artikel er</h2>
+    <p class="lead">Et Usenet-opslag er ikke én fil. Det er tusindvis af små artikler, hver især gemt uafhængigt på hver udbyders servere, og den NZB, du henter, er en liste over deres navne. En udgivelse på 6.5 GB er omtrent 9,000 af dem.</p>
+
+    <p>Artikler forsvinder af helt almindelige grunde. Udbydere gemmer dem i en fast opbevaringsperiode og sletter dem så. Nogle udbydere modtog aldrig en bestemt artikel til at begynde med, fordi udbredelsen mellem servere er ufuldkommen. Nu og da var en upload ufuldstændig, da den blev lagt op, og en del af den fandtes aldrig nogen steder. Uanset årsagen er virkningen den samme: din klient beder om en artikel, og svaret er en afvisning i stedet for data.</p>
+
+    <p>Det er normalt nok til, at de, der lægger op på Usenet, regner med det. Næsten enhver udgivelse følges af <b>paritetsdata</b>, som regel PAR2-filer, altså ekstra overflødig information beregnet ud fra originalen. Mangler en del af indholdet, kan pariteten genskabe det, forudsat at du har nok af den. Et typisk opslag bærer omkring 10% paritet, så et opslag kan miste en pæn bid af sig selv og stadig være fuldt ud til at redde.</p>
+
+    <div class="callout">
+      <p>Et beskadiget opslag er derfor sjældent et ødelagt download. Det er et download, der kræver lidt regnearbejde, før det er færdigt. Spørgsmålet er kun, hvor lang tid en klient bruger på at regne det ud, og dér adskiller de sig med en faktor to eller mere.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Den dyre del</p>
+    <h2>At spørge efter noget, ingen har</h2>
+    <p class="lead">Når en server ikke har en artikel, returnerer den en afvisning, og klienten prøver så den næste server på din liste. Det er det rigtige at gøre, for den anden udbyder har den meget ofte. Prisen viser sig, når ingen har den.</p>
+
+    <p>I det tilfælde går klienten hele din udbyderliste igennem, én server ad gangen, og bliver afvist af hver eneste, før den kan slutte, at artiklen virkelig er væk. Gennemgangen er sekventiel, og afvisninger er langsommere, end folk går ud fra. Vi målte dem direkte, på en hvilende linje, uden at noget indhold overhovedet bevægede sig:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>udbyder</th><th class="num">tid til at besvare en almindelig forespørgsel</th><th class="num">tid til at afvise en manglende artikel</th></tr></thead>
+      <tbody>
+        <tr><td>Udbyder A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Udbyder B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Udbyder C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Udbyder D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Udbyder E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>To ting springer i øjnene. For det første er spredningen enorm: <b>en afvisning koster et sted mellem 79 ms og 2.2 sekunder</b> afhængigt af hvilken udbyder der svarer, en forskel på næsten tredive gange. For det andet afviser én udbyder stort set på den tid, det tager at spørge, mens en anden bruger mere end to hundrede gange sin egen normale svartid på at sige nej. Det er ikke netværksforsinkelse, det er arbejde, der foregår hos dem, og at spørge i færre tur-retur hjælper næsten ikke.</p>
+
+    <p>Læg det sammen: en fuld gennemgang af fem udbydere koster for én enkelt artikel, der ikke længere findes, omkring <b>5 sekunder</b>. Overvej så, at et beskadiget opslag har mange sådanne artikler, og at en klient, der behandler dem i rækkefølge, betaler den pris igen og igen, mens din forbindelse ligger stille. Downloadet er ikke langsomt, fordi data kommer langsomt. Data er holdt helt op med at komme, og klienten venter på at få fortalt det, den allerede har oplysninger nok til at regne ud.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Løsningen</p>
+    <h2>Hold op med at spørge, og reparér i stedet</h2>
+    <p class="lead">Indsigten er ikke at gøre afvisninger hurtigere, for vi bestemmer ikke over udbyderne. Den er at bemærke, hvornår svaret ikke længere betyder noget.</p>
+
+    <p>På ethvert tidspunkt under et download ved klienten to ting: hvor mange stykker der stadig mangler, og hvor mange paritetsdata den allerede har. Rækker pariteten i hånden til at genopbygge alt det udestående, kan svaret på, om nogen har denne artikel, ikke længere ændre udfaldet. Uanset om det er et langsomt ja eller et langsomt nej, bliver filen genopbygget alligevel. At fortsætte gennemgangen køber intet andet end forsinkelse.</p>
+
+    <p>Det nuværende build holder derfor op med at spørge på det punkt og går direkte til reparation. Selve genopbygningen er hurtig og har altid været det: omkring <b>2.3 sekunder</b> på et opslag på 6.5 GB, og det tal er det samme i hver eneste version, vi har målt. Den sparede tid er udelukkende den ventetid, der ikke længere finder sted.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>opslag på 6.5 GB, 60 manglende artikler</th><th class="num">tid til en verificeret fil</th></tr></thead>
+      <tbody>
+        <tr><td>vente på at hver udbyder afviser</td><td class="num">23 s</td></tr>
+        <tr><td><b>stoppe så snart pariteten dækker hullet</b></td><td class="win">13 s</td></tr>
+        <tr><td>heraf selve reparationsregnestykket</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Den samme ændring gør absolut intet på et ubeskadiget opslag, hvilket er det klareste bevis på, at den gør det, vi tror: uden manglende artikler er der ingen gennemgang at afkorte, og de to builds gennemfører en ren opgave på 6.5 GB på identiske 7 sekunder.</p>
+
+    <p><b>Det er en byttehandel, ikke en gratis gevinst.</b> At reparere tidligt betyder at holde paritetsdata i hukommelsen frem for at smide dem væk og hente mere senere, så spidsbelastningen af hukommelse (RSS) på et hårdt beskadiget opslag stiger fra omkring 0.8 GB til omkring 1.3 GB, og vi henter cirka 400 MB mere hos udbyderne. På et ubeskadiget opslag er hukommelsen uændret på 0.24 GB. Vi mener, det er den rigtige byttehandel for de fleste, eftersom hukommelsen kun bruges i det tilfælde, hvor den giver dig ti sekunder, men det er en reel omkostning, og der findes en indstilling for den.</p>
+
+    <p class="note" style="text-align:start">Udbydernavnene er bevidst udeladt i afvisningstabellen. Tallene er egenskaben ved én måling en aften fra ét sted, og en udbyder, der indekserer anderledes, eller som vi tilfældigvis ramte på en dårlig aften, bør ikke stemples som langsom på grundlag af én enkelt omgang. Det, der betyder noget for argumentet, er formen: afvisninger varierer voldsomt, og summen er stor nok til at dominere et beskadiget download. Tallene pr. udbyder og de rå måledata ligger i vores interne optegnelser, og de tal fra ende til anden, de forklarer, står på <a href="benchmarks.da.html#damaged">benchmarksiden</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - one-pass Usenet-downloaderen.</div>
+    <div>
+      <a href="index.da.html">Hjem</a> ·
+      <a href="features.da.html">Funktioner</a> ·
+      <a href="indexer.da.html">Indexer</a> ·
+      <a href="benchmarks.da.html">Benchmarks</a> ·
+      <a href="explained.da.html">Forklaret</a> ·
+      <a href="download.da.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Afvisningstider målt den 11. august 2026 fra Europa hos fem udbydere, én forbindelse hver, på en hvilende linje uden nogen indholdsoverførsel. Tallene fra ende til anden for beskadigede opslag stammer fra samme aftens omgang med seks klienter; se benchmarksiden for de fulde tabeller, klientversionerne og de omgange, vi taber.</p>
+</div></footer>
+
+</body>
+</html>

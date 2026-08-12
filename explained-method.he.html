@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>איך אנחנו בודקים, במלואו - nzbfast</title>
+<meta name="description" content="המכונות, חומרי הבדיקה, ההגדרות שכל לקוח מקבל, והכללים שקובעים אם סבב בדיקה נחשב בכלל.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.he.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.he.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.he.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.he.html" class="home">בית</a>
+    <a href="features.he.html">תכונות</a>
+    <a href="indexer.he.html">האינדקסר</a>
+    <a href="benchmarks.he.html">בדיקות ביצועים</a>
+    <a href="explained.he.html" class="on">הסברים</a>
+    <a href="MANUAL.html">מסמכים</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.he.html">הורדה</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html">Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html" selected>עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.he.html" style="color:inherit">הסברים</a> &middot; שלושה</p>
+  <h1>איך אנחנו בודקים, במלואו</h1>
+  <p class="sub">אנחנו מפרסמים השוואות מול תוכנות של אנשים אחרים, ולכן השיטה חייבת להיות ניתנת לבדיקה. הנה היא כולה: המכונות, התוכן, ההגדרות שכל לקוח מקבל, והכללים שקובעים אם ריצה נחשבת תוצאה או נזרקת.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">מערך הבדיקה</p>
+    <h2>אותה מכונה, אותו קו, אותו תוכן</h2>
+    <p class="lead">כל לקוח בהשוואה רץ על מכונה אחת, מול אותם ספקים, על אותו תוכן, בתוך אותו סבב. שום דבר אינו נגרר מיום קודם.</p>
+
+    <ul class="plain">
+      <li><b>המכונות.</b> מכונת Apple M1 Ultra על קו 10 GbE באירופה, ומכונת M3 Ultra על קו איטי יותר בארצות הברית. השוואות לעולם אינן מערבבות את השתיים: טבלה היא מכונה אחת.</li>
+      <li><b>הקו חשוב יותר מהמעבד.</b> על קו 10 GbE רוב הלקוחות יכולים לרווֹת את החיבור במשימה קלה, ולכן התרחישים המעניינים הם אלה שבהם משהו אחר מרוחב הפס הגולמי מכריע את התוצאה.</li>
+      <li><b>ספקים.</b> חמישה ספקים מסחריים, אותה קבוצה לכל לקוח, מעל TLS. אנחנו מוציאים ספק אחד מהסבבים האלה משום שהוא מגביל כמה מיקומים רשאים להתחבר בו זמנית, מה שהיה הופך מכונת בדיקה משותפת לבלתי הוגנת כלפי מי שרץ שני.</li>
+      <li><b>חיבורים.</b> כל לקוח מקבל את אותו מספר לכל ספק בסבב נתון, והסבב מציין איזה. יותר אינו טוב יותר אוטומטית; מדדנו את הלקוח שלנו עצמו שומר על אותו זמן סיום לאורך שינוי של פי תשעה במספר החיבורים.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">הכלל שמכריע הכול</p>
+    <h2>לקוח נשפט על פי הקובץ, לא על פי הודעת המצב של עצמו</h2>
+    <p class="lead">זה הדבר החשוב ביותר בעמוד הזה. כל סבב מסתיים באיתור הקובץ הגדול ביותר שהלקוח הפיק, בכל מקום בפלט שלו, ובחישוב תקציר שלו מול עותק ידוע כתקין. גודל ו-MD5, בכל סבב, לא על מדגם.</p>
+
+    <p>אנחנו עושים זאת משום שדיווח ההצלחה של לקוח אינו ראיה אמינה. מדדנו לקוח שדיווח <i>done</i> על משימה שתיקיית הפלט שלה הייתה ריקה. מדדנו אחר שדיווח <i>Completed</i> לאחר שמסר כרכי ארכיון גולמיים שמעולם לא פרק. כלי תיקון נפוץ יוצא עם קוד כשל אחרי תיקון מוצלח. אף אחד מהלקוחות האלה לא שיקר; מחרוזות מצב פשוט אומרות דברים שונים למחברים שונים, ומדידה שסומכת עליהן מודדת אוצר מילים ולא התנהגות.</p>
+
+    <p>לכן קו הסיום זהה לכולם: <b>התוכן קיים, בגודל הנכון, עם התקציר הנכון</b>. אם לקוח נעצר לפני כן, הוא אינו מקבל זמן, והעמודה כולה מסומנת ולא מושמטת בשקט. לקוח איטי שמסיים עושה טוב יותר מלקוח מהיר שאינו מסיים, והטבלה צריכה לומר זאת.</p>
+
+    <div class="callout">
+      <p>המסקנה הנגזרת היא שאי-סיום הוא תוצאה, לא שגיאה מצידנו. כשאנחנו מפרסמים אחד כזה, אנחנו מתארים את מצב הסיום במילים פשוטות, כולל כל דבר שמרמז שהוא ייחודי למשימה הזאת ולא כללי, ואומרים מה הלקוח עשה במקום לסיים.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">סדר וחזרה</p>
+    <h2>למה הסבבים מתחלפים, ולמה ריצות בודדות אינן מתפרסמות</h2>
+    <p class="lead">תפוקת הספקים משתנה מדקה לדקה, לעיתים בפי שניים או שלושה. שתי מדידות שנלקחו בזמנים שונים מודדות בחלקן את מזג האוויר.</p>
+
+    <p>לכן הלקוחות רצים <b>בזה אחר זה ולסירוגין</b>, והסדר מתהפך בין החזרות, כך שאף לקוח אינו תמיד זה שנכנס ראשון לקו חם או קר. תוצאה היא התבנית לאורך החזרות, לא הריצה הטובה ביותר. כשהפיזור רחב, אנחנו מפרסמים את הטווח ולא ממוצע שהיה מסתיר אותו, ואם איננו יודעים למה המספרים של לקוח מפוזרים, אנחנו אומרים זאת במקום להמציא סיבה.</p>
+
+    <p>השוואות בין סבבים שונים נמנעות בכל מקום שאפשר. אם טענה דורשת שני מספרים, אנחנו מעדיפים להריץ מחדש את שניהם בסבב אחד ולא להחסיר את הנתון של יום אחד מזה של יום אחר, כי מצב המערך, תנאי הספקים וגרסאות הלקוחות כולם נודדים. כשאנחנו משווים שתי גרסאות משלנו, שתיהן רצות באותו סבב, לסירוגין, על אותו תוכן.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">הבדיקות הלא זוהרות</p>
+    <h2>מה רץ לפני כל סבב ובמהלכו</h2>
+    <p class="lead">רובן קיימות משום שתקלה שקטה הפיקה פעם מספר בריא למראה, ראוי לפרסום ושגוי. כל אחת מהן רצה כעת אוטומטית ועוצרת את הסבב במקום להזהיר.</p>
+
+    <ul class="plain">
+      <li><b>כל ספק עונה לפני שהסבב מתחיל.</b> סבב שרץ בזמן ששני ספקים מושבתים מודד תקלה, וזה נראה בדיוק כמו לקוח איטי.</li>
+      <li><b>הקובץ הבינארי מזוהה לפי תקציר לפני כל סבב</b>, לא לפי שם קובץ או מחרוזת גרסה. שתי גרסאות שלנו דיווחו על אותו מספר גרסה אף שנבדלו ב-88 שינויים; רק התקציר מבדיל ביניהן, והטבלאות מציינות אותו.</li>
+      <li><b>כל לקוח רץ כקוד מקורי.</b> במכונות Apple עוזר שנבנה שלא כהלכה עלול לרוץ בשקט תחת תרגום, מה שעולה זמן מעבד ששייך לבחירת האריזה שלנו ולא לקוד של הלקוח. אנחנו בודקים את התהליך הרץ, לא רק את הקובץ.</li>
+      <li><b>מגבלות הקבצים הפתוחים מוגדלות לכולם, באופן זהה.</b> מערכת macOS מפעילה תוכניות עם מגבלה של 256 קבצים פתוחים, שמערך חיבורים מלא עלול לחרוג ממנה. לקוח שנתקל בה נוטה להיעלם בלי דוח קריסה, מה שנקרא בדיוק ככשל של התוכנה. אי-הסיום לכאורה של מתחרה אחד התברר כזה; לאחר ההגדלה, אותה משימה בדיוק הסתיימה ב-44 שניות.</li>
+      <li><b>תעבורת הדיסק נרשמת לכל סבב</b>, וזה משמש גם כבדיקה ששום דבר אחר לא השתמש במכונה. המונים האלה מכסים את הדיסק כולו ולא תוכנית אחת, כך שאם משימה שנייה הייתה רצה, עבודתה הייתה מופיעה בתוך המדידות שלנו. קריאות שטוחות לאורך סבב הן הדרך שבה אנחנו יודעים שתוצאה שייכת ללקוח שהיא נוקבת בשמו.</li>
+      <li><b>כל לקוח כותב לעץ פלט משלו</b>, והעץ נמחק לפני כל סבב, כך שאף ריצה אינה יכולה להסתפק בקובץ של ריצה קודמת.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">היכן שלקוח זקוק להגדרות מסוימות כדי לתפקד היטב, הוא מקבל אותן, והסבב מציין אילו. דוגמאות: שרשור בקשות מופעל היכן שלקוח מגיע איתו כבוי, בדיקת כפילויות מושבתת כשאותה משימה מורדת שוב ושוב, ועוזרי פריקה שנלקחים מהחבילה של הלקוח עצמו ולא מעותק מערכת. המטרה היא שכל לקוח יימדד במיטבו ולא בהגדרות ברירת המחדל שלו, שכן ברירות מחדל הן דיון נפרד מיכולת.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">מה לא נעשה</p>
+    <h2>גבולות המספרים האלה</h2>
+    <ul class="plain">
+      <li><b>איננו מפרסמים נתון שלא מדדנו.</b> אם מספר נגזר ולא נצפה, הוא מסומן כנגזר, ואנחנו מעדיפים להשאיר פער מאשר למלא אותו בחישוב שנקרא כמו מדידה.</li>
+      <li><b>איננו מעדכנים בשקט תוצאה מפסידה.</b> סבב שאנחנו מפסידים נשאר מפורסם עד שריצה חוזרת תחליף אותו, וכשהפסד הופך לניצחון, השינוי מקבל הסבר לצד הטבלה ולא עריכה שקטה.</li>
+      <li><b>סבבי הספקים אינם ניתנים עדיין לשחזור עצמאי</b>, משום שהתוכן אינו שלנו להפצה. בדיקות הרכיבים, שמשתמשות בתוכן מיוצר, כן. אנחנו מכינים קובצי בדיקה שנוכל לפרסם כדי שגם סבבי הספקים יהיו ניתנים לבדיקה.</li>
+      <li><b>אלה בדיקות הביצועים שלנו לתוכנות של אנשים אחרים.</b> כל גרסה נקובה בשם ובתאריך, וכשלקוח משחרר גרסה חדשה אנחנו מריצים מחדש את הסבבים שהיא נוגעת בהם ולא משאירים השוואה מיושנת. אם נראה לך שתוצאה שגויה, ההגדרות והגרסאות מפורסמות כדי שאפשר יהיה לחלוק עליה באופן ספציפי.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - מוריד ה-Usenet במעבר יחיד.</div>
+    <div>
+      <a href="index.he.html">בית</a> ·
+      <a href="features.he.html">תכונות</a> ·
+      <a href="indexer.he.html">האינדקסר</a> ·
+      <a href="benchmarks.he.html">בדיקות ביצועים</a> ·
+      <a href="explained.he.html">הסברים</a> ·
+      <a href="download.he.html">הורדה</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

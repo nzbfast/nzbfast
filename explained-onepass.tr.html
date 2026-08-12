@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tek geçişli indirme nasıl çalışır - nzbfast</title>
+<meta name="description" content="Tek geçiş gerçekte ne yapar, neden doğrudan açmayla aynı şey değildir, hangi arşiv biçimlerini kaldırır, ve yaz-sonra-geri-oku döngüsünü kaldırmak neden disk, işlemci zamanı ve bellek kazandırır.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="fr" href="explained-onepass.fr.html">
+<link rel="alternate" hreflang="de" href="explained-onepass.de.html">
+<link rel="alternate" hreflang="it" href="explained-onepass.it.html">
+<link rel="alternate" hreflang="es" href="explained-onepass.es.html">
+<link rel="alternate" hreflang="nl" href="explained-onepass.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-onepass.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-onepass.sv.html">
+<link rel="alternate" hreflang="da" href="explained-onepass.da.html">
+<link rel="alternate" hreflang="nb" href="explained-onepass.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-onepass.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-onepass.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-onepass.ro.html">
+<link rel="alternate" hreflang="he" href="explained-onepass.he.html">
+<link rel="alternate" hreflang="ar" href="explained-onepass.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-onepass.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-onepass.tr.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.tr.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.tr.html" class="home">Ana sayfa</a>
+    <a href="features.tr.html">Özellikler</a>
+    <a href="indexer.tr.html">Dizinleyici</a>
+    <a href="benchmarks.tr.html">Kıyaslamalar</a>
+    <a href="explained.tr.html" class="on">Açıklamalar</a>
+    <a href="MANUAL.html">Belgeler</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.tr.html">İndir</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-onepass.html">English</option><option value="explained-onepass.fr.html">Français</option><option value="explained-onepass.de.html">Deutsch</option><option value="explained-onepass.it.html">Italiano</option><option value="explained-onepass.es.html">Español</option><option value="explained-onepass.nl.html">Nederlands</option><option value="explained-onepass.pt.html">Português</option><option value="explained-onepass.sv.html">Svenska</option><option value="explained-onepass.da.html">Dansk</option><option value="explained-onepass.nb.html">Norsk</option><option value="explained-onepass.fi.html">Suomi</option><option value="explained-onepass.tr.html" selected>Türkçe</option><option value="explained-onepass.ro.html">Română</option><option value="explained-onepass.he.html">עברית</option><option value="explained-onepass.ar.html">العربية</option><option value="explained-onepass.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.tr.html" style="color:inherit">Açıklamalar</a> &middot; bir</p>
+  <h1>Tek geçişli indirme nasıl çalışır</h1>
+  <p class="sub">Bu istemciyi hızlı kılan şeyin çoğu daha hızlı bir ağ yolu değildir. Verinin yalnızca bir kez hareket etmesidir. İşte bunun uygulamada ne demek olduğu, neden doğrudan açmadan farklı bir şey olduğu, hangi arşiv biçimlerinin bundan sağ çıktığı, ve yaz-sonra-geri-oku döngüsünü kaldırmanın gerçek bir makinede aslında ne değerde olduğu.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Başlangıç noktası</p>
+    <h2>Bir Usenet indirmesi geleneksel olarak ne yapar</h2>
+    <p class="lead">Bir gönderi, birlikte bir arşiv birimleri kümesi oluşturan binlerce küçük kodlanmış makaledir; o birimler de sırayla gerçekten istediğiniz dosyayı içerir. Birinden ötekine geçmek geleneksel olarak dört ayrı iş olmuştur; her biri bir sonraki başlamadan önce biter.</p>
+
+    <ol>
+      <li><b>İndir ve kodunu çöz.</b> Her makaleyi getir, kodunu çöz, ve yeniden birleştirilmiş arşiv birimlerini diske yaz. 60 GB'lik bir sürüm için bu 60 GB yazılmış demektir.</li>
+      <li><b>Doğrula.</b> Eşlik verisine karşı denetlemek için 60 GB'nin tümünü diskten geri oku, ve bir şey yanlışsa onar.</li>
+      <li><b>Aç.</b> Birimleri yeniden oku, ve çıkarılan içeriği onların yanına yaz. Artık diskte 120 GB var.</li>
+      <li><b>Temizle.</b> Birimleri sil, geriye içerik kalsın.</li>
+    </ol>
+
+    <p>Her aşama doğrudur, ve sonuç yerindedir. Ama içerik iki kez yazılmış, en az iki kez okunmuş, ve doruk noktasında disk, yalnızca tek bir kopyasını istediğiniz bir işin iki tam kopyasını tutmak zorunda kalmıştır. Yaşadığınız saat, dört aşamanın peş peşe toplamıdır; bu yüzden bir istemci hızlı bir indirme bildirip yine de sizi bekletebilir.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Değişiklik</p>
+    <h2>Onun yerine bir kez yapmak</h2>
+    <p class="lead">Tek geçiş, baytların ağdan son varış yerine, diskinizde hiç arşiv dosyası hâline gelmeden gitmesi demektir. İkinci ya da üçüncü aşama yoktur, çünkü ikisinin de işi, birinci aşama hâlâ sürerken olur.</p>
+
+    <p>Uygulamada, her makale geldikçe bellekte kodu çözülür ve doğrudan iki şeye birden verilir. Doğrulayıcı onu hemen eşlik verisine karşı denetler; böylece doğruluk, veriyi sonradan yeniden okuyarak değil, veri inerken saptanır. Çıkarıcı gelen baytları arşivin içindeki bir konum olarak ele alır, hangi içerik dosyasının hangi parçasına ait olduklarını hesaplar, ve onları oraya yazar.</p>
+
+    <p>Arşiv birimleri hiçbir zaman birleştirilmez. İndirme havadayken çıkarıcının anladığı bir yapı olarak varlar, ve diskinize ulaşan tek şey istediğiniz dosyadır. Son makale geldiğinde yapılacak neredeyse hiçbir şey kalmaz; bitiş sürelerimizin bir indirme artı kuyruk yerine indirme süresinin kendisine yakın olmasının nedeni budur.</p>
+
+    <div class="callout">
+      <p>Ölçülebilir sonuç: aynı iş için yaklaşık yarısı kadar yazarız, çok daha azını geri okuruz, ve boş alanda iki katı yerine kabaca içeriğin kendi boyutu kadarına ihtiyaç duyarız. 190 GB'lik bir sürümde bu, yaklaşık 157 GB boş alan demektir, yaklaşık 313 GB'ye karşı; ve disk trafiğinin kabaca üçte biri.</p>
+    </div>
+
+    <p>İki şey bunu kulağa geldiğinden daha zor kılar, ve bunlar bu yaklaşımın seyrek olmasının nedenidir. Makaleler sırayla gelmez, dolayısıyla çıkarıcının baştan başlayan bir akış yerine rastgele konumlara inen baytlarla baş etmesi gerekir. Ve sıkıştırılmış bir arşiv ortasından açılamaz, dolayısıyla işin gerçekten sıra gerektiren her parçası varsayımla geçiştirilmek yerine tanınmalı ve ayrıca ele alınmalıdır.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Sorulan karşılaştırma</p>
+    <h2>Bu neden doğrudan açma değildir</h2>
+    <p class="lead">Doğrudan açma iyi bir özelliktir ve ona sahip istemciler onunla daha iyi durumdadır. Ayrıca sorunun başka bir bölümünü çözer, ve fark tam da önemli olduğu yerde ortaya çıkar.</p>
+
+    <p>Doğrudan açma, indirme bitmeden çıkarmaya başlar; böylece üçüncü aşama birinci aşamayı izlemek yerine onunla örtüşür. Yapmadığı şey, birinci aşamayı kaldırmaktır. <b>Arşiv birimleri hâlâ eksiksiz olarak diskinize yazılır</b>, çünkü açıcı, sıradan dosyaları okuyan sıradan bir açıcıdır; doğrudan açma yalnızca onu daha erken başlatır. İki kopya hâlâ vardır, iki yazma hâlâ olur, ve boş alan gereksinimi değişmez.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>birimleri diske yaz</th><th class="num">gereken boş alan</th><th class="num">içeriğin kaç kez yazıldığı</th></tr></thead>
+      <tbody>
+        <tr><td>İndir, sonra aç</td><td>evet, sonra geri okuma</td><td class="num">~2&times; iş</td><td class="num">2</td></tr>
+        <tr><td>Doğrudan açma</td><td>evet, daha erken geri okunur</td><td class="num">~2&times; iş</td><td class="num">2</td></tr>
+        <tr><td><b>Tek geçiş</b></td><td class="win">hiç yazılmaz</td><td class="win">~1&times; iş</td><td class="win">1</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>İkinci fark, biçim basit olmadığında ne olduğudur. Doğrudan açma, birimler belirdikçe işi sıradan bir açıcıya devrettiğinden, durumun sorunsuz olmasına ihtiyaç duyar: birimler kullanılabilir bir sırayla mevcut, bekleyen bir onarım yok, önce kilidi açılması gereken bir şey yok, ve içeriği kendisi arşiv olmayan bir arşiv. Bunlardan biri sağlanmadığında yapılacak akıllıca şey geri çekilip sona açmaya dönmektir, ve olan da budur. Doğru bir sonuç ve alışılmış zamanlamayı alırsınız.</p>
+
+    <p>Çıkarıcımız en baştan sırasız baytlar çevresinde kurulduğundan, o durumlar onun için istisna değildir. Asıl ayrım budur: daha erken başlamamız değil, sıklıkla sağlanmayan koşullara bel bağlamamamız.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Bundan gerçekte ne sağ çıkar</p>
+    <h2>Kaldırdığı biçimler</h2>
+    <p class="lead">Böyle bir tasarım ancak tertemiz bir en iyi duruma değil, gerçekten karşılaştığınız gönderilere uyuyorsa değerlidir. Şu anki durum: <b>hiçbir kapsayıcı biçimi yalnızca diskte işlenmiyor.</b> RAR, 7z ve zip'in hepsi tek geçiş yolundan gidiyor.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>biçim</th><th>tek geçiş</th><th>notlar</th></tr></thead>
+      <tbody>
+        <tr><td>RAR, depolanmış (sıkıştırmasız)</td><td class="yes">evet</td><td>ortam sürümlerinde olağan durum</td></tr>
+        <tr><td>RAR, sıkıştırılmış</td><td class="yes">evet</td><td>dış katman olarak sıkıştırılmış bir arşiv dâhil</td></tr>
+        <tr><td>RAR 1.5, 3, 4 ve 5</td><td class="yes">evet</td><td>biçimin dört kuşağının tümü</td></tr>
+        <tr><td>7z</td><td class="yes">evet</td><td>deflate ile sıkıştırılmış içerikler dâhil</td></tr>
+        <tr><td>zip</td><td class="yes">evet</td><td>bzip2 ve LZMA içerikleri dâhil</td></tr>
+        <tr><td>Şifreli içerik</td><td class="yes">evet</td><td>parolayla, şifreli zip dâhil</td></tr>
+        <tr><td>Şifreli başlıklar</td><td class="yes">evet</td><td>dosya adlarının da gizli olduğu durumda</td></tr>
+        <tr><td>Parola zincirleri</td><td class="yes">evet</td><td>her katmanın parolası bir üstteki katmanın içine konmuş</td></tr>
+        <tr><td>İç içe arşivler</td><td class="yes">evet</td><td>uçuşta iç içelikten çıkarılır, ayarlanabilir bir derinliğe kadar</td></tr>
+        <tr><td>Birkaç katmanda hasarlı</td><td class="yes">evet</td><td>her düzeyde onarım, yine tek geçiş</td></tr>
+        <tr><td>Sayısal olarak bölünmüş kümeler</td><td class="yes">evet</td><td><code>name.001</code> tarzı bölmeler</td></tr>
+        <tr><td>Kendiliğinden açılan arşivler</td><td class="no">disk geçişi</td><td>arşiv dosyanın başında başlamaz</td></tr>
+        <tr><td>Bölünmüş zip (<code>.z01</code>)</td><td class="no">disk geçişi</td><td>ve daha seyrek görülen bazı zip türevleri</td></tr>
+        <tr><td>Sürdürülen işler</td><td class="no">disk geçişi</td><td>yeniden başlatmadan sonra sürdürülen bir iş alışılmış biçimde biter</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Üç ret de dürüsttür ve aynı biçimde davranır: iş, alışılmış yol kullanılarak doğru şekilde tamamlanır, ve o indirme için olağan iki kopyalı zamanlamayı alırsınız. Hiçbir şey başarısız olmaz; yalnızca bu sayfanın geri kalanının anlattığı biçimde hızlı olmaktan çıkar. Kendiliğinden açılan arşivler çaba eksikliğinden değil yapısal bir nedenle reddedilir: bir arşivi ilk baytlarından tanımak, ilk baytlar bir program olduğunda işleyemez.</p>
+
+    <p>İç içelik ve şifreleme satırları ciddiye alınmaya değer olanlardır, çünkü çoğu istemcinin işi size geri verdiği yer burasıdır. On iç içe biçimden oluşan üretilmiş bir derlemde, içeriği yeniden adlandıran bir istemcinin yine de puan alması için içerik özetiyle notlandırılarak, <b>9 biçimi müdahalesiz tamamladık, 10 üzerinden</b>; en yakın istemci 5'ini, iki tanesi de 2'sini tamamladı. Otomatik olarak tamamlayamadığımız, on düzeyli bir merdiven; öntanımlı beş derinlik sınırında temiz biter ve en derin katmanı sağlam bir arşiv olarak bırakır, sınırı yükseltirseniz tümüyle tamamlanır. O turlar tam ızgarasıyla <a href="benchmarks.tr.html#nested">kıyaslama sayfasındadır</a>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Neden yapmaya değer</p>
+    <h2>Gidiş dönüşü kaldırmak gerçekte ne kazandırır</h2>
+
+    <p><b>Daha hızlıdır, hiç de gösterişli olmayan bir nedenle.</b> 60 GB yazıp geri okumak hızlı bir katı hâl sürücüsünde bile bedava değildir, ve daha yavaş her şeyde çoğu zaman ağ yerine asıl darboğaz odur. Bir yazma ile iki okumayı kaldırmak o süreyi saatinizden bütünüyle çıkarır. Kazanç tam da en çok fark edildiği yerde en büyüktür: büyük işlerde, ve diski en hızlı parçası olmayan makinelerde.</p>
+
+    <p><b>Aşınmayı yarıya indirir.</b> Katı hâl sürücülerinin içinde sonlu sayıda yazma vardır, ve her içeriği iki kez yazan bir indirici, size hiçbir yarar sağlamadan o bütçeyi iki kat hızla harcar. Etkin bir kullanıcı için olağan bir yıl olan birkaç yüz terabaytlık indirme boyunca, fark bir sürücünün ömrünün kayda değer bir bölümüdür.</p>
+
+    <p><b>Neyin sığacağını değiştirir.</b> Boş alan bir başarım özelliği değil, bir evet ya da hayırdır. Kendi boyutunun iki katı kadar pay isteyen bir iş ya çalışır ya çalışmaz. Kabaca içeriğin boyutu kadarına ihtiyaç duymak, alışılmış yaklaşımın düpedüz durduğu makine ve birimlerde işlerin tamamlanması demektir; 190 GB'lik bir sürümün burada yaklaşık 157 GB boş alana sığmasının, yaklaşık 313 GB yerine, nedeni de budur.</p>
+
+    <p><b>Daha az işlemci zamanına mal olur.</b> Veriyi diskten iki kez geçirmemek, bunu yapmanın işini ortadan kaldırır; ve indirme sırasında doğrulamak, içeriği denetlemek için ikinci bir geçiş olmaması demektir. İşlemci maliyetimiz gigabayt başına yaklaşık 1.7 işlemci saniyesinde düz kalır, 35 GB'lik bir işten 190 GB'liğe kadar, ki yararlı özellik budur: gigabayt başına maliyet, iş büyüdükçe büyümez.</p>
+
+    <p><b>Daha az bellekte, ve sınırlı bellekte çalışır.</b> Baytlar biriktirilmek yerine geldikçe tüketildiğinden, çalışma kümesi işin boyutunun bir işlevi değil, sizin belirlediğiniz bir bütçedir. 190 GB'lik bir sürümün yaklaşık 1.1 GB kullanılabilir belleği olan bir makinede işlenmesine izin veren de budur. Önemli olan ayrım sayı değil biçimdir: işle birlikte büyüyen bellek er ya da geç makinenizin bitiremeyeceği bir işle karşılaşır, ve size söyleyerek değil, takas yaparak ya da öldürülerek başarısız olur.</p>
+
+    <div class="callout">
+      <p>Hepsi bir arada bakıldığında bunlar bir kıyaslamayı kazanmaktan çok, yazılımın nerede çalışabildiğiyle ilgilidir. Boş alanın yarısına, yazmaların yarısına ve sınırlı miktarda belleğe ihtiyaç duyan bir tasarım, küçük bir ev sunucusunda, daha eski bir dizüstünde ya da bir NAS'ta çalışır; bu yazılımın epey bir bölümünün gerçekten yaşadığı yer de burasıdır.</p>
+    </div>
+
+    <p class="note" style="text-align:start">Bu sayfadaki her rakam ölçülmüştür ve <a href="benchmarks.tr.html">kıyaslama sayfasında</a> yanında yapı ve tarihiyle yayımlanmıştır; kaybettiğimiz turlar dâhil. Orada da belirtilen dürüst karşı ağırlık: canlı bir indirmeye eşlik etmek üzere kurulmuş bir çıkarıcı ve onarıcı, komut satırından bir kez çalıştırılan bağımsız bir araçtan daha fazla yerleşik bellek tutar; dolayısıyla kısıtınız hâlihazırda sahip olduğunuz bir dosya üzerinde tek seferlik bir iş için mümkün olan en küçük ayak izi ise, o sütunu adanmış araçlar kazanır.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - tek geçişli Usenet indiricisi.</div>
+    <div>
+      <a href="index.tr.html">Ana sayfa</a> ·
+      <a href="features.tr.html">Özellikler</a> ·
+      <a href="indexer.tr.html">Dizinleyici</a> ·
+      <a href="benchmarks.tr.html">Kıyaslamalar</a> ·
+      <a href="explained.tr.html">Açıklamalar</a> ·
+      <a href="download.tr.html">İndir</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

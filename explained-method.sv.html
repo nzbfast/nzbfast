@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Så testar vi, i sin helhet - nzbfast</title>
+<meta name="description" content="Maskinerna, testmaterialet, inställningarna varje klient får, och reglerna som avgör om en mätomgång alls räknas.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-method.sv.html">
+<link rel="alternate" hreflang="fr" href="explained-method.fr.html">
+<link rel="alternate" hreflang="de" href="explained-method.de.html">
+<link rel="alternate" hreflang="it" href="explained-method.it.html">
+<link rel="alternate" hreflang="es" href="explained-method.es.html">
+<link rel="alternate" hreflang="nl" href="explained-method.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-method.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-method.sv.html">
+<link rel="alternate" hreflang="da" href="explained-method.da.html">
+<link rel="alternate" hreflang="nb" href="explained-method.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-method.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-method.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-method.ro.html">
+<link rel="alternate" hreflang="he" href="explained-method.he.html">
+<link rel="alternate" hreflang="ar" href="explained-method.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-method.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-method.sv.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.sv.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.sv.html" class="home">Hem</a>
+    <a href="features.sv.html">Funktioner</a>
+    <a href="indexer.sv.html">Indexerare</a>
+    <a href="benchmarks.sv.html">Benchmarks</a>
+    <a href="explained.sv.html" class="on">Förklarat</a>
+    <a href="MANUAL.html">Dokumentation</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.sv.html">Ladda ner</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-method.html">English</option><option value="explained-method.fr.html">Français</option><option value="explained-method.de.html">Deutsch</option><option value="explained-method.it.html">Italiano</option><option value="explained-method.es.html">Español</option><option value="explained-method.nl.html">Nederlands</option><option value="explained-method.pt.html">Português</option><option value="explained-method.sv.html" selected>Svenska</option><option value="explained-method.da.html">Dansk</option><option value="explained-method.nb.html">Norsk</option><option value="explained-method.fi.html">Suomi</option><option value="explained-method.tr.html">Türkçe</option><option value="explained-method.ro.html">Română</option><option value="explained-method.he.html">עברית</option><option value="explained-method.ar.html">العربية</option><option value="explained-method.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.sv.html" style="color:inherit">Förklarat</a> &middot; tre</p>
+  <h1>Så testar vi, i sin helhet</h1>
+  <p class="sub">Vi publicerar jämförelser mot andras programvara, så metoden måste gå att granska. Här är hela den: maskinerna, innehållet, inställningarna varje klient får, och reglerna som avgör om en körning räknas som ett resultat eller kastas.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Riggen</p>
+    <h2>Samma maskin, samma lina, samma innehåll</h2>
+    <p class="lead">Varje klient i en jämförelse körs på en maskin, mot samma leverantörer, på samma innehåll, inom samma omgång. Inget förs över från en tidigare dag.</p>
+
+    <ul class="plain">
+      <li><b>Maskinerna.</b> En Apple M1 Ultra på en 10 GbE-lina i Europa, och en M3 Ultra på en långsammare lina i USA. Jämförelser blandar aldrig de två: en tabell är en maskin.</li>
+      <li><b>Linan betyder mer än processorn.</b> På en 10 GbE-lina kan de flesta klienter mätta förbindelsen på ett lätt jobb, och därför är de intressanta scenarierna de där något annat än ren bandbredd avgör utfallet.</li>
+      <li><b>Leverantörer.</b> Fem kommersiella leverantörer, samma uppsättning för varje klient, över TLS. Vi utesluter en leverantör ur dessa omgångar eftersom den begränsar hur många platser som får ansluta samtidigt, vilket skulle göra en delad testmaskin orättvis mot den som körde som tvåa.</li>
+      <li><b>Anslutningar.</b> Varje klient får samma antal per leverantör i en given omgång, och omgången anger vilket. Fler är inte automatiskt bättre; vi har mätt vår egen klient hålla samma sluttid över en niofaldig förändring av antalet anslutningar.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Regeln som avgör allt</p>
+    <h2>En klient bedöms på filen, inte på sitt eget statusmeddelande</h2>
+    <p class="lead">Detta är det enskilt viktigaste på den här sidan. Varje omgång avslutas med att den största fil klienten producerat letas upp, var som helst i dess utdata, och hashas mot en känd korrekt kopia. Storlek och MD5, vid varje omgång, inte på ett stickprov.</p>
+
+    <p>Vi gör det för att en klients egen rapport om framgång inte är tillförlitligt belägg. Vi har mätt en klient som rapporterade <i>done</i> på ett jobb vars utdatamapp var tom. Vi har mätt en annan som rapporterade <i>Completed</i> efter att ha levererat råa arkivvolymer den aldrig packat upp. Ett vitt spritt reparationsverktyg avslutas med felkod efter en lyckad reparation. Ingen av dessa klienter ljög; statussträngar betyder helt enkelt olika saker för olika upphovsmän, och en mätning som litar på dem mäter ordval snarare än beteende.</p>
+
+    <p>Mållinjen är alltså densamma för alla: <b>innehållet finns, i rätt storlek, med rätt hash</b>. Stannar en klient före det får den ingen tid, och hela kolumnen markeras i stället för att tyst utelämnas. En långsam klient som blir klar gör bättre ifrån sig än en snabb som inte gör det, och tabellen ska säga det.</p>
+
+    <div class="callout">
+      <p>Följdsatsen är att ett uteblivet resultat är ett resultat, inte ett fel från vår sida. När vi publicerar ett beskriver vi sluttillståndet i klartext, inklusive allt som tyder på att det är specifikt för det jobbet snarare än allmänt, och vi säger vad klienten gjorde i stället för att bli klar.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ordning och upprepning</p>
+    <h2>Varför omgångar växlar, och varför enskilda körningar inte publiceras</h2>
+    <p class="lead">Leverantörernas genomströmning varierar minut för minut, ibland med en faktor två eller tre. Två mätningar tagna vid olika tillfällen mäter delvis vädret.</p>
+
+    <p>Klienter körs därför <b>tätt efter varandra och omlott</b>, och ordningen kastas om mellan upprepningarna, så att ingen klient alltid är den som går först ut på en varm eller kall lina. Ett resultat är mönstret över upprepningarna, inte den bästa körningen. När spridningen är stor publicerar vi intervallet i stället för ett medelvärde som skulle dölja den, och om vi inte vet varför en klients siffror spretar säger vi det i stället för att hitta på en orsak.</p>
+
+    <p>Jämförelser mellan olika omgångar undviks där det går. Kräver ett påstående två siffror kör vi hellre om båda i en och samma omgång än drar den ena dagens siffra från den andras, eftersom riggens tillstånd, leverantörsförhållandena och klientversionerna alla driver. När vi jämför två av våra egna byggen körs båda i samma omgång, växelvis, på samma innehåll.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">De oglamorösa kontrollerna</p>
+    <h2>Vad som körs före och under varje omgång</h2>
+    <p class="lead">De flesta finns för att ett tyst fel en gång gav ett friskt utseende, publicerbart och felaktigt tal. Var och en körs nu automatiskt och stoppar omgången i stället för att varna.</p>
+
+    <ul class="plain">
+      <li><b>Varje leverantör svarar innan omgången börjar.</b> En omgång körd medan två leverantörer ligger nere mäter ett avbrott, och det ser exakt ut som en långsam klient.</li>
+      <li><b>Binären identifieras med hash före varje omgång</b>, inte med filnamn eller versionssträng. Två av våra byggen uppgav samma versionsnummer trots att de skilde sig med 88 incheckningar; bara hashen skiljer dem åt, och tabellerna anger den.</li>
+      <li><b>Varje klient körs som inbyggd kod.</b> På Apple-maskiner kan ett felaktigt byggt hjälpprogram tyst köras under översättning, vilket kostar processortid som hör till vårt paketeringsval och inte till klientens kod. Vi kontrollerar den körande processen, inte bara filen.</li>
+      <li><b>Gränserna för öppna filer höjs för alla, likadant.</b> macOS startar program med en gräns på 256 öppna filer, vilket en full uppsättning anslutningar kan överskrida. En klient som slår i den brukar försvinna utan kraschrapport, vilket läses precis som ett fel i programvaran. En konkurrents skenbart uteblivna resultat visade sig vara detta; med höjd gräns blev det identiska jobbet klart på 44 sekunder.</li>
+      <li><b>Disktrafiken registreras per omgång</b>, vilket samtidigt kontrollerar att inget annat använde maskinen. Dessa räknare täcker hela disken snarare än ett program, så om ett andra jobb kördes skulle dess arbete synas inne i våra mätningar. Jämna avläsningar genom en omgång är hur vi vet att ett resultat tillhör den klient det namnger.</li>
+      <li><b>Varje klient skriver till sitt eget utdataträd</b>, och trädet rensas före varje omgång, så att ingen körning kan tillfredsställas av en tidigare körnings fil.</li>
+    </ul>
+
+    <p class="note" style="text-align:start">Där en klient behöver särskilda inställningar för att prestera väl får den dem, och omgången anger vilka. Exempel: begäranspipelining påslaget där en klient levereras med det avstängt, dubblettkontroll avstängd när samma jobb laddas ned upprepade gånger, och uppackningshjälpmedel tagna ur klientens eget paket snarare än en systemkopia. Målet är att varje klient mäts när den är som bäst snarare än vid sina standardvärden, eftersom standardvärden är en annan diskussion än förmåga.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Vad vi inte kommer att göra</p>
+    <h2>Gränserna för dessa siffror</h2>
+    <ul class="plain">
+      <li><b>Vi publicerar inte en siffra vi inte har mätt.</b> Är ett tal härlett snarare än observerat märks det som härlett, och vi lämnar hellre en lucka än fyller den med räkneövningar som läses som en mätning.</li>
+      <li><b>Vi uppdaterar inte tyst ett förlorande resultat.</b> En omgång vi förlorar står kvar publicerad tills en omkörning ersätter den, och när en förlust blir en vinst får förändringen en förklaring bredvid tabellen i stället för en tyst redigering.</li>
+      <li><b>Leverantörsomgångarna är ännu inte oberoende reproducerbara</b>, eftersom innehållet inte är vårt att sprida. Komponenttesterna, som använder genererat innehåll, är det. Vi förbereder testfiler vi kan publicera så att även leverantörsomgångarna blir granskbara.</li>
+      <li><b>Detta är våra mätningar av andras programvara.</b> Varje version namnges och dateras, och när en klient släpper en ny utgåva kör vi om de omgångar den påverkar i stället för att låta en inaktuell jämförelse stå kvar. Om du tycker att ett resultat är fel är inställningar och versioner publicerade så att det går att invända konkret.</li>
+    </ul>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - enpass-nedladdaren för Usenet.</div>
+    <div>
+      <a href="index.sv.html">Hem</a> ·
+      <a href="features.sv.html">Funktioner</a> ·
+      <a href="indexer.sv.html">Indexerare</a> ·
+      <a href="benchmarks.sv.html">Benchmarks</a> ·
+      <a href="explained.sv.html">Förklarat</a> ·
+      <a href="download.sv.html">Ladda ner</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+</div></footer>
+
+</body>
+</html>

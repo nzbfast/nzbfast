@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perché i post danneggiati contano - nzbfast</title>
+<meta name="description" content="Cos'è un articolo mancante, perché chiederlo a un server costa fra 79 ms e 2.2 secondi, e perché la soluzione utile è smettere di chiedere invece di chiedere più in fretta.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.it.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.it.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.it.html" class="home">Home</a>
+    <a href="features.it.html">Funzionalità</a>
+    <a href="indexer.it.html">Indexer</a>
+    <a href="benchmarks.it.html">Benchmark</a>
+    <a href="explained.it.html" class="on">Spiegazioni</a>
+    <a href="MANUAL.html">Documentazione</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.it.html">Scarica</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html" selected>Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html">Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.it.html" style="color:inherit">Spiegazioni</a> &middot; due</p>
+  <h1>Perché i post danneggiati contano</h1>
+  <p class="sub">Uno scaricamento che va liscio è il caso facile, e ogni client lo gestisce con competenza. Le differenze interessanti compaiono quando manca una parte del post, cosa che accade molto più spesso di quanto il caso pulito lasci pensare. Ecco cosa succede davvero, e perché costa così tanto tempo.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">La forma del problema</p>
+    <h2>Cos'è un articolo mancante</h2>
+    <p class="lead">Un post Usenet non è un file solo. Sono migliaia di piccoli articoli, ciascuno conservato in modo indipendente sui server di ogni provider, e l'NZB che scarichi è l'elenco dei loro nomi. Un rilascio da 6.5 GB ne conta all'incirca 9,000.</p>
+
+    <p>Gli articoli spariscono per motivi ordinari. I provider li tengono per un periodo di conservazione fisso e poi li cancellano. Alcuni provider un certo articolo non l'hanno mai ricevuto in partenza, perché la propagazione fra server è imperfetta. Ogni tanto un caricamento era incompleto al momento della pubblicazione, e una sua parte non è mai esistita da nessuna parte. Qualunque sia la causa, l'effetto è lo stesso: il tuo client chiede un articolo, e la risposta è un rifiuto invece che dei dati.</p>
+
+    <p>È talmente normale che chi pubblica su Usenet lo mette in conto. Quasi ogni rilascio viene accompagnato da <b>dati di parità</b>, di solito file PAR2, cioè informazione ridondante in più calcolata a partire dall'originale. Se manca una parte del contenuto, la parità può ricostruirla, purché ce ne sia abbastanza. Un post tipico porta con sé circa 10% di parità, quindi può perdere una discreta frazione di sé e restare perfettamente recuperabile.</p>
+
+    <div class="callout">
+      <p>Un post danneggiato di solito non è dunque uno scaricamento rotto. È uno scaricamento che richiede un po' di aritmetica prima di essere completo. L'unica domanda è quanto ci mette un client a capirlo, ed è lì che differiscono di un fattore due o più.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">La parte costosa</p>
+    <h2>Chiedere una cosa che nessuno ha</h2>
+    <p class="lead">Quando un server non ha un articolo restituisce un rifiuto, e il client prova allora il server successivo nel tuo elenco. È la cosa giusta da fare, perché il secondo provider molto spesso ce l'ha. Il costo compare quando non ce l'ha nessuno.</p>
+
+    <p>In quel caso il client percorre tutto il tuo elenco di provider, un server alla volta, e viene rifiutato da ognuno di loro prima di poter concludere che l'articolo è davvero sparito. Il percorso è sequenziale, e i rifiuti sono più lenti di quanto si creda. Li abbiamo misurati direttamente, su una linea a riposo, senza alcun contenuto in movimento:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>provider</th><th class="num">tempo per rispondere a una richiesta normale</th><th class="num">tempo per rifiutare un articolo mancante</th></tr></thead>
+      <tbody>
+        <tr><td>Provider A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Provider B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Provider C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Provider D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Provider E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Due cose saltano all'occhio. Primo, la forbice è enorme: <b>un rifiuto costa fra 79 ms e 2.2 secondi</b> a seconda del provider che risponde, una differenza di quasi trenta volte. Secondo, un provider rifiuta in sostanza nel tempo che serve a chiedere, mentre un altro impiega più di duecento volte il proprio tempo di risposta normale per dire di no. Non è latenza di rete, è lavoro che avviene dalla loro parte, e chiedere in meno andate e ritorni non serve quasi a niente.</p>
+
+    <p>Fai la somma: un percorso completo su cinque provider, per un solo articolo che non esiste più, costa circa <b>5 secondi</b>. Ora considera che un post danneggiato ha molti articoli così, e che un client che li tratta in sequenza paga quel costo ripetutamente mentre la tua connessione resta ferma. Lo scaricamento non è lento perché i dati arrivano piano. Hanno smesso del tutto di arrivare, e il client sta aspettando che gli si dica ciò che ha già abbastanza informazioni per dedurre.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">La soluzione</p>
+    <h2>Smettere di chiedere, e riparare invece</h2>
+    <p class="lead">L'intuizione non è rendere i rifiuti più veloci, perché i provider non li controlliamo noi. È accorgersi di quando la risposta non conta più.</p>
+
+    <p>In ogni momento di uno scaricamento il client sa due cose: quanti pezzi mancano ancora all'appello e quanti dati di parità ha già in mano. Se la parità che possiede basta a ricostruire tutto ciò che resta in sospeso, allora la risposta a «qualcuno ha questo articolo?» non può più cambiare l'esito. Che sia un sì lento o un no lento, il file viene ricostruito comunque. Continuare il percorso non compra nulla se non ritardo.</p>
+
+    <p>Quindi la build attuale smette di chiedere a quel punto e passa dritta alla riparazione. La ricostruzione in sé è rapida e lo è sempre stata: circa <b>2.3 secondi</b> su un post da 6.5 GB, e quella cifra è la stessa in ogni versione che abbiamo misurato. Il tempo risparmiato è interamente l'attesa che non avviene più.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>post da 6.5 GB, 60 articoli mancanti</th><th class="num">tempo fino a un file verificato</th></tr></thead>
+      <tbody>
+        <tr><td>aspettare il rifiuto di ogni provider</td><td class="num">23 s</td></tr>
+        <tr><td><b>fermarsi appena la parità copre il buco</b></td><td class="win">13 s</td></tr>
+        <tr><td>di cui l'aritmetica di riparazione vera e propria</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Lo stesso cambiamento non fa proprio nulla su un post integro, il che è la prova più chiara che sta facendo quello che pensiamo: senza articoli mancanti non c'è alcun percorso da accorciare, e le due build finiscono un lavoro pulito da 6.5 GB in 7 secondi identici.</p>
+
+    <p><b>È uno scambio, non una vittoria gratis.</b> Riparare presto significa tenere i dati di parità in memoria invece di scartarli e procurarsene altri dopo, quindi la memoria di picco (RSS) su un post gravemente danneggiato sale da circa 0.8 GB a circa 1.3 GB, e tiriamo giù all'incirca 400 MB in più dai provider. Su un post integro la memoria è invariata a 0.24 GB. Pensiamo sia lo scambio giusto per la maggior parte delle persone, dato che la memoria si spende solo nel caso in cui ti fa guadagnare dieci secondi, ma è un costo reale e c'è un'impostazione apposita.</p>
+
+    <p class="note" style="text-align:start">I nomi dei provider nella tabella dei rifiuti sono taciuti di proposito. Quelle cifre sono la proprietà di una misura, una sera, da un solo luogo, e un provider che indicizza in modo diverso, o che abbiamo raggiunto per caso in una serataccia, non dovrebbe essere etichettato come lento sulla base di una sola tornata. Ciò che conta per il ragionamento è la forma: i rifiuti variano enormemente, e il totale è abbastanza grande da dominare uno scaricamento danneggiato. Le cifre per singolo provider e l'output grezzo delle sonde sono nei nostri archivi interni, e i numeri da estremo a estremo che spiegano sono nella <a href="benchmarks.it.html#damaged">pagina dei benchmark</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - il downloader Usenet a passata unica.</div>
+    <div>
+      <a href="index.it.html">Home</a> ·
+      <a href="features.it.html">Funzionalità</a> ·
+      <a href="indexer.it.html">Indexer</a> ·
+      <a href="benchmarks.it.html">Benchmark</a> ·
+      <a href="explained.it.html">Spiegazioni</a> ·
+      <a href="download.it.html">Scarica</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Tempi di rifiuto misurati l'11 agosto 2026 dall'Europa su cinque provider, una connessione ciascuno, su una linea a riposo senza alcun trasferimento di contenuto. Le cifre da estremo a estremo sul post danneggiato vengono dalla tornata a sei client della stessa sera; per le tabelle complete, le versioni dei client e le prove che perdiamo si veda la pagina dei benchmark.</p>
+</div></footer>
+
+</body>
+</html>

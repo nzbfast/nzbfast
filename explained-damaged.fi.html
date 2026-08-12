@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Miksi vaurioituneilla postauksilla on väliä - nzbfast</title>
+<meta name="description" content="Mikä puuttuva artikkeli on, miksi sen pyytäminen palvelimelta maksaa 79 ms ja 2.2 sekunnin väliltä, ja miksi hyödyllinen ratkaisu on lakata kysymästä eikä kysyä nopeammin.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="alternate" hreflang="en" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="fr" href="explained-damaged.fr.html">
+<link rel="alternate" hreflang="de" href="explained-damaged.de.html">
+<link rel="alternate" hreflang="it" href="explained-damaged.it.html">
+<link rel="alternate" hreflang="es" href="explained-damaged.es.html">
+<link rel="alternate" hreflang="nl" href="explained-damaged.nl.html">
+<link rel="alternate" hreflang="pt" href="explained-damaged.pt.html">
+<link rel="alternate" hreflang="sv" href="explained-damaged.sv.html">
+<link rel="alternate" hreflang="da" href="explained-damaged.da.html">
+<link rel="alternate" hreflang="nb" href="explained-damaged.nb.html">
+<link rel="alternate" hreflang="fi" href="explained-damaged.fi.html">
+<link rel="alternate" hreflang="tr" href="explained-damaged.tr.html">
+<link rel="alternate" hreflang="ro" href="explained-damaged.ro.html">
+<link rel="alternate" hreflang="he" href="explained-damaged.he.html">
+<link rel="alternate" hreflang="ar" href="explained-damaged.ar.html">
+<link rel="alternate" hreflang="fa" href="explained-damaged.fa.html">
+<link rel="alternate" hreflang="x-default" href="explained-damaged.fi.html">
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.fi.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.fi.html" class="home">Etusivu</a>
+    <a href="features.fi.html">Ominaisuudet</a>
+    <a href="indexer.fi.html">Indeksoija</a>
+    <a href="benchmarks.fi.html">Vertailut</a>
+    <a href="explained.fi.html" class="on">Selitykset</a>
+    <a href="MANUAL.html">Ohjeet</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.fi.html">Lataa</a>
+    <!-- i18n picker: same markup in every language file; hrefs fixed -->
+    <select class="langsw" aria-label="Language" style="font-size:11.5px;opacity:.8;margin-inline-start:10px;background:transparent;color:inherit;border:1px solid rgba(128,128,128,.4);border-radius:6px;padding:2px 4px;cursor:pointer;max-width:110px" onchange="location.href=this.value"><option value="explained-damaged.html">English</option><option value="explained-damaged.fr.html">Français</option><option value="explained-damaged.de.html">Deutsch</option><option value="explained-damaged.it.html">Italiano</option><option value="explained-damaged.es.html">Español</option><option value="explained-damaged.nl.html">Nederlands</option><option value="explained-damaged.pt.html">Português</option><option value="explained-damaged.sv.html">Svenska</option><option value="explained-damaged.da.html">Dansk</option><option value="explained-damaged.nb.html">Norsk</option><option value="explained-damaged.fi.html" selected>Suomi</option><option value="explained-damaged.tr.html">Türkçe</option><option value="explained-damaged.ro.html">Română</option><option value="explained-damaged.he.html">עברית</option><option value="explained-damaged.ar.html">العربية</option><option value="explained-damaged.fa.html">فارسی</option></select>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <p class="kicker"><a href="explained.fi.html" style="color:inherit">Selitykset</a> &middot; kaksi</p>
+  <h1>Miksi vaurioituneilla postauksilla on väliä</h1>
+  <p class="sub">Täydellisesti sujuva lataus on helppo tapaus, ja jokainen ohjelma hoitaa sen pätevästi. Kiinnostavat erot ilmaantuvat kun osa postauksesta puuttuu, ja niin käy paljon useammin kuin puhdas tapaus antaisi ymmärtää. Tässä kerrotaan mitä oikeasti tapahtuu ja miksi se maksaa niin paljon aikaa.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ongelman muoto</p>
+    <h2>Mikä puuttuva artikkeli on</h2>
+    <p class="lead">Usenet-postaus ei ole yksi tiedosto. Se on tuhansia pieniä artikkeleita, joista kukin on tallennettu itsenäisesti kunkin palveluntarjoajan palvelimille, ja lataamasi NZB on luettelo niiden nimistä. 6.5 GB:n julkaisussa niitä on karkeasti 9,000.</p>
+
+    <p>Artikkelit katoavat tavanomaisista syistä. Palveluntarjoajat säilyttävät niitä kiinteän säilytysajan ja poistavat ne sitten. Jotkin palveluntarjoajat eivät koskaan saaneet tiettyä artikkelia alun perinkään, koska leviäminen palvelinten välillä on epätäydellistä. Toisinaan lähetys oli keskeneräinen kun se julkaistiin, eikä osa siitä koskaan ollut olemassa missään. Syystä riippumatta vaikutus on sama: ohjelmasi pyytää artikkelia, ja vastaus on kieltäytyminen eikä dataa.</p>
+
+    <p>Tämä on riittävän tavallista, että Usenetiin postaavat ihmiset varautuvat siihen. Lähes jokaisen julkaisun mukana tulee <b>pariteettidataa</b>, yleensä PAR2-tiedostoja, eli ylimääräistä alkuperäisestä laskettua toisteista tietoa. Jos osa sisällöstä puuttuu, pariteetti voi rakentaa sen uudelleen, kunhan sitä on tarpeeksi. Tyypillinen postaus kantaa noin 10% pariteettia, joten postaus voi menettää melkoisen osan itsestään ja olla silti täysin palautettavissa.</p>
+
+    <div class="callout">
+      <p>Vaurioitunut postaus ei siis yleensä ole rikkinäinen lataus. Se on lataus joka vaatii hieman laskentaa ennen valmistumista. Ainoa kysymys on kuinka kauan ohjelmalta kestää tajuta se, ja juuri siinä ne eroavat kaksinkertaisesti tai enemmän.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <p class="kicker">Kallis osa</p>
+    <h2>Sellaisen pyytäminen mitä kellään ei ole</h2>
+    <p class="lead">Kun palvelimella ei ole artikkelia, se palauttaa kieltäytymisen, ja ohjelma kokeilee sitten listasi seuraavaa palvelinta. Se on oikea toimintatapa, koska toisella palveluntarjoajalla se hyvin usein on. Hinta ilmaantuu kun sitä ei ole kenelläkään.</p>
+
+    <p>Siinä tapauksessa ohjelma käy läpi koko palveluntarjoajalistasi, yhden palvelimen kerrallaan, ja saa kieltäytymisen jokaiselta ennen kuin voi päätellä artikkelin olevan todella poissa. Läpikäynti on peräkkäinen, ja kieltäytymiset ovat hitaampia kuin oletetaan. Mittasimme ne suoraan, lepäävällä linjalla, ilman että sisältöä liikkui lainkaan:</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>palveluntarjoaja</th><th class="num">aika vastata tavalliseen pyyntöön</th><th class="num">aika kieltäytyä puuttuvasta artikkelista</th></tr></thead>
+      <tbody>
+        <tr><td>Palveluntarjoaja A</td><td class="num">77.5 ms</td><td class="win">78.8 ms</td></tr>
+        <tr><td>Palveluntarjoaja B</td><td class="num">10.5 ms</td><td class="num">454 ms</td></tr>
+        <tr><td>Palveluntarjoaja C</td><td class="num">10.8 ms</td><td class="num">871 ms</td></tr>
+        <tr><td>Palveluntarjoaja D</td><td class="num">9.9 ms</td><td class="num">1,227 ms</td></tr>
+        <tr><td>Palveluntarjoaja E</td><td class="num">10.6 ms</td><td class="bad">2,239 ms</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Kaksi asiaa erottuu. Ensinnäkin hajonta on valtava: <b>kieltäytyminen maksaa jotain 79 ms:n ja 2.2 sekunnin väliltä</b> riippuen siitä kuka palveluntarjoaja vastaa, lähes kolmikymmenkertainen ero. Toiseksi yksi palveluntarjoaja kieltäytyy käytännössä siinä ajassa mikä kysymiseen menee, kun taas toinen käyttää yli kaksisataa kertaa oman normaalin vastausaikansa sanoakseen ei. Se ei ole verkkoviivettä, se on työtä joka tapahtuu heidän puolellaan, eikä harvemmilla edestakaisilla kysyminen juuri auta.</p>
+
+    <p>Laske yhteen: täysi läpikäynti viidellä palveluntarjoajalla maksaa yhdestä ainoasta enää olemattomasta artikkelista noin <b>5 sekuntia</b>. Ajattele nyt että vaurioituneessa postauksessa on monta sellaista artikkelia, ja että peräkkäin niitä käsittelevä ohjelma maksaa sen hinnan yhä uudelleen samalla kun yhteytesi seisoo tyhjänä. Lataus ei ole hidas siksi että data saapuu hitaasti. Se on lakannut saapumasta kokonaan, ja ohjelma odottaa että sille kerrotaan se minkä päättelemiseen sillä on jo tarpeeksi tietoa.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ratkaisu</p>
+    <h2>Lakkaa kysymästä, ja korjaa sen sijaan</h2>
+    <p class="lead">Oivallus ei ole tehdä kieltäytymisistä nopeampia, koska emme hallitse palveluntarjoajia. Se on huomata milloin vastauksella ei enää ole merkitystä.</p>
+
+    <p>Minä hetkenä hyvänsä latauksen aikana ohjelma tietää kaksi asiaa: kuinka monta palasta on yhä kateissa, ja kuinka paljon pariteettidataa sillä jo on. Jos kädessä oleva pariteetti riittää rakentamaan uudelleen kaiken yhä avoinna olevan, vastaus kysymykseen onko tämä artikkeli kenelläkään ei voi enää muuttaa lopputulosta. Oli se hidas kyllä tai hidas ei, tiedosto rakennetaan joka tapauksessa. Läpikäynnin jatkaminen ostaa vain viivettä.</p>
+
+    <p>Nykyinen koontiversio lakkaa siis kysymästä siinä kohtaa ja siirtyy suoraan korjaukseen. Itse uudelleenrakennus on nopea ja on aina ollut: noin <b>2.3 sekuntia</b> 6.5 GB:n postauksella, ja tuo luku on sama jokaisessa mittaamassamme versiossa. Säästynyt aika on kokonaan odotusta jota ei enää tapahdu.</p>
+
+    <div class="tblwrap"><table>
+      <thead><tr><th>6.5 GB:n postaus, 60 puuttuvaa artikkelia</th><th class="num">aika tarkistettuun tiedostoon</th></tr></thead>
+      <tbody>
+        <tr><td>odottaa jokaisen palveluntarjoajan kieltäytymistä</td><td class="num">23 s</td></tr>
+        <tr><td><b>lopettaa heti kun pariteetti kattaa aukon</b></td><td class="win">13 s</td></tr>
+        <tr><td>josta varsinainen korjauslaskenta</td><td class="num">2.3 s</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Sama muutos ei tee yhtään mitään vahingoittumattomalle postaukselle, mikä on selvin todiste siitä että se tekee sen mitä ajattelemme: ilman puuttuvia artikkeleita ei ole läpikäyntiä lyhennettäväksi, ja molemmat koontiversiot päättävät puhtaan 6.5 GB:n työn samoissa 7 sekunnissa.</p>
+
+    <p><b>Se on vaihtokauppa, ei ilmainen voitto.</b> Aikainen korjaaminen tarkoittaa pariteettidatan pitämistä muistissa sen sijaan että se heitettäisiin pois ja haettaisiin lisää myöhemmin, joten muistin huippukäyttö (RSS) pahoin vaurioituneessa postauksessa nousee noin 0.8 GB:stä noin 1.3 GB:hen, ja vedämme palveluntarjoajilta suunnilleen 400 MB enemmän. Vahingoittumattomassa postauksessa muisti pysyy ennallaan 0.24 GB:ssä. Pidämme sitä useimmille oikeana vaihtokauppana, koska muistia kuluu vain siinä tapauksessa jossa se ostaa sinulle kymmenen sekuntia, mutta se on todellinen kustannus ja sille on asetus.</p>
+
+    <p class="note" style="text-align:start">Palveluntarjoajien nimet jätetään kieltäytymistaulukosta pois tarkoituksella. Luvut ovat yhden mittauksen ominaisuus, yhtenä iltana, yhdestä paikasta, eikä palveluntarjoajaa joka indeksoi toisin, tai jonka satuimme tavoittamaan huonona iltana, pitäisi leimata hitaaksi yhden kierroksen perusteella. Argumentin kannalta merkitsee muoto: kieltäytymiset vaihtelevat valtavasti, ja summa on tarpeeksi suuri hallitakseen vaurioitunutta latausta. Palveluntarjoajakohtaiset luvut ja raaka mittaustuloste ovat sisäisissä muistiinpanoissamme, ja niiden selittämät päästä päähän -luvut ovat <a href="benchmarks.fi.html#damaged">vertailusivulla</a>.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - yhden läpimenon Usenet-lataaja.</div>
+    <div>
+      <a href="index.fi.html">Etusivu</a> ·
+      <a href="features.fi.html">Ominaisuudet</a> ·
+      <a href="indexer.fi.html">Indeksoija</a> ·
+      <a href="benchmarks.fi.html">Vertailut</a> ·
+      <a href="explained.fi.html">Selitykset</a> ·
+      <a href="download.fi.html">Lataa</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Kieltäytymisajat mitattu 11. elokuuta 2026 Euroopasta viideltä palveluntarjoajalta, yksi yhteys kutakin, lepäävällä linjalla ilman minkäänlaista sisällönsiirtoa. Vaurioituneen postauksen päästä päähän -luvut ovat saman illan kuuden asiakasohjelman kierrokselta; täydelliset taulukot, ohjelmaversiot ja häviämämme kierrokset ovat vertailusivulla.</p>
+</div></footer>
+
+</body>
+</html>
