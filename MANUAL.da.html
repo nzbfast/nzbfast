@@ -55,8 +55,16 @@
       r.style.setProperty('--user-acc',a);
       r.setAttribute('data-accent','1');
     }
+    // Interface scale. This drives `zoom` (see --ui-zoom below), NOT the
+    // root font-size: every size on these pages is in px, so scaling the
+    // root scaled nothing at all and the slider had never once moved a
+    // pixel - it wrote its value, redrew its own "140%" label, and the
+    // page stayed exactly as it was (reported by a tester 2 Aug 2026,
+    // who reasonably read it as a container quirk). Keep the stored key
+    // and its 0.8-1.4 range so an existing setting starts working rather
+    // than resetting.
     var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
-    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    if(f>=0.8&&f<=1.4) r.style.setProperty('--ui-zoom',f);
     // §Stage6 appearance layers. Same reasoning as the theme: applied
     // before first paint, so nobody watches the page change shape after
     // it has already drawn. Each value is checked against a fixed list,
@@ -225,8 +233,55 @@ button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
   <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
   <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
   <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+  <!--
+    Job-origin glyphs (TODO §140 / issue #31). The row badge that says
+    where a job came from used to be an emoji per origin, with ONE robot
+    standing in for every app that posts over the API - so a Sonarr grab,
+    a Radarr grab and a shell script looked identical in history.
+
+    These are neutral shapes for the KIND of thing each sender keeps - a
+    set for series, a film strip for films, a note for music - and they
+    are deliberately NOT the other projects' logos: nzbfast does not ship
+    anyone else's mark. The name still lives in the tooltip, which is
+    what actually identifies the sender; the glyph only has to separate
+    the rows at a glance.
+  -->
+  <g id="i-o-folder"><path d="M3 18.5V6.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2.2 2.7h8.3A1.7 1.7 0 0 1 21 8.9v9.6a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.5z"/></g>
+  <g id="i-o-star"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></g>
+  <g id="i-o-rss"><path d="M4.5 12.5A7 7 0 0 1 11.5 19.5"/><path d="M4.5 6.5A13 13 0 0 1 17.5 19.5"/><circle cx="5.2" cy="18.8" r="1.3" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-link"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.4 1.4"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+  <g id="i-o-pin"><path d="M12 21.5V14.2"/><path d="M8.2 2.8h7.6l-1.1 5.1 2.6 2.6v1.6H6.7v-1.6l2.6-2.6z"/></g>
+  <g id="i-o-retry"><path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.6 2.8v4.6H16"/></g>
+  <!-- Generic API sender: a plug, for a client that named itself with a
+       name we have no shape for (and for records that only say "arr"). -->
+  <g id="i-o-app"><path d="M9 2.8v5.2M15 2.8v5.2"/><path d="M6.4 8h11.2v3.4a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17v4.2"/></g>
+  <g id="i-o-tv"><rect x="3" y="8" width="18" height="12.2" rx="2"/><path d="M8 3.8l4 4.2 4-4.2"/></g>
+  <g id="i-o-film"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3 9.2h4.5M3 14.8h4.5M16.5 9.2H21M16.5 14.8H21"/></g>
+  <g id="i-o-music"><path d="M9.2 18V5.8l9.6-2v12"/><circle cx="6.7" cy="18" r="2.5"/><circle cx="16.3" cy="15.8" r="2.5"/></g>
+  <g id="i-o-book"><path d="M12 7.2C10.3 5.6 8 4.8 4.3 4.8v12.6c3.7 0 6 .8 7.7 2.4 1.7-1.6 4-2.4 7.7-2.4V4.8c-3.7 0-6 .8-7.7 2.4z"/><path d="M12 7.2v12.6"/></g>
+  <g id="i-o-cam"><rect x="2.6" y="6.6" width="13" height="10.8" rx="2"/><path d="M15.6 11l5.8-3.4v8.8L15.6 13z"/></g>
+  <g id="i-o-hub"><circle cx="12" cy="12" r="2.6"/><circle cx="4.6" cy="5.4" r="1.8"/><circle cx="19.4" cy="5.4" r="1.8"/><circle cx="12" cy="20.4" r="1.8"/><path d="M6 6.7l4.1 3.6M18 6.7l-4.1 3.6M12 14.6v3.9"/></g>
+  <g id="i-o-funnel"><path d="M3.4 4.6h17.2l-6.5 8v7.2l-4.2 1.8V12.6z"/></g>
+  <g id="i-o-inbox"><path d="M12 2.8v8.6M8.6 8l3.4 3.4L15.4 8"/><path d="M3.6 14.2h4.8l1.4 2.4h4.4l1.4-2.4h4.8v4.3a1.9 1.9 0 0 1-1.9 1.9H5.5a1.9 1.9 0 0 1-1.9-1.9z"/></g>
+  <g id="i-o-phone"><rect x="6.5" y="2.6" width="11" height="18.8" rx="2.5"/><path d="M10.4 5.6h3.2"/><circle cx="12" cy="18" r="1" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-window"><rect x="3" y="4.6" width="18" height="14.8" rx="2"/><path d="M3 9.2h18"/><circle cx="6.4" cy="6.9" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-term"><rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2"/><path d="M7 9.6l3 2.4-3 2.4M12.6 15h4.6"/></g>
 </defs></svg>
 <style>
+/* The interface-scale control, for every page that inlines these tokens.
+   `zoom` rather than a root font-size: these pages size everything in px,
+   so the old root-font-size approach moved nothing (see the loader
+   above). Zoom takes the whole layout with it - type, spacing, controls
+   and chart furniture together - which is also what a size control is
+   normally expected to do, and it cannot leave text overflowing padding
+   that stayed behind.
+
+   On the BODY, not :root: zooming the root element re-scales the
+   viewport that position:fixed and 100vh resolve against, so the header
+   and any fixed overlay drift. Default 1 means a page with no setting is
+   byte-identical to before. */
+body{zoom:var(--ui-zoom,1)}
+
 /* One icon class. 1em so an icon scales with the text it sits beside,
    including the user's text-size setting. */
 .ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
@@ -264,12 +319,27 @@ h3{font-size:16.5px;margin:28px 0 6px}
 h4{font-size:14.5px;margin:20px 0 4px}
 p{margin:8px 0}
 li{margin:3px 0}
+/* Prose breaks a long unbreakable token instead of pushing the page sideways.
+   The API section quotes a 368px query string, which does not fit the 280px
+   text column of a 320px phone. Deliberately not applied to header or data
+   cells: inside a scroll wrapper, breaking a cell reflows the columns rather
+   than letting the wide table scroll, which is what the wrapper is for. */
+p,li,.tip,.note,.warn-box{overflow-wrap:break-word}
 code,kbd{background:var(--code);border:1px solid var(--line);border-radius:5px;
   padding:1px 6px;font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre{background:var(--code);border:1px solid var(--line);border-radius:9px;
   padding:12px 15px;overflow-x:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre code{background:none;border:none;padding:0}
-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+/* A table scrolls inside its own box instead of widening the page. One long
+   unbreakable command in a cell (the docker compose upgrade line, 338px wide
+   in an 87px column) used to drag the whole document sideways on a phone:
+   +140 at 320px and +85 at 375px in English, up to +217 / +162 in the
+   longer-word locales, and da/nl even at 500px. The 12px margin sits on the
+   wrapper so it still collapses with the adjacent paragraph exactly as
+   the margin on the table itself did - a scroll box does not collapse
+   margins through, so leaving it in place would have opened every gap. */
+.tblwrap{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;margin:0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
@@ -298,6 +368,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
   body{background:#fff;color:#000;font-size:11.5pt}
   h2{page-break-after:avoid}
   pre{white-space:pre-wrap}
+  .tblwrap{overflow:visible}
   a{color:inherit}
 }
 </style>
@@ -402,6 +473,16 @@ loginoplysninger over: Indstillinger → Usenet-servere → <b>Importér fra SAB
 finder din eksisterende installation og kopierer dens servere over. Der findes også
 <code>nzbfast import-sab</code> på kommandolinjen.</div>
 
+<p>Velkomstkortet spørger også, <b>hvordan du har tænkt dig at bruge nzbfast</b>,
+med fire svar: en app som Sonarr eller Radarr styrer den, skifter fra SABnzbd,
+skifter fra NZBGet, eller bare dig, fra dette dashboard. At vælge et ændrer
+ingenting i sig selv. Det viser en kort gennemgangsliste - hver anbefaling med
+indstillingens eget navn, dens nuværende værdi, den anbefalede værdi og én linje
+om hvorfor - og <b>Anvend</b> sætter kun de rækker, du sætter flueben ved. Hver
+række er en almindelig indstilling, du bagefter kan ændre tilbage for sig selv,
+og den samme liste er senere stadig tilgængelig under Indstillinger →
+<b>Anbefalede indstillinger til den måde, du bruger den på</b>.</p>
+
 <h3 id="firstrun-key">Din API-nøgle</h3>
 <p>På en helt ny installation laver nzbfast selv en API-nøgle, første gang daemonen
 starter, og skriver den ud én gang i et banner lige under dashboardets adresse.
@@ -443,7 +524,7 @@ computer, hvor intet andet har brug for adgang.</p>
 
 <h2 id="concepts">3 · Sådan virker nzbfast</h2>
 <p>En hurtig ordliste, så resten af manualen er let at læse:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Begreb</th><th>Betydning</th></tr>
 <tr><td><b>Udbyder / server</b></td><td>En Usenet-tjeneste, du har en konto hos
 (Newshosting, Eweka, XS News…). Hver tillader et vist antal samtidige forbindelser.</td></tr>
@@ -458,7 +539,7 @@ beskadigede eller mangler.</td></tr>
 <tr><td><b>Store-mode-RAR</b></td><td>De fleste releases er pakket i RAR-volumener uden
 komprimering. nzbfast genkender dette og skriver den <em>indre fil</em> direkte til dens
 endelige placering, mens den henter - ingen udpakningsfase bagefter.</td></tr>
-</table>
+</table></div>
 <p>Pipelinen kører download → afkod → verificér → udpak <em>samtidig</em>. Pipeline-kortet
 på dashboardet viser alle tre baner bevæge sig på én gang. Når den sidste
 byte ankommer, er verificeringen allerede færdig, og filen er allerede udpakket; et
@@ -475,13 +556,13 @@ genverificerer alt, den gendannede, mod PAR2-blok-mappet, før den stoler på de
 <p>Målt mod SABnzbd 5.0.4 og NZBGet 26.2 på samme maskine, samme
 udbydere og samme NZB'er, taget tid til en <em>brugbar fil</em> - download, verificering,
 reparation og udpakning alt inkluderet, for det er, når jobbet reelt er færdigt:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Jobstørrelse</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th></tr>
 <tr><td>7 GB</td><td><b>13.7 s</b></td><td>+26%</td><td>+39%</td></tr>
 <tr><td>35 GB</td><td><b>67 s</b></td><td>+61%</td><td>+325%</td></tr>
 <tr><td>87 GB</td><td><b>272 s</b></td><td>+36%</td><td>+160%</td></tr>
 <tr><td>190 GB</td><td><b>9 m 00 s</b></td><td>+30%</td><td>+111%</td></tr>
-</table>
+</table></div>
 <p>Forskellen er den efterbehandling, de andre stadig skal lave, efter den sidste byte
 lander. Begge konkurrenter blev tunet til sammenligningen, ikke efterladt på standardindstillinger -
 SABnzbd leveres i særdeleshed med anmodnings-pipelining <em>slået fra</em>, hvilket koster den
@@ -546,7 +627,11 @@ udbyder altid er øverst.</p>
 <li><b>Træk rækker for at ændre rækkefølge</b> (inden for et prioritetsbånd - Tving/Høj kører stadig først);
 skift prioritet inline.</li>
 <li><b>Klik på en række</b> for detaljeskuffen: fremgangsbjælker pr. fil, antal verificerings-
-blokke, og hvilken server der bidrog med hvor meget til <em>dette</em> job.</li>
+blokke, hvilken server der bidrog med hvor meget til <em>dette</em> job, og en
+"tilføjet af"-linje, der fortæller, hvor jobbet kom fra (watch-mappen, en tilsluttet
+app, API'et…). Knappen <b>Hent .nzb-filen</b> gemmer jobbets <code>.nzb</code>-fil - nzbfast
+beholder sin egen kopi, så det virker for hvert job, selv når den originale fil
+for længst er væk.</li>
 <li>Mærker viser særlige tilstande: <i>udskudt (langsom)</i>, <i>prefetcher</i>,
 <i>på pause</i> (se <a href="#performance">Ydelsesværktøjer</a>).</li>
 <li>Et nedtællingsdiagram følger de samlede GB, der er tilbage i hele køen.</li>
@@ -559,11 +644,23 @@ indexer nødvendig. Statuslinjen viser scanningsfremgang; <b>Scan nu</b> fremtvi
 <p>Tilføj titler ved navn - også dem, der endnu ikke er postet. Når en matchende release
 dukker op i indekset, hentes den automatisk, med kvalitetspræferencer og
 opgraderingsregler (en bedre kopi erstatter en dårligere).</p>
+<p>Kortet kan også følge en liste, du har i Plex. Tilføj en <b>listekilde</b>: forbind
+enten din Plex-konto (du godkender en kort kode på Plex' egen side, så ingen adgangskode
+nogensinde når nzbfast), eller indsæt adressen på din Plex-overvågningsliste. Behandl
+den adresse som en adgangskode - enhver, der har den, kan læse din liste - og derfor
+maskeres den, når den er gemt. Synkroniserede titler vises som skrivebeskyttede rækker
+ved siden af dine egne. En forbundet konto ser hele din liste, så fjerner du en titel
+dér, overvåges den heller ikke længere her (færdige downloads røres aldrig); en adresse
+viser kun de nyeste poster, så en manglende titel kan simpelthen være rullet ud, og
+intet fjernes. Begge adfærd kan slås om pr. kilde.</p>
 <h3 id="dash-history">Historik</h3>
 <p>Seneste downloads, én række hver. Mislykkede jobs tilbyder <b>Prøv igen</b>
 (genoptager fra journalen). Krypterede arkiver viser en 🔑 lås-op-kontrol - indtast
 adgangskoden, og jobbet bliver færdigt på stedet. Verificerings-sundhedsstriben viser defekte PAR2-
-blokke pr. download - en stigende hale betyder, at artikler kommer beskadigede frem.</p>
+blokke pr. download - en stigende hale betyder, at artikler kommer beskadigede frem.
+Hver rækkes skuffe fortæller, hvem der tilføjede jobbet, og har den samme
+<b>Hent .nzb-filen</b>-knap som køen - praktisk til at hente en release igen et andet
+sted, eller til at vedhæfte dens <code>.nzb</code> til en fejlrapport.</p>
 <p>Kortet viser ti downloads som standard, og resten er ét klik væk, på knappen ▤. Status, placering og årsagen til et fejlet job ligger bag et klik på selve rækken, så det almindelige tilfælde - hvad der blev færdigt, hvor stort, hvornår - forbliver læsbart uden at scrolle. Træk i kortets nederste kant for i stedet at lade listen scrolle i en højde, du selv vælger. <b>History rows</b> under Indstillinger → Grænseflade ændrer de ti; da det er en egenskab ved daemonen og ikke ved din browser, gælder det enhver enhed, der kigger på denne installation. <b>Colour History names</b> ved siden af farver færdige navne grønne og fejlede røde; slået fra forbliver navnene neutrale, og den farvede prik og rækkens egne detaljer siger stadig, hvad der er hvad.</p>
 <h3 id="dash-usage">Dataforbrug</h3>
 <p>Daglige bjælker pr. udbyder og totaler for I dag / 7 dage / 30 dage - uundværligt for målte
@@ -573,19 +670,25 @@ og blok-konti. Blok-konti viser livstidsforbrug mod deres størrelse.</p>
 <a href="#performance">Ydelsesværktøjer</a>.</p>
 
 <h2 id="adding">5 · Tilføj downloads</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Metode</th><th>Hvordan</th></tr>
 <tr><td><b>Træk &amp; slip</b></td><td>Slip en eller flere <code>.nzb</code>-filer hvor som helst på dashboardet.</td></tr>
 <tr><td><b>Watch-mappe</b></td><td>Vælg en mappe under Indstillinger; enhver <code>.nzb</code>, der gemmes i den, opfanges
-inden for 5 sekunder, og filen fjernes. Peg din browsers downloadmappe
+inden for 5 sekunder og flyttes til papirkurven, og et åbent dashboard melder hver
+afhentning ved navn ("… hentet fra Downloads"), så en fil, der forlader mappen,
+aldrig er et mysterium. Vil du hellere beholde dine filer? Slå <b>Behold .nzb-filer
+efter afhentning</b> til (se <a href="#settings">§9</a>). Peg din browsers downloadmappe
 mod den for hentninger med ét klik fra indexer-sites.</td></tr>
 <tr><td><b>Fra en URL</b></td><td>Indsæt et NZB-link (API <code>mode=addurl</code>, eller via en tilsluttet app).</td></tr>
 <tr><td><b>nzblnk:-links</b></td><td>Indsæt et <code>nzblnk:</code>-link hvor som helst på dashboardet, eller træk det ind. Har du installeret fra macOS-DMG'en eller Windows-installationsprogrammet, kan du også klikke på et direkte på et board. Se <a href="#nzblnk">nzblnk-links</a> nedenfor.</td></tr>
 <tr><td><b>Gennemse indeks</b></td><td>Klik på en hvilken som helst komplet release i Gennemse-kortet.</td></tr>
+<tr><td><b>Søg på indeksere</b></td><td>Søg på de indekser-konti, du har tilføjet, og
+sæt et resultat i kø direkte fra listen. Se <a href="#pullsearch">Søg på dine
+indekser-konti</a> længere nede.</td></tr>
 <tr><td><b>Overvågningsliste / RSS</b></td><td>Automatisk - se <a href="#automation">Automatisering</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr osv.</b></td><td>De sender hentninger direkte til køen - se <a href="#arr">§11</a>.</td></tr>
 <tr><td><b>Kommandolinje</b></td><td><code>nzbfast get file.nzb</code> henter uden daemonen.</td></tr>
-</table>
+</table></div>
 <h3>Kategorier, prioriteter, adgangskoder</h3>
 <ul>
 <li><b>Kategorier</b> er frie labels; hver bliver til en undermappe i din downloadmappe,
@@ -598,6 +701,56 @@ og Smarte mapper (se <a href="#automation">§10</a>) kan tildele dem efter regel
 Historik (🔑).</li>
 </ul>
 
+<h3 id="pullsearch">Søg på dine indekser-konti</h3>
+<p>Har du en konto hos et NZB-indekserwebsted, kan nzbfast søge der herfra og sætte det,
+du vælger, i kø, i stedet for at du skal gå til webstedet, hente en NZB og bære den
+tilbage. Det taler det almindelige indekser-API, som alle de websteder tilbyder, så der
+er ikke noget at sætte op pr. websted: NZBGeek, NZBFinder, DrunkenSlug, DOGnzb og resten
+virker ens. En Prowlarr- eller NZBHydra2-instans er også kun én linje, og tager alle de
+indeksere, der ligger bag den, med sig.</p>
+<p><b>Tilføj en konto.</b> Indstillinger → Søg på indeksere →
+<b>+ Tilføj indekser</b>. Udfyld et navn efter eget valg, webstedets API-adresse (dets
+almindelige webadresse er nok; en Prowlarr-linje ser ud som
+<code>http://host:9696/1/api</code>) og API-nøglen fra din kontoside der, og derefter
+<b>Anvend indeksere</b>. <b>Test</b> spørger webstedet, hvad det understøtter, og viser,
+hvad der kom tilbage, hvilket beviser adressen og nøglen med ét klik. En gemt nøgle vises
+aldrig igen: feltet siger det, og lader du det stå tomt, beholdes den nøgle, der allerede
+er der.</p>
+<p><b>At søge.</b> Åbn <b>🎬 væggen</b> i overskriftslinjen, og skift til
+release-listen. Rullemenuen ved siden af søgefeltet afgør, hvor en søgning kigger:
+<b>Dette indeks</b>, altså det, denne maskine selv har skannet, <b>Indeksere</b> eller
+<b>Begge</b>. Dit valg huskes. At spørge dine konti kræver noget i feltet, for at blade i
+dem med en tom forespørgsel ville bruge et døgns tildeling på en liste, ingen bad om. Med
+den indbyggede indekser slået fra, hvilket er sådan nzbfast kommer, er der ingen plakater
+at vise, og siden er præcis dette: et søgefelt, dine konti og resultaterne.</p>
+<p><b>Resultaterne.</b> Én linje pr. release, de nyeste først, med størrelse, alder og
+hvor ofte den indeksers egne brugere har hentet den. En release, som flere af dine konti
+fører, optræder én gang. Under <b>Begge</b> vinder en kopi, dit eget indeks allerede har,
+og den udefra falder væk, for at hente det, du allerede har indekseret, koster dig ikke
+noget. <b>Hent</b> sætter den i kø med høj prioritet: nzbfast henter selv NZB'en, og
+derfra er jobbet som ethvert andet, med reparation, udpakning, kategorier og scripts
+uændret.</p>
+<p><b>At spørge om én titel.</b> Åbn en titels kort på væggen, og tryk på
+<b>⌕ Søg på mine indeksere</b>. For film går spørgsmålet via IMDb-nummeret alle de
+steder, webstedet tager imod et, og det er forskellen på den film, du mente, og enhver
+release, hvis navn tilfældigvis indeholder de ord. nzbfast slår selv nummeret op, så
+siden har aldrig et. Websteder uden match på nummer bliver spurgt med ord i stedet.</p>
+<p><b>Din tildeling.</b> Indekser-konti tælles: så og så mange søgninger og så og så
+mange downloads om dagen, alt efter dit niveau. Skriv de to tal på linjen, så trækker
+nzbfast fra dem og begynder forfra ved midnat UTC. 0, standardværdien, betyder
+ubegrænset, og der tælles alligevel. En konto, der har brugt sin tildeling, sidder over,
+mens de andre arbejder, og en linje over resultaterne nævner den, der blev sprunget over:
+at løbe tør er aldrig tavst. Et websted, der svarer med en grænse af sin egen, eller beder
+os sætte farten ned, sættes til side i en time.</p>
+<p><b>Hvor din nøgle havner.</b> Kun hos den indekser, den hører til. Nøgler bliver på
+denne maskine, gives aldrig til browseren - hver resultatlinje bærer en billet, der
+gælder en halv time, i stedet for et link - og fjernes fra loggen og fra enhver fejl,
+webstedet sender tilbage, så en indsat fejlmeddelelse ikke kan lække en. En download kan
+kun hente et link, som en af dine egne søgninger gav.</p>
+<p>Det er de samme konti, som et <a href="#nzblnk">nzblnk-link</a> falder tilbage på, når
+det lokale indeks ikke kender dets hoved, og dem, overvågningslisten kan spørge om det,
+du vil have (<a href="#automation">§10</a>).</p>
+
 <h3 id="nzblnk">nzblnk-links</h3>
 <p>Nogle boards, mest tyske og hollandske, udgiver et <code>nzblnk:</code>-link i stedet
 for en NZB-fil. Indlægget er sløret, så der er slet ikke noget filnavn at linke til.
@@ -606,7 +759,7 @@ plus en valgfri titel <code>t=</code>, en adgangskode <code>p=</code> og en grup
 <code>g=</code>. Nogen skal først ud og finde indlægget.</p>
 <p>nzbfast slår headeren op i sit eget indeks først, hvilket slet ikke kræver netværk,
 og kun hvis det ikke rammer, spørger den de søgeindeksere, du har sat op (Indstillinger
-→ Søgeindeksere, <a href="#settings">§9</a>), under de samme dagsbudgetter og den samme
+→ Søg på indeksere, <a href="#settings">§9</a>), under de samme dagsbudgetter og den samme
 backoff som enhver anden søgning. Titlen bliver jobbets navn, og adgangskoden lægges
 automatisk på jobbet.</p>
 <ul>
@@ -665,6 +818,31 @@ at delene bliver ved med at mangle. Hele grupper, der er ved at blive ryddet, f�
 rigtige fil. Åbn den, mens den henter, tjek at indhold, sprog og kvalitet er som
 forventet, og annuller tidligt, hvis de ikke er - i stedet for først at opdage det
 efter hele downloaden.</p>
+<p>Den første halvdel af det står allerede på siden. Åbn en downloads række i
+køen (eller i historikken), så viser skuffen, hvad der er inde i videofilen, læst
+ud af de bytes, der er ankommet indtil nu: opløsning, video- og lydcodecs,
+lydsprog, undertekster, kapitler. En release, der er den forkerte version, det
+forkerte sprog eller en opskalering, afslører sig selv i det panel, længe før
+downloaden er færdig.</p>
+<p>Siden finder også ud af, om <em>denne</em> browser kan afspille filen, og siger
+det i stedet for at gætte: browsere er forskellige (Safari afkoder HEVC, hvor
+Chrome ikke gør, og næsten ingen afkoder AC-3- eller DTS-lyd), så spørgsmålet
+stilles til den browser, du faktisk sidder i. Når svaret er ja, åbner <b>▶
+Afspil</b> en afspiller direkte på siden, som viser filen, mens den hentes. De
+fleste udgivelser er MKV, som mange browsere nægter at åbne, selv om de kan
+afkode alt indeni, så nzbfast pakker dem om, mens de afspilles. Intet bliver
+kodet om: billede og lyd er de oprindelige bytes i en anden indpakning, og at
+springe til et andet sted virker stadig. Er lydsporet et, som denne browser ikke
+kan afkode, og bærer udgivelsen et andet, som den kan, er det det andet spor,
+der afspilles, så billedet ikke kommer stumt. Først når browseren mangler
+afkoderen til selve videoen, giver knappen filen videre til din egen
+medieafspiller, som beskrevet nedenfor.</p>
+<p>Én indstilling styrer det hele: Indstillinger → Grænseflade → <b>Tjek en fil,
+mens den henter</b>. <b>Kun detaljer</b>, standarden, viser panelet og
+tilbyder ingen afspiller på siden; <b>Detaljer og en afspiller</b> tilføjer
+afspilleren; <b>Fra</b> standser al læsning af filen - med den slået fra åbner
+intet en halvt hentet fil for nogen.</p>
+<p>For i stedet at tjekke i din egen medieafspiller:</p>
 <ul>
 <li><b>▶ Afspil</b> på væggen (eller <code>/m3u/&lt;id&gt;</code>) giver din medieafspiller
 en URL; daemonen starter eller genbruger downloaden bag den.</li>
@@ -690,15 +868,27 @@ nøglefri installationer opfører sig som før.</div>
 <h2 id="servers">8 · Usenet-servere</h2>
 <p>Indstillinger → <b>Usenet-servere</b> er den fulde editor: tilføje, redigere, fjerne, omarrangere og tage enhver
 server ind i eller ud af puljen. Hver server har:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Felt</th><th>Noter</th></tr>
 <tr><td>Host / port</td><td>Brug SSL-port <b>563</b>. TLS koster intet måleligt - nzbfast krypterer altid.</td></tr>
 <tr><td>Brugernavn / adgangskode</td><td>Gemmes lokalt i <code>config.local.json</code>, vises aldrig tilbage til browseren. Lader du adgangskoden stå tom ved redigering, beholdes den gemte. Adgangskoder er <a href="#passwords">sløret på disken, ikke krypteret</a>.</td></tr>
 <tr><td>Forbindelser</td><td>Samtidige forbindelser pr. server. Brug <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) til at finde hver udbyders bedste punkt frem for at gætte højt.</td></tr>
 <tr><td>Niveau (tier)</td><td>0 = primær; højere niveauer er fill-servere, der kun spørges om artikler, som alle lavere niveauer missede. Sæt ubegrænsede konti på 0, blok-konti på 1+.</td></tr>
 <tr><td>Blokstørrelse (GB)</td><td>Til blok-konti (betaling pr. GB): nzbfast holder styr på livstidsforbruget mod dette og holder op med at bruge serveren, når den er brugt op (advarsel ved 85%).</td></tr>
-</table>
+<tr><td>Hver byte faktureres</td><td>Slå til for en konto med målt forbrug. Dine downloads bruger serveren præcis som før; det, der stopper, er, at nzbfast sender den trafik på egen hånd - den automatiske forbindelsestuner, systemtestens netværksdel og header-scanninger til det indbyggede indeks springer den alle over. Uafhængig af niveauet og af blokstørrelsen, for en målt konto kan være din eneste udbyder, og en ubegrænset kan stå på niveau 2. Slået fra som standard. Den manuelle <b>Test</b> i <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) virker stadig på en markeret server og spørger først, for dér er det dig, der vælger at bruge penge.</td></tr>
+</table></div>
 <p><b>Lad der være lidt luft under kontoens forbindelsesgrænse.</b> At sætte forbindelserne lidt under grænsen koster ingenting: gennemløbet flader ud længe før de sidste en eller to forbindelser, og <b>Forbindelsestuning</b> (<a href="#performance">§13</a>) lander alligevel under. Det er de ledige pladser, der lader en anden enhed, et andet program eller et nyt forsøg efter en afbrudt socket komme ind alligevel i stedet for at blive afvist, mens denne her optager hver eneste plads.</p>
+<p><b>Du behøver ikke holde styr på maskinens grænse for åbne filer.</b> Systemet tæller
+hver forbindelse som en åben fil, og macOS starter et program med en grænse på 256 af dem,
+som et fuldt sæt forbindelser fordelt på flere servere kan passere. På macOS og Linux
+hæver nzbfast selv den grænse ved opstart: det beder om 65536 åbne filer og går ned gennem
+16384, 4096 og 1024, indtil systemet siger ja, aldrig over den hårde grænse systemet
+sætter, og det kører videre med den grænse, det havde, hvis hvert trin bliver afvist.
+Windows har ingen grænse af den slags pr. proces. Andre programmer tager den grænse,
+skallen gav dem, og et program, der løber tør for åbne filer midt i et job, kan stoppe uden
+at skrive hvorfor i sin log. Sæt derfor forbindelserne pr. server efter, hvad dit
+abonnement tillader, minus luften ovenfor, og ikke efter hvad du tror maskinen kan holde
+til.</p>
 <h3 id="passwords">Sådan gemmes dine udbyderadgangskoder</h3>
 <p>Udbyderadgangskoder i <code>config.local.json</code> er <b>sløret, ikke
 krypteret</b>. De gemmes som <code>obf1:</code> efterfulgt af en kodet form, så filen
@@ -733,11 +923,11 @@ alle steder, er indtil videre den bedre handel.</p>
 <p>To yderligere indstillinger pr. server har endnu ingen betjening i dashboardet:
 skriv dem i hånden ved den servers post i <code>config.local.json</code>
 (se <a href="#files">§17</a>), og genstart.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Nøgle</th><th>Noter</th></tr>
 <tr><td><code>bind_ip</code></td><td>Binder denne servers udgående forbindelser til en bestemt lokal adresse, til maskiner med flere udgange og delte VPN-tunneler. Adressefamilien vælger samtidig målfamilien: en v4-binding forbinder til serverens v4-adresse.</td></tr>
 <tr><td><code>socks5</code></td><td>Sender denne servers NNTP-trafik gennem en SOCKS5-proxy: <code>host:port</code>, eller <code>user:pass@host:port</code>. Værtsnavnet slås op <em>af proxyen</em>, så der er intet lokalt DNS-læk.</td></tr>
-</table>
+</table></div>
 <ul>
 <li><b>Fluebenet</b> ved siden af hver server er dens til/fra-kontakt: sat betyder, at
 serveren er med i download-puljen, ikke sat betyder deaktiveret. En deaktiveret server
@@ -764,7 +954,7 @@ foretages her, gemmes i <code>settings.json</code> og overlever genstart (værdi
 brugerfladen slår flag på kommandolinjen).</p>
 
 <h3>Hastighed &amp; planlægning <span class="pill live">live</span></h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Indstilling</th><th>Hvad den gør</th></tr>
 <tr><td>Hastighedsgrænse</td><td>Loft i bytes/sek. (<code>50M</code>, <code>1G</code>, 0 = ubegrænset). Fjern-apps kan sende procenter - sæt <i>Linjehastighed</i>, så de oversættes korrekt.</td></tr>
 <tr><td>Auto-hastighed</td><td>RTT-styret loft, der viger for anden trafik i husstanden og udvider sig igen, når linjen er stille.</td></tr>
@@ -773,20 +963,22 @@ brugerfladen slår flag på kommandolinjen).</p>
 <tr><td>Auto-opdatering / URL til opdateringstjek</td><td>Se <a href="#updates">§14</a>.</td></tr>
 <tr><td>Linjehastighed</td><td>Din forbindelses angivne hastighed - muliggør procentvise grænser fra SABnzbd-kompatible apps.</td></tr>
 <tr><td>Ugeplan</td><td>Rækkeeditor til regler efter ugetidspunkt: pause, genoptag eller sæt en hastighedsgrænse på givne dage/tidspunkter (lokal tid). F.eks. begræns til 20&nbsp;MB/s på hverdage 9–17, ubegrænset ellers.</td></tr>
-</table>
+</table></div>
 
 <h3>Næste download <span class="pill live">live</span></h3>
 <p><b>Forbindelser</b> (pr. server), <b>vindue</b> (pipelining-dybde pr. forbindelse),
 <b>decodere</b> (parallelle afkodningstråde). Aflæses, når hvert job starter. Standardværdierne
 passer til de fleste linjer; brug tuning-værktøjerne, før du hæver blindt.</p>
 
-<p><b>Hurtig verificering (CRC32)</b> (slået til som standard) gør krav på
-PAR2-blokke via CRC32, mens downloadet stadig kører, hvilket er 2-3x hurtigere på en
-langsom CPU. Hver artikels egen kontrolsum bliver stadig verificeret, og den afsluttende
-runde bruger altid fuld MD5: der gås ikke på kompromis med korrektheden. Fjern fluebenet
-for også at køre MD5 pr. blok under downloadet.</p>
+<p><b>Kontrol under download</b> vælger, hvor meget der verificeres, mens data kommer ind.
+<i>Fuld</i> bekræfter hver PAR2-blok med MD5. <i>Hurtig</i> (standard) gør krav på
+blokke via CRC32, hvilket er 2-3x hurtigere på en langsom CPU, og verificerer stadig
+hver artikels egen kontrolsum. <i>Let</i> springer desuden de artikelkontrolsummer over,
+så snart PAR2 dækker en fil: skaden dukker så op et øjeblik senere, ved sin blok. I alle
+tre bruger den afsluttende runde og enhver reparation fuld MD5, og et download uden
+PAR2-filer beholder sine artikelkontrolsummer.</p>
 <h3>Disk &amp; kvote <span class="pill live">live</span></h3>
-<p><b>Minimum fri plads</b> (sæt nye jobs på pause under den), <b>downloadkvote</b> pr.
+<p><b>Minimum fri plads</b> (sæt nye jobs på pause under den; 2 GB som standard, 0 slår det fra), <b>downloadkvote</b> pr.
 dag eller måned (UTC; Tving-jobs omgår den), <b>hukommelsesgrænse</b> - motorens RAM-budget
 (standard: ¼ af RAM, med loft; hæv den på en maskine med meget RAM for maksimal hastighed på kæmpe
 jobs, og se <a href="#memory">hvad lav hukommelse koster</a>, før du sænker den)
@@ -815,7 +1007,7 @@ ud, og downloadet fuldføres alligevel. Hæv den kun til usædvanligt dybe udgiv
 et rent, sigende navn: en film bliver <code>Example Movie (2024)</code>, serier beholder
 <code>Show - S01E02</code>. Slørede eller ukendte navne får lov at stå præcis som
 postet i stedet for at blive gættet.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Indstilling</th><th>Hvad den gør</th></tr>
 <tr><td>Medtag opløsning</td><td>Sætter <code>1080p</code>, <code>2160p</code>… i navnet. <b>Slået til som standard</b>; de øvrige fire mærker er slået fra.</td></tr>
 <tr><td>Medtag videocodec</td><td><code>x265</code>, <code>x264</code>, <code>AV1</code>…</td></tr>
@@ -824,12 +1016,32 @@ postet i stedet for at blive gættet.</p>
 <tr><td>Medtag release-gruppe</td><td>Mærket <code>-GROUP</code> til sidst.</td></tr>
 <tr><td>Fjern skraldefiler</td><td><b>Slået til som standard.</b> Sletter efterladte <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> og sample-klip fra færdige film- og seriemapper. Aldrig videoen eller dens undertekster.</td></tr>
 <tr><td>Behold kun mediefilen</td><td><b>Slået fra som standard, og destruktiv:</b> sletter permanent alt i mappen undtagen videoen (eller videoerne) og underteksterne. Hvert afsnit i en sæsonpakke bevares. Går forud for <b>Fjern skraldefiler</b>, når begge er slået til.</td></tr>
+<tr><td>Navngiv downloads efter .nzb-filen</td><td><b>Slået fra som standard.</b> Den færdige mappe og dens hovedfil tager navnet fra <code>.nzb</code>-filen i stedet for det ryddede navn, der er regnet ud fra releasen. Kun den største fil omdøbes: resten af en episodepakke, samplen, underteksterne og <code>.nfo</code>-filen beholder de navne, de ankom med. Enhver kategori kan tillade eller afvise det for sig selv under <b>Dine kategorier</b>, og det er sådan, du får det for én slags download og ikke en anden.</td></tr>
 <tr><td>Keep the other words in the name</td><td><b>Slået til som standard.</b> Sport, løb og andre begivenheder er ofte én og samme titel gentaget hele sæsonen, kun et ord eller to fra hinanden - "Round11 Hungary Race" over for "Round11 Hungary Qualifying". At beholde de ord er det, der forhindrer en hel sæson i at falde sammen til samme navn. Gælder kun, hvor navnet ikke kunne ryddes op på anden vis, så almindelige film og afsnit røres ikke.</td></tr>
-</table>
+</table></div>
 <p class="dim">Hele gruppen kører efter reparation og udpakning og før <b>Flyt fuldførte
 til</b>, og springes helt over for et job, der stadig venter på en adgangskode. Begge
 sletttrin gælder <em>kun</em> udgivelser, der er genkendt som film eller serie: en
 softwarelast eller et sæt, der ikke kan klassificeres (sløret), bliver aldrig ryddet.</p>
+
+<p><b>Slettede filer ryger i papirkurven</b> afgør, hvad "slette" betyder ovenfor.
+Slået til flytter oprydningen filer til systemets papirkurv, så et forkert gæt om,
+hvad der var skrald, kan fortrydes; slået fra slettes de med det samme. Den er
+<b>slået til som standard på macOS og Windows</b>, hvor papirkurven er et sted, du
+kan se og tømme, og <b>slået fra som standard på Linux</b>, hvor den som regel ikke
+er det.</p>
+<div class="note"><b>På en NAS eller i en container: lad den være slået fra.</b> Når
+dine downloads ligger på en anden disk end din hjemmemappe - hvilket er det normale
+setup på Unraid, Synology, en seedbox eller enhver Docker-installation med et
+monteret share - bruger Linux' papirkurvsregler slet ikke nogen
+skrivebordspapirkurv. De opretter en skjult mappe <code>.Trash-1000</code> (tallet
+er dit bruger-id) øverst på downloaddisken og flytter filerne derhen i stedet.
+Intet viser dig den mappe, intet tømmer den, og pladsen, den holder på, kommer
+aldrig tilbage.
+<p>Har du kørt en tidligere version af nzbfast på Linux med den slået til, så kig
+efter den mappe i roden af dit download-share. Den er sikker at tømme: alt i den er
+filer, en oprydning allerede har afgjort, at du ikke ville have. nzbfast tømmer den
+ikke for dig, for den ligger på din disk, og det er dig, der dømmer.</p></div>
 
 <h3>Mapper &amp; behandling</h3>
 <p><b>Downloadmappe</b> <span class="pill restart">genstart</span>, <b>watch-mappe</b>,
@@ -837,6 +1049,27 @@ softwarelast eller et sæt, der ikke kan klassificeres (sløret), bliver aldrig 
 og <code>SAB_*</code>-miljø - eksisterende SAB-scripts virker uændret),
 <b>oprydningsendelser</b> (skraldfiler slettet efter fuldførelse), <b>Smarte mapper</b>
 og <b>tv-arkivering</b> (se <a href="#automation">§10</a>).</p>
+<p><b>Behold .nzb-filer efter afhentning</b> (slået fra som standard) lader den
+originale <code>.nzb</code> blive i watch-mappen, efter den er sat i kø, i stedet
+for at flytte den til papirkurven - for samlere, og til at give filen videre, når en
+download driller. En beholdt fil huskes, også på tværs af genstarter, og sættes ikke
+i kø igen; gem den igen for at hente den på ny. Uanset hvad du vælger, har hvert
+jobs skuffe en <b>Hent .nzb-filen</b>-knap, så en kopi af ethvert jobs
+<code>.nzb</code> aldrig er mere end et klik væk.</p>
+
+<h3 id="set-indexers">Søg på indeksere <span class="pill live">live</span></h3>
+<p>Dine konti hos NZB-indekserwebsteder, én linje hver, så en søgning på væggen også kan
+spørge dem. Hvad funktionen gør, og hvordan man søger med den, står i
+<a href="#pullsearch">§5</a>.</p>
+<div class="tblwrap"><table>
+<tr><th>Felt</th><th>Hvad det gør</th></tr>
+<tr><td>Navn</td><td>En etiket efter eget valg, og den identitet, dagens tællere og grænser føres under. At omdøbe en linje begynder en ny linje, så indtast nøglen igen.</td></tr>
+<tr><td>API-adresse</td><td>Webstedets API-adresse. Dets almindelige webadresse er nok; en Prowlarr- eller NZBHydra2-linje ser ud som <code>http://host:9696/1/api</code>.</td></tr>
+<tr><td>API-nøgle</td><td>Fra din kontoside på det websted. Bliver på denne maskine, sendes kun til det websted, den hører til, vises aldrig igen og skrives aldrig i loggen. Tom beholder den gemte.</td></tr>
+<tr><td>Søgninger om dagen</td><td>Hvor mange søgninger denne konto må bruge om dagen. 0 = ubegrænset, og standard.</td></tr>
+<tr><td>Downloads om dagen</td><td>Hvor mange hentninger den må bruge om dagen. 0 = ubegrænset. Begge tællere begynder forfra ved midnat UTC.</td></tr>
+<tr><td>til, Test</td><td><b>til</b> er det, der gør en linje søgbar; fjern fluebenet for at beholde en konto uden at bruge den. <b>Test</b> spørger webstedet, hvad det understøtter, og viser svaret, eller fejlen, på stedet.</td></tr>
+</table></div>
 
 <h3>Indeksering <span class="pill live">live</span></h3>
 <div class="note"><b>Den indbyggede indekser er slået fra som standard.</b> Den finder
@@ -846,12 +1079,13 @@ samlegruppe. Det rigtige navn lever kun i en NZB, som uploaderen udgiver et ande
 så det var aldrig på Usenet, hvor en skanner kunne læse det. Målt på vores eget indeks
 gav 14,8 millioner skannede indlæg omkring 31.000 gennemsøgelige releases, groft sagt
 én ud af fem hundrede. Bliv ved med at bruge kommercielle indeksere, og tilføj dem under
-Indstillinger → Søgeindeksere, så du kan søge i dem fra væggen. Slå det her til, hvis du
+Indstillinger → Søg på indeksere, så du kan søge i dem fra væggen. Slå det her til, hvis du
 følger bestemte grupper, hvor folk stadig poster under rigtige navne, eller hvis du vil
 se, hvad din udbyder faktisk fører. Med kontakten slået fra skannes eller hentes
-ingenting, der oprettes ingen database, og væggen, Gennemse, overvågningslisten og
-newznab-feedet er skjult.</div>
-<table>
+ingenting, og der oprettes ingen database; Gennemse og newznab-feedet forsvinder, væggen
+bliver en almindelig søgeside for de indekser-konti, du har tilføjet, og
+overvågningslisten arbejder på de konti i stedet.</div>
+<div class="tblwrap"><table>
 <tr><th>Indstilling</th><th>Hvad den gør</th></tr>
 <tr><td>Indbygget indekser</td><td>Hovedkontakten, <b>slået fra medmindre du slår den til</b>. Fra betyder ingen skanning, ingen metadataopslag, ingen tilgængelighedsstikprøver og intet newznab-feed; et indeks, der allerede ligger på disken, bevares (der er en sletteknap), så at slå til igen fortsætter i stedet for at skanne forfra.</td></tr>
 <tr><td>Grupper</td><td>Newsgroups, som den indbyggede indexer scanner (f.eks. <code>alt.binaries.teevee</code>).</td></tr>
@@ -863,7 +1097,12 @@ newznab-feedet er skjult.</div>
 <tr><td>Ingest-filtre</td><td>JSON-regler, der filtrerer, hvad der kommer ind i indekset: typer (obfuskeret skrald droppes som standard), år/opløsning/sprog, størrelsesgrænser.</td></tr>
 <tr><td>Scan nu / dyb genscanning</td><td>Kør en gennemgang med det samme; med en dybde genscannes så mange nylige headers.</td></tr>
 <tr><td>OMDb-nøgle / genopfrisk metadata / slet</td><td>Kontroller til væg-berigelse (<a href="#wall">§6</a>). Slet genopbygger databasen fra bunden - genoprettelsesvejen, hvis den nogensinde bliver korrupt.</td></tr>
-</table>
+<tr><td>Pre-feed</td><td><b>Slået fra, indtil du slår det til.</b> Mange uploads udgives uden deres navn, og så har en skanning intet at læse. Offentlige relækanaler annoncerer det rigtige navn, den eneste åbne vej til at parre de indlæg. At slå til holder en forbindelse til et IRC-net åben og lytter: der sendes aldrig noget, og der oprettes ingen konto. Kræver at indekseringen er slået til, for et feed uden et sted at lægge det, det hører, er bare en socket, der står åben til ingen nytte.</td></tr>
+<tr><td>Relæserver, Relækanaler</td><td>IRC-nettet, der bærer annonceringerne (vært eller vært:port), og kanalerne at lytte med i, kommasepareret. En ændring træder i kraft ved næste forbindelse: slå feedet fra og til igen for at anvende den straks.</td></tr>
+<tr><td>Navngiv ved korrelation</td><td>De offentlige direkte relæer bærer ingen filnavne, så de fleste sløre indlæg kan ikke parres direkte. Hvad en annoncering derimod fastslår, er hvornår en udgivelse dukkede op, og hvor stor den er. Dette sammenligner annonceret tid og størrelse med navnløse indlæg og foreslår, når de passer, det rigtige navn under Gennemse. Et forslag er markeret som et forslag, kræver dit klik og omdøber aldrig filer på disken.</td></tr>
+<tr><td>Anvend stærke match automatisk</td><td>Slået fra som standard, og streng når den er til: størrelsen skal passe tæt, ingen anden annoncering må passe næsten lige så godt, og annonceringen skal vælge dette indlæg tilbage ved kontrollen den anden vej. Et anvendt navn ændrer kun, hvordan udgivelsen vises, er markeret som udledt og trækker sig selv tilbage, hvis en færdig download modbeviser det. Alt svagere forbliver et forslag.</td></tr>
+<tr><td>Annonceringshistorik</td><td>Det direkte feed hører kun annonceringer fra efter det blev slået til. Dette henter cirka seks måneders tidligere annonceringer fra en offentlig pre-database, høfligt og én gang, så også allerede indekserede indlæg kan parres. Kører en halv times tid i baggrunden.</td></tr>
+</table></div>
 
 <h3>Bibliotek, Sikkerhed, Grænseflade</h3>
 <p><b>Bibliotek</b>: kategorier behandlet som øjeblikkelige biblioteksposter + gentjek-interval.
@@ -875,23 +1114,46 @@ hastighed vises i dashboardet: megabyte (MB/s, normen blandt downloadprogrammer,
 standarden) eller megabit (Mb/s, sådan som udbydere angiver linjer). Filstørrelser
 bliver i byte. Det er en egenskab ved daemonen, ikke ved din browser, så det gælder
 hver enhed, der kigger på denne installation.</p>
-<h3>Avanceret: indstillinger uden betjening i dashboardet</h3>
-<p>Fire indstillinger har hverken en betjening i brugerfladen eller et flag på
-kommandolinjen. Sæt dem via API'et (<a href="#api">§16</a>), f.eks.
+<h3>Avanceret: knapperne bag de indlysende</h3>
+<p>Seks indstillinger uden flag på kommandolinjen. Hver har nu en avanceret række på det
+indstillingskort, den hører til, og kan stadig sættes via API'et
+(<a href="#api">§16</a>), f.eks.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Som
 alle andre gemmes de i <code>settings.json</code>.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Navn</th><th>Hvad den gør</th></tr>
-<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (standard <code>fast</code>). <code>lean</code> er skubbet til langsomme CPU'er: som fast, men springer desuden yEnc-CRC pr. artikel over, så snart PAR2 dækker en fil, altså ét CRC32-lag i stedet for to. Downloads uden PAR2 beholder deres artikel-CRC'er, og verificering og reparation i slutningen af jobbet er uændrede i begge tilfælde. <b>Hurtig verificering</b> ovenfor er den samme betjening for full mod fast.</td></tr>
+<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (standard <code>fast</code>). <code>lean</code> er skubbet til langsomme CPU'er: som fast, men springer desuden yEnc-CRC pr. artikel over, så snart PAR2 dækker en fil, altså ét CRC32-lag i stedet for to. Downloads uden PAR2 beholder deres artikel-CRC'er, og verificering og reparation i slutningen af jobbet er uændrede i begge tilfælde. Vælgeren <b>Kontrol under download</b> ovenfor er denne indstilling.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Ventetid før det <em>ene</em> automatiske gentagne forsøg, som en første fejl med manglende artikler får (standard 20). Propagationsforsinkelse er en reel årsag til manglende artikler og løser sig selv; takket være journalen henter genkørslen kun det, der stadig mangler. Fejl på grund af adgangskode eller takedown kvalificerer sig aldrig.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Hvor mange grupper indekseringen skanner parallelt (standard 3, begrænset til 1-8).</td></tr>
 <tr><td><code>oracle_sample</code></td><td>Tilgængelighedsoraklets STAT-budget i tomgang (<a href="#oracle">§13</a>), sonderinger i timen pr. server. Standard 300, maks. 3600, <code>0</code> slår sampling helt fra.</td></tr>
-</table>
+<tr><td><code>predb_max_rows</code></td><td>Hvor mange pre-annonceringer feed-tabellen beholder (standard 250000, begrænset til 10000-5000000). Den timelige beskæring skærer ned til det tal, og den historiske import nægter at starte, hvis den ville gå forbi det, så en import aldrig tilføjer rækker, som den næste beskæring sletter.</td></tr>
+<tr><td><code>predb_seed_days</code></td><td>Hvor langt tilbage en historisk import når, når den startes uden sit eget vindue (standard 180 dage, højst 366). Et større vindue er flere forespørgsler til pre-kilden, som kører i takten en hvert andet sekund.</td></tr>
+</table></div>
 <h2 id="automation">10 · Automatisering</h2>
 <h3>Overvågningsliste</h3>
 <p>Den enkleste automatisering: tilføj en titel på dashboardet, sæt kvalitetspræferencer,
 færdig. Nye releases hentes, efterhånden som de dukker op i dine indekserede grupper;
 kopier af bedre kvalitet opgraderer tidligere hentninger; en kalendervisning viser, hvad der er på vej.</p>
+<p>En <b>listekilde</b> fodrer overvågningslisten fra en liste, du har i Plex, på en af
+to måder: forbind din Plex-konto ved at godkende en kort kode på Plex' side, eller
+indsæt adressen på en Plex-overvågningsliste. Adressen er en adgangsnøgle - den giver
+enhver, der har den, ret til at læse listen - så den maskeres, når den er gemt.
+Synkronisering af fjernelser er med vilje forskellig pr. tilstand: en forbundet konto
+ser hele listen, så en titel, der fjernes dér, overvåges ikke længere her (allerede
+færdige downloads bliver); et adressefeed indeholder kun de nyeste poster, så fravær
+beviser ingenting, og titler bliver kun tilføjet. Begge standarder kan ændres pr.
+kilde.</p>
+<p><b>Søg også på mine indekser-konti efter det, jeg vil have</b>, nederst på
+overvågningslistens kort, lader den spørge kontiene fra Indstillinger → Søg på
+indeksere ud over dit eget indeks (<a href="#pullsearch">§5</a>). Det begynder slået fra,
+for det er det eneste her, der bruger en målt konto, uden at du klikker. Slået til
+spørger hver overvåget post cirka to gange om dagen, og kun efter det, den ikke allerede
+har fundet, under de samme daglige grænser og med de samme bemærkninger, når en konto
+springes over. En kandidat fra en indekser bedømmes præcis som en lokal, så
+kvalitetsgulve, opgraderinger, sæsonpakker og dublethåndtering gælder alle sammen, og en
+lokal kopi vinder enhver lige stilling, fordi den ikke koster tildeling. Med den
+indbyggede indekser slået fra er det dette, der overhovedet giver overvågningslisten
+noget at arbejde med.</p>
 <h3 id="auto-rss">RSS-feeds</h3>
 <p>Indstillinger → RSS: enhver newznab-/indexer-RSS-URL med interval pr. feed, kategori og
 filterregler (titelmønstre, størrelsesgrænser). Matchende emner hentes
@@ -906,8 +1168,62 @@ klar til Plex/Jellyfin uden et eksternt værktøj.</p>
 efter tidspunkt på dagen.</p>
 <h3>Scripts</h3>
 <p>Et efterbehandlingsscript modtager SABnzbds positionsargumenter og
-<code>SAB_*</code>-miljøvariabler - det store økosystem af SAB-scripts kører
-som det er.</p>
+<code>SAB_*</code>-miljøvariabler: det store økosystem af SAB-scripts kører
+som det er. NZBGets dialekt leveres ved siden af - <code>NZBPP_*</code>-variabler
+(<code>DIRECTORY</code>, <code>NZBNAME</code>, <code>CATEGORY</code>,
+<code>TOTALSTATUS</code>, <code>PARSTATUS</code>, <code>UNPACKSTATUS</code>,
+<code>FINALDIR</code>) og exitkoderne 93/94/95 - så kernelogikken i et
+NZBGet-udvidelsesscript kører også. Mapningen er ærlig snarere end en emulering:
+reparation og udpakning sker inde i one-pass-downloaden, så en ren fuldførelse
+rapporterer <code>PARSTATUS=0</code> og en repareret <code>PARSTATUS=2</code>.
+Scriptegne indstillingsformer (<code>NZBPO_*</code>) leveres ikke.
+Et script må gerne efterlade en hjælper kørende i baggrunden, når det slutter, og
+nzbfast dræber den ikke, men nzbfast holder op med at læse scriptets output,
+i det øjeblik scriptet selv er færdigt: giv en baggrundshjælper sin egen
+output-omdirigering, ellers bliver den standset, første gang den prøver at skrive.</p>
+<h3>Præ-kø-script</h3>
+<p>En anden krog kører, <em>før</em> en download kommer i køen
+(Indstillinger → Mapper → Præ-kø-script), med SABnzbds præ-kø-kontrakt:
+argumenterne <code>name, pp, category, script, priority, size, group</code> plus
+<code>SAB_*</code>-miljøet. Dets første outputlinje accepterer (<code>1</code>)
+eller afviser (<code>0</code>) downloaden; linje 2-7 kan omdøbe den, sætte
+<code>pp</code>, skifte kategori, vælge et script eller ændre prioriteten
+(tomme linjer beholder standarden). En afvist download går i historikken som
+Mislykket med årsagen, og Prøv igen fra historikken bringer den tilbage uden at
+spørge scriptet igen. Krogen kan aldrig miste en download: hvis scriptet mangler,
+går ned, overskrider sit tidsbudget eller skriver noget, der ikke er en dom,
+fortsætter tilføjelsen urørt, og loggen siger hvorfor.</p>
+<h3>Livscyklushændelser og signerede webhooks</h3>
+<p>Hver jobmilepæl er en versioneret hændelse: <code>job.added</code>,
+<code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
+<code>job.completed</code>, <code>job.failed</code>, plus
+<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code> og <code>quota.reached</code>. Hver bærer
+<code>schema_version</code> (i øjeblikket 1; nye nøgler kan dukke op uden et hop -
+ignorer det, du ikke kender), et monotont <code>seq</code> og et
+<code>at</code>-tidsstempel i millisekunder.</p>
+<p>For at modtage dem tilføjer du et <b>webhook</b>-notifikationsmål
+(Indstillinger → Automatisering) og skriver i dets <i>events</i>-felt, hvilke
+hændelsestyper det skal have - præcise typer eller et præfiks som <code>job.*</code>.
+Målet modtager derefter én POST pr. hændelse: hændelsens JSON som krop plus et
+<code>delivery</code>-id (<code>&lt;boot&gt;-&lt;seq&gt;</code>, håndtaget at
+deduplikere på), headerne <code>X-NzbFast-Event</code> og
+<code>X-NzbFast-Delivery</code>, og - når målet har en signeringshemmelighed -
+<code>X-NzbFast-Signature: sha256=&lt;hex&gt;</code>, en HMAC-SHA256
+af kroppens nøjagtige bytes under din hemmelighed (samme form, som GitHubs
+webhooks bruger). Verificér i Python:</p>
+<pre><code>expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, request.headers["X-NzbFast-Signature"])</code></pre>
+<p>Levering er mindst-én-gang: et mål, der ikke kan nås, prøves igen efter
+10&nbsp;s, 60&nbsp;s og 5&nbsp;min og droppes derefter med fejlen vist på
+målets indstillingsrække. Et HTTP-fejlsvar (404, 401...) prøves ikke igen - ret
+modtageren og brug Test. Hvert mål har sin egen leveringsbane, så et, der er
+langsomt eller unåeligt, aldrig holder et andet tilbage; inden for en bane
+beholder leveringerne den rækkefølge, hændelserne skete i, og droppes én, viser
+sekvensnumrene hullet. De klassiske hændelsesord
+(<code>completed</code>, <code>failed</code>, <code>repaired</code>,
+<code>disk</code>, <code>quota</code>) beholder deres betydning for menneskelige
+notifikationer på samme mål.</p>
 
 <h2 id="arr">11 · Sonarr, Radarr &amp; venner</h2>
 <p>nzbfast taler SABnzbd-API'et native, så hvert *arr virker ud af boksen -
@@ -919,6 +1235,11 @@ og den kan også fungere som deres <em>indexer</em>.</p>
 (hvor du finder den: <a href="#firstrun-key">§2</a>).</li>
 <li>Kategori efter ønske (f.eks. <code>tv</code> / <code>movies</code>). Test → grønt flueben → Gem.</li>
 </ol>
+<p>Dashboardet rækker dig adressen: på en installation, der endnu ikke har hentet
+noget, viser velkomstkortets rute "Lad Sonarr, Radarr eller en app tilføje
+downloads" den præcise adresse med en <b>Copy</b>-knap ved siden af. API-nøglen
+står med vilje ikke på den linje; den bliver bag sin egen visning i
+Indstillinger → Sikkerhed (<a href="#firstrun-key">§2</a>).</p>
 <p>Kø, historik, status pr. job, "fjern &amp; slet", nyt forsøg og kategoridirigering
 opfører sig alle, som *arr-programmerne forventer.</p>
 <h3>Som en indexer (newznab)</h3>
@@ -942,26 +1263,60 @@ det, der blev postet under et rigtigt filnavn.</div>
 <p>nzbfast implementerer <em>begge</em> de store fjernbetjeningsprotokoller, så næsten alle
 mobil-/tablet-apps virker. Vælg den protokol, din app understøtter:</p>
 <h3>Apps, der taler NZBGet (nzb360, LunaSea, NZB Unity…)</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Felt i app'en</th><th>Værdi</th></tr>
 <tr><td>Type</td><td>NZBGet</td></tr>
 <tr><td>Host / port</td><td>din maskine : <b>6789</b></td></tr>
 <tr><td>Brugernavn</td><td>hvad som helst (f.eks. <code>nzbfast</code>)</td></tr>
 <tr><td>Adgangskode</td><td>din <b>API-nøgle</b></td></tr>
-</table>
+</table></div>
 <p>Hele den JSON-RPC-flade, disse apps bruger, serveres: status, kø med
 omorganisér/pause/slet, historik, tilføj-NZB, hastighedsgrænse, pause/genoptag, log.</p>
 <h3>Apps, der taler SABnzbd</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Felt i app'en</th><th>Værdi</th></tr>
 <tr><td>Type</td><td>SABnzbd</td></tr>
 <tr><td>Host / port</td><td>din maskine : <b>6789</b></td></tr>
 <tr><td>API-nøgle</td><td>din API-nøgle (eller NZB-nøglen for kun-tilføj-adgang)</td></tr>
-</table>
+</table></div>
 <h3>Dashboardet på din telefon</h3>
 <p>Åbn bare <code>http://&lt;machine&gt;:6789</code> i en mobilbrowser - hele
 dashboardet og væggen har et touch-layout. Panelet Indstillinger → Fjernadgang viser
 de præcise URL'er og en QR-kode til at scanne.</p>
+
+<h3 id="remote-proxy">Nå nzbfast udefra</h3>
+<p>Der er ingen loginside, og det er med vilje. Et login med sessionscookie er en sikkerhedsflade, der skal vedligeholdes for altid, og den ville stadig være den svageste lås på noget, der vender mod det åbne internet. nzbfast godkender i stedet med din API-nøgle og tager nøglen både i en forespørgselsheader og i URL'en (<code>X-Api-Key</code> eller <code>Authorization: Bearer</code>) - og det er netop det, der lader noget foran klare loginet ordentligt.</p>
+<p><b>Det enkleste er slet ikke at offentliggøre den.</b> Installer <b>Tailscale</b> på denne maskine og på telefonen, så er begge på det samme private net: intet er eksponeret, hverken router eller certifikat skal røres, og Indstillinger → Fjernadgang viser en adresse, der virker overalt, så snart Tailscale kører. Vælg det, medmindre du direkte har brug for et offentligt domæne.</p>
+<p><b>nzbfast kan også selv servere HTTPS.</b> Peg Indstillinger → Sikkerhed →
+HTTPS-certifikat / HTTPS-privatnøgle på et PEM-certifikat og dets nøgle (eller
+start med <code>--tls-cert cert.pem --tls-key key.pem</code>), genstart, så svarer
+dashboardet og API'et på <code>https://</code> i stedet for almindelig HTTP - én
+lytter, ét skema. Brug det certifikat, dit domæne allerede har (for eksempel
+fra Let's Encrypt via certbot), eller et selvsigneret til LAN'et, som browsere
+accepterer efter en engangsadvarsel. Et defekt eller udløbet certifikat nægter
+opstart med filen nævnt ved navn, så fejlen er synlig, hvor du lavede den; forny
+ved at udskifte filerne og genstarte. Indbygget HTTPS krypterer trafikken, men
+tilføjer intet login, så behold API-nøglen sat.</p>
+<p><b>Har du brug for et offentligt domæne</b>, så sæt en omvendt proxy foran, giv den certifikatet, og lad den stå for godkendelsen. Start nzbfast med <code>--bind 127.0.0.1</code>, så proxyen er eneste vej ind, og peg proxyen på <code>http://127.0.0.1:6789</code>:</p>
+<pre><code># Caddy
+example.com {
+    reverse_proxy 127.0.0.1:6789
+}
+
+# nginx
+location / {
+    proxy_pass http://127.0.0.1:6789;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}</code></pre>
+<p>Læg det på, som din proxy tilbyder: basic auth, en forward-auth-tjeneste som Authelia eller Authentik, eller klientcertifikater. Én ting fanger alle - Sonarr, Radarr og telefonapperne kan ikke gennemføre et browserlogin, så lad dem slippe udenom. De fleste proxyer kan lukke en forespørgsel med en gyldig <code>X-Api-Key</code>-header igennem og kræve godkendelse af alt andet.</p>
+<div class="warn-box"><b>Videresend ikke bare port 6789 på routeren.</b>
+Uden et konfigureret certifikat taler dashboardet almindelig HTTP, så din
+API-nøgle og alt, hvad du bruger den til, ville krydse internettet læsbart for
+enhver undervejs, og en installation helt uden nøgle står åben for den, der
+finder den. Videresender du alligevel en port, så sæt en API-nøgle først og slå
+HTTPS til.</div>
 
 <h2 id="performance">13 · Ydelsesværktøjer</h2>
 <h3 id="perf-benchmark">System-benchmark</h3>
@@ -1028,13 +1383,13 @@ degraderer til mere disk-I/O frem for at swappe eller fejle. Men den spill er ik
 gratis, og på store jobs kan du måle den.</p>
 <p>Målt på én maskine og én linje (M1 Ultra, 10 GbE), samme filer ved hvert
 budget. Hver kørsel frembragte et korrekt, fuldt verificeret, udpakket resultat:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Jobstørrelse</th><th>Rigeligt RAM</th><th>2 GB-budget<br><span class="dim">≈ 8 GB-maskine</span></th><th>1 GB-budget<br><span class="dim">≈ 4 GB-maskine</span></th><th>256 MB-budget<br><span class="dim">≈ 2 GB-NAS</span></th></tr>
 <tr><td>7 GB</td><td>15 s</td><td>15 s</td><td>15 s</td><td>15 s</td></tr>
 <tr><td>35 GB</td><td>65 s</td><td>70 s</td><td>70 s</td><td>65 s</td></tr>
 <tr><td>87 GB</td><td>148 s</td><td>206 s <span class="dim">+39%</span></td><td>196 s <span class="dim">+32%</span></td><td>180 s <span class="dim">+22%</span></td></tr>
 <tr><td>190 GB</td><td>330 s</td><td>427 s <span class="dim">+29%</span></td><td>402 s <span class="dim">+22%</span></td><td>411 s <span class="dim">+25%</span></td></tr>
-</table>
+</table></div>
 <p>Topforbruget følger <em>budgettet</em>, ikke jobbet: den 190 GB-download fuldføres
 i cirka 1.1 GB RAM. Det, du bytter for det, er tid - og kun på store jobs.</p>
 <ul>
@@ -1082,9 +1437,57 @@ opdateringer</b> (Indstillinger) fra, og den kontakter slet ikke
 opdateringsmanifestet; en tom opdaterings-URL gør det samme.</li>
 </ul>
 
+<h3 id="updating">Opdatering uden at miste dine indstillinger</h3>
+<p>Én regel dækker enhver installation: <b>en opdatering udskifter programmet, aldrig
+dine indstillinger.</b> Alt, hvad du har konfigureret - servere, stier, API-nøglen,
+køen - bor i en håndfuld filer i én mappe (<a href="#files">§17</a>), og intet
+installationsprogram, image-pull eller pakkeopgradering rører den mappe. Når
+indstillinger alligevel ser væk ud efter en opdatering, er det næsten altid, fordi
+den nye installation læser en <em>anden, tom</em> mappe, ikke fordi noget blev
+slettet; de gamle filer ligger stadig, hvor de altid har ligget.
+<a href="#settings-gone">§18</a> har trinnene til at få dem tilbage.</p>
+<div class="tblwrap"><table>
+<tr><th>Installation</th><th>Sådan opdaterer du</th></tr>
+<tr><td>macOS-appen</td><td>Åbn den nye DMG og træk <b>NzbFast</b> ind i
+<b>Programmer</b>, så den gamle erstattes. Din datamappe er separat og bliver
+ikke rørt.</td></tr>
+<tr><td>Windows-installationsprogrammet</td><td>Kør den nye installation oven på den
+gamle. Din datamappe er separat og bliver ikke rørt.</td></tr>
+<tr><td>Docker (kommandolinjen)</td><td><code>docker pull nzbfast/nzbfast</code>,
+fjern den gamle container, og kør så den nye med <b>præcis de samme
+<code>-v</code>-mapninger</b>. Imaget er til at smide væk; den mappede
+<code>/config</code>-mappe er din installation. Bruger din run-kommando en relativ
+sti som <code>-v ./config:/config</code>, så kør den fra den samme mappe hver
+gang - alle andre steder fra er <code>./config</code> en anden, tom
+mappe.</td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose
+up -d</code>, med den samme compose-fil samme sted. <code>./config</code> i filen
+er forankret i filens egen mappe, så lad filen blive, hvor den er.</td></tr>
+<tr><td>Watchtower</td><td>Intet at gøre: den genskaber containeren med de samme
+mapninger, når et nyt image udkommer.</td></tr>
+<tr><td>Unraid</td><td>Docker-fanen → <b>Check for Updates</b> → <b>Apply
+Update</b>. Fjern og gentilføj aldrig appen for at opdatere den; skulle du en dag
+geninstallere, så behold den samme appdata-sti, så den finder din eksisterende
+<code>/config</code>.</td></tr>
+<tr><td>Synology (Container Manager)</td><td>Hent det nye image, stop containeren,
+og genskab den med de samme volume-indstillinger - gennemgangen i Synology-guiden
+dækker det klik for klik, inklusive hvordan du gør det efter et skema.</td></tr>
+<tr><td>Synology (pakke)</td><td>Installér den nye <code>.spk</code> i Package
+Center; den opgraderer på stedet.</td></tr>
+<tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
+<tr><td>Ren binær</td><td>Udskift binæren. Din konfiguration bliver, hvor du lavede
+den (<a href="#files">§17</a>).</td></tr>
+</table></div>
+<div class="tip"><b>Tip</b>Docker-brugere, der kobler Sonarr eller Radarr på: læg
+API-nøglen i selve containerdefinitionen
+(<code>-e NZBFAST_APIKEY=…</code>, eller environment-blokken i din compose-fil
+eller Unraid-skabelon). En nøgle, der ligger dér, overlever ethvert containeruheld,
+fordi den bor på værten, i definitionen, og bliver lagt på igen ved hver start. En
+nøgle, du senere sætter under Indstillinger, vinder stadig over den.</div>
+
 <h2 id="cli">15 · Kommandolinje</h2>
 <p>Alt, hvad daemonen gør, kan også scriptes. De daglige kommandoer:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Kommando</th><th>Formål</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interaktiv serveropsætning.</td></tr>
 <tr><td><code>nzbfast serve</code></td><td>Kør daemonen (dashboard + API + automatisering). <code>--open</code> åbner browseren; <code>--apikey</code> sætter nøglen i hånden (<a href="#firstrun-key">§2</a>); <code>--bind</code> vælger lytteadressen, standard <code>0.0.0.0</code> (hver grænseflade), <code>127.0.0.1</code> for kun denne maskine. Se <code>--help</code> for hele flag-listen; hver dashboard-indstilling har en flag-tvilling.</td></tr>
@@ -1094,10 +1497,11 @@ opdateringsmanifestet; en tom opdaterings-URL gør det samme.</li>
 <tr><td><code>nzbfast sysbench</code></td><td>System-benchmarken + diversitetsrapporten, i terminalen.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Scan grupper ind i indekset / søg i det, uden daemonen.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Importér servere fra en SABnzbd-ini.</td></tr>
-</table>
+</table></div>
 <p class="dim">Også tilgængelige: <code>inspect</code>, <code>probe</code>,
 <code>bench</code>, <code>bench-cpu</code>, <code>soak</code>, <code>fetch</code>,
 <code>spots</code>/<code>spot-search</code>/<code>spot-get</code> (Spotnet),
+<code>predb-seed</code> (fylder pre-databasen med tiden før feedet blev slået til),
 <code>make-release-nzb</code>/<code>make-test-nzb</code> (test-fixtures). Hver
 kommando tager <code>--config</code> og <code>--help</code>. Dertil kommer <code>post</code>: den uploader filer som
 yEnc-artikler og skriver den tilhørende NZB. Et driftsværktøj; det kræver et
@@ -1108,20 +1512,34 @@ udtrykkeligt <code>--post-server</code> og vælger aldrig en server for dig.</p>
 SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøgler:
 <b>API-nøglen</b> (fuld kontrol) og <b>NZB-nøglen</b> (kun-tilføj:
 <code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> er med vilje ikke med i sættet for kun at tilføje: at slå et link op kan bruge målt indekserkvote, og det har en nøgle til kun at tilføje ikke noget at gøre med.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Område</th><th>Modes</th></tr>
 <tr><td>Kø</td><td><code>queue</code> (med <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
-<tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
+<tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code>, plus <code>/jobnzb/&lt;nzo_id&gt;</code> (jobbets egen gemte <code>.nzb</code> ud igen, kø eller historik; kun fuld API-nøgle)</td></tr>
 <tr><td>Konfiguration</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (hvert Indstillinger-felt), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Indeks &amp; væg</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, plus newznab på <code>/api?t=caps|search|tvsearch|movie</code> og <code>/getnzb/&lt;id&gt;</code></td></tr>
 <tr><td>Automatisering</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostik</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code>, <code>update_apply</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: enhver bruger, API-nøgle som adgangskode)</td></tr>
 <tr><td>Forhåndsvisning / afspilning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; at starte et parkeret biblioteksjob kræver <code>?t=</code>-token eller nøgle), <code>/m3u/&lt;id&gt;</code> (kræver nøgle; udsteder token'en), <code>/wall</code>, <code>/art/…</code></td></tr>
-</table>
+</table></div>
 
 <h2 id="files">17 · Filer &amp; placeringer</h2>
-<table>
+<p>Hvor indstillingsmappen ligger, afhænger af, hvordan nzbfast blev installeret.
+Denne ene mappe rummer alt, hvad der er værd at tage backup af:</p>
+<div class="tblwrap"><table>
+<tr><th>Installation</th><th>Indstillingsmappe</th></tr>
+<tr><td>macOS-appen</td><td><code>~/Library/Application Support/nzbfast/</code></td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\nzbfast\</code></td></tr>
+<tr><td>Docker / NAS-containere</td><td><code>/config</code> inde i containeren,
+som er den værtsmappe, du har mappet til den. På Unraid er det appens
+appdata-mappe.</td></tr>
+<tr><td>Synology-pakken</td><td><code>/var/packages/nzbfast/var/</code></td></tr>
+<tr><td>Terminal</td><td>Den mappe, du kørte <code>nzbfast setup</code> i, eller
+hvor end <code>--config</code> / <code>$NZBFAST_CONFIG</code> peger hen.</td></tr>
+</table></div>
+<p>Og hvad der ligger i den:</p>
+<div class="tblwrap"><table>
 <tr><th>Fil</th><th>Indhold</th></tr>
 <tr><td><code>config.local.json</code></td><td>Server-loginoplysninger og indstillinger pr. server. Oprettet af guiden; kan redigeres under Indstillinger. Hold den privat. Adgangskoder er <a href="#passwords">sløret, ikke krypteret</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Hver indstilling, der er ændret i dashboardet. Ligger ved siden af konfigurationen; UI-værdier tilsidesætter kommandolinje-flag. Slet en nøgle (eller filen) for at falde tilbage til flag/standarder.</td></tr>
@@ -1130,10 +1548,10 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøg
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Kø-tilstand (overlever genstarter), NZB'er pr. job, forbrugsregnskab, benchmark-historik, poster-artwork-cache.</td></tr>
 <tr><td>Artikel-journal</td><td>Inde i hvert jobs outputmappe, mens det er ufuldstændigt - driver crash-genoptagelse og nyt forsøg. Fjernes ved succes.</td></tr>
 <tr><td>Eksterne værktøjer</td><td>Ingen nødvendige - RAR-udpakning og PAR2-reparation er native. Hvis et eksotisk sæt nogensinde kræver en ekstern <code>unrar</code> eller <code>par2</code> som fallback, kigger nzbfast ved siden af sin eksekverbare fil, derefter på <code>$PATH</code>.</td></tr>
-</table>
+</table></div>
 
 <h2 id="troubleshooting">18 · Fejlfinding</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Tjek</th></tr>
 <tr><td>Langsomme downloads</td><td>Kør <b>System-benchmark</b> - den udpeger flaskehalsen direkte. Er det netværket: kør <b>Forbindelsestuning</b>, tjek antal forbindelser pr. server, og bekræft, at dine udbydere ikke alle er én backbone (<b>Server-diversitet</b>).</td></tr>
 <tr><td>Langsom kun på meget store jobs<br>(NAS eller maskine med lidt RAM)</td><td>Forventet og måleligt: et udsultet hukommelsesbudget spiller caches til disk og koster 20–40% efter ~87 GB. Se <a href="#memory">Hukommelsesbudget</a> for tallene og hvor meget RAM, den skal have. Mindre jobs er upåvirkede.</td></tr>
@@ -1145,12 +1563,14 @@ løser sig selv.</td></tr>
 <tr><td>Et arkiv pakkes ikke ud</td><td>Adgangskode- og reparationsfejl navngiver sig selv i historik-rækken. For alt andet findes der en nødudgang: Indstillinger → Watch-mappe &amp; efterbehandling → <b>Udpak med eksternt unrar</b> (en avanceret indstilling) overlader udpakningen til programmet <code>unrar</code>, der er installeret på din maskine, i stedet for den indbyggede udpakker. Lad den ellers være slået fra: den indbyggede vej er hurtigere på alle former, vi har målt, og slørede poster med hash-navne bruger den alligevel altid, fordi unrar ikke kan følge deres omdøbning. Den samme kontakt for <code>nzbfast get</code>-kørsler er miljøvariablen <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Hvis unrar udpakker et arkiv, som den indbyggede udpakker afviste, så meld det gerne, så vi kan reparere den indbyggede vej.</td></tr>
 <tr><td>Sonarr/Radarr kan ikke forbinde</td><td>Kan port 6789 nås? API-nøgle korrekt (fuld nøgle, ikke NZB-nøgle)? Klienttype sat til SABnzbd?</td></tr>
 <tr><td>Dashboardet beder om en API-nøgle, jeg aldrig har sat</td><td>En ny installation laver selv en og skriver den ud én gang ved opstart (<a href="#firstrun-key">§2</a>). Den står i filen <code>apikey</code> ved siden af din konfiguration, og i opstartsudskriften. Eller skriv din egen nøgle ind under Indstillinger → Sikkerhed fra en browser, der allerede er logget ind.</td></tr>
+<tr id="settings-gone"><td>Alle mine indstillinger ser væk ud efter en opdatering<br>(servere, stier, API-nøgle)</td><td>Intet i en opdatering sletter indstillinger; det her betyder, at nzbfast læser en anden, tom mappe. Først: API-nøglefeltet under Indstillinger vises tomt med vilje - klik <b>Show</b>, før du konkluderer, at den er væk. På Docker: sammenlign den nye containers <code>/config</code>-mapning med den gamles: en ændret værtssti, en relativ sti kørt fra en anden mappe eller en frisk appdata-mappe starter alle sammen nzbfast helt forfra, mens dine rigtige indstillinger ligger urørte på den tidligere sti. Find den gamle mappe (kig efter <code>settings.json</code>, din konfigurationsfil og <code>apikey</code> - placeringer i <a href="#files">§17</a>), og peg så enten mapningen tilbage på den, eller kopiér de filer ind i den nye mappe og genstart. Opstartsloggen navngiver præcis den indstillingsfil, der er i brug: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Intet på netværket kan nå daemonen</td><td>Tjek <code>--bind</code>: <code>127.0.0.1</code> betjener kun den maskine, nzbfast kører på. Standarden, <code>0.0.0.0</code>, betjener hver grænseflade. Tjek derefter maskinens egen firewall for port 6789.</td></tr>
 <tr><td>Gennemse-kortet forbliver lille</td><td>Indexeren vokser i baggrunden - tjek, at grupper er sat under Indstillinger → Indeksering, og giv Uddyb pr. scanning tid til at opbygge historik. "Scan nu" fremtvinger en gennemgang; statuslinjen viser live fremgang.</td></tr>
 <tr><td>Væggen viser forkert/intet artwork</td><td>Detaljeark → ✎ Ret match eller ↻ Genopfrisk metadata. Filmopslag forbedres med en gratis OMDb-nøgle.</td></tr>
+<tr id="mac-cant-open"><td>macOS siger, at programmet "nzbfast" ikke kan åbnes</td><td>To årsager, begge hurtige. Bruger du den enkle <code>-macos-universal.zip</code>, så dobbeltklik på <b>Start nzbfast.command</b> og ikke på filen <code>nzbfast</code> ved siden af - den er selve programmet, og Finder svarer på et dobbeltklik der med præcis denne besked. Det er starteren, der sætter det hele op og starter det. Giver starteren den samme besked, har kopien mistet sin Unix-kørselsbit undervejs: macOS bevarer den bit inde i .zip-filen, men chat-apps, cloud-drev og ny zipning gør det ikke, så en kopi, der er sendt videre i hånden, ankommer uden kørselstilladelse. Hent .dmg eller .zip direkte fra releases-siden, så sker det ikke. For at redde den kopi, du allerede har: åbn Terminal, skriv <code>chmod +x</code> med et mellemrum til sidst, træk <b>Start nzbfast.command</b> og filen <code>nzbfast</code> ind i vinduet og tryk Retur - dobbeltklik derefter på starteren igen.</td></tr>
 <tr><td>Daemonen vil ikke starte: porten er i brug</td><td>En anden instans kører - eller skift <code>--port</code>.</td></tr>
 <tr><td>Hvor er loggene?</td><td>Log-kortet på dashboardet, eller den terminal/logfil, du startede <code>serve</code> med.</td></tr>
-</table>
+</table></div>
 <div class="note"><b>Stadig gået i stå?</b>Log-kortet udpeger som regel synderen -
 vedlæg dens hale, når du rapporterer et problem, sammen med din
 <code>nzbfast --version</code>.</div>

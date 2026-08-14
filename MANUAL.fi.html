@@ -55,8 +55,16 @@
       r.style.setProperty('--user-acc',a);
       r.setAttribute('data-accent','1');
     }
+    // Interface scale. This drives `zoom` (see --ui-zoom below), NOT the
+    // root font-size: every size on these pages is in px, so scaling the
+    // root scaled nothing at all and the slider had never once moved a
+    // pixel - it wrote its value, redrew its own "140%" label, and the
+    // page stayed exactly as it was (reported by a tester 2 Aug 2026,
+    // who reasonably read it as a container quirk). Keep the stored key
+    // and its 0.8-1.4 range so an existing setting starts working rather
+    // than resetting.
     var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
-    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    if(f>=0.8&&f<=1.4) r.style.setProperty('--ui-zoom',f);
     // §Stage6 appearance layers. Same reasoning as the theme: applied
     // before first paint, so nobody watches the page change shape after
     // it has already drawn. Each value is checked against a fixed list,
@@ -225,8 +233,55 @@ button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
   <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
   <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
   <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+  <!--
+    Job-origin glyphs (TODO §140 / issue #31). The row badge that says
+    where a job came from used to be an emoji per origin, with ONE robot
+    standing in for every app that posts over the API - so a Sonarr grab,
+    a Radarr grab and a shell script looked identical in history.
+
+    These are neutral shapes for the KIND of thing each sender keeps - a
+    set for series, a film strip for films, a note for music - and they
+    are deliberately NOT the other projects' logos: nzbfast does not ship
+    anyone else's mark. The name still lives in the tooltip, which is
+    what actually identifies the sender; the glyph only has to separate
+    the rows at a glance.
+  -->
+  <g id="i-o-folder"><path d="M3 18.5V6.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2.2 2.7h8.3A1.7 1.7 0 0 1 21 8.9v9.6a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.5z"/></g>
+  <g id="i-o-star"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></g>
+  <g id="i-o-rss"><path d="M4.5 12.5A7 7 0 0 1 11.5 19.5"/><path d="M4.5 6.5A13 13 0 0 1 17.5 19.5"/><circle cx="5.2" cy="18.8" r="1.3" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-link"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.4 1.4"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+  <g id="i-o-pin"><path d="M12 21.5V14.2"/><path d="M8.2 2.8h7.6l-1.1 5.1 2.6 2.6v1.6H6.7v-1.6l2.6-2.6z"/></g>
+  <g id="i-o-retry"><path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.6 2.8v4.6H16"/></g>
+  <!-- Generic API sender: a plug, for a client that named itself with a
+       name we have no shape for (and for records that only say "arr"). -->
+  <g id="i-o-app"><path d="M9 2.8v5.2M15 2.8v5.2"/><path d="M6.4 8h11.2v3.4a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17v4.2"/></g>
+  <g id="i-o-tv"><rect x="3" y="8" width="18" height="12.2" rx="2"/><path d="M8 3.8l4 4.2 4-4.2"/></g>
+  <g id="i-o-film"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3 9.2h4.5M3 14.8h4.5M16.5 9.2H21M16.5 14.8H21"/></g>
+  <g id="i-o-music"><path d="M9.2 18V5.8l9.6-2v12"/><circle cx="6.7" cy="18" r="2.5"/><circle cx="16.3" cy="15.8" r="2.5"/></g>
+  <g id="i-o-book"><path d="M12 7.2C10.3 5.6 8 4.8 4.3 4.8v12.6c3.7 0 6 .8 7.7 2.4 1.7-1.6 4-2.4 7.7-2.4V4.8c-3.7 0-6 .8-7.7 2.4z"/><path d="M12 7.2v12.6"/></g>
+  <g id="i-o-cam"><rect x="2.6" y="6.6" width="13" height="10.8" rx="2"/><path d="M15.6 11l5.8-3.4v8.8L15.6 13z"/></g>
+  <g id="i-o-hub"><circle cx="12" cy="12" r="2.6"/><circle cx="4.6" cy="5.4" r="1.8"/><circle cx="19.4" cy="5.4" r="1.8"/><circle cx="12" cy="20.4" r="1.8"/><path d="M6 6.7l4.1 3.6M18 6.7l-4.1 3.6M12 14.6v3.9"/></g>
+  <g id="i-o-funnel"><path d="M3.4 4.6h17.2l-6.5 8v7.2l-4.2 1.8V12.6z"/></g>
+  <g id="i-o-inbox"><path d="M12 2.8v8.6M8.6 8l3.4 3.4L15.4 8"/><path d="M3.6 14.2h4.8l1.4 2.4h4.4l1.4-2.4h4.8v4.3a1.9 1.9 0 0 1-1.9 1.9H5.5a1.9 1.9 0 0 1-1.9-1.9z"/></g>
+  <g id="i-o-phone"><rect x="6.5" y="2.6" width="11" height="18.8" rx="2.5"/><path d="M10.4 5.6h3.2"/><circle cx="12" cy="18" r="1" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-window"><rect x="3" y="4.6" width="18" height="14.8" rx="2"/><path d="M3 9.2h18"/><circle cx="6.4" cy="6.9" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-term"><rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2"/><path d="M7 9.6l3 2.4-3 2.4M12.6 15h4.6"/></g>
 </defs></svg>
 <style>
+/* The interface-scale control, for every page that inlines these tokens.
+   `zoom` rather than a root font-size: these pages size everything in px,
+   so the old root-font-size approach moved nothing (see the loader
+   above). Zoom takes the whole layout with it - type, spacing, controls
+   and chart furniture together - which is also what a size control is
+   normally expected to do, and it cannot leave text overflowing padding
+   that stayed behind.
+
+   On the BODY, not :root: zooming the root element re-scales the
+   viewport that position:fixed and 100vh resolve against, so the header
+   and any fixed overlay drift. Default 1 means a page with no setting is
+   byte-identical to before. */
+body{zoom:var(--ui-zoom,1)}
+
 /* One icon class. 1em so an icon scales with the text it sits beside,
    including the user's text-size setting. */
 .ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
@@ -264,12 +319,27 @@ h3{font-size:16.5px;margin:28px 0 6px}
 h4{font-size:14.5px;margin:20px 0 4px}
 p{margin:8px 0}
 li{margin:3px 0}
+/* Prose breaks a long unbreakable token instead of pushing the page sideways.
+   The API section quotes a 368px query string, which does not fit the 280px
+   text column of a 320px phone. Deliberately not applied to header or data
+   cells: inside a scroll wrapper, breaking a cell reflows the columns rather
+   than letting the wide table scroll, which is what the wrapper is for. */
+p,li,.tip,.note,.warn-box{overflow-wrap:break-word}
 code,kbd{background:var(--code);border:1px solid var(--line);border-radius:5px;
   padding:1px 6px;font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre{background:var(--code);border:1px solid var(--line);border-radius:9px;
   padding:12px 15px;overflow-x:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre code{background:none;border:none;padding:0}
-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+/* A table scrolls inside its own box instead of widening the page. One long
+   unbreakable command in a cell (the docker compose upgrade line, 338px wide
+   in an 87px column) used to drag the whole document sideways on a phone:
+   +140 at 320px and +85 at 375px in English, up to +217 / +162 in the
+   longer-word locales, and da/nl even at 500px. The 12px margin sits on the
+   wrapper so it still collapses with the adjacent paragraph exactly as
+   the margin on the table itself did - a scroll box does not collapse
+   margins through, so leaving it in place would have opened every gap. */
+.tblwrap{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;margin:0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
@@ -298,6 +368,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
   body{background:#fff;color:#000;font-size:11.5pt}
   h2{page-break-after:avoid}
   pre{white-space:pre-wrap}
+  .tblwrap{overflow:visible}
   a{color:inherit}
 }
 </style>
@@ -400,6 +471,15 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 <div class="tip"><b>Vinkki</b>Ajoitko jo SABnzbdiä tai NZBGetiä? Ohita tunnusten kirjoittaminen:
 Asetukset → Usenet-palvelimet → <b>Tuo SABnzbdistä / NZBGetistä…</b> löytää olemassa olevan
 asennuksesi ja kopioi sen palvelimet. Komentorivillä on myös <code>nzbfast import-sab</code>.</div>
+<p>Tervetulokortti kysyy myös, <b>miten aiot käyttää nzbfastia</b>, neljällä
+vaihtoehdolla: sovellus kuten Sonarr tai Radarr ohjaa sitä, siirryt SABnzbdistä,
+siirryt NZBGetistä, tai vain sinä, tästä koontinäytöstä. Valinta ei itsessään
+muuta mitään. Se näyttää lyhyen tarkistuslistan - jokainen suositus asetuksen
+omalla nimellä, sen nykyinen arvo, suositeltu arvo ja yksi rivi perusteluja -
+ja <b>Käytä</b> asettaa vain ne rivit, jotka ruksaat. Jokainen rivi on
+tavallinen asetus, jonka voit muuttaa takaisin itsekseen jälkeenpäin, ja sama
+lista pysyy myöhemminkin saatavilla kohdassa Asetukset → <b>Suositellut
+asetukset käyttötapasi mukaan</b>.</p>
 
 <h3 id="firstrun-key">API-avaimesi</h3>
 <p>Aidosti uudessa asennuksessa nzbfast tekee itselleen API-avaimen, kun daemon
@@ -442,7 +522,7 @@ jossa mikään muu ei tarvitse pääsyä.</p>
 
 <h2 id="concepts">3 · Miten nzbfast toimii</h2>
 <p>Nopea sanasto, jotta loppu käyttöohjeesta luistaa helposti:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Termi</th><th>Merkitys</th></tr>
 <tr><td><b>Palveluntarjoaja / palvelin</b></td><td>Usenet-palvelu, johon sinulla on tili
 (Newshosting, Eweka, XS News…). Kukin sallii jonkin määrän samanaikaisia yhteyksiä.</td></tr>
@@ -457,7 +537,7 @@ vioittuneet tai puuttuvat.</td></tr>
 <tr><td><b>Store-tilan RAR</b></td><td>Useimmat julkaisut on pakattu RAR-osiin ilman
 pakkausta. nzbfast tunnistaa tämän ja kirjoittaa <em>sisätiedoston</em> suoraan sen
 lopulliseen sijaintiin latauksen aikana - ei erillistä purkuvaihetta jälkeenpäin.</td></tr>
-</table>
+</table></div>
 <p>Liukuhihna ajaa lataus → dekoodaus → varmistus → purku <em>samanaikaisesti</em>.
 Koontinäytön Liukuhihna-kortti näyttää kaikki kolme kaistaa liikkumassa yhtä aikaa. Kun viimeinen
 tavu saapuu, varmistus on jo tehty ja tiedosto on jo purettu; tyypillisen työn
@@ -474,13 +554,13 @@ varmistaa kaiken palauttamansa PAR2-lohkokarttaa vasten ennen kuin luottaa siihe
 <p>Mitattuna SABnzbd 5.0.4:ää ja NZBGet 26.2:ta vastaan samalla koneella, samoilla
 palveluntarjoajilla ja samoilla NZB:illä, ajastettuna <em>käyttökelpoiseen tiedostoon</em> - lataus, varmistus,
 korjaus ja purku kaikki mukaan lukien, koska silloin työ on todella valmis:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Työn koko</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th></tr>
 <tr><td>7 GB</td><td><b>13.7 s</b></td><td>+26%</td><td>+39%</td></tr>
 <tr><td>35 GB</td><td><b>67 s</b></td><td>+61%</td><td>+325%</td></tr>
 <tr><td>87 GB</td><td><b>272 s</b></td><td>+36%</td><td>+160%</td></tr>
 <tr><td>190 GB</td><td><b>9 m 00 s</b></td><td>+30%</td><td>+111%</td></tr>
-</table>
+</table></div>
 <p>Ero on se jälkikäsittely, joka muilla on vielä tehtävänä viimeisen tavun
 laskeuduttua. Molemmat kilpailijat viritettiin vertailua varten, ei jätetty oletuksiin -
 SABnzbd erityisesti toimitetaan pyyntöjen liukuhihnoitus <em>pois päältä</em>, mikä maksaa sille
@@ -546,7 +626,11 @@ palveluntarjoajasi on aina ylimpänä.</p>
 <li><b>Raahaa rivejä järjestääksesi uudelleen</b> (prioriteettikaistan sisällä - Pakota/Korkea latautuu silti ensin);
 muuta prioriteettia rivin sisällä.</li>
 <li><b>Napsauta riviä</b> avataksesi tietolaatikon: tiedostokohtaiset edistymispalkit, varmistuslohkojen
-määrät ja mikä palvelin osallistui kuinka paljon <em>tähän</em> työhön.</li>
+määrät, mikä palvelin osallistui kuinka paljon <em>tähän</em> työhön, sekä "lisääjä"-rivi,
+joka kertoo mistä työ tuli (valvontakansio, yhdistetty sovellus, API…).
+<b>Lataa .nzb-tiedosto</b> -painike tallentaa työn <code>.nzb</code>-tiedoston - nzbfast
+säilyttää oman kopionsa, joten tämä toimii jokaiselle työlle, vaikka alkuperäinen
+tiedosto olisi jo kauan sitten poissa.</li>
 <li>Merkit näyttävät erityistilat: <i>lykätty (hidas)</i>, <i>esihaetaan</i>,
 <i>keskeytetty</i> (katso <a href="#performance">Suorituskykytyökalut</a>).</li>
 <li>Burn-down-kaavio seuraa jonossa jäljellä olevaa GB-määrää yhteensä.</li>
@@ -559,11 +643,22 @@ indeksoijaa tarvita. Tilarivi näyttää skannausedistymisen; <b>Skannaa nyt</b>
 <p>Lisää nimikkeitä nimellä - myös sellaisia, joita ei ole vielä julkaistu. Kun vastaava julkaisu
 ilmestyy indeksiin, se napataan automaattisesti laatuvalintojen ja
 päivityssääntöjen mukaan (parempi kopio korvaa huonomman).</p>
+<p>Kortti voi myös seurata listaa, jota pidät Plexissä. Lisää <b>listalähde</b>: joko yhdistä
+Plex-tilisi (hyväksyt lyhyen koodin Plexin omalla sivulla, joten salasanasi ei koskaan päädy
+nzbfastille) tai liitä Plex-seurantalistasi osoite. Käsittele osoitetta kuin salasanaa - kuka
+tahansa, jolla se on, voi lukea listasi - ja siksi se peitetään tallennuksen jälkeen.
+Synkronoidut nimikkeet näkyvät vain luku -riveinä omiesi rinnalla. Yhdistetty tili näkee koko
+listasi, joten nimikkeen poistaminen sieltä lopettaa sen seurannan myös täällä (valmiisiin
+latauksiin ei kosketa); osoite näyttää vain uusimmat kohteet, joten puuttuva nimike on voinut
+vain vieriä pois listalta eikä mitään poisteta. Kummankin toiminnan voi vaihtaa lähdekohtaisesti.</p>
 <h3 id="dash-history">Historia</h3>
 <p>Viimeaikaiset lataukset, kukin omalla rivillään. Epäonnistuneet työt tarjoavat <b>Yritä uudelleen</b>
 (jatkaa journaalista). Salatut arkistot näyttävät 🔑-lukituksen avauksen - syötä
 salasana ja työ valmistuu paikan päällä. Varmistuksen tila -nauha piirtää viallisia PAR2-
-lohkoja latausta kohti - nouseva loppupää tarkoittaa, että artikkelit saapuvat vioittuneina.</p>
+lohkoja latausta kohti - nouseva loppupää tarkoittaa, että artikkelit saapuvat vioittuneina.
+Jokaisen rivin tietolaatikko kertoo, kuka työn lisäsi, ja siinä on sama
+<b>Lataa .nzb-tiedosto</b> -painike kuin jonossa - kätevä, kun haluat ladata julkaisun
+uudelleen muualla tai liittää <code>.nzb</code>-tiedoston ongelmaraporttiin.</p>
 <p>Kortti listaa oletuksena kymmenen latausta, ja loput ovat yhden klikkauksen päässä ▤-painikkeesta. Tila, sijainti ja epäonnistumisen syy ovat rivin oman klikkauksen takana, joten tavallinen tapaus - mikä valmistui, kuinka suuri, milloin - pysyy luettavana ilman vieritystä. Vedä sen sijaan kortin alareunasta, niin lista vierii valitsemallasi korkeudella. <b>History rows</b> kohdassa Asetukset → Käyttöliittymä muuttaa tuota kymmentä; koska se on daemonin eikä selaimesi ominaisuus, se koskee jokaista tätä asennusta katsovaa laitetta. <b>Colour History names</b> sen vieressä värjää valmiit nimet vihreiksi ja epäonnistuneet punaisiksi; pois päältä nimet pysyvät neutraaleina, ja värillinen piste ja rivin omat tiedot kertovat yhä kumpi on kumpi.</p>
 <h3 id="dash-usage">Datan käyttö</h3>
 <p>Palveluntarjoajakohtaiset päiväpalkit ja Tänään / 7 päivää / 30 päivää -kokonaismäärät - olennaista
@@ -573,19 +668,25 @@ mitatuille ja lohkotileille. Lohkotilit näyttävät elinaikaisen käytön kokoa
 <a href="#performance">Suorituskykytyökalut</a>.</p>
 
 <h2 id="adding">5 · Latausten lisääminen</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Tapa</th><th>Miten</th></tr>
 <tr><td><b>Raahaa &amp; pudota</b></td><td>Pudota yksi tai useampi <code>.nzb</code>-tiedosto minne tahansa koontinäytöllä.</td></tr>
 <tr><td><b>Valvontakansio</b></td><td>Aseta kansio Asetuksissa; mikä tahansa siihen tallennettu <code>.nzb</code>
-poimitaan 5 sekunnin sisällä ja tiedosto poistetaan. Ohjaa selaimesi latauskansio
+poimitaan 5 sekunnin sisällä ja siirretään roskakoriin, ja avoin koontinäyttö ilmoittaa
+jokaisesta poiminnasta nimellä ("… poimittu kansiosta Lataukset"), joten kansiosta katoava
+tiedosto ei jää koskaan arvoitukseksi. Haluatko mieluummin säilyttää tiedostosi? Kytke päälle
+<b>Säilytä .nzb-tiedostot poiminnan jälkeen</b> (katso <a href="#settings">§9</a>). Ohjaa selaimesi latauskansio
 siihen saadaksesi yhden napsautuksen nappaukset indeksoijasivustoilta.</td></tr>
 <tr><td><b>URL:sta</b></td><td>Liitä NZB-linkki (API <code>mode=addurl</code> tai minkä tahansa yhdistetyn sovelluksen kautta).</td></tr>
 <tr><td><b>nzblnk:-linkit</b></td><td>Liitä <code>nzblnk:</code>-linkki mihin tahansa kohtaan hallintapaneelia tai raahaa se sisään. Jos asensit macOS-DMG:stä tai Windows-asennusohjelmasta, voit myös napsauttaa linkkiä suoraan boardilla. Katso <a href="#nzblnk">nzblnk-linkit</a> alempaa.</td></tr>
 <tr><td><b>Selaa indeksiä</b></td><td>Napsauta mitä tahansa täydellistä julkaisua Selaa-kortissa.</td></tr>
+<tr><td><b>Hae indeksoijilta</b></td><td>Hae lisäämiltäsi indeksoijatileiltä ja laita
+tulos jonoon suoraan listalta. Katso <a href="#pullsearch">Haku omilta
+indeksoijatileiltä</a> alempana.</td></tr>
 <tr><td><b>Seurantalista / RSS</b></td><td>Automaattinen - katso <a href="#automation">Automaatio</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr yms.</b></td><td>Ne lähettävät nappaukset suoraan jonoon - katso <a href="#arr">§11</a>.</td></tr>
 <tr><td><b>Komentorivi</b></td><td><code>nzbfast get file.nzb</code> lataa ilman daemonia.</td></tr>
-</table>
+</table></div>
 <h3>Kategoriat, prioriteetit, salasanat</h3>
 <ul>
 <li><b>Kategoriat</b> ovat vapaamuotoisia nimilappuja; kustakin tulee latauskansiosi
@@ -598,6 +699,57 @@ alikansio, ja Älykkäät kansiot (katso <a href="#automation">§10</a>) voivat 
 Historiasta (🔑).</li>
 </ul>
 
+<h3 id="pullsearch">Haku omilta indeksoijatileiltä</h3>
+<p>Jos sinulla on tili NZB-indeksoijasivustolla, nzbfast voi hakea sieltä täältä käsin ja
+laittaa jonoon sen minkä valitset, sen sijaan että kävisit sivustolla, lataisit NZB:n ja
+kantaisit sen takaisin. Se puhuu tavallista indeksoija-rajapintaa, jota kaikki nuo
+sivustot tarjoavat, joten sivustokohtaista säätöä ei ole: NZBGeek, NZBFinder,
+DrunkenSlug, DOGnzb ja muut toimivat samalla tavalla. Prowlarr- tai
+NZBHydra2-asennuskin on yksi rivi, ja tuo mukanaan jokaisen takanaan olevan
+indeksoijan.</p>
+<p><b>Tilin lisääminen.</b> Asetukset → Hae indeksoijilta →
+<b>+ Lisää indeksoija</b>. Kirjoita valitsemasi nimi, sivuston rajapinnan osoite (sen
+tavallinen verkko-osoite riittää; Prowlarr-rivi näyttää tältä:
+<code>http://host:9696/1/api</code>) ja API-avain sivuston tilisivultasi, ja sitten
+<b>Ota indeksoijat käyttöön</b>. <b>Testaa</b> kysyy sivustolta mitä se tukee ja näyttää
+mitä tuli takaisin, mikä todistaa osoitteen ja avaimen yhdellä napsautuksella.
+Tallennettua avainta ei näytetä enää: kenttä sanoo niin, ja tyhjäksi jättäminen säilyttää
+jo tallennetun avaimen.</p>
+<p><b>Hakeminen.</b> Avaa <b>🎬 seinä</b> yläpalkista ja vaihda julkaisulistaan.
+Hakukentän vieressä oleva valikko päättää mistä haku katsoo: <b>Tämä indeksi</b>, eli se
+mitä tämä kone on itse skannannut, <b>Indeksoijat</b> tai <b>Molemmat</b>. Valintasi
+muistetaan. Tilien kysyminen vaatii jotain kenttään, sillä niiden selailu tyhjällä
+kyselyllä kuluttaisi päivän kiintiön listaan jota kukaan ei pyytänyt. Kun sisäänrakennettu
+indeksoija on pois päältä, ja niin nzbfast saapuu, julisteita ei ole näytettäväksi ja sivu
+on juuri tämä: hakukenttä, tilisi ja tulokset.</p>
+<p><b>Tulokset.</b> Yksi rivi julkaisua kohti, uusimmat ensin, koko, ikä ja se kuinka
+usein sen indeksoijan omat käyttäjät ovat hakeneet sen. Julkaisu jota useampi tileistäsi
+tarjoaa, näkyy kerran. <b>Molemmat</b>-tilassa oman indeksisi kopio voittaa ja ulkopuolinen
+karsiutuu, sillä jo indeksoidun hakeminen ei maksa sinulle mitään. <b>Lataa</b> laittaa
+sen jonoon korkealla prioriteetilla: nzbfast noutaa NZB:n itse, ja siitä eteenpäin työ on
+kuin mikä tahansa muu, korjaus, purku, kategoriat ja skriptit ennallaan.</p>
+<p><b>Yhden nimikkeen kysyminen.</b> Avaa nimikkeen kortti seinällä ja paina
+<b>⌕ Hae indeksoijiltani</b>. Elokuvissa kysymys kulkee IMDb-numerolla kaikkialla missä
+sivusto sen hyväksyy, ja siinä on ero tarkoittamasi elokuvan ja jokaisen sellaisen
+julkaisun välillä jonka nimessä sattuu olemaan samat sanat. nzbfast etsii numeron itse,
+joten sivulla ei ole koskaan yhtään. Sivustoilta jotka eivät tarjoa numerohakua kysytään
+pelkin sanoin.</p>
+<p><b>Kiintiösi.</b> Indeksoijatilit ovat mitattuja: näin monta hakua ja näin monta
+latausta päivässä, tasosi mukaan. Kirjoita nuo kaksi lukua riville, niin nzbfast laskee
+niitä vastaan ja aloittaa alusta keskiyöllä UTC. 0, oletusarvo, tarkoittaa rajatonta, ja
+laskenta jatkuu silti. Tili joka on käyttänyt kiintiönsä jää sivuun muiden tehdessä työtä,
+ja tulosten yläpuolella oleva rivi nimeää ohitetun: kiintiön loppuminen ei ole koskaan
+äänetöntä. Sivusto joka vastaa omalla rajallaan, tai pyytää meitä hidastamaan, siirretään
+sivuun tunniksi.</p>
+<p><b>Minne avaimesi menee.</b> Vain sille indeksoijalle jolle se kuuluu. Avaimet pysyvät
+tällä koneella, niitä ei anneta koskaan selaimelle - jokainen tulosrivi kantaa linkin
+sijasta puolen tunnin ajan kelpaavaa lippua - ja ne poistetaan lokista ja jokaisesta
+virheestä jonka sivusto palauttaa, joten liitetty virheilmoitus ei voi vuotaa yhtäkään.
+Lataus voi noutaa vain linkin jonka jokin omista hauistasi palautti.</p>
+<p>Nämä ovat samat tilit joihin <a href="#nzblnk">nzblnk-linkki</a> turvautuu kun
+paikallinen indeksi ei tunnista sen otsikkoa, ja ne joilta seurantalista voi kysyä
+haluamistasi kohteista (<a href="#automation">§10</a>).</p>
+
 <h3 id="nzblnk">nzblnk-linkit</h3>
 <p>Osa boardeista, etenkin saksalaiset ja hollantilaiset, julkaisee
 <code>nzblnk:</code>-linkin NZB-tiedoston sijaan. Postaus on hämärretty, joten
@@ -607,7 +759,7 @@ tiedostonimeä, johon linkittää, ei ole. Linkki kantaa sen sijaan otsikkoa
 ensin etsittävä.</p>
 <p>nzbfast hakee otsikkoa ensin omasta indeksistään, mikä ei vaadi verkkoa lainkaan, ja
 vasta jos se ei osu, se kysyy määrittämiltäsi hakuindeksoijilta (Asetukset →
-Hakuindeksoijat, <a href="#settings">§9</a>) samoilla päivittäisillä budjeteilla ja
+Hae indeksoijilta, <a href="#settings">§9</a>) samoilla päivittäisillä budjeteilla ja
 samalla perääntymisellä kuin mikä tahansa muu haku. Otsikosta tulee työn nimi ja
 salasana liitetään työhön automaattisesti.</p>
 <ul>
@@ -668,6 +820,31 @@ joita parhaillaan tyhjennetään, saavat <b>siivottu</b>-merkin.</li>
 tiedosto. Avaa se latauksen aikana, tarkista että sisältö, kieli ja laatu ovat mitä
 odotit, ja keskeytä ajoissa jos eivät ole - sen sijaan että huomaisit sen vasta koko
 latauksen jälkeen.</p>
+<p>Ensimmäinen puoli tästä on jo sivulla. Avaa latauksen rivi jonossa (tai
+historiassa), niin laatikko näyttää mitä videotiedoston sisällä on, luettuna
+tähän mennessä saapuneista tavuista: resoluutio, video- ja äänikoodekit,
+äänen kielet, tekstitykset, luvut. Julkaisu, joka on väärä leikkaus, väärä
+kieli tai skaalattu ylöspäin, paljastaa itsensä tuossa paneelissa kauan ennen
+latauksen valmistumista.</p>
+<p>Sivu selvittää myös, pystyykö <em>tämä</em> selain toistamaan tiedoston, ja
+sanoo sen arvailun sijaan: selaimet eroavat (Safari purkaa HEVC:n siinä missä
+Chrome ei, eikä juuri mikään pura AC-3- tai DTS-ääntä), joten kysymys esitetään
+juuri sille selaimelle, jossa olet. Kun vastaus on kyllä, <b>▶ Toista</b> avaa
+soittimen suoraan sivulle, joka näyttää tiedoston sen latautuessa. Useimmat
+julkaisut ovat MKV-tiedostoja, joita monet selaimet kieltäytyvät avaamasta,
+vaikka osaavat purkaa kaiken niiden sisällä, joten nzbfast pakkaa ne uudelleen
+toiston aikana. Mitään ei koodata uudelleen: kuva ja ääni ovat alkuperäiset
+tavut toisessa kuoressa, ja toiseen kohtaan hyppääminen toimii yhä. Jos
+ääniraita on sellainen, jota tämä selain ei osaa purkaa, ja julkaisussa on
+toinen, jonka se osaa, soitetaan tuo toinen raita, jottei kuva tule mykkänä.
+Vasta kun selaimelta puuttuu purkaja itse videolle, painike luovuttaa tiedoston
+omalle mediasoittimellesi, kuten alla kuvataan.</p>
+<p>Yksi asetus hallitsee kaikkea tätä: Asetukset → Käyttöliittymä → <b>Tarkista
+tiedosto latauksen aikana</b>. <b>Vain tiedot</b>, oletus, näyttää paneelin
+eikä tarjoa sivun sisäistä soitinta; <b>Tiedot ja soitin</b> lisää soittimen;
+<b>Pois</b> estää tiedoston lukemisen kokonaan - sen ollessa pois mikään ei
+avaa puoliksi ladattua tiedostoa kenellekään.</p>
+<p>Tarkistaaksesi sen sijaan omassa mediasoittimessasi:</p>
 <ul>
 <li><b>▶ Toista</b> seinällä (tai <code>/m3u/&lt;id&gt;</code>) antaa mediasoittimellesi
 URL:n; daemon käynnistää tai käyttää uudelleen sen takana olevaa latausta.</li>
@@ -693,15 +870,27 @@ avaimettomat asennukset käyttäytyvät kuten ennenkin.</div>
 <h2 id="servers">8 · Usenet-palvelimet</h2>
 <p>Asetukset → <b>Usenet-palvelimet</b> on täysi editori: lisää, muokkaa, poista, järjestä uudelleen ja ota mikä
 tahansa palvelin mukaan pooliin tai pois siitä. Jokaisella palvelimella on:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Kenttä</th><th>Huomiot</th></tr>
 <tr><td>Osoite / portti</td><td>Käytä SSL-porttia <b>563</b>. TLS ei maksa mitattavasti mitään - nzbfast salaa aina.</td></tr>
 <tr><td>Käyttäjänimi / salasana</td><td>Tallennetaan paikallisesti tiedostoon <code>config.local.json</code>, ei koskaan näytetä takaisin selaimelle. Salasanan jättäminen tyhjäksi muokatessa säilyttää tallennetun. Salasanat ovat <a href="#passwords">levyllä hämärrettyjä, ei salattuja</a>.</td></tr>
 <tr><td>Yhteydet</td><td>Palvelinkohtaiset samanaikaiset yhteydet. Käytä <b>Yhteyksien viritystä</b> (<a href="#performance">§13</a>) löytääksesi kunkin palveluntarjoajan makeimman kohdan sen sijaan, että arvaisit korkealta.</td></tr>
 <tr><td>Taso / porras</td><td>0 = ensisijainen; korkeammat tasot ovat täyttöpalvelimia, joilta kysytään vain artikkeleita, jotka jokainen alempi taso jätti väliin. Aseta rajoittamattomat tilit tasolle 0, lohkotilit tasolle 1+.</td></tr>
 <tr><td>Lohkon koko (GB)</td><td>Lohko- (maksa-per-GB) tileille: nzbfast seuraa elinaikaista käyttöä tätä vasten ja lakkaa käyttämästä palvelinta, kun se on käytetty loppuun (varoitus 85%:ssa).</td></tr>
-</table>
+<tr><td>Jokainen tavu laskutetaan</td><td>Kytke päälle mitatulle tilille. Latauksesi käyttävät palvelinta täsmälleen kuten ennenkin; se mikä loppuu on nzbfastin oman liikenteen lähettäminen sille - automaattinen yhteysviritin, järjestelmän suorituskykytestin verkko-osuus ja sisäänrakennetun indeksin otsakeskannaukset ohittavat sen kaikki. Riippumaton tasosta ja lohkon koosta, koska mitattu tili voi olla ainoa palveluntarjoajasi ja rajoittamaton voi istua tasolla 2. Oletuksena pois. Manuaalinen <b>Test</b> kohdassa <b>Yhteyksien viritys</b> (<a href="#performance">§13</a>) toimii yhä merkityllä palvelimella ja kysyy ensin, koska siinä sinä itse valitset kuluttamisen.</td></tr>
+</table></div>
 <p><b>Jätä hieman pelivaraa tilisi yhteysrajan alle.</b> Yhteysmäärän asettaminen hieman rajan alle ei maksa mitään: siirtonopeus tasaantuu jo hyvissä ajoin ennen viimeistä paria yhteyttä, ja <b>Yhteyksien viritys</b> (<a href="#performance">§13</a>) päätyy joka tapauksessa sen alle. Juuri nuo vapaat paikat päästävät toisen laitteen, toisen ohjelman tai katkenneen yhteyden uusintayrityksen silti sisään sen sijaan, että ne torjuttaisiin tämän varatessa jokaisen paikan.</p>
+<p><b>Sinun ei tarvitse huolehtia koneesi avointen tiedostojen rajasta.</b> Järjestelmä
+laskee jokaisen yhteyden avoimeksi tiedostoksi, ja macOS käynnistää ohjelman 256 tiedoston
+rajalla, jonka täysi yhteysmäärä usealla palvelimella voi ylittää. macOS:ssä ja Linuxissa
+nzbfast nostaa rajaa itse käynnistyessään: se pyytää 65536 avointa tiedostoa ja laskee
+siitä lukuihin 16384, 4096 ja 1024, kunnes järjestelmä suostuu, eikä koskaan yli
+järjestelmän asettaman kovan rajan, ja se jatkaa saamallaan rajalla, jos jokainen askel
+torjutaan. Windowsissa ei ole tällaista prosessikohtaista rajaa. Muut ohjelmat tyytyvät
+siihen rajaan, jonka komentotulkki niille antoi, ja ohjelma, jolta avoimet tiedostot
+loppuvat kesken työn, voi pysähtyä kertomatta lokissaan syytä. Aseta siis kunkin
+palvelimen yhteydet sen mukaan, mitä tilauksesi sallii, yllä mainittu pelivara
+vähennettynä, etkä sen mukaan, mitä arvelet koneen kestävän.</p>
 <h3 id="passwords">Miten palveluntarjoajien salasanat tallennetaan</h3>
 <p>Palvelinsalasanat tiedostossa <code>config.local.json</code> ovat <b>hämärrettyjä,
 eivät salattuja</b>. Ne tallennetaan muodossa <code>obf1:</code> ja sen perässä
@@ -737,11 +926,11 @@ joka käyttäytyy kaikkialla samoin, on toistaiseksi parempi kauppa.</p>
 koontinäytössä: lisää ne käsin kyseisen palvelimen kohtaan tiedostossa
 <code>config.local.json</code> (katso <a href="#files">§17</a>) ja käynnistä
 uudelleen.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Avain</th><th>Huomioita</th></tr>
 <tr><td><code>bind_ip</code></td><td>Sitoo tämän palvelimen lähtevät yhteydet tiettyyn paikalliseen osoitteeseen, moniyhteyskoneille ja jaetuille VPN-tunneleille. Osoiteperhe valitsee samalla kohdeperheen: v4-sidonta yhdistää palvelimen v4-osoitteeseen.</td></tr>
 <tr><td><code>socks5</code></td><td>Ohjaa tämän palvelimen NNTP-liikenteen SOCKS5-välityspalvelimen kautta: <code>host:port</code> tai <code>user:pass@host:port</code>. Isäntänimen selvittää <em>välityspalvelin</em>, joten paikallista DNS-vuotoa ei synny.</td></tr>
-</table>
+</table></div>
 <ul>
 <li>Kunkin palvelimen vieressä oleva <b>valintamerkki</b> on sen virtakytkin: merkitty
 tarkoittaa, että palvelin on latauspoolissa, merkitsemätön tarkoittaa käytöstä
@@ -769,7 +958,7 @@ käynnistyksellä. Jokainen täällä tehty muutos tallentuu tiedostoon
 voittavat komentorivivalitsimet).</p>
 
 <h3>Nopeus &amp; ajastus <span class="pill live">live</span></h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
 <tr><td>Nopeusrajoitus</td><td>Katto tavuina/s (<code>50M</code>, <code>1G</code>, 0 = rajoittamaton). Etäsovellukset voivat lähettää prosentteja - aseta <i>Linjanopeus</i>, jotta ne kääntyvät oikein.</td></tr>
 <tr><td>Autonopeus</td><td>RTT-ohjattu katto, joka väistää muuta kotitalousliikennettä ja laajenee uudelleen, kun linja on hiljainen.</td></tr>
@@ -778,20 +967,23 @@ voittavat komentorivivalitsimet).</p>
 <tr><td>Automaattipäivitys / Päivitystarkistuksen URL</td><td>Katso <a href="#updates">§14</a>.</td></tr>
 <tr><td>Linjanopeus</td><td>Yhteytesi nimellisnopeus - mahdollistaa prosenttirajat SABnzbd-yhteensopivista sovelluksista.</td></tr>
 <tr><td>Viikkoajastus</td><td>Rivieditori viikonaika-säännöille: keskeytä, jatka tai aseta nopeusrajoitus annettuina päivinä/aikoina (paikallinen aika). Esim. rajoita 20&nbsp;MB/s arkisin 9–17, muuten rajoittamaton.</td></tr>
-</table>
+</table></div>
 
 <h3>Seuraava lataus <span class="pill live">live</span></h3>
 <p><b>Yhteydet</b> (per palvelin), <b>ikkuna</b> (liukuhihnan syvyys per yhteys),
 <b>dekooderit</b> (rinnakkaiset dekoodaussäikeet). Näytteistetään kunkin työn alkaessa. Oletukset
 ovat oikeat useimmille linjoille; käytä viritystyökaluja ennen sokeaa nostamista.</p>
 
-<p><b>Pikavarmistus (CRC32)</b> (oletuksena päällä) lunastaa PAR2-lohkot pelkällä
-CRC32:lla latauksen vielä käydessä, mikä on hitaalla suorittimella 2-3x nopeampaa.
-Jokaisen artikkelin oma tarkistussumma varmistetaan silti, ja lopullinen kierros käyttää
-aina täyttä MD5:tä: oikeellisuudesta ei tingitä. Poista valinta, jos haluat laskea
-MD5:n lohkoittain myös latauksen aikana.</p>
+<p><b>Tarkistus latauksen aikana</b> valitsee, kuinka paljon varmistetaan sitä mukaa kuin
+data saapuu. <i>Täysi</i> vahvistaa jokaisen PAR2-lohkon MD5:llä. <i>Nopea</i>
+(oletus) lunastaa lohkot CRC32:lla, mikä on hitaalla suorittimella 2-3x nopeampaa, ja
+varmistaa yhä jokaisen artikkelin oman tarkistussumman. <i>Kevyt</i> ohittaa lisäksi
+nuo artikkelien tarkistussummat heti kun PAR2 kattaa tiedoston: vaurio tulee esiin
+hetkeä myöhemmin, omassa lohkossaan. Kaikissa kolmessa lopullinen kierros ja kaikki
+korjaus käyttävät täyttä MD5:tä, ja ilman PAR2-tiedostoja tehty lataus säilyttää
+artikkeliensa tarkistussummat.</p>
 <h3>Levy &amp; kiintiö <span class="pill live">live</span></h3>
-<p><b>Vähimmäisvapaa tila</b> (keskeytä uudet työt sen alle), <b>latauskiintiö</b> per
+<p><b>Vähimmäisvapaa tila</b> (keskeytä uudet työt sen alle; oletuksena 2 Gt, 0 poistaa sen käytöstä), <b>latauskiintiö</b> per
 päivä tai kuukausi (UTC; Pakota-työt ohittavat), <b>muistiraja</b> - moottorin RAM-budjetti
 (oletus: ¼ RAM:ista, rajattu; nosta sitä isomuistisella koneella maksiminopeuteen valtavissa
 töissä ja katso <a href="#memory">mitä vähäinen muisti maksaa</a> ennen sen laskemista)
@@ -822,7 +1014,7 @@ päätiedostolle siistin, kuvaavan nimen: elokuvasta tulee
 <code>Example Movie (2024)</code>, sarjat säilyttävät muodon <code>Show - S01E02</code>.
 Hämärretyt tai tunnistamattomat nimet jätetään täsmälleen sellaisiksi kuin ne
 julkaistiin sen sijaan että niitä arvattaisiin.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
 <tr><td>Sisällytä resoluutio</td><td>Lisää nimeen <code>1080p</code>, <code>2160p</code>… <b>Oletuksena päällä</b>; muut neljä merkintää ovat pois.</td></tr>
 <tr><td>Sisällytä videokoodekki</td><td><code>x265</code>, <code>x264</code>, <code>AV1</code>…</td></tr>
@@ -831,13 +1023,32 @@ julkaistiin sen sijaan että niitä arvattaisiin.</p>
 <tr><td>Sisällytä julkaisuryhmä</td><td>Lopussa oleva <code>-GROUP</code>-merkintä.</td></tr>
 <tr><td>Poista roskatiedostot</td><td><b>Oletuksena päällä.</b> Poistaa yli jääneet <code>.par2</code>-, <code>.nzb</code>-, <code>.sfv</code>- ja <code>.nfo</code>-tiedostot sekä näytepätkät valmiista elokuva- ja sarjakansioista. Ei koskaan videota eikä sen tekstityksiä.</td></tr>
 <tr><td>Säilytä vain mediatiedosto</td><td><b>Oletuksena pois, ja tuhoava:</b> poistaa pysyvästi kaiken kansiosta paitsi videon (tai videot) ja tekstitykset. Kausipaketin jokainen jakso säilytetään. Ohittaa asetuksen <b>Poista roskatiedostot</b>, kun molemmat ovat päällä.</td></tr>
+<tr><td>Nimeä lataukset .nzb-tiedoston mukaan</td><td><b>Oletuksena pois.</b> Valmis kansio ja sen päätiedosto saavat <code>.nzb</code>-tiedoston nimen sen siistityn nimen sijaan, joka julkaisusta pääteltiin. Vain suurin tiedosto nimetään uudelleen: jaksopaketin loput, näyte, tekstitykset ja <code>.nfo</code> pitävät nimet, joilla ne saapuivat. Mikä tahansa kategoria voi sallia tai kieltää sen itsekseen kohdassa <b>Omat kategoriat</b>, ja juuri niin saat sen yhdelle lataustyypille etkä toiselle.</td></tr>
 <tr><td>Keep the other words in the name</td><td><b>Päällä oletuksena.</b> Urheilu, kilpailut ja muut tapahtumat ovat usein yksi ja sama nimi toistettuna koko kauden ajan, vain sanan tai kahden päässä toisistaan - "Round11 Hungary Race" vastaan "Round11 Hungary Qualifying". Noiden sanojen säilyttäminen on juuri se, mikä estää koko kautta luhistumasta samaksi nimeksi. Pätee vain siellä, missä nimeä ei voitu siistiä muulla tavoin, joten tavallisiin elokuviin ja jaksoihin ei kosketa.</td></tr>
-</table>
+</table></div>
 <p class="dim">Koko ryhmä ajetaan korjauksen ja purun jälkeen ja ennen kohtaa <b>Siirrä
 valmiit kohteeseen</b>, ja se ohitetaan kokonaan työltä, joka odottaa vielä salasanaa.
 Molemmat poistovaiheet koskevat <em>vain</em> elokuviksi tai sarjoiksi tunnistettuja
 julkaisuja: ohjelmistokuormaa tai luokittelematonta (hämärrettyä) settiä ei siivota
 koskaan.</p>
+
+<p><b>Poistetut tiedostot siirtyvät roskakoriin</b> ratkaisee, mitä "poistaa"
+tarkoittaa yllä. Kun se on päällä, siivous siirtää tiedostot järjestelmän
+roskakoriin, joten väärän arvauksen siitä, mikä oli roskaa, voi perua; kun se on
+pois, ne poistetaan saman tien. Se on <b>oletuksena päällä macOS:ssä ja
+Windowsissa</b>, joissa roskakori on paikassa, jonka näet ja voit tyhjentää, ja
+<b>oletuksena pois Linuxissa</b>, jossa se yleensä ei ole.</p>
+<div class="note"><b>NAS-laitteessa tai kontissa jätä tämä pois päältä.</b> Kun
+latauksesi ovat eri levyllä kuin kotihakemistosi - mikä on normaali järjestely, kun
+alustana on Unraid, Synology, seedbox tai mikä tahansa Docker-asennus liitetyllä
+jaolla - Linuxin roskakorisäännöt eivät käytä työpöydän roskakoria lainkaan. Ne
+luovat piilotetun <code>.Trash-1000</code>-kansion (numero on oma käyttäjä-id:si)
+latauslevyn juureen ja siirtävät tiedostot sinne. Mikään ei näytä sinulle sitä
+kansiota, mikään ei tyhjennä sitä, eikä sen pitämä tila palaa koskaan.
+<p>Jos ajoit aiempaa nzbfast-versiota Linuxissa tämä päällä, etsi se kansio
+latausjakosi juuresta. Sen voi huoletta tyhjentää: kaikki siellä on tiedostoja,
+joita siivous on jo päättänyt, ettet halunnut. nzbfast ei tyhjennä sitä puolestasi,
+koska se on sinun levylläsi ja sinun arvioitavasi.</p></div>
 
 <h3>Kansiot &amp; käsittely</h3>
 <p><b>Latauskansio</b> <span class="pill restart">restart</span>, <b>valvontakansio</b>,
@@ -845,6 +1056,28 @@ koskaan.</p>
 ja <code>SAB_*</code>-ympäristöllä - olemassa olevat SAB-komentosarjat toimivat muuttumatta),
 <b>siivouspäätteet</b> (roskatiedostot poistetaan valmistumisen jälkeen), <b>Älykkäät kansiot</b>
 ja <b>TV-arkistointi</b> (katso <a href="#automation">§10</a>).</p>
+<p><b>Säilytä .nzb-tiedostot poiminnan jälkeen</b> (oletuksena pois päältä) jättää
+alkuperäisen <code>.nzb</code>-tiedoston valvontakansioon jonoon lisäämisen jälkeen sen
+sijaan, että se siirrettäisiin roskakoriin - keräilijöille, ja tiedoston antamiseen
+jollekulle, kun lataus ei toimi. Säilytetty tiedosto muistetaan, myös
+uudelleenkäynnistysten yli, eikä sitä lisätä jonoon uudelleen; tallenna se uudelleen
+ladataksesi sen uudestaan. Valitsitpa kumman tahansa, jokaisen työn tietolaatikossa on
+<b>Lataa .nzb-tiedosto</b> -painike, joten kopio minkä tahansa työn <code>.nzb</code>-tiedostosta
+on aina vain napsautuksen päässä.</p>
+
+<h3 id="set-indexers">Hae indeksoijilta <span class="pill live">live</span></h3>
+<p>Tilisi NZB-indeksoijasivustoilla, rivi kutakin kohti, jotta seinällä tehty haku voi
+kysyä myös niiltä. Mitä toiminto tekee ja miten sillä haetaan, on kohdassa
+<a href="#pullsearch">§5</a>.</p>
+<div class="tblwrap"><table>
+<tr><th>Kenttä</th><th>Mitä se tekee</th></tr>
+<tr><td>Nimi</td><td>Valitsemasi nimilappu, ja se tunnus jonka alla päivän laskurit ja rajat pidetään. Rivin uudelleennimeäminen aloittaa uuden rivin, joten syötä avain uudelleen.</td></tr>
+<tr><td>Rajapinnan osoite</td><td>Sivuston rajapinnan osoite. Sen tavallinen verkko-osoite riittää; Prowlarr- tai NZBHydra2-rivi näyttää tältä: <code>http://host:9696/1/api</code>.</td></tr>
+<tr><td>API-avain</td><td>Sivuston tilisivultasi. Pysyy tällä koneella, lähetetään vain sille sivustolle jolle se kuuluu, ei näytetä enää eikä kirjoiteta koskaan lokiin. Tyhjä säilyttää tallennetun.</td></tr>
+<tr><td>Hakuja päivässä</td><td>Montako hakua tämä tili saa kuluttaa päivässä. 0 = rajaton, ja oletus.</td></tr>
+<tr><td>Latauksia päivässä</td><td>Montako noutoa se saa kuluttaa päivässä. 0 = rajaton. Molemmat laskurit alkavat alusta keskiyöllä UTC.</td></tr>
+<tr><td>päällä, Testaa</td><td><b>päällä</b> on se mikä tekee rivistä haettavan; ota rasti pois jos haluat säilyttää tilin käyttämättä sitä. <b>Testaa</b> kysyy sivustolta mitä se tukee ja näyttää vastauksen, tai virheen, paikan päällä.</td></tr>
+</table></div>
 
 <h3>Indeksointi <span class="pill live">live</span></h3>
 <div class="note"><b>Sisäänrakennettu indeksoija on oletuksena pois päältä.</b> Se
@@ -854,12 +1087,13 @@ tiedostonimet sisällä, pudotettuna kaatoryhmään. Oikea nimi elää vain NZB-
 jonka lataaja julkaisee muualla, joten se ei koskaan ollut Usenetissä minkään skannerin
 luettavaksi. Omalla indeksillämme mitattuna 14,8 miljoonaa skannattua postausta tuotti
 noin 31 000 selattavaa julkaisua, karkeasti yksi viidestäsadasta. Jatka kaupallisten
-indeksoijien käyttöä ja lisää ne kohtaan Asetukset → Hakuindeksoijat, jotta voit hakea
+indeksoijien käyttöä ja lisää ne kohtaan Asetukset → Hae indeksoijilta, jotta voit hakea
 niistä seinältä. Kytke tämä päälle, jos seuraat tiettyjä ryhmiä, joissa yhä
 julkaistaan oikeilla nimillä, tai jos haluat nähdä, mitä palveluntarjoajasi oikeasti
-kantaa. Kytkin pois päältä: mitään ei skannata eikä haeta, tietokantaa ei luoda, ja
-seinä, Selaa, seurantalista ja newznab-syöte ovat piilossa.</div>
-<table>
+kantaa. Kytkin pois päältä: mitään ei skannata eikä haeta eikä tietokantaa luoda; Selaa ja
+newznab-syöte katoavat, seinästä tulee pelkkä hakusivu lisäämillesi indeksoijatileille,
+ja seurantalista toimii niiden tilien varassa.</div>
+<div class="tblwrap"><table>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
 <tr><td>Sisäänrakennettu indeksoija</td><td>Pääkytkin, <b>pois päältä ellet kytke sitä</b>. Pois tarkoittaa: ei skannausta, ei metatietohakuja, ei saatavuusotantaa eikä newznab-syötettä; levyllä jo oleva indeksi säilytetään (poistopainike on olemassa), joten päälle kytkeminen jatkaa sen sijaan että skannaisi uudelleen.</td></tr>
 <tr><td>Ryhmät</td><td>Keskusteluryhmät, joita sisäänrakennettu indeksoija skannaa (esim. <code>alt.binaries.teevee</code>).</td></tr>
@@ -871,7 +1105,12 @@ seinä, Selaa, seurantalista ja newznab-syöte ovat piilossa.</div>
 <tr><td>Sisäänoton portit</td><td>JSON-säännöt, jotka suodattavat, mitä indeksiin päätyy: tyypit (peitelty roska pudotetaan oletuksena), vuosi/resoluutio/kieli, kokorajat.</td></tr>
 <tr><td>Skannaa nyt / syväskannaus</td><td>Aja kierros heti; syvyyden kanssa skannaa uudelleen näin monta tuoretta otsaketta.</td></tr>
 <tr><td>OMDb-avain / metatietojen päivitys / pyyhi</td><td>Seinän rikastuksen hallinta (<a href="#wall">§6</a>). Pyyhi rakentaa tietokannan alusta - palautuspolku, jos se koskaan vioittuu.</td></tr>
-</table>
+<tr><td>Pre-syöte</td><td><b>Pois päältä, kunnes kytket sen.</b> Moni lataus julkaistaan ilman nimeään, jolloin skannauksella ei ole mitään luettavaa. Julkiset välityskanavat ilmoittavat oikean nimen, ainoa avoin tapa yhdistää tällaiset julkaisut. Kytkeminen pitää yhteyden IRC-verkkoon auki ja kuuntelee: mitään ei koskaan lähetetä eikä tiliä luoda. Vaatii indeksoijan päälle, sillä syöte ilman paikkaa kuulemalleen on vain turhaan auki oleva pistoke.</td></tr>
+<tr><td>Välityspalvelin, Välityskanavat</td><td>IRC-verkko, joka kuljettaa ilmoitukset (isäntä tai isäntä:portti), ja kuunneltavat kanavat pilkuin eroteltuna. Muutos astuu voimaan seuraavalla yhteydellä: kytke syöte pois ja takaisin ottaaksesi sen heti käyttöön.</td></tr>
+<tr><td>Nimeä korrelaatiolla</td><td>Julkiset live-välitykset eivät kuljeta tiedostonimiä, joten useimpia hämärrettyjä julkaisuja ei voi yhdistää suoraan. Ilmoitus kuitenkin naulaa sen, milloin julkaisu ilmestyi ja kuinka suuri se on. Tämä vertaa ilmoitettua aikaa ja kokoa nimettömiin julkaisuihin ja ehdottaa sopivuuden löytyessä oikeaa nimeä Selaa-näkymässä. Ehdotus on merkitty ehdotukseksi, vaatii napsautuksesi eikä koskaan nimeä levyllä olevia tiedostoja uudelleen.</td></tr>
+<tr><td>Ota vahvat osumat automaattisesti käyttöön</td><td>Oletuksena pois, ja tiukka päällä ollessaan: koon on täsmättävä tarkasti, mikään muu ilmoitus ei saa sopia lähes yhtä hyvin, ja ilmoituksen on valittava tämä julkaisu takaisin käänteisessä tarkistuksessa. Käyttöön otettu nimi muuttaa vain sen, miten julkaisu näytetään, se on merkitty päätellyksi ja poistuu itsestään, jos valmistunut lataus osoittaa sen vääräksi. Kaikki heikompi jää ehdotukseksi.</td></tr>
+<tr><td>Ilmoitushistoria</td><td>Live-syöte kuulee vain käyttöönoton jälkeen tehdyt ilmoitukset. Tämä hakee noin puolen vuoden edestä vanhoja ilmoituksia julkisesta pre-tietokannasta, kohteliaasti ja kerran, jotta myös jo indeksoidut julkaisut voidaan yhdistää. Käy taustalla puolisen tuntia.</td></tr>
+</table></div>
 
 <h3>Kirjasto, Suojaus, Käyttöliittymä</h3>
 <p><b>Kirjasto</b>: kategoriat, joita kohdellaan välittöminä kirjastomerkintöinä + uudelleentarkistusväli.
@@ -883,23 +1122,44 @@ nopeus näytetään koontinäytössä: megatavuina (MB/s, latausohjelmien vakiin
 oletus) vai megabitteinä (Mb/s, kuten operaattorit ilmoittavat liittymät).
 Tiedostokoot pysyvät tavuina. Tämä on daemonin ominaisuus, ei selaimesi, joten se pätee
 jokaiseen laitteeseen, joka katsoo tätä asennusta.</p>
-<h3>Lisäasetukset: asetukset ilman hallintaa koontinäytössä</h3>
-<p>Neljällä asetuksella ei ole hallintaa käyttöliittymässä eikä komentorivivalitsinta.
-Aseta ne API:n kautta (<a href="#api">§16</a>), esim.
+<h3>Lisäasetukset: säätimet ilmeisten takana</h3>
+<p>Kuusi asetusta, joilla ei ole komentorivivalitsinta. Kullakin on nyt lisäasetusrivi
+sillä asetuskortilla, jolle se kuuluu, ja kunkin voi yhä asettaa API:n kautta
+(<a href="#api">§16</a>), esim.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Kuten
 kaikki muutkin, ne tallentuvat tiedostoon <code>settings.json</code>.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Nimi</th><th>Mitä se tekee</th></tr>
-<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (oletus <code>fast</code>). <code>lean</code> on vauhtia hitaille suorittimille: kuten fast, mutta ohittaa lisäksi artikkelikohtaisen yEnc-CRC:n heti kun PAR2 kattaa tiedoston, jolloin CRC32-kerroksia on yksi kahden sijaan. Ilman PAR2:ta ladatut säilyttävät artikkelien CRC:t, ja työn lopun varmistus ja korjaus pysyvät kummassakin tapauksessa ennallaan. Yllä oleva <b>Pikavarmistus</b> on sama säädin valintaan full vastaan fast.</td></tr>
+<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (oletus <code>fast</code>). <code>lean</code> on vauhtia hitaille suorittimille: kuten fast, mutta ohittaa lisäksi artikkelikohtaisen yEnc-CRC:n heti kun PAR2 kattaa tiedoston, jolloin CRC32-kerroksia on yksi kahden sijaan. Ilman PAR2:ta ladatut säilyttävät artikkelien CRC:t, ja työn lopun varmistus ja korjaus pysyvät kummassakin tapauksessa ennallaan. Yllä oleva valitsin <b>Tarkistus latauksen aikana</b> on tämä asetus.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Odotusaika ennen sitä <em>yhtä</em> automaattista uusintayritystä, jonka ensimmäinen puuttuviin artikkeleihin kaatunut yritys saa (oletus 20). Levitysviive on todellinen syy puuttuviin artikkeleihin ja korjaantuu itsestään; päiväkirjan ansiosta uusinta hakee vain sen mikä yhä puuttuu. Salasana- ja poistovirheet eivät kelpaa koskaan.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Montako ryhmää indeksoija skannaa rinnakkain (oletus 3, rajattu välille 1-8).</td></tr>
 <tr><td><code>oracle_sample</code></td><td>Saatavuusoraakkelin STAT-budjetti joutokäynnillä (<a href="#oracle">§13</a>), luotauksia tunnissa palvelinta kohti. Oletus 300, enintään 3600, <code>0</code> poistaa otannan kokonaan käytöstä.</td></tr>
-</table>
+<tr><td><code>predb_max_rows</code></td><td>Kuinka monta pre-ilmoitusta syötetaulu säilyttää (oletus 250000, rajattu välille 10000-5000000). Tunnittainen karsinta leikkaa tähän lukuun, ja historiallinen tuonti kieltäytyy käynnistymästä, jos se ylittäisi sen, joten tuonti ei koskaan lisää rivejä, jotka seuraava karsinta poistaa.</td></tr>
+<tr><td><code>predb_seed_days</code></td><td>Kuinka kauas taaksepäin ilman omaa ikkunaa käynnistetty historiallinen tuonti ulottuu (oletus 180 päivää, enintään 366). Laajempi ikkuna tarkoittaa enemmän pyyntöjä pre-lähteeseen, joka etenee tahtiin yksi kahden sekunnin välein.</td></tr>
+</table></div>
 <h2 id="automation">10 · Automaatio</h2>
 <h3>Seurantalista</h3>
 <p>Yksinkertaisin automaatio: lisää nimike koontinäytölle, aseta laatuvalinnat,
 valmis. Uudet julkaisut napataan niiden ilmestyessä indeksoituihin ryhmiisi;
 parempilaatuiset kopiot päivittävät aiemmat nappaukset; kalenterinäkymä näyttää, mitä on tulossa.</p>
+<p><b>Listalähde</b> syöttää seurantalistaa Plexissä pitämästäsi listasta kahdella tavalla:
+yhdistä Plex-tilisi hyväksymällä lyhyt koodi Plexin sivulla, tai liitä Plex-seurantalistan
+osoite. Osoite on tunnistautumistieto - se antaa haltijalleen oikeuden lukea listan - joten se
+peitetään tallennuksen jälkeen. Poistojen synkronointi eroaa tiloittain tarkoituksella:
+yhdistetty tili näkee koko listan, joten sieltä poistetun nimikkeen seuranta loppuu myös täällä
+(jo valmistuneet lataukset säilyvät); osoitesyöte sisältää vain uusimmat kohteet, joten
+puuttuminen ei todista mitään ja nimikkeitä vain lisätään. Molemmat oletukset voi muuttaa
+lähdekohtaisesti.</p>
+<p><b>Hae haluamiani myös indeksoijatileiltäni</b>, seurantalistan kortin alalaidassa,
+antaa sen kysyä oman indeksisi lisäksi myös tileiltä kohdasta Asetukset → Hae
+indeksoijilta (<a href="#pullsearch">§5</a>). Se alkaa pois päältä, koska se on täällä
+ainoa asia joka kuluttaa mitattua tiliä ilman että napsautat mitään. Päällä jokainen
+seurattu kohde kysyy noin kahdesti päivässä, ja vain sitä mitä se ei ole jo löytänyt,
+samojen päivärajojen alla ja samoin merkinnöin kun tili ohitetaan. Indeksoijalta tullutta
+ehdokasta arvioidaan täsmälleen kuten paikallista, joten laatulattiat, päivitykset,
+kausipaketit ja kaksoiskappaleiden käsittely pätevät kaikki, ja paikallinen kopio voittaa
+jokaisen tasatilanteen koska se ei maksa kiintiötä. Kun sisäänrakennettu indeksoija on
+pois päältä, tämä on se mikä ylipäätään antaa seurantalistalle jotain työstettävää.</p>
 <h3 id="auto-rss">RSS-syötteet</h3>
 <p>Asetukset → RSS: mikä tahansa newznab/indeksoija-RSS-URL syötekohtaisella välillä, kategorialla ja
 suodatussäännöillä (nimikemallit, kokorajat). Vastaavat kohteet ladataan
@@ -914,8 +1174,63 @@ plex/Jellyfin-valmiina ilman ulkoista työkalua.</p>
 vuorokaudenajan mukaan.</p>
 <h3>Komentosarjat</h3>
 <p>Jälkikäsittelykomentosarja saa SABnzbdin positionaaliset argumentit ja
-<code>SAB_*</code>-ympäristömuuttujat - laaja SAB-komentosarjojen ekosysteemi toimii
-sellaisenaan.</p>
+<code>SAB_*</code>-ympäristömuuttujat: laaja SAB-komentosarjojen ekosysteemi toimii
+sellaisenaan. NZBGetin murre tarjotaan sen rinnalla - <code>NZBPP_*</code>-muuttujat
+(<code>DIRECTORY</code>, <code>NZBNAME</code>, <code>CATEGORY</code>,
+<code>TOTALSTATUS</code>, <code>PARSTATUS</code>, <code>UNPACKSTATUS</code>,
+<code>FINALDIR</code>) ja poistumiskoodit 93/94/95 - joten myös NZBGet-laajennus-
+komentosarjan ydinlogiikka toimii. Kartoitus on rehellinen eikä emulointi:
+korjaus ja purku tapahtuvat yksivaiheisen latauksen sisällä, joten puhdas
+valmistuminen raportoi <code>PARSTATUS=0</code> ja korjattu <code>PARSTATUS=2</code>.
+Komentosarjakohtaisia valintamuotoja (<code>NZBPO_*</code>) ei tarjota.
+Komentosarja voi jättää apuohjelman pyörimään taustalle poistuessaan, eikä
+nzbfast tapa sitä, mutta nzbfast lakkaa lukemasta komentosarjan tulostetta
+heti kun itse komentosarja päättyy: anna taustalle jätetylle apuohjelmalle
+oma tulosteenohjaus, tai se pysäytetään heti ensimmäisellä kerralla, kun se
+yrittää tulostaa.</p>
+<h3>Jonoa edeltävä komentosarja</h3>
+<p>Toinen koukku ajetaan <em>ennen</em> kuin lataus tulee jonoon
+(Asetukset → Kansiot → Jonoa edeltävä komentosarja), SABnzbdin pre-queue-sopimuksella:
+argumentit <code>name, pp, category, script, priority, size, group</code> sekä
+<code>SAB_*</code>-ympäristö. Sen tulosteen ensimmäinen rivi hyväksyy (<code>1</code>)
+tai hylkää (<code>0</code>) latauksen; rivit 2-7 voivat nimetä sen uudelleen, asettaa
+<code>pp</code>:n, vaihtaa kategorian, valita komentosarjan tai vaihtaa prioriteetin
+(tyhjät rivit pitävät oletuksen). Hylätty lataus menee historiaan Epäonnistuneena
+syyn kera, ja Uudelleenyritys historiasta tuo sen takaisin kysymättä komentosarjalta
+uudestaan. Koukku ei voi koskaan hukata latausta: jos komentosarja puuttuu,
+kaatuu, ylittää aikabudjettinsa tai tulostaa jotain, mikä ei ole tuomio,
+lisäys etenee koskemattomana ja loki kertoo miksi.</p>
+<h3>Elinkaaritapahtumat ja allekirjoitetut webhookit</h3>
+<p>Jokainen työn merkkipaalu on versioitu tapahtuma: <code>job.added</code>,
+<code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
+<code>job.completed</code>, <code>job.failed</code>, sekä
+<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code> ja <code>quota.reached</code>. Jokainen kantaa
+<code>schema_version</code>-kentän (nyt 1; uusia avaimia voi ilmestyä ilman
+versiokorotusta - ohita se, mitä et tunne), monotonisen <code>seq</code>-arvon ja
+<code>at</code>-aikaleiman millisekunteina.</p>
+<p>Vastaanottaaksesi ne lisää <b>webhook</b>-ilmoituskohde
+(Asetukset → Automaatio) ja listaa sen <i>events</i>-kenttään tapahtumalajit,
+jotka sen pitää saada - tarkat lajit tai etuliite kuten <code>job.*</code>. Kohde
+saa sitten yhden POSTin per tapahtuma: tapahtuman JSONin runkona sekä
+<code>delivery</code>-tunnisteen (<code>&lt;boot&gt;-&lt;seq&gt;</code>, kahvan jolla
+kaksoiskappaleet karsitaan), <code>X-NzbFast-Event</code>- ja
+<code>X-NzbFast-Delivery</code>-otsakkeet, ja - kun kohteella on allekirjoitus-
+salaisuus - <code>X-NzbFast-Signature: sha256=&lt;hex&gt;</code>, HMAC-SHA256:n
+täsmälleen rungon tavuista salaisuudellasi (sama muoto, jota GitHubin webhookit
+käyttävät). Varmenna Pythonilla:</p>
+<pre><code>expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, request.headers["X-NzbFast-Signature"])</code></pre>
+<p>Toimitus on vähintään-kerran: kohdetta, jota ei tavoiteta, yritetään uudelleen
+10&nbsp;s, 60&nbsp;s ja 5&nbsp;min kuluttua, minkä jälkeen se pudotetaan ja
+epäonnistuminen näkyy kohteen asetusrivillä. HTTP-virhevastausta (404, 401...) ei
+yritetä uudelleen - korjaa vastaanottaja ja käytä Testiä. Jokaisella kohteella on
+oma toimituskaistansa, joten hidas tai tavoittamaton ei koskaan pidättele toista;
+kaistan sisällä toimitukset pitävät tapahtumien tapahtumisjärjestyksen, ja jos yksi
+pudotetaan, järjestysnumerot näyttävät aukon. Klassiset tapahtumasanat
+(<code>completed</code>, <code>failed</code>, <code>repaired</code>,
+<code>disk</code>, <code>quota</code>) säilyttävät ihmisilmoitusmerkityksensä
+samalla kohteella.</p>
 
 <h2 id="arr">11 · Sonarr, Radarr &amp; kumppanit</h2>
 <p>nzbfast puhuu SABnzbd-API:a natiivisti, joten jokainen *arr toimii heti laatikosta -
@@ -927,6 +1242,11 @@ ja se voi toimia myös niiden <em>indeksoijana</em>.</p>
 (mistä löydät sen: <a href="#firstrun-key">§2</a>).</li>
 <li>Kategoria halutusti (esim. <code>tv</code> / <code>movies</code>). Test → vihreä ruksi → Save.</li>
 </ol>
+<p>Koontinäyttö ojentaa osoitteen sinulle: asennuksessa, joka ei ole vielä ladannut
+mitään, tervetulokortin reitti ”Anna Sonarrin, Radarrin tai sovelluksen lisätä
+lataukset” näyttää tarkan osoitteen ja <b>Copy</b>-painikkeen sen vieressä. API-avain
+ei tarkoituksella ole sillä rivillä; se pysyy oman paljastuksensa takana kohdassa
+Asetukset → Suojaus (<a href="#firstrun-key">§2</a>).</p>
 <p>Jono, historia, työkohtainen tila, ”remove &amp; delete”, uudelleenyritys ja kategoriaohjaus
 käyttäytyvät kaikki niin kuin *arrit odottavat.</p>
 <h3>Indeksoijana (newznab)</h3>
@@ -950,26 +1270,60 @@ sen, mikä julkaistiin oikealla tiedostonimellä.</div>
 <p>nzbfast toteuttaa <em>molemmat</em> suuret etäohjausprotokollat, joten lähes jokainen
 mobiili-/tablettisovellus toimii. Valitse mikä tahansa protokolla, jota sovelluksesi tukee:</p>
 <h3>Sovellukset, jotka puhuvat NZBGetiä (nzb360, LunaSea, NZB Unity…)</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Kenttä sovelluksessa</th><th>Arvo</th></tr>
 <tr><td>Type</td><td>NZBGet</td></tr>
 <tr><td>Host / port</td><td>koneesi : <b>6789</b></td></tr>
 <tr><td>Username</td><td>mikä tahansa (esim. <code>nzbfast</code>)</td></tr>
 <tr><td>Password</td><td><b>API-avaimesi</b></td></tr>
-</table>
+</table></div>
 <p>Koko JSON-RPC-pinta, jota nämä sovellukset käyttävät, tarjotaan: tila, jono
 uudelleenjärjestyksellä/keskeytyksellä/poistolla, historia, lisää-NZB, nopeusrajoitus, keskeytä/jatka, loki.</p>
 <h3>Sovellukset, jotka puhuvat SABnzbdiä</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Kenttä sovelluksessa</th><th>Arvo</th></tr>
 <tr><td>Type</td><td>SABnzbd</td></tr>
 <tr><td>Host / port</td><td>koneesi : <b>6789</b></td></tr>
 <tr><td>API key</td><td>API-avaimesi (tai NZB-avain vain lisäävään käyttöön)</td></tr>
-</table>
+</table></div>
 <h3>Koontinäyttö puhelimessasi</h3>
 <p>Avaa vain <code>http://&lt;machine&gt;:6789</code> mobiiliselaimessa - koko
 koontinäytöllä ja seinällä on kosketusasettelu. Asetukset → Etäkäyttö -paneeli näyttää
 tarkat URL:t ja skannattavan QR-koodin.</p>
+
+<h3 id="remote-proxy">nzbfastin tavoittaminen kodin ulkopuolelta</h3>
+<p>Kirjautumissivua ei ole, ja se on tarkoituksellista. Istuntoevästeeseen perustuva kirjautuminen on tietoturvapinta, jota pitäisi ylläpitää ikuisesti, ja se olisi silti heikoin lukko missä tahansa avoimeen internetiin näkyvässä. nzbfast todentaa sen sijaan API-avaimellasi, ja ottaa avaimen vastaan sekä pyynnön otsakkeessa että osoitteessa (<code>X-Api-Key</code> tai <code>Authorization: Bearer</code>) - juuri se antaa edessä olevan palvelun hoitaa kirjautumisen kunnolla.</p>
+<p><b>Yksinkertaisinta on olla julkaisematta sitä lainkaan.</b> Asenna <b>Tailscale</b> tähän koneeseen ja puhelimeesi, niin molemmat liittyvät samaan yksityisverkkoon: mitään ei altisteta, reitittimeen tai varmenteisiin ei tarvitse koskea, ja Asetukset → Etäkäyttö näyttää kaikkialta toimivan osoitteen heti kun Tailscale on käynnissä. Valitse tämä, ellet nimenomaan tarvitse julkista verkkotunnusta.</p>
+<p><b>nzbfast osaa myös tarjota HTTPS:n itse.</b> Osoita Asetukset → Suojaus →
+HTTPS-varmenne / HTTPS-yksityisavain PEM-varmenteeseen ja sen avaimeen (tai
+käynnistä valitsimilla <code>--tls-cert cert.pem --tls-key key.pem</code>), käynnistä
+uudelleen, ja koontinäyttö ja API vastaavat osoitteessa <code>https://</code> pelkän
+HTTP:n sijaan - yksi kuuntelija, yksi skeema. Käytä varmennetta, joka verkkotunnuksellasi
+jo on (esimerkiksi Let's Encryptistä certbotilla), tai itse allekirjoitettua
+lähiverkkoon; selaimet hyväksyvät sen kertaluonteisen varoituksen jälkeen. Viallinen
+tai vanhentunut varmenne estää käynnistyksen ja nimeää tiedoston, joten virhe näkyy
+siellä missä sen teit; uusi korvaamalla tiedostot ja käynnistämällä uudelleen. Natiivi
+HTTPS salaa liikenteen mutta ei lisää kirjautumista, joten pidä API-avain asetettuna.</p>
+<p><b>Jos tarvitset julkisen verkkotunnuksen</b>, laita eteen käänteisproxy, anna sille varmenne ja anna sen hoitaa todennus. Käynnistä nzbfast valitsimella <code>--bind 127.0.0.1</code>, jotta proxy on ainoa reitti sisään, ja osoita proxy osoitteeseen <code>http://127.0.0.1:6789</code>:</p>
+<pre><code># Caddy
+example.com {
+    reverse_proxy 127.0.0.1:6789
+}
+
+# nginx
+location / {
+    proxy_pass http://127.0.0.1:6789;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}</code></pre>
+<p>Lisää päälle se, mitä proxysi tarjoaa: basic auth, forward-auth-palvelu kuten Authelia tai Authentik, tai asiakasvarmenteet. Yksi asia yllättää kaikki - Sonarr, Radarr ja puhelinsovellukset eivät pysty suorittamaan selainkirjautumista, joten jätä niille reitti ohi. Useimmat proxyt osaavat päästää läpi pyynnön, jossa on kelvollinen <code>X-Api-Key</code>-otsake, ja vaatia todennuksen kaikelta muulta.</p>
+<div class="warn-box"><b>Älä vain ohjaa porttia 6789 reitittimessäsi.</b>
+Ilman määritettyä varmennetta koontinäyttö puhuu salaamatonta HTTP:tä, joten
+API-avaimesi ja kaikki mitä sillä teet kulkisivat internetin yli kenen tahansa
+reitillä olevan luettavissa, ja asennus, jossa avainta ei ole asetettu lainkaan,
+on avoin kenelle tahansa sen löytävälle. Jos ohjaat portin silti, aseta ensin
+API-avain ja kytke HTTPS päälle.</div>
 
 <h2 id="performance">13 · Suorituskykytyökalut</h2>
 <h3 id="perf-benchmark">Järjestelmän mittaus</h3>
@@ -1037,13 +1391,13 @@ heikkenee kohti enemmän levy-I/O:ta sivutuksen tai epäonnistumisen sijaan. Mut
 ilmaista, ja isoissa töissä sen voi mitata.</p>
 <p>Mitattuna yhdellä koneella ja yhdellä linjalla (M1 Ultra, 10 GbE), samat tiedostot kullakin
 budjetilla. Jokainen ajo tuotti oikean, täysin varmistetun ja puretun tuloksen:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Työn koko</th><th>Runsaasti RAM:ia</th><th>2 GB budjetti<br><span class="dim">≈ 8 GB kone</span></th><th>1 GB budjetti<br><span class="dim">≈ 4 GB kone</span></th><th>256 MB budjetti<br><span class="dim">≈ 2 GB NAS</span></th></tr>
 <tr><td>7 GB</td><td>15 s</td><td>15 s</td><td>15 s</td><td>15 s</td></tr>
 <tr><td>35 GB</td><td>65 s</td><td>70 s</td><td>70 s</td><td>65 s</td></tr>
 <tr><td>87 GB</td><td>148 s</td><td>206 s <span class="dim">+39%</span></td><td>196 s <span class="dim">+32%</span></td><td>180 s <span class="dim">+22%</span></td></tr>
 <tr><td>190 GB</td><td>330 s</td><td>427 s <span class="dim">+29%</span></td><td>402 s <span class="dim">+22%</span></td><td>411 s <span class="dim">+25%</span></td></tr>
-</table>
+</table></div>
 <p>Huippumuisti seuraa <em>budjettia</em>, ei työtä: tuo 190 GB:n lataus valmistuu
 noin 1.1 GB:ssä RAM:ia. Se, mistä maksat, on aikaa - ja vain isoissa töissä.</p>
 <ul>
@@ -1091,9 +1445,59 @@ päivitykset</b> (Asetukset) pois, eikä se ota päivitysmanifestiin enää lain
 yhteyttä; tyhjä tarkistus-URL tekee saman.</li>
 </ul>
 
+<h3 id="updating">Päivittäminen menettämättä asetuksiasi</h3>
+<p>Yksi sääntö kattaa jokaisen asennuksen: <b>päivitys korvaa ohjelman, ei
+koskaan asetuksiasi.</b> Kaikki määrittämäsi - palvelimet, polut, API-avain,
+jono - asuu kourallisessa tiedostoja yhdessä kansiossa (<a href="#files">§17</a>),
+eikä mikään asennusohjelma, imagen nouto tai paketin päivitys koske siihen
+kansioon. Kun asetukset näyttävät kadonneen päivityksen jälkeen, syy on lähes
+aina se, että uusi asennus lukee <em>eri, tyhjää</em> kansiota - ei se, että
+mitään olisi poistettu; vanhat tiedostot ovat yhä siellä, missä ne ovat aina
+olleet. <a href="#settings-gone">§18</a> kertoo palautusaskeleet.</p>
+<div class="tblwrap"><table>
+<tr><th>Asennus</th><th>Näin päivität</th></tr>
+<tr><td>macOS-sovellus</td><td>Avaa uusi DMG ja vedä <b>NzbFast</b> kansioon
+<b>Ohjelmat</b> vanhan tilalle. Datakansiosi on erillinen, eikä siihen
+kosketa.</td></tr>
+<tr><td>Windows-asennusohjelma</td><td>Aja uusi asennusohjelma vanhan asennuksen
+päälle. Datakansiosi on erillinen, eikä siihen kosketa.</td></tr>
+<tr><td>Docker (komentorivi)</td><td><code>docker pull nzbfast/nzbfast</code>,
+poista vanha kontti ja aja sitten uusi <b>täsmälleen samoilla
+<code>-v</code>-liitoksilla</b>. Image on kertakäyttöinen; liittämäsi
+<code>/config</code>-kansio on asennuksesi. Jos ajokomentosi käyttää suhteellista
+polkua kuten <code>-v ./config:/config</code>, aja se joka kerta samasta
+hakemistosta - mistä tahansa muualta <code>./config</code> on eri, tyhjä
+kansio.</td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose
+up -d</code> samalla compose-tiedostolla samassa paikassa. Tiedoston
+<code>./config</code> on ankkuroitu tiedoston omaan kansioon, joten pidä tiedosto
+siellä, missä se on.</td></tr>
+<tr><td>Watchtower</td><td>Ei mitään tehtävää: se luo kontin uudelleen samoilla
+liitoksilla, kun uusi image julkaistaan.</td></tr>
+<tr><td>Unraid</td><td>Docker-välilehti → <b>Check for Updates</b> → <b>Apply
+Update</b>. Älä koskaan poista ja lisää sovellusta uudelleen päivittääksesi sen;
+jos joskus kuitenkin asennat uudelleen, pidä sama appdata-polku, jotta se löytää
+olemassa olevan <code>/config</code>-kansiosi.</td></tr>
+<tr><td>Synology (Container Manager)</td><td>Lataa uusi image, pysäytä kontti ja
+luo se uudelleen samoilla taltioasetuksilla - Synology-oppaan läpikävely näyttää
+sen napsautus napsautukselta, myös aikataulutettuna.</td></tr>
+<tr><td>Synology (paketti)</td><td>Asenna uusi <code>.spk</code> Package
+Centerissä; se päivittyy paikallaan.</td></tr>
+<tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
+<tr><td>Pelkkä binääri</td><td>Korvaa binääri. Määrityksesi pysyy siellä, minne
+sen teit (<a href="#files">§17</a>).</td></tr>
+</table></div>
+<div class="tip"><b>Vinkki</b>Docker-käyttäjät, jotka kytkevät Sonarrin tai
+Radarrin: laita API-avain itse kontin määrittelyyn
+(<code>-e NZBFAST_APIKEY=…</code> tai compose-tiedostosi tai Unraid-mallipohjasi
+environment-lohkoon). Sinne tallennettu avain selviää mistä tahansa kontin
+kommelluksesta, koska se asuu isäntäkoneella, määrittelyssä, ja otetaan käyttöön
+uudelleen jokaisessa käynnistyksessä. Myöhemmin Asetuksissa asettamasi avain
+voittaa sen silti.</div>
+
 <h2 id="cli">15 · Komentorivi</h2>
 <p>Kaikki, mitä daemon tekee, on myös skriptattavissa. Jokapäiväiset komennot:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Komento</th><th>Tarkoitus</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interaktiivinen palvelinasennus.</td></tr>
 <tr><td><code>nzbfast serve</code></td><td>Aja daemon (koontinäyttö + API + automaatio). <code>--open</code> avaa selaimen; <code>--apikey</code> asettaa avaimen käsin (<a href="#firstrun-key">§2</a>); <code>--bind</code> valitsee kuunteluosoitteen, oletus <code>0.0.0.0</code> (jokainen liitäntä), <code>127.0.0.1</code> vain tälle koneelle. Katso <code>--help</code> koko lippulistalle - jokaisella koontinäytön asetuksella on lipun kaksonen.</td></tr>
@@ -1103,10 +1507,11 @@ yhteyttä; tyhjä tarkistus-URL tekee saman.</li>
 <tr><td><code>nzbfast sysbench</code></td><td>Järjestelmän mittaus + monimuotoisuusraportti terminaalissa.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Skannaa ryhmät indeksiin / hae siitä ilman daemonia.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Tuo palvelimet SABnzbd-ini-tiedostosta.</td></tr>
-</table>
+</table></div>
 <p class="dim">Saatavilla myös: <code>inspect</code>, <code>probe</code>,
 <code>bench</code>, <code>bench-cpu</code>, <code>soak</code>, <code>fetch</code>,
 <code>spots</code>/<code>spot-search</code>/<code>spot-get</code> (Spotnet),
+<code>predb-seed</code> (täyttää pre-tietokannan syötteen käyttöönottoa edeltävältä ajalta),
 <code>make-release-nzb</code>/<code>make-test-nzb</code> (testikiinnikkeet). Jokainen
 komento ottaa <code>--config</code>- ja <code>--help</code>-valinnan. Näiden lisäksi on <code>post</code>: se lähettää tiedostot
 yEnc-artikkeleina ja kirjoittaa niitä vastaavan NZB:n. Ylläpitotyökalu; se vaatii
@@ -1118,20 +1523,34 @@ puolestasi.</p>
 SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatta. Kaksi avainta:
 <b>API-avain</b> (täysi hallinta) ja <b>NZB-avain</b> (vain lisäävä:
 <code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> ei tarkoituksella kuulu pelkän lisäyksen joukkoon: linkin ratkaiseminen voi kuluttaa mitattua indeksoijakiintiötä, mikä ei kuulu pelkkään lisäykseen tarkoitetulle tunnukselle.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Alue</th><th>Tilat</th></tr>
 <tr><td>Jono</td><td><code>queue</code> (nimellä <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
-<tr><td>Tiedot</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
+<tr><td>Tiedot</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code>, lisäksi <code>/jobnzb/&lt;nzo_id&gt;</code> (työn oma talletettu <code>.nzb</code> takaisin ulos, jonosta tai historiasta; vain täysi API-avain)</td></tr>
 <tr><td>Määritys</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (jokainen Asetukset-kenttä), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Indeksi &amp; seinä</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, sekä newznab osoitteessa <code>/api?t=caps|search|tvsearch|movie</code> ja <code>/getnzb/&lt;id&gt;</code></td></tr>
 <tr><td>Automaatio</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostiikka</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code>, <code>update_apply</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-todennus: mikä tahansa käyttäjä, API-avain salasanana)</td></tr>
 <tr><td>Esikatselu / toisto</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-alueet; pysäköidyn kirjastotyön käynnistys tarvitsee <code>?t=</code>-tunnisteen tai avaimen), <code>/m3u/&lt;id&gt;</code> (tarvitsee avaimen; luo tunnisteen), <code>/wall</code>, <code>/art/…</code></td></tr>
-</table>
+</table></div>
 
 <h2 id="files">17 · Tiedostot &amp; sijainnit</h2>
-<table>
+<p>Missä asetuskansio on, riippuu siitä, miten nzbfast asennettiin. Tämä yksi
+kansio sisältää kaiken varmuuskopioimisen arvoisen:</p>
+<div class="tblwrap"><table>
+<tr><th>Asennus</th><th>Asetuskansio</th></tr>
+<tr><td>macOS-sovellus</td><td><code>~/Library/Application Support/nzbfast/</code></td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\nzbfast\</code></td></tr>
+<tr><td>Docker / NAS-kontit</td><td><code>/config</code> kontin sisällä, eli
+isäntäkoneen kansio, jonka liitit siihen. Unraidilla se on sovelluksen
+appdata-kansio.</td></tr>
+<tr><td>Synology-paketti</td><td><code>/var/packages/nzbfast/var/</code></td></tr>
+<tr><td>Terminaali</td><td>Kansio, jossa ajoit komennon <code>nzbfast setup</code>,
+tai minne <code>--config</code> / <code>$NZBFAST_CONFIG</code> osoittaa.</td></tr>
+</table></div>
+<p>Ja mitä sen sisällä on:</p>
+<div class="tblwrap"><table>
 <tr><th>Tiedosto</th><th>Sisältö</th></tr>
 <tr><td><code>config.local.json</code></td><td>Palvelintunnukset ja palvelinkohtaiset valinnat. Velhon luoma; muokattavissa Asetuksissa. Pidä se yksityisenä. Salasanat ovat <a href="#passwords">hämärrettyjä, ei salattuja</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Jokainen koontinäytöllä muutettu asetus. Asuu määrityksen vieressä; käyttöliittymäarvot voittavat komentorivilliput. Poista avain (tai tiedosto) palataksesi lippuihin/oletuksiin.</td></tr>
@@ -1140,10 +1559,10 @@ SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatt
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Jonon tila (säilyy uudelleenkäynnistyksissä), työkohtaiset NZB:t, käyttökirjanpito, mittaushistoria, julistekuvien välimuisti.</td></tr>
 <tr><td>Artikkelijournaali</td><td>Kunkin työn tulostuskansion sisällä keskeneräisenä - pyörittää kaatumisen jälkeistä jatkoa ja uudelleenyritystä. Poistetaan onnistuessa.</td></tr>
 <tr><td>Ulkoiset työkalut</td><td>Ei tarvita - RAR-purku ja PAR2-korjaus ovat natiiveja. Jos jokin eksoottinen sarja koskaan tarvitsee ulkoista <code>unrar</code>- tai <code>par2</code>-työkalua varajärjestelynä, nzbfast etsii sen suoritettavansa vierestä, sitten polusta <code>$PATH</code>.</td></tr>
-</table>
+</table></div>
 
 <h2 id="troubleshooting">18 · Vianmääritys</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Oire</th><th>Tarkista</th></tr>
 <tr><td>Hitaat lataukset</td><td>Aja <b>Järjestelmän mittaus</b> - se nimeää pullonkaulan suoraan. Jos se on verkko: aja <b>Yhteyksien viritys</b>, tarkista palvelinkohtaiset yhteysmäärät ja varmista, etteivät palveluntarjoajasi ole kaikki yhtä backbonea (<b>Palvelinten monimuotoisuus</b>).</td></tr>
 <tr><td>Hidas vain hyvin suurissa töissä<br>(NAS tai vähämuistinen kone)</td><td>Odotettua, ja mitattavissa: näännytetty muistibudjetti valuttaa välimuistit levylle ja maksaa 20–40% yli ~87 GB. Katso <a href="#memory">Muistibudjetti</a> luvuista ja siitä, kuinka paljon RAM:ia sille antaa. Pienemmät työt ovat vaikuttamattomia.</td></tr>
@@ -1155,12 +1574,14 @@ täsmälleen samalta ja korjaantuu itsestään.</td></tr>
 <tr><td>Arkisto ei purkaudu</td><td>Salasana- ja korjausvirheet nimeävät itsensä historiarivillä. Kaikelle muulle on hätäluukku: Asetukset → Valvontakansio &amp; jälkikäsittely → <b>Pura ulkoisella unrarilla</b> (lisäasetus) antaa purkamisen koneellesi asennetulle <code>unrar</code>-ohjelmalle sisäänrakennetun purkajan sijasta. Pidä se muuten pois päältä: sisäänrakennettu polku on nopeampi kaikissa mittaamissamme muodoissa, ja hash-nimiset obfuskoidut julkaisut käyttävät sitä joka tapauksessa aina, koska unrar ei voi seurata niiden uudelleennimeämistä. Sama kytkin <code>nzbfast get</code>-ajoille on ympäristömuuttuja <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Jos unrar purkaa arkiston, jonka sisäänrakennettu purkaja hylkäsi, ilmoita siitä, jotta voimme korjata sisäänrakennetun polun.</td></tr>
 <tr><td>Sonarr/Radarr ei saa yhteyttä</td><td>Onko portti 6789 tavoitettavissa? API-avain oikein (täysi avain, ei NZB-avain)? Asiakastyyppi asetettu SABnzbdiksi?</td></tr>
 <tr><td>Koontinäyttö kysyy API-avainta, jota en koskaan asettanut</td><td>Uusi asennus tekee sellaisen itselleen ja tulostaa sen kerran käynnistyksessä (<a href="#firstrun-key">§2</a>). Se on <code>apikey</code>-tiedostossa määrityksesi vieressä ja käynnistystulosteessa. Tai kirjoita oma avaimesi kohtaan Asetukset → Suojaus selaimesta, joka on jo kirjautuneena.</td></tr>
+<tr id="settings-gone"><td>Kaikki asetukseni näyttävät kadonneen päivityksen jälkeen<br>(palvelimet, polut, API-avain)</td><td>Mikään päivityksessä ei poista asetuksia; tämä tarkoittaa, että nzbfast lukee eri, tyhjää kansiota. Ensin: API-avainkenttä Asetuksissa näyttää tyhjältä tarkoituksella - napsauta <b>Show</b> ennen kuin päättelet avaimen kadonneen. Dockerissa vertaa uuden kontin <code>/config</code>-liitosta vanhaan: muuttunut isäntäkoneen polku, suhteellinen polku eri hakemistosta ajettuna tai tuore appdata-kansio käynnistävät kaikki nzbfastin puhtaalta pöydältä, kun oikeat asetuksesi lepäävät koskemattomina entisessä polussa. Etsi vanha kansio (etsi tiedostoja <code>settings.json</code>, määritystiedostosi ja <code>apikey</code> - sijainnit kohdassa <a href="#files">§17</a>), ja osoita sitten liitos takaisin siihen tai kopioi nuo tiedostot uuteen kansioon ja käynnistä uudelleen. Käynnistysloki nimeää käytössä olevan asetustiedoston täsmälleen: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Mikään verkossa ei tavoita daemonia</td><td>Tarkista <code>--bind</code>: <code>127.0.0.1</code> palvelee vain sitä konetta, jolla nzbfast ajaa. Oletus, <code>0.0.0.0</code>, palvelee jokaista liitäntää. Tarkista sitten koneen oma palomuuri portin 6789 osalta.</td></tr>
 <tr><td>Selaa-kortti pysyy pienenä</td><td>Indeksoija kasvaa taustalla - tarkista, että Asetukset → Indeksointi -ryhmät on asetettu, ja anna Syvennä per skannaus -asetukselle aikaa kerätä historiaa. ”Skannaa nyt” pakottaa kierroksen; tilarivi näyttää live-edistymisen.</td></tr>
 <tr><td>Seinä näyttää väärän/ei kuvitusta</td><td>Tietosivu → ✎ Korjaa osuma tai ↻ Päivitä metatiedot. Elokuvahaut paranevat ilmaisella OMDb-avaimella.</td></tr>
+<tr id="mac-cant-open"><td>macOS sanoo, ettei sovellusta "nzbfast" voi avata</td><td>Kaksi syytä, molemmat nopeita. Jos käytät pelkkää <code>-macos-universal.zip</code>-pakettia, kaksoisnapsauta <b>Start nzbfast.command</b>-tiedostoa, älä sen vieressä olevaa <code>nzbfast</code>-tiedostoa: se on itse ohjelma, ja Finder vastaa sen kaksoisnapsautukseen juuri tällä ilmoituksella. Käynnistin on se, joka valmistelee ja käynnistää kaiken. Jos käynnistin antaa saman ilmoituksen, kopio on menettänyt Unix-suoritusbittinsä matkalla: macOS säilyttää bitin .zip-tiedoston sisällä, mutta chat-sovellukset, pilvilevyt ja uudelleenpakkaus eivät, joten kädestä käteen kulkenut kopio saapuu ilman suoritusoikeutta. Lataa .dmg tai .zip suoraan releases-sivulta, niin näin ei käy. Jos haluat pelastaa jo lataamasi kopion: avaa Pääte, kirjoita <code>chmod +x</code> ja välilyönti perään, raahaa <b>Start nzbfast.command</b> ja <code>nzbfast</code>-tiedosto ikkunaan ja paina rivinvaihtoa, ja kaksoisnapsauta sitten käynnistintä uudelleen.</td></tr>
 <tr><td>Daemon ei käynnisty: portti käytössä</td><td>Toinen instanssi on käynnissä - tai vaihda <code>--port</code>.</td></tr>
 <tr><td>Missä lokit ovat?</td><td>Koontinäytön Loki-kortti tai terminaali/lokitiedosto, jolla käynnistit <code>serve</code>n.</td></tr>
-</table>
+</table></div>
 <div class="note"><b>Yhä jumissa?</b>Loki-kortti nimeää yleensä syyllisen -
 sisällytä sen loppuosa ongelmaa raportoidessasi, sekä
 <code>nzbfast --version</code>.</div>

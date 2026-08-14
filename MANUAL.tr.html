@@ -55,8 +55,16 @@
       r.style.setProperty('--user-acc',a);
       r.setAttribute('data-accent','1');
     }
+    // Interface scale. This drives `zoom` (see --ui-zoom below), NOT the
+    // root font-size: every size on these pages is in px, so scaling the
+    // root scaled nothing at all and the slider had never once moved a
+    // pixel - it wrote its value, redrew its own "140%" label, and the
+    // page stayed exactly as it was (reported by a tester 2 Aug 2026,
+    // who reasonably read it as a container quirk). Keep the stored key
+    // and its 0.8-1.4 range so an existing setting starts working rather
+    // than resetting.
     var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
-    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    if(f>=0.8&&f<=1.4) r.style.setProperty('--ui-zoom',f);
     // §Stage6 appearance layers. Same reasoning as the theme: applied
     // before first paint, so nobody watches the page change shape after
     // it has already drawn. Each value is checked against a fixed list,
@@ -225,8 +233,55 @@ button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
   <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
   <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
   <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+  <!--
+    Job-origin glyphs (TODO §140 / issue #31). The row badge that says
+    where a job came from used to be an emoji per origin, with ONE robot
+    standing in for every app that posts over the API - so a Sonarr grab,
+    a Radarr grab and a shell script looked identical in history.
+
+    These are neutral shapes for the KIND of thing each sender keeps - a
+    set for series, a film strip for films, a note for music - and they
+    are deliberately NOT the other projects' logos: nzbfast does not ship
+    anyone else's mark. The name still lives in the tooltip, which is
+    what actually identifies the sender; the glyph only has to separate
+    the rows at a glance.
+  -->
+  <g id="i-o-folder"><path d="M3 18.5V6.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2.2 2.7h8.3A1.7 1.7 0 0 1 21 8.9v9.6a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.5z"/></g>
+  <g id="i-o-star"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></g>
+  <g id="i-o-rss"><path d="M4.5 12.5A7 7 0 0 1 11.5 19.5"/><path d="M4.5 6.5A13 13 0 0 1 17.5 19.5"/><circle cx="5.2" cy="18.8" r="1.3" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-link"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.4 1.4"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+  <g id="i-o-pin"><path d="M12 21.5V14.2"/><path d="M8.2 2.8h7.6l-1.1 5.1 2.6 2.6v1.6H6.7v-1.6l2.6-2.6z"/></g>
+  <g id="i-o-retry"><path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.6 2.8v4.6H16"/></g>
+  <!-- Generic API sender: a plug, for a client that named itself with a
+       name we have no shape for (and for records that only say "arr"). -->
+  <g id="i-o-app"><path d="M9 2.8v5.2M15 2.8v5.2"/><path d="M6.4 8h11.2v3.4a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17v4.2"/></g>
+  <g id="i-o-tv"><rect x="3" y="8" width="18" height="12.2" rx="2"/><path d="M8 3.8l4 4.2 4-4.2"/></g>
+  <g id="i-o-film"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3 9.2h4.5M3 14.8h4.5M16.5 9.2H21M16.5 14.8H21"/></g>
+  <g id="i-o-music"><path d="M9.2 18V5.8l9.6-2v12"/><circle cx="6.7" cy="18" r="2.5"/><circle cx="16.3" cy="15.8" r="2.5"/></g>
+  <g id="i-o-book"><path d="M12 7.2C10.3 5.6 8 4.8 4.3 4.8v12.6c3.7 0 6 .8 7.7 2.4 1.7-1.6 4-2.4 7.7-2.4V4.8c-3.7 0-6 .8-7.7 2.4z"/><path d="M12 7.2v12.6"/></g>
+  <g id="i-o-cam"><rect x="2.6" y="6.6" width="13" height="10.8" rx="2"/><path d="M15.6 11l5.8-3.4v8.8L15.6 13z"/></g>
+  <g id="i-o-hub"><circle cx="12" cy="12" r="2.6"/><circle cx="4.6" cy="5.4" r="1.8"/><circle cx="19.4" cy="5.4" r="1.8"/><circle cx="12" cy="20.4" r="1.8"/><path d="M6 6.7l4.1 3.6M18 6.7l-4.1 3.6M12 14.6v3.9"/></g>
+  <g id="i-o-funnel"><path d="M3.4 4.6h17.2l-6.5 8v7.2l-4.2 1.8V12.6z"/></g>
+  <g id="i-o-inbox"><path d="M12 2.8v8.6M8.6 8l3.4 3.4L15.4 8"/><path d="M3.6 14.2h4.8l1.4 2.4h4.4l1.4-2.4h4.8v4.3a1.9 1.9 0 0 1-1.9 1.9H5.5a1.9 1.9 0 0 1-1.9-1.9z"/></g>
+  <g id="i-o-phone"><rect x="6.5" y="2.6" width="11" height="18.8" rx="2.5"/><path d="M10.4 5.6h3.2"/><circle cx="12" cy="18" r="1" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-window"><rect x="3" y="4.6" width="18" height="14.8" rx="2"/><path d="M3 9.2h18"/><circle cx="6.4" cy="6.9" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-term"><rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2"/><path d="M7 9.6l3 2.4-3 2.4M12.6 15h4.6"/></g>
 </defs></svg>
 <style>
+/* The interface-scale control, for every page that inlines these tokens.
+   `zoom` rather than a root font-size: these pages size everything in px,
+   so the old root-font-size approach moved nothing (see the loader
+   above). Zoom takes the whole layout with it - type, spacing, controls
+   and chart furniture together - which is also what a size control is
+   normally expected to do, and it cannot leave text overflowing padding
+   that stayed behind.
+
+   On the BODY, not :root: zooming the root element re-scales the
+   viewport that position:fixed and 100vh resolve against, so the header
+   and any fixed overlay drift. Default 1 means a page with no setting is
+   byte-identical to before. */
+body{zoom:var(--ui-zoom,1)}
+
 /* One icon class. 1em so an icon scales with the text it sits beside,
    including the user's text-size setting. */
 .ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
@@ -264,12 +319,27 @@ h3{font-size:16.5px;margin:28px 0 6px}
 h4{font-size:14.5px;margin:20px 0 4px}
 p{margin:8px 0}
 li{margin:3px 0}
+/* Prose breaks a long unbreakable token instead of pushing the page sideways.
+   The API section quotes a 368px query string, which does not fit the 280px
+   text column of a 320px phone. Deliberately not applied to header or data
+   cells: inside a scroll wrapper, breaking a cell reflows the columns rather
+   than letting the wide table scroll, which is what the wrapper is for. */
+p,li,.tip,.note,.warn-box{overflow-wrap:break-word}
 code,kbd{background:var(--code);border:1px solid var(--line);border-radius:5px;
   padding:1px 6px;font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre{background:var(--code);border:1px solid var(--line);border-radius:9px;
   padding:12px 15px;overflow-x:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre code{background:none;border:none;padding:0}
-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+/* A table scrolls inside its own box instead of widening the page. One long
+   unbreakable command in a cell (the docker compose upgrade line, 338px wide
+   in an 87px column) used to drag the whole document sideways on a phone:
+   +140 at 320px and +85 at 375px in English, up to +217 / +162 in the
+   longer-word locales, and da/nl even at 500px. The 12px margin sits on the
+   wrapper so it still collapses with the adjacent paragraph exactly as
+   the margin on the table itself did - a scroll box does not collapse
+   margins through, so leaving it in place would have opened every gap. */
+.tblwrap{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;margin:0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
@@ -298,6 +368,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
   body{background:#fff;color:#000;font-size:11.5pt}
   h2{page-break-after:avoid}
   pre{white-space:pre-wrap}
+  .tblwrap{overflow:visible}
   a{color:inherit}
 }
 </style>
@@ -401,6 +472,15 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 yazmayı atla: Ayarlar → Usenet sunucuları → <b>SABnzbd / NZBGet'ten içe aktar…</b> mevcut
 kurulumunu bulur ve sunucularını kopyalar. Komut satırında ayrıca <code>nzbfast import-sab</code>
 de vardır.</div>
+<p>Karşılama kartı ayrıca <b>nzbfast'i nasıl kullanmayı planladığını</b> dört
+seçenekle sorar: Sonarr ya da Radarr gibi bir uygulama onu yönetiyor, SABnzbd'den
+geçiyorsun, NZBGet'ten geçiyorsun ya da yalnızca sen, bu panelden. Birini seçmek
+tek başına hiçbir şeyi değiştirmez. Kısa bir gözden geçirme listesi gösterir - her
+öneri, ayarın kendi adıyla, mevcut değeri, önerilen değer ve tek satırlık bir
+gerekçeyle - ve <b>Uygula</b> yalnızca işaretlediğin satırları ayarlar. Her satır,
+sonradan kendi başına geri değiştirebileceğin sıradan bir ayardır ve aynı liste
+daha sonra da Ayarlar → <b>Kullanım şekline göre önerilen ayarlar</b> altında
+durur.</p>
 
 <h3 id="firstrun-key">API anahtarın</h3>
 <p>Gerçekten yeni bir kurulumda nzbfast, arka plan süreci ilk kez başladığında kendine
@@ -443,7 +523,7 @@ sınırlar; başka hiçbir şeyin erişime ihtiyacı olmadığı tek bir masaüs
 
 <h2 id="concepts">3 · nzbfast nasıl çalışır</h2>
 <p>Kılavuzun geri kalanının rahat okunması için hızlı bir sözlük:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Terim</th><th>Anlamı</th></tr>
 <tr><td><b>Sağlayıcı / sunucu</b></td><td>Hesabının olduğu bir Usenet servisi
 (Newshosting, Eweka, XS News…). Her biri belli sayıda eşzamanlı bağlantıya izin verir.</td></tr>
@@ -458,7 +538,7 @@ otomatik onarır.</td></tr>
 <tr><td><b>Depolama modu RAR</b></td><td>Çoğu sürüm sıkıştırma olmadan RAR birimlerine
 paketlenir. nzbfast bunu tanır ve indirirken <em>iç dosyayı</em> doğrudan son konumuna
 yazar - sonrasında bir açma adımı yoktur.</td></tr>
-</table>
+</table></div>
 <p>İşlem hattı, indirme → kod çözme → doğrulama → çıkarma adımlarını <em>eşzamanlı</em>
 çalıştırır. Paneldeki İşlem hattı kartı üç şeridin de aynı anda hareket ettiğini gösterir.
 Son bayt geldiğinde doğrulama çoktan bitmiş ve dosya çoktan çıkarılmıştır; tipik bir işin
@@ -475,13 +555,13 @@ güvenmeden önce geri yüklediği her şeyi PAR2 blok haritasına karşı yenid
 <p>Aynı makinede, aynı sağlayıcılar ve aynı NZB'lerle SABnzbd 5.0.4 ve NZBGet 26.2'ye karşı
 ölçülüp <em>kullanılabilir bir dosyaya</em> göre zamanlandı - indirme, doğrulama, onarım ve
 çıkarmanın tümü dahil, çünkü iş asıl o zaman bitmiş olur:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>İş boyutu</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th></tr>
 <tr><td>7 GB</td><td><b>13.7 s</b></td><td>+26%</td><td>+39%</td></tr>
 <tr><td>35 GB</td><td><b>67 s</b></td><td>+61%</td><td>+325%</td></tr>
 <tr><td>87 GB</td><td><b>272 s</b></td><td>+36%</td><td>+160%</td></tr>
 <tr><td>190 GB</td><td><b>9 m 00 s</b></td><td>+30%</td><td>+111%</td></tr>
-</table>
+</table></div>
 <p>Fark, son bayt indikten sonra diğerlerinin hâlâ yapması gereken son işlemdir. İki rakip de
 karşılaştırma için ince ayar edildi, varsayılanlarda bırakılmadı -
 özellikle SABnzbd istek işlem hatlamasını <em>kapalı</em> gönderir, bu ona pahalıya patlar,
@@ -546,7 +626,11 @@ en hızlı sağlayıcın her zaman en üstte olur.</p>
 <li><b>Yeniden sıralamak için satırları sürükle</b> (bir öncelik bandı içinde - Zorla/Yüksek
 yine önce çalışır); önceliği satır içinde değiştir.</li>
 <li>Ayrıntı çekmecesi için <b>bir satıra tıkla</b>: dosya başına ilerleme çubukları, doğrulama
-blok sayıları ve <em>bu</em> işe hangi sunucunun ne kadar katkı sağladığı.</li>
+blok sayıları, <em>bu</em> işe hangi sunucunun ne kadar katkı sağladığı ve işin nereden
+geldiğini söyleyen bir «ekleyen» satırı (izleme klasörü, bağlı bir uygulama, API…).
+Bir <b>.nzb dosyasını indir</b> düğmesi işin <code>.nzb</code> dosyasını kaydeder - nzbfast
+kendi kopyasını sakladığından bu her iş için çalışır, orijinal dosya çoktan
+kaybolmuş olsa bile.</li>
 <li>Rozetler özel durumları gösterir: <i>ertelendi (yavaş)</i>, <i>ön yükleniyor</i>,
 <i>duraklatıldı</i> (bkz. <a href="#performance">Performans araçları</a>).</li>
 <li>Bir iniş grafiği kuyruk boyunca kalan toplam GB'ı izler.</li>
@@ -560,11 +644,23 @@ zorlar.</p>
 <p>Başlıkları ada göre ekle - henüz gönderilmemiş olanlar dahil. Eşleşen bir sürüm dizinde
 belirdiğinde, kalite tercihleri ve yükseltme kurallarıyla (daha iyi bir kopya daha kötüsünün
 yerini alır) otomatik yakalanır.</p>
+<p>Kart, Plex'te tuttuğun bir listeyi de takip edebilir. Bir <b>liste kaynağı</b> ekle: ya
+Plex hesabını bağla (kısa bir kodu Plex'in kendi sayfasında onaylarsın, böylece parolan
+nzbfast'e hiç ulaşmaz) ya da Plex izleme listesi adresini yapıştır. Bu adrese bir parola gibi
+davran - elinde bulunduran herkes listeni okuyabilir - bu yüzden kaydedildikten sonra
+maskelenir. Eşitlenen başlıklar kendi satırlarının yanında salt okunur satırlar olarak görünür.
+Bağlı bir hesap listenin tamamını görür, bu yüzden orada kaldırılan bir başlık burada da
+izlenmeyi bırakır (tamamlanmış indirmelere asla dokunulmaz); bir adres yalnızca en yeni
+girdileri gösterir, bu yüzden eksik bir başlık listeden kaymış olabilir ve hiçbir şey silinmez.
+Her iki davranış da kaynak başına değiştirilebilir.</p>
 <h3 id="dash-history">Geçmiş</h3>
 <p>Son indirmeler, her biri tek satır. Başarısız işler <b>Yeniden Dene</b> sunar
 (günlükten devam eder). Şifreli arşivler bir 🔑 kilit açma denetimi gösterir - parolayı gir
 ve iş yerinde biter. Doğrulama sağlığı şeridi, indirme başına bozuk PAR2 bloklarını çizer -
-yükselen bir kuyruk makalelerin hasarlı geldiği anlamına gelir.</p>
+yükselen bir kuyruk makalelerin hasarlı geldiği anlamına gelir.
+Her satırın çekmecesi işi kimin eklediğini söyler ve kuyruktakiyle aynı
+<b>.nzb dosyasını indir</b> düğmesini taşır - bir sürümü başka bir yerde yeniden indirmek
+ya da <code>.nzb</code> dosyasını bir sorun bildirimine eklemek için kullanışlı.</p>
 <p>Kart varsayılan olarak on indirme listeler, gerisi ▤ düğmesiyle bir tık uzaktadır. Durum, konum ve bir işin neden başarısız olduğu satırın kendisine tıklamanın arkasındadır; böylece yaygın durum - ne bitti, ne kadar büyük, ne zaman - kaydırmadan okunabilir kalır. Bunun yerine kartın alt kenarını sürükleyerek listeyi seçtiğiniz bir yükseklikte kaydırabilirsiniz. Ayarlar → Arayüz altındaki <b>History rows</b> bu onu değiştirir; tarayıcınızın değil daemon'un bir özelliği olduğundan, bu kuruluma bakan her cihaz için geçerlidir. Yanındaki <b>Colour History names</b> biten adları yeşile, başarısız olanları kırmızıya boyar; kapatıldığında adlar sade kalır ve renkli nokta ile satırın kendi ayrıntıları hangisinin hangisi olduğunu yine söyler.</p>
 <h3 id="dash-usage">Veri kullanımı</h3>
 <p>Sağlayıcı başına günlük çubuklar ve Bugün / 7 günlük / 30 günlük toplamlar - sayaçlı ve
@@ -574,19 +670,26 @@ blok hesaplar için elzem. Blok hesaplar ömür boyu kullanımı boyutlarına ka
 anlatılan üç kendini ölçme aracı.</p>
 
 <h2 id="adding">5 · İndirme ekleme</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Yöntem</th><th>Nasıl</th></tr>
 <tr><td><b>Sürükle &amp; bırak</b></td><td>Bir ya da daha fazla <code>.nzb</code> dosyasını panelin herhangi bir yerine bırak.</td></tr>
 <tr><td><b>İzleme klasörü</b></td><td>Ayarlar'da bir klasör belirle; içine kaydedilen her <code>.nzb</code>
-5 saniye içinde alınır ve dosya kaldırılır. Dizinleyici sitelerinden tek tıkla yakalamalar
-için tarayıcının indirme dizinini buna yönlendir.</td></tr>
+5 saniye içinde alınır ve çöp kutusuna taşınır; açık bir panel her alışı adıyla duyurur
+(«…, Downloads klasöründen alındı»), böylece klasörden ayrılan bir dosya asla bir
+gizem olmaz. Dosyalarını saklamayı mı tercih ediyorsun? <b>Alındıktan sonra .nzb
+dosyalarını sakla</b> ayarını aç (bkz. <a href="#settings">§9</a>). Dizinleyici
+sitelerinden tek tıkla yakalamalar için tarayıcının indirme dizinini buna
+yönlendir.</td></tr>
 <tr><td><b>Bir URL'den</b></td><td>Bir NZB bağlantısı yapıştır (API <code>mode=addurl</code> ya da bağlı herhangi bir uygulama üzerinden).</td></tr>
 <tr><td><b>nzblnk: bağlantıları</b></td><td>Bir <code>nzblnk:</code> bağlantısını panonun herhangi bir yerine yapıştırın ya da içine sürükleyin. macOS DMG'sinden veya Windows kurulumundan kurduysanız bir board üzerinde doğrudan tıklayabilirsiniz de. Aşağıdaki <a href="#nzblnk">nzblnk bağlantıları</a> bölümüne bakın.</td></tr>
 <tr><td><b>Dizine göz at</b></td><td>Göz at kartındaki tam bir sürüme tıkla.</td></tr>
+<tr><td><b>Indexer'larda ara</b></td><td>Eklediğin indexer hesaplarında ara ve bir
+sonucu doğrudan listeden kuyruğa al. Aşağıdaki <a href="#pullsearch">Kendi indexer
+hesaplarında arama</a> bölümüne bak.</td></tr>
 <tr><td><b>İzleme listesi / RSS</b></td><td>Otomatik - bkz. <a href="#automation">Otomasyon</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr vb.</b></td><td>Yakalamaları doğrudan kuyruğa gönderir - bkz. <a href="#arr">§11</a>.</td></tr>
 <tr><td><b>Komut satırı</b></td><td><code>nzbfast get file.nzb</code> arka plan süreci olmadan indirir.</td></tr>
-</table>
+</table></div>
 <h3>Kategoriler, öncelikler, parolalar</h3>
 <ul>
 <li><b>Kategoriler</b> serbest biçimli etiketlerdir; her biri indirme dizininin bir alt
@@ -600,6 +703,53 @@ atlar.</li>
 <a href="#nzblnk">nzblnk bağlantısının</a> <code>p=</code> alanından otomatik alınır;
 ayrıca iş başına API üzerinden veya sonradan Geçmiş'ten (🔑) verilebilir.</li>
 </ul>
+
+<h3 id="pullsearch">Kendi indexer hesaplarında arama</h3>
+<p>Bir NZB indexer sitesinde hesabın varsa, nzbfast oraya buradan sorabilir ve seçtiğini
+kuyruğa alabilir; siteye gidip bir NZB indirip geri taşımana gerek kalmaz. Bütün o
+sitelerin sunduğu standart indexer arayüzünü konuşur, yani site başına ayarlanacak bir
+şey yoktur: NZBGeek, NZBFinder, DrunkenSlug, DOGnzb ve diğerleri aynı biçimde çalışır.
+Bir Prowlarr ya da NZBHydra2 kurulumu da tek bir satırdır ve arkasındaki bütün
+indexer'ları beraberinde getirir.</p>
+<p><b>Hesap ekleme.</b> Ayarlar → Indexer'larda ara →
+<b>+ Indexer ekle</b>. Kendi seçtiğin bir ad, sitenin API adresi (sıradan web adresi
+yeter; bir Prowlarr satırı şuna benzer: <code>http://host:9696/1/api</code>) ve oradaki
+hesap sayfandan aldığın API anahtarını gir, sonra <b>Indexer'ları uygula</b>.
+<b>Sına</b> siteye neyi desteklediğini sorar ve dönen yanıtı gösterir; adresi ve anahtarı
+tek tıkla kanıtlar. Kaydedilmiş bir anahtar bir daha gösterilmez: kutu bunu söyler ve boş
+bırakmak hâlihazırdaki anahtarı korur.</p>
+<p><b>Arama.</b> Üst çubuktan <b>🎬 duvar</b>'ı aç ve release listesine geç. Arama
+kutusunun yanındaki açılır menü aramanın nereye bakacağını belirler: <b>Bu dizin</b>,
+yani bu makinenin kendi taradığı şey, <b>Indexer'lar</b> ya da <b>İkisi de</b>. Seçimin
+hatırlanır. Hesaplarına sormak kutuda bir şey yazmayı gerektirir, çünkü boş bir sorguyla
+onlara göz atmak, kimsenin istemediği bir liste için bir günlük hakkı harcardı. Yerleşik
+dizinleyici kapalıyken, ki nzbfast öyle gelir, gösterilecek afiş yoktur ve sayfa tam
+olarak şudur: bir arama kutusu, hesapların ve sonuçlar.</p>
+<p><b>Sonuçlar.</b> Her release için bir satır, en yenisi başta; boyutu, yaşı ve o
+indexer'ın kendi kullanıcılarının onu kaç kez aldığı. Birden çok hesabının taşıdığı bir
+release bir kez görünür. <b>İkisi de</b> altında, kendi dizinindeki kopya kazanır ve
+dışarıdaki düşer, çünkü zaten dizinlediğin şeyi almak sana hiçbir şeye mal olmaz.
+<b>İndir</b> onu yüksek öncelikle kuyruğa alır: NZB'yi nzbfast kendi getirir ve oradan
+sonra iş her iş gibidir; onarım, çıkarma, kategoriler ve betikler değişmez.</p>
+<p><b>Tek bir başlığı sorma.</b> Duvarda bir başlığın kartını aç ve
+<b>⌕ Indexer'larımda ara</b>'ya bas. Filmlerde soru, sitenin kabul ettiği her yerde IMDb
+numarası üzerinden gider; kastettiğin filmle adında o sözcükler rastgele geçen her release
+arasındaki fark budur. Numarayı nzbfast kendi bulur, yani sayfa hiçbir zaman bir numara
+tutmaz. Numarayla eşleştirme sunmayan siteler bunun yerine düz sözcüklerle sorulur.</p>
+<p><b>Hakkın.</b> Indexer hesapları ölçülür: paketine göre günde şu kadar arama ve şu
+kadar indirme. Bu iki sayıyı satıra yaz, nzbfast onlara karşı sayar ve UTC gece yarısında
+yeniden başlar. Varsayılan olan 0 sınırsız demektir, sayım yine de sürer. Hakkını
+harcamış bir hesap diğerleri çalışırken dışarıda kalır ve sonuçların üstündeki bir satır
+atlananın adını verir: hakkın bitmesi hiçbir zaman sessiz değildir. Kendi sınırıyla
+yanıt veren ya da yavaşlamamızı isteyen bir site bir saatliğine kenara alınır.</p>
+<p><b>Anahtarın nereye gider.</b> Yalnızca ait olduğu indexer'a. Anahtarlar bu makinede
+kalır, tarayıcıya asla verilmez - her sonuç satırı bağlantı yerine yarım saat geçerli bir
+fiş taşır - ve günlükten de sitenin döndürdüğü her hatadan da çıkarılır, böylece
+yapıştırılan bir hata iletisi hiçbirini sızdıramaz. Bir indirme yalnızca senin kendi
+aramalarından birinin döndürdüğü bir bağlantıyı getirebilir.</p>
+<p>Bunlar, yerel dizin başlığını tanımadığında bir <a href="#nzblnk">nzblnk bağlantısının</a>
+başvurduğu hesapların aynısıdır ve izleme listesinin istenen ögeler için sorabildiği
+hesaplardır (<a href="#automation">§10</a>).</p>
 
 <h3 id="nzblnk">nzblnk bağlantıları</h3>
 <p>Bazı board'lar, çoğunlukla Alman ve Hollanda kaynaklı olanlar, NZB dosyası yerine bir
@@ -669,6 +819,30 @@ kırmızı ise parçalarının sürekli eksik geldiği. Halihazırda temizlenen 
 değilsin. Dosyayı indirilirken aç, içeriğin, dilin ve kalitenin beklediğin gibi
 olduğunu kontrol et ve değilse erkenden iptal et - indirme tamamlandıktan sonra
 öğrenmek yerine.</p>
+<p>Bunun ilk yarısı zaten sayfada. Kuyrukta (ya da geçmişte) bir indirmenin
+satırını aç; çekmece, şimdiye dek gelen baytlardan okunarak video dosyasının
+içinde ne olduğunu gösterir: çözünürlük, video ve ses çözücüleri, ses dilleri,
+altyazılar, bölümler. Yanlış kurgu, yanlış dil ya da yapay büyütme olan bir
+sürüm, indirme bitmeden çok önce o panelde kendini ele verir.</p>
+<p>Sayfa ayrıca <em>bu</em> tarayıcının dosyayı oynatıp oynatamayacağını da çözer
+ve tahmin etmek yerine söyler: tarayıcılar farklıdır (Safari, Chrome'un
+çözemediği HEVC'yi çözer ve neredeyse hiçbiri AC-3 ya da DTS sesi çözmez), bu
+yüzden soru gerçekten içinde olduğun tarayıcıya sorulur. Yanıt evet olduğunda
+<b>▶ Oynat</b> doğrudan sayfada bir oynatıcı açar ve dosyayı inerken gösterir.
+Yayınların çoğu MKV'dir; birçok tarayıcı içindeki her şeyi çözebildiği hâlde bu
+kabı açmayı reddeder, bu yüzden nzbfast onları oynatırken yeniden paketler.
+Hiçbir şey yeniden kodlanmaz: görüntü ve ses özgün baytlardır, yalnızca başka
+bir kabın içindedir ve başka bir ana atlamak yine çalışır. Ses parçası bu
+tarayıcının çözemediği bir parçaysa ve sürüm çözebildiği ikinci bir parça
+taşıyorsa, çalan o ikinci parçadır; böylece görüntü sessiz gelmez. Yalnızca
+tarayıcıda videonun kendisi için çözücü yoksa düğme dosyayı aşağıda anlatıldığı
+gibi kendi medya oynatıcınıza devreder.</p>
+<p>Hepsini tek bir ayar yönetir: Ayarlar → Arayüz → <b>Dosyayı indirilirken
+kontrol et</b>. Varsayılan olan <b>Yalnızca ayrıntılar</b> paneli gösterir ve
+sayfa içi oynatıcı sunmaz; <b>Ayrıntılar ve bir oynatıcı</b> oynatıcıyı ekler;
+<b>Kapalı</b> dosyanın okunmasını tümüyle durdurur - kapalıyken hiçbir şey,
+yarısı inmiş bir dosyayı kimse için açmaz.</p>
+<p>Bunun yerine kendi medya oynatıcında kontrol etmek için:</p>
 <ul>
 <li>Duvarda <b>▶ Oynat</b> (ya da <code>/m3u/&lt;id&gt;</code>) medya oynatıcına bir URL
 verir; arka plan süreci arkasındaki indirmeyi başlatır ya da yeniden kullanır.</li>
@@ -694,15 +868,26 @@ sunumu açık kalır ve anahtarsız kurulumlar eskisi gibi davranır.</div>
 <h2 id="servers">8 · Usenet sunucuları</h2>
 <p>Ayarlar → <b>Usenet sunucuları</b> tam düzenleyicidir: ekleme, düzenleme, kaldırma, yeniden sıralama ve herhangi
 bir sunucuyu havuza alıp havuzdan çıkarma. Her sunucuda şunlar bulunur:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Alan</th><th>Notlar</th></tr>
 <tr><td>Adres / port</td><td>SSL portu <b>563</b>'ü kullan. TLS ölçülebilir hiçbir maliyet getirmez - nzbfast her zaman şifreler.</td></tr>
 <tr><td>Kullanıcı adı / parola</td><td><code>config.local.json</code> içinde yerel olarak saklanır, tarayıcıya asla geri gösterilmez. Düzenlemede parolayı boş bırakmak saklananı korur. Parolalar diskte <a href="#passwords">şifrelenmez, gizlenir</a>.</td></tr>
 <tr><td>Bağlantılar</td><td>Sunucu başına eşzamanlı bağlantı. Yükseği tahmin etmek yerine her sağlayıcının en uygun noktasını bulmak için <b>Bağlantı ayarı</b>'nı (<a href="#performance">§13</a>) kullan.</td></tr>
 <tr><td>Düzey (katman)</td><td>0 = birincil; daha yüksek düzeyler yalnızca her alt düzeyin kaçırdığı makaleler için istenen dolum sunucularıdır. Sınırsız hesapları 0'a, blok hesaplarını 1+'a koy.</td></tr>
 <tr><td>Blok boyutu (GB)</td><td>Blok (GB başına ücret) hesaplar için: nzbfast ömür boyu kullanımı buna karşı izler ve bittiğinde sunucuyu kullanmayı bırakır (%85'te uyarı).</td></tr>
-</table>
+<tr><td>Her bayt faturalandırılır</td><td>Kotalı bir hesap için aç. İndirmelerin sunucuyu tam olarak eskisi gibi kullanır; duran şey nzbfast'in ona kendi trafiğini göndermesidir - otomatik bağlantı ayarlayıcı, sistem kıyaslamasının ağ ayağı ve yerleşik dizin için başlık taramalarının hepsi onu atlar. Seviyeden ve blok boyutundan bağımsızdır, çünkü kotalı bir hesap tek sağlayıcın olabilir ve sınırsız bir hesap seviye 2'de durabilir. Varsayılan olarak kapalı. <b>Bağlantı ayarı</b>'ndaki (<a href="#performance">§13</a>) elle çalıştırılan <b>Test</b> işaretli bir sunucuda yine çalışır ve önce sorar, çünkü orada harcamayı seçen sensin.</td></tr>
+</table></div>
 <p><b>Hesabının bağlantı sınırının altında biraz pay bırak.</b> Bağlantıları sınırın biraz altına ayarlamak hiçbir şeye mal olmaz: hız son bir iki bağlantıdan çok önce düzleşir ve <b>Bağlantı ayarı</b> (<a href="#performance">§13</a>) zaten sınırın altında kalır. İkinci bir cihazın, başka bir istemcinin ya da kopan bir soketten sonraki yeniden denemenin yine de girebilmesini sağlayan şey o boş yerlerdir; aksi hâlde bu taraf her yeri tutarken reddedilirler.</p>
+<p><b>Makinenin açık dosya sınırıyla uğraşman gerekmez.</b> Sistem her bağlantıyı bir
+açık dosya olarak sayar ve macOS bir programı 256 dosyalık sınırla başlatır; birkaç
+sunucuya yayılmış tam bir bağlantı takımı bu sınırı aşabilir. macOS ve Linux'ta nzbfast
+bu sınırı açılışta kendisi yükseltir: 65536 açık dosya ister, sistem kabul edene kadar
+16384, 4096 ve 1024'e iner, sistemin koyduğu sert sınırın üstüne asla çıkmaz ve her adım
+reddedilirse elindeki sınırla devam eder. Windows'ta süreç başına böyle bir sınır yoktur.
+Diğer istemciler kabuğun verdiği sınırla yetinir ve işin ortasında açık dosyası tükenen
+bir istemci, günlüğünde nedenini yazmadan durabilir. Bu yüzden her sunucunun
+bağlantılarını, yukarıdaki payı düşerek planının izin verdiği kadar ayarla; makinenin ne
+kadarını kaldıracağını tahmin ederek değil.</p>
 <h3 id="passwords">Sağlayıcı parolalarınız nasıl saklanıyor</h3>
 <p><code>config.local.json</code> içindeki sağlayıcı parolaları <b>gizlenmiştir,
 şifrelenmemiştir</b>. <code>obf1:</code> ve ardından kodlanmış bir biçim olarak
@@ -738,11 +923,11 @@ ayrı saklama yolu bırakırdı. Her yerde aynı davranan tek ve iyi anlaşılm�
 <p>Sunucu başına iki seçeneğin panoda henüz bir denetimi yok: bunları o sunucunun
 <code>config.local.json</code> içindeki girdisine elle ekleyin
 (bkz. <a href="#files">§17</a>) ve yeniden başlatın.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Anahtar</th><th>Notlar</th></tr>
 <tr><td><code>bind_ip</code></td><td>Bu sunucunun giden bağlantılarını belirli bir yerel adrese bağlar; çok çıkışlı makineler ve VPN bölünmüş tünelleri için. Adres ailesi hedef aileyi de seçer: v4 bağlaması sunucunun v4 adresine bağlanır.</td></tr>
 <tr><td><code>socks5</code></td><td>Bu sunucunun NNTP trafiğini bir SOCKS5 vekili üzerinden gönderir: <code>host:port</code> ya da <code>user:pass@host:port</code>. Ana bilgisayar adını <em>vekil</em> çözer, dolayısıyla yerel DNS sızıntısı olmaz.</td></tr>
-</table>
+</table></div>
 <ul>
 <li>Her sunucunun yanındaki <b>onay işareti</b> onun aç/kapa anahtarıdır: işaretliyse
 sunucu indirme havuzundadır, işaretli değilse devre dışıdır. Devre dışı bir sunucu kimlik
@@ -772,7 +957,7 @@ yeniden başlatmalardan sağ çıkar (arayüz değerleri komut satırı bayrakla
 yener).</p>
 
 <h3>Hız &amp; zamanlama <span class="pill live">canlı</span></h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
 <tr><td>Hız sınırı</td><td>Bayt/sn cinsinden üst sınır (<code>50M</code>, <code>1G</code>, 0 = sınırsız). Uzak uygulamalar yüzde gönderebilir - doğru çevrilsinler diye <i>Hat hızı</i>'nı ayarla.</td></tr>
 <tr><td>Otomatik hız</td><td>Diğer ev trafiğine öncelik veren ve hat sessiz olduğunda yeniden genişleyen, RTT denetimli üst sınır.</td></tr>
@@ -781,20 +966,22 @@ yener).</p>
 <tr><td>Otomatik güncelleme / Güncelleme denetimi URL'si</td><td>Bkz. <a href="#updates">§14</a>.</td></tr>
 <tr><td>Hat hızı</td><td>Bağlantının anma hızı - SABnzbd uyumlu uygulamalardan yüzdesel sınırları etkinleştirir.</td></tr>
 <tr><td>Haftalık zamanlama</td><td>Hafta-içi kuralları için satır düzenleyici: verilen gün/saatlerde (yerel saat) duraklat, sürdür ya da bir hız sınırı ayarla. Örn. hafta içi 9–17 arası 20&nbsp;MB/s'ye sınırla, diğer zamanlar sınırsız.</td></tr>
-</table>
+</table></div>
 
 <h3>Sonraki indirme <span class="pill live">canlı</span></h3>
 <p><b>Bağlantılar</b> (sunucu başına), <b>pencere</b> (bağlantı başına işlem hattı derinliği),
 <b>kod çözücüler</b> (paralel kod çözme iş parçacıkları). Her iş başladığında örneklenir.
 Varsayılanlar çoğu hat için doğrudur; körlemesine yükseltmeden önce ayar araçlarını kullan.</p>
 
-<p><b>Hızlı doğrulama (CRC32)</b> (öntanımlı olarak açık) indirme sürerken PAR2
-bloklarını yalnızca CRC32 ile sahiplenir; yavaş bir işlemcide bu 2-3x daha hızlıdır.
-Her makalenin kendi sağlama toplamı yine de doğrulanır ve son yerleşme geçişi her zaman
-tam MD5 kullanır: doğruluktan ödün verilmez. İndirme sırasında da blok başına MD5
-istiyorsanız işareti kaldırın.</p>
+<p><b>İndirme sırasında denetim</b>, veri gelirken ne kadarının doğrulanacağını seçer.
+<i>Tam</i>, her PAR2 bloğunu MD5 ile doğrular. <i>Hızlı</i> (öntanımlı), blokları
+bunun yerine CRC32 ile sahiplenir; yavaş bir işlemcide bu 2-3x daha hızlıdır ve her
+makalenin kendi sağlama toplamı yine doğrulanır. <i>Yalın</i> ise PAR2 bir dosyayı
+kapsar kapsamaz o makale sağlama toplamlarını da atlar: hasar bir an sonra, kendi
+bloğunda ortaya çıkar. Üçünde de son yerleşme geçişi ve her onarım tam MD5 kullanır ve
+PAR2 dosyası olmayan bir indirme makale sağlama toplamlarını korur.</p>
 <h3>Disk &amp; kota <span class="pill live">canlı</span></h3>
-<p><b>En az boş alan</b> (bunun altında yeni işleri duraklat), gün ya da ay başına
+<p><b>En az boş alan</b> (bunun altında yeni işleri duraklat; varsayılan 2 GB, 0 kapatır), gün ya da ay başına
 <b>indirme kotası</b> (UTC; Zorla işler atlar), <b>bellek sınırı</b> - motorun RAM bütçesi
 (varsayılan: RAM'in ¼'ü, kelepçeli; devasa işlerde en yüksek hız için büyük RAM'li bir
 makinede yükselt ve düşürmeden önce <a href="#memory">az belleğin ne maliyeti olduğuna</a>
@@ -822,7 +1009,7 @@ tamamlanır. Yalnızca alışılmadık derinlikteki sürümler için yükseltin.
 dosyaya temiz ve açıklayıcı bir ad verir: bir film <code>Example Movie (2024)</code>
 olur, diziler <code>Show - S01E02</code> biçimini korur. Gizlenmiş ya da tanınmayan
 adlar tahmin edilmek yerine gönderildiği gibi bırakılır.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
 <tr><td>Çözünürlüğü dahil et</td><td>Ada <code>1080p</code>, <code>2160p</code>… ekler. <b>Öntanımlı olarak açık</b>; diğer dört etiket kapalıdır.</td></tr>
 <tr><td>Video codec'ini dahil et</td><td><code>x265</code>, <code>x264</code>, <code>AV1</code>…</td></tr>
@@ -831,13 +1018,32 @@ adlar tahmin edilmek yerine gönderildiği gibi bırakılır.</p>
 <tr><td>Sürüm grubunu dahil et</td><td>Sondaki <code>-GROUP</code> etiketi.</td></tr>
 <tr><td>Çöp dosyaları kaldır</td><td><b>Öntanımlı olarak açık.</b> Biten film ve dizi klasörlerinden artakalan <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> dosyalarını ve örnek klipleri siler. Videoyu ya da altyazılarını asla.</td></tr>
 <tr><td>Yalnızca medya dosyasını tut</td><td><b>Öntanımlı olarak kapalı ve yıkıcı:</b> klasörde video(lar) ve altyazılar dışındaki her şeyi kalıcı olarak siler. Bir sezon paketinin her bölümü korunur. İkisi de açıkken <b>Çöp dosyaları kaldır</b> ayarının önüne geçer.</td></tr>
+<tr><td>İndirmeleri .nzb dosyasına göre adlandır</td><td><b>Varsayılan olarak kapalı.</b> Biten klasör ve içindeki ana dosya, sürümden çıkarılan derlenip toparlanmış ad yerine <code>.nzb</code> dosyasının adını alır. Yalnızca en büyük dosya yeniden adlandırılır: bir bölüm paketinin geri kalanı, örnek, altyazılar ve <code>.nfo</code> geldikleri adları korur. Her kategori bunu <b>Kategorilerin</b> altında kendi başına izin verebilir ya da yasaklayabilir; bir indirme türünde açık, diğerinde kapalı olmasını böyle sağlarsın.</td></tr>
 <tr><td>Keep the other words in the name</td><td><b>Varsayılan olarak açık.</b> Spor, yarışlar ve diğer etkinlikler çoğu zaman sezon boyunca yinelenen tek bir başlıktır ve aralarında yalnızca bir iki kelime fark vardır - "Round11 Hungary Race" ile "Round11 Hungary Qualifying" gibi. Bir sezonun tamamının aynı isme dönüşmesini engelleyen şey, işte o kelimeleri korumaktır. Yalnızca adın başka türlü düzeltilemediği yerlerde devreye girer, dolayısıyla sıradan filmler ve bölümler etkilenmez.</td></tr>
-</table>
+</table></div>
 <p class="dim">Grubun tamamı onarım ve açmanın ardından, <b>Tamamlananları şuraya
 taşı</b> işleminden önce çalışır ve hâlâ parola bekleyen bir iş için tümüyle atlanır.
 Her iki silme adımı da <em>yalnızca</em> film veya dizi olarak tanınan sürümlere
 uygulanır: bir yazılım yükü ya da sınıflandırılamayan (gizlenmiş) bir takım asla
 süpürülmez.</p>
+
+<p><b>Silinen dosyalar Çöp Kutusuna gider</b> yukarıdaki "silme"nin ne anlama
+geldiğine karar verir. Açıkken temizlik dosyaları sistemin Çöp Kutusuna ya da Geri
+Dönüşüm Kutusuna taşır; böylece neyin çöp olduğuna dair yanlış bir tahmin geri
+alınabilir. Kapalıyken dosyalar doğrudan silinir. Çöp kutusunun görülüp
+boşaltılabildiği <b>macOS ve Windows'ta varsayılan olarak açık</b>, çoğu zaman öyle
+olmadığı <b>Linux'ta varsayılan olarak kapalıdır</b>.</p>
+<div class="note"><b>Bir NAS'ta ya da konteynerde bunu kapalı bırak.</b> İndirmelerin
+ev dizininden farklı bir diskteyse - ki Unraid, Synology, bir seedbox ya da bağlanmış
+paylaşımı olan herhangi bir Docker kurulumunda olağan düzen budur - Linux çöp
+kuralları masaüstü çöp kutusunu hiç kullanmaz. Bunun yerine indirme diskinin en
+üstünde gizli bir <code>.Trash-1000</code> klasörü (sayı senin kullanıcı kimliğindir)
+oluşturur ve dosyaları oraya taşır. O klasörü sana hiçbir şey göstermez, hiçbir şey
+boşaltmaz ve tuttuğu alan asla geri gelmez.
+<p>nzbfast'in eski bir sürümünü Linux'ta bu ayar açıkken çalıştırdıysan, o klasörü
+indirme paylaşımının kökünde ara. Boşaltması güvenlidir: içindeki her şey, temizliğin
+zaten istemediğine karar verdiği dosyalardır. nzbfast onu senin yerine boşaltmaz,
+çünkü senin diskindedir ve karar senindir.</p></div>
 
 <h3>Klasörler &amp; işleme</h3>
 <p><b>İndirme klasörü</b> <span class="pill restart">yeniden başlat</span>, <b>izleme
@@ -845,6 +1051,28 @@ klasörü</b>, <b>son işlem betiği</b> (her işten sonra SABnzbd uyumlu argüm
 <code>SAB_*</code> ortamıyla çalışır - mevcut SAB betikleri değişmeden çalışır),
 <b>temizleme uzantıları</b> (tamamlanmadan sonra silinen çöp dosyalar), <b>Akıllı
 Klasörler</b> ve <b>TV dosyalama</b> (bkz. <a href="#automation">§10</a>).</p>
+<p><b>Alındıktan sonra .nzb dosyalarını sakla</b> (varsayılan olarak kapalı) orijinal
+<code>.nzb</code> dosyasını kuyruğa eklendikten sonra çöp kutusuna taşımak yerine
+izleme klasöründe bırakır - koleksiyoncular için ve bir indirme sorun çıkardığında
+dosyayı birine vermek için. Saklanan bir dosya, yeniden başlatmalardan sonra bile
+hatırlanır ve yeniden kuyruğa alınmaz; yeniden indirmek için dosyayı tekrar kaydet.
+Hangisini seçersen seç, her işin çekmecesinde bir <b>.nzb dosyasını indir</b> düğmesi
+vardır; böylece herhangi bir işin <code>.nzb</code> dosyasının bir kopyası hiçbir
+zaman bir tıktan uzakta değildir.</p>
+
+<h3 id="set-indexers">Indexer'larda ara <span class="pill live">canlı</span></h3>
+<p>NZB indexer sitelerindeki hesapların, her biri bir satır; böylece duvardaki bir arama
+onlara da sorabilir. Özelliğin ne yaptığı ve onunla nasıl arandığı
+<a href="#pullsearch">§5</a>'te.</p>
+<div class="tblwrap"><table>
+<tr><th>Alan</th><th>Ne yapar</th></tr>
+<tr><td>Ad</td><td>Kendi seçtiğin bir etiket ve günün sayaçlarıyla sınırlarının altında tutulduğu kimlik. Bir satırı yeniden adlandırmak yeni bir satır başlatır, o yüzden anahtarı yeniden gir.</td></tr>
+<tr><td>API adresi</td><td>Sitenin API adresi. Sıradan web adresi yeter; bir Prowlarr ya da NZBHydra2 satırı şuna benzer: <code>http://host:9696/1/api</code>.</td></tr>
+<tr><td>API anahtarı</td><td>O sitedeki hesap sayfandan. Bu makinede kalır, yalnızca ait olduğu siteye gönderilir, bir daha gösterilmez ve günlüğe hiç yazılmaz. Boş bırakmak kayıtlı olanı korur.</td></tr>
+<tr><td>Günlük arama</td><td>Bu hesabın günde kaç arama harcayabileceği. 0 = sınırsız, ve varsayılan.</td></tr>
+<tr><td>Günlük indirme</td><td>Günde kaç alma harcayabileceği. 0 = sınırsız. İki sayaç da UTC gece yarısında yeniden başlar.</td></tr>
+<tr><td>açık, Sına</td><td><b>açık</b>, bir satırı aranabilir yapan şeydir; bir hesabı kullanmadan tutmak için işareti kaldır. <b>Sına</b> siteye neyi desteklediğini sorar ve yanıtı, ya da hatayı, yerinde gösterir.</td></tr>
+</table></div>
 
 <h3>Dizinleme <span class="pill live">canlı</span></h3>
 <div class="note"><b>Dahili dizinleyici varsayılan olarak kapalıdır.</b> Gerçek bir
@@ -854,12 +1082,13 @@ her şeyin atıldığı bir gruba bırakılmış. Gerçek ad yalnızca yükleyic
 yayımladığı bir NZB'de yaşar, yani hiçbir tarayıcının okuyabileceği biçimde Usenet'te
 hiç bulunmadı. Kendi dizinimizde ölçtük: taranan 14,8 milyon gönderi yaklaşık 31.000
 göz atılabilir yayın verdi, kabaca beş yüzde bir. Ticari dizinleyicileri kullanmayı
-sürdürün ve onları Ayarlar → Arama dizinleyicileri altına ekleyin ki duvardan
+sürdürün ve onları Ayarlar → Indexer'larda ara altına ekleyin ki duvardan
 arayabilesiniz. İnsanların hâlâ gerçek adlarla attığı belirli grupları izliyorsanız ya
 da sağlayıcınızın gerçekte ne taşıdığını görmek istiyorsanız bunu açın. Anahtar
-kapalıyken hiçbir şey taranmaz veya çekilmez, veritabanı oluşturulmaz; duvar, Göz at,
-izleme listesi ve newznab beslemesi gizlenir.</div>
-<table>
+kapalıyken hiçbir şey taranmaz veya çekilmez ve veritabanı oluşturulmaz; Göz at ile
+newznab beslemesi kaybolur, duvar eklediğin indexer hesapları için sade bir arama
+sayfasına döner, izleme listesi de onun yerine o hesaplarla çalışır.</div>
+<div class="tblwrap"><table>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
 <tr><td>Dahili dizinleyici</td><td>Ana anahtar, <b>siz açmadıkça kapalı</b>. Kapalı demek: tarama yok, meta veri sorgusu yok, erişilebilirlik örneklemesi yok, newznab beslemesi yok; diskte hâlihazırda duran bir dizin korunur (silme düğmesi vardır), dolayısıyla yeniden açmak baştan taramak yerine kaldığı yerden sürdürür.</td></tr>
 <tr><td>Gruplar</td><td>Gömülü dizinleyicinin taradığı haber grupları (örn. <code>alt.binaries.teevee</code>).</td></tr>
@@ -871,7 +1100,12 @@ izleme listesi ve newznab beslemesi gizlenir.</div>
 <tr><td>Alım geçitleri</td><td>Dizine neyin gireceğini süzen JSON kuralları: türler (gizlenmiş çöp varsayılan olarak atılır), yıl/çözünürlük/dil, boyut sınırları.</td></tr>
 <tr><td>Şimdi tara / derin yeniden tarama</td><td>Hemen bir geçiş çalıştır; bir derinlikle, o kadar güncel başlığı yeniden tara.</td></tr>
 <tr><td>OMDb anahtarı / meta veri yenileme / silme</td><td>Duvar zenginleştirme denetimleri (<a href="#wall">§6</a>). Silme veritabanını sıfırdan yeniden inşa eder - bozulursa kurtarma yolu.</td></tr>
-</table>
+<tr><td>Pre akışı</td><td><b>Siz açana kadar kapalı.</b> Pek çok yükleme adı çıkarılarak gönderilir ve taramanın okuyacağı bir şey kalmaz. Herkese açık aktarım kanalları gerçek adı duyurur; bu tür gönderileri eşleştirmenin tek açık yolu budur. Açmak bir IRC ağına bağlantıyı açık tutar ve dinler: hiçbir zaman bir şey gönderilmez, hesap açılmaz. Dizinleyicinin açık olmasını gerektirir, çünkü duyduğunu koyacak yeri olmayan bir akış boşuna açık duran bir sokettir.</td></tr>
+<tr><td>Aktarım sunucusu, Aktarım kanalları</td><td>Duyuruları taşıyan IRC ağı (konak ya da konak:port) ve dinlenecek kanallar, virgülle ayrılmış. Bir değişiklik bir sonraki bağlantıda geçerli olur: hemen uygulamak için akışı kapatıp açın.</td></tr>
+<tr><td>İlintiyle adlandır</td><td>Canlı genel aktarımlar dosya adı taşımaz, bu yüzden gizlenmiş gönderilerin çoğu doğrudan eşleştirilemez. Bir duyurunun kesinleştirdiği şey, bir sürümün ne zaman ortaya çıktığı ve ne kadar büyük olduğudur. Bu, duyurulan zaman ve boyutu adsız gönderilerle karşılaştırır ve uyduklarında Göz at bölümünde gerçek adı önerir. Bir öneri açıkça öneri olarak işaretlenir, uygulanması tıklamanızı ister ve diskteki dosyaları asla yeniden adlandırmaz.</td></tr>
+<tr><td>Güçlü eşleşmeleri kendiliğinden uygula</td><td>Varsayılan olarak kapalı, açıkken katı: boyut sıkı biçimde uyuşmalı, başka hiçbir duyuru neredeyse aynı ölçüde uymamalı ve duyuru ters yönden bakıldığında bu gönderiyi geri seçmeli. Uygulanan bir ad yalnızca sürümün nasıl gösterildiğini değiştirir, çıkarım olarak işaretlenir ve tamamlanan bir indirme onu yanlışlarsa kendiliğinden geri alınır. Daha zayıf olan her şey öneri kalır.</td></tr>
+<tr><td>Duyuru geçmişi</td><td>Canlı akış yalnızca açıldıktan sonraki duyuruları duyar. Bu, herkese açık bir pre veritabanından kabaca altı aylık eski duyuruyu nazikçe ve bir kez getirir; böylece dizinde zaten bulunan gönderiler de eşleştirilebilir. Arka planda yarım saat kadar çalışır.</td></tr>
+</table></div>
 
 <h3>Kitaplık, Güvenlik, Arayüz</h3>
 <p><b>Kitaplık</b>: anlık kitaplık girişleri olarak ele alınan kategoriler + yeniden denetim
@@ -883,23 +1117,43 @@ gösterileceğini belirler: megabayt (MB/s, indirme yöneticilerinin alışılm�
 öntanımlı) ya da megabit (Mb/s, servis sağlayıcıların hatları ilan ettiği birim). Dosya
 boyutları her hâlde bayt kalır. Bu, tarayıcınızın değil daemon'un bir özelliğidir;
 dolayısıyla bu kuruluma bakan her aygıt için geçerlidir.</p>
-<h3>Gelişmiş: panoda denetimi olmayan ayarlar</h3>
-<p>Dört ayarın ne arayüzde bir denetimi ne de komut satırı bayrağı vardır. Bunları API
-üzerinden ayarlayın (<a href="#api">§16</a>), örn.
+<h3>Gelişmiş: bariz olanların ardındaki ayar düğmeleri</h3>
+<p>Komut satırı bayrağı olmayan altı ayar. Her biri artık kendisine ait ayar kartında
+gelişmiş bir satıra sahiptir ve API üzerinden de ayarlanmaya devam eder
+(<a href="#api">§16</a>), örn.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Diğer
 her ayar gibi <code>settings.json</code> dosyasına yazılırlar.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Ad</th><th>Ne yapar</th></tr>
-<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (öntanımlı <code>fast</code>). <code>lean</code> yavaş işlemciler için ek hızdır: fast gibidir, ama PAR2 bir dosyayı kapsar kapsamaz makale başına yEnc CRC'sini de atlar; yani iki yerine tek bir CRC32 katmanı kalır. PAR2'siz indirmeler makale CRC'lerini korur ve işin sonundaki doğrulama ile onarım her iki durumda da değişmez. Yukarıdaki <b>Hızlı doğrulama</b>, full ile fast arasındaki aynı denetimdir.</td></tr>
+<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (öntanımlı <code>fast</code>). <code>lean</code> yavaş işlemciler için ek hızdır: fast gibidir, ama PAR2 bir dosyayı kapsar kapsamaz makale başına yEnc CRC'sini de atlar; yani iki yerine tek bir CRC32 katmanı kalır. PAR2'siz indirmeler makale CRC'lerini korur ve işin sonundaki doğrulama ile onarım her iki durumda da değişmez. Yukarıdaki <b>İndirme sırasında denetim</b> seçicisi bu ayardır.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Eksik makale yüzünden ilk kez başarısız olan bir işe tanınan <em>tek</em> otomatik yeniden denemeden önceki bekleme (öntanımlı 20). Yayılma gecikmesi eksik makalelerin gerçek bir nedenidir ve kendiliğinden düzelir; günlük sayesinde yeniden çalıştırma yalnızca hâlâ eksik olanı çeker. Parola ve kaldırma kaynaklı başarısızlıklar asla bu kapsama girmez.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Dizinleyicinin kaç grubu paralel taradığı (öntanımlı 3, 1-8 aralığına sınırlı).</td></tr>
 <tr><td><code>oracle_sample</code></td><td>Erişilebilirlik kâhininin boştaki STAT bütçesi (<a href="#oracle">§13</a>), sunucu başına saatlik yoklama. Öntanımlı 300, en fazla 3600, <code>0</code> örneklemeyi tümüyle kapatır.</td></tr>
-</table>
+<tr><td><code>predb_max_rows</code></td><td>Akış tablosunun kaç pre duyurusu tuttuğu (varsayılan 250000, 10000-5000000 aralığına kısılır). Saatlik budama bu sayıya iner ve geçmiş içe aktarımı bu sayıyı aşacaksa başlamayı reddeder; böylece bir içe aktarım, bir sonraki budamanın sileceği satırları asla eklemez.</td></tr>
+<tr><td><code>predb_seed_days</code></td><td>Kendi penceresi verilmeden başlatılan geçmiş içe aktarımının ne kadar geriye uzandığı (varsayılan 180 gün, en çok 366). Daha geniş bir pencere, iki saniyede bir istek hızıyla çalışan pre kaynağına daha çok istek demektir.</td></tr>
+</table></div>
 <h2 id="automation">10 · Otomasyon</h2>
 <h3>İzleme listesi</h3>
 <p>En basit otomasyon: panelde bir başlık ekle, kalite tercihlerini ayarla, bitti. Yeni
 sürümler dizinlenmiş gruplarında belirdikçe yakalanır; daha iyi kaliteli kopyalar önceki
 yakalamaları yükseltir; bir takvim görünümü neyin geldiğini gösterir.</p>
+<p>Bir <b>liste kaynağı</b>, izleme listesini Plex'te tuttuğun bir listeden iki yoldan biriyle
+besler: Plex'in sayfasında kısa bir kodu onaylayarak Plex hesabını bağla, ya da bir Plex izleme
+listesi adresi yapıştır. Adres bir kimlik bilgisidir - elinde bulunduran herkese listeyi okuma
+hakkı verir - bu yüzden kaydedildikten sonra maskelenir. Silme eşitlemesi bilerek moda göre
+farklıdır: bağlı bir hesap listenin tamamını görür, dolayısıyla orada kaldırılan bir başlık
+burada da izlenmeyi bırakır (zaten tamamlanmış indirmeler kalır); bir adres beslemesi yalnızca
+en son girdileri taşır, dolayısıyla yokluk hiçbir şey kanıtlamaz ve başlıklar yalnızca eklenir.
+Her iki varsayılan da kaynak başına değiştirilebilir.</p>
+<p>İzleme listesi kartının altındaki <b>İstediklerimi indexer hesaplarımda da ara</b>,
+listenin kendi dizininin yanı sıra Ayarlar → Indexer'larda ara altındaki hesaplara
+da sormasını sağlar (<a href="#pullsearch">§5</a>). Kapalı başlar, çünkü burada sen
+tıklamadan ölçülü bir hesabı harcayan tek şey odur. Açıkken izlenen her öge günde iki kez
+kadar sorar, yalnızca henüz bulamadığı şey için, aynı günlük sınırlar altında ve bir
+hesap atlandığında aynı notlarla. Bir indexer'dan gelen aday tam olarak yerel bir aday
+gibi değerlendirilir; kalite tabanları, yükseltmeler, sezon paketleri ve yineleme işlemesi
+hepsi geçerlidir ve yerel bir kopya her eşitliği kazanır, çünkü hiç hak harcamaz. Yerleşik
+dizinleyici kapalıyken izleme listesine çalışacak bir şey veren de budur.</p>
 <h3 id="auto-rss">RSS beslemeleri</h3>
 <p>Ayarlar → RSS: besleme başına aralık, kategori ve filtre kurallarıyla (başlık kalıpları,
 boyut sınırları) herhangi bir newznab/dizinleyici RSS URL'si. Eşleşen öğeler otomatik
@@ -914,7 +1168,63 @@ dosyalanır - harici bir araç olmadan Plex/Jellyfin'e hazır.</p>
 duraklat/sürdür/hızı otomatikleştirir.</p>
 <h3>Betikler</h3>
 <p>Bir son işlem betiği SABnzbd'nin konumsal argümanlarını ve <code>SAB_*</code> ortam
-değişkenlerini alır - geniş SAB betikleri ekosistemi olduğu gibi çalışır.</p>
+değişkenlerini alır: geniş SAB betikleri ekosistemi olduğu gibi çalışır.
+NZBGet'in lehçesi de yanında sunulur - <code>NZBPP_*</code> değişkenleri
+(<code>DIRECTORY</code>, <code>NZBNAME</code>, <code>CATEGORY</code>,
+<code>TOTALSTATUS</code>, <code>PARSTATUS</code>, <code>UNPACKSTATUS</code>,
+<code>FINALDIR</code>) ve 93/94/95 çıkış kodları - böylece bir NZBGet uzantı
+betiğinin çekirdek mantığı da çalışır. Eşleme bir öykünme değil, dürüst bir
+eşlemedir: onarım ve açma tek geçişli indirmenin içinde gerçekleşir, bu yüzden
+temiz bir tamamlanma <code>PARSTATUS=0</code>, onarılmış olan ise
+<code>PARSTATUS=2</code> bildirir. Betik başına seçenek biçimleri
+(<code>NZBPO_*</code>) sunulmaz.
+Bir betik çıkarken arka planda çalışan bir yardımcı bırakabilir ve nzbfast onu
+öldürmez, ama nzbfast betiğin kendisi biter bitmez betiğin çıktısını okumayı
+durdurur: arka plana alınmış yardımcıya kendi çıktı yönlendirmesini ver, yoksa
+ilk kez bir şey yazdırmayı denediğinde durdurulur.</p>
+<h3>Kuyruk öncesi betik</h3>
+<p>İkinci bir kanca, bir indirme kuyruğa girmeden <em>önce</em> çalışır
+(Ayarlar → Klasörler → Kuyruk öncesi betik), SABnzbd'nin kuyruk öncesi
+sözleşmesiyle: argümanlar <code>name, pp, category, script, priority, size, group</code>
+artı <code>SAB_*</code> ortamı. Çıktısının ilk satırı indirmeyi kabul eder
+(<code>1</code>) ya da reddeder (<code>0</code>); 2-7. satırlar onu yeniden
+adlandırabilir, <code>pp</code>'yi ayarlayabilir, kategoriyi değiştirebilir, bir
+betik seçebilir ya da önceliği değiştirebilir (boş satırlar varsayılanı korur).
+Reddedilen bir indirme, gerekçesiyle birlikte geçmişe Başarısız olarak gider ve
+geçmişten Yeniden dene, betiğe yeniden sormadan onu geri getirir. Kanca hiçbir
+zaman bir indirmeyi kaybedemez: betik yoksa, çökerse, zaman bütçesini aşarsa ya
+da karar olmayan bir şey yazdırırsa ekleme dokunulmadan sürer ve günlük nedenini
+söyler.</p>
+<h3>Yaşam döngüsü olayları ve imzalı webhook'lar</h3>
+<p>Her iş kilometre taşı sürümlü bir olaydır: <code>job.added</code>,
+<code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
+<code>job.completed</code>, <code>job.failed</code>, artı
+<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code> ve <code>quota.reached</code>. Her biri bir
+<code>schema_version</code> (şu an 1; yeni anahtarlar sürüm artmadan gelebilir -
+bilmediğini yok say), tekdüze artan bir <code>seq</code> ve milisaniye cinsinden
+bir <code>at</code> zaman damgası taşır.</p>
+<p>Onları almak için bir <b>webhook</b> bildirim hedefi ekle
+(Ayarlar → Otomasyon) ve alması gereken olay türlerini hedefin <i>events</i>
+alanına yaz - tam türler ya da <code>job.*</code> gibi bir önek. Hedef sonra
+olay başına bir POST alır: gövde olarak olayın JSON'u, artı bir
+<code>delivery</code> kimliği (<code>&lt;boot&gt;-&lt;seq&gt;</code>,
+yinelenenleri ayıklamak için tutamak), <code>X-NzbFast-Event</code> ve
+<code>X-NzbFast-Delivery</code> başlıkları ve - hedefin bir imza sırrı
+olduğunda - <code>X-NzbFast-Signature: sha256=&lt;hex&gt;</code>, sırrınla tam
+gövde baytlarının HMAC-SHA256'sı (GitHub webhook'larının kullandığı biçimin
+aynısı). Python'da doğrula:</p>
+<pre><code>expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, request.headers["X-NzbFast-Signature"])</code></pre>
+<p>Teslimat en az bir keredir: ulaşılamayan bir hedef 10&nbsp;s, 60&nbsp;s ve
+5&nbsp;dk sonra yeniden denenir, sonra hata hedefin ayar satırında gösterilerek
+bırakılır. Bir HTTP hata yanıtı (404, 401...) yeniden denenmez - alıcıyı düzelt
+ve Test'i kullan. Her hedefin kendi teslimat şeridi vardır; yavaş ya da
+ulaşılamayan biri diğerini asla bekletmez. Bir şeridin içinde teslimatlar
+olayların gerçekleşme sırasını korur ve biri bırakılırsa sıra numaraları
+boşluğu gösterir. Klasik olay sözcükleri (<code>completed</code>,
+<code>failed</code>, <code>repaired</code>, <code>disk</code>,
+<code>quota</code>) aynı hedefte insan bildirimi anlamlarını korur.</p>
 
 <h2 id="arr">11 · Sonarr, Radarr &amp; arkadaşları</h2>
 <p>nzbfast, SABnzbd API'sini yerel olarak konuşur, bu yüzden her *arr kutudan çıktığı gibi
@@ -926,6 +1236,11 @@ değişkenlerini alır - geniş SAB betikleri ekosistemi olduğu gibi çalışı
 (nerede bulacağın: <a href="#firstrun-key">§2</a>).</li>
 <li>İstediğin kategori (örn. <code>tv</code> / <code>movies</code>). Test → yeşil onay → Kaydet.</li>
 </ol>
+<p>Panel adresi eline verir: henüz hiçbir şey indirmemiş bir kurulumda,
+karşılama kartının "Sonarr, Radarr ya da bir uygulama indirme eklesin" yolu tam
+adresi, yanında bir <b>Kopyala</b> düğmesiyle gösterir. API anahtarı bilerek o
+satırda değildir; Ayarlar → Güvenlik'te kendi gösterme adımının arkasında kalır
+(<a href="#firstrun-key">§2</a>).</p>
 <p>Kuyruk, geçmiş, iş başına durum, "kaldır &amp; sil", yeniden deneme ve kategori
 yönlendirmesinin hepsi *arr'ların beklediği gibi davranır.</p>
 <h3>Bir dizinleyici olarak (newznab)</h3>
@@ -950,26 +1265,61 @@ yalnızca gerçek bir dosya adıyla atılanı bulur.</div>
 neredeyse her mobil/tablet uygulaması çalışır. Uygulamanın desteklediği hangisiyse onu
 seç:</p>
 <h3>NZBGet konuşan uygulamalar (nzb360, LunaSea, NZB Unity…)</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Uygulamadaki alan</th><th>Değer</th></tr>
 <tr><td>Tür</td><td>NZBGet</td></tr>
 <tr><td>Adres / port</td><td>makinen : <b>6789</b></td></tr>
 <tr><td>Kullanıcı adı</td><td>herhangi bir şey (örn. <code>nzbfast</code>)</td></tr>
 <tr><td>Parola</td><td><b>API anahtarın</b></td></tr>
-</table>
+</table></div>
 <p>Bu uygulamaların kullandığı tam JSON-RPC yüzeyi sunulur: durum, yeniden
 sıralama/duraklat/sil ile kuyruk, geçmiş, NZB ekle, hız sınırı, duraklat/sürdür, günlük.</p>
 <h3>SABnzbd konuşan uygulamalar</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Uygulamadaki alan</th><th>Değer</th></tr>
 <tr><td>Tür</td><td>SABnzbd</td></tr>
 <tr><td>Adres / port</td><td>makinen : <b>6789</b></td></tr>
 <tr><td>API anahtarı</td><td>API anahtarın (ya da yalnızca ekleme erişimi için NZB anahtarı)</td></tr>
-</table>
+</table></div>
 <h3>Telefonunda panel</h3>
 <p>Bir mobil tarayıcıda sadece <code>http://&lt;machine&gt;:6789</code>'u aç - tüm panelin
 ve duvarın bir dokunmatik düzeni vardır. Ayarlar → Uzaktan erişim paneli tam URL'leri ve
 taranacak bir QR kodu gösterir.</p>
+
+<h3 id="remote-proxy">nzbfast'e ev dışından erişmek</h3>
+<p>Oturum açma sayfası yok, bu bilinçli bir tercih. Oturum çerezine dayalı bir giriş, sonsuza kadar bakımı gereken bir güvenlik yüzeyidir ve açık internete bakan bir şeyin yine de en zayıf kilidi olurdu. nzbfast bunun yerine API anahtarınızla kimlik doğrular ve bu anahtarı URL'de olduğu kadar bir istek başlığında da kabul eder (<code>X-Api-Key</code> veya <code>Authorization: Bearer</code>) - önüne konan bir şeyin girişi düzgün biçimde üstlenmesini sağlayan da tam olarak budur.</p>
+<p><b>En basit yanıt onu hiç yayımlamamaktır.</b> Bu makineye ve telefonunuza <b>Tailscale</b> kurun, ikisi de aynı özel ağa katılsın: hiçbir şey dışa açılmaz, yönlendirici ya da sertifika işi gerekmez ve Ayarlar → Uzaktan erişim, Tailscale'i çalışır görür görmez her yerden çalışan bir adres gösterir. Açıkça bir genel alan adına ihtiyacınız yoksa bunu tercih edin.</p>
+<p><b>nzbfast HTTPS'i kendisi de sunabilir.</b> Ayarlar → Güvenlik →
+HTTPS sertifikası / HTTPS özel anahtarı'nı bir PEM sertifikasına ve anahtarına
+yöneltin (ya da <code>--tls-cert cert.pem --tls-key key.pem</code> ile başlatın),
+yeniden başlatın; panel ve API düz HTTP yerine <code>https://</code> üzerinden
+yanıt verir - tek dinleyici, tek şema. Alan adınızın zaten sahip olduğu
+sertifikayı kullanın (örneğin certbot aracılığıyla Let's Encrypt'ten) ya da LAN
+için kendinden imzalı birini; tarayıcılar onu tek seferlik bir uyarıdan sonra
+kabul eder. Bozuk ya da süresi geçmiş bir sertifika, dosyanın adı verilerek
+başlatmayı reddeder, böylece hata onu yaptığınız yerde görünür; yenilemek için
+dosyaları değiştirip yeniden başlatın. Yerleşik HTTPS trafiği şifreler ama bir
+giriş eklemez, bu yüzden API anahtarını ayarlı tutun.</p>
+<p><b>Bir genel alan adına ihtiyacınız varsa</b>, önüne bir ters vekil sunucu koyun, sertifikayı ona verin ve kimlik doğrulamayı o yapsın. nzbfast'i <code>--bind 127.0.0.1</code> ile başlatın ki tek giriş vekil sunucu olsun ve vekil sunucuyu <code>http://127.0.0.1:6789</code> adresine yönlendirin:</p>
+<pre><code># Caddy
+example.com {
+    reverse_proxy 127.0.0.1:6789
+}
+
+# nginx
+location / {
+    proxy_pass http://127.0.0.1:6789;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}</code></pre>
+<p>Üstüne vekil sunucunuzun sunduğunu ekleyin: basic auth, Authelia veya Authentik gibi bir forward-auth hizmeti ya da istemci sertifikaları. Bir ayrıntı herkesi yakalar - Sonarr, Radarr ve telefon uygulamaları tarayıcı girişini tamamlayamaz, bu yüzden onlara bir geçiş bırakın. Çoğu vekil sunucu, geçerli bir <code>X-Api-Key</code> başlığı taşıyan isteği geçirip diğer her şeyden kimlik doğrulama isteyebilir.</p>
+<div class="warn-box"><b>6789 numaralı bağlantı noktasını yönlendiricinizde öylece açmayın.</b>
+Yapılandırılmış bir sertifika olmadan panel düz HTTP konuşur; API anahtarınız ve
+onunla yaptığınız her şey, yol üzerindeki herkesin okuyabileceği biçimde
+internetten geçerdi ve hiç anahtar ayarlanmamış bir kurulum onu bulan herkese
+açıktır. Yine de bir bağlantı noktası yönlendirecekseniz, önce bir API anahtarı
+belirleyin ve HTTPS'i açın.</div>
 
 <h2 id="performance">13 · Performans araçları</h2>
 <h3 id="perf-benchmark">Sistem kıyaslaması</h3>
@@ -1033,13 +1383,13 @@ takasa girmek ya da başarısız olmak yerine daha fazla disk G/Ç'ye düşer. A
 bedava değildir ve büyük işlerde onu ölçebilirsin.</p>
 <p>Bir makinede ve bir hatta ölçüldü (M1 Ultra, 10 GbE), her bütçede aynı dosyalar. Her
 çalıştırma doğru, tam doğrulanmış, çıkarılmış bir sonuç üretti:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>İş boyutu</th><th>Bol RAM</th><th>2 GB bütçe<br><span class="dim">≈ 8 GB makine</span></th><th>1 GB bütçe<br><span class="dim">≈ 4 GB makine</span></th><th>256 MB bütçe<br><span class="dim">≈ 2 GB NAS</span></th></tr>
 <tr><td>7 GB</td><td>15 s</td><td>15 s</td><td>15 s</td><td>15 s</td></tr>
 <tr><td>35 GB</td><td>65 s</td><td>70 s</td><td>70 s</td><td>65 s</td></tr>
 <tr><td>87 GB</td><td>148 s</td><td>206 s <span class="dim">+39%</span></td><td>196 s <span class="dim">+32%</span></td><td>180 s <span class="dim">+22%</span></td></tr>
 <tr><td>190 GB</td><td>330 s</td><td>427 s <span class="dim">+29%</span></td><td>402 s <span class="dim">+22%</span></td><td>411 s <span class="dim">+25%</span></td></tr>
-</table>
+</table></div>
 <p>Zirve bellek işi değil, <em>bütçeyi</em> izler: o 190 GB'lık indirme yaklaşık 1.1 GB
 RAM'de tamamlanır. Karşılığında verdiğin şey zamandır - ve yalnızca büyük işlerde.</p>
 <ul>
@@ -1084,9 +1434,58 @@ denetle</b> (Ayarlar) kapatılırsa güncelleme manifestiyle hiç iletişim kurm
 boş bir denetim URL'si de aynısını yapar.</li>
 </ul>
 
+<h3 id="updating">Ayarlarını kaybetmeden güncelleme</h3>
+<p>Tek bir kural her kurulumu kapsar: <b>bir güncelleme programı değiştirir,
+ayarlarını asla.</b> Yapılandırdığın her şey - sunucular, yollar, API anahtarı,
+kuyruk - tek bir klasördeki bir avuç dosyada yaşar (<a href="#files">§17</a>) ve
+hiçbir yükleyici, imaj çekme ya da paket yükseltmesi o klasöre dokunmaz. Bir
+güncellemeden sonra ayarlar gitmiş görünüyorsa, bu neredeyse her zaman yeni
+kurulumun <em>farklı, boş</em> bir klasörü okumasındandır, bir şeylerin
+silinmesinden değil; eski dosyalar hâlâ her zaman oldukları yerdedir.
+Kurtarma adımları <a href="#settings-gone">§18</a>'de.</p>
+<div class="tblwrap"><table>
+<tr><th>Kurulum</th><th>Nasıl güncellenir</th></tr>
+<tr><td>macOS uygulaması</td><td>Yeni DMG'yi aç ve <b>NzbFast</b>'i eskisinin
+yerine geçecek şekilde <b>Applications</b>'a sürükle. Veri klasörün ayrıdır ve
+ona dokunulmaz.</td></tr>
+<tr><td>Windows yükleyicisi</td><td>Yeni kurulumu eskisinin üzerine çalıştır.
+Veri klasörün ayrıdır ve ona dokunulmaz.</td></tr>
+<tr><td>Docker (komut satırı)</td><td><code>docker pull nzbfast/nzbfast</code>,
+eski konteyneri kaldır, sonra yenisini <b>tam olarak aynı <code>-v</code>
+eşlemeleriyle</b> çalıştır. İmaj atılabilirdir; eşlediğin <code>/config</code>
+klasörü senin kurulumundur. Çalıştırma komutun <code>-v ./config:/config</code>
+gibi göreli bir yol kullanıyorsa, onu her seferinde aynı dizinden çalıştır -
+başka herhangi bir yerden <code>./config</code> farklı, boş bir
+klasördür.</td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose
+up -d</code>, aynı compose dosyasıyla aynı yerde. Dosyadaki <code>./config</code>
+dosyanın kendi klasörüne bağlıdır, bu yüzden dosyayı olduğu yerde
+tut.</td></tr>
+<tr><td>Watchtower</td><td>Yapacak bir şey yok: yeni bir imaj çıktığında
+konteyneri aynı eşlemelerle yeniden oluşturur.</td></tr>
+<tr><td>Unraid</td><td>Docker sekmesi → <b>Check for Updates</b> → <b>Apply
+Update</b>. Güncellemek için uygulamayı asla kaldırıp yeniden ekleme; günün
+birinde gerçekten yeniden kurarsan, mevcut <code>/config</code>'ini bulabilmesi
+için aynı appdata yolunu koru.</td></tr>
+<tr><td>Synology (Container Manager)</td><td>Yeni imajı indir, konteyneri durdur
+ve aynı birim ayarlarıyla yeniden oluştur - Synology kılavuzundaki anlatım bunu
+tık tık gösterir, bir zamanlamaya bağlamak dahil.</td></tr>
+<tr><td>Synology (paket)</td><td>Yeni <code>.spk</code>'yı Package Center'da
+kur; yerinde yükseltir.</td></tr>
+<tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
+<tr><td>Düz ikili dosya</td><td>İkili dosyayı değiştir. Yapılandırman onu
+yaptığın yerde kalır (<a href="#files">§17</a>).</td></tr>
+</table></div>
+<div class="tip"><b>İpucu</b>Sonarr ya da Radarr bağlayan Docker kullanıcıları:
+API anahtarını konteyner tanımının kendisine koy
+(<code>-e NZBFAST_APIKEY=…</code>, ya da compose dosyanın veya Unraid şablonunun
+environment bloğuna). Orada saklanan bir anahtar her konteyner kazasını atlatır,
+çünkü ana makinede, tanımın içinde yaşar ve her başlangıçta yeniden uygulanır.
+Sonradan Ayarlar'da ayarladığın bir anahtar yine de ona üstün gelir.</div>
+
 <h2 id="cli">15 · Komut satırı</h2>
 <p>Arka plan sürecinin yaptığı her şey ayrıca betiklenebilir. Günlük komutlar:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Komut</th><th>Amaç</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Etkileşimli sunucu kurulumu.</td></tr>
 <tr><td><code>nzbfast serve</code></td><td>Arka plan sürecini çalıştır (panel + API + otomasyon). <code>--open</code> tarayıcıyı açar; <code>--apikey</code> anahtarı elle ayarlar (<a href="#firstrun-key">§2</a>); <code>--bind</code> dinleme adresini seçer, varsayılan <code>0.0.0.0</code> (her arayüz), yalnızca bu makine için <code>127.0.0.1</code>. Tam bayrak listesi için <code>--help</code>'e bak - her panel ayarının bir bayrak ikizi vardır.</td></tr>
@@ -1096,10 +1495,11 @@ boş bir denetim URL'si de aynısını yapar.</li>
 <tr><td><code>nzbfast sysbench</code></td><td>Sistem kıyaslaması + çeşitlilik raporu, terminalde.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Grupları dizine tara / onu ara, arka plan süreci olmadan.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Bir SABnzbd ini'sinden sunucuları içe aktar.</td></tr>
-</table>
+</table></div>
 <p class="dim">Ayrıca mevcut: <code>inspect</code>, <code>probe</code>,
 <code>bench</code>, <code>bench-cpu</code>, <code>soak</code>, <code>fetch</code>,
 <code>spots</code>/<code>spot-search</code>/<code>spot-get</code> (Spotnet),
+<code>predb-seed</code> (akış açılmadan önceki dönemle pre veritabanını doldurur),
 <code>make-release-nzb</code>/<code>make-test-nzb</code> (test malzemeleri). Her komut
 <code>--config</code> ve <code>--help</code> alır. Bunlara <code>post</code> eklenir: dosyaları yEnc makaleleri
 olarak yükler ve eşleşen NZB'yi yazar. Bir işletim aracıdır; açık bir
@@ -1110,20 +1510,35 @@ olarak yükler ve eşleşen NZB'yi yazar. Bir işletim aracıdır; açık bir
 SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır. İki anahtar:
 <b>API anahtarı</b> (tam denetim) ve <b>NZB anahtarı</b> (yalnızca ekleme:
 <code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> bilerek yalnızca ekleme kümesinde değildir: bir bağlantıyı çözümlemek ölçülen dizinleyici kotası harcayabilir, ki bu yalnızca ekleme yetkisinin işi değildir.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Alan</th><th>Modlar</th></tr>
 <tr><td>Kuyruk</td><td><code>queue</code> (<code>name=delete/pause/resume/priority/switch</code> ile), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
-<tr><td>Bilgi</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
+<tr><td>Bilgi</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code>, artı <code>/jobnzb/&lt;nzo_id&gt;</code> (işin kendi saklanan <code>.nzb</code> dosyasını geri verir, kuyruk veya geçmiş; yalnızca tam API anahtarı)</td></tr>
 <tr><td>Yapılandırma</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (her Ayarlar alanı), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Dizin &amp; duvar</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, ayrıca <code>/api?t=caps|search|tvsearch|movie</code> ve <code>/getnzb/&lt;id&gt;</code>'de newznab</td></tr>
 <tr><td>Otomasyon</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Tanılama</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code>, <code>update_apply</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: herhangi bir kullanıcı, parola olarak API anahtarı)</td></tr>
 <tr><td>Önizleme / oynatma</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP aralıkları; park edilmiş bir kitaplık işini başlatmak <code>?t=</code> belirteci ya da anahtar gerektirir), <code>/m3u/&lt;id&gt;</code> (anahtar gerektirir; belirteci üretir), <code>/wall</code>, <code>/art/…</code></td></tr>
-</table>
+</table></div>
 
 <h2 id="files">17 · Dosyalar &amp; konumlar</h2>
-<table>
+<p>Ayar klasörünün nerede olduğu nzbfast'in nasıl kurulduğuna bağlıdır.
+Yedeklemeye değer her şey bu tek klasördedir:</p>
+<div class="tblwrap"><table>
+<tr><th>Kurulum</th><th>Ayar klasörü</th></tr>
+<tr><td>macOS uygulaması</td><td><code>~/Library/Application Support/nzbfast/</code></td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\nzbfast\</code></td></tr>
+<tr><td>Docker / NAS konteynerleri</td><td>Konteynerin içindeki
+<code>/config</code>, yani ona eşlediğin ana makine klasörü. Unraid'de bu,
+uygulamanın appdata klasörüdür.</td></tr>
+<tr><td>Synology paketi</td><td><code>/var/packages/nzbfast/var/</code></td></tr>
+<tr><td>Terminal</td><td><code>nzbfast setup</code>'ı çalıştırdığın klasör ya da
+<code>--config</code> / <code>$NZBFAST_CONFIG</code> neresini gösteriyorsa
+orası.</td></tr>
+</table></div>
+<p>Ve içinde ne var:</p>
+<div class="tblwrap"><table>
 <tr><th>Dosya</th><th>İçerik</th></tr>
 <tr><td><code>config.local.json</code></td><td>Sunucu kimlik bilgileri ve sunucu başına seçenekler. Sihirbaz tarafından oluşturulur; Ayarlar'da düzenlenebilir. Onu gizli tut. Parolalar <a href="#passwords">gizlenir, şifrelenmez</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Panelde değiştirilen her ayar. Yapılandırmanın yanında yaşar; arayüz değerleri komut satırı bayraklarını geçersiz kılar. Bayraklara/varsayılanlara dönmek için bir anahtarı (ya da dosyayı) sil.</td></tr>
@@ -1132,10 +1547,10 @@ SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Kuyruk durumu (yeniden başlatmaları atlatır), iş başına NZB'ler, kullanım defteri, kıyaslama geçmişi, poster görsel önbelleği.</td></tr>
 <tr><td>Makale günlüğü</td><td>Eksikken her işin çıktı klasörünün içinde - çökme sonrası devam ve yeniden denemeyi çalıştırır. Başarıda kaldırılır.</td></tr>
 <tr><td>Harici araçlar</td><td>Hiçbiri gerekmez - RAR çıkarma ve PAR2 onarımı yerleşiktir. Egzotik bir küme yedek olarak harici bir <code>unrar</code> veya <code>par2</code> gerektirirse, nzbfast önce çalıştırılabilir dosyasının yanına, sonra <code>$PATH</code>'e bakar.</td></tr>
-</table>
+</table></div>
 
 <h2 id="troubleshooting">18 · Sorun giderme</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Belirti</th><th>Denetle</th></tr>
 <tr><td>Yavaş indirmeler</td><td><b>Sistem kıyaslaması</b>'nı çalıştır - darboğazı açıkça adlandırır. Ağsa: <b>Bağlantı ayarı</b>'nı çalıştır, sunucu başına bağlantı sayılarını denetle ve sağlayıcılarının hepsinin tek bir backbone olmadığını doğrula (<b>Sunucu çeşitliliği</b>).</td></tr>
 <tr><td>Yalnızca çok büyük işlerde yavaş<br>(NAS ya da az RAM'li makine)</td><td>Beklenen ve ölçülebilir: aç bir bellek bütçesi önbellekleri diske döker ve ~87 GB'ı geçince %20–40 maliyet getirir. Rakamlar ve ne kadar RAM verileceği için <a href="#memory">Bellek bütçesi</a>'ne bak. Daha küçük işler etkilenmez.</td></tr>
@@ -1147,12 +1562,14 @@ kendiliğinden düzelir.</td></tr>
 <tr><td>Bir arşiv çıkarılamıyor</td><td>Parola ve onarım hataları kendilerini Geçmiş satırında adlandırır. Geri kalan her şey için bir kaçış kapısı vardır: Ayarlar → İzleme klasörü &amp; son işlem → <b>Harici unrar ile çıkar</b> (gelişmiş bir ayar) çıkarma işini yerleşik çıkarıcı yerine makinende kurulu <code>unrar</code> programına devreder. Bunun dışında kapalı bırak: yerleşik yol ölçtüğümüz her biçimde daha hızlıdır ve hash adlı gizlenmiş gönderiler zaten her zaman onu kullanır, çünkü unrar onların yeniden adlandırmasını izleyemez. <code>nzbfast get</code> çalıştırmaları için aynı anahtar <code>NZBFAST_NO_NATIVE_UNRAR=1</code> ortam değişkenidir. Yerleşik çıkarıcının reddettiği bir arşivi unrar çıkarırsa, yerleşik yolu düzeltebilmemiz için lütfen bildir.</td></tr>
 <tr><td>Sonarr/Radarr bağlanamıyor</td><td>Port 6789 erişilebilir mi? API anahtarı doğru mu (tam anahtar, NZB anahtarı değil)? İstemci türü SABnzbd olarak mı ayarlı?</td></tr>
 <tr><td>Panel hiç ayarlamadığım bir API anahtarı istiyor</td><td>Yeni bir kurulum kendine bir tane üretir ve onu başlangıçta bir kez yazdırır (<a href="#firstrun-key">§2</a>). Yapılandırmanın yanındaki <code>apikey</code> dosyasında ve başlangıç çıktısındadır. Ya da zaten oturum açmış bir tarayıcıdan Ayarlar → Güvenlik'e kendi anahtarını yaz.</td></tr>
+<tr id="settings-gone"><td>Bir güncellemeden sonra bütün ayarlarım gitmiş görünüyor<br>(sunucular, yollar, API anahtarı)</td><td>Bir güncellemedeki hiçbir şey ayar silmez; bu, nzbfast'in farklı, boş bir klasörü okuduğu anlamına gelir. Önce: Ayarlar'daki API anahtarı alanı tasarım gereği boş görünür - kaybolduğuna karar vermeden önce <b>Show</b>'a tıkla. Docker'da yeni konteynerin <code>/config</code> eşlemesini eskisiyle karşılaştır: değişmiş bir ana makine yolu, farklı bir dizinden çalıştırılan göreli bir yol ya da taze bir appdata klasörü, gerçek ayarların önceki yolda el değmeden dururken nzbfast'i sıfırdan başlatır. Eski klasörü bul (<code>settings.json</code>'ı, yapılandırma dosyanı ve <code>apikey</code>'i ara - konumlar <a href="#files">§17</a>'de), sonra ya eşlemeyi ona geri döndür ya da o dosyaları yeni klasöre kopyalayıp yeniden başlat. Başlangıç günlüğü kullanılan ayar dosyasını tam olarak adlandırır: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Ağdaki hiçbir şey arka plan sürecine erişemiyor</td><td><code>--bind</code>'ı denetle: <code>127.0.0.1</code> yalnızca nzbfast'in çalıştığı makineye hizmet eder. Varsayılan olan <code>0.0.0.0</code> her arayüze hizmet eder. Sonra makinenin kendi güvenlik duvarını 6789 portu için denetle.</td></tr>
 <tr><td>Göz at kartı küçük kalıyor</td><td>Dizinleyici arka planda büyür - Ayarlar → Dizinleme gruplarının ayarlı olduğunu denetle ve Tarama başına derinleştir'e geçmiş biriktirmesi için zaman ver. "Şimdi tara" bir geçişi zorlar; durum satırı canlı ilerlemeyi gösterir.</td></tr>
 <tr><td>Duvar yanlış/görselsiz gösteriyor</td><td>Ayrıntı sayfası → ✎ Eşleşmeyi düzelt ya da ↻ Meta veriyi yenile. Film aramaları ücretsiz bir OMDb anahtarıyla iyileşir.</td></tr>
+<tr id="mac-cant-open"><td>macOS "nzbfast" uygulamasının açılamadığını söylüyor</td><td>İki nedeni var, ikisi de hızlı çözülür. Sade <code>-macos-universal.zip</code> paketini kullanıyorsan, yanındaki <code>nzbfast</code> dosyasına değil <b>Start nzbfast.command</b> dosyasına çift tıkla: o dosya programın kendisi ve Finder ona yapılan çift tıklamaya tam olarak bu mesajla karşılık verir. Her şeyi hazırlayıp başlatan şey başlatıcıdır. Başlatıcı da aynı mesajı veriyorsa, kopya yolda Unix çalıştırma bitini kaybetmiştir: macOS bu biti .zip dosyasının içinde saklar, ama sohbet uygulamaları, bulut sürücüleri ve yeniden sıkıştırma saklamaz, bu yüzden elden ele geçen bir kopya çalıştırılamaz halde gelir. .dmg veya .zip dosyasını doğrudan releases sayfasından indir, o zaman bu olmaz. Elindeki kopyayı kurtarmak için: Terminal'i aç, sonuna bir boşluk koyarak <code>chmod +x</code> yaz, <b>Start nzbfast.command</b> ve <code>nzbfast</code> dosyasını pencereye sürükle ve Return'e bas, sonra başlatıcıya yeniden çift tıkla.</td></tr>
 <tr><td>Arka plan süreci başlamıyor: port kullanımda</td><td>Başka bir örnek çalışıyor - ya da <code>--port</code>'u değiştir.</td></tr>
 <tr><td>Günlükler nerede?</td><td>Paneldeki Günlük kartı ya da <code>serve</code>'ü başlattığın terminal/günlük dosyası.</td></tr>
-</table>
+</table></div>
 <div class="note"><b>Hâlâ takıldın mı?</b>Günlük kartı genellikle suçluyu adlandırır - bir
 sorun bildirirken kuyruğunu, <code>nzbfast --version</code>'ınla birlikte ekle.</div>
 

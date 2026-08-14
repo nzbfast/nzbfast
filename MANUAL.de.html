@@ -55,8 +55,16 @@
       r.style.setProperty('--user-acc',a);
       r.setAttribute('data-accent','1');
     }
+    // Interface scale. This drives `zoom` (see --ui-zoom below), NOT the
+    // root font-size: every size on these pages is in px, so scaling the
+    // root scaled nothing at all and the slider had never once moved a
+    // pixel - it wrote its value, redrew its own "140%" label, and the
+    // page stayed exactly as it was (reported by a tester 2 Aug 2026,
+    // who reasonably read it as a container quirk). Keep the stored key
+    // and its 0.8-1.4 range so an existing setting starts working rather
+    // than resetting.
     var f=parseFloat(localStorage.getItem('nzbfastFontScale'));
-    if(f>=0.8&&f<=1.4) r.style.fontSize=(f*100)+'%';
+    if(f>=0.8&&f<=1.4) r.style.setProperty('--ui-zoom',f);
     // §Stage6 appearance layers. Same reasoning as the theme: applied
     // before first paint, so nobody watches the page change shape after
     // it has already drawn. Each value is checked against a fixed list,
@@ -225,8 +233,55 @@ button,input.txt,select.sel,input.search,.chip{border-radius:var(--radius-sm)}
   <g id="i-gauge"><path d="M4 16.5a8.5 8.5 0 1 1 16 0"/><path d="M12 16.5 16 10"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor" stroke="none"/></g>
   <g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></g>
   <g id="i-caret"><path d="M6 9.5l6 6 6-6"/></g>
+  <!--
+    Job-origin glyphs (TODO §140 / issue #31). The row badge that says
+    where a job came from used to be an emoji per origin, with ONE robot
+    standing in for every app that posts over the API - so a Sonarr grab,
+    a Radarr grab and a shell script looked identical in history.
+
+    These are neutral shapes for the KIND of thing each sender keeps - a
+    set for series, a film strip for films, a note for music - and they
+    are deliberately NOT the other projects' logos: nzbfast does not ship
+    anyone else's mark. The name still lives in the tooltip, which is
+    what actually identifies the sender; the glyph only has to separate
+    the rows at a glance.
+  -->
+  <g id="i-o-folder"><path d="M3 18.5V6.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2.2 2.7h8.3A1.7 1.7 0 0 1 21 8.9v9.6a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.5z"/></g>
+  <g id="i-o-star"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></g>
+  <g id="i-o-rss"><path d="M4.5 12.5A7 7 0 0 1 11.5 19.5"/><path d="M4.5 6.5A13 13 0 0 1 17.5 19.5"/><circle cx="5.2" cy="18.8" r="1.3" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-link"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.4 1.4"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+  <g id="i-o-pin"><path d="M12 21.5V14.2"/><path d="M8.2 2.8h7.6l-1.1 5.1 2.6 2.6v1.6H6.7v-1.6l2.6-2.6z"/></g>
+  <g id="i-o-retry"><path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.6 2.8v4.6H16"/></g>
+  <!-- Generic API sender: a plug, for a client that named itself with a
+       name we have no shape for (and for records that only say "arr"). -->
+  <g id="i-o-app"><path d="M9 2.8v5.2M15 2.8v5.2"/><path d="M6.4 8h11.2v3.4a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17v4.2"/></g>
+  <g id="i-o-tv"><rect x="3" y="8" width="18" height="12.2" rx="2"/><path d="M8 3.8l4 4.2 4-4.2"/></g>
+  <g id="i-o-film"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3 9.2h4.5M3 14.8h4.5M16.5 9.2H21M16.5 14.8H21"/></g>
+  <g id="i-o-music"><path d="M9.2 18V5.8l9.6-2v12"/><circle cx="6.7" cy="18" r="2.5"/><circle cx="16.3" cy="15.8" r="2.5"/></g>
+  <g id="i-o-book"><path d="M12 7.2C10.3 5.6 8 4.8 4.3 4.8v12.6c3.7 0 6 .8 7.7 2.4 1.7-1.6 4-2.4 7.7-2.4V4.8c-3.7 0-6 .8-7.7 2.4z"/><path d="M12 7.2v12.6"/></g>
+  <g id="i-o-cam"><rect x="2.6" y="6.6" width="13" height="10.8" rx="2"/><path d="M15.6 11l5.8-3.4v8.8L15.6 13z"/></g>
+  <g id="i-o-hub"><circle cx="12" cy="12" r="2.6"/><circle cx="4.6" cy="5.4" r="1.8"/><circle cx="19.4" cy="5.4" r="1.8"/><circle cx="12" cy="20.4" r="1.8"/><path d="M6 6.7l4.1 3.6M18 6.7l-4.1 3.6M12 14.6v3.9"/></g>
+  <g id="i-o-funnel"><path d="M3.4 4.6h17.2l-6.5 8v7.2l-4.2 1.8V12.6z"/></g>
+  <g id="i-o-inbox"><path d="M12 2.8v8.6M8.6 8l3.4 3.4L15.4 8"/><path d="M3.6 14.2h4.8l1.4 2.4h4.4l1.4-2.4h4.8v4.3a1.9 1.9 0 0 1-1.9 1.9H5.5a1.9 1.9 0 0 1-1.9-1.9z"/></g>
+  <g id="i-o-phone"><rect x="6.5" y="2.6" width="11" height="18.8" rx="2.5"/><path d="M10.4 5.6h3.2"/><circle cx="12" cy="18" r="1" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-window"><rect x="3" y="4.6" width="18" height="14.8" rx="2"/><path d="M3 9.2h18"/><circle cx="6.4" cy="6.9" r=".9" fill="currentColor" stroke="none"/></g>
+  <g id="i-o-term"><rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2"/><path d="M7 9.6l3 2.4-3 2.4M12.6 15h4.6"/></g>
 </defs></svg>
 <style>
+/* The interface-scale control, for every page that inlines these tokens.
+   `zoom` rather than a root font-size: these pages size everything in px,
+   so the old root-font-size approach moved nothing (see the loader
+   above). Zoom takes the whole layout with it - type, spacing, controls
+   and chart furniture together - which is also what a size control is
+   normally expected to do, and it cannot leave text overflowing padding
+   that stayed behind.
+
+   On the BODY, not :root: zooming the root element re-scales the
+   viewport that position:fixed and 100vh resolve against, so the header
+   and any fixed overlay drift. Default 1 means a page with no setting is
+   byte-identical to before. */
+body{zoom:var(--ui-zoom,1)}
+
 /* One icon class. 1em so an icon scales with the text it sits beside,
    including the user's text-size setting. */
 .ic{width:1.05em;height:1.05em;flex:none;vertical-align:-.16em;
@@ -264,12 +319,27 @@ h3{font-size:16.5px;margin:28px 0 6px}
 h4{font-size:14.5px;margin:20px 0 4px}
 p{margin:8px 0}
 li{margin:3px 0}
+/* Prose breaks a long unbreakable token instead of pushing the page sideways.
+   The API section quotes a 368px query string, which does not fit the 280px
+   text column of a 320px phone. Deliberately not applied to header or data
+   cells: inside a scroll wrapper, breaking a cell reflows the columns rather
+   than letting the wide table scroll, which is what the wrapper is for. */
+p,li,.tip,.note,.warn-box{overflow-wrap:break-word}
 code,kbd{background:var(--code);border:1px solid var(--line);border-radius:5px;
   padding:1px 6px;font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre{background:var(--code);border:1px solid var(--line);border-radius:9px;
   padding:12px 15px;overflow-x:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 pre code{background:none;border:none;padding:0}
-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+/* A table scrolls inside its own box instead of widening the page. One long
+   unbreakable command in a cell (the docker compose upgrade line, 338px wide
+   in an 87px column) used to drag the whole document sideways on a phone:
+   +140 at 320px and +85 at 375px in English, up to +217 / +162 in the
+   longer-word locales, and da/nl even at 500px. The 12px margin sits on the
+   wrapper so it still collapses with the adjacent paragraph exactly as
+   the margin on the table itself did - a scroll box does not collapse
+   margins through, so leaving it in place would have opened every gap. */
+.tblwrap{overflow-x:auto;margin:12px 0}
+table{border-collapse:collapse;width:100%;margin:0;font-size:13.5px}
 th{text-align:left;color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 th,td{padding:7px 12px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
 td code{white-space:nowrap}
@@ -298,6 +368,7 @@ hr{border:none;border-top:1px solid var(--line);margin:30px 0}
   body{background:#fff;color:#000;font-size:11.5pt}
   h2{page-break-after:avoid}
   pre{white-space:pre-wrap}
+  .tblwrap{overflow:visible}
   a{color:inherit}
 }
 </style>
@@ -408,6 +479,15 @@ nzbfast serve --open     # start the daemon and open the dashboard</code></pre>
 Abtippen der Zugangsdaten: Einstellungen → Usenet-Server → <b>Aus SABnzbd / NZBGet
 importieren…</b> findet deine bestehende Installation und übernimmt ihre Server.
 Auf der Kommandozeile gibt es außerdem <code>nzbfast import-sab</code>.</div>
+<p>Die Willkommenskarte fragt außerdem, <b>wie du nzbfast nutzen willst</b>, mit
+vier Antworten: eine App wie Sonarr oder Radarr steuert es, Umstieg von SABnzbd,
+Umstieg von NZBGet, oder nur du, von diesem Dashboard aus. Eine Antwort zu wählen
+ändert für sich genommen nichts. Sie zeigt eine kurze Liste zum Durchsehen - jede
+Empfehlung mit dem eigenen Namen der Einstellung, ihrem aktuellen Wert, dem
+empfohlenen Wert und einer Zeile Begründung - und <b>Anwenden</b> setzt nur die
+Zeilen, die du ankreuzt. Jede Zeile ist eine gewöhnliche Einstellung, die du danach
+einzeln zurückstellen kannst, und dieselbe Liste bleibt später unter
+Einstellungen → <b>Empfohlene Einstellungen für deine Nutzung</b> verfügbar.</p>
 
 <h3 id="firstrun-key">Dein API-Key</h3>
 <p>Auf einer wirklich neuen Installation macht sich nzbfast beim ersten Start des
@@ -452,7 +532,7 @@ Desktop willst, auf dem sonst niemand Zugriff braucht.</p>
 
 <h2 id="concepts">3 · So funktioniert nzbfast</h2>
 <p>Ein kurzes Vokabular, damit sich der Rest des Handbuchs leicht liest:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Begriff</th><th>Bedeutung</th></tr>
 <tr><td><b>Provider / Server</b></td><td>Ein Usenet-Dienst, bei dem du ein Konto hast
 (Newshosting, Eweka, XS News…). Jeder erlaubt eine bestimmte Zahl gleichzeitiger
@@ -469,7 +549,7 @@ wenn Artikel beschädigt sind oder fehlen.</td></tr>
 <tr><td><b>Store-Mode-RAR</b></td><td>Die meisten Releases sind ohne Kompression in
 RAR-Volumes gepackt. nzbfast erkennt das und schreibt die <em>innere Datei</em> schon
 beim Download direkt an ihren endgültigen Ort - kein Entpack-Schritt danach.</td></tr>
-</table>
+</table></div>
 <p>Die Pipeline fährt Download → Dekodieren → Prüfen → Entpacken <em>gleichzeitig</em>.
 Die Pipeline-Karte im Dashboard zeigt alle drei Spuren gleichzeitig in Bewegung. Wenn
 das letzte Byte ankommt, ist die Prüfung schon durch und die Datei schon entpackt; die
@@ -488,13 +568,13 @@ PAR2-Blockkarte nachprüft, bevor es ihm vertraut.</p>
 Providern und denselben NZBs, gestoppt bis zur <em>nutzbaren Datei</em> - Download,
 Prüfung, Reparatur und Entpacken eingeschlossen, denn erst dann ist der Job wirklich
 fertig:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Job-Größe</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th></tr>
 <tr><td>7 GB</td><td><b>13,7 s</b></td><td>+26%</td><td>+39%</td></tr>
 <tr><td>35 GB</td><td><b>67 s</b></td><td>+61%</td><td>+325%</td></tr>
 <tr><td>87 GB</td><td><b>272 s</b></td><td>+36%</td><td>+160%</td></tr>
 <tr><td>190 GB</td><td><b>9 m 00 s</b></td><td>+30%</td><td>+111%</td></tr>
-</table>
+</table></div>
 <p>Der Abstand ist die Nachbearbeitung, die die anderen nach dem letzten Byte noch
 vor sich haben. Beide Konkurrenten wurden für den Vergleich getunt, nicht auf
 Standardwerten gelassen - SABnzbd liefert Request-Pipelining ab Werk
@@ -566,8 +646,12 @@ Einstellungen → Oberfläche), damit dein schnellster Provider immer oben steht
 <li><b>Zeilen ziehen zum Umsortieren</b> (innerhalb eines Prioritätsbands -
 Erzwingen/Hoch läuft trotzdem zuerst); Priorität direkt in der Zeile ändern.</li>
 <li><b>Klick auf eine Zeile</b> für die Detail-Schublade: Fortschrittsbalken pro
-Datei, Prüf-Blockzähler und welcher Server wie viel zu <em>diesem</em> Job
-beigetragen hat.</li>
+Datei, Prüf-Blockzähler, welcher Server wie viel zu <em>diesem</em> Job
+beigetragen hat, und eine „Hinzugefügt von“-Zeile, die sagt, woher der Job kam
+(Watch-Ordner, eine verbundene App, die API…). Eine Schaltfläche
+<b>.nzb herunterladen</b> speichert dir die <code>.nzb</code>-Datei des Jobs -
+nzbfast behält eine eigene Kopie, das funktioniert also für jeden Job, auch wenn
+die Originaldatei längst weg ist.</li>
 <li>Badges zeigen Sonderzustände: <i>zurückgestellt (langsam)</i>, <i>Prefetch</i>,
 <i>pausiert</i> (siehe <a href="#performance">Performance-Tools</a>).</li>
 <li>Ein Burn-down-Diagramm verfolgt die verbleibenden GB über die ganze
@@ -582,11 +666,26 @@ einem Klick - kein externer Indexer nötig. Die Statuszeile zeigt den Scan-Forts
 <p>Füge Titel per Name hinzu - auch solche, die noch gar nicht gepostet wurden. Taucht
 ein passendes Release im Index auf, wird es automatisch geholt, mit Qualitätsvorlieben
 und Upgrade-Regeln (eine bessere Kopie ersetzt eine schlechtere).</p>
+<p>Die Karte kann auch einer Liste folgen, die du in Plex pflegst. Füge eine
+<b>Listenquelle</b> hinzu: Verknüpfe entweder dein Plex-Konto (du bestätigst einen
+kurzen Code auf Plex' eigener Seite, ein Passwort erreicht nzbfast also nie) oder
+füge die Adresse deiner Plex-Watchlist ein. Behandle diese Adresse wie ein
+Passwort - wer sie hat, kann deine Liste lesen - deshalb wird sie nach dem Speichern
+maskiert. Synchronisierte Titel erscheinen als schreibgeschützte Zeilen neben deinen
+eigenen. Ein verknüpftes Konto sieht deine ganze Liste: Entfernst du dort einen
+Titel, wird er auch hier nicht mehr beobachtet (fertige Downloads bleiben
+unangetastet); eine Adresse zeigt nur die neuesten Einträge - ein fehlender Titel
+kann also einfach herausgerutscht sein, und es wird nichts entfernt. Beides lässt
+sich pro Quelle umstellen.</p>
 <h3 id="dash-history">Verlauf</h3>
 <p>Die jüngsten Downloads, eine Zeile je Download. Fehlgeschlagene Jobs bieten <b>Erneut</b> (setzt aus dem Journal fort). Verschlüsselte Archive zeigen ein
 🔑-Entsperr-Element - gib das Passwort ein und der Job wird an Ort und Stelle fertig.
 Der Prüfstatus-Streifen zeichnet defekte PAR2-Blöcke pro Download auf - ein steigendes
-Ende heißt: Artikel kommen beschädigt an.</p>
+Ende heißt: Artikel kommen beschädigt an.
+Die Schublade jeder Zeile sagt, wer den Job hinzugefügt hat, und hat dieselbe
+Schaltfläche <b>.nzb herunterladen</b> wie die Warteschlange - praktisch, um ein
+Release woanders noch einmal herunterzuladen oder die <code>.nzb</code> an eine
+Problemmeldung anzuhängen.</p>
 <p>Die Karte listet standardmäßig zehn Downloads, der Rest ist einen Klick entfernt, über die Schaltfläche ▤. Status, Ort und der Grund eines Fehlschlags liegen hinter einem Klick auf die Zeile selbst, damit der häufige Fall - was fertig wurde, wie groß, wann - ohne Scrollen lesbar bleibt. Zieh stattdessen die Unterkante der Karte, damit die Liste auf einer von dir gewählten Höhe scrollt. <b>History rows</b> unter Einstellungen → Oberfläche ändert die Zehn; da es eine Eigenschaft des Daemons ist und nicht deines Browsers, gilt es für jedes Gerät, das auf diese Installation schaut. <b>Colour History names</b> daneben färbt fertige Namen grün und fehlgeschlagene rot; ausgeschaltet bleiben die Namen schlicht, und der farbige Punkt wie auch die Details der Zeile sagen weiterhin, was was ist.</p>
 <h3 id="dash-usage">Datenverbrauch</h3>
 <p>Tagesbalken pro Provider und Summen für Heute / 7 Tage / 30 Tage - unverzichtbar
@@ -597,20 +696,27 @@ Größe.</p>
 <a href="#performance">Performance-Tools</a>.</p>
 
 <h2 id="adding">5 · Downloads hinzufügen</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Methode</th><th>So geht’s</th></tr>
 <tr><td><b>Drag &amp; Drop</b></td><td>Zieh eine oder mehrere <code>.nzb</code>-Dateien irgendwo aufs Dashboard.</td></tr>
 <tr><td><b>Watch-Ordner</b></td><td>Leg in den Einstellungen einen Ordner fest; jede dort
-gespeicherte <code>.nzb</code> wird binnen 5 Sekunden aufgegriffen und die Datei
-entfernt. Richte den Download-Ordner deines Browsers dorthin - für Ein-Klick-Grabs
+gespeicherte <code>.nzb</code> wird binnen 5 Sekunden aufgegriffen und in den
+Papierkorb verschoben, und ein offenes Dashboard meldet jede Übernahme beim Namen
+(„… aus Downloads übernommen“), sodass eine Datei, die aus dem Ordner verschwindet,
+nie ein Rätsel bleibt. Du behältst deine Dateien lieber? Schalte <b>.nzb-Dateien
+nach Übernahme behalten</b> ein (siehe <a href="#settings">§9</a>). Richte den
+Download-Ordner deines Browsers dorthin - für Ein-Klick-Grabs
 von Indexer-Seiten.</td></tr>
 <tr><td><b>Von einer URL</b></td><td>Füge einen NZB-Link ein (API <code>mode=addurl</code>, oder über jede verbundene App).</td></tr>
 <tr><td><b>nzblnk:-Links</b></td><td>Füge einen <code>nzblnk:</code>-Link irgendwo im Dashboard ein oder zieh ihn hinein. Aus dem macOS-DMG oder dem Windows-Installer installiert, kannst du auch direkt auf einem Board einen anklicken. Siehe <a href="#nzblnk">nzblnk-Links</a> weiter unten.</td></tr>
 <tr><td><b>Index durchsuchen</b></td><td>Klick ein vollständiges Release in der Durchsuchen-Karte an.</td></tr>
+<tr><td><b>Indexer durchsuchen</b></td><td>Durchsuche die Indexer-Konten, die du
+hinzugefügt hast, und stell ein Ergebnis direkt aus der Liste in die Warteschlange.
+Siehe <a href="#pullsearch">Deine Indexer-Konten durchsuchen</a> weiter unten.</td></tr>
 <tr><td><b>Watchlist / RSS</b></td><td>Automatisch - siehe <a href="#automation">Automatisierung</a>.</td></tr>
 <tr><td><b>Sonarr/Radarr etc.</b></td><td>Sie schicken Grabs direkt in die Warteschlange - siehe <a href="#arr">§11</a>.</td></tr>
 <tr><td><b>Kommandozeile</b></td><td><code>nzbfast get file.nzb</code> lädt ohne den Daemon.</td></tr>
-</table>
+</table></div>
 <h3>Kategorien, Prioritäten, Passwörter</h3>
 <ul>
 <li><b>Kategorien</b> sind freie Etiketten; jede wird zu einem Unterordner deines
@@ -624,6 +730,61 @@ per Regel zuweisen.</li>
 nachträglich aus dem Verlauf (🔑) angeben.</li>
 </ul>
 
+<h3 id="pullsearch">Deine Indexer-Konten durchsuchen</h3>
+<p>Wenn du ein Konto bei einer NZB-Indexer-Seite hast, kann nzbfast sie von hier aus
+durchsuchen und in die Warteschlange stellen, was du auswählst, statt dass du zur Seite
+gehst, ein NZB herunterlädst und es zurückträgst. Es spricht die übliche Indexer-API,
+die all diese Seiten anbieten, es gibt also nichts pro Seite einzurichten: NZBGeek,
+NZBFinder, DrunkenSlug, DOGnzb und der Rest laufen gleich. Eine Prowlarr- oder
+NZBHydra2-Instanz ist ebenfalls nur ein Eintrag und bringt jeden Indexer dahinter
+gleich mit.</p>
+<p><b>Ein Konto eintragen.</b> Einstellungen → Indexer durchsuchen →
+<b>+ Indexer hinzufügen</b>. Trag einen Namen deiner Wahl ein, die API-Adresse der Seite
+(ihre normale Webadresse genügt; ein Prowlarr-Eintrag sieht aus wie
+<code>http://host:9696/1/api</code>) und den API-Schlüssel von deiner Kontoseite dort,
+dann <b>Indexer übernehmen</b>. <b>Testen</b> fragt die Seite, was sie unterstützt, und
+zeigt die Antwort, was Adresse und Schlüssel mit einem Klick belegt. Ein gespeicherter
+Schlüssel wird nie wieder angezeigt: das Feld sagt es, und leer lassen behält den
+Schlüssel, der schon da ist.</p>
+<p><b>Suchen.</b> Öffne <b>🎬 Wand</b> in der Kopfzeile und wechsle zur Release-Liste.
+Das Auswahlfeld neben dem Suchfeld entscheidet, wo eine Suche nachsieht: <b>Dieser
+Index</b>, also das, was diese Maschine selbst gescannt hat, <b>Indexer</b> oder
+<b>Beides</b>. Deine Wahl wird gemerkt. Für eine Frage an deine Konten muss etwas im
+Feld stehen, denn sie mit leerer Anfrage zu durchblättern würde das Tagesbudget für
+eine Liste ausgeben, die niemand verlangt hat. Mit ausgeschaltetem eingebautem Indexer,
+so wie nzbfast ausgeliefert wird, gibt es keine Poster zu zeigen und die Seite ist
+genau das: ein Suchfeld, deine Konten und die Ergebnisse.</p>
+<p><b>Die Ergebnisse.</b> Eine Zeile pro Release, die neuesten zuerst, mit Größe, Alter
+und wie oft die Nutzer dieses Indexers es geholt haben. Ein Release, das mehrere deiner
+Konten führen, erscheint einmal. Unter <b>Beides</b> gewinnt eine Kopie, die dein
+eigener Index schon hat, und die von außen fällt weg, denn zu holen, was du bereits
+indexiert hast, kostet dich nichts. <b>Download</b> stellt es mit hoher Priorität in
+die Warteschlange: nzbfast holt das NZB selbst, und ab da ist der Job wie jeder andere,
+mit Reparatur, Entpacken, Kategorien und Skripten unverändert.</p>
+<p><b>Nach einem einzelnen Titel fragen.</b> Öffne die Karte eines Titels auf der Wand
+und drück <b>⌕ Meine Indexer durchsuchen</b>. Bei Filmen fragt das über die
+IMDb-Nummer, wo immer die Seite eine annimmt, und das ist der Unterschied zwischen dem
+Film, den du meintest, und jedem Release, in dessen Namen diese Wörter zufällig
+vorkommen. nzbfast schlägt die Nummer selbst nach, die Seite hält also nie eine. Seiten
+ohne Nummernabgleich werden stattdessen mit den bloßen Wörtern gefragt.</p>
+<p><b>Dein Kontingent.</b> Indexer-Konten sind gezählt: so viele Suchen und so viele
+Downloads pro Tag, je nach Tarif. Trag diese zwei Zahlen am Eintrag ein, und nzbfast
+rechnet dagegen, mit einem Neustart um Mitternacht UTC. 0, die Vorgabe, heißt
+unbegrenzt, und gezählt wird trotzdem. Ein Konto, das sein Kontingent verbraucht hat,
+setzt die Suche aus, während die anderen laufen, und eine Zeile über den Ergebnissen
+nennt das übersprungene: ein leeres Kontingent bleibt nie unbemerkt. Eine Seite, die
+mit einer eigenen Grenze antwortet oder um Langsamkeit bittet, wird für eine Stunde
+beiseitegelegt.</p>
+<p><b>Wohin dein Schlüssel geht.</b> Nur zu dem Indexer, dem er gehört. Schlüssel
+bleiben auf dieser Maschine, gehen nie an den Browser - jede Ergebniszeile trägt statt
+eines Links eine halbe Stunde lang gültige Marke - und werden aus dem Log und aus jedem
+Fehler entfernt, den die Seite zurückgibt, sodass eine kopierte Fehlermeldung keinen
+verraten kann. Ein Download kann immer nur einen Link holen, den eine deiner eigenen
+Suchen geliefert hat.</p>
+<p>Das sind dieselben Konten, auf die ein <a href="#nzblnk">nzblnk-Link</a> zurückfällt,
+wenn der lokale Index seinen Header nicht kennt, und die, die die Watchlist nach
+Gewünschtem fragen kann (<a href="#automation">§10</a>).</p>
+
 <h3 id="nzblnk">nzblnk-Links</h3>
 <p>Manche Boards, vor allem deutsche und niederländische, geben einen
 <code>nzblnk:</code>-Link statt einer NZB-Datei heraus. Der Beitrag ist verschleiert,
@@ -633,7 +794,7 @@ dazu optional einen Titel <code>t=</code>, ein Passwort <code>p=</code> und eine
 Gruppe <code>g=</code>. Irgendwer muss den Beitrag also erst suchen gehen.</p>
 <p>nzbfast schlägt den Header zunächst im eigenen Index nach, wofür überhaupt kein
 Netz nötig ist, und fragt erst bei einem Fehlschlag die von dir eingerichteten
-Suchindexer (Einstellungen → Suchindexer, <a href="#settings">§9</a>), unter denselben
+Indexer durchsuchen (Einstellungen → Indexer durchsuchen, <a href="#settings">§9</a>), unter denselben
 Tagesbudgets und demselben Backoff wie jede andere Suche. Der Titel wird zum Job-Namen,
 das Passwort wird dem Job automatisch mitgegeben.</p>
 <ul>
@@ -696,6 +857,32 @@ tragen ein <b>abgeräumt</b>-Abzeichen.</li>
 richtige Datei ist. Öffne sie, während sie lädt, prüfe, ob Inhalt, Sprache und
 Qualität deinen Erwartungen entsprechen, und brich früh ab, wenn nicht - statt es
 erst nach dem kompletten Download festzustellen.</p>
+<p>Die erste Hälfte davon steht schon auf der Seite. Öffne die Zeile eines Downloads
+in der Warteschlange (oder im Verlauf), und die Schublade zeigt, was in der
+Videodatei steckt, gelesen aus den bereits angekommenen Bytes: Auflösung, Video- und
+Audio-Codecs, Audiosprachen, Untertitel, Kapitel. Ein Release, das der falsche
+Schnitt, die falsche Sprache oder ein Upscale ist, verrät sich in diesem Panel lange
+bevor der Download fertig ist.</p>
+<p>Die Seite findet außerdem heraus, ob <em>dieser</em> Browser die Datei abspielen
+kann, und sagt es, statt zu raten: Browser unterscheiden sich (Safari dekodiert
+HEVC, wo Chrome es nicht tut, und fast keiner dekodiert AC-3- oder DTS-Audio),
+die Frage wird also dem Browser gestellt, in dem du tatsächlich bist. Lautet die
+Antwort ja, öffnet <b>▶ Abspielen</b> einen Player direkt auf der Seite, der die
+Datei zeigt, während sie lädt. Die meisten Releases sind MKV, das viele Browser
+nicht öffnen, obwohl sie alles darin dekodieren können, also packt nzbfast diese
+beim Abspielen um. Nichts wird neu kodiert: Bild und Ton sind die ursprünglichen
+Bytes in einer anderen Hülle, und das Springen im Film funktioniert weiterhin.
+Ist die Tonspur eine, die dieser Browser nicht dekodieren kann, und das Release
+führt eine zweite mit, die er kann, läuft diese zweite Spur, damit das Bild
+nicht stumm ankommt. Erst wenn dem Browser der Dekoder für das Video selbst
+fehlt, reicht der Knopf die Datei stattdessen an deinen eigenen Medienplayer
+weiter, wie unten beschrieben.</p>
+<p>Eine Einstellung regelt das alles: Einstellungen → Oberfläche → <b>Eine Datei
+prüfen, während sie lädt</b>. <b>Nur Details</b>, der Standard, zeigt das Panel und
+bietet keinen Player auf der Seite an; <b>Details und ein Player</b> fügt den Player
+hinzu; <b>Aus</b> verhindert, dass die Datei überhaupt gelesen wird - damit öffnet
+nichts für niemanden eine halb geladene Datei.</p>
+<p>So prüfst du stattdessen in deinem eigenen Medienplayer:</p>
 <ul>
 <li><b>▶ Abspielen</b> auf der Wand (oder <code>/m3u/&lt;id&gt;</code>) reicht deinem
 Medienplayer eine URL; der Daemon startet den Download dahinter oder nutzt den
@@ -725,15 +912,27 @@ bisher.</div>
 <h2 id="servers">8 · Usenet-Server</h2>
 <p>Einstellungen → <b>Usenet-Server</b> ist der volle Editor: hinzufügen, bearbeiten, entfernen, umsortieren und
 jeden Server in den Pool holen oder aus ihm herausnehmen. Jeder Server hat:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Feld</th><th>Hinweise</th></tr>
 <tr><td>Host / Port</td><td>Nimm den SSL-Port <b>563</b>. TLS kostet nichts Messbares - nzbfast verschlüsselt immer.</td></tr>
 <tr><td>Benutzername / Passwort</td><td>Lokal in <code>config.local.json</code> gespeichert, nie zurück an den Browser gezeigt. Das Passwort beim Bearbeiten leer lassen behält das gespeicherte. Passwörter werden <a href="#passwords">auf der Platte verschleiert, nicht verschlüsselt</a>.</td></tr>
 <tr><td>Verbindungen</td><td>Gleichzeitige Verbindungen pro Server. Nutz <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>), um den Sweet Spot jedes Providers zu finden, statt einfach hoch zu raten.</td></tr>
 <tr><td>Level (Tier)</td><td>0 = primär; höhere Level sind Fill-Server und werden nur nach Artikeln gefragt, die alle niedrigeren Level verpasst haben. Flatrate-Konten auf 0, Block-Konten auf 1+.</td></tr>
 <tr><td>Blockgröße (GB)</td><td>Für Block-Konten (Bezahlung pro GB): nzbfast zählt die Lebenszeitnutzung dagegen und lässt den Server aus, sobald der Block aufgebraucht ist (Warnung bei 85 %).</td></tr>
-</table>
+<tr><td>Jedes Byte wird abgerechnet</td><td>Für ein Konto mit Volumenabrechnung einschalten. Deine Downloads nutzen den Server genau wie zuvor; was aufhört, ist Verkehr, den nzbfast von sich aus schickt - das automatische Verbindungs-Tuning, die Netzwerk-Etappe des System-Benchmarks und die Header-Scans für den eingebauten Index lassen ihn alle aus. Unabhängig vom Level und von der Blockgröße, denn ein Volumen-Konto kann dein einziger Provider sein und ein Flatrate-Konto auf Level 2 sitzen. Standardmäßig aus. Der manuelle <b>Test</b> im <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>) funktioniert auf einem so markierten Server weiterhin und fragt vorher, denn dort entscheidest du selbst, etwas auszugeben.</td></tr>
+</table></div>
 <p><b>Lass etwas Luft unter dem Verbindungslimit deines Kontos.</b> Die Verbindungszahl etwas unter das Limit zu setzen kostet nichts: der Durchsatz flacht schon vor den letzten ein, zwei Verbindungen ab, und <b>Verbindungs-Tuning</b> (<a href="#performance">§13</a>) landet ohnehin meist darunter. Die freien Plätze sind es, durch die ein zweites Gerät, ein anderes Programm oder ein neuer Versuch nach einem abgebrochenen Socket noch hineinkommt, statt abgewiesen zu werden, während hier jeder Platz belegt ist.</p>
+<p><b>Um das Limit offener Dateien deiner Maschine musst du dich nicht kümmern.</b> Das
+System zählt jede Verbindung als offene Datei, und macOS startet ein Programm mit einem
+Limit von 256 davon, das ein voller Satz Verbindungen über mehrere Server hinweg
+überschreiten kann. Unter macOS und Linux hebt nzbfast dieses Limit beim Start selbst an:
+es fragt nach 65536 offenen Dateien und geht über 16384, 4096 und 1024 herunter, bis das
+System zustimmt, nie über das harte Limit hinaus, das das System setzt, und es läuft mit
+dem Limit weiter, das es hatte, wenn jede Stufe abgelehnt wird. Windows kennt kein solches
+Limit pro Prozess. Andere Programme nehmen das Limit, das die Shell ihnen mitgegeben hat,
+und eines, dem mitten im Job die offenen Dateien ausgehen, kann stehen bleiben, ohne dass
+im Log steht, warum. Stell die Verbindungen pro Server also nach dem ein, was dein Tarif
+erlaubt, abzüglich der Luft von oben, und nicht danach, was die Maschine wohl mitmacht.</p>
 <h3 id="passwords">Wie deine Provider-Passwörter gespeichert werden</h3>
 <p>Provider-Passwörter in <code>config.local.json</code> sind <b>verschleiert, nicht
 verschlüsselt</b>. Sie werden als <code>obf1:</code> gefolgt von einer kodierten Form
@@ -773,11 +972,11 @@ der bessere Handel.</p>
 <p>Zwei weitere Optionen pro Server haben noch kein Bedienelement im Dashboard:
 trage sie von Hand beim Eintrag dieses Servers in <code>config.local.json</code> ein
 (siehe <a href="#files">§17</a>) und starte neu.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Schlüssel</th><th>Hinweise</th></tr>
 <tr><td><code>bind_ip</code></td><td>Bindet die ausgehenden Verbindungen dieses Servers an eine bestimmte lokale Adresse, für Rechner mit mehreren Anbindungen und VPN-Split-Tunnel. Die Adressfamilie wählt zugleich die Zielfamilie: eine v4-Bindung verbindet sich mit der v4-Adresse des Servers.</td></tr>
 <tr><td><code>socks5</code></td><td>Schickt den NNTP-Verkehr dieses Servers über einen SOCKS5-Proxy: <code>host:port</code> oder <code>user:pass@host:port</code>. Der Hostname wird <em>vom Proxy</em> aufgelöst, es gibt also kein lokales DNS-Leck.</td></tr>
-</table>
+</table></div>
 <ul>
 <li>Das <b>Häkchen</b> neben jedem Server ist sein Ein/Aus-Schalter: gesetzt heißt, der
 Server ist im Download-Pool, nicht gesetzt heißt deaktiviert. Ein deaktivierter Server
@@ -806,7 +1005,7 @@ nächsten Start. Jede hier gemachte Änderung wird in <code>settings.json</code>
 gespeichert und übersteht Neustarts (UI-Werte schlagen Kommandozeilen-Flags).</p>
 
 <h3>Tempo &amp; Zeitplan <span class="pill live">live</span></h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Einstellung</th><th>Was sie bewirkt</th></tr>
 <tr><td>Tempolimit</td><td>Limit in Bytes/Sek. (<code>50M</code>, <code>1G</code>, 0 = unbegrenzt). Fernsteuer-Apps schicken womöglich Prozente - setz das <i>Leitungstempo</i>, damit sie richtig übersetzt werden.</td></tr>
 <tr><td>Auto-Tempo</td><td>RTT-gesteuertes Limit, das anderem Verkehr im Haushalt weicht und sich wieder ausdehnt, wenn die Leitung ruhig ist.</td></tr>
@@ -815,7 +1014,7 @@ gespeichert und übersteht Neustarts (UI-Werte schlagen Kommandozeilen-Flags).</
 <tr><td>Auto-Update / Update-Check-URL</td><td>Siehe <a href="#updates">§14</a>.</td></tr>
 <tr><td>Leitungstempo</td><td>Die Nenngeschwindigkeit deines Anschlusses - ermöglicht Prozent-Limits aus SABnzbd-kompatiblen Apps.</td></tr>
 <tr><td>Wochenplan</td><td>Zeileneditor für Wochenzeit-Regeln: pausieren, fortsetzen oder ein Tempolimit zu bestimmten Tagen/Uhrzeiten setzen (lokale Zeit). Z.&nbsp;B. werktags 9–17 auf 20&nbsp;MB/s begrenzen, sonst unbegrenzt.</td></tr>
-</table>
+</table></div>
 
 <h3>Nächster Download <span class="pill live">live</span></h3>
 <p><b>Verbindungen</b> (pro Server), <b>Fenster</b> (Pipelining-Tiefe pro Verbindung),
@@ -823,13 +1022,16 @@ gespeichert und übersteht Neustarts (UI-Werte schlagen Kommandozeilen-Flags).</
 Standardwerte passen für die meisten Leitungen; nutz die Tuning-Tools, bevor du blind
 erhöhst.</p>
 
-<p><b>Schnellprüfung (CRC32)</b> (standardmäßig an) belegt PAR2-Blöcke schon während
-des laufenden Downloads allein per CRC32, was auf einer langsamen CPU 2-3x schneller
-ist. Die eigene Prüfsumme jedes Artikels wird trotzdem geprüft, und der abschließende
-Durchgang rechnet immer volles MD5: an der Korrektheit ändert sich also nichts.
-Abwählen, um auch während des Downloads MD5 pro Block zu rechnen.</p>
+<p><b>Prüfung während des Downloads</b> wählt, wie viel schon beim Eintreffen geprüft
+wird. <i>Vollständig</i> bestätigt jeden PAR2-Block per MD5. <i>Schnell</i> (die
+Vorgabe) belegt Blöcke stattdessen per CRC32, was auf einer langsamen CPU 2-3x
+schneller ist, und prüft weiterhin die eigene Prüfsumme jedes Artikels. <i>Sparsam</i>
+überspringt zusätzlich diese Artikel-Prüfsummen, sobald PAR2 eine Datei abdeckt: ein
+Schaden fällt dann einen Moment später auf, bei seinem Block. In allen dreien rechnen
+der abschließende Durchgang und jede Reparatur volles MD5, und ein Download ohne
+PAR2-Dateien behält seine Artikel-Prüfsummen.</p>
 <h3>Festplatte &amp; Quota <span class="pill live">live</span></h3>
-<p><b>Minimaler freier Platz</b> (neue Jobs darunter pausieren), <b>Download-Quota</b>
+<p><b>Minimaler freier Platz</b> (neue Jobs darunter pausieren; standardmäßig 2 GB, 0 schaltet es ab), <b>Download-Quota</b>
 pro Tag oder Monat (UTC; Erzwingen-Jobs umgehen sie), <b>Speicher-Budget</b> - die
 RAM-Zuteilung der Engine (Standard: ¼ des RAM, gedeckelt; erhöh es auf einer Maschine
 mit viel RAM für maximales Tempo bei riesigen Jobs, und lies vor dem Senken,
@@ -860,7 +1062,7 @@ Hauptdatei einen sauberen, aussagekräftigen Namen: aus einem Film wird
 <code>Example Movie (2024)</code>, Serien behalten <code>Show - S01E02</code>.
 Verschleierte oder unerkannte Namen bleiben exakt so, wie sie gepostet wurden, statt
 geraten zu werden.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Einstellung</th><th>Wirkung</th></tr>
 <tr><td>Auflösung einbeziehen</td><td>Setzt <code>1080p</code>, <code>2160p</code>… in den Namen. <b>Standardmäßig an</b>; die anderen vier Kennzeichen sind aus.</td></tr>
 <tr><td>Video-Codec einbeziehen</td><td><code>x265</code>, <code>x264</code>, <code>AV1</code>…</td></tr>
@@ -869,13 +1071,36 @@ geraten zu werden.</p>
 <tr><td>Release-Gruppe einbeziehen</td><td>Das <code>-GROUP</code>-Kennzeichen am Ende.</td></tr>
 <tr><td>Müll-Dateien entfernen</td><td><b>Standardmäßig an.</b> Löscht übrig gebliebene <code>.par2</code>, <code>.nzb</code>, <code>.sfv</code>, <code>.nfo</code> und Sample-Clips aus fertigen Film- und Serienordnern. Nie das Video oder seine Untertitel.</td></tr>
 <tr><td>Nur die Mediendatei behalten</td><td><b>Standardmäßig aus, und destruktiv:</b> löscht dauerhaft alles im Ordner außer dem Video (oder den Videos) und den Untertiteln. Jede Episode eines Staffelpakets bleibt erhalten. Hat Vorrang vor <b>Müll-Dateien entfernen</b>, wenn beides an ist.</td></tr>
+<tr><td>Downloads nach der .nzb-Datei benennen</td><td><b>Standardmäßig aus.</b> Der fertige Ordner und seine Hauptdatei bekommen den Namen der <code>.nzb</code>-Datei statt des aufgeräumten Namens, der aus dem Release ermittelt wurde. Nur die größte Datei wird umbenannt: der Rest eines Episodenpakets, das Sample, die Untertitel und die <code>.nfo</code> behalten die Namen, mit denen sie angekommen sind. Jede Kategorie kann es unter <b>Deine Kategorien</b> für sich erlauben oder verbieten - so bekommst du es für eine Art von Download und für eine andere nicht.</td></tr>
 <tr><td>Keep the other words in the name</td><td><b>Standardmäßig an.</b> Sport, Rennen und andere Events sind oft ein und derselbe Titel, die ganze Saison lang wiederholt und nur ein oder zwei Wörter auseinander - "Round11 Hungary Race" gegen "Round11 Hungary Qualifying". Diese Wörter zu behalten ist das, was verhindert, dass eine ganze Saison zum selben Namen zusammenfällt. Greift nur dort, wo der Name sich anders nicht aufräumen ließ, gewöhnliche Filme und Folgen bleiben also unberührt.</td></tr>
-</table>
+</table></div>
 <p class="dim">Die ganze Gruppe läuft nach Reparatur und Entpacken und vor <b>Fertige
 verschieben nach</b>, und wird für einen Job, der noch auf ein Passwort wartet,
 komplett übersprungen. Beide Löschschritte gelten <em>nur</em> für Releases, die als
 Film oder Serie erkannt wurden: eine Software-Nutzlast oder ein nicht einzuordnender
 (verschleierter) Satz wird nie ausgemistet.</p>
+
+<p><b>Gelöschte Dateien in den Papierkorb</b> entscheidet, was "löschen" oben
+bedeutet. Ist die Option an, verschiebt die Bereinigung Dateien in den Papierkorb
+des Systems, sodass eine falsche Einschätzung darüber, was Müll war, rückgängig
+gemacht werden kann; ist sie aus, werden sie endgültig gelöscht. Sie ist
+<b>unter macOS und Windows standardmäßig an</b>, wo der Papierkorb ein Ort ist,
+den Sie sehen und leeren können, und <b>unter Linux standardmäßig aus</b>, wo das
+meist nicht der Fall ist.</p>
+<div class="note"><b>Auf einem NAS oder in einem Container lassen Sie das aus.</b>
+Liegen Ihre Downloads auf einer anderen Festplatte als Ihr Home-Verzeichnis - die
+übliche Anordnung auf Unraid, Synology, einer Seedbox oder jeder
+Docker-Installation mit eingebundener Freigabe - verwenden die Linux-Regeln für
+den Papierkorb gar keinen Desktop-Papierkorb. Sie legen einen versteckten Ordner
+<code>.Trash-1000</code> (die Zahl ist Ihre Benutzer-ID) oben auf der
+Download-Festplatte an und verschieben die Dateien dorthin. Nichts zeigt Ihnen
+diesen Ordner, nichts leert ihn, und der Platz, den er belegt, kommt nie zurück.
+<p>Wenn Sie eine frühere Version von nzbfast unter Linux mit dieser Option
+betrieben haben, suchen Sie diesen Ordner im Wurzelverzeichnis Ihrer
+Download-Freigabe. Sie können ihn gefahrlos leeren: Alles darin ist eine Datei,
+von der die Bereinigung bereits entschieden hatte, dass Sie sie nicht wollten.
+nzbfast leert ihn nicht für Sie, denn er liegt auf Ihrer Festplatte, und das
+Urteil darüber steht Ihnen zu.</p></div>
 
 <h3>Ordner &amp; Verarbeitung</h3>
 <p><b>Download-Ordner</b> <span class="pill restart">Neustart</span>, <b>Watch-Ordner</b>,
@@ -884,6 +1109,28 @@ Argumenten und <code>SAB_*</code>-Umgebung - bestehende SAB-Skripte laufen
 unverändert), <b>Aufräum-Endungen</b> (Müll-Dateien, die nach dem Abschluss gelöscht
 werden), <b>Smarte Ordner</b> und <b>TV-Ablage</b> (siehe
 <a href="#automation">§10</a>).</p>
+<p><b>.nzb-Dateien nach Übernahme behalten</b> (standardmäßig aus) lässt die
+ursprüngliche <code>.nzb</code> nach dem Einreihen im Watch-Ordner liegen, statt
+sie in den Papierkorb zu verschieben - für Sammler, und um die Datei
+weiterzugeben, wenn ein Download Probleme macht. Eine behaltene Datei wird
+gemerkt, auch über Neustarts hinweg, und nicht erneut eingereiht; speichere sie
+neu, um sie erneut herunterzuladen. Wie auch immer du dich entscheidest: Die
+Schublade jedes Jobs hat eine Schaltfläche <b>.nzb herunterladen</b>, eine Kopie
+der <code>.nzb</code> eines Jobs ist also nie mehr als einen Klick entfernt.</p>
+
+<h3 id="set-indexers">Indexer durchsuchen <span class="pill live">live</span></h3>
+<p>Deine Konten bei NZB-Indexer-Seiten, je eine Zeile, damit eine Suche auf der Wand
+auch sie fragen kann. Was die Funktion tut und wie man damit sucht, steht in
+<a href="#pullsearch">§5</a>.</p>
+<div class="tblwrap"><table>
+<tr><th>Feld</th><th>Was es tut</th></tr>
+<tr><td>Name</td><td>Ein Etikett deiner Wahl, und die Identität, unter der die Tageszähler und Grenzen geführt werden. Eine Zeile umzubenennen beginnt einen neuen Eintrag, also gib den Schlüssel neu ein.</td></tr>
+<tr><td>API-Adresse</td><td>Die API-Adresse der Seite. Ihre normale Webadresse genügt; ein Prowlarr- oder NZBHydra2-Eintrag sieht aus wie <code>http://host:9696/1/api</code>.</td></tr>
+<tr><td>API-Schlüssel</td><td>Von deiner Kontoseite auf dieser Seite. Bleibt auf dieser Maschine, geht nur an die Seite, der er gehört, wird nie wieder angezeigt und nie ins Log geschrieben. Leer lassen behält den gespeicherten.</td></tr>
+<tr><td>Suchen pro Tag</td><td>Wie viele Suchen dieses Konto pro Tag ausgeben darf. 0 = unbegrenzt, und die Vorgabe.</td></tr>
+<tr><td>Downloads pro Tag</td><td>Wie viele Grabs es pro Tag ausgeben darf. 0 = unbegrenzt. Beide Zähler starten um Mitternacht UTC neu.</td></tr>
+<tr><td>an, Testen</td><td><b>an</b> ist es, was eine Zeile durchsuchbar macht; nimm den Haken weg, um ein Konto zu behalten, ohne es zu nutzen. <b>Testen</b> fragt die Seite, was sie unterstützt, und zeigt die Antwort oder den Fehler an Ort und Stelle.</td></tr>
+</table></div>
 
 <h3>Indexierung <span class="pill live">live</span></h3>
 <div class="note"><b>Der eingebaute Indexer ist standardmäßig aus.</b> Er findet
@@ -894,12 +1141,14 @@ lebt nur in einer NZB, die der Uploader anderswo veröffentlicht, er war also ni
 Usenet, wo ein Scanner ihn hätte lesen können. An unserem eigenen Index gemessen
 ergaben 14,8 Millionen gescannte Beiträge etwa 31.000 durchsuchbare Releases, also
 ungefähr einer von fünfhundert. Nutze weiter kommerzielle Indexer und trage sie unter
-Einstellungen → Suchindexer ein, damit du sie von der Wand aus durchsuchen kannst.
+Einstellungen → Indexer durchsuchen ein, damit du sie von der Wand aus durchsuchen kannst.
 Schalte das hier ein, wenn du bestimmten Gruppen folgst, in denen noch unter echten
 Namen gepostet wird, oder wenn du sehen willst, was dein Provider tatsächlich führt.
-Bei ausgeschaltetem Schalter wird nichts gescannt oder geholt, keine Datenbank
-angelegt, und Wand, Durchsuchen, Watchlist und der newznab-Feed sind ausgeblendet.</div>
-<table>
+Bei ausgeschaltetem Schalter wird nichts gescannt oder geholt und keine Datenbank
+angelegt; Durchsuchen und der newznab-Feed verschwinden, die Wand wird zu einer reinen
+Suchseite für die Indexer-Konten, die du eingetragen hast, und die Watchlist arbeitet
+stattdessen mit diesen Konten.</div>
+<div class="tblwrap"><table>
 <tr><th>Einstellung</th><th>Was sie bewirkt</th></tr>
 <tr><td>Eingebauter Indexer</td><td>Der Hauptschalter, <b>aus, solange du ihn nicht einschaltest</b>. Aus heißt: kein Scannen, keine Metadaten-Abfragen, keine Verfügbarkeitsstichproben und kein newznab-Feed; ein bereits auf der Platte liegender Index bleibt erhalten (es gibt einen Löschknopf), das Wiedereinschalten setzt also fort statt neu zu scannen.</td></tr>
 <tr><td>Gruppen</td><td>Newsgroups, die der eingebaute Indexer scannt (z.&nbsp;B. <code>alt.binaries.teevee</code>).</td></tr>
@@ -911,7 +1160,12 @@ angelegt, und Wand, Durchsuchen, Watchlist und der newznab-Feed sind ausgeblende
 <tr><td>Ingest-Filter</td><td>JSON-Regeln, die filtern, was in den Index kommt: Arten (verschleierter Müll fliegt standardmäßig raus), Jahr/Auflösung/Sprache, Größengrenzen.</td></tr>
 <tr><td>Jetzt scannen / Tiefenscan</td><td>Sofort einen Durchlauf starten; mit einer Tiefe werden so viele aktuelle Header neu gescannt.</td></tr>
 <tr><td>OMDb-Key / Metadaten erneuern / Index löschen</td><td>Anreicherungs-Regler der Wand (<a href="#wall">§6</a>). Löschen baut die Datenbank von Grund auf neu - der Rettungsweg, falls sie je korrumpiert wird.</td></tr>
-</table>
+<tr><td>Pre-Feed</td><td><b>Aus, bis du ihn einschaltest.</b> Viele Uploads werden ohne ihren Namen veröffentlicht, ein Scan hat dann nichts zu lesen. Öffentliche Relay-Kanäle kündigen den echten Namen an, der einzige offene Weg, solche Posts zuzuordnen. Einschalten hält eine Verbindung zu einem IRC-Netz offen und hört zu: gesendet wird nie etwas, ein Konto wird nicht angelegt. Braucht den Indexer, denn ein Feed ohne Ablage für das Gehörte ist nur ein offenes Socket.</td></tr>
+<tr><td>Relay-Server, Relay-Kanäle</td><td>Das IRC-Netz, das die Ankündigungen trägt (Host oder Host:Port), und die kommagetrennten Kanäle. Eine Änderung greift beim nächsten Verbinden: Feed aus und wieder an, um sie sofort anzuwenden.</td></tr>
+<tr><td>Über Korrelation benennen</td><td>Die öffentlichen Live-Relays führen keine Dateinamen, die meisten verschleierten Posts lassen sich also nicht direkt zuordnen. Was eine Ankündigung festhält, ist der Zeitpunkt und die Größe. Dies vergleicht Ankündigungszeit und -größe mit namenlosen Posts und schlägt bei Passung den echten Namen unter Durchsuchen vor. Ein Vorschlag ist als solcher markiert, braucht deinen Klick und benennt nie Dateien auf der Platte um.</td></tr>
+<tr><td>Starke Treffer automatisch anwenden</td><td>Standardmäßig aus, und streng, wenn an: die Größe muss eng passen, keine andere Ankündigung darf fast genauso gut passen, und die Ankündigung muss diesen Post in der Gegenprobe zurückwählen. Ein angewandter Name ändert nur die Anzeige, ist als abgeleitet markiert und verschwindet von selbst, wenn ein fertiger Download ihn widerlegt. Alles Schwächere bleibt ein Vorschlag.</td></tr>
+<tr><td>Ankündigungs-Historie</td><td>Der Live-Feed hört nur, was nach dem Einschalten angekündigt wird. Dies holt rund sechs Monate frühere Ankündigungen von einer öffentlichen Pre-Datenbank, höflich und einmalig, damit auch bereits indizierte Posts zugeordnet werden können. Läuft etwa eine halbe Stunde im Hintergrund.</td></tr>
+</table></div>
 
 <h3>Bibliothek, Sicherheit, Oberfläche</h3>
 <p><b>Bibliothek</b>: Kategorien, die als sofortige Bibliothekseinträge behandelt
@@ -923,24 +1177,48 @@ Geschwindigkeit im Dashboard angezeigt wird: Megabyte (MB/s, die Norm bei
 Download-Managern, Standard) oder Megabit (Mb/s, wie Provider Leitungen angeben).
 Dateigrößen bleiben in Byte. Das ist eine Eigenschaft des Daemons, nicht deines
 Browsers, gilt also für jedes Gerät, das auf diese Installation schaut.</p>
-<h3>Fortgeschritten: Einstellungen ohne Bedienelement</h3>
-<p>Vier Einstellungen haben weder ein Bedienelement noch ein Kommandozeilen-Flag.
-Setze sie über die API (<a href="#api">§16</a>), z. B.
+<h3>Fortgeschritten: die Stellschrauben hinter den offensichtlichen</h3>
+<p>Sechs Einstellungen ohne Kommandozeilen-Flag. Jede hat jetzt eine erweiterte Zeile auf
+der Einstellungskarte, zu der sie gehört, und bleibt über die API setzbar
+(<a href="#api">§16</a>), z. B.
 <code>/api?mode=config&amp;name=verify_mode&amp;value=lean&amp;apikey=…</code>. Wie
 alle anderen landen sie dauerhaft in <code>settings.json</code>.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Name</th><th>Wirkung</th></tr>
-<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (Standard <code>fast</code>). <code>lean</code> ist der Schub für langsame CPUs: wie fast, überspringt aber zusätzlich den yEnc-CRC pro Artikel, sobald PAR2 eine Datei abdeckt, also eine CRC32-Schicht statt zwei. Downloads ohne PAR2 behalten ihre Artikel-CRCs, und die Prüfung und Reparatur am Ende des Jobs bleiben in jedem Fall unverändert. Die <b>Schnellprüfung</b> oben ist dieselbe Steuerung für full gegen fast.</td></tr>
+<tr><td><code>verify_mode</code></td><td><code>full</code> | <code>fast</code> | <code>lean</code> (Standard <code>fast</code>). <code>lean</code> ist der Schub für langsame CPUs: wie fast, überspringt aber zusätzlich den yEnc-CRC pro Artikel, sobald PAR2 eine Datei abdeckt, also eine CRC32-Schicht statt zwei. Downloads ohne PAR2 behalten ihre Artikel-CRCs, und die Prüfung und Reparatur am Ende des Jobs bleiben in jedem Fall unverändert. Die Auswahl <b>Prüfung während des Downloads</b> oben ist diese Einstellung.</td></tr>
 <tr><td><code>auto_retry_mins</code></td><td>Wartezeit vor dem <em>einen</em> automatischen zweiten Versuch, den ein erstes Scheitern mit fehlenden Artikeln bekommt (Standard 20). Propagationsverzögerung ist eine echte Ursache fehlender Artikel und löst sich von selbst; dank Journal holt der zweite Lauf nur, was noch fehlt. Passwort- und Takedown-Fehler qualifizieren sich nie.</td></tr>
 <tr><td><code>index_scan_par</code></td><td>Wie viele Gruppen der Indexer parallel scannt (Standard 3, begrenzt auf 1-8).</td></tr>
 <tr><td><code>oracle_sample</code></td><td>Leerlauf-STAT-Budget des Verfügbarkeits-Orakels (<a href="#oracle">§13</a>), Proben pro Stunde und Server. Standard 300, Maximum 3600, <code>0</code> schaltet das Abtasten ganz ab.</td></tr>
-</table>
+<tr><td><code>predb_max_rows</code></td><td>Wie viele Pre-Ankündigungen die Feed-Tabelle behält (Standard 250000, begrenzt auf 10000-5000000). Der stündliche Schnitt kürzt auf diesen Wert, und der historische Import verweigert den Start, sobald er darüber hinausginge - so fügt ein Import nie Zeilen hinzu, die der nächste Schnitt löscht.</td></tr>
+<tr><td><code>predb_seed_days</code></td><td>Wie weit ein historischer Import zurückreicht, wenn er ohne eigenes Fenster gestartet wird (Standard 180 Tage, Maximum 366). Ein größeres Fenster bedeutet mehr Anfragen an die Pre-Quelle, die auf eine alle zwei Sekunden getaktet ist.</td></tr>
+</table></div>
 <h2 id="automation">10 · Automatisierung</h2>
 <h3>Watchlist</h3>
 <p>Die einfachste Automatisierung: Titel im Dashboard hinzufügen, Qualitätsvorlieben
 setzen, fertig. Neue Releases werden geholt, sobald sie in deinen indexierten Gruppen
 auftauchen; Kopien in besserer Qualität ersetzen frühere Grabs; eine Kalenderansicht
 zeigt, was ansteht.</p>
+<p>Eine <b>Listenquelle</b> speist die Watchlist aus einer Liste, die du in Plex
+pflegst, auf eine von zwei Arten: Verknüpfe dein Plex-Konto, indem du einen kurzen
+Code auf der Plex-Seite bestätigst, oder füge eine Plex-Watchlist-Adresse ein. Die
+Adresse ist ein Zugangsschlüssel - wer sie besitzt, darf die Liste lesen - deshalb
+wird sie nach dem Speichern maskiert. Das Synchronisieren von Entfernungen
+unterscheidet sich absichtlich je nach Modus: Ein verknüpftes Konto sieht die ganze
+Liste, ein dort entfernter Titel wird also auch hier nicht mehr beobachtet (bereits
+fertige Downloads bleiben); ein Adress-Feed enthält nur die neuesten Einträge,
+Abwesenheit beweist also nichts und Titel werden immer nur hinzugefügt. Beide
+Vorgaben lassen sich pro Quelle ändern.</p>
+<p><b>Auch meine Indexer-Konten nach Gewünschtem durchsuchen</b>, am Fuß der
+Watchlist-Karte, lässt sie zusätzlich zu deinem eigenen Index die Konten aus
+Einstellungen → Indexer durchsuchen fragen (<a href="#pullsearch">§5</a>). Es
+beginnt ausgeschaltet, weil es das Einzige hier ist, das ein gezähltes Konto ausgibt,
+ohne dass du klickst. Eingeschaltet fragt jeder beobachtete Eintrag etwa zweimal am Tag
+und nur nach dem, was er noch nicht gefunden hat, unter denselben Tagesgrenzen und mit
+denselben Hinweisen, wenn ein Konto übersprungen wird. Ein Kandidat von einem Indexer
+wird genau wie ein lokaler beurteilt, Qualitätsuntergrenzen, Upgrades, Staffelpakete und
+Dublettenbehandlung gelten also alle weiter, und eine lokale Kopie gewinnt jeden
+Gleichstand, weil sie kein Kontingent kostet. Mit ausgeschaltetem eingebautem Indexer
+ist das, was der Watchlist überhaupt etwas zum Arbeiten gibt.</p>
 <h3 id="auto-rss">RSS-Feeds</h3>
 <p>Einstellungen → RSS: jede newznab-/Indexer-RSS-URL, mit Intervall, Kategorie und
 Filterregeln pro Feed (Titelmuster, Größengrenzen). Passende Einträge werden
@@ -957,7 +1235,64 @@ Pause/Fortsetzen/Tempo nach Tageszeit.</p>
 <h3>Skripte</h3>
 <p>Ein Nachbearbeitungs-Skript bekommt SABnzbds Positionsargumente und
 <code>SAB_*</code>-Umgebungsvariablen - das große Ökosystem an SAB-Skripten läuft
-unverändert.</p>
+unverändert. NZBGets Dialekt wird daneben bereitgestellt - <code>NZBPP_*</code>-Variablen
+(<code>DIRECTORY</code>, <code>NZBNAME</code>, <code>CATEGORY</code>,
+<code>TOTALSTATUS</code>, <code>PARSTATUS</code>, <code>UNPACKSTATUS</code>,
+<code>FINALDIR</code>) und die Exit-Codes 93/94/95 - sodass auch die Kernlogik
+eines NZBGet-Erweiterungsskripts läuft. Die Abbildung ist ehrlich statt einer
+Emulation: Reparatur und Entpacken passieren im Ein-Pass-Download, eine saubere
+Fertigstellung meldet also <code>PARSTATUS=0</code> und eine reparierte
+<code>PARSTATUS=2</code>.
+Formen für Optionen pro Skript (<code>NZBPO_*</code>) werden nicht bereitgestellt.
+Ein Skript darf beim Beenden einen Helfer im Hintergrund weiterlaufen lassen und
+nzbfast wird ihn nicht töten, aber nzbfast hört in dem Moment auf, die Ausgabe des
+Skripts zu lesen, in dem das Skript selbst endet: gib einem Hintergrund-Helfer
+eine eigene Ausgabe-Umleitung, sonst wird er beim ersten Druckversuch gestoppt.</p>
+<h3>Pre-Queue-Skript</h3>
+<p>Ein zweiter Haken läuft, <em>bevor</em> ein Download in die Warteschlange kommt
+(Einstellungen → Ordner → Pre-Queue-Skript), mit SABnzbds Pre-Queue-Vertrag:
+Argumente <code>name, pp, category, script, priority, size, group</code> plus die
+<code>SAB_*</code>-Umgebung. Die erste Zeile seiner Ausgabe akzeptiert den Download
+(<code>1</code>) oder lehnt ihn ab (<code>0</code>); die Zeilen 2 bis 7 können ihn
+umbenennen, <code>pp</code> setzen, die Kategorie ändern, ein Skript wählen oder
+die Priorität ändern (leere Zeilen behalten den Standard). Ein abgelehnter
+Download geht als Fehlgeschlagen mit dem Grund in den Verlauf, und Retry aus dem
+Verlauf holt ihn zurück, ohne das Skript erneut zu fragen. Der Haken kann nie
+einen Download verlieren: Fehlt das Skript, stürzt es ab, überzieht es sein
+Zeitbudget oder druckt es etwas, das kein Urteil ist, geht das Hinzufügen
+unangetastet weiter, und das Log sagt warum.</p>
+<h3>Lebenszyklus-Ereignisse und signierte Webhooks</h3>
+<p>Jeder Job-Meilenstein ist ein versioniertes Ereignis: <code>job.added</code>,
+<code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
+<code>job.completed</code>, <code>job.failed</code>, dazu
+<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code> und <code>quota.reached</code>. Jedes trägt
+<code>schema_version</code> (derzeit 1; neue Schlüssel können ohne Erhöhung
+auftauchen - ignoriere, was du nicht kennst), eine monotone <code>seq</code> und
+einen <code>at</code>-Zeitstempel in Millisekunden.</p>
+<p>Um sie zu empfangen, leg ein <b>Webhook</b>-Benachrichtigungsziel an
+(Einstellungen → Automatisierung) und liste in seinem <i>events</i>-Feld die
+Ereignisarten auf, die es bekommen soll - exakte Arten oder ein Präfix wie
+<code>job.*</code>. Das Ziel bekommt dann einen POST pro Ereignis: das
+Ereignis-JSON als Body plus eine <code>delivery</code>-Kennung
+(<code>&lt;boot&gt;-&lt;seq&gt;</code>, der Griff zum Deduplizieren), die Header
+<code>X-NzbFast-Event</code> und <code>X-NzbFast-Delivery</code>, und - wenn das
+Ziel ein Signier-Geheimnis hat - <code>X-NzbFast-Signature: sha256=&lt;hex&gt;</code>,
+ein HMAC-SHA256 der exakten Body-Bytes unter deinem Geheimnis (dieselbe Form, die
+GitHub-Webhooks nutzen). Prüfung in Python:</p>
+<pre><code>expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, request.headers["X-NzbFast-Signature"])</code></pre>
+<p>Die Zustellung ist mindestens-einmal: ein nicht erreichbares Ziel wird nach
+10&nbsp;s, 60&nbsp;s und 5&nbsp;min erneut versucht, dann fallen gelassen, wobei
+der Fehlschlag auf der Einstellungszeile des Ziels erscheint. Eine
+HTTP-Fehlerantwort (404, 401...) wird nicht wiederholt - reparier den Empfänger
+und nutz Test. Jedes Ziel hat seine eigene Zustellspur, sodass ein langsames oder
+unerreichbares nie ein anderes aufhält; innerhalb einer Spur behalten Zustellungen
+die Reihenfolge, in der die Ereignisse passiert sind, und wird eine fallen
+gelassen, zeigen die Sequenznummern die Lücke. Die klassischen Ereigniswörter
+(<code>completed</code>, <code>failed</code>, <code>repaired</code>,
+<code>disk</code>, <code>quota</code>) behalten auf demselben Ziel ihre Bedeutung
+für menschliche Benachrichtigungen.</p>
 
 <h2 id="arr">11 · Sonarr, Radarr &amp; Co.</h2>
 <p>nzbfast spricht die SABnzbd-API nativ, also funktioniert jedes *arr out of the
@@ -969,6 +1304,12 @@ box - und es kann obendrein ihr <em>Indexer</em> sein.</p>
 (wo du ihn findest: <a href="#firstrun-key">§2</a>).</li>
 <li>Kategorie nach Wunsch (z.&nbsp;B. <code>tv</code> / <code>movies</code>). Test → grüner Haken → Save.</li>
 </ol>
+<p>Das Dashboard reicht dir die Adresse: Auf einer Installation, die noch nichts
+geladen hat, zeigt die Route „Sonarr, Radarr oder eine App Downloads hinzufügen
+lassen“ der Willkommenskarte die exakte Adresse mit einem <b>Kopieren</b>-Knopf
+daneben. Der API-Key steht absichtlich nicht auf dieser Zeile; er bleibt hinter
+seiner eigenen Enthüllung in Einstellungen → Sicherheit
+(<a href="#firstrun-key">§2</a>).</p>
 <p>Warteschlange, Verlauf, Status pro Job, „remove &amp; delete“, Retry und
 Kategorie-Routing verhalten sich alle so, wie die *arrs es erwarten.</p>
 <h3>Als Indexer (newznab)</h3>
@@ -993,27 +1334,62 @@ nur, was unter einem echten Dateinamen gepostet wurde.</div>
 funktioniert fast jede Handy-/Tablet-App. Nimm das Protokoll, das deine App
 unterstützt:</p>
 <h3>Apps, die NZBGet sprechen (nzb360, LunaSea, NZB Unity…)</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Feld in der App</th><th>Wert</th></tr>
 <tr><td>Typ</td><td>NZBGet</td></tr>
 <tr><td>Host / Port</td><td>deine Maschine : <b>6789</b></td></tr>
 <tr><td>Benutzername</td><td>beliebig (z.&nbsp;B. <code>nzbfast</code>)</td></tr>
 <tr><td>Passwort</td><td>dein <b>API-Key</b></td></tr>
-</table>
+</table></div>
 <p>Die volle JSON-RPC-Oberfläche, die diese Apps nutzen, wird bedient: Status,
 Warteschlange mit Umsortieren/Pause/Löschen, Verlauf, NZB hinzufügen, Tempolimit,
 Pause/Fortsetzen, Log.</p>
 <h3>Apps, die SABnzbd sprechen</h3>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Feld in der App</th><th>Wert</th></tr>
 <tr><td>Typ</td><td>SABnzbd</td></tr>
 <tr><td>Host / Port</td><td>deine Maschine : <b>6789</b></td></tr>
 <tr><td>API-Key</td><td>dein API-Key (oder der NZB-Key für Nur-Hinzufügen-Zugriff)</td></tr>
-</table>
+</table></div>
 <h3>Das Dashboard auf deinem Handy</h3>
 <p>Öffne einfach <code>http://&lt;machine&gt;:6789</code> in einem mobilen Browser -
 das ganze Dashboard und die Wand haben ein Touch-Layout. Das Panel Einstellungen →
 Fernzugriff zeigt die genauen URLs und einen QR-Code zum Scannen.</p>
+
+<h3 id="remote-proxy">nzbfast von außerhalb erreichen</h3>
+<p>Es gibt keine Anmeldeseite, und das ist Absicht. Eine Anmeldung per Session-Cookie ist eine Sicherheitsfläche, die dauerhaft gepflegt werden muss, und sie wäre trotzdem das schwächste Schloss an allem, was im offenen Internet steht. nzbfast authentifiziert stattdessen mit Ihrem API-Schlüssel und nimmt diesen Schlüssel ebenso im Anfrage-Header wie in der URL entgegen (<code>X-Api-Key</code> oder <code>Authorization: Bearer</code>) - genau das erlaubt es einer vorgeschalteten Instanz, die Anmeldung sauber zu übernehmen.</p>
+<p><b>Am einfachsten ist es, gar nichts zu veröffentlichen.</b> Installieren Sie <b>Tailscale</b> auf diesem Rechner und auf Ihrem Telefon, und beide sind im selben privaten Netz: nichts ist exponiert, weder Router- noch Zertifikatsarbeit fällt an, und Einstellungen → Fernzugriff zeigt eine Adresse für überall, sobald Tailscale läuft. Nehmen Sie diesen Weg, sofern Sie nicht ausdrücklich eine öffentliche Domain brauchen.</p>
+<p><b>nzbfast kann auch selbst HTTPS ausliefern.</b> Zeigen Sie Einstellungen →
+Sicherheit → HTTPS-Zertifikat / privater HTTPS-Schlüssel auf ein PEM-Zertifikat und
+seinen Schlüssel (oder starten Sie mit <code>--tls-cert cert.pem --tls-key key.pem</code>),
+starten Sie neu, und Dashboard und API antworten auf <code>https://</code> statt auf
+unverschlüsseltem HTTP - ein Listener, ein Schema. Nehmen Sie das Zertifikat, das
+Ihre Domain schon hat (etwa von Let's Encrypt via certbot), oder ein
+selbstsigniertes fürs LAN, das Browser nach einer einmaligen Warnung akzeptieren.
+Ein defektes oder abgelaufenes Zertifikat verweigert den Start und nennt die Datei,
+der Fehler ist also dort sichtbar, wo Sie ihn gemacht haben; erneuern Sie, indem
+Sie die Dateien ersetzen und neu starten. Natives HTTPS verschlüsselt den Verkehr,
+fügt aber keine Anmeldung hinzu, lassen Sie den API-Schlüssel also gesetzt.</p>
+<p><b>Wenn Sie eine öffentliche Domain brauchen</b>, setzen Sie einen Reverse-Proxy davor, geben Sie ihm das Zertifikat und lassen Sie ihn die Authentifizierung erledigen. Starten Sie nzbfast mit <code>--bind 127.0.0.1</code>, damit der Proxy der einzige Weg hinein ist, und richten Sie den Proxy auf <code>http://127.0.0.1:6789</code>:</p>
+<pre><code># Caddy
+example.com {
+    reverse_proxy 127.0.0.1:6789
+}
+
+# nginx
+location / {
+    proxy_pass http://127.0.0.1:6789;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}</code></pre>
+<p>Legen Sie darüber, was Ihr Proxy bietet: Basic Auth, einen Forward-Auth-Dienst wie Authelia oder Authentik, oder Client-Zertifikate. Eine Sache erwischt alle - Sonarr, Radarr und die Telefon-Apps können keine Browser-Anmeldung durchlaufen, lassen Sie ihnen also einen Weg daran vorbei. Die meisten Proxys können eine Anfrage mit gültigem <code>X-Api-Key</code>-Header durchlassen und alles andere abfragen.</p>
+<div class="warn-box"><b>Leiten Sie nicht einfach Port 6789 am Router weiter.</b>
+Ohne konfiguriertes Zertifikat spricht das Dashboard unverschlüsseltes HTTP, Ihr
+API-Schlüssel und alles, was Sie damit tun, liefe also für jeden auf dem Weg lesbar
+durchs Internet, und eine Installation ganz ohne Schlüssel steht jedem offen, der
+sie findet. Wenn Sie trotzdem einen Port weiterleiten, setzen Sie zuerst einen
+API-Schlüssel und schalten Sie HTTPS ein.</div>
 
 <h2 id="performance">13 · Performance-Tools</h2>
 <h3 id="perf-benchmark">System-Benchmark</h3>
@@ -1085,13 +1461,13 @@ nicht gratis, und bei großen Jobs kannst du es messen.</p>
 <p>Gemessen auf einer Maschine und einer Leitung (M1 Ultra, 10 GbE), dieselben
 Dateien bei jedem Budget. Jeder Lauf lieferte ein korrektes, voll verifiziertes,
 entpacktes Ergebnis:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Job-Größe</th><th>Reichlich RAM</th><th>2-GB-Budget<br><span class="dim">≈ 8-GB-Maschine</span></th><th>1-GB-Budget<br><span class="dim">≈ 4-GB-Maschine</span></th><th>256-MB-Budget<br><span class="dim">≈ 2-GB-NAS</span></th></tr>
 <tr><td>7 GB</td><td>15 s</td><td>15 s</td><td>15 s</td><td>15 s</td></tr>
 <tr><td>35 GB</td><td>65 s</td><td>70 s</td><td>70 s</td><td>65 s</td></tr>
 <tr><td>87 GB</td><td>148 s</td><td>206 s <span class="dim">+39%</span></td><td>196 s <span class="dim">+32%</span></td><td>180 s <span class="dim">+22%</span></td></tr>
 <tr><td>190 GB</td><td>330 s</td><td>427 s <span class="dim">+29%</span></td><td>402 s <span class="dim">+22%</span></td><td>411 s <span class="dim">+25%</span></td></tr>
-</table>
+</table></div>
 <p>Der Spitzenverbrauch folgt dem <em>Budget</em>, nicht dem Job: Dieser
 190-GB-Download läuft in etwa 1,1 GB RAM durch. Was du dafür eintauschst, ist Zeit -
 und nur bei großen Jobs.</p>
@@ -1145,9 +1521,61 @@ prüfen</b> (Einstellungen) aus und es kontaktiert das Update-Manifest gar nicht
 mehr; eine leere Update-Check-URL bewirkt dasselbe.</li>
 </ul>
 
+<h3 id="updating">Aktualisieren, ohne deine Einstellungen zu verlieren</h3>
+<p>Eine Regel gilt für jede Installation: <b>ein Update ersetzt das Programm,
+nie deine Einstellungen.</b> Alles, was du konfiguriert hast - Server, Pfade,
+der API-Key, die Warteschlange - liegt in einer Handvoll Dateien in einem
+Ordner (<a href="#files">§17</a>), und kein Installer, kein Image-Pull und kein
+Paket-Upgrade rührt diesen Ordner an. Wenn Einstellungen nach einem Update doch
+verschwunden wirken, liegt das fast immer daran, dass die neue Installation
+einen <em>anderen, leeren</em> Ordner liest, nicht daran, dass irgendetwas
+gelöscht wurde; die alten Dateien liegen noch genau dort, wo sie immer lagen.
+<a href="#settings-gone">§18</a> hat die Schritte zur Wiederherstellung.</p>
+<div class="tblwrap"><table>
+<tr><th>Installation</th><th>So aktualisierst du</th></tr>
+<tr><td>macOS-App</td><td>Öffne das neue DMG und zieh <b>NzbFast</b> nach
+<b>Programme</b>, ersetz dabei die alte. Dein Datenordner ist separat und wird
+nicht angetastet.</td></tr>
+<tr><td>Windows-Installer</td><td>Lass das neue Setup über die alte Installation
+laufen. Dein Datenordner ist separat und wird nicht angetastet.</td></tr>
+<tr><td>Docker (Kommandozeile)</td><td><code>docker pull nzbfast/nzbfast</code>,
+entferne den alten Container und starte den neuen mit <b>exakt denselben
+<code>-v</code>-Zuordnungen</b>. Das Image ist wegwerfbar; der eingebundene
+<code>/config</code>-Ordner ist deine Installation. Nutzt dein Startbefehl einen
+relativen Pfad wie <code>-v ./config:/config</code>, führ ihn jedes Mal aus
+demselben Verzeichnis aus - von überall sonst ist <code>./config</code> ein
+anderer, leerer Ordner.</td></tr>
+<tr><td>Docker Compose</td><td><code>docker compose pull &amp;&amp; docker compose
+up -d</code>, mit derselben Compose-Datei am selben Ort. Das
+<code>./config</code> in der Datei ist am Ordner der Datei selbst verankert,
+lass die Datei also, wo sie ist.</td></tr>
+<tr><td>Watchtower</td><td>Nichts zu tun: Es erstellt den Container mit
+denselben Zuordnungen neu, sobald ein neues Image erscheint.</td></tr>
+<tr><td>Unraid</td><td>Docker-Tab → <b>Check for Updates</b> → <b>Apply
+Update</b>. Aktualisiere nie, indem du die App entfernst und neu hinzufügst;
+falls du doch einmal neu installierst, behalte denselben appdata-Pfad, damit sie
+dein bestehendes <code>/config</code> findet.</td></tr>
+<tr><td>Synology (Container Manager)</td><td>Lade das neue Image herunter,
+stopp den Container und erstelle ihn mit denselben Volume-Einstellungen neu -
+die Schritt-für-Schritt-Strecke in der Synology-Anleitung erklärt es Klick für
+Klick, auch wie du es nach Zeitplan machst.</td></tr>
+<tr><td>Synology (Paket)</td><td>Installiere das neue <code>.spk</code> im
+Package Center; es wird an Ort und Stelle aktualisiert.</td></tr>
+<tr><td>Homebrew</td><td><code>brew upgrade nzbfast</code></td></tr>
+<tr><td>Reines Binary</td><td>Ersetz das Binary. Deine Config bleibt, wo du sie
+angelegt hast (<a href="#files">§17</a>).</td></tr>
+</table></div>
+<div class="tip"><b>Tipp</b>Docker-Nutzer, die Sonarr oder Radarr anbinden:
+Leg den API-Key in die Container-Definition selbst
+(<code>-e NZBFAST_APIKEY=…</code>, oder in den environment-Block deiner
+Compose-Datei oder deines Unraid-Templates). Ein dort abgelegter Key übersteht
+jedes Container-Missgeschick, denn er liegt auf dem Host, in der Definition, und
+wird bei jedem Start neu angewendet. Ein Key, den du später in den Einstellungen
+setzt, gewinnt trotzdem gegen ihn.</div>
+
 <h2 id="cli">15 · Kommandozeile</h2>
 <p>Alles, was der Daemon kann, ist auch skriptbar. Die Alltagsbefehle:</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Befehl</th><th>Zweck</th></tr>
 <tr><td><code>nzbfast setup</code></td><td>Interaktive Server-Einrichtung.</td></tr>
 <tr><td><code>nzbfast serve</code></td><td>Den Daemon starten (Dashboard + API + Automatisierung). <code>--open</code> öffnet den Browser; <code>--apikey</code> setzt den Key von Hand (<a href="#firstrun-key">§2</a>); <code>--bind</code> wählt die Lausch-Adresse, standardmäßig <code>0.0.0.0</code> (jede Schnittstelle), <code>127.0.0.1</code> nur für diese Maschine. <code>--help</code> zeigt die volle Flag-Liste - jede Dashboard-Einstellung hat einen Flag-Zwilling.</td></tr>
@@ -1157,10 +1585,11 @@ mehr; eine leere Update-Check-URL bewirkt dasselbe.</li>
 <tr><td><code>nzbfast sysbench</code></td><td>Der System-Benchmark + Diversitäts-Bericht, im Terminal.</td></tr>
 <tr><td><code>nzbfast index / search</code></td><td>Gruppen in den Index scannen / ihn durchsuchen, ohne Daemon.</td></tr>
 <tr><td><code>nzbfast import-sab</code></td><td>Server aus einer SABnzbd-ini importieren.</td></tr>
-</table>
+</table></div>
 <p class="dim">Außerdem verfügbar: <code>inspect</code>, <code>probe</code>,
 <code>bench</code>, <code>bench-cpu</code>, <code>soak</code>, <code>fetch</code>,
 <code>spots</code>/<code>spot-search</code>/<code>spot-get</code> (Spotnet),
+<code>predb-seed</code> (füllt die Pre-Datenbank mit der Zeit vor dem Einschalten des Feeds),
 <code>make-release-nzb</code>/<code>make-test-nzb</code> (Test-Fixtures). Jeder
 Befehl nimmt <code>--config</code> und <code>--help</code>. Dazu kommt <code>post</code>: lädt Dateien als
 yEnc-Artikel hoch und schreibt die passende NZB. Ein Betriebswerkzeug, es verlangt ein
@@ -1171,20 +1600,35 @@ ausdrückliches <code>--post-server</code> und wählt nie selbst einen Server au
 SABnzbd-kompatibel, bestehende SAB-Integrationen funktionieren also unverändert. Zwei
 Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufügen:
 <code>addfile</code>/<code>addurl</code>). <code>addnzblnk</code> gehört absichtlich nicht zum Nur-Hinzufügen-Satz: einen Link aufzulösen kann bezahltes Indexer-Kontingent verbrauchen, und das geht einen Nur-Hinzufügen-Zugang nichts an.</p>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Bereich</th><th>Modes</th></tr>
 <tr><td>Warteschlange</td><td><code>queue</code> (mit <code>name=delete/pause/resume/priority/switch</code>), <code>pause</code>, <code>resume</code>, <code>addfile</code>, <code>addurl</code>, <code>addnzblnk</code>, <code>retry</code>, <code>set_password</code></td></tr>
-<tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code></td></tr>
+<tr><td>Info</td><td><code>history</code>, <code>status</code>/<code>fullstatus</code>, <code>stats</code>, <code>version</code>, <code>server_stats</code>, <code>usage</code>, <code>log</code>, <code>warnings</code>, dazu <code>/jobnzb/&lt;nzo_id&gt;</code> (gibt die eigene gespoolte <code>.nzb</code> des Jobs wieder heraus, Warteschlange oder Verlauf; nur mit vollem API-Key)</td></tr>
 <tr><td>Konfiguration</td><td><code>get_config</code>, <code>config&amp;name=&lt;setting&gt;&amp;value=…</code> (jedes Einstellungs-Feld), <code>server_save/delete/test/enable/reorder</code>, <code>import_probe/apply</code></td></tr>
 <tr><td>Index &amp; Wand</td><td><code>index_search</code>, <code>index_get</code>, <code>index_stats</code>, <code>index_scan_now</code>, <code>wall</code>, <code>wall_search/fix/refresh/art</code>, dazu newznab unter <code>/api?t=caps|search|tvsearch|movie</code> und <code>/getnzb/&lt;id&gt;</code></td></tr>
 <tr><td>Automatisierung</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnose</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code>, <code>update_apply</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-Auth: beliebiger Benutzer, API-Key als Passwort)</td></tr>
 <tr><td>Vorschau / Wiedergabe</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-Ranges; das Starten eines geparkten Bibliotheks-Jobs braucht ein <code>?t=</code>-Token oder den Key), <code>/m3u/&lt;id&gt;</code> (braucht den Key; stellt das Token aus), <code>/wall</code>, <code>/art/…</code></td></tr>
-</table>
+</table></div>
 
 <h2 id="files">17 · Dateien &amp; Speicherorte</h2>
-<table>
+<p>Wo der Einstellungs-Ordner liegt, hängt davon ab, wie nzbfast installiert
+wurde. Dieser eine Ordner enthält alles, was ein Backup wert ist:</p>
+<div class="tblwrap"><table>
+<tr><th>Installation</th><th>Einstellungs-Ordner</th></tr>
+<tr><td>macOS-App</td><td><code>~/Library/Application Support/nzbfast/</code></td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\nzbfast\</code></td></tr>
+<tr><td>Docker / NAS-Container</td><td><code>/config</code> im Container, also
+der Host-Ordner, den du dorthin eingebunden hast. Auf Unraid ist das der
+appdata-Ordner der App.</td></tr>
+<tr><td>Synology-Paket</td><td><code>/var/packages/nzbfast/var/</code></td></tr>
+<tr><td>Terminal</td><td>Der Ordner, in dem du <code>nzbfast setup</code>
+ausgeführt hast, oder wohin <code>--config</code> / <code>$NZBFAST_CONFIG</code>
+zeigt.</td></tr>
+</table></div>
+<p>Und was darin liegt:</p>
+<div class="tblwrap"><table>
 <tr><th>Datei</th><th>Inhalt</th></tr>
 <tr><td><code>config.local.json</code></td><td>Server-Zugangsdaten und Optionen pro Server. Vom Assistenten angelegt; in den Einstellungen bearbeitbar. Halte sie privat. Passwörter sind <a href="#passwords">verschleiert, nicht verschlüsselt</a>.</td></tr>
 <tr><td><code>settings.json</code></td><td>Jede im Dashboard geänderte Einstellung. Liegt neben der Config; UI-Werte übersteuern Kommandozeilen-Flags. Lösche einen Key (oder die Datei), um auf Flags/Standardwerte zurückzufallen.</td></tr>
@@ -1193,10 +1637,10 @@ Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufüg
 <tr><td><code>&lt;config&gt;/.spool/</code></td><td>Warteschlangen-Zustand (übersteht Neustarts), NZBs pro Job, Verbrauchs-Buch, Benchmark-Verlauf, Poster-Art-Cache.</td></tr>
 <tr><td>Artikel-Journal</td><td>Liegt im Ausgabeordner jedes Jobs, solange er unvollständig ist - treibt Absturz-Resume und Erneut-Versuchen an. Bei Erfolg entfernt.</td></tr>
 <tr><td>Externe Tools</td><td>Keine nötig - RAR-Entpacken und PAR2-Reparatur sind nativ. Sollte ein exotisches Set je ein externes <code>unrar</code> oder <code>par2</code> als Fallback brauchen, schaut nzbfast neben seine ausführbare Datei, dann auf den <code>$PATH</code>.</td></tr>
-</table>
+</table></div>
 
 <h2 id="troubleshooting">18 · Fehlerbehebung</h2>
-<table>
+<div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Prüfen</th></tr>
 <tr><td>Langsame Downloads</td><td>Lass den <b>System-Benchmark</b> laufen - er nennt den Flaschenhals direkt beim Namen. Ist es das Netzwerk: <b>Verbindungs-Tuning</b> laufen lassen, die Verbindungszahlen pro Server prüfen und sicherstellen, dass deine Provider nicht alle ein Backbone sind (<b>Server-Diversität</b>).</td></tr>
 <tr><td>Langsam nur bei sehr großen Jobs<br>(NAS oder Maschine mit wenig RAM)</td><td>Erwartet, und messbar: Ein ausgehungertes Speicher-Budget lagert Caches auf die Festplatte aus und kostet ab ~87 GB 20–40 %. Siehe <a href="#memory">Speicher-Budget</a> für die Zahlen und wie viel RAM du geben solltest. Kleinere Jobs sind nicht betroffen.</td></tr>
@@ -1208,12 +1652,14 @@ sieht genauso aus und löst sich von allein.</td></tr>
 <tr><td>Ein Archiv lässt sich nicht entpacken</td><td>Passwort- und Reparaturfehler benennen sich selbst in der Verlaufszeile. Für alles andere gibt es einen Notausgang: Einstellungen → Watch-Ordner &amp; Nachbearbeitung → <b>Mit externem unrar entpacken</b> (eine erweiterte Einstellung) übergibt das Entpacken an das auf deinem Rechner installierte Programm <code>unrar</code> statt an den eingebauten Entpacker. Lass es sonst aus: der eingebaute Weg ist bei jeder von uns gemessenen Form schneller, und verschleierte Posts mit Hash-Namen nehmen ihn ohnehin immer, weil unrar ihrer Umbenennung nicht folgen kann. Derselbe Schalter für <code>nzbfast get</code>-Läufe ist die Umgebungsvariable <code>NZBFAST_NO_NATIVE_UNRAR=1</code>. Wenn unrar ein Archiv entpackt, das der eingebaute Entpacker abgelehnt hat, melde es bitte, damit wir den eingebauten Weg reparieren können.</td></tr>
 <tr><td>Sonarr/Radarr bekommt keine Verbindung</td><td>Port 6789 erreichbar? API-Key korrekt (voller Key, nicht der NZB-Key)? Client-Typ auf SABnzbd gestellt?</td></tr>
 <tr><td>Das Dashboard fragt nach einem API-Key, den ich nie gesetzt habe</td><td>Eine neue Installation macht sich selbst einen und druckt ihn einmalig beim Start (<a href="#firstrun-key">§2</a>). Er steht in der Datei <code>apikey</code> neben deiner Config und in der Startausgabe. Oder tipp aus einem bereits angemeldeten Browser unter Einstellungen → Sicherheit einen eigenen Key ein.</td></tr>
+<tr id="settings-gone"><td>Alle meine Einstellungen wirken nach einem Update weg<br>(Server, Pfade, API-Key)</td><td>Nichts an einem Update löscht Einstellungen; das heißt, nzbfast liest einen anderen, leeren Ordner. Zuerst: Das API-Key-Feld in den Einstellungen zeigt sich absichtlich leer - klick <b>Show</b>, bevor du schließt, dass er verloren ist. Auf Docker vergleich die <code>/config</code>-Zuordnung des neuen Containers mit der des alten: Ein geänderter Host-Pfad, ein relativer Pfad aus einem anderen Verzeichnis oder ein frischer appdata-Ordner lassen nzbfast allesamt bei null anfangen, während deine echten Einstellungen unangetastet am vorherigen Pfad liegen. Find den alten Ordner (such nach <code>settings.json</code>, deiner Config-Datei und <code>apikey</code> - die Orte stehen in <a href="#files">§17</a>), dann richte entweder die Zuordnung wieder auf ihn oder kopiere die Dateien in den neuen Ordner und starte neu. Das Start-Log nennt die exakt verwendete Einstellungsdatei: <code>[settings] applying saved settings from …</code></td></tr>
 <tr><td>Nichts im Netzwerk erreicht den Daemon</td><td>Prüf <code>--bind</code>: <code>127.0.0.1</code> bedient nur die Maschine, auf der nzbfast läuft. Der Standard, <code>0.0.0.0</code>, bedient jede Schnittstelle. Prüf dann die Firewall der Maschine selbst für Port 6789.</td></tr>
 <tr><td>Durchsuchen-Karte bleibt klein</td><td>Der Indexer wächst im Hintergrund - prüf, ob unter Einstellungen → Indexierung Gruppen gesetzt sind, und gib „Vertiefen pro Scan“ Zeit, Historie anzusammeln. „Jetzt scannen“ erzwingt einen Durchlauf; die Statuszeile zeigt den Live-Fortschritt.</td></tr>
 <tr><td>Wand zeigt falsches/kein Artwork</td><td>Detailblatt → ✎ Match korrigieren oder ↻ Metadaten erneuern. Film-Zuordnungen werden mit einem gratis OMDb-Key besser.</td></tr>
+<tr id="mac-cant-open"><td>macOS sagt, die Anwendung „nzbfast“ könne nicht geöffnet werden</td><td>Zwei Ursachen, beide schnell behoben. Wenn du das schlichte <code>-macos-universal.zip</code> verwendest: doppelklick <b>Start nzbfast.command</b>, nicht die Datei <code>nzbfast</code> daneben - das ist das Programm selbst, und der Finder beantwortet einen Doppelklick darauf mit genau dieser Meldung. Der Starter ist das, was alles einrichtet und startet. Kommt dieselbe Meldung auch beim Starter, hat die Kopie unterwegs ihr Unix-Ausführungsbit verloren: macOS bewahrt dieses Bit im .zip auf, Chat-Apps, Cloud-Laufwerke und erneutes Zippen aber nicht - so kommt ein weitergereichter Build nicht ausführbar bei dir an. Lade das .dmg oder das .zip direkt von der Releases-Seite, dann passiert das nicht. Um die vorhandene Kopie zu retten: Terminal öffnen, <code>chmod +x</code> mit einem Leerzeichen am Ende tippen, <b>Start nzbfast.command</b> und die Datei <code>nzbfast</code> ins Fenster ziehen, Return drücken - und dann den Starter erneut doppelklicken.</td></tr>
 <tr><td>Daemon startet nicht: Port belegt</td><td>Eine andere Instanz läuft schon - oder ändere <code>--port</code>.</td></tr>
 <tr><td>Wo sind die Logs?</td><td>Die Log-Karte im Dashboard, oder das Terminal bzw. die Logdatei, mit der du <code>serve</code> gestartet hast.</td></tr>
-</table>
+</table></div>
 <div class="note"><b>Hängst du immer noch?</b>Die Log-Karte nennt den Übeltäter
 meistens - häng ihr Ende an, wenn du ein Problem meldest, zusammen mit deiner
 <code>nzbfast --version</code>.</div>
