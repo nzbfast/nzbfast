@@ -807,7 +807,7 @@
 
     <p class="note" style="text-align:start"><b>The whole field, seconds, lower is better.</b> Best of three, tools interleaved inside each round rather than run in blocks, output checked against the source payload on every single run. A tool that produced the wrong bytes gets a correctness note, never a fast time. <code>rarpar</code> is Weaver's own RAR and PAR2 code, built from source at <code>bd87611</code>; we pin the commit rather than a version because its crates carry three different version numbers.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>shape</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <thead><tr><th>shape</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar 1.10.7</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">High-end desktop, 32 cores</td></tr>
         <tr><td>store, 1 GB</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
@@ -823,7 +823,7 @@
         <tr><td>solid</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">unsupported¹</td></tr>
         <tr><td>repetitive</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">unsupported¹</td></tr>
         <tr><td>big, 4 volumes</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">wrong output²</td><td class="no">unsupported¹</td></tr>
-        <tr><td>encrypted</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">no crypto³</td><td class="no">unsupported¹</td></tr>
+        <tr><td>encrypted</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>8.49</td><td class="no">no crypto³</td><td class="no">unsupported¹</td></tr>
         <tr><td>128 MiB dictionary</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">no big dict⁴</td><td class="no">unsupported¹</td></tr>
         <tr><td colspan="7" class="grp">Laptop, 14 cores / 20 threads, Windows⁵</td></tr>
         <tr><td>store, 1 GB</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">no CLI⁵</td><td>0.81</td><td>0.76</td></tr>

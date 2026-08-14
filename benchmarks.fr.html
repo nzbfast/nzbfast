@@ -555,7 +555,7 @@
 
     <p class="note" style="text-align:start"><b>Tout le plateau, en secondes, plus bas est meilleur.</b> Meilleur sur trois, outils entrelacés à l’intérieur de chaque tour plutôt que lancés par blocs, sortie vérifiée contre les données source à chaque exécution. Un outil qui produit les mauvais octets reçoit une note de correction, jamais un temps rapide. <code>rarpar</code> est le code RAR et PAR2 de Weaver, compilé depuis la source au commit <code>bd87611</code> ; nous épinglons le commit plutôt qu’une version parce que ses crates portent trois numéros de version différents.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>forme</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <thead><tr><th>forme</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar 1.10.7</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
       <tbody>
         <tr><td colspan="7" class="grp">Bureau haut de gamme, 32 cœurs</td></tr>
         <tr><td>store, 1 Go</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
@@ -571,7 +571,7 @@
         <tr><td>solide</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">non pris en charge¹</td></tr>
         <tr><td>répétitif</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">non pris en charge¹</td></tr>
         <tr><td>grand, 4 volumes</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">sortie erronée²</td><td class="no">non pris en charge¹</td></tr>
-        <tr><td>chiffré</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>9.61</td><td class="no">pas de chiffrement³</td><td class="no">non pris en charge¹</td></tr>
+        <tr><td>chiffré</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>8.49</td><td class="no">pas de chiffrement³</td><td class="no">non pris en charge¹</td></tr>
         <tr><td>dictionnaire de 128 Mio</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">gros dico non géré⁴</td><td class="no">non pris en charge¹</td></tr>
         <tr><td colspan="7" class="grp">Portable, 14 cœurs / 20 threads, Windows⁵</td></tr>
         <tr><td>store, 1 Go</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">pas de CLI⁵</td><td>0.81</td><td>0.76</td></tr>
