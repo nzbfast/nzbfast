@@ -851,6 +851,8 @@
 
     <p class="note" style="text-align:start"><b>One choice worth declaring.</b> The archives are packed with the compressor pinned to four threads. RAR's block split otherwise follows the core count of whatever machine packed the archive, so a 32-core box and a 20-core box produce different bytes from the same input and the machines stop being comparable. Pinning it makes the extraction corpus byte-identical everywhere, which is the point, but it also caps how much of the decode can run in parallel - so when the two closest shapes were losses we re-raced them against archives packed with all 32 threads, to check that the pinning was not what caused it. It was not: solid moved from 4.2% behind to 2.4% behind and the 128 MiB dictionary from 6.6% to 6.3%, the same ordering either way. Both are now wins on the pinned corpus by a wider margin than that check could account for.</p>
 
+    <p class="note" style="text-align:start"><b>Why there is no RAR4 row, and what happens to those posts.</b> Every shape above is RAR5 or RAR7, which is what usenet posts today. Older RAR4 archives still turn up, and the same engine reads them, including the compressed and password-protected forms, in the same single pass as the newer ones rather than writing the volumes to disk and unpacking them afterwards. They get no row here because the official <code>rar</code> 7.23 can no longer create RAR4, so there is no neutral corpus to race the field on; that work is checked against archives written by WinRAR 3.00 instead, byte for byte against unrar.</p>
+
     <h3 style="margin:44px 0 4px">PAR2 verify and repair: 1 GiB set, four damage levels</h3>
     <p class="note" style="text-align:start;margin-top:6px">Corpus: 1 GiB of random payload packed store-mode into 21 RAR volumes, then two PAR2 sets at 10% redundancy, one at 1 MiB blocks and one at 64 KiB, then fixed damage maps. Every run uses the same protocol: fresh copy, read the whole corpus once to warm the cache, then time. Best of three interleaved rounds; every repaired volume is compared against the pristine set on every round. Lower is better.</p>
 
@@ -945,7 +947,7 @@
     with memory on both engines: extraction peaks around 240 MB against unrar's 41 MB, and
     verify around 126 MB against turbo's 7 MB, because these are the inline engines that ride a
     live download rather than standalone one-shots. The 128 MiB-dictionary shape is the worst of
-    it, at about 423 MB against unrar's 139 MB. <b>The heaviest repair now costs memory too:</b>
+    it, at about 304 MB against unrar's 139 MB. <b>The heaviest repair now costs memory too:</b>
     the faster method for 512-plus missing blocks works from the recovery data held resident, so
     it is allowed up to a quarter of the machine's RAM, capped at 4 GB, and a machine that cannot
     spare that quietly takes the low-memory method instead - the same arithmetic and the same times
