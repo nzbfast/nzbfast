@@ -77,10 +77,10 @@
         <p>Les articles sont décodés en SIMD sur place, écrits une seule fois directement à leur
         position finale, et vérifiés en PAR2 depuis les mêmes tampons. L’archive est extraite
         <i>pendant</i> le téléchargement, ses volumes n’existent donc jamais sous forme de
-        fichiers. Cela vaut pour les archives simples, <b>chiffrées</b> et imbriquées, soit
+        fichiers. Cela vaut pour les archives simples, <b>chiffrées</b>, imbriquées et 7z, soit
         <a href="benchmarks.fr.html#census">environ 97% de tout ce qui est posté, en volume</a>.
-        Seules les archives réellement compressées et les 7z de premier niveau exigent encore une
-        seconde passe, et à elles deux elles représentent environ 3%.</p></div>
+        Seules les archives réellement compressées exigent encore une
+        seconde passe.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilité en union</h3>
         <p>Un article n’est « manquant » que lorsque <i>chaque</i> backbone configuré l’a refusé.
         Un décompte au bloc près tranche COMPLET / RÉPARABLE / IMPOSSIBLE avant de gaspiller le
@@ -139,10 +139,11 @@ socket ──TLS──▶ <b>décodage SIMD rapidyenc</b> (sur place - 4.95 GB/s
       </ul>
       <ul class="feat">
         <li><b>API prêtes à l’emploi:</b> <span class="d">API compatible SABnzbd et JSON-RPC NZBGet : Sonarr, Radarr, nzb360 et LunaSea fonctionnent sans modification. Import en un clic de votre config SAB/NZBGet.</span></li>
+        <li><b>Liens nzblnk:, résolus:</b> <span class="d">collez-en un sur le tableau de bord, ou cliquez-en un directement sur un board une fois que l'installation macOS ou Windows a enregistré le schéma. Le post obfusqué est cherché d'abord dans votre propre index, puis chez vos indexeurs, et le mot de passe du lien part avec la tâche.</span></li>
         <li><b>Indexeur intégré:</b> <span class="d">scanne vos newsgroups vers un index local cherchable, et sert du Newznab pour que votre pile *arr puisse le chercher aussi.</span></li>
         <li><b>Mur d’affiches avec métadonnées sans clé:</b> <span class="d">affiches, notes, casting et synopsis pour tout ce que contient votre index, sans aucune clé API à demander.</span></li>
         <li><b>Automatisation par liste de suivi:</b> <span class="d">nommez une série ou un film (diffusé ou non) ; il est récupéré dès son apparition, puis monté en qualité jusqu’à atteindre votre cible.</span></li>
-        <li><b>Un seul exécutable:</b> <span class="d">la réparation (par2) et l’extraction (RAR) voyagent dans le binaire. Dézippez, lancez, c’est fait.</span></li>
+        <li><b>Un seul exécutable:</b> <span class="d">la réparation (par2) et l’extraction (RAR) voyagent dans le binaire. Dézippez, lancez, c’est fait, et <a href="benchmarks.fr.html#unpack-repair">les deux égalent ou dépassent les outils autonomes</a> quand on les fait courir seuls.</span></li>
       </ul>
     </div>
   </div>

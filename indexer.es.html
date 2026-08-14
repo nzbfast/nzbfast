@@ -50,6 +50,7 @@
     <p class="lead">El indexador integrado escanea los newsgroups que te interesan; el muro convierte
     el resultado en pósteres, valoraciones, reparto y rejillas de episodios, usando solo fuentes
     públicas sin clave, obtenidas por tu propia instalación. Haz clic en un chip de episodio para descargarlo.</p>
+    <p class="lead" style="margin-top:14px"><b>Lee primero los límites.</b> Un escáner de cabeceras solo puede encontrar lo que se publicó con un nombre de archivo real, y buena parte de Usenet deliberadamente no lo está. Es una propiedad de cómo se subieron esos archivos y no algo que arregle un escáner mejor, así que <a href="#limits">los indexadores comerciales siguen siendo la recomendación</a> y aquí no se enciende nada a menos que lo pidas.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="Muro de pósteres de nzbfast: una rejilla de pósteres de TV con distintivos de calidad, valoraciones y número de temporadas" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Filas de tendencias:</b> franjas de «nuevo esta semana» y «de moda ahora» construidas a partir de la frecuencia de publicación.</li>
         <li><b>Un muro que aprende.</b> «No me interesa» oculta un título y enseña una regla permanente; el orden «Para ti» clasifica el muro de pósteres según el perfil de gustos que construyen tus propias capturas. Todo se queda en local.</li>
         <li><b>Corrige lo que sea.</b> ¿Coincidencia errónea? Elige entre los candidatos o simplemente escribe la identidad correcta: lo que fijas a mano nunca se sobrescribe. Apunta un póster a una URL o sube uno. Un botón reenriquece un solo título; otro borra y reconstruye el índice entero.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">La parte honesta</p>
+    <h2>Qué puede y qué no puede encontrar un escáner de cabeceras</h2>
+    <p class="lead">Lo medimos sobre nuestro propio índice en vez de adivinarlo, y la respuesta no salió a nuestro favor. Merece decirse con claridad, porque una función que encuentra en silencio una fracción de lo que esperas es peor que una que te da la cifra.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Encuentra los posts publicados con un nombre de archivo real.</b> Un escaneo lee las cabeceras del grupo de noticias, así que todo lo subido como <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> se reconoce, se analiza, se archiva bajo su título y recibe una carátula. Donde la gente todavía publica así, esto funciona bien y no necesita la cuenta de nadie.</li>
+        <li><b>No puede encontrar los posts ofuscados, y nada más que escanee puede tampoco.</b> Una parte grande y creciente de Usenet se sube con el nombre eliminado: un asunto aleatorio, nombres de archivo aleatorios dentro, todo volcado en un grupo cajón de sastre. El nombre real solo existe en un NZB que quien lo sube publica en otro sitio. Nunca se publicó en Usenet, así que no hay nada en el cable que ningún escáner pueda leer, ni el nuestro ni el de nadie.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>La cifra.</b> Un índice completo de 14.8 millones de posts escaneados dio alrededor de 31,000 lanzamientos navegables. Aproximadamente uno de cada quinientos. Casi todo lo demás es un único fragmento sin nombre que no se puede agrupar en un lanzamiento en absoluto.</li>
+        <li><b>Es poco probable que esto cambie.</b> Leímos las rutas de nombrado de los indexadores de código abierto y probamos las técnicas que podrían ayudar de forma plausible: la correlación previa a la base de datos por tamaño y hora de publicación no discrimina lo suficiente para identificar un lanzamiento, y descargar un segmento para leer la cabecera del archivo falla en los archivos con cabecera cifrada que dominan el conjunto ofuscado. Ninguna de las dos es un arreglo a corto plazo, y no vamos a dar a entender lo contrario.</li>
+        <li><b>Así que sigue usando indexadores comerciales.</b> A un indexador le <i>dicen</i> qué es un lanzamiento quien lo subió, que es exactamente la información que falta en el cable. Eso es una relación de comunidad, no un problema de ingeniería que un binario autoalojado pueda arrancar por su cuenta. nzbfast busca en tus cuentas de indexador directamente desde su propia interfaz y descarga directo a la cola, así que no pierdes nada dejando apagado el escáner integrado.</li>
       </ul>
     </div>
   </div>

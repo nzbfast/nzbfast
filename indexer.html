@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Indexer &amp; the poster wall - nzbfast</title>
-<meta name="description" content="Scan the groups you care about into a private index, then browse the result as a poster wall. Every bit of the metadata is pulled from keyless public sources by your own install. T">
+<meta name="description" content="An optional header scanner that turns the groups you choose into a private, browsable index with posters. It finds posts made under real filenames, not obfuscated ones, so commercial indexers stay recommended.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="indexer.html">
@@ -45,11 +45,16 @@
 
 <section>
   <div class="wrap">
-    <p class="kicker">The showcase</p>
+    <p class="kicker">Optional, off by default</p>
     <h2>Your index, presented as a poster wall</h2>
-    <p class="lead">The built-in indexer scans the newsgroups you care about, and the wall
-    turns what it finds into posters, ratings, cast and episode grids, all from keyless
+    <p class="lead">Switch the built-in indexer on and it scans the newsgroups you choose, and the
+    wall turns what it finds into posters, ratings, cast and episode grids, all from keyless
     public sources that your own install fetches. Click an episode chip to download it.</p>
+    <p class="lead" style="margin-top:14px"><b>Read the limits first.</b> A header scanner can only
+    find what was posted under a real filename, and much of Usenet deliberately is not. That is a
+    property of how those files were uploaded rather than something a better scanner fixes, so
+    <a href="#limits">commercial indexers stay the recommendation</a> and nothing here is switched
+    on unless you ask for it.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast poster wall: a grid of film posters with quality badges, ratings and years" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -78,11 +83,50 @@
         <li><b>Takedown detection.</b> Background availability sampling notices a group being reaped and badges its releases, so a post that's already being taken down doesn't waste a grab.</li>
       </ul>
       <ul class="plain">
-        <li><b>Keyless enrichment.</b> TVmaze for TV, iTunes Search for film, plus public ratings datasets, Wikidata, Wikipedia and AniList fill in posters, ratings and vote counts, cast, genres and plots. OMDb and TMDB keys work if you have them, but nothing needs one.</li>
+        <li><b>Keyless enrichment.</b> TVmaze for TV, plus public ratings datasets, Wikidata, Wikipedia and AniList fill in posters, ratings and vote counts, cast, genres and plots. OMDb and TMDB keys work if you have them, but nothing needs one.</li>
         <li><b>Episode grids:</b> per-season chips with the best encode of each episode a click from downloading, season packs flagged, and a "watch series" on every season header.</li>
         <li><b>Trending rows:</b> new-this-week and hot-right-now strips built from post frequency.</li>
         <li><b>A wall that learns.</b> "Not interested" hides a title and teaches a standing rule; the "For you" sort ranks the wall by the taste profile your own grabs build. All of it stays local.</li>
         <li><b>Fix anything.</b> Wrong match? Pick from the candidates or just type the right identity. Anything you set by hand is never overwritten. Point a poster at a URL or upload one. One button re-enriches a single title; another wipes and rebuilds the whole index.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">The honest part</p>
+    <h2>What a header scanner can and cannot find</h2>
+    <p class="lead">We measured this on our own index rather than guessing, and the answer did not
+    go our way. It is worth stating plainly, because a feature that quietly finds a fraction of
+    what you expect is worse than one that tells you the number.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>It finds posts made under a real filename.</b> A scan reads the newsgroup headers, so
+        anything uploaded as <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> is
+        recognised, parsed, filed under its title and given a poster. Where people still post that
+        way, this works well and needs nobody's account.</li>
+        <li><b>It cannot find obfuscated posts, and nor can anything else that scans.</b> A large
+        and growing share of Usenet is uploaded with the name stripped out: a random subject, random
+        filenames inside, all dropped into a catch-all group. The real name exists only in an NZB
+        the uploader publishes elsewhere. It was never posted to Usenet, so there is nothing on the
+        wire for any scanner to read - ours, or anyone's.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>The number.</b> A full index of 14.8 million scanned posts yielded about 31,000
+        browsable releases. Roughly one in five hundred. Almost everything else is a single
+        unnamed fragment that cannot be grouped into a release at all.</li>
+        <li><b>This is unlikely to change.</b> We read the open-source indexers' naming paths and
+        tested the techniques that could plausibly help: pre-database correlation by size and
+        posting time is not discriminating enough to identify a release, and fetching a segment to
+        read the archive header fails on the header-encrypted archives that dominate the obfuscated
+        set. Neither is a near-term fix, and we are not going to imply otherwise.</li>
+        <li><b>So keep using commercial indexers.</b> An indexer is <i>told</i> what a release is by
+        whoever uploaded it, which is exactly the information that is missing from the wire. That is
+        a community relationship, not an engineering problem a self-hosted binary can bootstrap.
+        nzbfast searches your indexer accounts directly from its own interface and grabs straight
+        into the queue, so you lose nothing by leaving the built-in scanner off.</li>
       </ul>
     </div>
   </div>

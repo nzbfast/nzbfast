@@ -76,9 +76,9 @@
         <p>Artikler SIMD-dekodes på stedet, skrives én gang rett til sine endelige offset
         og PAR2-verifiseres fra de samme bufferne. Arkivet pakkes ut <i>underveis</i> i
         nedlastingen, så volumene dets finnes aldri som filer i det hele tatt. Det gjelder
-        vanlige, <b>krypterte</b> og nøstede arkiver, som er <a href="benchmarks.nb.html#census">omtrent
-        97 % av alt som postes, målt i volum</a>. Bare genuint komprimerte arkiver og 7z på
-        toppnivå trenger fortsatt en andre omgang, og til sammen utgjør de omtrent 3 %.</p></div>
+        vanlige, <b>krypterte</b>, nøstede og 7z-arkiver, som er <a href="benchmarks.nb.html#census">omtrent
+        97 % av alt som postes, målt i volum</a>. Bare genuint komprimerte arkiver
+        trenger fortsatt en andre omgang.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-tilgjengelighet</h3>
         <p>En artikkel «mangler» bare når <i>hver</i> konfigurerte backbone har avvist
         den. Blokk-eksakt regnskap avgjør COMPLETE / REPAIRABLE / IMPOSSIBLE før det
@@ -137,10 +137,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Klar-til-bruk-API-er:</b> <span class="d">SABnzbd-kompatibelt API og NZBGet JSON-RPC: Sonarr, Radarr, nzb360 og LunaSea fungerer uendret. Ett-klikks-import av SAB-/NZBGet-oppsettet ditt.</span></li>
+        <li><b>nzblnk:-lenker, løst opp:</b> <span class="d">lim inn en på panelet, eller klikk på en rett på et board når macOS- eller Windows-installasjonen har registrert skjemaet. Det tilslørte innlegget slås opp i ditt eget indeks først, så hos indeksererne dine, og passordet i lenken følger med jobben.</span></li>
         <li><b>Innebygd indekserer:</b> <span class="d">skanner newsgroupene dine inn i en søkbar lokal indeks, serverer Newznab så *arr-stacken din kan søke i den også.</span></li>
         <li><b>Plakatvegg med nøkkelfri metadata:</b> <span class="d">illustrasjoner, vurderinger, rollebesetning og sammendrag for alt i indeksen din, uten API-nøkler å registrere seg for.</span></li>
         <li><b>Watchlist-automatisering:</b> <span class="d">navngi en serie eller film (sendt eller ikke); den hentes i det øyeblikket den dukker opp, deretter kvalitetsoppgradert til målet ditt er nådd.</span></li>
-        <li><b>Én enkelt kjørbar fil:</b> <span class="d">reparasjon (par2) og utpakking (RAR) rir inni binæren. Pakk ut, kjør, ferdig.</span></li>
+        <li><b>Én enkelt kjørbar fil:</b> <span class="d">reparasjon (par2) og utpakking (RAR) rir inni binæren. Pakk ut, kjør, ferdig, og <a href="benchmarks.nb.html#unpack-repair">begge matcher eller slår de frittstående verktøyene</a> når de kappes hver for seg.</span></li>
       </ul>
     </div>
   </div>

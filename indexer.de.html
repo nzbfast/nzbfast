@@ -50,6 +50,7 @@
     <p class="lead">Der eingebaute Indexer scannt die Newsgroups, die dich interessieren; die Wand macht
     daraus Poster, Bewertungen, Besetzung und Episodenraster, nur aus schlüssellosen öffentlichen
     Quellen, geholt von deiner eigenen Installation. Klick auf einen Episoden-Chip, um ihn zu laden.</p>
+    <p class="lead" style="margin-top:14px"><b>Lies zuerst die Grenzen.</b> Ein Header-Scanner findet nur, was unter einem echten Dateinamen gepostet wurde, und ein großer Teil des Usenets ist das absichtlich nicht. Das ist eine Eigenschaft davon, wie diese Dateien hochgeladen wurden, und nichts, das ein besserer Scanner behebt, also <a href="#limits">bleiben kommerzielle Indexer die Empfehlung</a>, und hier wird nichts eingeschaltet, solange du nicht darum bittest.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast poster wall: a grid of TV posters with quality badges, ratings and season counts" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Trend-Leisten:</b> Leisten für „Neu diese Woche“ und „Gerade heiß“, gebildet aus der Post-Frequenz.</li>
         <li><b>Eine Wand, die dazulernt.</b> „Kein Interesse“ blendet einen Titel aus und bringt zugleich eine dauerhafte Regel bei; die Sortierung „Für dich“ ordnet die Posterwand nach dem Geschmacksprofil, das deine eigenen Grabs aufbauen. All das bleibt lokal.</li>
         <li><b>Alles korrigierbar.</b> Falsche Zuordnung? Wähl aus den Kandidaten oder tipp einfach die richtige Identität ein. Was du von Hand setzt, wird nie überschrieben. Verweise ein Poster auf eine URL oder lade eins hoch. Ein Knopf reichert einen einzelnen Titel neu an, ein anderer löscht den ganzen Index und baut ihn neu auf.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Der ehrliche Teil</p>
+    <h2>Was ein Header-Scanner finden kann und was nicht</h2>
+    <p class="lead">Wir haben das an unserem eigenen Index gemessen, statt zu raten, und die Antwort ging nicht zu unseren Gunsten aus. Sie gehört klar gesagt, denn eine Funktion, die still einen Bruchteil dessen findet, was du erwartest, ist schlechter als eine, die dir die Zahl nennt.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Er findet Posts, die unter einem echten Dateinamen stehen.</b> Ein Scan liest die Newsgroup-Header, also wird alles, was als <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> hochgeladen wurde, erkannt, ausgewertet, unter seinem Titel abgelegt und mit einem Poster versehen. Wo Leute noch so posten, funktioniert das gut und braucht niemandes Konto.</li>
+        <li><b>Er kann verschleierte Posts nicht finden, und nichts anderes, das scannt, kann es auch.</b> Ein großer und wachsender Teil des Usenets wird mit entferntem Namen hochgeladen: ein zufälliger Betreff, zufällige Dateinamen darin, alles in eine Sammelgruppe geworfen. Der echte Name existiert nur in einer NZB, die der Uploader anderswo veröffentlicht. Er wurde nie ins Usenet gepostet, es gibt also auf der Leitung nichts, was irgendein Scanner lesen könnte - unserer nicht und niemandes sonst.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Die Zahl.</b> Ein vollständiger Index aus 14.8 Millionen gescannten Posts ergab etwa 31,000 durchsuchbare Releases. Ungefähr eines von fünfhundert. Fast alles andere ist ein einzelnes namenloses Bruchstück, das sich überhaupt nicht zu einem Release gruppieren lässt.</li>
+        <li><b>Daran wird sich wohl nichts ändern.</b> Wir haben die Benennungspfade der quelloffenen Indexer gelesen und die Techniken getestet, die plausibel helfen könnten: eine Korrelation vor der Datenbank über Größe und Postzeitpunkt trennt nicht scharf genug, um ein Release zu identifizieren, und ein Segment zu holen, um den Archivkopf zu lesen, scheitert an den kopfverschlüsselten Archiven, die den verschleierten Bestand beherrschen. Keines davon ist eine baldige Lösung, und wir werden nichts anderes andeuten.</li>
+        <li><b>Nutze also weiter kommerzielle Indexer.</b> Einem Indexer wird von demjenigen, der es hochgeladen hat, <i>gesagt</i>, was ein Release ist, und genau diese Information fehlt auf der Leitung. Das ist eine Gemeinschaftsbeziehung, kein technisches Problem, das ein selbst betriebenes Programm aus dem Nichts lösen kann. nzbfast durchsucht deine Indexer-Konten direkt aus seiner eigenen Oberfläche und holt geradewegs in die Warteschlange, du verlierst also nichts, wenn du den eingebauten Scanner ausgeschaltet lässt.</li>
       </ul>
     </div>
   </div>

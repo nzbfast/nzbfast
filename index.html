@@ -76,9 +76,9 @@
         <p>Articles are SIMD-decoded in place, written once straight to their final offsets,
         and PAR2-verified out of the same buffers. The archive is extracted <i>during</i> the
         download, so its volumes never exist as files at all. That holds for plain,
-        <b>encrypted</b> and nested archives, which is <a href="benchmarks.html#census">about
-        97% of everything posted, by volume</a>. Only genuinely compressed archives and
-        top-level 7z still need a second pass, and between them they are about 3%.</p></div>
+        <b>encrypted</b>, nested and 7z archives, which is <a href="benchmarks.html#census">about
+        97% of everything posted, by volume</a>. Only genuinely compressed archives still
+        need a second pass.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union availability</h3>
         <p>An article counts as "missing" only once <i>every</i> configured backbone has
         turned it down. Block-exact accounting calls the job COMPLETE, REPAIRABLE or
@@ -136,7 +136,8 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Drop-in APIs:</b> <span class="d">SABnzbd-compatible API and NZBGet JSON-RPC. Sonarr, Radarr, nzb360 and LunaSea work unmodified. One-click import of your SAB/NZBGet config.</span></li>
-        <li><b>Built-in indexer:</b> <span class="d">scans your newsgroups into a searchable local index, serves Newznab so your *arr stack can search it too.</span></li>
+        <li><b>nzblnk: links, resolved:</b> <span class="d">paste one on the dashboard, or click one straight from a board once the macOS or Windows install has registered the scheme. The obfuscated posting is looked up in your own index first, then your indexers, and the link's password goes to the job.</span></li>
+        <li><b>Optional built-in indexer:</b> <span class="d">off by default. Turn it on and it scans your newsgroups into a searchable local index and serves Newznab. It finds what is posted under real filenames, which is a limited slice of Usenet, so keep using your commercial indexers - see the Indexer page.</span></li>
         <li><b>Poster wall with keyless metadata:</b> <span class="d">artwork, ratings, cast and synopses for everything in your index, with no API keys to sign up for.</span></li>
         <li><b>Watchlist automation:</b> <span class="d">name a show or film (aired or not); it's grabbed the moment it appears, then quality-upgraded until your target is met.</span></li>
         <li><b>A single executable:</b> <span class="d">repair (par2) and unpack (RAR) ride inside the binary. Unzip, run, done, and <a href="benchmarks.html#unpack-repair">both match or beat the standalone tools</a> when raced on their own.</span></li>
@@ -172,8 +173,9 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
     <div class="grid3">
       <div class="card"><h3>Sonarr / Radarr</h3><p>It carries the full SABnzbd-compatible API, so
         you add nzbfast as a "SABnzbd" download client and it just works: grabs, categories,
-        priorities, retries, post-processing scripts on the SAB_* contract, history. The Newznab
-        facade goes one further and lets the *arrs <i>search your local index</i> as if it were an indexer.</p></div>
+        priorities, retries, post-processing scripts on the SAB_* contract, history. Keep your
+        usual indexers pointed at the *arrs; if you also switch the built-in indexer on, the
+        Newznab facade lets them <i>search your own scans</i> alongside.</p></div>
       <div class="card"><h3>nzb360 / LunaSea</h3><p>The daemon speaks NZBGet's JSON-RPC as well,
         so the popular phone remotes drive nzbfast without any changes. The dashboard itself also
         has a proper phone layout for when you're away from the big screen.</p></div>

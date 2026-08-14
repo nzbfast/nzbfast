@@ -50,6 +50,7 @@
     <p class="lead">Den inbyggda indexeraren skannar de newsgroups du bryr dig om; väggen förvandlar
     resultatet till posters, betyg, skådespelare och avsnittsrutnät, med enbart nyckellösa publika
     källor, hämtade av din egen installation. Klicka på ett avsnittsmärke för att ladda ner det.</p>
+    <p class="lead" style="margin-top:14px"><b>Läs gränserna först.</b> En huvudavsökare kan bara hitta det som lagts upp under ett riktigt filnamn, och en stor del av Usenet är avsiktligt inte det. Det är en egenskap hos hur de filerna laddades upp snarare än något en bättre avsökare rättar till, så <a href="#limits">kommersiella indexerare förblir rekommendationen</a> och ingenting här slås på om du inte ber om det.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast poster wall: a grid of TV posters with quality badges, ratings and season counts" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Trendrader:</b> remsor för nytt-den-här-veckan och hett-just-nu, byggda utifrån postfrekvens.</li>
         <li><b>En vägg som lär sig.</b> "Inte intresserad" döljer en titel och lär den en stående regel; sorteringen "För dig" rangordnar väggen efter smakprofilen som dina egna grabs bygger upp. Alltihop stannar lokalt.</li>
         <li><b>Korrigera vad som helst.</b> Fel matchning? Välj bland kandidaterna eller skriv bara in rätt identitet. Det du sätter för hand skrivs aldrig över. Peka en poster mot en URL eller ladda upp en själv. En knapp berikar om en enskild titel; en annan raderar och bygger om hela indexet.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Den ärliga delen</p>
+    <h2>Vad en huvudavsökare kan och inte kan hitta</h2>
+    <p class="lead">Vi mätte detta på vårt eget index i stället för att gissa, och svaret gick inte vår väg. Det är värt att säga rakt ut, för en funktion som tyst hittar en bråkdel av vad du väntar dig är sämre än en som ger dig siffran.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Den hittar poster som lagts upp under ett riktigt filnamn.</b> En avsökning läser diskussionsgruppens huvuden, så allt som laddats upp som <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> känns igen, tolkas, sorteras under sin titel och får en affisch. Där folk fortfarande lägger upp så fungerar det bra och kräver ingens konto.</li>
+        <li><b>Den kan inte hitta obfuskerade poster, och det kan inget annat som söker av heller.</b> En stor och växande del av Usenet laddas upp med namnet borttaget: ett slumpmässigt ämne, slumpmässiga filnamn inuti, allt slängt i en samlingsgrupp. Det riktiga namnet finns bara i en NZB som den som laddar upp publicerar någon annanstans. Det lades aldrig upp på Usenet, så det finns ingenting på ledningen som någon avsökare kan läsa, varken vår eller någon annans.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Siffran.</b> Ett fullständigt index över 14.8 miljoner avsökta poster gav omkring 31,000 bläddringsbara utgåvor. Ungefär en av femhundra. Nästan allt annat är ett enda namnlöst fragment som inte alls går att gruppera till en utgåva.</li>
+        <li><b>Detta lär inte ändras.</b> Vi läste namngivningsvägarna hos indexerarna med öppen källkod och testade de tekniker som rimligen skulle kunna hjälpa: korrelation före databasen utifrån storlek och publiceringstid skiljer inte tillräckligt skarpt för att identifiera en utgåva, och att hämta ett segment för att läsa arkivhuvudet misslyckas på de huvudkrypterade arkiv som dominerar den obfuskerade mängden. Ingendera är en lösning på kort sikt, och vi tänker inte antyda något annat.</li>
+        <li><b>Fortsätt alltså använda kommersiella indexerare.</b> En indexerare får <i>veta</i> vad en utgåva är av den som laddade upp den, vilket är precis den information som saknas på ledningen. Det är en gemenskapsrelation, inte ett tekniskt problem som en egendriven binär kan starta upp på egen hand. nzbfast söker i dina indexerarkonton direkt från sitt eget gränssnitt och hämtar rakt in i kön, så du förlorar ingenting på att låta den inbyggda avsökaren vara avstängd.</li>
       </ul>
     </div>
   </div>

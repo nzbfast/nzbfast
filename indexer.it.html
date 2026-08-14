@@ -50,6 +50,7 @@
     <p class="lead">L'indexer integrato scansiona i newsgroup che ti interessano; la bacheca trasforma
     il risultato in poster, valutazioni, cast e griglie di episodi, usando solo fonti pubbliche
     senza chiave, recuperate dalla tua installazione. Clicca il chip di un episodio per scaricarlo.</p>
+    <p class="lead" style="margin-top:14px"><b>Leggi prima i limiti.</b> Uno scanner di intestazioni può trovare solo ciò che è stato pubblicato con un nome di file reale, e gran parte di Usenet deliberatamente non lo è. È una proprietà di come quei file sono stati caricati anziché qualcosa che uno scanner migliore risolve, quindi <a href="#limits">gli indicizzatori commerciali restano la raccomandazione</a> e qui non si accende nulla se non lo chiedi.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast poster wall: a grid of TV posters with quality badges, ratings and season counts" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Righe di tendenza:</b> strisce «novità della settimana» e «caldi adesso» costruite sulla frequenza dei post.</li>
         <li><b>Una bacheca che impara.</b> «Non mi interessa» nasconde un titolo e insegna una regola permanente; l'ordinamento «Per te» classifica la bacheca secondo il profilo dei gusti costruito dai tuoi stessi prelievi. Tutto resta in locale.</li>
         <li><b>Correggi qualsiasi cosa.</b> Corrispondenza sbagliata? Scegli tra i candidati o digita semplicemente l'identità giusta. Ciò che imposti a mano non viene mai sovrascritto. Punta un poster a un URL o caricalo tu. Un pulsante ri-arricchisce un singolo titolo; un altro azzera e ricostruisce l'intero indice.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">La parte onesta</p>
+    <h2>Cosa può e cosa non può trovare uno scanner di intestazioni</h2>
+    <p class="lead">L'abbiamo misurato sul nostro indice anziché tirare a indovinare, e la risposta non è andata a nostro favore. Vale la pena dirlo chiaramente, perché una funzione che trova in sordina una frazione di quello che ti aspetti è peggio di una che ti dice il numero.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Trova i post pubblicati con un nome di file reale.</b> Una scansione legge le intestazioni del newsgroup, quindi qualunque cosa caricata come <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> viene riconosciuta, analizzata, archiviata sotto il suo titolo e dotata di locandina. Dove la gente pubblica ancora così, funziona bene e non richiede l'account di nessuno.</li>
+        <li><b>Non può trovare i post offuscati, e nemmeno qualsiasi altra cosa che scansiona.</b> Una quota ampia e crescente di Usenet viene caricata con il nome rimosso: un oggetto casuale, nomi di file casuali all'interno, tutto scaricato in un gruppo generico. Il nome vero esiste solo in un NZB che chi carica pubblica altrove. Non è mai stato pubblicato su Usenet, quindi non c'è nulla sul filo che uno scanner possa leggere - né il nostro, né quello di chiunque altro.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Il numero.</b> Un indice completo di 14.8 milioni di post scansionati ha prodotto circa 31,000 rilasci consultabili. All'incirca uno su cinquecento. Quasi tutto il resto è un singolo frammento senza nome che non si può raggruppare in un rilascio in alcun modo.</li>
+        <li><b>È improbabile che cambi.</b> Abbiamo letto i percorsi di denominazione degli indicizzatori open source e provato le tecniche che avrebbero plausibilmente potuto aiutare: la correlazione precedente al database per dimensione e orario di pubblicazione non è abbastanza discriminante per identificare un rilascio, e recuperare un segmento per leggere l'intestazione dell'archivio fallisce sugli archivi a intestazione cifrata che dominano l'insieme offuscato. Nessuna delle due è una soluzione a breve termine, e non lasceremo intendere il contrario.</li>
+        <li><b>Quindi continua a usare gli indicizzatori commerciali.</b> A un indicizzatore <i>viene detto</i> cos'è un rilascio da chi lo ha caricato, che è esattamente l'informazione assente dal filo. È un rapporto di comunità, non un problema di ingegneria che un binario auto-ospitato possa avviare da solo. nzbfast interroga i tuoi account di indicizzatore direttamente dalla propria interfaccia e preleva dritto nella coda, quindi non perdi nulla lasciando spento lo scanner integrato.</li>
       </ul>
     </div>
   </div>

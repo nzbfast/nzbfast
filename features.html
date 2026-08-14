@@ -60,7 +60,7 @@
       </ul>
       <ul class="feat">
         <li><b>SABnzbd-compatible + NZBGet JSON-RPC APIs:</b> <span class="d">Sonarr/Radarr/nzb360/LunaSea work unmodified.</span></li>
-        <li><b>Built-in indexer:</b> <span class="d">scan groups into a local, searchable, Newznab-serving index.</span></li>
+        <li><b>Built-in indexer (optional, off by default):</b> <span class="d">scan groups into a local, searchable, Newznab-serving index. Real filenames only, so keep your commercial indexers.</span></li>
         <li><b>Poster wall:</b> <span class="d">artwork, ratings, cast, episode grids; no API keys.</span></li>
         <li><b>Watchlist auto-grab + quality upgrades:</b> <span class="d">grab on first appearance, upgrade to target quality.</span></li>
         <li><b>Single self-contained executable:</b> <span class="d">par2 + RAR unpack embedded.</span></li>
@@ -145,9 +145,9 @@
       <ul class="plain">
         <li><b>SABnzbd-compatible API:</b> the whole surface the *arrs actually use: addfile/addurl, categories, priorities, per-job pause/resume, retry, pagination, two-tier API keys. Sonarr and Radarr talk to it as if it were SABnzbd.</li>
         <li><b>NZBGet JSON-RPC facade.</b> nzb360, LunaSea and other NZBGet remotes connect unmodified.</li>
-        <li><b>Newznab server.</b> Your local index answers t=search/tvsearch/movie, so the *arrs can treat your own scans as an indexer.</li>
+        <li><b>Newznab server.</b> With the built-in indexer switched on, your local index answers t=search/tvsearch/movie, so the *arrs can treat your own scans as one more indexer alongside the ones you pay for. It is off unless you turn it on, and the facade is closed while it is.</li>
         <li><b>RSS auto-grab:</b> an indexer's feed is the same thing a news reader subscribes to, except it lists what has just been posted to Usenet. Anything matching the filters downloads itself. Feeds are filtered with an NZBGet-style language, added and edited live from the dashboard.</li>
-        <li><b>Watchlist.</b> Name the shows and films you want, even ones that haven't aired yet. Each episode is grabbed on its first appearance and upgraded until it reaches your target quality (say, 720p → 1080p REMUX), with the superseded copy deleted only after the upgrade has verified. An airdate calendar shows what's coming.</li>
+        <li><b>Watchlist.</b> Name the shows and films you want, even ones that haven't aired yet. Each episode is grabbed on its first appearance and upgraded until it reaches your target quality (say, 720p → 1080p REMUX), with the superseded copy deleted only after the upgrade has verified. An airdate calendar shows what's coming. It can also follow your Plex watchlist: link your account, or paste the list's address, and everything you add there is watched here too.</li>
       </ul>
       <ul class="plain">
         <li><b>Watch folder.</b> Drop a .nzb in and it downloads; the file disappears once it's been taken.</li>
@@ -209,7 +209,7 @@
       <li><b>Single self-contained executable.</b> par2 and RAR unpacking are native code compiled into the binary. Nothing gets extracted on first run, and there's no runtime and no installer to fuss with.</li>
       <li><b>macOS, first-class:</b> a universal binary for Apple Silicon and Intel, a native SwiftUI menu-bar app, a launchd unit, and a Homebrew formula.</li>
       <li><b>Windows:</b> a fully static x64 exe that runs on stock Windows 10 and 11, with a double-click launcher and guided setup.</li>
-      <li><b>Linux, Docker and NAS:</b> a hardened systemd unit, a multi-stage Docker image with a linuxserver-style PUID/PGID entrypoint, a compose file in the box, an Unraid template, and a Synology guide. <a href="download.html">All platforms →</a></li>
+      <li><b>Linux, Docker and NAS:</b> a hardened systemd unit, a multi-stage Docker image with a linuxserver-style PUID/PGID entrypoint, a compose file in the box, and step-by-step guides for Unraid and Synology. <a href="download.html">All platforms →</a></li>
       <li><b>It never updates itself.</b> New releases show up as a dashboard notice, or not even that if you turn the check off. Updating stays your call, on your schedule.</li>
       <li><b>Guided setup.</b> Run the <code>nzbfast setup</code> wizard, or let it auto-detect an existing SABnzbd or NZBGet config. You'll have a first download running in under two minutes.</li>
     </ul>

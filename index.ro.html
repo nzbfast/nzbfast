@@ -76,9 +76,9 @@
         <p>Articolele sunt decodate SIMD pe loc, scrise o singură dată direct la offset-urile lor
         finale și verificate PAR2 din aceleași buffere. Arhiva este extrasă <i>în timpul</i>
         descărcării, așa că volumele ei nu există niciodată ca fișiere. Asta e valabil pentru
-        arhivele simple, <b>criptate</b> și imbricate, adică <a href="benchmarks.ro.html#census">circa
-        97% din tot ce se postează, ca volum de date</a>. Doar arhivele cu adevărat comprimate și
-        7z la nivelul de sus mai au nevoie de o a doua trecere, iar împreună sunt circa 3%.</p></div>
+        arhivele simple, <b>criptate</b>, imbricate și 7z, adică <a href="benchmarks.ro.html#census">circa
+        97% din tot ce se postează, ca volum de date</a>. Doar arhivele cu adevărat comprimate
+        mai au nevoie de o a doua trecere.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilitate prin uniune</h3>
         <p>Un articol este „lipsă” doar când <i>fiecare</i> backbone configurat l-a
         refuzat. Contabilitatea exactă la nivel de bloc decide COMPLETE / REPAIRABLE / IMPOSSIBLE înainte de
@@ -137,10 +137,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>API-uri drop-in:</b> <span class="d">API compatibil SABnzbd și NZBGet JSON-RPC: Sonarr, Radarr, nzb360 și LunaSea funcționează nemodificate. Import cu un clic al configurației tale SAB/NZBGet.</span></li>
+        <li><b>Legături nzblnk:, rezolvate:</b> <span class="d">lipește una pe panou, sau dă clic pe una direct pe un board după ce instalarea macOS sau Windows a înregistrat schema. Postarea ofuscată este căutată întâi în propriul tău index, apoi la indexatoarele tale, iar parola din legătură merge la sarcină.</span></li>
         <li><b>Indexer integrat:</b> <span class="d">scanează newsgroup-urile tale într-un index local căutabil, servește Newznab ca stack-ul tău *arr să-l poată căuta și el.</span></li>
         <li><b>Perete de postere cu metadate fără cheie:</b> <span class="d">grafică, note, distribuție și sinopsisuri pentru tot ce e în indexul tău, fără nicio cheie API de creat.</span></li>
         <li><b>Automatizare watchlist:</b> <span class="d">numește un serial sau un film (difuzat sau nu); este preluat în clipa în care apare, apoi îmbunătățit ca calitate până se atinge ținta ta.</span></li>
-        <li><b>Un singur executabil:</b> <span class="d">repararea (par2) și dezarhivarea (RAR) sunt în interiorul binarului. Dezarhivezi, rulezi, gata.</span></li>
+        <li><b>Un singur executabil:</b> <span class="d">repararea (par2) și dezarhivarea (RAR) sunt în interiorul binarului. Dezarhivezi, rulezi, gata, iar <a href="benchmarks.ro.html#unpack-repair">amândouă egalează sau depășesc uneltele de sine stătătoare</a> când sunt puse să concureze separat.</span></li>
       </ul>
     </div>
   </div>

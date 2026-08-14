@@ -50,6 +50,7 @@
     <p class="lead">O indexador integrado varre os newsgroups que lhe interessam, e o mural transforma
     o que encontra em pôsteres, notas, elenco e grades de episódios, tudo a partir de fontes públicas
     sem chave que a sua própria instalação busca. Clique num chip de episódio para baixá-lo.</p>
+    <p class="lead" style="margin-top:14px"><b>Lê primeiro os limites.</b> Um scanner de cabeçalhos só consegue encontrar o que foi publicado com um nome de ficheiro real, e boa parte da Usenet deliberadamente não está. É uma propriedade de como esses ficheiros foram carregados e não algo que um scanner melhor resolva, portanto <a href="#limits">os indexadores comerciais continuam a ser a recomendação</a> e aqui nada é ligado a não ser que o peças.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="Mural de pôsteres do nzbfast: uma grade de pôsteres de TV com emblemas de qualidade, notas e contagens de temporadas" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Linhas em alta:</b> faixas de novidades da semana e do momento, montadas a partir da frequência de publicações.</li>
         <li><b>Um mural que aprende.</b> "Sem interesse" oculta um título e ensina uma regra permanente; a ordenação "Para você" classifica o mural pelo perfil de gosto que as suas próprias capturas constroem. Tudo isso fica local.</li>
         <li><b>Corrija qualquer coisa.</b> Correspondência errada? Escolha entre os candidatos ou simplesmente digite a identidade certa. Nada do que você define à mão é sobrescrito. Aponte um pôster para uma URL ou envie um. Um botão reenriquece um único título; outro apaga e reconstrói o índice inteiro.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">A parte honesta</p>
+    <h2>O que um scanner de cabeçalhos consegue e não consegue encontrar</h2>
+    <p class="lead">Medimos isto no nosso próprio índice em vez de adivinhar, e a resposta não foi a nosso favor. Vale a pena dizê-lo com clareza, porque uma funcionalidade que encontra em surdina uma fração do que esperas é pior do que uma que te dá o número.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Encontra os posts publicados com um nome de ficheiro real.</b> Uma leitura percorre os cabeçalhos do grupo de notícias, portanto tudo o que for carregado como <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> é reconhecido, analisado, arrumado sob o seu título e recebe um cartaz. Onde as pessoas ainda publicam assim, isto funciona bem e não precisa da conta de ninguém.</li>
+        <li><b>Não consegue encontrar posts ofuscados, e nada mais que faça leitura consegue.</b> Uma fatia grande e crescente da Usenet é carregada com o nome retirado: um assunto aleatório, nomes de ficheiro aleatórios lá dentro, tudo despejado num grupo genérico. O nome verdadeiro existe apenas num NZB que quem carrega publica noutro sítio. Nunca foi publicado na Usenet, portanto não há nada na linha que qualquer leitor possa ler, nem o nosso nem o de ninguém.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>O número.</b> Um índice completo de 14.8 milhões de posts lidos rendeu cerca de 31,000 lançamentos navegáveis. Aproximadamente um em quinhentos. Quase todo o resto é um único fragmento sem nome que não se consegue agrupar num lançamento de todo.</li>
+        <li><b>É pouco provável que mude.</b> Lemos os caminhos de nomeação dos indexadores de código aberto e testámos as técnicas que plausivelmente poderiam ajudar: a correlação anterior à base de dados por tamanho e hora de publicação não é suficientemente discriminante para identificar um lançamento, e ir buscar um segmento para ler o cabeçalho do arquivo falha nos arquivos de cabeçalho cifrado que dominam o conjunto ofuscado. Nenhuma das duas é uma solução a curto prazo, e não vamos dar a entender o contrário.</li>
+        <li><b>Por isso continua a usar indexadores comerciais.</b> A um indexador é-lhe <i>dito</i> o que é um lançamento por quem o carregou, que é exatamente a informação que falta na linha. Isso é uma relação de comunidade, não um problema de engenharia que um binário auto-alojado consiga arrancar sozinho. O nzbfast pesquisa as tuas contas de indexador diretamente a partir da sua própria interface e agarra direto para a fila, portanto não perdes nada em deixar o leitor interno desligado.</li>
       </ul>
     </div>
   </div>

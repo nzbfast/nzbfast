@@ -77,10 +77,10 @@
         <p>Artikel werden per SIMD an Ort und Stelle dekodiert, einmal direkt an ihre
         endgültigen Offsets geschrieben und aus denselben Puffern PAR2-geprüft. Das Archiv wird
         <i>während</i> des Downloads entpackt, seine Volumes existieren also nie als Dateien.
-        Das gilt für einfache, <b>verschlüsselte</b> und verschachtelte Archive, also
+        Das gilt für einfache, <b>verschlüsselte</b>, verschachtelte und 7z-Archive, also
         <a href="benchmarks.de.html#census">rund 97 % von allem, was gepostet wird, nach
-        Volumen</a>. Nur echt komprimierte Archive und Top-Level-7z brauchen noch einen zweiten
-        Durchlauf, und zusammen machen sie etwa 3 % aus.</p></div>
+        Volumen</a>. Nur echt komprimierte Archive brauchen noch einen zweiten
+        Durchlauf.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-Verfügbarkeit</h3>
         <p>Ein Artikel gilt erst als „fehlend“, wenn <i>jedes</i> konfigurierte Backbone ihn
         verweigert hat. Blockgenaue Buchführung entscheidet VOLLSTÄNDIG / REPARIERBAR / UNMÖGLICH,
@@ -139,10 +139,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD-Dekodierung</b> (an Ort und Stelle -
       </ul>
       <ul class="feat">
         <li><b>Drop-in-APIs:</b> <span class="d">SABnzbd-kompatible API und NZBGet-JSON-RPC: Sonarr, Radarr, nzb360 und LunaSea laufen unverändert. Ein-Klick-Import deiner SAB-/NZBGet-Konfiguration.</span></li>
+        <li><b>nzblnk:-Links, aufgelöst:</b> <span class="d">einen ins Dashboard einfügen, oder direkt auf einem Board anklicken, sobald die macOS- oder Windows-Installation das Schema registriert hat. Der verschleierte Beitrag wird zuerst im eigenen Index gesucht, dann bei deinen Indexern, und das Passwort aus dem Link geht mit an den Job.</span></li>
         <li><b>Eingebauter Indexer:</b> <span class="d">scannt deine Newsgroups in einen durchsuchbaren lokalen Index und bietet Newznab, damit auch dein *arr-Stack darin suchen kann.</span></li>
         <li><b>Posterwand mit schlüssellosen Metadaten:</b> <span class="d">Artwork, Bewertungen, Besetzung und Handlung für alles in deinem Index, ganz ohne API-Keys, für die man sich anmelden muss.</span></li>
         <li><b>Watchlist-Automatik:</b> <span class="d">nenn eine Serie oder einen Film (ausgestrahlt oder nicht); geladen wird beim ersten Auftauchen, dann bis zu deiner Zielqualität aufgerüstet.</span></li>
-        <li><b>Eine einzige Programmdatei:</b> <span class="d">Reparatur (par2) und Entpacken (RAR) stecken in der Binary. Auspacken, starten, fertig.</span></li>
+        <li><b>Eine einzige Programmdatei:</b> <span class="d">Reparatur (par2) und Entpacken (RAR) stecken in der Binary. Auspacken, starten, fertig, und <a href="benchmarks.de.html#unpack-repair">beide erreichen oder schlagen die eigenständigen Werkzeuge</a>, wenn man sie einzeln antreten lässt.</span></li>
       </ul>
     </div>
   </div>

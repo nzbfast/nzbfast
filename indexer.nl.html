@@ -50,6 +50,7 @@
     <p class="lead">De ingebouwde indexer scant de nieuwsgroepen die jou interesseren; de wall maakt
     van het resultaat posters, ratings, cast en afleveringsgrids, met alleen sleutelloze publieke
     bronnen, opgehaald door je eigen installatie. Klik op een afleveringschip om hem te downloaden.</p>
+    <p class="lead" style="margin-top:14px"><b>Lees eerst de grenzen.</b> Een headerscanner kan alleen vinden wat onder een echte bestandsnaam is geplaatst, en een groot deel van Usenet is dat bewust niet. Dat is een eigenschap van hoe die bestanden zijn geüpload en niet iets dat een betere scanner oplost, dus <a href="#limits">commerciële indexeerders blijven de aanbeveling</a> en hier wordt niets ingeschakeld tenzij je erom vraagt.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast-posterwall: een raster van tv-posters met kwaliteitsbadges, ratings en seizoensaantallen" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Trending-rijen:</b> stroken "nieuw deze week" en "nu populair", opgebouwd uit postfrequentie.</li>
         <li><b>Een wall die leert.</b> "Niet geïnteresseerd" verbergt een titel en leert meteen een vaste regel aan; de sortering "Voor jou" rangschikt de posterwall op het smaakprofiel dat je eigen grabs opbouwen. Dat blijft allemaal lokaal.</li>
         <li><b>Alles te corrigeren.</b> Verkeerde match? Kies uit de kandidaten of typ gewoon de juiste identiteit. Wat je met de hand instelt wordt nooit overschreven. Wijs een poster naar een URL of upload er een. Eén knop verrijkt een enkele titel opnieuw; een andere wist en herbouwt de hele index.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Het eerlijke deel</p>
+    <h2>Wat een headerscanner wel en niet kan vinden</h2>
+    <p class="lead">We hebben dit op onze eigen index gemeten in plaats van te gokken, en het antwoord viel niet in ons voordeel uit. Het is de moeite waard het onomwonden te zeggen, want een functie die stilletjes een fractie vindt van wat je verwacht is slechter dan een die je het getal geeft.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Hij vindt posts die onder een echte bestandsnaam staan.</b> Een scan leest de nieuwsgroepheaders, dus alles wat is geüpload als <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> wordt herkend, ontleed, onder zijn titel opgeborgen en van een poster voorzien. Waar mensen nog zo posten werkt dit goed en is niemands account nodig.</li>
+        <li><b>Hij kan versluierde posts niet vinden, en niets anders dat scant kan dat ook.</b> Een groot en groeiend deel van Usenet wordt geüpload met de naam eruit gestript: een willekeurig onderwerp, willekeurige bestandsnamen erin, alles gedumpt in een verzamelgroep. De echte naam bestaat alleen in een NZB die de uploader elders publiceert. Hij is nooit op Usenet geplaatst, dus er staat niets op de lijn dat welke scanner dan ook kan lezen, de onze niet en die van niemand.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Het getal.</b> Een volledige index van 14.8 miljoen gescande posts leverde ongeveer 31,000 doorbladerbare releases op. Ruwweg één op vijfhonderd. Bijna al het overige is één naamloos fragment dat helemaal niet tot een release te groeperen valt.</li>
+        <li><b>Dit gaat waarschijnlijk niet veranderen.</b> We hebben de naamgevingspaden van de open source-indexeerders gelezen en de technieken getest die plausibel zouden kunnen helpen: correlatie vóór de database op grootte en plaatsingstijd onderscheidt niet scherp genoeg om een release te identificeren, en een segment ophalen om de archiefheader te lezen mislukt op de archieven met versleutelde headers die de versluierde verzameling domineren. Geen van beide is een oplossing op korte termijn, en we gaan niet suggereren van wel.</li>
+        <li><b>Blijf dus commerciële indexeerders gebruiken.</b> Een indexeerder krijgt van degene die het uploadde te <i>horen</i> wat een release is, en dat is precies de informatie die op de lijn ontbreekt. Dat is een gemeenschapsrelatie, geen technisch probleem dat een zelfgehost programma uit het niets kan oplossen. nzbfast doorzoekt je indexeeraccounts rechtstreeks vanuit zijn eigen interface en pakt direct naar de wachtrij, dus je verliest niets door de ingebouwde scanner uit te laten.</li>
       </ul>
     </div>
   </div>

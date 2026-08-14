@@ -77,9 +77,9 @@
         <p>Artikelen worden in-place SIMD-gedecodeerd, één keer weggeschreven op hun definitieve
         offsets en PAR2-geverifieerd vanuit dezelfde buffers. Het archief wordt <i>tijdens</i> de
         download uitgepakt, dus de volumes bestaan nooit als bestand. Dat geldt voor gewone,
-        <b>versleutelde</b> en geneste archieven, samen <a href="benchmarks.nl.html#census">zo'n
-        97% van alles wat gepost wordt, naar volume</a>. Alleen echt gecomprimeerde archieven en
-        top-level 7z hebben nog een tweede doorgang nodig, en samen zijn ze ongeveer 3%.</p></div>
+        <b>versleutelde</b>, geneste en 7z-archieven, samen <a href="benchmarks.nl.html#census">zo'n
+        97% van alles wat gepost wordt, naar volume</a>. Alleen echt gecomprimeerde archieven
+        hebben nog een tweede doorgang nodig.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-beschikbaarheid</h3>
         <p>Een artikel is pas "ontbrekend" als <i>élke</i> ingestelde backbone het heeft geweigerd.
         Blok-exacte boekhouding bepaalt COMPLEET / HERSTELBAAR / ONMOGELIJK voordat er bytes
@@ -138,10 +138,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD-decode</b> (in-place - 4,95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Drop-in-API's:</b> <span class="d">SABnzbd-compatibele API en NZBGet JSON-RPC: Sonarr, Radarr, nzb360 en LunaSea werken zonder aanpassing. Import van je SAB/NZBGet-config met één klik.</span></li>
+        <li><b>nzblnk:-links, opgelost:</b> <span class="d">plak er een op het dashboard, of klik er een rechtstreeks aan op een board zodra de macOS- of Windows-installatie het schema heeft geregistreerd. De versluierde post wordt eerst in je eigen index opgezocht en daarna bij je indexers, en het wachtwoord uit de link gaat mee naar de klus.</span></li>
         <li><b>Ingebouwde indexer:</b> <span class="d">scant je nieuwsgroepen naar een doorzoekbare lokale index en serveert Newznab, zodat je *arr-stack er ook in kan zoeken.</span></li>
         <li><b>Posterwall met sleutelloze metadata:</b> <span class="d">artwork, ratings, cast en synopsissen voor alles in je index, zonder ook maar één API-sleutel aan te vragen.</span></li>
         <li><b>Watchlist-automatisering:</b> <span class="d">voer een serie of film op (uitgezonden of niet); hij wordt gegrepen zodra hij verschijnt en daarna in kwaliteit geüpgraded tot je doel is bereikt.</span></li>
-        <li><b>Eén enkel uitvoerbaar bestand:</b> <span class="d">herstel (par2) en uitpakken (RAR) zitten in de binary. Uitpakken, uitvoeren, klaar.</span></li>
+        <li><b>Eén enkel uitvoerbaar bestand:</b> <span class="d">herstel (par2) en uitpakken (RAR) zitten in de binary. Uitpakken, uitvoeren, klaar, en <a href="benchmarks.nl.html#unpack-repair">beide evenaren of verslaan de losse tools</a> wanneer je ze apart tegen elkaar laat racen.</span></li>
       </ul>
     </div>
   </div>

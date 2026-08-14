@@ -76,10 +76,10 @@
         <p>Os artigos são decodificados por SIMD no próprio lugar, escritos uma única vez direto
         para seus deslocamentos finais e verificados por PAR2 a partir dos mesmos buffers. O
         arquivo compactado é extraído <i>durante</i> o download, então seus volumes nunca existem
-        como arquivos. Isso vale para arquivos simples, <b>criptografados</b> e aninhados, o que é
+        como arquivos. Isso vale para arquivos simples, <b>criptografados</b>, aninhados e 7z, o que é
         <a href="benchmarks.pt.html#census">cerca de 97% de tudo o que é publicado, em volume</a>.
-        Só arquivos genuinamente comprimidos e 7z de nível superior ainda precisam de uma segunda
-        passagem, e juntos somam cerca de 3%.</p></div>
+        Só arquivos genuinamente comprimidos ainda precisam de uma segunda
+        passagem.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilidade por união</h3>
         <p>Um artigo só conta como "ausente" quando <i>todo</i> backbone configurado o recusou.
         A contabilidade exata por bloco declara o trabalho COMPLETE, REPAIRABLE ou IMPOSSIBLE antes de
@@ -138,10 +138,11 @@ socket ──TLS──▶ <b>decodificação SIMD rapidyenc</b> (no lugar - 4,95
       </ul>
       <ul class="feat">
         <li><b>APIs de encaixe direto:</b> <span class="d">API compatível com o SABnzbd e JSON-RPC do NZBGet: Sonarr, Radarr, nzb360 e LunaSea funcionam sem modificação. Importação de um clique da sua configuração SAB/NZBGet.</span></li>
+        <li><b>Links nzblnk:, resolvidos:</b> <span class="d">cole um no painel, ou clique em um direto num board assim que a instalação do macOS ou do Windows tiver registrado o esquema. A postagem ofuscada é procurada primeiro no seu próprio índice e depois nos seus indexadores, e a senha do link vai junto para o trabalho.</span></li>
         <li><b>Indexador integrado:</b> <span class="d">varre seus newsgroups para um índice local pesquisável, serve Newznab para que sua pilha *arr também possa pesquisá-lo.</span></li>
         <li><b>Mural de pôsteres com metadados sem chave:</b> <span class="d">imagens, notas, elenco e sinopses para tudo no seu índice, sem nenhuma chave de API para cadastrar.</span></li>
         <li><b>Automação de lista de acompanhamento:</b> <span class="d">nomeie uma série ou filme (estreado ou não); é capturado no momento em que aparece, depois tem a qualidade melhorada até atingir seu alvo.</span></li>
-        <li><b>Um único executável:</b> <span class="d">reparo (par2) e extração (RAR) viajam dentro do binário. Descompacte, execute, pronto.</span></li>
+        <li><b>Um único executável:</b> <span class="d">reparo (par2) e extração (RAR) viajam dentro do binário. Descompacte, execute, pronto, e <a href="benchmarks.pt.html#unpack-repair">ambos igualam ou superam as ferramentas independentes</a> quando disputam sozinhos.</span></li>
       </ul>
     </div>
   </div>

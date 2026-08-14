@@ -76,10 +76,9 @@
         <p>Gli articoli vengono decodificati SIMD sul posto, scritti una sola volta ai loro
         offset finali e verificati PAR2 dagli stessi buffer. L'archivio viene estratto
         <i>durante</i> il download, così i suoi volumi non esistono mai come file. Vale per gli
-        archivi semplici, <b>cifrati</b> e annidati, cioè <a href="benchmarks.it.html#census">circa
+        archivi semplici, <b>cifrati</b>, annidati e 7z, cioè <a href="benchmarks.it.html#census">circa
         il 97% di tutto ciò che viene pubblicato, in volume</a>. Solo gli archivi davvero
-        compressi e i 7z di primo livello richiedono ancora una seconda passata, e insieme
-        sono circa il 3%.</p></div>
+        compressi richiedono ancora una seconda passata.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilità in unione</h3>
         <p>Un articolo è «mancante» solo quando <i>ogni</i> backbone configurato lo ha rifiutato.
         Una contabilità esatta al blocco decide COMPLETO / RIPARABILE / IMPOSSIBILE prima di
@@ -138,10 +137,11 @@ socket ──TLS──▶ <b>decodifica SIMD rapidyenc</b> (sul posto - 4.95 GB/
       </ul>
       <ul class="feat">
         <li><b>API drop-in:</b> <span class="d">API compatibile SABnzbd e JSON-RPC NZBGet: Sonarr, Radarr, nzb360 e LunaSea funzionano senza modifiche. Importazione in un clic della tua configurazione SAB/NZBGet.</span></li>
+        <li><b>Link nzblnk:, risolti:</b> <span class="d">incollane uno sulla dashboard, oppure cliccane uno direttamente su un board una volta che l'installazione macOS o Windows ha registrato lo schema. Il post offuscato viene cercato prima nel tuo indice, poi presso i tuoi indicizzatori, e la password del link va al lavoro.</span></li>
         <li><b>Indexer integrato:</b> <span class="d">scansiona i tuoi newsgroup in un indice locale ricercabile, e serve Newznab così anche il tuo stack *arr può cercarlo.</span></li>
         <li><b>Bacheca dei poster con metadati senza chiave:</b> <span class="d">copertine, valutazioni, cast e trame per tutto ciò che è nel tuo indice, senza nessuna chiave API da richiedere.</span></li>
         <li><b>Automazione della watchlist:</b> <span class="d">indica una serie o un film (già uscito o no); viene prelevato appena compare, poi migliorato di qualità fino a raggiungere il tuo obiettivo.</span></li>
-        <li><b>Un unico eseguibile:</b> <span class="d">riparazione (par2) ed estrazione (RAR) viaggiano dentro il binario. Estrai, avvia, fatto.</span></li>
+        <li><b>Un unico eseguibile:</b> <span class="d">riparazione (par2) ed estrazione (RAR) viaggiano dentro il binario. Estrai, avvia, fatto, e <a href="benchmarks.it.html#unpack-repair">entrambi eguagliano o battono gli strumenti autonomi</a> quando corrono da soli.</span></li>
       </ul>
     </div>
   </div>

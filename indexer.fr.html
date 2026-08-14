@@ -51,6 +51,7 @@
     le résultat en affiches, notes, casting et grilles d’épisodes, en s’appuyant uniquement sur des
     sources publiques sans clé, récupérées par votre propre installation. Cliquez sur une pastille
     d’épisode pour le télécharger.</p>
+    <p class="lead" style="margin-top:14px"><b>Lisez d'abord les limites.</b> Un scanner d'en-têtes ne peut trouver que ce qui a été publié sous un vrai nom de fichier, et une grande partie d'Usenet ne l'est délibérément pas. C'est une propriété de la façon dont ces fichiers ont été mis en ligne plutôt que quelque chose qu'un meilleur scanner corrige, donc <a href="#limits">les indexeurs commerciaux restent la recommandation</a> et rien ici n'est activé sans que vous le demandiez.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast poster wall: a grid of TV posters with quality badges, ratings and season counts" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -84,6 +85,26 @@
         <li><b>Rangées tendance :</b> des bandeaux « nouveautés de la semaine » et « en vogue en ce moment » bâtis à partir de la fréquence des posts.</li>
         <li><b>Un mur qui apprend.</b> « Pas intéressé » masque un titre et enseigne une règle permanente ; le tri « Pour vous » classe le mur d’affiches selon le profil de goûts que vos propres téléchargements construisent. Tout cela reste en local.</li>
         <li><b>Tout se corrige.</b> Mauvaise correspondance ? Choisissez parmi les candidats ou saisissez simplement la bonne identité. Rien de ce que vous réglez à la main n’est jamais écrasé. Pointez une affiche vers une URL ou téléversez-la. Un bouton ré-enrichit un seul titre ; un autre efface et reconstruit tout l’index.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">La partie honnête</p>
+    <h2>Ce qu'un scanner d'en-têtes peut et ne peut pas trouver</h2>
+    <p class="lead">Nous l'avons mesuré sur notre propre index plutôt que de le deviner, et la réponse n'est pas allée dans notre sens. Cela vaut la peine d'être dit clairement, car une fonctionnalité qui trouve discrètement une fraction de ce que vous attendez est pire qu'une qui vous donne le chiffre.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Il trouve les posts publiés sous un vrai nom de fichier.</b> Un scan lit les en-têtes du newsgroup, donc tout ce qui est mis en ligne comme <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> est reconnu, analysé, classé sous son titre et doté d'une affiche. Là où les gens publient encore ainsi, cela fonctionne bien et ne demande le compte de personne.</li>
+        <li><b>Il ne peut pas trouver les posts obfusqués, et rien d'autre qui scanne ne le peut non plus.</b> Une part importante et croissante d'Usenet est mise en ligne avec le nom retiré : un sujet aléatoire, des noms de fichiers aléatoires à l'intérieur, le tout déposé dans un groupe fourre-tout. Le vrai nom n'existe que dans un NZB que l'uploadeur publie ailleurs. Il n'a jamais été posté sur Usenet, il n'y a donc rien sur le fil qu'un scanner puisse lire - le nôtre, ou celui de quiconque.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Le chiffre.</b> Un index complet de 14.8 millions de posts scannés a donné environ 31,000 sorties parcourables. Environ une sur cinq cents. Presque tout le reste est un unique fragment sans nom qui ne peut pas du tout être regroupé en une sortie.</li>
+        <li><b>Cela a peu de chances de changer.</b> Nous avons lu les chemins de nommage des indexeurs libres et testé les techniques qui pourraient plausiblement aider : la corrélation avant base de données par taille et heure de publication n'est pas assez discriminante pour identifier une sortie, et récupérer un segment pour lire l'en-tête de l'archive échoue sur les archives à en-têtes chiffrés qui dominent l'ensemble obfusqué. Ni l'un ni l'autre n'est un correctif à court terme, et nous n'allons pas laisser entendre le contraire.</li>
+        <li><b>Continuez donc à utiliser des indexeurs commerciaux.</b> Un indexeur se fait <i>dire</i> ce qu'est une sortie par celui qui l'a mise en ligne, ce qui est exactement l'information absente du fil. C'est une relation de communauté, pas un problème d'ingénierie qu'un binaire auto-hébergé peut amorcer. nzbfast interroge vos comptes d'indexeur directement depuis sa propre interface et récupère droit dans la file, vous ne perdez donc rien à laisser le scanner intégré désactivé.</li>
       </ul>
     </div>
   </div>

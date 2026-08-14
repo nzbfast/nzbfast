@@ -78,6 +78,11 @@
     <h2>Route A: Container Manager Project <span class="tag now" style="vertical-align:middle">recommended</span></h2>
     <p class="lead-guide">One file you can back up, re-use, and update with a single click. This is the
     route to take if you want nzbfast to keep itself up to date.</p>
+    <div class="callout"><b>The quickest version.</b>
+    <a href="nzbfast-synology.yml" download="docker-compose.yml">Download <code>docker-compose.yml</code></a>,
+    upload it into a folder on your NAS with File Station (e.g. <code>/docker/nzbfast</code>), edit the three
+    values at the top, and create a Project pointing at that folder. The steps below are the same thing
+    done by hand.</div>
     <ol class="steps">
       <li><h3>Create the project</h3>
         <p>File Station → make the project folder, e.g. <code>/docker/nzbfast</code>. Then Container Manager →
@@ -99,11 +104,13 @@
       # - NZBFAST_APIKEY=change-me   # only if you'll connect Sonarr/Radarr
     volumes:
       - ./config:/config          # settings + index database
-      - ./downloads:/downloads    # finished files
+      - ./downloads:/downloads    # finished files - change this line if you
+                                  # also run Sonarr or Radarr, see below
       - ./watch:/watch            # drop an .nzb here to auto-download
 
-  # Optional: checks nightly for a newer nzbfast image and recreates the
-  # container when one ships. Delete this service to update by hand instead.
+  # Optional: checks nightly for a newer nzbfast image and recreates
+  # the container when one ships. Needs the Docker socket; delete this
+  # service to update by hand, or on a DSM schedule instead.
   watchtower:
     image: containrrr/watchtower
     container_name: nzbfast-watchtower
@@ -122,11 +129,29 @@
       </li>
     </ol>
     <div class="callout"><b>About that last service.</b> Watchtower is what keeps nzbfast current, and it
-    needs the Docker socket to recreate containers. That access is root-equivalent on your NAS, so it is a
-    real trade: convenience against handing one container broad control. If you would rather not, delete the
-    <code>watchtower</code> block and update by hand (see <a href="#updating">Updating</a>). It is scoped to
-    the <code>nzbfast</code> container by the name at the end of the <code>command</code> line, so it will
-    never touch your other containers.</div>
+    needs the Docker socket to recreate containers. Mounting <code>/var/run/docker.sock</code> gives that
+    container root-equivalent control of your NAS, so it is a real trade: convenience against handing one
+    container broad power. If you would rather not make it, delete the <code>watchtower</code> block and take
+    the scheduled-task route below instead. It is scoped to the <code>nzbfast</code> container by the name at
+    the end of the <code>command</code> line, so it will never touch your other containers.</div>
+
+    <h2 id="nosocket" style="margin-top:34px">Auto-update without the Docker socket</h2>
+    <p class="lead-guide">DSM can do the same job on a schedule, and nothing needs the socket mounted. Delete
+    the <code>watchtower</code> service from the compose file, then:</p>
+    <ol class="steps">
+      <li><h3>Create the task</h3>
+        <p>Control Panel → <b>Task Scheduler</b> → <b>Create</b> → <b>Scheduled Task</b> →
+        <b>User-defined script</b>. Name it something like <code>nzbfast update</code> and set
+        <b>User</b> to <code>root</code>, which Docker commands need. Schedule it daily, at a quiet hour.</p>
+      </li>
+      <li><h3>Give it this command</h3>
+        <pre class="cmd">cd /volume1/docker/nzbfast &amp;&amp; docker compose pull &amp;&amp; docker compose up -d</pre>
+        <p class="note">Adjust the path to your project folder. On DSM 7.1 and older the command is
+        <code>docker-compose</code> (with the hyphen) rather than <code>docker compose</code>.</p>
+      </li>
+    </ol>
+    <p class="lead-guide">The trade here runs the other way: the task itself runs as root, but nothing gains
+    standing access to the Docker socket, and you can read exactly what it does.</p>
   </div>
 </section>
 
@@ -141,7 +166,8 @@
         <p>File Station → create a shared folder or sub-tree for the container's data, e.g.:</p>
         <div class="tbl"><table><tbody>
           <tr><td><code>/docker/nzbfast/config</code></td><td>settings + index database</td></tr>
-          <tr><td><code>/docker/nzbfast/downloads</code></td><td>finished files land here</td></tr>
+          <tr><td><code>/docker/nzbfast/downloads</code></td><td>finished files land here (but see
+            <a href="#arrpaths">Sonarr and Radarr</a> if you run them)</td></tr>
           <tr><td><code>/docker/nzbfast/watch</code></td><td>drop an <code>.nzb</code> here to auto-download it</td></tr>
         </tbody></table></div>
       </li>
@@ -191,6 +217,37 @@
 
 <section class="alt">
   <div class="wrap">
+    <h2 id="arrpaths">Sonarr and Radarr: where downloads have to live</h2>
+    <p class="lead-guide">Skip this if you do not run them. If you do, it decides whether every
+    import is instant or is a full copy of a 5-50 GB release, and on NAS hardware a copy is the
+    slowest thing in the chain.</p>
+    <p>An <i>arr</i> imports by <b>renaming</b> the files into your library when downloads and library
+    share a filesystem, and by <b>copying then deleting</b> when they do not. Docker decides that more
+    bluntly than the disk does: two separate mounts look like two filesystems to a container even when
+    one volume sits underneath. On a DiskStation <code>/docker</code> and your media share are
+    different shared folders by construction, so the folders above produce the copy case by default.</p>
+    <p>Put both under one shared folder instead. If your library lives in a shared folder called
+    <code>data</code>:</p>
+    <div class="tbl"><table><tbody>
+      <tr><td><code>/volume1/data/usenet</code></td><td>nzbfast downloads here</td></tr>
+      <tr><td><code>/volume1/data/media</code></td><td>your Sonarr/Radarr library</td></tr>
+    </tbody></table></div>
+    <p>Mount it into nzbfast at the <b>same path on both sides</b> - in the compose file,
+    <code>- /volume1/data/usenet:/volume1/data/usenet</code> in place of the downloads line, plus
+    <code>- NZBFAST_OUT=/volume1/data/usenet</code> under <code>environment:</code>.</p>
+    <div class="callout"><b>Both halves matter.</b> The shared root is what makes the import a rename.
+    The identical path is what makes it happen at all: nzbfast tells your *arr where a finished job is,
+    so that path has to mean the same thing inside their container as inside nzbfast's. Map it
+    somewhere else and the download just sits in the queue while the *arr reports a remote path mapping
+    error, with nothing actually wrong with the files.</div>
+    <p>Give nzbfast <code>usenet</code> only, not the whole <code>data</code> folder - it has no
+    business in your library, and the rename still works because it is your *arr that moves the files
+    and it sees both sides. There is <b>no <code>incomplete</code> folder</b> to make: SABnzbd needs one
+    because it writes there and moves everything when a job finishes, while nzbfast writes at the final
+    path from the first article on. A SAB migrant has two filesystem boundaries to get right here and
+    you have exactly one. TRaSH keep a DSM-specific guide too:
+    <a href="https://trash-guides.info/Hardlinks/How-to-setup-for/Synology/">trash-guides.info</a>.</p>
+
     <h2>Connecting Sonarr / Radarr</h2>
     <p class="lead-guide">nzbfast speaks the SABnzbd API. In your *arr app, add a <b>SABnzbd</b> download client:
     <b>Host</b> = your NAS IP, <b>Port</b> = <code>6789</code>, <b>API Key</b> = the value you set in
@@ -202,6 +259,8 @@
     <ul class="plain">
       <li><b>Automatically</b>, if you took Route A and kept the <code>watchtower</code> service: nothing to do.
       It checks nightly at 04:00 and recreates the container when a new version ships.</li>
+      <li><b>Automatically, without the Docker socket:</b> the DSM scheduled task described under
+      <a href="#nosocket">Auto-update without the Docker socket</a>.</li>
       <li><b>By hand, in a Project:</b> Container Manager → <b>Project</b> → <code>nzbfast</code> → <b>Stop</b>,
       then <b>Build</b> (this re-pulls <code>latest</code>), then <b>Start</b>.</li>
       <li><b>By hand, Route B:</b> Container Manager → <b>Registry</b> → re-download the <code>latest</code> tag,
@@ -218,6 +277,13 @@
   <div class="wrap">
     <h2>Troubleshooting</h2>
     <ul class="plain">
+      <li><b>It won't start after an update</b>, or Container Manager says "stopped unexpectedly": the
+      container prints the reason and exits, so it is in the container's own log. Container Manager →
+      <b>Container</b> → <code>nzbfast</code> → <b>Details</b> → the <b>Log</b> tab. The <b>Log</b> page in DSM's
+      left-hand menu is a different thing, recording who pressed start and stop, and will never show why a
+      container died. Over SSH: <code>sudo docker logs --tail 50 nzbfast</code>. A container that quits a
+      second or two after starting, repeatedly, is usually refusing on purpose rather than crashing, and the
+      log says which case it is.</li>
       <li><b>"Permission denied" / files owned by root</b>: your <code>PUID</code>/<code>PGID</code> don't match
       the folder owner. Re-check with <code>id your_dsm_username</code>. This is the most common issue.</li>
       <li><b>Can't reach the dashboard</b>: confirm the container is running and the port is mapped. If something

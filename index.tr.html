@@ -75,10 +75,10 @@
       <div class="card"><span class="ic">🚿</span><h3>Tek geçiş, neredeyse her biçim</h3>
         <p>Makaleler yerinde SIMD ile kod çözülür, son ofsetlerine bir kez yazılır ve aynı
         tamponlardan PAR2 ile doğrulanır. Arşiv indirme <i>sırasında</i> çıkarılır, böylece
-        birimleri dosya olarak hiç var olmaz. Bu düz, <b>şifreli</b> ve iç içe arşivler için
+        birimleri dosya olarak hiç var olmaz. Bu düz, <b>şifreli</b>, iç içe ve 7z arşivler için
         geçerlidir; bu da <a href="benchmarks.tr.html#census">hacme göre gönderilen her şeyin
-        yaklaşık %97'si</a> demektir. Yalnızca gerçekten sıkıştırılmış arşivler ve üst düzey 7z
-        hâlâ ikinci bir geçiş ister; ikisi birlikte yaklaşık %3.</p></div>
+        yaklaşık %97'si</a> demektir. Yalnızca gerçekten sıkıştırılmış arşivler
+        hâlâ ikinci bir geçiş ister.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Birleşim kullanılabilirliği</h3>
         <p>Bir makale yalnızca yapılandırılmış <i>her</i> backbone onu reddettiğinde
         "eksik"tir. Blok kesinlikli muhasebe, bayt israf etmeden COMPLETE / REPAIRABLE /
@@ -136,10 +136,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Tak-çalıştır API'ler:</b> <span class="d">SABnzbd uyumlu API ve NZBGet JSON-RPC: Sonarr, Radarr, nzb360 ve LunaSea değişmeden çalışır. SAB/NZBGet yapılandırmanı tek tıkla içe aktar.</span></li>
+        <li><b>nzblnk: bağlantıları, çözümlenmiş:</b> <span class="d">panoya bir tanesini yapıştırın ya da macOS veya Windows kurulumu şemayı kaydettikten sonra bir board üzerinde doğrudan tıklayın. Belirsizleştirilmiş gönderi önce kendi dizininizde, sonra dizinleyicilerinizde aranır ve bağlantıdaki parola işe geçer.</span></li>
         <li><b>Gömülü dizinleyici:</b> <span class="d">haber gruplarını aranabilir bir yerel dizine tarar, Newznab sunar, böylece *arr yığının da onu arayabilir.</span></li>
         <li><b>Anahtarsız meta verili poster duvarı:</b> <span class="d">dizinindeki her şey için görseller, puanlar, oyuncular ve özetler; kaydolman gereken hiçbir API anahtarı olmadan.</span></li>
         <li><b>İzleme listesi otomasyonu:</b> <span class="d">bir diziyi ya da filmi adlandır (yayınlanmış olsun ya da olmasın); belirdiği an yakalanır, sonra hedefine ulaşana dek kalitesi yükseltilir.</span></li>
-        <li><b>Tek bir çalıştırılabilir dosya:</b> <span class="d">onarım (par2) ve açma (RAR) ikili dosyanın içinde gider. Aç, çalıştır, bitti.</span></li>
+        <li><b>Tek bir çalıştırılabilir dosya:</b> <span class="d">onarım (par2) ve açma (RAR) ikili dosyanın içinde gider. Aç, çalıştır, bitti; üstelik <a href="benchmarks.tr.html#unpack-repair">ikisi de tek başına yarıştırıldığında bağımsız araçlara eşit ya da onlardan hızlı</a>.</span></li>
       </ul>
     </div>
   </div>

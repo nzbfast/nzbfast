@@ -50,6 +50,7 @@
     <p class="lead">Sisäänrakennettu indeksoija skannaa keskusteluryhmät, joista välität, ja seinä muuttaa
     löytämänsä julisteiksi, arvosanoiksi, näyttelijöiksi ja jaksoruudukoiksi, kaikki avaimettomista julkisista
     lähteistä, jotka oma asennuksesi hakee. Napsauta jaksomerkkiä ladataksesi sen.</p>
+    <p class="lead" style="margin-top:14px"><b>Lue ensin rajat.</b> Otsakeskanneri voi löytää vain sen mikä on postattu oikealla tiedostonimellä, ja suuri osa Usenetistä ei tarkoituksella ole. Se on ominaisuus siinä miten nuo tiedostot ladattiin eikä jotain minkä parempi skanneri korjaa, joten <a href="#limits">kaupalliset indeksoijat pysyvät suosituksena</a> eikä täällä kytketä mitään päälle ellet pyydä.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast-julisteseinä: ruudukko TV-julisteita laatumerkeillä, arvosanoilla ja kausimäärillä" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Trendirivit:</b> uutta tällä viikolla- ja juuri nyt kuumaa -nauhat julkaisutiheydestä koottuina.</li>
         <li><b>Seinä, joka oppii.</b> ”Ei kiinnosta” piilottaa nimikkeen ja opettaa pysyvän säännön; ”Sinulle”-järjestys lajittelee seinän sen makuprofiilin mukaan, jonka omat nappauksesi rakentavat. Kaikki tämä pysyy paikallisena.</li>
         <li><b>Korjaa mikä tahansa.</b> Väärä osuma? Valitse ehdokkaista tai kirjoita oikea identiteetti itse. Mitään käsin asettamaasi ei koskaan ylikirjoiteta. Osoita juliste URL:iin tai lataa oma. Yksi painike rikastaa yksittäisen nimikkeen uudelleen, toinen pyyhkii ja rakentaa koko indeksin uudelleen.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Rehellinen osa</p>
+    <h2>Mitä otsakeskanneri voi ja ei voi löytää</h2>
+    <p class="lead">Mittasimme tämän omasta indeksistämme sen sijaan että olisimme arvanneet, eikä vastaus mennyt meidän eduksemme. Se kannattaa sanoa suoraan, sillä ominaisuus joka hiljaa löytää murto-osan siitä mitä odotat on huonompi kuin sellainen joka kertoo sinulle luvun.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Se löytää postaukset jotka on tehty oikealla tiedostonimellä.</b> Skannaus lukee keskusteluryhmän otsakkeet, joten kaikki mikä on ladattu muodossa <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> tunnistetaan, jäsennetään, arkistoidaan otsikkonsa alle ja saa julisteen. Siellä missä ihmiset yhä postaavat noin, tämä toimii hyvin eikä vaadi kenenkään tiliä.</li>
+        <li><b>Se ei löydä hämärrettyjä postauksia, eikä löydä mikään muukaan joka skannaa.</b> Suuri ja kasvava osa Usenetistä ladataan nimi riisuttuna: satunnainen aihe, satunnaiset tiedostonimet sisällä, kaikki pudotettuna kaatoluokkaryhmään. Oikea nimi on olemassa vain NZB-tiedostossa jonka lataaja julkaisee muualla. Sitä ei koskaan postattu Usenetiin, joten johdolla ei ole mitään mitä mikään skanneri voisi lukea, ei meidän eikä kenenkään.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Luku.</b> Täysi indeksi 14.8 miljoonasta skannatusta postauksesta tuotti noin 31,000 selattavaa julkaisua. Karkeasti yksi viidestäsadasta. Lähes kaikki muu on yksittäinen nimetön sirpale jota ei voi ryhmitellä julkaisuksi lainkaan.</li>
+        <li><b>Tämä tuskin muuttuu.</b> Luimme avoimen lähdekoodin indeksoijien nimeämispolut ja testasimme tekniikat jotka voisivat uskottavasti auttaa: tietokantaa edeltävä korrelointi koon ja postausajan perusteella ei erottele riittävän tarkasti julkaisun tunnistamiseen, ja segmentin hakeminen arkiston otsakkeen lukemiseksi epäonnistuu otsakesalatuilla arkistoilla jotka hallitsevat hämärrettyä joukkoa. Kumpikaan ei ole lähiajan korjaus, emmekä aio antaa toisin ymmärtää.</li>
+        <li><b>Joten jatka kaupallisten indeksoijien käyttöä.</b> Indeksoijalle <i>kerrotaan</i> mikä julkaisu on, sen toimesta joka sen latasi, ja juuri se tieto puuttuu johdolta. Se on yhteisösuhde eikä tekninen ongelma jonka itse ylläpidetty ohjelma voisi käynnistää tyhjästä. nzbfast hakee indeksoijatileiltäsi suoraan omasta käyttöliittymästään ja nappaa suoraan jonoon, joten et menetä mitään jättämällä sisäänrakennetun skannerin pois päältä.</li>
       </ul>
     </div>
   </div>

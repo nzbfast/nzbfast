@@ -50,6 +50,7 @@
     <p class="lead">Den indbyggede indexer scanner de newsgroups, du går op i; væggen forvandler
     resultatet til postere, bedømmelser, medvirkende og episodegitre, kun ud fra nøglefrie offentlige
     kilder, hentet af din egen installation. Klik på en episode-chip for at hente den.</p>
+    <p class="lead" style="margin-top:14px"><b>Læs grænserne først.</b> En hovedskanner kan kun finde det, der er lagt op under et rigtigt filnavn, og en stor del af Usenet er det bevidst ikke. Det er en egenskab ved, hvordan de filer blev lagt op, snarere end noget en bedre skanner retter, så <a href="#limits">kommercielle indeksere er fortsat anbefalingen</a>, og intet her bliver slået til, medmindre du beder om det.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="nzbfast-postervæg: et gitter af tv-postere med kvalitetsmærker, bedømmelser og sæsonantal" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Trend-rækker:</b> nyt-i-denne-uge- og hot-lige-nu-striber bygget ud fra postfrekvens.</li>
         <li><b>En væg, der lærer.</b> "Ikke interesseret" skjuler en titel og lærer den en stående regel; sorteringen "Til dig" rangerer væggen efter den smagsprofil, dine egne hentninger bygger. Det hele forbliver lokalt.</li>
         <li><b>Ret hvad som helst.</b> Forkert match? Vælg blandt kandidaterne, eller skriv bare den rigtige identitet. Alt, hvad du sætter i hånden, overskrives aldrig. Peg en poster mod en URL, eller upload en. Én knap beriger en enkelt titel på ny; en anden sletter og genopbygger hele indekset.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Den ærlige del</p>
+    <h2>Hvad en hovedskanner kan og ikke kan finde</h2>
+    <p class="lead">Vi målte det på vores eget indeks frem for at gætte, og svaret faldt ikke ud til vores fordel. Det er værd at sige lige ud, for en funktion, der stilfærdigt finder en brøkdel af det, du venter, er værre end en, der giver dig tallet.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Den finder opslag, der er lagt op under et rigtigt filnavn.</b> En skanning læser nyhedsgruppens hoveder, så alt, der er lagt op som <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code>, bliver genkendt, tolket, arkiveret under sin titel og forsynet med en plakat. Hvor folk stadig lægger op på den måde, virker det godt og kræver ingens konto.</li>
+        <li><b>Den kan ikke finde slørede opslag, og det kan intet andet, der skanner, heller ikke.</b> En stor og voksende del af Usenet bliver lagt op med navnet fjernet: et tilfældigt emne, tilfældige filnavne indeni, det hele smidt i en samlegruppe. Det rigtige navn findes kun i en NZB, som den, der lægger op, offentliggør et andet sted. Det blev aldrig lagt op på Usenet, så der er intet på ledningen, nogen skanner kan læse, hverken vores eller nogen andens.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Tallet.</b> Et fuldt indeks over 14.8 millioner skannede opslag gav omkring 31,000 udgivelser, man kan bladre i. Cirka én ud af fem hundrede. Næsten alt det øvrige er et enkelt navnløst fragment, der slet ikke kan grupperes til en udgivelse.</li>
+        <li><b>Det ændrer sig næppe.</b> Vi læste navngivningsvejene hos indekserne med åben kildekode og afprøvede de teknikker, der med rimelighed kunne hjælpe: korrelation før databasen ud fra størrelse og opslagstidspunkt skelner ikke skarpt nok til at identificere en udgivelse, og at hente et segment for at læse arkivhovedet fejler på de hovedkrypterede arkiver, der dominerer den slørede mængde. Ingen af delene er en løsning på kort sigt, og vi vil ikke antyde andet.</li>
+        <li><b>Så bliv ved med at bruge kommercielle indeksere.</b> En indekser får <i>at vide</i>, hvad en udgivelse er, af den, der lagde den op, og det er præcis den oplysning, der mangler på ledningen. Det er et fællesskabsforhold, ikke et teknisk problem, som en selvhostet binær kan starte op på egen hånd. nzbfast søger i dine indekserkonti direkte fra sin egen grænseflade og henter lige ned i køen, så du mister intet ved at lade den indbyggede skanner være slået fra.</li>
       </ul>
     </div>
   </div>

@@ -76,9 +76,9 @@
         <p>Artikkelit dekoodataan SIMD:llä paikan päällä, kirjoitetaan kerran suoraan lopullisiin
         siirtymiinsä ja varmistetaan PAR2:lla samoista puskureista. Arkisto puretaan <i>latauksen</i>
         aikana, joten sen osat eivät koskaan ole olemassa tiedostoina. Tämä pätee tavallisiin,
-        <b>salattuihin</b> ja sisäkkäisiin arkistoihin, mikä on <a href="benchmarks.fi.html#census">noin
-        97% kaikesta postatusta, tavumäärällä mitattuna</a>. Vain aidosti pakatut arkistot ja ylimmän
-        tason 7z tarvitsevat yhä toisen läpimenon, ja yhdessä ne ovat noin 3%.</p></div>
+        <b>salattuihin</b>, sisäkkäisiin ja 7z-arkistoihin, mikä on <a href="benchmarks.fi.html#census">noin
+        97% kaikesta postatusta, tavumäärällä mitattuna</a>. Vain aidosti pakatut arkistot
+        tarvitsevat yhä toisen läpimenon.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Yhdistetty saatavuus</h3>
         <p>Artikkeli lasketaan ”puuttuvaksi” vasta kun <i>jokainen</i> määritetty backbone on torjunut
         sen. Lohkotarkka kirjanpito julistaa työn tilaan COMPLETE, REPAIRABLE tai IMPOSSIBLE ennen
@@ -137,10 +137,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Valmiit API:t:</b> <span class="d">SABnzbd-yhteensopiva API ja NZBGet JSON-RPC: Sonarr, Radarr, nzb360 ja LunaSea toimivat muuttamatta. Yhden napsautuksen tuonti SAB-/NZBGet-määrityksestäsi.</span></li>
+        <li><b>nzblnk:-linkit, ratkaistuna:</b> <span class="d">liitä linkki hallintapaneeliin tai napsauta sitä suoraan boardilla, kun macOS- tai Windows-asennus on rekisteröinyt skeeman. Hämärretty postaus haetaan ensin omasta indeksistäsi ja sitten indeksoijiltasi, ja linkin salasana kulkee työn mukana.</span></li>
         <li><b>Sisäänrakennettu indeksoija:</b> <span class="d">skannaa keskusteluryhmäsi haettavaan paikalliseen indeksiin, tarjoaa Newznabin, jotta *arr-pinosi voi hakea siitäkin.</span></li>
         <li><b>Julisteseinä avaimettomilla metatiedoilla:</b> <span class="d">kuvitus, arvosanat, näyttelijät ja juonet kaikelle indeksissäsi, ilman ainoatakaan rekisteröitävää API-avainta.</span></li>
         <li><b>Seurantalistan automaatio:</b> <span class="d">nimeä sarja tai elokuva (esitetty tai ei); se napataan heti sen ilmestyessä ja päivitetään laadultaan, kunnes tavoitteesi täyttyy.</span></li>
-        <li><b>Yksi suoritettava tiedosto:</b> <span class="d">korjaus (par2) ja purku (RAR) kulkevat binäärin sisällä. Pura, aja, valmis.</span></li>
+        <li><b>Yksi suoritettava tiedosto:</b> <span class="d">korjaus (par2) ja purku (RAR) kulkevat binäärin sisällä. Pura, aja, valmis, ja <a href="benchmarks.fi.html#unpack-repair">molemmat yltävät erillisten työkalujen tasolle tai ohi</a>, kun ne kilpailevat yksinään.</span></li>
       </ul>
     </div>
   </div>

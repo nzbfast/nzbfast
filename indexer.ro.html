@@ -50,6 +50,7 @@
     <p class="lead">Indexerul integrat scanează newsgroup-urile care te interesează; peretele transformă
     rezultatul în postere, note, distribuție și grile de episoade, folosind doar surse publice fără
     cheie, preluate de propria ta instalare. Dă clic pe o insignă de episod pentru a-l descărca.</p>
+    <p class="lead" style="margin-top:14px"><b>Citește mai întâi limitele.</b> Un scaner de antete poate găsi doar ce a fost postat sub un nume de fișier real, iar o bună parte din Usenet în mod deliberat nu este. Aceasta este o proprietate a felului în care au fost încărcate acele fișiere, nu ceva ce repară un scaner mai bun, așa că <a href="#limits">indexerele comerciale rămân recomandarea</a> și nimic de aici nu se pornește dacă nu ceri tu.</p>
     <figure class="shot"><img src="assets/wall-grid.jpg" alt="peretele de postere nzbfast: o grilă de postere TV cu insigne de calitate, note și numărul de sezoane" loading="lazy"></figure>
     <div style="height:18px"></div>
     <div class="shots">
@@ -83,6 +84,26 @@
         <li><b>Rânduri în tendințe:</b> fâșii „noi săptămâna aceasta” și „populare acum”, construite din frecvența postărilor.</li>
         <li><b>Un perete care învață.</b> „Nu mă interesează” ascunde un titlu și învață o regulă permanentă; sortarea „Pentru tine” ordonează peretele după profilul de gusturi pe care îl construiesc propriile tale descărcări. Totul rămâne local.</li>
         <li><b>Corectează orice.</b> Potrivire greșită? Alege dintre candidați sau scrie pur și simplu identitatea corectă. Nimic din ce setezi manual nu e vreodată suprascris. Indică un poster printr-un URL sau încarcă unul. Un buton reîmbogățește un singur titlu; altul șterge și reconstruiește tot indexul.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="kicker">Partea onestă</p>
+    <h2>Ce poate și ce nu poate găsi un scaner de antete</h2>
+    <p class="lead">Am măsurat asta pe propriul nostru index în loc să ghicim, iar răspunsul nu a ieșit în favoarea noastră. Merită spus pe șleau, fiindcă o funcție care găsește pe tăcute o fracțiune din ce te aștepți este mai rea decât una care îți spune numărul.</p>
+    <div style="height:20px"></div>
+    <div class="grid2">
+      <ul class="plain">
+        <li><b>Găsește postările făcute sub un nume de fișier real.</b> O scanare citește antetele grupului de discuții, deci orice a fost încărcat ca <code>Some.Film.2026.1080p.WEB-DL.x264-GROUP.part01.rar</code> este recunoscut, analizat, clasat sub titlul său și primește un afiș. Acolo unde lumea încă postează așa, asta funcționează bine și nu are nevoie de contul nimănui.</li>
+        <li><b>Nu poate găsi postările ofuscate, și nici altceva care scanează nu poate.</b> O parte mare și în creștere din Usenet este încărcată cu numele scos: un subiect aleatoriu, nume de fișiere aleatorii înăuntru, totul aruncat într-un grup de-a valma. Numele real există doar într-un NZB pe care cel care încarcă îl publică în altă parte. Nu a fost niciodată postat pe Usenet, deci nu există nimic pe fir pe care vreun scaner să îl poată citi - nici al nostru, nici al altcuiva.</li>
+      </ul>
+      <ul class="plain">
+        <li><b>Numărul.</b> Un index complet a 14.8 milioane de postări scanate a dat aproximativ 31,000 de lansări răsfoibile. Cam una din cinci sute. Aproape tot restul este un singur fragment fără nume care nu poate fi grupat într-o lansare deloc.</li>
+        <li><b>Este puțin probabil să se schimbe.</b> Am citit căile de denumire ale indexerelor cu sursă deschisă și am testat tehnicile care ar fi putut plauzibil ajuta: corelarea dinaintea bazei de date după dimensiune și ora publicării nu discriminează suficient ca să identifice o lansare, iar aducerea unui segment pentru a citi antetul arhivei eșuează la arhivele cu antet criptat care domină mulțimea ofuscată. Niciuna nu este o rezolvare pe termen scurt, și nu vom lăsa să se înțeleagă altceva.</li>
+        <li><b>Așa că folosește în continuare indexere comerciale.</b> Unui indexer i <i>se spune</i> ce este o lansare de către cel care a încărcat-o, ceea ce este exact informația care lipsește de pe fir. Aceea este o relație de comunitate, nu o problemă de inginerie pe care un binar găzduit de tine să o poată porni de la zero. nzbfast caută în conturile tale de indexer direct din propria interfață și trage drept în coadă, deci nu pierzi nimic lăsând scanerul încorporat oprit.</li>
       </ul>
     </div>
   </div>

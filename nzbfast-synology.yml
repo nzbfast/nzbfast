@@ -37,6 +37,12 @@ services:
       - "6789:6789"
     volumes:
       - ./config:/config            # settings + index database
+      # Finished files. If Sonarr or Radarr also run on this NAS, this
+      # line is the one to change: downloads have to sit under the same
+      # shared folder as your library, mapped to the SAME path on both
+      # sides, or every import copies the whole release instead of
+      # renaming it. The walkthrough has the two-minute version:
+      # https://nzbfast.github.io/nzbfast/synology.html
       - ./downloads:/downloads      # finished files
       - ./watch:/watch              # drop an .nzb here to auto-download
     # Nothing below is needed for a normal install.

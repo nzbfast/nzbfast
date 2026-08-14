@@ -76,9 +76,9 @@
         <p>Artiklar SIMD-avkodas på plats, skrivs en enda gång rakt till sina slutliga offset
         och PAR2-verifieras ur samma buffertar. Arkivet packas upp <i>under</i> nedladdningen,
         så dess volymer existerar aldrig som filer över huvud taget. Det gäller vanliga,
-        <b>krypterade</b> och nästlade arkiv, vilket är <a href="benchmarks.sv.html#census">ungefär
-        97 % av allt som postas, räknat i volym</a>. Bara genuint komprimerade arkiv och 7z på
-        toppnivå behöver fortfarande ett andra pass, och tillsammans är de ungefär 3 %.</p></div>
+        <b>krypterade</b>, nästlade och 7z-arkiv, vilket är <a href="benchmarks.sv.html#census">ungefär
+        97 % av allt som postas, räknat i volym</a>. Bara genuint komprimerade arkiv
+        behöver fortfarande ett andra pass.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-tillgänglighet</h3>
         <p>En artikel räknas som "saknad" först när <i>varje</i> konfigurerad backbone har
         tackat nej. Blockexakt bokföring avgör COMPLETE, REPAIRABLE eller IMPOSSIBLE innan byte
@@ -137,10 +137,11 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
       </ul>
       <ul class="feat">
         <li><b>Färdiga API:er:</b> <span class="d">SABnzbd-kompatibelt API och NZBGet JSON-RPC: Sonarr, Radarr, nzb360 och LunaSea fungerar oförändrade. Importera din SAB-/NZBGet-konfig med ett klick.</span></li>
+        <li><b>nzblnk:-länkar, lösta:</b> <span class="d">klistra in en på panelen, eller klicka på en direkt på ett board när macOS- eller Windows-installationen har registrerat schemat. Det fördunklade inlägget slås upp i ditt eget index först, sedan hos dina indexerare, och lösenordet i länken följer med jobbet.</span></li>
         <li><b>Inbyggd indexerare:</b> <span class="d">skannar dina newsgroups till ett sökbart lokalt index, serverar Newznab så att din *arr-stack kan söka i det också.</span></li>
         <li><b>Postervägg med nyckellös metadata:</b> <span class="d">omslag, betyg, skådespelare och synopsis för allt i ditt index, utan en enda API-nyckel att registrera sig för.</span></li>
         <li><b>Bevakningslisteautomatisering:</b> <span class="d">namnge en serie eller film (sänd eller inte); den grabbas i samma stund den dyker upp, och kvalitetsuppgraderas sedan tills ditt mål nås.</span></li>
-        <li><b>En enda körbar fil:</b> <span class="d">reparation (par2) och uppackning (RAR) rider inuti binären. Packa upp, kör, klart.</span></li>
+        <li><b>En enda körbar fil:</b> <span class="d">reparation (par2) och uppackning (RAR) rider inuti binären. Packa upp, kör, klart, och <a href="benchmarks.sv.html#unpack-repair">båda matchar eller slår de fristående verktygen</a> när de får tävla var för sig.</span></li>
       </ul>
     </div>
   </div>
