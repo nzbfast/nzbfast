@@ -75,7 +75,9 @@ services:
   # As written it is scoped to nzbfast by the name at the end of the
   # command line, so it never touches your other containers.
   watchtower:
-    image: containrrr/watchtower
+    # The maintained fork. The original containrrr/watchtower was
+    # archived, and its image has not been rebuilt since 2023.
+    image: nickfedor/watchtower
     container_name: nzbfast-watchtower
     restart: unless-stopped
     environment:
