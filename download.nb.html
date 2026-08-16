@@ -78,9 +78,10 @@
       <div class="card">
         <h3>🐳 Docker <span class="tag now">tilgjengelig</span></h3>
         <p>Multi-arch-image (amd64 + arm64) på Docker Hub og ghcr, PUID/PGID-entrypoint i linuxserver-stil, healthcheck, compose-fil. Også veien for <b>Unraid</b>, <b>TrueNAS SCALE</b> og <b>QNAP Container Station</b>.</p>
-        <pre class="cmd">docker run -d -p 6789:6789 \
-  -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
-  nzbfast/nzbfast</pre>
+        <pre class="cmd">docker run -d -p 6789:6789 -e NZBFAST_OUT=/data/usenet \
+  -v /srv/nzbfast/config:/config -v /srv/nzbfast/watch:/watch \
+  -v /data/usenet:/data/usenet nzbfast/nzbfast</pre>
+        <p class="get"><a class="btn ghost" href="https://github.com/nzbfast/nzbfast/blob/main/docker-compose.yml">Compose-fil, med automatisk oppdatering</a></p>
       </div>
       <div class="card">
         <h3>🧡 Unraid <span class="tag now">tilgjengelig</span></h3>

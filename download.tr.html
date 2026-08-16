@@ -78,9 +78,10 @@
       <div class="card">
         <h3>🐳 Docker <span class="tag now">mevcut</span></h3>
         <p>Çok mimarili görüntü (amd64 + arm64), Docker Hub ve ghcr üzerinde, linuxserver tarzı PUID/PGID entrypoint, healthcheck, compose dosyası. Ayrıca <b>Unraid</b>, <b>TrueNAS SCALE</b> ve <b>QNAP Container Station</b> için de yol budur.</p>
-        <pre class="cmd">docker run -d -p 6789:6789 \
-  -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
-  nzbfast/nzbfast</pre>
+        <pre class="cmd">docker run -d -p 6789:6789 -e NZBFAST_OUT=/data/usenet \
+  -v /srv/nzbfast/config:/config -v /srv/nzbfast/watch:/watch \
+  -v /data/usenet:/data/usenet nzbfast/nzbfast</pre>
+        <p class="get"><a class="btn ghost" href="https://github.com/nzbfast/nzbfast/blob/main/docker-compose.yml">Compose dosyası, otomatik güncellemeli</a></p>
       </div>
       <div class="card">
         <h3>🧡 Unraid <span class="tag now">mevcut</span></h3>

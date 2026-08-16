@@ -78,9 +78,10 @@
       <div class="card">
         <h3>🐳 Docker <span class="tag now">disponibil</span></h3>
         <p>Imagine multi-arch (amd64 + arm64) pe Docker Hub și ghcr, entrypoint PUID/PGID în stil linuxserver, healthcheck, fișier compose. Este și calea pentru <b>Unraid</b>, <b>TrueNAS SCALE</b> și <b>QNAP Container Station</b>.</p>
-        <pre class="cmd">docker run -d -p 6789:6789 \
-  -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
-  nzbfast/nzbfast</pre>
+        <pre class="cmd">docker run -d -p 6789:6789 -e NZBFAST_OUT=/data/usenet \
+  -v /srv/nzbfast/config:/config -v /srv/nzbfast/watch:/watch \
+  -v /data/usenet:/data/usenet nzbfast/nzbfast</pre>
+        <p class="get"><a class="btn ghost" href="https://github.com/nzbfast/nzbfast/blob/main/docker-compose.yml">Fișier compose, cu actualizare automată</a></p>
       </div>
       <div class="card">
         <h3>🧡 Unraid <span class="tag now">disponibil</span></h3>

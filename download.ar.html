@@ -78,9 +78,10 @@
       <div class="card">
         <h3>🐳 Docker <span class="tag now">متاح</span></h3>
         <p>صورة متعددة المعماريات (amd64 + arm64) على Docker Hub و ghcr، نقطة دخول PUID/PGID بأسلوب linuxserver، فحص صحة، ملف compose. وهي أيضًا المسار لـ <b>Unraid</b> و<b>TrueNAS SCALE</b> و<b>QNAP Container Station</b>.</p>
-        <pre class="cmd">docker run -d -p 6789:6789 \
-  -v ./config:/config -v ./downloads:/downloads -v ./watch:/watch \
-  nzbfast/nzbfast</pre>
+        <pre class="cmd">docker run -d -p 6789:6789 -e NZBFAST_OUT=/data/usenet \
+  -v /srv/nzbfast/config:/config -v /srv/nzbfast/watch:/watch \
+  -v /data/usenet:/data/usenet nzbfast/nzbfast</pre>
+        <p class="get"><a class="btn ghost" href="https://github.com/nzbfast/nzbfast/blob/main/docker-compose.yml">ملف compose، مع تحديث تلقائي</a></p>
       </div>
       <div class="card">
         <h3>🧡 Unraid <span class="tag now">متاح</span></h3>
