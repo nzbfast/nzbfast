@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Liukuhihnoitettu NNTP linjanopeudella:</b> <span class="d">8.31 Gbps mitattu 10 GbE:llä.</span></li>
+        <li><b>Liukuhihnoitettu NNTP linjanopeudella:</b> <span class="d">9.0-9.3 Gbps mitattu 10 GbE -linjalla, jonka oma katto on 9.8.</span></li>
         <li><b>Yhden läpimenon liukuhihna:</b> <span class="d">dekoodaus, varmistus ja purku limittyvät; RAR-osat eivät koskaan kosketa levyä; sisäkkäiset arkistot puretaan samassa läpimenossa.</span></li>
         <li><b>Monen palveluntarjoajan yhdistetty saatavuus:</b> <span class="d">täydellinen palvelimiesi yhdistelmästä, tai keskeytä aikaisin.</span></li>
         <li><b>Muistibudjetti:</b> <span class="d">rajattu RAM, hallittu levylle valuminen, ei koskaan sivuta.</span></li>
@@ -74,10 +74,10 @@
     <h2>Moottori &amp; nopeus</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>Liukuhihnoitettu NNTP.</b> Kun useampi pyyntö pysyy lennossa yhteyttä kohti, se voittaa sekä edestakaisen viiveen että TCP:n ruuhkanhallintaikkunan kutistumisen. Mittauksissa etu peräkkäishakuun on +12%…+270%, ja noin 8 yhteyttä per palvelin riittää kyllästämään linjan.</li>
+        <li><b>Liukuhihnoitettu NNTP.</b> Kun useampi pyyntö pysyy lennossa yhteyttä kohti, se voittaa sekä edestakaisen viiveen että TCP:n ruuhkanhallintaikkunan kutistumisen. Mittauksissa etu peräkkäishakuun on +64%…+270%, toistettuna jokaisella edestakaisella viiveellä, 14 ms:n konesaliyhteydestä 63 ms:n satelliittiin.</li>
         <li><b>SIMD-yEnc-dekoodaus</b> (rapidyenc, NEON- ja AVX-ytimin) käy 4.95 GB/s per ydin, dekoodattuna paikan päällä sitä mukaa kun tavut saapuvat vastaanottopolulle.</li>
         <li><b>Monen palvelimen jaettu jono.</b> Palveluntarjoajat tasapainottuvat itse ~2%:n sisälle ilman viritystä. Kunkin todellista nopeutta seurataan, ja työn loppupää lähetetään duplikaattina, jottei yksi hidas palvelin pääse venyttämään työn loppua.</li>
-        <li><b>Töiden välinen liotus.</b> Työn N loppupää limittyy työn N+1 alkuun, joten linja pysyy sytytettynä reunasta reunaan läpi koko jonon: 2% jouten tässä vs. SABnzbdin 61% pimeänä samassa vertailussa.</li>
+        <li><b>Töiden välinen liotus.</b> Työn N loppupää limittyy työn N+1 alkuun, joten linja pysyy sytytettynä reunasta reunaan läpi koko jonon: 2% jouten tässä vs. SABnzbd 5.0.4:n 61% pimeänä samassa vertailussa.</li>
         <li><b>Hitaan työn vahtikoira.</b> Yhdellä hitaalla palvelimella ryömivä lataus muiden ollessa jouten siirretään jonon perälle, edistyminen tallessa, ja jatkuu heti kun jono tyhjenee.</li>
         <li><b>Jouten olevan palvelimen esihaku:</b> palvelin, jota aktiivinen työ ei voi käyttää, koska sen artikkeleita ei ole siellä, aloittaa seuraavan jonossa olevan työn sen sijaan että jäisi jouten.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Nopeusrajoitukset ja viikkoajastin:</b> livenä säädettävät katot, paikallisajan (kesäaikaturvallinen) ajastus ja ”keskeytä N minuutiksi”, joka jatkaa itsestään.</li>
         <li><b>Muistibudjetti.</b> Yksi globaali RAM-budjetti (auto: neljännes RAMista, rajattu, ohitettavissa). Kun budjetti tiukkenee, ensin pienenevät puskurit, sitten data valuu levylle ja luetaan takaisin, kun työ tasaantuu. Se ei koskaan sivuta. 190 GB:n työ valmistuu 1 GB:n budjetin sisällä ~1.1 GB:n huippu-RSS:llä, ja NAS-laatikoille on mitattu ja dokumentoitu 2 GB:n profiili.</li>
         <li><b>Vastapaine.</b> Hidas levy kuristaa socketit sen sijaan, että antaisi RAMin täyttyä. Se pysyy ±1%:n sisällä kirjoituskatosta, ja RAM itse asiassa <i>laskee</i> paineen alla.</li>
-        <li><b>Työn jälkeinen muistin karsinta:</b> heti jouten jäätyään daemon luovuttaa vapautetun muistin takaisin käyttöjärjestelmälle, pudoten noin 8 MB:iin töiden välillä macOS:llä.</li>
+        <li><b>Työn jälkeinen muistin karsinta:</b> heti kun työ valmistuu ja daemon jää jouten, sen kasvattamat puskurit ja välimuistit palautuvat käyttöjärjestelmälle sen sijaan, että niitä pidettäisiin seuraavaa varten.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Suora purku:</b> store-tilan RAR-julkaisut (useimmat scene-julkaisut) kartoitetaan ja puretaan latauksen aikana, joten osat eivät koskaan päädy levylle. Levykirjoitukset ovat sisältö × 1.0 ja tarvittava levy 1×, siinä missä muut haluavat noin 2×.</li>
         <li><b>Sisäkkäiset arkistot, ja syvyys ei juuri maksa mitään.</b> Arkistot arkistojen sisällä - RAR RAR:in sisällä, 7z RAR:in sisällä, monen tason tikkaat - puretaan sitä mukaa kuin tavut saapuvat, sen saman ajon sisällä jonka jo teimme. Siinä on koko ero: asiakas joka kirjoittaa jokaisen kerroksen levylle, sulkee sen, avaa uudelleen ja lukee läpi, maksaa täyden ajon jokaisesta tasosta, joten jokainen taso alaspäin maksaa sille vielä yhden kierroksen levyn kautta. Meidän kerroksemme kulkevat mukana ensimmäisessä ajossa, ja hyötykuorma tulee ulos kymmenen tason tikkailta samalla tavalla kuin yhden tason. Yksi kopio levyllä siinä missä kirjoita-ja-lue-uudelleen pitää kahta tai kolmea.</li>
         <li><b>Peittelyn purku.</b> Peitellyt julkaisut nimetään uudelleen niiden PAR2-metatiedoista, ROT13-sekoitetut nimet pelastetaan, ja tiivistenimetty roska luokitellaan ja portitetaan pois.</li>
+        <li><b>Tavalliset paloitellut tiedostot.</b> HJSplit-tyyliin .001/.002- tai .1/.2-osiin paloitellut sarjat, joissa ei ole lainkaan arkisto-otsaketta, tunnistetaan ja liitetään takaisin alkuperäiseksi tiedostoksi sen sijaan, että ne jäisivät levylle irtopaloina.</li>
       </ul>
       <ul class="plain">
         <li><b>Tarkalleen sopiva korjaus.</b> Vioittuneet lohkot tunnetaan heti niiden sattuessa, joten haetaan vain minimitavumäärän verran palautusosia (reppuongelman ratkaisu) ja korjaus koskee vain vioittuneita alueita.</li>
-        <li><b>RAR-palautustietueet.</b> Kun PAR2 on käytetty loppuun, tai sitä ei koskaan julkaistu, RAR-osiin upotetut palautustietueet korjaavat vioittuneet osat paikoillaan.</li>
+        <li><b>RAR-palautustietueet.</b> Kun PAR2 on käytetty loppuun, tai sitä ei koskaan julkaistu, RAR-osiin upotetut palautustietueet ja erilliset .rev-palautusosat korjaavat vioittuneet osat paikoillaan.</li>
         <li><b>Korjaus joka syvyydellä.</b> Sisemmän kerroksen sisään pakattu PAR2-sarja löydetään ja ajetaan omalla tasollaan, ja pelkät parit sisältävä julkaisu (data poistettu, jäljellä 100% palautuksen sarja) rakennetaan kokonaan uudelleen ja puretaan sitten.</li>
         <li><b>Pakattu ja salattu varajärjestely:</b> ei-store-julkaisut kirjoittuvat levylle ja puretaan natiivilla RAR-moottorilla, kaikki RAR4:stä uuteen RAR7:ään, muun jonon kanssa limitettynä. Salatut sarjat pysäköidään selkeällä viestillä sen sijaan, että ne kaatuisivat hiljaa.</li>
         <li><b>Se etsii salasanan itse.</b> Useimmat salatut postaukset eivät tarvitse sinua. Se kokeilee NZB:n omia metatietoja ja <code>{{pw}}</code>-nimeämiskäytäntöä, *arr-rajapintaa, sitten mitä tahansa lyhyttä tekstimuistiinpanoa tiedostojen vierestä, ja viimeisenä julkaisun ja tiedostojen omia nimiä. Se toistaa haun <i>jokaisella</i> tasolla: ketju, joka piilottaa kunkin kerroksen salasanan sen yläpuoliseen kerrokseen - eri salasana joka tasolla - aukeaa pohjaan asti ilman että kirjoitat mitään. Se mikä oikeasti jää jäljelle, hoituu koontinäytön 🔑-avauksella: se avaa taustalla ja arkistoi sitten normaalisti.</li>
@@ -125,7 +126,7 @@
         <li><b>Yhdistetty reititys.</b> Artikkeli lasketaan puuttuvaksi vasta kun jokainen elävä palvelin on kieltäytynyt siitä; siihen asti se reitittyy sille palvelimelle, jolla se on. Backbonet eroavat säilytyksessä ja poistoissa, joten yhdistelmä täydentää hiljaa julkaisut, joihin mikään yksittäinen palvelin ei pysty.</li>
         <li><b>Kaatumisvarma journaali.</b> Journaali toimii artikkelin tarkkuudella. Anna kill −9 kesken työn, ja se palaa hakien uudelleen vain sen, mitä ei ollut tallennettu; jono ja historia elävät uudelleenkäynnistysten yli.</li>
         <li><b>Pysäköinti ja uudelleenyritys:</b> epäonnistuneet työt pysäköidään historiaan, ja uudelleenyritys hakee vain yhä puuttuvat palaset.</li>
-        <li><b>Kaaostestattu.</b> ValeNNTP-palvelin ajaa kymmenen päästä päähän -epäonnistumisskenaariota (430:t, korruptio, katkaisu, jumit, kuolleet palvelimet, kill −9) jokaisella testiajolla.</li>
+        <li><b>Kaaostestattu.</b> ValeNNTP-palvelin näyttelee 33 vikaprofiilia, ja jokaisella testiajolla ajetaan kahdeksan päästä päähän -vaihetta: puhdas perustaso sekä katkenneet yhteydet, kuollut ilma, jännitekuopat, korruptio, kuristetut linjat, TLS-katkaisu ja kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Palveluntarjoajan luotettavuuspisteytys.</b> Palvelinkohtaisia täydellisyysasteita pidetään pysyvästi ja näytetään koontinäytöllä, varoituksin alle 98%:n.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab-palvelin.</b> Paikallinen indeksisi vastaa kyselyihin t=search/tvsearch/movie, joten *arrit voivat kohdella omia skannauksiasi indeksoijana.</li>
         <li><b>RSS-automaattinappaus:</b> indeksoijan syöte on sama asia, jota uutislukija tilaa, paitsi että se luettelee sen, mitä Usenetiin on juuri lähetetty. Kaikki suodattimiin osuva latautuu itsestään. Syötteet suodatettuina NZBGet-tyylisellä kielellä, lisättyinä ja muokattuina livenä koontinäytöltä.</li>
         <li><b>Seurantalista.</b> Nimeä haluamasi sarjat ja elokuvat, myös vielä esittämättömät. Jokainen jakso napataan heti sen ensiesiintymisellä ja päivitetään, kunnes se saavuttaa tavoitelaatusi (vaikkapa 720p → 1080p REMUX), ja korvattu kopio poistetaan vasta kun päivitys on varmistettu. Esityspäiväkalenteri näyttää, mitä on tulossa. Se voi seurata myös Plex-seurantalistaasi: yhdistä tilisi tai liitä listan osoite, ja kaikki sinne lisäämäsi seurataan myös täällä.</li>
+        <li><b>Ilmoitukset sinne, minne jo katsot.</b> Sähköposti, Discord, Slack, Telegram, Pushover, ntfy, Gotify ja mikä tahansa itse pyörittämäsi Apprise-palvelin, sekä Kodin, Plexin ja Jellyfinin kirjastopäivitykset ja webhook, jonka pohjan kirjoitat itse.</li>
       </ul>
       <ul class="plain">
-        <li><b>Valvontakansio.</b> Pudota .nzb sisään ja se latautuu; tiedosto katoaa heti kun se on otettu.</li>
+        <li><b>Valvontakansio.</b> Pudota .nzb sisään ja se latautuu; tiedosto katoaa heti kun se on otettu. Myös alikansioita valvotaan, ja watch/tv-kansioon pudotettu tiedosto päätyy tv-kategoriaan.</li>
         <li><b>Älykkäät kansiot:</b> regex-, avainsana- ja kokosäännöt lajittelevat lataukset kategorioihin jo jonoon lisättäessä, ja valinnainen TV-arkistointi nimeää muotoon <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Kategoriakohtainen käyttäytyminen.</b> Jokaisella kategorialla on oma kohdekansionsa, oma prioriteettinsa ja oma jälkikäsittelyskriptinsä, joten sarjat ja elokuvat voivat päätyä eri paikkoihin eri säännöillä.</li>
         <li><b>Siivoussäännöt:</b> roskapäätteet poistetaan heti kun työ valmistuu.</li>
         <li><b>Siirto NAS-asemalle:</b> valmiit lataukset siirtyvät purun ja uudelleennimeämisen jälkeen kohdekansioon kategoriarakenne säilyttäen, ja kohteet kategorioittain voivat ohjata sarjat ja elokuvat eri jakoihin. Jos jako ei ole tavoitettavissa, tiedostot jäävät paikoilleen.</li>
         <li><b>Jälkikäsittelykomentosarjat.</b> Ne noudattavat SABnzbdin SAB_*-ympäristösopimusta, joten jo olemassa olevat komentosarjasi toimivat sellaisenaan.</li>
@@ -189,11 +192,13 @@
         <li><b>Live-kaaviot, ei kirjastoja.</b> Kaikki kysellään kerran sekunnissa (nopeusalue, palveluntarjoajakohtainen pinottu alue, varmistuksen tila -aikajana, jonon burn-down ja nopeushistogrammi) ja kaaviot levittävät aikaikkunaansa sitä mukaa kun levennät selainta.</li>
         <li><b>Resurssimonitori:</b> CPU, RAM budjettia vasten, levylle kirjoitukset ja verkko yhdellä kaaviolla, vähän-tilaa-varoituksin.</li>
         <li><b>Palveluntarjoajien tulostaulu.</b> Palvelimet järjestyvät itse uudelleen live-suorituskyvyn mukaan, ja kukin näyttää istuntotavut, yhteysmäärän, käyttöasteen ja luotettavuuden.</li>
-        <li><b>Jonon hallinta:</b> raahaa järjestääksesi uudelleen, aseta prioriteetti ja kategoria rivin sisällä, avaa latauskohtainen laatikko, keskeytä optimistisesti tai ”keskeytä N minuutiksi”.</li>
+        <li><b>Jonon hallinta:</b> raahaa järjestääksesi uudelleen, aseta prioriteetti ja kategoria rivin sisällä, avaa latauskohtainen laatikko, keskeytä optimistisesti tai ”keskeytä N minuutiksi”. Valitse monta riviä kerralla, jonossa tai historiassa, ja käsittele koko joukko - hiirellä tai näppäimistöltä.</li>
+        <li><b>Historia, joka säilyttää kaiken.</b> Valmiit työt menevät omaan varastoonsa ilman rivirajaa, sivutettuna ja haettavana, ja ne selviävät uudelleenkäynnistyksistä. Ikä- ja määrärajat ovat olemassa, jos haluat ne, ja ne ovat pois päältä.</li>
       </ul>
       <ul class="plain">
         <li><b>Kaikki on määritettävissä selaimessa:</b> palvelimet (live-yhteystesteineen), nopeus ja ajastus, yhteydet/ikkuna/dekooderit, levy ja kiintiö, valvontakansiot ja komentosarjat, indeksoinnin portit, kirjasto, RSS sekä suojaus avaimen vaihdolla. Asetukset säilyvät uudelleenkäynnistysten yli.</li>
-        <li><b>Diagnostiikka sisäänrakennettuna:</b> käyttöliittymän sisäinen lokinkatselin, järjestelmän mittaus, joka löytää verkon, laskennan ja levyn katot ja kertoo, mitä niille tehdä, palvelinten monimuotoisuusanalysaattori ja yhteysporras.</li>
+        <li><b>HTTPS sisäänrakennettuna.</b> Osoita sille varmenne ja avain, niin se yksi kuuntelija vastaa https:llä http:n sijaan, sekä käyttöliittymä että API. Rikkinäinen tai vanhentunut varmenne kieltäytyy käynnistymästä ja nimeää tiedoston sen sijaan, että se ilmestyisi myöhemmin muualla selainvirheenä.</li>
+        <li><b>Diagnostiikka sisäänrakennettuna:</b> käyttöliittymän sisäinen lokinkatselin, jota voi suodattaa tagin mukaan ja viedä ulos, latauskohtainen vastaus kysymykseen ”miksi tämä on hidas?”, joka nimeää rajoittavan vaiheen, järjestelmän mittaus, joka löytää verkon, laskennan ja levyn katot ja kertoo, mitä niille tehdä, palvelinten monimuotoisuusanalysaattori ja yhteysporras.</li>
         <li><b>Datan käyttö:</b> 14 päivän pinotut palveluntarjoajakohtaiset palkit, päivittäinen historia ja elinaikaiset laskurit lohkotileille.</li>
         <li><b>28 kieltä.</b> Koontinäyttö toimitetaan täysin lokalisoituna, oikealta vasemmalle kirjoitettavat kielet mukaan lukien; manuaali ja tämä sivusto ovat saatavilla 16:lla.</li>
         <li><b>Käytön mukavuus.</b> Raahaa ja pudota .nzb minne tahansa, työpöytäilmoitukset, valmistumisäänet, ensikäynnistysvelho ja <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Yksi itsenäinen suoritettava tiedosto.</b> par2 ja RAR-purku ovat binääriin käännettyä natiivikoodia. Mitään ei pureta ensikäynnistyksellä, eikä ole ajoympäristöä tai asennusohjelmaa säädettäväksi.</li>
       <li><b>macOS ensiluokkaisesti:</b> universaali binääri Apple Siliconille ja Intelille, natiivi SwiftUI-valikkopalkkisovellus, launchd-yksikkö ja Homebrew-formula.</li>
       <li><b>Windows:</b> täysin staattinen x64-exe, joka toimii vakio-Windows 10:llä ja 11:llä, kaksoisnapsautuskäynnistimineen ja ohjattuine asennuksineen.</li>
-      <li><b>Linux, Docker ja NAS:</b> kovennettu systemd-yksikkö, monivaiheinen Docker-kuva linuxserver-tyylisellä PUID/PGID-sisäänmenopisteellä, compose-tiedosto mukana, Unraid-malli ja Synology-opas. <a href="download.fi.html">Kaikki alustat →</a></li>
+      <li><b>Linux, Docker ja NAS:</b> kovennettu systemd-yksikkö, monivaiheinen Docker-kuva linuxserver-tyylisellä PUID/PGID-sisäänmenopisteellä, compose-tiedosto mukana, Synology-paketti, Unraid-malli ja Synology-opas. <a href="download.fi.html">Kaikki alustat →</a></li>
+      <li><b>Myös julkaistu, yhä beetassa:</b> .deb- ja .rpm-paketit amd64:lle ja arm64:lle, QNAP-paketti, FreeBSD-käännös, 32-bittinen ARM Raspberry Pi:lle ja Windows ARM:lla. Kukin rakennetaan jokaisen julkaisun yhteydessä ja pysyy beetaksi merkittynä, kunnes se on ajettu oikealla laitteistolla.</li>
       <li><b>Se ei koskaan päivitä itseään.</b> Uudet julkaisut näkyvät ilmoituksena koontinäytöllä, tai eivät edes sitä, jos kytket tarkistuksen pois. Päivittäminen pysyy sinun päätöksenäsi, sinun aikataulussasi.</li>
       <li><b>Ohjattu asennus.</b> Aja <code>nzbfast setup</code> -velho, tai anna sen tunnistaa automaattisesti olemassa oleva SABnzbd- tai NZBGet-määritys. Ensimmäinen lataus on käynnissä alle kahdessa minuutissa.</li>
     </ul>

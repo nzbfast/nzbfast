@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Pipelinead NNTP i linjefart:</b> <span class="d">8.31 Gbps uppmätt på 10 GbE.</span></li>
+        <li><b>Pipelinead NNTP i linjefart:</b> <span class="d">9.0-9.3 Gbps uppmätt på en 10 GbE-linje vars eget tak är 9.8.</span></li>
         <li><b>Enpassrörledning:</b> <span class="d">avkoda, verifiera och packa upp överlappar; RAR-volymer rör aldrig disken; nästlade arkiv packas upp i samma pass.</span></li>
         <li><b>Union-tillgänglighet över flera providers:</b> <span class="d">komplett från unionen av dina servrar, eller avbryt tidigt.</span></li>
         <li><b>Minnesbudget:</b> <span class="d">begränsat RAM, graciöst spill, swappar aldrig.</span></li>
@@ -74,10 +74,10 @@
     <h2>Motor &amp; hastighet</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>Pipelinead NNTP.</b> Att hålla flera förfrågningar i luften per anslutning slår både tur-och-retur-latensen och TCP:s avtynande congestion-fönster. Vi mäter allt från +12 % till +270 % jämfört med seriell hämtning, och runt 8 anslutningar per server räcker för att mätta linjen.</li>
+        <li><b>Pipelinead NNTP.</b> Att hålla flera förfrågningar i luften per anslutning slår både tur-och-retur-latensen och TCP:s avtynande congestion-fönster. Vi mäter +64 % till +270 % jämfört med seriell hämtning, upprepat vid varje tur-och-retur-tid, från en datacenterlänk på 14 ms till 63 ms via satellit.</li>
         <li><b>SIMD yEnc-avkodning</b> (rapidyenc, med NEON- och AVX-kärnor) går i 4.95 GB/s per kärna och avkodas på plats i samma stund byten landar i mottagningsvägen.</li>
         <li><b>Delad kö över flera servrar.</b> Providerna balanserar sig själva till inom ~2 % helt utan trimning. Vi håller koll på varje servers verkliga fart, och svansen på ett jobb dubbeldispatchas så att en enda långsam server inte kan dra ut på slutet.</li>
-        <li><b>Genomsköljning mellan jobb.</b> Svansen på jobb N överlappar starten av jobb N+1, så linjen hålls tänd kant till kant genom hela kön: 2 % vila här mot SABnzbds 61 % mörker i samma bench.</li>
+        <li><b>Genomsköljning mellan jobb.</b> Svansen på jobb N överlappar starten av jobb N+1, så linjen hålls tänd kant till kant genom hela kön: 2 % vila här mot SABnzbd 5.0.4:s 61 % mörker i samma bench.</li>
         <li><b>Vakthund för långsamma jobb.</b> En nedladdning som kryper fram på en enda långsam server medan resten står stilla flyttas längst bak i kön, behåller sitt förlopp och återupptas så snart kön är fri.</li>
         <li><b>Prefetch på lediga servrar:</b> en server som det aktiva jobbet inte kan använda, eftersom dess artiklar inte finns lagrade där, sätter i gång med nästa jobb i kön i stället för att stå och vila.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Hastighetsgränser och ett veckoschema:</b> tak som går att justera live, ett schema i lokal tid (DST-säkert) och en "pausa i N minuter" som startar om av sig själv.</li>
         <li><b>Minnesbudget.</b> En enda global RAM-budget (auto: en fjärdedel av RAM, med tak, går att åsidosätta). När det börjar bli trångt krymper buffertarna först, sedan spiller data till disk och läses tillbaka när jobbet lugnat sig. Den swappar aldrig. Ett 190 GB-jobb blir klart inom en 1 GB-budget vid ~1.1 GB topp-RSS, och det finns en uppmätt, dokumenterad 2 GB-profil för NAS-lådor.</li>
         <li><b>Backpressure.</b> En långsam disk stryper socketarna i stället för att låta RAM fyllas. Den håller sig inom ±1 % av ett skrivtak, och RAM <i>sjunker</i> faktiskt under tryck.</li>
-        <li><b>Minnestrim efter jobb:</b> så snart daemonen är ledig lämnar den tillbaka frigjort minne till OS:et och sjunker till runt 8 MB mellan jobb på macOS.</li>
+        <li><b>Minnestrim efter jobb:</b> så snart ett jobb är klart och daemonen blir ledig lämnas de buffertar och cacher den byggt upp tillbaka till OS:et i stället för att hållas kvar till nästa.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Direktuppackning:</b> store-mode-RAR-inlägg (de flesta scene-releaser) mappas och packas upp medan de laddas ner, så volymerna landar aldrig på disk över huvud taget. Diskskrivningar hamnar på innehåll × 1.0 och disk som behövs på 1×, där andra vill ha ungefär 2×.</li>
         <li><b>Nästlade arkiv, och djup kostar nästan ingenting.</b> Arkiv inuti arkiv - RAR i RAR, 7z i ett RAR, stegar många nivåer djupa - packas upp allteftersom byten kommer in, inuti den genomgång vi ändå gjorde. Där ligger hela skillnaden: en klient som skriver ut varje lager, stänger det, öppnar det igen och läser om det betalar en hel genomgång per nivå, så varje nivå den går ner kostar den ännu en vända över disken. Våra åker med i den första genomgången, och nyttolasten kommer ut ur en tio nivåer djup stege precis som ur en enda. En kopia på disk där skriv-ut-och-läs-om håller två eller tre.</li>
         <li><b>Deobfuskering.</b> Obfuskerade inlägg döps om utifrån sin PAR2-metadata, ROT13-krypterade namn räddas, och hashnamnat skräp klassificeras och sållas bort.</li>
+        <li><b>Vanliga delade filer.</b> Uppsättningar som delats på HJSplit-vis, i .001/.002- eller .1/.2-delar helt utan arkivhuvud, känns igen och fogas ihop till originalfilen igen i stället för att hamna som lösa delar på din disk.</li>
       </ul>
       <ul class="plain">
         <li><b>Exakt passande reparation.</b> Skadade block är kända allteftersom de uppstår, så bara den byte-minimala uppsättningen återställningsvolymer hämtas (ett knapsack-problem) och reparationen rör inget annat än de skadade spannen.</li>
-        <li><b>RAR-återställningsposter.</b> När PAR2 är uttömt, eller aldrig postades, reparerar inbäddade RAR-återställningsposter skadade volymer på plats.</li>
+        <li><b>RAR-återställningsposter.</b> När PAR2 är uttömt, eller aldrig postades, reparerar inbäddade RAR-återställningsposter och separata .rev-återställningsvolymer skadade volymer på plats.</li>
         <li><b>Reparation på varje djup.</b> Ett PAR2-set packat inuti ett inre lager hittas och körs på sin egen nivå, och ett par-only-inlägg (data raderad, ett set med 100 % återställning kvarlämnat) byggs upp helt igen och packas sedan upp.</li>
         <li><b>Fallback för komprimerat och krypterat:</b> inlägg som inte är store materialiseras och packas upp genom den inbyggda RAR-motorn, allt från RAR4 till nya RAR7, överlappat med resten av kön. Krypterade set parkeras med ett tydligt meddelande i stället för att fallera tyst.</li>
         <li><b>Den letar rätt på lösenordet själv.</b> De flesta krypterade poster behöver dig inte. Den provar NZB:ns egna metadata och namnkonventionen <code>{{pw}}</code>, *arr-API:t, sedan varje kort textnotis som postats bredvid filerna, och i sista hand namnen på releasen och filerna själva. Den upprepar letandet på <i>varje</i> nivå: en kedja som gömmer varje lagers lösenord i lagret ovanför - ett annat lösenord på varje nivå - låses upp hela vägen ner utan att du skriver något. Det som verkligen blir kvar får 🔑-upplåsningen på instrumentpanelen: den låser upp i bakgrunden och arkiverar sedan som vanligt.</li>
@@ -125,7 +126,7 @@
         <li><b>Union-routning.</b> En artikel räknas som saknad först när varje levande server har nekat den; fram till dess routas den till vilken server som än har den. Backbones skiljer sig åt i retention och takedowns, så unionen slutför i tysthet inlägg som ingen enskild server hade klarat.</li>
         <li><b>Kraschsäker journal.</b> Journalen arbetar på artikelnivå. Skicka en kill −9 mitt i jobbet så kommer den tillbaka och hämtar bara om det som inte hunnit sparas; kön och historiken överlever omstarter.</li>
         <li><b>Parkera och försök igen:</b> misslyckade jobb parkeras i historiken, och ett nytt försök hämtar bara de bitar som fortfarande saknas.</li>
-        <li><b>Kaos-testad.</b> En mock-NNTP-server kör tio felscenarier från början till slut (430:or, korruption, trunkering, stopp, döda servrar, kill −9) vid varenda testkörning.</li>
+        <li><b>Kaos-testad.</b> En mock-NNTP-server spelar upp 33 felprofiler, och åtta lopp från början till slut körs vid varenda testkörning: en ren baslinje plus brutna anslutningar, dödtystnad, brownouts, korruption, strypta länkar, TLS-trunkering och kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Tillförlitlighetspoäng per provider.</b> Kompletteringsgraden för varje server sparas för gott och visas på instrumentpanelen, med en varning under 98 %.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab-server.</b> Ditt lokala index svarar på t=search/tvsearch/movie, så *arr-verktygen kan behandla dina egna skanningar som en indexerare.</li>
         <li><b>RSS auto-grab:</b> en indexerares flöde är samma sak som en nyhetsläsare prenumererar på, fast det listar vad som just lagts upp på Usenet. Allt som matchar filtren laddas ner av sig självt. Flöden filtrerade med ett NZBGet-liknande språk, tillagda och redigerade live från instrumentpanelen.</li>
         <li><b>Bevakningslista.</b> Namnge serierna och filmerna du vill ha, även sådana som inte sänts än. Varje avsnitt grabbas vid sin första förekomst och uppgraderas tills det når din målkvalitet (säg 720p → 1080p REMUX), och den ersatta kopian raderas först efter att uppgraderingen verifierats. En kalender över sändningsdatum visar vad som är på väg. Den kan också följa din Plex-bevakningslista: koppla ditt konto, eller klistra in listans adress, så bevakas allt du lägger till där även här.</li>
+        <li><b>Aviseringar där du redan tittar.</b> E-post, Discord, Slack, Telegram, Pushover, ntfy, Gotify och vilken Apprise-server du än kör själv, utöver biblioteksuppdateringar för Kodi, Plex och Jellyfin och en webhook som du mallar själv.</li>
       </ul>
       <ul class="plain">
-        <li><b>Bevakningsmapp.</b> Släpp in en .nzb så laddas den ner; filen försvinner så snart den plockats upp.</li>
+        <li><b>Bevakningsmapp.</b> Släpp in en .nzb så laddas den ner; filen försvinner så snart den plockats upp. Undermappar bevakas också, och en fil som släpps i watch/tv hamnar i kategorin tv.</li>
         <li><b>Smarta mappar:</b> regler för regex, nyckelord och storlek sorterar nedladdningar i kategorier redan vid inläggning i kön, med valfri TV-arkivering till <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Beteende per kategori.</b> Varje kategori bär sin egen målmapp, sin egen prioritet och sitt eget efterbehandlingsskript, så serier och filmer kan hamna på olika ställen under olika regler.</li>
         <li><b>Städregler:</b> skräptillägg tas bort så snart ett jobb är klart.</li>
         <li><b>Flytta till en NAS:</b> färdiga nedladdningar flyttas efter uppackning och namnbyte till en målmapp med kategoristrukturen bevarad, och mål per kategori kan skicka serier och filmer till olika utdelningar. Är utdelningen onåbar stannar filerna där de är.</li>
         <li><b>Efterbehandlingsskript.</b> De följer SABnzbds SAB_*-miljökontrakt, så skripten du redan har körs precis som de är.</li>
@@ -189,11 +192,13 @@
         <li><b>Live-diagram, inga bibliotek.</b> Allt pollas en gång i sekunden (en genomströmningsarea, staplad area per provider, en tidslinje för verifieringshälsa, könedräkning och ett hastighetshistogram) och diagrammen breddar sitt tidsfönster i takt med att du breddar webbläsaren.</li>
         <li><b>Resursmonitor:</b> CPU, RAM mot budget, diskskrivningar och nätverk i ett enda diagram, med en varning för låg disk.</li>
         <li><b>Topplista över providers.</b> Servrarna sorterar om sig själva efter live-prestanda och visar var och en sessionsbyte, antal anslutningar, utnyttjande och tillförlitlighet.</li>
-        <li><b>Köhantering:</b> dra för att ändra ordning, sätt prioritet och kategori inline, öppna en låda per nedladdning, pausa optimistiskt eller "pausa i N minuter".</li>
+        <li><b>Köhantering:</b> dra för att ändra ordning, sätt prioritet och kategori inline, öppna en låda per nedladdning, pausa optimistiskt eller "pausa i N minuter". Markera många rader på en gång, i kön eller i historiken, och hantera hela högen - med musen eller från tangentbordet.</li>
+        <li><b>En historik som sparar allt.</b> Färdiga jobb hamnar i sitt eget lager utan radgräns, sidindelat och sökbart, och de överlever omstarter. Gränser på ålder och antal finns om du vill ha dem, och de är avstängda.</li>
       </ul>
       <ul class="plain">
         <li><b>Allt går att konfigurera i webbläsaren:</b> servrar (med live-anslutningstester), hastighet och schema, anslutningar/fönster/avkodare, disk och kvot, bevakningsmappar och skript, indexeringsfilter, bibliotek, RSS, och säkerhet med nyckelrotation. Inställningarna överlever omstarter.</li>
-        <li><b>Diagnostik inbyggd:</b> en loggvisare i gränssnittet, ett systembenchmark som hittar dina tak för nätverk, beräkning och disk och talar om vad du ska göra åt dem, analysen av serverdiversitet, och anslutningsstegen.</li>
+        <li><b>HTTPS inbyggt.</b> Peka den på ett certifikat och en nyckel, så svarar den enda lyssnaren https i stället för http, både panel och API. Ett trasigt eller utgånget certifikat vägrar starta och namnger filen, i stället för att dyka upp som ett webbläsarfel någon annanstans senare.</li>
+        <li><b>Diagnostik inbyggd:</b> en loggvisare i gränssnittet som du kan filtrera på tagg och exportera, ett svar per nedladdning på "varför är det här långsamt?" som namnger steget som bromsar, ett systembenchmark som hittar dina tak för nätverk, beräkning och disk och talar om vad du ska göra åt dem, analysen av serverdiversitet, och anslutningsstegen.</li>
         <li><b>Dataförbrukning:</b> staplade staplar per provider över 14 dagar, daglig historik, och livstidsräknare för blockkonton.</li>
         <li><b>28 språk.</b> Instrumentpanelen levereras helt lokaliserad, höger-till-vänster-skrifter inräknat; manualen och den här sajten finns på 16.</li>
         <li><b>Bekvämligheter.</b> Dra och släpp en .nzb var som helst, skrivbordsaviseringar, slutförandeljud, en förstagångsguide och <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>En enda fristående körbar fil.</b> par2 och RAR-uppackning är native-kod inkompilerad i binären. Inget packas upp vid första körningen, och det finns ingen runtime och ingen installer att pyssla med.</li>
       <li><b>macOS, förstklassigt:</b> en universell binär för Apple Silicon och Intel, en native SwiftUI-menyradsapp, en launchd-enhet och en Homebrew-formula.</li>
       <li><b>Windows:</b> en helt statisk x64-exe som körs på standard Windows 10 och 11, med en startare för dubbelklick och guidad konfiguration.</li>
-      <li><b>Linux, Docker och NAS:</b> en härdad systemd-enhet, en flerstegs Docker-image med en linuxserver-liknande PUID/PGID-entrypoint, en compose-fil på köpet, en Unraid-mall och en Synology-guide. <a href="download.sv.html">Alla plattformar →</a></li>
+      <li><b>Linux, Docker och NAS:</b> en härdad systemd-enhet, en flerstegs Docker-image med en linuxserver-liknande PUID/PGID-entrypoint, en compose-fil på köpet, ett Synology-paket, en Unraid-mall och en Synology-guide. <a href="download.sv.html">Alla plattformar →</a></li>
+      <li><b>Också utgivet, fortfarande i beta:</b> .deb- och .rpm-paket för amd64 och arm64, ett QNAP-paket, ett FreeBSD-bygge, 32-bitars ARM för Raspberry Pi och Windows på ARM. Vart och ett byggs med varje utgåva och förblir märkt beta tills det har körts på riktig hårdvara.</li>
       <li><b>Den uppdaterar aldrig sig själv.</b> Nya releaser dyker upp som en notis på instrumentpanelen, eller inte ens det om du stänger av kollen. Att uppdatera förblir ditt beslut, enligt ditt schema.</li>
       <li><b>Guidad konfiguration.</b> Kör guiden <code>nzbfast setup</code>, eller låt den autodetektera en befintlig SABnzbd- eller NZBGet-konfig. Du har en första nedladdning igång på under två minuter.</li>
     </ul>

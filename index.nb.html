@@ -50,7 +50,7 @@
   etterpå, ingenting igjen å verifisere eller pakke ut når den er ferdig. I det øyeblikket
   fremdriftslinjen fylles, er filen ferdig og beviselig intakt.</p>
   <div class="chips">
-    <span class="chip"><b>8.31&nbsp;Gbps</b> på en 10&nbsp;GbE-linje</span>
+    <span class="chip"><b>9,0-9,3&nbsp;Gbps</b> på en 10&nbsp;GbE-linje</span>
     <span class="chip"><b>190&nbsp;GB → 4m33s</b> til en verifisert fil</span>
     <span class="chip">RAR-volumer <b>rører aldri disken</b></span>
     <span class="chip"><b>Halve disken</b> konkurrentene trenger</span>
@@ -129,7 +129,7 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
     <a href="features.nb.html">funksjonssiden</a>.</p>
     <div class="grid2">
       <ul class="feat">
-        <li><b>Nedlastinger på linjefart:</b> <span class="d">pipelinet NNTP målt til 8,31 Gbps på 10 GbE; den raskeste klienten på hver rene benchmark-etappe, ved hver størrelse.</span></li>
+        <li><b>Nedlastinger på linjefart:</b> <span class="d">pipelinet NNTP målt til 9,0-9,3 Gbps på en 10 GbE-linje med et eget tak på 9,8; den raskeste klienten på hver rene benchmark-etappe, ved hver størrelse.</span></li>
         <li><b>Pipeline i én omgang:</b> <span class="d">dekoding, verifisering og utpakking overlapper; arkivvolumene treffer aldri disken, uansett om posten er vanlig, kryptert eller nøstet; trenger 1× disk der andre trenger ~2×. På en 94 GB kryptert release er det 90 GB skrevet i stedet for 180 GB.</span></li>
         <li><b>Fler-leverandør union-tilgjengelighet:</b> <span class="d">blokk-eksakt ruting på tvers av backbones; preflight-dommer; eksakt tilpasset reparasjon; tidlig avbrudd av umulige poster.</span></li>
         <li><b>Minnebudsjett:</b> <span class="d">ett globalt RAM-budsjett med elegante spill-nivåer. Den swapper aldri maskinen din: en 190 GB-jobb fullføres innenfor et 1 GB-budsjett (~1,1 GB topp-RSS).</span></li>

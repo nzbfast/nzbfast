@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Pipelined NNTP at line rate:</b> <span class="d">8.31 Gbps measured on 10 GbE.</span></li>
+        <li><b>Pipelined NNTP at line rate:</b> <span class="d">9.0-9.3 Gbps measured on a 10 GbE line whose own ceiling is 9.8.</span></li>
         <li><b>One-pass pipeline:</b> <span class="d">decode, verify and extract overlap; RAR volumes never touch disk; nested archives unpack in the same pass.</span></li>
         <li><b>Multi-provider union availability:</b> <span class="d">complete from the union of your servers, or abort early.</span></li>
         <li><b>Memory budget:</b> <span class="d">bounded RAM, graceful spill, never swaps.</span></li>
@@ -74,10 +74,10 @@
     <h2>Engine &amp; speed</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>Pipelined NNTP.</b> Keeping several requests in flight per connection beats both round-trip latency and TCP congestion-window decay. We measure anywhere from +12% to +270% over serial fetching, and about 8 connections per server is enough to saturate the line.</li>
+        <li><b>Pipelined NNTP.</b> Keeping several requests in flight per connection beats both round-trip latency and TCP congestion-window decay. We measure +64% to +270% over serial fetching, replicated at every round-trip time from a 14 ms datacentre link to 63 ms satellite.</li>
         <li><b>SIMD yEnc decode</b> (rapidyenc, with NEON and AVX kernels) runs at 4.95 GB/s per core, decoded in place as the bytes land in the receive path.</li>
         <li><b>Multi-server shared queue.</b> Providers self-balance to within ~2% with no tuning. Each one's real rate is tracked, and the tail of a job is duplicate-dispatched so a single slow server can't drag out the finish.</li>
-        <li><b>Cross-job soak.</b> The tail of job N overlaps the start of job N+1, so the line stays lit edge to edge across a whole queue: 2% idle here versus SABnzbd's 61% dark in the same bench.</li>
+        <li><b>Cross-job soak.</b> The tail of job N overlaps the start of job N+1, so the line stays lit edge to edge across a whole queue: 2% idle here versus SABnzbd 5.0.4's 61% dark in the same bench.</li>
         <li><b>Slow-job watchdog.</b> A download crawling on one slow server while the rest sit idle gets bumped to the back of the queue, progress kept, and resumes once the queue clears.</li>
         <li><b>Idle-server prefetch:</b> a server the active job can't use, because its articles aren't stored there, starts on the next queued job instead of sitting idle.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Speed limits and a weekly scheduler:</b> live-adjustable caps, a local-time (DST-safe) schedule, and a "pause for N minutes" that resumes on its own.</li>
         <li><b>Memory budget.</b> One global RAM budget (auto: a quarter of RAM, capped, overridable). As it tightens, buffers shrink first, then data spills to disk and reads back once the job settles. It never swaps. A 190 GB job finishes inside a 1 GB budget at ~1.1 GB peak RSS, and there's a measured, documented 2 GB profile for NAS boxes.</li>
         <li><b>Backpressure.</b> A slow disk throttles the sockets instead of letting RAM fill. It holds within ±1% of a write cap, and RAM actually <i>falls</i> under pressure.</li>
-        <li><b>Post-job memory trim:</b> once idle, the daemon hands freed memory back to the OS, dropping to around 8 MB between jobs on macOS.</li>
+        <li><b>Post-job memory trim:</b> once a job finishes and the daemon falls idle, the buffers and caches it grew are handed back to the OS instead of being held for the next one.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Direct extraction:</b> store-mode RAR posts (most scene releases) are mapped and extracted while they download, so the volumes never land on disk at all. Disk written comes to content × 1.0 and disk needed to 1×, where others want roughly 2×.</li>
         <li><b>Nested archives, and depth barely costs anything.</b> Archives inside archives - RAR in RAR, 7z inside RAR, ladders many levels deep - are denested as the bytes arrive, inside the pass we were already making. That is the whole difference: a client that writes each layer out, closes it, reopens it and scans it again pays a fresh pass for every level, so each layer it goes down costs it another round trip through the disk. Ours ride along in the first pass, and the payload comes out of a ten-level ladder the same way it comes out of a one-level one. One copy on disk where write-out-and-rescan holds two or three.</li>
         <li><b>Deobfuscation.</b> Obfuscated posts are renamed from their PAR2 metadata, ROT13-scrambled names get rescued, and hash-named junk is classified and gated out.</li>
+        <li><b>Plain split files.</b> Sets split the HJSplit way, into .001/.002 or .1/.2 parts with no archive header at all, are recognised and joined back into the original file rather than landing on your disk as loose parts.</li>
       </ul>
       <ul class="plain">
         <li><b>Exact-fit repair.</b> Damaged blocks are known as they happen, so only the minimum-byte set of recovery volumes gets fetched (a knapsack solve) and repair touches nothing but the damaged spans.</li>
-        <li><b>RAR recovery records.</b> When PAR2 is exhausted, or was never posted, embedded RAR recovery records repair damaged volumes in place.</li>
+        <li><b>RAR recovery records.</b> When PAR2 is exhausted, or was never posted, embedded RAR recovery records and separate .rev recovery volumes repair damaged volumes in place.</li>
         <li><b>Repair at every depth.</b> A PAR2 set packed inside an inner layer is found and run at its own level, and a par-only post (data deleted, a 100%-recovery set left behind) is rebuilt whole and then unpacked.</li>
         <li><b>Compressed and encrypted fallback:</b> non-store posts materialise and unpack through the native RAR engine, everything from RAR4 to the new RAR7, overlapped with the rest of the queue. Encrypted sets park with a clear message instead of failing quietly.</li>
         <li><b>It goes looking for the password itself.</b> Most encrypted posts never need you. It tries the NZB's own metadata and the <code>{{pw}}</code> filename convention, the *arr API, then any short text note posted alongside the files, and failing all that the release and file names themselves. It repeats that hunt at <i>every</i> level, so a chain that hides each layer's password inside the layer above it - a different password at every level - unlocks all the way down with nothing typed. Anything genuinely left over gets a 🔑 unlock on the dashboard: it unlocks in the background, then files as normal.</li>
@@ -125,7 +126,7 @@
         <li><b>Union routing.</b> An article counts as missing only once every live server has refused it; until then it routes to whichever server holds it. Backbones differ in retention and takedowns, so the union quietly completes posts that no single server could.</li>
         <li><b>Crash-safe journal.</b> The journal works at article granularity. Send a kill −9 mid-job and it comes back, refetching only what hadn't been persisted; the queue and history outlive restarts.</li>
         <li><b>Park and retry:</b> failed jobs park in history, and a retry pulls only the pieces still missing.</li>
-        <li><b>Chaos-tested.</b> A mock NNTP server runs ten end-to-end failure scenarios (430s, corruption, truncation, stalls, dead servers, kill −9) on every single test run.</li>
+        <li><b>Chaos-tested.</b> A mock NNTP server plays 33 fault profiles, and eight end-to-end legs run on every single test run: a clean baseline plus dropped connections, dead air, brownouts, corruption, shaped links, TLS truncation and kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Provider reliability scoring.</b> Per-server completion rates are kept for good and shown in the dashboard, with a warning below 98%.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab server.</b> With the built-in indexer switched on, your local index answers t=search/tvsearch/movie, so the *arrs can treat your own scans as one more indexer alongside the ones you pay for. It is off unless you turn it on, and the facade is closed while it is.</li>
         <li><b>RSS auto-grab:</b> an indexer's feed is the same thing a news reader subscribes to, except it lists what has just been posted to Usenet. Anything matching the filters downloads itself. Feeds are filtered with an NZBGet-style language, added and edited live from the dashboard.</li>
         <li><b>Watchlist.</b> Name the shows and films you want, even ones that haven't aired yet. Each episode is grabbed on its first appearance and upgraded until it reaches your target quality (say, 720p → 1080p REMUX), with the superseded copy deleted only after the upgrade has verified. An airdate calendar shows what's coming. It can also follow your Plex watchlist: link your account, or paste the list's address, and everything you add there is watched here too.</li>
+        <li><b>Notifications where you already look.</b> Email, Discord, Slack, Telegram, Pushover, ntfy, Gotify and any Apprise server you run, alongside Kodi, Plex and Jellyfin library refreshes and a webhook you template yourself.</li>
       </ul>
       <ul class="plain">
-        <li><b>Watch folder.</b> Drop a .nzb in and it downloads; the file disappears once it's been taken.</li>
+        <li><b>Watch folder.</b> Drop a .nzb in and it downloads; the file disappears once it's been taken. Subfolders are watched too, and a file dropped in watch/tv arrives in the tv category.</li>
         <li><b>Smart folders:</b> regex, keyword and size rules sort downloads into categories at enqueue time, with optional TV filing to <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Per-category behaviour.</b> Each category carries its own destination folder, priority and post-processing script, so TV and films can land in different places under different rules.</li>
         <li><b>Cleanup rules:</b> junk extensions are removed once a job completes.</li>
         <li><b>Move to a NAS:</b> finished downloads move to a destination folder after unpack and renaming, keeping the category layout, and per-category destinations can send TV and films to different shares. If the share is unreachable, the files stay put.</li>
         <li><b>Post-processing scripts.</b> They honour SABnzbd's SAB_* environment contract, so the scripts you already have run as they are.</li>
@@ -189,11 +192,13 @@
         <li><b>Live charts, no libraries.</b> Everything polls once a second (a throughput area, per-provider stacked area, a verify-health timeline, queue burn-down, a speed histogram) and the charts widen their time window as you widen the browser.</li>
         <li><b>Resource monitor:</b> CPU, RAM against budget, disk writes and network on a single chart, with a low-disk warning.</li>
         <li><b>Provider leaderboard.</b> Servers re-sort themselves by live performance, each showing session bytes, connection count, utilisation and reliability.</li>
-        <li><b>Queue management:</b> drag to reorder, set priority and category inline, open a per-download drawer, pause optimistically, or "pause for N minutes".</li>
+        <li><b>Queue management:</b> drag to reorder, set priority and category inline, open a per-download drawer, pause optimistically, or "pause for N minutes". Pick many rows at once, in the queue or in history, and act on the lot - with the mouse or from the keyboard.</li>
+        <li><b>History that keeps everything.</b> Finished jobs go to their own store with no row limit, paged and searchable, and they outlive restarts. Age and count limits are there if you want them, and they are off.</li>
       </ul>
       <ul class="plain">
         <li><b>Everything is configurable in the browser:</b> servers (with live connection tests), speed and schedule, connections/window/decoders, disk and quota, watch folders and scripts, indexing gates, library, RSS, and security with key rotation. Settings survive restarts.</li>
-        <li><b>Diagnostics built in:</b> an in-UI log viewer, a system benchmark that finds your network, compute and disk ceilings and tells you what to do about them, the server-diversity analyser, and the connection ladder.</li>
+        <li><b>HTTPS built in.</b> Point it at a certificate and key and the one listener answers https instead of http, dashboard and API alike. A certificate that is broken or expired refuses startup and names the file, rather than surfacing as a browser error somewhere else later.</li>
+        <li><b>Diagnostics built in:</b> an in-UI log viewer you can filter by tag and export, a per-download "why is this slow?" answer that names the stage doing the limiting, a system benchmark that finds your network, compute and disk ceilings and tells you what to do about them, the server-diversity analyser, and the connection ladder.</li>
         <li><b>Data usage:</b> 14-day stacked per-provider bars, daily history, and lifetime counters for block accounts.</li>
         <li><b>28 languages.</b> The dashboard ships fully localised, right-to-left scripts included; the manual and this site are in 16.</li>
         <li><b>Quality of life.</b> Drag and drop a .nzb anywhere, desktop notifications, completion sounds, a first-run wizard, and <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Single self-contained executable.</b> par2 and RAR unpacking are native code compiled into the binary. Nothing gets extracted on first run, and there's no runtime and no installer to fuss with.</li>
       <li><b>macOS, first-class:</b> a universal binary for Apple Silicon and Intel, a native SwiftUI menu-bar app, a launchd unit, and a Homebrew formula.</li>
       <li><b>Windows:</b> a fully static x64 exe that runs on stock Windows 10 and 11, with a double-click launcher and guided setup.</li>
-      <li><b>Linux, Docker and NAS:</b> a hardened systemd unit, a multi-stage Docker image with a linuxserver-style PUID/PGID entrypoint, a compose file in the box, and step-by-step guides for Unraid and Synology. <a href="download.html">All platforms →</a></li>
+      <li><b>Linux, Docker and NAS:</b> a hardened systemd unit, a multi-stage Docker image with a linuxserver-style PUID/PGID entrypoint, a compose file in the box, a Synology package, and step-by-step guides for Unraid and Synology. <a href="download.html">All platforms →</a></li>
+      <li><b>Also published, still in beta:</b> .deb and .rpm packages for amd64 and arm64, a QNAP package, a FreeBSD build, 32-bit ARM for the Raspberry Pi, and Windows on ARM. Each is built with every release and stays labelled beta until it has run on real hardware.</li>
       <li><b>It never updates itself.</b> New releases show up as a dashboard notice, or not even that if you turn the check off. Updating stays your call, on your schedule.</li>
       <li><b>Guided setup.</b> Run the <code>nzbfast setup</code> wizard, or let it auto-detect an existing SABnzbd or NZBGet config. You'll have a first download running in under two minutes.</li>
     </ul>

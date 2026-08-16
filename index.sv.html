@@ -50,7 +50,7 @@
   Det finns inget monteringspass efteråt, inget kvar att verifiera eller packa upp när den väl
   är klar. I samma stund som förloppsstapeln fylls är filen färdig och bevisligen intakt.</p>
   <div class="chips">
-    <span class="chip"><b>8.31&nbsp;Gbps</b> på en 10&nbsp;GbE-linje</span>
+    <span class="chip"><b>9.0-9.3&nbsp;Gbps</b> på en 10&nbsp;GbE-linje</span>
     <span class="chip"><b>190&nbsp;GB → 4m33s</b> till en verifierad fil</span>
     <span class="chip">RAR-volymer <b>rör aldrig disken</b></span>
     <span class="chip"><b>Halva disken</b> konkurrenter behöver</span>
@@ -129,7 +129,7 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
     <a href="features.sv.html">funktionssidan</a>.</p>
     <div class="grid2">
       <ul class="feat">
-        <li><b>Nedladdningar i linjefart:</b> <span class="d">pipelinead NNTP uppmätt till 8.31 Gbps på 10 GbE; den snabbaste klienten på varje ren benchmark-etapp, i varje storlek.</span></li>
+        <li><b>Nedladdningar i linjefart:</b> <span class="d">pipelinead NNTP uppmätt till 9.0-9.3 Gbps på en 10 GbE-linje vars eget tak är 9.8; den snabbaste klienten på varje ren benchmark-etapp, i varje storlek.</span></li>
         <li><b>Enpassrörledning:</b> <span class="d">avkoda, verifiera och packa upp överlappar; arkivvolymerna rör aldrig disken, oavsett om inlägget är vanligt, krypterat eller nästlat; behöver 1× disk där andra behöver ~2×. På en 94 GB krypterad release är det 90 GB skrivet i stället för 180 GB.</span></li>
         <li><b>Union-tillgänglighet över flera providers:</b> <span class="d">blockexakt routning över backbones; preflight-utlåtanden; exakt passande reparation; tidigt avbrott av omöjliga inlägg.</span></li>
         <li><b>Minnesbudget:</b> <span class="d">en global RAM-budget med graciösa spill-nivåer. Den swappar aldrig din maskin: ett 190 GB-jobb blir klart inom en 1 GB-budget (~1.1 GB topp-RSS).</span></li>

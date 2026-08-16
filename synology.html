@@ -112,7 +112,7 @@
   # the container when one ships. Needs the Docker socket; delete this
   # service to update by hand, or on a DSM schedule instead.
   watchtower:
-    image: containrrr/watchtower
+    image: nickfedor/watchtower
     container_name: nzbfast-watchtower
     restart: unless-stopped
     environment:

@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Gepipelinede NNTP op lijnsnelheid:</b> <span class="d">8,31 Gbps gemeten op 10 GbE.</span></li>
+        <li><b>Gepipelinede NNTP op lijnsnelheid:</b> <span class="d">9,0-9,3 Gbps gemeten op een 10-GbE-lijn met een eigen plafond van 9,8.</span></li>
         <li><b>One-pass pipeline:</b> <span class="d">decoderen, verifiëren en uitpakken overlappen; RAR-volumes raken de schijf nooit aan; geneste archieven pakken uit in dezelfde doorgang.</span></li>
         <li><b>Union-beschikbaarheid over providers:</b> <span class="d">compleet vanuit de unie van al je servers, of vroegtijdig afbreken.</span></li>
         <li><b>Geheugenbudget:</b> <span class="d">begrensd RAM, nette spill naar schijf, swapt nooit.</span></li>
@@ -74,10 +74,10 @@
     <h2>Engine &amp; snelheid</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>Gepipelinede NNTP.</b> Meerdere verzoeken tegelijk onderweg per verbinding verslaan zowel de round-trip-latency als het inzakken van het TCP-congestievenster. We meten overal tussen +12% en +270% t.o.v. serieel ophalen, en zo'n 8 verbindingen per server volstaan om de lijn te verzadigen.</li>
+        <li><b>Gepipelinede NNTP.</b> Meerdere verzoeken tegelijk onderweg per verbinding verslaan zowel de round-trip-latency als het inzakken van het TCP-congestievenster. We meten +64% tot +270% t.o.v. serieel ophalen, herhaald bij elke round-trip-tijd, van een datacenterlijn van 14 ms tot 63 ms via satelliet.</li>
         <li><b>SIMD yEnc-decodering</b> (rapidyenc, met NEON- en AVX-kernels) draait op 4,95 GB/s per core, in-place gedecodeerd zodra de bytes in het ontvangstpad binnenkomen.</li>
         <li><b>Gedeelde wachtrij over meerdere servers.</b> Providers balanceren zichzelf tot binnen ~2%, zonder ook maar iets bij te stellen. Van elke server wordt de echte snelheid bijgehouden, en de staart van een taak wordt dubbel uitgestuurd zodat één trage server het einde niet kan ophouden.</li>
-        <li><b>Cross-job soak.</b> De staart van taak N overlapt de start van taak N+1, dus de lijn blijft van rand tot rand branden over een hele wachtrij: hier 2% idle tegenover de 61% donker van SABnzbd in dezelfde benchmark.</li>
+        <li><b>Cross-job soak.</b> De staart van taak N overlapt de start van taak N+1, dus de lijn blijft van rand tot rand branden over een hele wachtrij: hier 2% idle tegenover de 61% donker van SABnzbd 5.0.4 in dezelfde benchmark.</li>
         <li><b>Watchdog voor trage taken.</b> Een download die op één trage server kruipt terwijl de rest stilzit, gaat naar achter in de wachtrij, met behoud van voortgang, en hervat zodra de wachtrij leeg is.</li>
         <li><b>Prefetch op inactieve servers:</b> een server die de actieve taak niet kan gebruiken, omdat de artikelen er niet op staan, begint alvast aan de volgende taak in de wachtrij in plaats van niks te doen.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Snelheidslimieten en een weekschema:</b> live aanpasbare limieten, een schema in lokale tijd (zomertijd-proof) en een "pauzeer voor N minuten" die vanzelf weer hervat.</li>
         <li><b>Geheugenbudget.</b> Eén globaal RAM-budget (auto: een kwart van het RAM, met plafond, instelbaar). Wordt het krap, dan krimpen eerst de buffers, daarna spilt data naar schijf en wordt teruggelezen zodra de taak tot rust komt. Swappen doet hij nooit. Een taak van 190 GB voltooit binnen een budget van 1 GB bij ~1,1 GB piek-RSS, en er is een gemeten, gedocumenteerd 2 GB-profiel voor NAS-apparaten.</li>
         <li><b>Backpressure.</b> Een trage schijf remt de sockets af in plaats van het RAM te laten vollopen. Hij blijft binnen ±1% van een schrijflimiet, en het RAM-gebruik <i>daalt</i> onder druk juist.</li>
-        <li><b>Geheugen teruggeven na de taak:</b> zodra hij inactief is, geeft de daemon vrijgekomen geheugen terug aan het OS en zakt tussen taken naar zo'n 8 MB op macOS.</li>
+        <li><b>Geheugen teruggeven na de taak:</b> zodra een taak klaar is en de daemon inactief wordt, gaan de buffers en caches die hij had opgebouwd terug naar het OS in plaats van bewaard te blijven voor de volgende.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Direct uitpakken:</b> store-mode RAR-posts (de meeste scene-releases) worden tijdens de download gemapt en uitgepakt, dus de volumes belanden helemaal niet op schijf. Het schrijfwerk komt uit op content × 1,0 en de benodigde schijfruimte op 1×, waar anderen grofweg 2× willen.</li>
         <li><b>Geneste archieven, en diepte kost bijna niets.</b> Archieven in archieven - RAR in RAR, 7z in een RAR, ladders van vele niveaus - worden ontnest terwijl de bytes binnenkomen, binnen de ronde die we toch al maakten. Daar zit het hele verschil: een client die elke laag wegschrijft, sluit, heropent en opnieuw scant betaalt een volle ronde per niveau, dus elk niveau dieper kost hem nog een rondje over de schijf. De onze liften mee in de eerste ronde, en de payload komt uit een ladder van tien niveaus net zo tevoorschijn als uit één van één. Eén kopie op schijf waar wegschrijven-en-herlezen er twee of drie vasthoudt.</li>
         <li><b>Deobfuscatie.</b> Geobfusceerde posts worden hernoemd op basis van hun PAR2-metadata, ROT13-verhaspelde namen worden gered, en hash-genaamde rommel wordt geclassificeerd en tegengehouden.</li>
+        <li><b>Gewoon gesplitste bestanden.</b> Sets die op de HJSplit-manier zijn gesplitst, in .001/.002- of .1/.2-delen zonder enige archiefkop, worden herkend en weer tot het originele bestand samengevoegd in plaats van als losse delen op je schijf te belanden.</li>
       </ul>
       <ul class="plain">
         <li><b>Exact passend herstel.</b> Beschadigde blokken zijn bekend zodra ze optreden, dus alleen de byte-minimale set recovery-volumes wordt opgehaald (een knapsack-oplossing) en het herstel raakt niets anders aan dan de beschadigde stukken.</li>
-        <li><b>RAR-recovery-records.</b> Als de PAR2 op is, of nooit is gepost, repareren de in de RARs ingebedde recovery-records beschadigde volumes ter plekke.</li>
+        <li><b>RAR-recovery-records.</b> Als de PAR2 op is, of nooit is gepost, repareren de in de RARs ingebedde recovery-records en losse .rev-recovery-volumes beschadigde volumes ter plekke.</li>
         <li><b>Herstel op elke diepte.</b> Een PAR2-set die in een binnenste laag zit ingepakt wordt gevonden en op zijn eigen niveau uitgevoerd, en een par-only post (data verwijderd, alleen een recovery-set met 100% dekking achtergelaten) wordt in zijn geheel herbouwd en daarna uitgepakt.</li>
         <li><b>Fallback voor gecomprimeerd en versleuteld:</b> niet-store-posts worden op schijf gezet en uitgepakt via de native RAR-engine, alles van RAR4 tot het nieuwe RAR7, overlappend met de rest van de wachtrij. Versleutelde sets worden geparkeerd met een duidelijke melding in plaats van stilletjes te mislukken.</li>
         <li><b>Hij gaat zelf op zoek naar het wachtwoord.</b> De meeste versleutelde posts hebben je niet nodig. Hij probeert de metadata van de NZB en de <code>{{pw}}</code>-naamconventie, de *arr-API, dan elk kort tekstnotitietje dat naast de bestanden is gepost, en als dat niets oplevert de namen van de release en de bestanden zelf. Die zoektocht herhaalt hij op <i>elk</i> niveau: een keten die het wachtwoord van elke laag verstopt in de laag erboven - een ander wachtwoord per niveau - gaat helemaal open zonder dat je iets typt. Wat echt overblijft krijgt de 🔑-ontgrendeling op het dashboard: hij ontgrendelt op de achtergrond en archiveert daarna gewoon.</li>
@@ -125,7 +126,7 @@
         <li><b>Union-routing.</b> Een artikel telt pas als ontbrekend zodra elke actieve server het heeft geweigerd; tot dan gaat het naar de server die het wél heeft. Backbones verschillen in retentie en takedowns, dus de unie maakt in stilte posts compleet die geen enkele server in z'n eentje kon leveren.</li>
         <li><b>Crashbestendig journal.</b> Het journal werkt op artikelniveau. Stuur midden in een taak een kill −9 en hij komt terug, waarbij alleen opnieuw wordt opgehaald wat nog niet was weggeschreven; wachtrij en geschiedenis overleven herstarts.</li>
         <li><b>Parkeren en opnieuw proberen:</b> mislukte taken parkeren in de geschiedenis, en een nieuwe poging haalt alleen de stukken op die nog ontbreken.</li>
-        <li><b>Chaos-getest.</b> Een mock-NNTP-server draait tien end-to-end-faalscenario's (430's, corruptie, afkapping, stalls, dode servers, kill −9) bij elke afzonderlijke testrun.</li>
+        <li><b>Chaos-getest.</b> Een mock-NNTP-server speelt 33 faalprofielen, en bij elke afzonderlijke testrun lopen acht end-to-end-trajecten: een schone basis plus verbroken verbindingen, radiostilte, brownouts, corruptie, geknepen lijnen, TLS-afkapping en kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Betrouwbaarheidsscore per provider.</b> De completion per server wordt voorgoed bijgehouden en in het dashboard getoond, met een waarschuwing onder de 98%.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab-server.</b> Je lokale index beantwoordt t=search/tvsearch/movie, zodat de *arrs je eigen scans als indexer kunnen behandelen.</li>
         <li><b>RSS auto-grab:</b> de feed van een indexer is hetzelfde als waar een nieuwslezer zich op abonneert, alleen staat erin wat er net op Usenet is geplaatst. Alles wat aan de filters voldoet, downloadt zichzelf. Feeds gefilterd met een taal in NZBGet-stijl, live toegevoegd en bewerkt vanuit het dashboard.</li>
         <li><b>Watchlist.</b> Noem de series en films die je wilt, ook die nog niet zijn uitgezonden. Elke aflevering wordt bij de eerste verschijning gegrepen en geüpgraded tot je doelkwaliteit is bereikt (bijvoorbeeld 720p → 1080p REMUX), waarbij de vervangen kopie pas wordt verwijderd nadat de upgrade is geverifieerd. Een uitzendkalender laat zien wat eraan komt. Hij kan ook je Plex-watchlist volgen: koppel je account of plak het adres van de lijst, en alles wat je daar toevoegt wordt hier ook gevolgd.</li>
+        <li><b>Meldingen waar je toch al kijkt.</b> E-mail, Discord, Slack, Telegram, Pushover, ntfy, Gotify en elke Apprise-server die je draait, naast bibliotheekverversingen voor Kodi, Plex en Jellyfin en een webhook die je zelf als sjabloon opstelt.</li>
       </ul>
       <ul class="plain">
-        <li><b>Watchmap.</b> Zet er een .nzb in en hij wordt gedownload; het bestand verdwijnt zodra het is opgepakt.</li>
+        <li><b>Watchmap.</b> Zet er een .nzb in en hij wordt gedownload; het bestand verdwijnt zodra het is opgepakt. Submappen worden ook bekeken, en een bestand dat in watch/tv wordt gezet komt in de categorie tv terecht.</li>
         <li><b>Slimme mappen:</b> regels op regex, trefwoord en grootte sorteren downloads bij het toevoegen al in categorieën, met optionele tv-opberging naar <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Gedrag per categorie.</b> Elke categorie draagt zijn eigen doelmap, prioriteit en nabewerkingsscript, zodat series en films onder verschillende regels op verschillende plekken kunnen landen.</li>
         <li><b>Opruimregels:</b> rommel-extensies worden verwijderd zodra een taak klaar is.</li>
         <li><b>Verplaatsen naar een NAS:</b> voltooide downloads gaan na uitpakken en hernoemen naar een bestemmingsmap met behoud van de categorie-indeling, en bestemmingen per categorie kunnen series en films naar verschillende shares sturen. Is de share onbereikbaar, dan blijven de bestanden staan.</li>
         <li><b>Nabewerkingsscripts.</b> Ze respecteren SABnzbd's SAB_*-omgevingscontract, dus de scripts die je al hebt draaien ongewijzigd door.</li>
@@ -189,11 +192,13 @@
         <li><b>Live grafieken, geen libraries.</b> Alles polt één keer per seconde (een doorvoervlak, gestapeld vlak per provider, een tijdlijn van de verificatiegezondheid, wachtrij-burn-down, een snelheidshistogram) en de grafieken verbreden hun tijdvenster naarmate je de browser verbreedt.</li>
         <li><b>Resourcemonitor:</b> CPU, RAM tegenover het budget, schijfschrijfacties en netwerk in één grafiek, met een waarschuwing bij weinig schijfruimte.</li>
         <li><b>Provider-ranglijst.</b> Servers hersorteren zichzelf op live prestaties, elk met sessiebytes, aantal verbindingen, benutting en betrouwbaarheid.</li>
-        <li><b>Wachtrijbeheer:</b> sleep om te herordenen, stel prioriteit en categorie inline in, open een paneel per download, pauzeer optimistisch, of "pauzeer voor N minuten".</li>
+        <li><b>Wachtrijbeheer:</b> sleep om te herordenen, stel prioriteit en categorie inline in, open een paneel per download, pauzeer optimistisch, of "pauzeer voor N minuten". Kies in de wachtrij of in de geschiedenis veel rijen tegelijk en handel ze in één keer af - met de muis of vanaf het toetsenbord.</li>
+        <li><b>Een geschiedenis die alles bewaart.</b> Afgeronde taken gaan naar hun eigen opslag zonder rijlimiet, met paginering en zoeken, en ze overleven herstarts. Grenzen op leeftijd en aantal zijn er als je ze wilt, en ze staan uit.</li>
       </ul>
       <ul class="plain">
         <li><b>Alles instelbaar in de browser:</b> servers (met live verbindingstests), snelheid en schema, verbindingen/venster/decoders, schijf en quotum, watchmappen en scripts, indexeringsfilters, bibliotheek, RSS, en beveiliging met sleutelrotatie. Instellingen overleven herstarts.</li>
-        <li><b>Diagnostiek ingebouwd:</b> een logviewer in de UI, een systeembenchmark die je plafonds voor netwerk, rekenkracht en schijf opzoekt en vertelt wat je eraan kunt doen, de serverdiversiteit-analyse, en de verbindingsladder.</li>
+        <li><b>HTTPS ingebouwd.</b> Wijs hem een certificaat en sleutel aan en de ene listener antwoordt https in plaats van http, dashboard en API allebei. Een kapot of verlopen certificaat weigert te starten en noemt het bestand, in plaats van later ergens anders als browserfout op te duiken.</li>
+        <li><b>Diagnostiek ingebouwd:</b> een logviewer in de UI die je op tag kunt filteren en exporteren, een antwoord per download op "waarom is dit traag?" dat de remmende stap benoemt, een systeembenchmark die je plafonds voor netwerk, rekenkracht en schijf opzoekt en vertelt wat je eraan kunt doen, de serverdiversiteit-analyse, en de verbindingsladder.</li>
         <li><b>Dataverbruik:</b> 14 dagen gestapelde staven per provider, dagelijkse historie, en totaaltellers voor blokaccounts.</li>
         <li><b>28 talen.</b> Het dashboard komt volledig vertaald, rechts-naar-links-schriften inbegrepen; de handleiding en deze site zijn er in 16.</li>
         <li><b>Fijne extra's.</b> Sleep een .nzb waar dan ook heen, bureaubladmeldingen, geluiden bij voltooiing, een wizard bij de eerste start, en <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Eén op zichzelf staand uitvoerbaar bestand.</b> par2 en RAR-uitpakken zijn native code, meegecompileerd in de binary. Er wordt bij het eerste gebruik niets uitgepakt, en er is geen runtime en geen installer om mee te stoeien.</li>
       <li><b>macOS, eersteklas:</b> een universele binary voor Apple Silicon en Intel, een native SwiftUI-menubalk-app, een launchd-unit en een Homebrew-formule.</li>
       <li><b>Windows:</b> een volledig statische x64-exe die op kaal Windows 10 en 11 draait, met een dubbelklik-launcher en begeleide setup.</li>
-      <li><b>Linux, Docker en NAS:</b> een geharde systemd-unit, een multi-stage Docker-image met een PUID/PGID-entrypoint in linuxserver-stijl, een compose-bestand in de doos, een Unraid-template en een Synology-gids. <a href="download.nl.html">Alle platforms →</a></li>
+      <li><b>Linux, Docker en NAS:</b> een geharde systemd-unit, een multi-stage Docker-image met een PUID/PGID-entrypoint in linuxserver-stijl, een compose-bestand in de doos, een Synology-pakket, een Unraid-template en een Synology-gids. <a href="download.nl.html">Alle platforms →</a></li>
+      <li><b>Ook uitgebracht, nog in bèta:</b> .deb- en .rpm-pakketten voor amd64 en arm64, een QNAP-pakket, een FreeBSD-build, 32-bits ARM voor de Raspberry Pi, en Windows op ARM. Elk wordt bij elke release gebouwd en blijft als bèta gemarkeerd tot het op echte hardware heeft gedraaid.</li>
       <li><b>Het werkt zichzelf nooit bij.</b> Nieuwe releases verschijnen als een melding op het dashboard, of zelfs dat niet als je de controle uitzet. Updaten blijft jouw keuze, op jouw moment.</li>
       <li><b>Begeleide setup.</b> Draai de <code>nzbfast setup</code>-wizard, of laat hem een bestaande SABnzbd- of NZBGet-config automatisch detecteren. Binnen twee minuten heb je een eerste download draaien.</li>
     </ul>

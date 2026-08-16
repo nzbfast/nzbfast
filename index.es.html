@@ -50,7 +50,7 @@
   No hay una pasada de ensamblado al final, ni nada que verificar o desempaquetar cuando termina: en el momento
   en que la barra de progreso se llena, el archivo está terminado y su integridad, demostrada.</p>
   <div class="chips">
-    <span class="chip"><b>8.31&nbsp;Gbps</b> en una línea de 10&nbsp;GbE</span>
+    <span class="chip"><b>9.0-9.3&nbsp;Gbps</b> en una línea de 10&nbsp;GbE</span>
     <span class="chip"><b>190&nbsp;GB → 4m33s</b> a un archivo verificado</span>
     <span class="chip">Los volúmenes RAR <b>nunca tocan el disco</b></span>
     <span class="chip"><b>La mitad del disco</b> que necesita la competencia</span>
@@ -130,7 +130,7 @@ socket ──TLS──▶ <b>decodificación SIMD rapidyenc</b> (in situ - 4.95 
     <a href="features.es.html">página de funciones</a>.</p>
     <div class="grid2">
       <ul class="feat">
-        <li><b>Descargas a velocidad de línea:</b> <span class="d">NNTP en pipeline medido a 8.31 Gbps en 10 GbE; el cliente más rápido en cada tramo de benchmark limpio, a cualquier tamaño.</span></li>
+        <li><b>Descargas a velocidad de línea:</b> <span class="d">NNTP en pipeline medido a 9.0-9.3 Gbps en una línea de 10 GbE cuyo propio techo es de 9.8; el cliente más rápido en cada tramo de benchmark limpio, a cualquier tamaño.</span></li>
         <li><b>Pipeline de una sola pasada:</b> <span class="d">decodificación, verificación y extracción se solapan; los volúmenes del archivo nunca tocan el disco, sea la publicación normal, cifrada o anidada; necesita 1× de disco donde otros necesitan ~2×. En una publicación cifrada de 94 GB, eso son 90 GB escritos en lugar de 180 GB.</span></li>
         <li><b>Disponibilidad por unión de proveedores:</b> <span class="d">enrutado exacto por bloque entre backbones; veredictos de comprobación previa; reparación a medida; aborto temprano de publicaciones imposibles.</span></li>
         <li><b>Presupuesto de memoria:</b> <span class="d">un único presupuesto global de RAM con niveles de desbordamiento graduales. Nunca hace swap en tu máquina: un trabajo de 190 GB se completa dentro de un presupuesto de 1 GB (~1.1 GB de RSS pico).</span></li>

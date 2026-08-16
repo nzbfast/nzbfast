@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Pipelined NNTP auf Leitungstempo:</b> <span class="d">8,31 Gbps gemessen auf 10 GbE.</span></li>
+        <li><b>Pipelined NNTP auf Leitungstempo:</b> <span class="d">9,0-9,3 Gbps gemessen auf einer 10-GbE-Leitung, deren eigene Obergrenze bei 9,8 liegt.</span></li>
         <li><b>Ein-Pass-Pipeline:</b> <span class="d">Dekodieren, Prüfen und Entpacken überlappen; RAR-Volumes berühren nie die Festplatte; verschachtelte Archive werden im selben Durchlauf entpackt.</span></li>
         <li><b>Union-Verfügbarkeit über mehrere Provider:</b> <span class="d">vervollständigt aus der Vereinigung deiner Server oder bricht früh ab.</span></li>
         <li><b>Speicher-Budget:</b> <span class="d">begrenzter RAM, sauberes Auslagern, niemals Swapping.</span></li>
@@ -74,10 +74,10 @@
     <h2>Engine &amp; Tempo</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>Pipelined NNTP.</b> Mehrere gleichzeitig offene Anfragen pro Verbindung schlagen sowohl die Round-Trip-Latenz als auch den Verfall des TCP-Congestion-Windows. Wir messen irgendwo zwischen +12 % und +270 % gegenüber seriellem Abruf, und rund 8 Verbindungen pro Server genügen, um die Leitung auszulasten.</li>
+        <li><b>Pipelined NNTP.</b> Mehrere gleichzeitig offene Anfragen pro Verbindung schlagen sowohl die Round-Trip-Latenz als auch den Verfall des TCP-Congestion-Windows. Wir messen +64 % bis +270 % gegenüber seriellem Abruf, nachgewiesen bei jeder Round-Trip-Zeit, von einer 14-ms-Rechenzentrumsleitung bis zu 63 ms per Satellit.</li>
         <li><b>SIMD-yEnc-Dekodierung</b> (rapidyenc, mit NEON- und AVX-Kerneln) läuft mit 4,95 GB/s pro Kern und dekodiert an Ort und Stelle, während die Bytes im Empfangspfad eintreffen.</li>
         <li><b>Gemeinsame Warteschlange über alle Server.</b> Ohne jedes Tuning gleichen sich die Provider bis auf etwa 2 % selbst aus. Die tatsächliche Rate jedes Servers wird mitverfolgt, und das Ende eines Jobs wird doppelt vergeben, damit ein einzelner langsamer Server das Finale nicht in die Länge zieht.</li>
-        <li><b>Job-übergreifendes Durchziehen.</b> Das Ende von Job N überlappt den Start von Job N+1, sodass die Leitung über eine ganze Warteschlange hinweg von Kante zu Kante ausgelastet bleibt: hier 2 % Leerlauf gegenüber 61 % Dunkelzeit bei SABnzbd im selben Benchmark.</li>
+        <li><b>Job-übergreifendes Durchziehen.</b> Das Ende von Job N überlappt den Start von Job N+1, sodass die Leitung über eine ganze Warteschlange hinweg von Kante zu Kante ausgelastet bleibt: hier 2 % Leerlauf gegenüber 61 % Dunkelzeit bei SABnzbd 5.0.4 im selben Benchmark.</li>
         <li><b>Watchdog für langsame Jobs.</b> Kriecht ein Download auf einem einzigen langsamen Server dahin, während der Rest untätig wartet, wandert er ans Ende der Warteschlange (der Fortschritt bleibt erhalten) und läuft weiter, sobald die Warteschlange frei ist.</li>
         <li><b>Prefetch auf freien Servern:</b> ein Server, den der aktive Job nicht nutzen kann, weil seine Artikel dort nicht liegen, beginnt stattdessen mit dem nächsten Job in der Warteschlange, statt untätig zu bleiben.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Tempolimits und ein Wochenplan:</b> live verstellbare Obergrenzen, ein Zeitplan in lokaler Zeit (sommerzeitfest) und ein „Pause für N Minuten“, das von selbst wieder anläuft.</li>
         <li><b>Speicher-Budget.</b> Ein einziges globales RAM-Budget (automatisch ein Viertel des RAM, gedeckelt, übersteuerbar). Wird es knapp, schrumpfen zuerst die Puffer, dann wandern Daten auf die Platte und werden zurückgelesen, sobald der Job zur Ruhe kommt. Geswappt wird nie. Ein 190-GB-Job läuft in einem 1-GB-Budget bei ~1,1 GB Spitzen-RSS durch, und für NAS-Geräte gibt es ein vermessenes, dokumentiertes 2-GB-Profil.</li>
         <li><b>Gegendruck.</b> Eine langsame Festplatte drosselt die Sockets, statt den RAM volllaufen zu lassen. Sie hält ein Schreiblimit auf ±1 % genau ein, und der RAM <i>sinkt</i> unter Druck sogar.</li>
-        <li><b>Speicher-Rückgabe nach dem Job:</b> sobald er im Leerlauf ist, gibt der Daemon freigewordenen Speicher ans Betriebssystem zurück und fällt zwischen Jobs unter macOS auf rund 8 MB.</li>
+        <li><b>Speicher-Rückgabe nach dem Job:</b> sobald ein Job fertig ist und der Daemon in den Leerlauf fällt, gehen die aufgebauten Puffer und Caches ans Betriebssystem zurück, statt für den nächsten Job gehalten zu werden.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Direktes Entpacken:</b> RAR-Posts im Store-Modus (die meisten Scene-Releases) werden schon während des Downloads gemappt und entpackt, sodass die Volumes gar nicht erst auf der Festplatte landen. Die Schreiblast beträgt Inhalt × 1,0 und der Plattenbedarf 1×, wo andere rund 2× verlangen.</li>
         <li><b>Verschachtelte Archive, und Tiefe kostet fast nichts.</b> Archive in Archiven - RAR im RAR, 7z im RAR, viele Ebenen tiefe Leitern - werden entschachtelt, während die Bytes ankommen, innerhalb des Durchlaufs, den wir ohnehin machen. Genau darin liegt der Unterschied: Ein Client, der jede Ebene herausschreibt, schließt, wieder öffnet und erneut liest, zahlt pro Ebene einen vollen Durchlauf, jede weitere Ebene kostet ihn also noch einen Umweg über die Platte. Unsere fahren im ersten Durchlauf mit, und die Nutzlast kommt aus einer zehnstufigen Leiter genauso heraus wie aus einer einstufigen. Eine Kopie auf der Platte, wo Herausschreiben-und-neu-Lesen zwei oder drei hält.</li>
         <li><b>Deobfuskierung.</b> Verschleierte Posts werden anhand ihrer PAR2-Metadaten umbenannt, ROT13-verwürfelte Namen gerettet und hash-benannter Müll erkannt und aussortiert.</li>
+        <li><b>Einfache Split-Dateien.</b> Sets, die nach HJSplit-Art in .001/.002- oder .1/.2-Teile zerlegt sind und gar keinen Archivkopf haben, werden erkannt und wieder zur Originaldatei zusammengefügt, statt als lose Teile auf deiner Platte zu landen.</li>
       </ul>
       <ul class="plain">
         <li><b>Passgenaue Reparatur.</b> Beschädigte Blöcke sind bekannt, sobald sie auftreten, sodass nur die byteminimale Menge an Recovery-Volumes geholt wird (ein Knapsack-Problem) und die Reparatur nichts als die beschädigten Bereiche anfasst.</li>
-        <li><b>RAR-Recovery-Records.</b> Wenn das PAR2 aufgebraucht ist, oder nie gepostet wurde, reparieren die in den RARs eingebetteten Recovery-Records beschädigte Volumes an Ort und Stelle.</li>
+        <li><b>RAR-Recovery-Records.</b> Wenn das PAR2 aufgebraucht ist, oder nie gepostet wurde, reparieren die in den RARs eingebetteten Recovery-Records und separate .rev-Recovery-Volumes beschädigte Volumes an Ort und Stelle.</li>
         <li><b>Reparatur auf jeder Ebene.</b> Ein PAR2-Set, das in einer inneren Schicht steckt, wird gefunden und auf seiner eigenen Ebene ausgeführt, und ein Nur-PAR-Post (Daten gelöscht, nur ein Recovery-Set mit 100 % Deckung zurückgelassen) wird erst komplett rekonstruiert und dann entpackt.</li>
         <li><b>Fallback für Komprimiertes und Verschlüsseltes:</b> Nicht-Store-Posts landen auf der Platte und werden über die native RAR-Engine entpackt, alles von RAR4 bis zum neuen RAR7, überlappt mit dem Rest der Warteschlange. Verschlüsselte Sets parken mit einer klaren Meldung, statt still zu scheitern.</li>
         <li><b>Es sucht das Passwort selbst.</b> Die meisten verschlüsselten Posts brauchen dich gar nicht. Es probiert die NZB-Metadaten und die <code>{{pw}}</code>-Namenskonvention, die *arr-API, dann jede kurze Textnotiz, die neben den Dateien liegt, und zuletzt die Namen der Release und der Dateien selbst. Diese Suche wiederholt es auf <i>jeder</i> Ebene: Eine Kette, die das Passwort jeder Schicht in der Schicht darüber versteckt - ein anderes Passwort pro Ebene - schließt sich bis ganz nach unten auf, ohne dass du etwas tippst. Was wirklich übrig bleibt, bekommt das 🔑-Entsperren im Dashboard: Es entsperrt im Hintergrund und legt dann normal ab.</li>
@@ -125,7 +126,7 @@
         <li><b>Union-Routing.</b> Ein Artikel gilt erst dann als fehlend, wenn ihn jeder aktive Server verweigert hat; bis dahin wird er zu dem Server geleitet, der ihn vorhält. Backbones unterscheiden sich in Retention und Takedowns, und so vervollständigt die Vereinigung klammheimlich Posts, die kein einzelner Server schaffen würde.</li>
         <li><b>Absturzfestes Journal.</b> Das Journal arbeitet auf Artikelebene. Schick mitten im Job ein kill −9, und es kommt zurück und lädt nur nach, was noch nicht gesichert war; Warteschlange und Verlauf überstehen Neustarts.</li>
         <li><b>Parken und erneut versuchen:</b> fehlgeschlagene Jobs parken im Verlauf, und ein erneuter Versuch holt nur die Teile, die noch fehlen.</li>
-        <li><b>Chaos-getestet.</b> Ein Mock-NNTP-Server fährt bei jedem einzelnen Testlauf zehn End-to-End-Fehlerszenarien durch: 430er, Korruption, Abschneiden, Hänger, tote Server, kill −9.</li>
+        <li><b>Chaos-getestet.</b> Ein Mock-NNTP-Server spielt 33 Fehlerprofile, und bei jedem einzelnen Testlauf laufen acht End-to-End-Durchgänge: eine saubere Referenz plus abgebrochene Verbindungen, Funkstille, Brownouts, Korruption, gedrosselte Leitungen, TLS-Abschneiden und kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Provider-Zuverlässigkeitswertung.</b> Die Vollständigkeitsraten pro Server werden dauerhaft festgehalten und im Dashboard angezeigt, mit einer Warnung unterhalb von 98 %.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab-Server.</b> Dein lokaler Index beantwortet t=search/tvsearch/movie, sodass die *arrs deine eigenen Scans wie einen Indexer behandeln können.</li>
         <li><b>RSS-Auto-Grab:</b> Der Feed eines Indexers ist dasselbe, was ein News-Reader abonniert, nur listet er auf, was gerade im Usenet gepostet wurde. Alles, was auf die Filter passt, lädt sich von selbst herunter. Feeds, gefiltert mit einer Sprache im NZBGet-Stil, live im Dashboard hinzugefügt und bearbeitet.</li>
         <li><b>Watchlist.</b> Nenn die Serien und Filme, die du willst, auch solche, die noch nicht ausgestrahlt sind. Jede Episode wird bei ihrem ersten Auftauchen geholt und aufgerüstet, bis sie deine Zielqualität erreicht (etwa 720p → 1080p REMUX), wobei die überholte Kopie erst gelöscht wird, nachdem das Upgrade verifiziert wurde. Ein Ausstrahlungskalender zeigt, was kommt. Sie kann auch deiner Plex-Watchlist folgen: Verknüpfe dein Konto oder füge die Adresse der Liste ein, und alles, was du dort hinzufügst, wird auch hier beobachtet.</li>
+        <li><b>Benachrichtigungen dort, wo du ohnehin hinschaust.</b> E-Mail, Discord, Slack, Telegram, Pushover, ntfy, Gotify und jeder Apprise-Server, den du betreibst, dazu Bibliotheks-Refreshes für Kodi, Plex und Jellyfin und ein Webhook, den du selbst als Vorlage baust.</li>
       </ul>
       <ul class="plain">
-        <li><b>Watch-Ordner.</b> Leg eine .nzb hinein, und sie wird geladen; die Datei verschwindet, sobald sie übernommen wurde.</li>
+        <li><b>Watch-Ordner.</b> Leg eine .nzb hinein, und sie wird geladen; die Datei verschwindet, sobald sie übernommen wurde. Unterordner werden ebenfalls beobachtet, und eine Datei, die in watch/tv landet, kommt in der Kategorie tv an.</li>
         <li><b>Smarte Ordner:</b> Regex-, Stichwort- und Größenregeln sortieren Downloads schon beim Einreihen in Kategorien, mit optionaler TV-Ablage nach <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Verhalten pro Kategorie.</b> Jede Kategorie bringt ihren eigenen Zielordner, ihre Priorität und ihr Nachbearbeitungsskript mit, sodass Serien und Filme unter verschiedenen Regeln an verschiedenen Orten landen können.</li>
         <li><b>Aufräumregeln:</b> Müll-Endungen werden entfernt, sobald ein Job abgeschlossen ist.</li>
         <li><b>Verschieben auf ein NAS:</b> fertige Downloads wandern nach dem Entpacken und Umbenennen in einen Zielordner, das Kategorie-Layout bleibt erhalten, und Ziele je Kategorie können Serien und Filme auf verschiedene Shares schicken. Ist das Share nicht erreichbar, bleiben die Dateien, wo sie sind.</li>
         <li><b>Nachbearbeitungs-Skripte.</b> Sie halten sich an SABnzbds SAB_*-Umgebungsvertrag, sodass die Skripte, die du schon hast, unverändert laufen.</li>
@@ -189,11 +192,13 @@
         <li><b>Live-Diagramme, ohne Libraries.</b> Alles pollt einmal pro Sekunde (eine Durchsatz-Fläche, eine gestapelte Fläche pro Provider, eine Prüfstatus-Zeitleiste, ein Warteschlangen-Burn-down, ein Tempo-Histogramm) und die Diagramme weiten ihr Zeitfenster, sobald du das Browserfenster breiter ziehst.</li>
         <li><b>Ressourcen-Monitor:</b> CPU, RAM gegen das Budget, Schreibvorgänge und Netzwerk in einem einzigen Diagramm, mit einer Warnung bei wenig Plattenplatz.</li>
         <li><b>Provider-Rangliste.</b> Die Server sortieren sich nach Live-Leistung selbst um und zeigen jeweils Sitzungs-Bytes, Verbindungszahl, Auslastung und Zuverlässigkeit.</li>
-        <li><b>Warteschlangen-Verwaltung:</b> zum Umsortieren ziehen, Priorität und Kategorie inline setzen, einen Drawer pro Download öffnen, optimistisch pausieren oder „Pause für N Minuten“.</li>
+        <li><b>Warteschlangen-Verwaltung:</b> zum Umsortieren ziehen, Priorität und Kategorie inline setzen, einen Drawer pro Download öffnen, optimistisch pausieren oder „Pause für N Minuten“. Wähle in der Warteschlange oder im Verlauf viele Zeilen auf einmal aus und handle mit allen zusammen - mit der Maus oder von der Tastatur.</li>
+        <li><b>Ein Verlauf, der alles behält.</b> Fertige Jobs wandern in einen eigenen Speicher ohne Zeilenlimit, mit Seiten und Suche, und sie überstehen Neustarts. Grenzen nach Alter und Anzahl gibt es, wenn du sie willst, und sie sind aus.</li>
       </ul>
       <ul class="plain">
         <li><b>Alles im Browser konfigurierbar:</b> Server (mit Live-Verbindungstests), Tempo und Zeitplan, Verbindungen/Fenster/Decoder, Platte und Quota, Watch-Ordner und Skripte, Ingest-Filter, Bibliothek, RSS und Sicherheit mit Key-Rotation. Die Einstellungen überstehen Neustarts.</li>
-        <li><b>Diagnose eingebaut:</b> ein Log-Viewer direkt in der UI, ein System-Benchmark, der deine Netzwerk-, Rechen- und Platten-Obergrenzen findet und dir sagt, was dagegen zu tun ist, die Server-Diversitäts-Analyse und die Verbindungs-Leiter.</li>
+        <li><b>HTTPS ist eingebaut.</b> Zeig ihm ein Zertifikat und einen Schlüssel, und der eine Listener antwortet https statt http, Dashboard wie API. Ein kaputtes oder abgelaufenes Zertifikat verweigert den Start und nennt die Datei, statt später anderswo als Browserfehler aufzutauchen.</li>
+        <li><b>Diagnose eingebaut:</b> ein Log-Viewer direkt in der UI, den du nach Tag filtern und exportieren kannst, eine Antwort pro Download auf „warum ist das langsam?“, die die bremsende Stufe benennt, ein System-Benchmark, der deine Netzwerk-, Rechen- und Platten-Obergrenzen findet und dir sagt, was dagegen zu tun ist, die Server-Diversitäts-Analyse und die Verbindungs-Leiter.</li>
         <li><b>Datenverbrauch:</b> gestapelte Balken pro Provider über 14 Tage, Tageshistorie und Lebenszeit-Zähler für Block-Konten.</li>
         <li><b>28 Sprachen.</b> Das Dashboard kommt vollständig übersetzt, Rechts-nach-links-Schriften eingeschlossen; das Handbuch und diese Seite gibt es in 16.</li>
         <li><b>Komfort.</b> Eine .nzb einfach irgendwohin ziehen, Desktop-Benachrichtigungen, Abschluss-Sounds, ein Erststart-Assistent und <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Eine einzige, in sich geschlossene Programmdatei.</b> par2 und RAR-Entpacken sind nativer Code, direkt in die Binary kompiliert. Beim ersten Start wird nichts entpackt, und es gibt weder eine Runtime noch einen Installer, mit dem man sich herumschlagen müsste.</li>
       <li><b>macOS, erstklassig:</b> eine Universal-Binary für Apple Silicon und Intel, eine native SwiftUI-Menüleisten-App, eine launchd-Unit und eine Homebrew-Formel.</li>
       <li><b>Windows:</b> eine vollständig statische x64-Exe, die auf Windows 10 und 11 ab Werk läuft, mit Doppelklick-Launcher und geführter Einrichtung.</li>
-      <li><b>Linux, Docker und NAS:</b> eine gehärtete systemd-Unit, ein Multi-Stage-Docker-Image mit PUID/PGID-Entrypoint im linuxserver-Stil, eine Compose-Datei, ein Unraid-Template und ein Synology-Guide liegen bei. <a href="download.de.html">Alle Plattformen →</a></li>
+      <li><b>Linux, Docker und NAS:</b> eine gehärtete systemd-Unit, ein Multi-Stage-Docker-Image mit PUID/PGID-Entrypoint im linuxserver-Stil, eine Compose-Datei, ein Synology-Paket, ein Unraid-Template und ein Synology-Guide liegen bei. <a href="download.de.html">Alle Plattformen →</a></li>
+      <li><b>Ebenfalls veröffentlicht, noch in der Beta:</b> .deb- und .rpm-Pakete für amd64 und arm64, ein QNAP-Paket, ein FreeBSD-Build, 32-Bit-ARM für den Raspberry Pi und Windows auf ARM. Jedes wird mit jedem Release gebaut und bleibt als Beta gekennzeichnet, bis es auf echter Hardware gelaufen ist.</li>
       <li><b>Es aktualisiert sich nie selbst.</b> Neue Releases erscheinen als Hinweis im Dashboard, oder nicht einmal das, wenn du die Prüfung abschaltest. Das Update bleibt deine Entscheidung, nach deinem Zeitplan.</li>
       <li><b>Geführte Einrichtung.</b> Starte den Assistenten <code>nzbfast setup</code> oder lass ihn eine bestehende SABnzbd- oder NZBGet-Konfiguration automatisch erkennen. Dein erster Download läuft in unter zwei Minuten.</li>
     </ul>

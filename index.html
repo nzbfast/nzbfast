@@ -50,7 +50,7 @@
   afterwards, nothing left to verify or unpack once it's done. The moment the progress bar
   fills, the file is finished and provably intact.</p>
   <div class="chips">
-    <span class="chip"><b>8.31&nbsp;Gbps</b> on a 10&nbsp;GbE line</span>
+    <span class="chip"><b>9.0-9.3&nbsp;Gbps</b> on a 10&nbsp;GbE line</span>
     <span class="chip"><b>190&nbsp;GB → 4m33s</b> to a verified file</span>
     <span class="chip">RAR volumes <b>never touch disk</b></span>
     <span class="chip"><b>Half the disk</b> competitors need</span>
@@ -128,7 +128,7 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
     <a href="features.html">features page</a>.</p>
     <div class="grid2">
       <ul class="feat">
-        <li><b>Line-rate downloads:</b> <span class="d">pipelined NNTP measured at 8.31 Gbps on 10 GbE; the fastest client on every clean benchmark leg, at every size.</span></li>
+        <li><b>Line-rate downloads:</b> <span class="d">pipelined NNTP measured at 9.0-9.3 Gbps on a 10 GbE line whose own ceiling is 9.8; the fastest client on every clean benchmark leg, at every size.</span></li>
         <li><b>One-pass pipeline:</b> <span class="d">decode, verify and extract overlap; the archive volumes never hit disk, whether the post is plain, encrypted or nested; needs 1× disk where others need ~2×. On a 94 GB encrypted release that is 90 GB written instead of 180 GB.</span></li>
         <li><b>Multi-provider union availability:</b> <span class="d">block-exact routing across backbones; preflight verdicts; exact-fit repair; early abort of impossible posts.</span></li>
         <li><b>Memory budget:</b> <span class="d">one global RAM budget with graceful spill tiers. It never swaps your machine: a 190 GB job completes inside a 1 GB budget (~1.1 GB peak RSS).</span></li>

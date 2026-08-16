@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>NNTP com pipeline em velocidade de linha:</b> <span class="d">8,31 Gbps medidos em 10 GbE.</span></li>
+        <li><b>NNTP com pipeline em velocidade de linha:</b> <span class="d">9,0-9,3 Gbps medidos em uma linha de 10 GbE cujo próprio teto é de 9,8.</span></li>
         <li><b>Pipeline de passagem única:</b> <span class="d">decodificação, verificação e extração se sobrepõem; volumes RAR nunca tocam o disco; arquivos aninhados são desempacotados na mesma passagem.</span></li>
         <li><b>Disponibilidade por união multiprovedor:</b> <span class="d">completa a partir da união dos seus servidores, ou aborta cedo.</span></li>
         <li><b>Orçamento de memória:</b> <span class="d">RAM limitada, spill gradual, nunca faz swap.</span></li>
@@ -74,10 +74,10 @@
     <h2>Motor e velocidade</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>NNTP com pipeline.</b> Manter várias solicitações em trânsito em cada conexão vence tanto a latência de ida e volta quanto a degradação da janela de congestionamento do TCP. Medimos de +12% a +270% sobre a busca serial, e cerca de 8 conexões por servidor bastam para saturar a linha.</li>
+        <li><b>NNTP com pipeline.</b> Manter várias solicitações em trânsito em cada conexão vence tanto a latência de ida e volta quanto a degradação da janela de congestionamento do TCP. Medimos de +64% a +270% sobre a busca serial, reproduzido em cada tempo de ida e volta, de um enlace de data center de 14 ms até 63 ms por satélite.</li>
         <li><b>Decodificação yEnc por SIMD</b> (rapidyenc, com kernels NEON e AVX) roda a 4,95 GB/s por núcleo, decodificando no próprio lugar à medida que os bytes chegam pelo caminho de recepção.</li>
         <li><b>Fila compartilhada entre servidores.</b> Os provedores se equilibram sozinhos dentro de ~2%, sem nenhum ajuste. A taxa real de cada um é acompanhada, e a cauda de um trabalho é despachada em duplicata para que um único servidor lento não arraste o final.</li>
-        <li><b>Absorção entre trabalhos.</b> A cauda do trabalho N se sobrepõe ao início do trabalho N+1, de modo que a linha continua acesa de ponta a ponta ao longo de uma fila inteira: 2% de ociosidade aqui contra os 61% de tempo morto do SABnzbd no mesmo bench.</li>
+        <li><b>Absorção entre trabalhos.</b> A cauda do trabalho N se sobrepõe ao início do trabalho N+1, de modo que a linha continua acesa de ponta a ponta ao longo de uma fila inteira: 2% de ociosidade aqui contra os 61% de tempo morto do SABnzbd 5.0.4 no mesmo bench.</li>
         <li><b>Vigia de trabalhos lentos.</b> Um download que se arrasta em um servidor lento enquanto os demais ficam parados é jogado para o fim da fila, com o progresso preservado, e recomeça assim que a fila esvazia.</li>
         <li><b>Pré-carga em servidor ocioso:</b> um servidor que o trabalho ativo não consegue usar, porque seus artigos não estão armazenados nele, começa o próximo trabalho da fila em vez de ficar parado.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Limites de velocidade e agendador semanal:</b> tetos ajustáveis ao vivo, uma agenda em horário local (à prova de horário de verão) e um "pausar por N minutos" que retoma sozinho.</li>
         <li><b>Orçamento de memória.</b> Um único orçamento global de RAM (automático: um quarto da RAM, com limite, substituível). Conforme ele aperta, primeiro os buffers encolhem, depois os dados fazem spill para o disco e voltam a ser lidos quando o trabalho estabiliza. Ele nunca faz swap. Um trabalho de 190 GB termina dentro de um orçamento de 1 GB com ~1,1 GB de pico de RSS, e há um perfil de 2 GB, medido e documentado, para NAS.</li>
         <li><b>Contrapressão.</b> Um disco lento estrangula os sockets em vez de deixar a RAM encher. Ele se mantém dentro de ±1% de um teto de escrita, e a RAM na verdade <i>cai</i> sob pressão.</li>
-        <li><b>Corte de memória após o trabalho:</b> quando fica ocioso, o daemon devolve a memória liberada ao SO, caindo para cerca de 8 MB entre trabalhos no macOS.</li>
+        <li><b>Corte de memória após o trabalho:</b> assim que um trabalho termina e o daemon fica ocioso, os buffers e caches que ele havia levantado voltam ao SO em vez de ficarem guardados para o próximo.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Extração direta:</b> publicações RAR em modo armazenamento (a maioria dos lançamentos scene) são mapeadas e extraídas enquanto baixam, de modo que os volumes nunca chegam ao disco. O disco escrito fica em conteúdo × 1,0 e o disco necessário em 1×, ao passo que os outros querem cerca de 2×.</li>
         <li><b>Arquivos aninhados, e a profundidade quase não custa nada.</b> Arquivos dentro de arquivos - RAR em RAR, 7z dentro de um RAR, escadas de muitos níveis - são desaninhados conforme os bytes chegam, dentro da passagem que já estávamos fazendo. É aí que está toda a diferença: um cliente que grava cada camada em disco, fecha, reabre e relê paga uma passagem inteira por nível, então cada camada que desce lhe custa mais uma ida e volta ao disco. As nossas pegam carona na primeira passagem, e o payload sai de uma escada de dez níveis do mesmo jeito que sai de uma de um nível. Uma cópia em disco onde gravar-e-reler segura duas ou três.</li>
         <li><b>Desofuscação.</b> Publicações ofuscadas são renomeadas a partir de seus metadados PAR2, nomes embaralhados por ROT13 são resgatados, e o lixo com nome de hash é classificado e barrado.</li>
+        <li><b>Arquivos simplesmente divididos.</b> Conjuntos divididos ao estilo HJSplit, em partes .001/.002 ou .1/.2 sem cabeçalho de arquivo nenhum, são reconhecidos e recompostos no arquivo original em vez de acabarem soltos no seu disco.</li>
       </ul>
       <ul class="plain">
         <li><b>Reparo sob medida.</b> Os blocos danificados são conhecidos no momento em que acontecem, então só o conjunto de volumes de recuperação com menor número de bytes é buscado (um problema da mochila resolvido) e o reparo não toca em nada além dos trechos danificados.</li>
-        <li><b>Registros de recuperação do RAR.</b> Quando o PAR2 se esgota, ou nunca foi publicado, os registros de recuperação embutidos no RAR reparam os volumes danificados no próprio lugar.</li>
+        <li><b>Registros de recuperação do RAR.</b> Quando o PAR2 se esgota, ou nunca foi publicado, os registros de recuperação embutidos no RAR e os volumes de recuperação .rev separados reparam os volumes danificados no próprio lugar.</li>
         <li><b>Reparo em todas as profundidades.</b> Um conjunto PAR2 embalado dentro de uma camada interna é encontrado e executado no seu próprio nível, e uma publicação só com par (dados apagados, um conjunto de recuperação de 100% deixado para trás) é reconstruída por inteiro e depois desempacotada.</li>
         <li><b>Recurso para comprimidos e criptografados:</b> publicações fora do modo armazenamento se materializam e são extraídas pelo motor RAR nativo, tudo do RAR4 ao novo RAR7, sobrepostas ao resto da fila. Conjuntos criptografados ficam estacionados com uma mensagem clara em vez de falhar em silêncio.</li>
         <li><b>Ele mesmo vai atrás da senha.</b> A maioria dos posts criptografados não precisa de você. Ele tenta os metadados do próprio NZB e a convenção de nome <code>{{pw}}</code>, a API dos *arr, depois qualquer nota de texto curta postada junto aos arquivos e, na falta disso, os nomes da release e dos próprios arquivos. Repete essa busca em <i>cada</i> nível: uma corrente que esconde a senha de cada camada dentro da camada acima - uma senha diferente em cada nível - se abre até o fim sem você digitar nada. O que realmente sobra passa pelo desbloqueio 🔑 no painel: desbloqueia em segundo plano e depois arquiva normalmente.</li>
@@ -125,7 +126,7 @@
         <li><b>Roteamento por união.</b> Um artigo só conta como ausente depois que todos os servidores ativos o recusaram; até lá, ele é roteado para qualquer servidor que o tenha. Os backbones diferem em retenção e remoções, então a união conclui discretamente publicações que nenhum servidor sozinho conseguiria.</li>
         <li><b>Diário à prova de travamento.</b> O diário trabalha na granularidade de artigo. Dê um kill −9 no meio do trabalho e ele volta, rebuscando só o que ainda não tinha sido persistido; a fila e o histórico sobrevivem a reinícios.</li>
         <li><b>Estacionar e repetir:</b> trabalhos que falham ficam estacionados no histórico, e uma nova tentativa puxa apenas as partes que ainda faltam.</li>
-        <li><b>Testado no caos.</b> Um servidor NNTP simulado conduz dez cenários de falha de ponta a ponta (430s, corrupção, truncamento, travamentos, servidores mortos, kill −9) em cada execução dos testes.</li>
+        <li><b>Testado no caos.</b> Um servidor NNTP simulado interpreta 33 perfis de falha, e oito percursos de ponta a ponta rodam em cada execução dos testes: uma referência limpa mais conexões caídas, silêncio total, quedas de tensão, corrupção, enlaces estrangulados, truncamento de TLS e kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Pontuação de confiabilidade de provedor.</b> As taxas de conclusão de cada servidor são guardadas para sempre e mostradas no painel, com um aviso abaixo de 98%.</li>
@@ -148,10 +149,12 @@
         <li><b>Servidor Newznab.</b> Seu índice local responde a t=search/tvsearch/movie, então os *arr podem tratar suas próprias varreduras como um indexador.</li>
         <li><b>Captura automática por RSS:</b> o feed de um indexador é a mesma coisa que um leitor de notícias assina, só que lista o que acabou de ser publicado na Usenet. Tudo o que corresponde aos filtros baixa sozinho. Feeds filtrados com uma linguagem ao estilo NZBGet, adicionados e editados ao vivo pelo painel.</li>
         <li><b>Lista de acompanhamento.</b> Nomeie as séries e os filmes que você quer, até os que ainda nem estrearam. Cada episódio é capturado na primeira aparição e melhorado até chegar à qualidade-alvo (digamos, 720p → 1080p REMUX), e a cópia substituída só é apagada depois que a melhoria é verificada. Um calendário de estreias mostra o que está por vir. Ela também pode seguir sua lista de acompanhamento do Plex: vincule sua conta, ou cole o endereço da lista, e tudo o que você adicionar lá também é acompanhado aqui.</li>
+        <li><b>Avisos onde você já olha.</b> E-mail, Discord, Slack, Telegram, Pushover, ntfy, Gotify e qualquer servidor Apprise que você mantenha, além das atualizações de biblioteca do Kodi, Plex e Jellyfin e de um webhook cujo modelo você mesmo escreve.</li>
       </ul>
       <ul class="plain">
-        <li><b>Pasta monitorada.</b> Solte um .nzb dentro e ele baixa; o arquivo some assim que é recolhido.</li>
+        <li><b>Pasta monitorada.</b> Solte um .nzb dentro e ele baixa; o arquivo some assim que é recolhido. As subpastas também são monitoradas, e um arquivo solto em watch/tv chega na categoria tv.</li>
         <li><b>Pastas inteligentes:</b> regras de regex, palavra-chave e tamanho organizam os downloads em categorias já no enfileiramento, com arquivamento de TV opcional para <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Comportamento por categoria.</b> Cada categoria carrega sua própria pasta de destino, sua prioridade e seu script de pós-processamento, de modo que séries e filmes podem cair em lugares diferentes sob regras diferentes.</li>
         <li><b>Regras de limpeza:</b> extensões de lixo são removidas assim que um trabalho conclui.</li>
         <li><b>Mover para um NAS:</b> após desempacotar e renomear, os downloads concluídos vão para uma pasta de destino mantendo a estrutura de categorias, e os destinos por categoria podem mandar séries e filmes para compartilhamentos diferentes. Se o compartilhamento estiver inacessível, os arquivos ficam onde estão.</li>
         <li><b>Scripts de pós-processamento.</b> Eles respeitam o contrato de ambiente SAB_* do SABnzbd, então os scripts que você já tem rodam do jeito que estão.</li>
@@ -189,11 +192,13 @@
         <li><b>Gráficos ao vivo, sem bibliotecas.</b> Tudo é atualizado uma vez por segundo (uma área de vazão, uma área empilhada por provedor, uma linha do tempo de saúde da verificação, a queima da fila, um histograma de velocidade) e os gráficos alargam sua janela de tempo conforme você alarga o navegador.</li>
         <li><b>Monitor de recursos:</b> CPU, RAM contra o orçamento, escritas em disco e rede em um único gráfico, com um aviso de pouco espaço em disco.</li>
         <li><b>Ranking de provedores.</b> Os servidores se reordenam sozinhos pelo desempenho ao vivo, cada um mostrando bytes da sessão, número de conexões, utilização e confiabilidade.</li>
-        <li><b>Gerenciamento da fila:</b> arraste para reordenar, defina prioridade e categoria na própria linha, abra uma gaveta por download, pause de forma otimista ou "pause por N minutos".</li>
+        <li><b>Gerenciamento da fila:</b> arraste para reordenar, defina prioridade e categoria na própria linha, abra uma gaveta por download, pause de forma otimista ou "pause por N minutos". Selecione várias linhas de uma vez, na fila ou no histórico, e trate todas juntas - com o mouse ou pelo teclado.</li>
+        <li><b>Um histórico que guarda tudo.</b> Os trabalhos concluídos vão para o próprio armazenamento deles, sem limite de linhas, paginado e pesquisável, e sobrevivem a reinicializações. Limites por idade e por quantidade existem se você quiser, e estão desligados.</li>
       </ul>
       <ul class="plain">
         <li><b>Tudo configurável no navegador:</b> servidores (com testes de conexão ao vivo), velocidade e agenda, conexões/janela/decodificadores, disco e cota, pastas monitoradas e scripts, filtros de indexação, biblioteca, RSS e segurança com rotação de chave. Os ajustes sobrevivem a reinícios.</li>
-        <li><b>Diagnóstico embutido:</b> um visualizador de log na própria interface, um benchmark do sistema que descobre os tetos de rede, cálculo e disco e diz o que fazer a respeito, o analisador de diversidade de servidores e a escada de conexões.</li>
+        <li><b>HTTPS embutido.</b> Aponte-o para um certificado e uma chave e o único listener responde https em vez de http, tanto o painel quanto a API. Um certificado quebrado ou vencido se recusa a iniciar e nomeia o arquivo, em vez de aparecer mais tarde como erro de navegador em outro lugar.</li>
+        <li><b>Diagnóstico embutido:</b> um visualizador de log na própria interface que você pode filtrar por etiqueta e exportar, uma resposta por download para "por que isto está lento?" que nomeia a etapa que limita, um benchmark do sistema que descobre os tetos de rede, cálculo e disco e diz o que fazer a respeito, o analisador de diversidade de servidores e a escada de conexões.</li>
         <li><b>Uso de dados:</b> barras empilhadas por provedor de 14 dias, histórico diário e contadores vitalícios para contas de bloco.</li>
         <li><b>28 idiomas.</b> O painel vem totalmente localizado, incluindo escritas da direita para a esquerda; o manual e este site estão em 16.</li>
         <li><b>Qualidade de vida.</b> Arraste e solte um .nzb em qualquer lugar, notificações da área de trabalho, sons de conclusão, um assistente de primeira execução e <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Executável único e autossuficiente.</b> A extração par2 e RAR é código nativo compilado no binário. Nada é extraído no primeiro uso, e não há runtime nem instalador com que se preocupar.</li>
       <li><b>macOS, de primeira classe:</b> um binário universal para Apple Silicon e Intel, um app nativo de barra de menu em SwiftUI, uma unidade launchd e uma fórmula Homebrew.</li>
       <li><b>Windows:</b> um exe x64 totalmente estático que roda no Windows 10 e 11 de fábrica, com um lançador de duplo clique e configuração guiada.</li>
-      <li><b>Linux, Docker e NAS:</b> uma unidade systemd reforçada, uma imagem Docker multiestágio com um entrypoint PUID/PGID ao estilo linuxserver, um arquivo compose já incluído, um template para Unraid e um guia para Synology. <a href="download.pt.html">Todas as plataformas →</a></li>
+      <li><b>Linux, Docker e NAS:</b> uma unidade systemd reforçada, uma imagem Docker multiestágio com um entrypoint PUID/PGID ao estilo linuxserver, um arquivo compose já incluído, um pacote Synology, um template para Unraid e um guia para Synology. <a href="download.pt.html">Todas as plataformas →</a></li>
+      <li><b>Também publicado, ainda em beta:</b> pacotes .deb e .rpm para amd64 e arm64, um pacote QNAP, uma build de FreeBSD, ARM de 32 bits para o Raspberry Pi e Windows em ARM. Cada um é compilado a cada versão e continua marcado como beta até ter rodado em hardware real.</li>
       <li><b>Ele nunca se atualiza sozinho.</b> Novas versões aparecem como um aviso no painel, ou nem isso se você desligar a verificação. Atualizar continua sendo decisão sua, no seu ritmo.</li>
       <li><b>Configuração guiada.</b> Rode o assistente <code>nzbfast setup</code>, ou deixe-o detectar automaticamente uma configuração existente do SABnzbd ou do NZBGet. Você terá um primeiro download rodando em menos de dois minutos.</li>
     </ul>

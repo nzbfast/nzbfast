@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>Hat hızında işlem hattı NNTP:</b> <span class="d">10 GbE'de 8.31 Gbps ölçüldü.</span></li>
+        <li><b>Hat hızında işlem hattı NNTP:</b> <span class="d">Kendi tavanı 9.8 olan bir 10 GbE hattında 9.0-9.3 Gbps ölçüldü.</span></li>
         <li><b>Tek geçişli işlem hattı:</b> <span class="d">kod çözme, doğrulama ve çıkarma örtüşür; RAR birimleri diske hiç dokunmaz; iç içe arşivler aynı geçişte açılır.</span></li>
         <li><b>Çoklu sağlayıcı birleşim kullanılabilirliği:</b> <span class="d">sunucularının birleşiminden tamamla ya da erken durdur.</span></li>
         <li><b>Bellek bütçesi:</b> <span class="d">sınırlı RAM, nazik dökülme, asla takas yok.</span></li>
@@ -74,10 +74,10 @@
     <h2>Motor &amp; hız</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>İşlem hattı NNTP.</b> Her bağlantıda birkaç isteği uçuşta tutmak hem gidiş-dönüş gecikmesini hem de TCP'nin tıkanıklık penceresi düşüşünü yener. Seri getirmeye göre +%12 ile +%270 arasında ölçüyoruz; hattı doyurmak için sunucu başına yaklaşık 8 bağlantı yetiyor.</li>
+        <li><b>İşlem hattı NNTP.</b> Her bağlantıda birkaç isteği uçuşta tutmak hem gidiş-dönüş gecikmesini hem de TCP'nin tıkanıklık penceresi düşüşünü yener. Seri getirmeye göre +%64 ile +%270 arasında ölçüyoruz; bu, 14 ms'lik bir veri merkezi bağlantısından 63 ms'lik uyduya kadar her gidiş-dönüş süresinde yinelendi.</li>
         <li><b>SIMD yEnc kod çözme</b> (rapidyenc, NEON ve AVX çekirdekleriyle) çekirdek başına 4.95 GB/s hızında çalışır; baytlar alım yoluna düştükçe yerinde çözülür.</li>
         <li><b>Çoklu sunucu paylaşımlı kuyruk.</b> Sağlayıcılar hiçbir ayar gerektirmeden ~%2 içinde kendini dengeler. Her birinin gerçek hızı izlenir ve işin son kısmı çift gönderilir; böylece tek bir yavaş sunucu bitişi geciktiremez.</li>
-        <li><b>İşler arası süreklilik.</b> N işinin son kısmı N+1 işinin başlangıcıyla örtüşür, böylece hat bütün kuyruk boyunca uçtan uca yanık kalır: aynı kıyaslamada burada %2 boşta kalınırken SABnzbd %61 karanlıkta.</li>
+        <li><b>İşler arası süreklilik.</b> N işinin son kısmı N+1 işinin başlangıcıyla örtüşür, böylece hat bütün kuyruk boyunca uçtan uca yanık kalır: aynı kıyaslamada burada %2 boşta kalınırken SABnzbd 5.0.4 %61 karanlıkta.</li>
         <li><b>Yavaş iş bekçisi.</b> Geri kalanı boştayken tek bir yavaş sunucuda sürünen bir indirme, ilerlemesi korunarak kuyruğun sonuna alınır ve kuyruk boşaldığında kaldığı yerden devam eder.</li>
         <li><b>Boştaki sunucu ön getirmesi:</b> etkin işin kullanamadığı bir sunucu (makaleler orada saklanmadığı için) boşta beklemek yerine kuyruktaki bir sonraki işe başlar.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Hız sınırları ve haftalık zamanlayıcı:</b> canlı ayarlanabilen üst sınırlar, yerel saate göre (yaz saati uyumlu) bir zamanlama ve kendiliğinden devam eden bir "N dakika duraklat".</li>
         <li><b>Bellek bütçesi.</b> Tek bir küresel RAM bütçesi (otomatik: RAM'in dörtte biri, sınırlı, geçersiz kılınabilir). Bütçe daraldıkça önce tamponlar küçülür, sonra veriler diske dökülür ve iş yatıştığında geri okunur. Asla takasa girmez. 190 GB'lık bir iş, ~1.1 GB zirve RSS ile 1 GB bütçenin içinde biter; NAS kutuları için ölçülmüş ve belgelenmiş bir 2 GB profili de var.</li>
         <li><b>Geri basınç.</b> Yavaş bir disk, RAM'in dolmasına izin vermek yerine soketleri kısar. Bir yazma üst sınırının ±%1'i içinde tutar ve RAM baskı altında aslında <i>düşer</i>.</li>
-        <li><b>İş sonrası bellek budaması:</b> arka plan süreci boşa çıktığında serbest kalan belleği işletim sistemine geri verir; macOS'ta işler arasında ~8 MB'a kadar iner.</li>
+        <li><b>İş sonrası bellek budaması:</b> bir iş bitip arka plan süreci boşa çıktığı anda, büyüttüğü tamponlar ve önbellekler bir sonraki iş için tutulmak yerine işletim sistemine geri verilir.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Doğrudan çıkarma:</b> depolama modu RAR gönderileri (çoğu scene sürümü) indirilirken haritalanıp çıkarılır, dolayısıyla birimler diske hiç düşmez. Diske yazılan içerik × 1.0'a, gereken disk ise 1×'e iner; diğerleri kabaca 2× ister.</li>
         <li><b>İç içe arşivler, ve derinliğin neredeyse hiç maliyeti yok.</b> Arşiv içinde arşivler - RAR içinde RAR, RAR içinde 7z, birçok seviye derinlikte merdivenler - baytlar geldikçe, zaten yaptığımız geçişin içinde açılır. Bütün fark burada: her katmanı diske yazan, kapatan, yeniden açan ve baştan tarayan bir istemci her seviye için tam bir geçiş öder; indiği her katman ona bir disk gidiş dönüşü daha mal olur. Bizimkiler ilk geçişe binerler ve yük, on seviyelik bir merdivenden tek seviyelikten çıktığı gibi çıkar. Yaz-ve-yeniden-tara yaklaşımının iki ya da üç kopya tuttuğu yerde diskte tek kopya.</li>
         <li><b>Gizleme çözme.</b> Gizlenmiş gönderiler PAR2 meta verilerinden yeniden adlandırılır, ROT13 ile karıştırılmış adlar kurtarılır, hash adlı çöp ise sınıflandırılıp elenir.</li>
+        <li><b>Düpedüz bölünmüş dosyalar.</b> HJSplit tarzında .001/.002 ya da .1/.2 parçalarına, hiçbir arşiv başlığı olmadan bölünmüş kümeler tanınır ve diskine dağınık parçalar hâlinde inmek yerine özgün dosyaya geri birleştirilir.</li>
       </ul>
       <ul class="plain">
         <li><b>Tam-oturan onarım.</b> Hasarlı bloklar oluştukları anda bilinir, bu yüzden yalnızca kurtarma birimlerinin en az baytlı kümesi getirilir (bir sırt çantası çözümü) ve onarım hasarlı aralıklardan başka hiçbir şeye dokunmaz.</li>
-        <li><b>RAR kurtarma kayıtları.</b> PAR2 tükendiğinde ya da hiç gönderilmediğinde, gömülü RAR kurtarma kayıtları hasarlı birimleri yerinde onarır.</li>
+        <li><b>RAR kurtarma kayıtları.</b> PAR2 tükendiğinde ya da hiç gönderilmediğinde, gömülü RAR kurtarma kayıtları ve ayrı .rev kurtarma birimleri hasarlı birimleri yerinde onarır.</li>
         <li><b>Her derinlikte onarım.</b> Bir iç katmana paketlenmiş bir PAR2 kümesi bulunur ve kendi düzeyinde çalıştırılır; yalnızca par içeren bir gönderi (verisi silinmiş, geriye %100 kurtarmalı bir küme bırakılmış) ise önce bütünüyle yeniden kurulur, sonra açılır.</li>
         <li><b>Sıkıştırılmış ve şifreli için yedek yol:</b> depolama modu olmayan gönderiler, kuyruğun geri kalanıyla örtüşerek yerleşik RAR motoru üzerinden - RAR4'ten yeni RAR7'ye kadar her şey - gerçekleşip açılır. Şifreli kümeler sessizce başarısız olmak yerine açık bir mesajla park eder.</li>
         <li><b>Parolayı kendisi arar.</b> Şifreli gönderilerin çoğu sana ihtiyaç duymaz. Önce NZB’nin kendi meta verilerini ve <code>{{pw}}</code> adlandırma kuralını, *arr API’sini, ardından dosyaların yanına konmuş kısa metin notlarını, o da yoksa sürümün ve dosyaların adlarını dener. Bu aramayı <i>her</i> seviyede yineler: her katmanın parolasını bir üstteki katmanda saklayan bir zincir - her seviyede farklı bir parola - sen hiçbir şey yazmadan en dibe kadar açılır. Gerçekten geriye kalan, panodaki 🔑 kilit açma ile halledilir: arka planda açar, sonra normal şekilde dosyalar.</li>
@@ -125,7 +126,7 @@
         <li><b>Birleşim yönlendirmesi.</b> Bir makale ancak her canlı sunucu onu geri çevirdiğinde eksik sayılır; o ana dek hangi sunucu ona sahipse oraya yönlendirilir. Backbone'lar saklama süresi ve kaldırmalarda farklılık gösterir, bu yüzden birleşim, tek bir sunucunun asla tamamlayamayacağı gönderileri sessizce tamamlar.</li>
         <li><b>Çökmeye dayanıklı günlük.</b> Günlük, makale ayrıntısında çalışır. İşin ortasında bir kill −9 gönder; geri döner ve yalnızca kalıcılaştırılmamış olanı yeniden getirir. Kuyruk ve geçmiş, yeniden başlatmalardan sağ çıkar.</li>
         <li><b>Park et ve yeniden dene:</b> başarısız işler geçmişte park eder ve bir yeniden deneme yalnızca hâlâ eksik olan parçaları çeker.</li>
-        <li><b>Kaos testli.</b> Sahte bir NNTP sunucusu, her tek test çalıştırmasında on uçtan uca başarısızlık senaryosunu (430'lar, bozulma, kesilme, takılmalar, ölü sunucular, kill −9) çalıştırır.</li>
+        <li><b>Kaos testli.</b> Sahte bir NNTP sunucusu 33 arıza profilini oynar ve her tek test çalıştırmasında uçtan uca sekiz tur koşar: temiz bir taban çizgisinin yanı sıra kopan bağlantılar, sessizlik, gerilim düşmeleri, bozulma, kısılmış hatlar, TLS kesilmesi ve kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Sağlayıcı güvenilirlik puanlaması.</b> Sunucu başına tamamlanma oranları kalıcı olarak tutulur ve panelde gösterilir; %98'in altında bir uyarı çıkar.</li>
@@ -148,10 +149,12 @@
         <li><b>Newznab sunucusu.</b> Yerel dizinin t=search/tvsearch/movie isteklerini yanıtlar, böylece *arr'lar kendi taramalarını bir dizinleyici gibi kullanabilir.</li>
         <li><b>RSS otomatik yakalama:</b> bir dizinleyicinin beslemesi, bir haber okuyucunun abone olduğu şeyin aynısıdır; yalnızca Usenet'e az önce gönderilenleri listeler. Filtrelere uyan her şey kendiliğinden iner. NZBGet tarzı bir dille filtrelenen beslemeler; panelden canlı olarak eklenip düzenlenir.</li>
         <li><b>İzleme listesi.</b> İstediğin dizileri ve filmleri, henüz yayınlanmamış olanları bile adıyla ekle. Her bölüm ilk göründüğünde yakalanır ve hedef kalitene ulaşana dek yükseltilir (diyelim 720p → 1080p REMUX); yerini alan kopya ise yalnızca yükseltme doğrulandıktan sonra silinir. Bir yayın tarihi takvimi neyin geleceğini gösterir. Plex izleme listeni de takip edebilir: hesabını bağla ya da listenin adresini yapıştır, oraya eklediğin her şey burada da izlenir.</li>
+        <li><b>Zaten baktığın yerde bildirimler.</b> E-posta, Discord, Slack, Telegram, Pushover, ntfy, Gotify ve kendi çalıştırdığın herhangi bir Apprise sunucusu; ayrıca Kodi, Plex ve Jellyfin kitaplık tazelemeleri ve şablonunu kendin yazdığın bir webhook.</li>
       </ul>
       <ul class="plain">
-        <li><b>İzleme klasörü.</b> İçine bir .nzb bırak, indirilir; dosya alındıktan sonra ortadan kaybolur.</li>
+        <li><b>İzleme klasörü.</b> İçine bir .nzb bırak, indirilir; dosya alındıktan sonra ortadan kaybolur. Alt klasörler de izlenir ve watch/tv içine bırakılan bir dosya tv kategorisine düşer.</li>
         <li><b>Akıllı klasörler:</b> regex, anahtar kelime ve boyut kuralları, indirmeleri kuyruğa alınırken kategorilere ayırır; isteğe bağlı TV dosyalamasıyla <code>Show/Season NN/Show - S01E02.ext</code> biçimine yerleştirir.</li>
+        <li><b>Kategori başına davranış.</b> Her kategori kendi hedef klasörünü, kendi önceliğini ve kendi işlem sonrası betiğini taşır; böylece diziler ve filmler farklı kurallarla farklı yerlere inebilir.</li>
         <li><b>Temizleme kuralları:</b> bir iş tamamlandığında çöp uzantılar silinir.</li>
         <li><b>NAS'a taşıma:</b> biten indirmeler açma ve yeniden adlandırmadan sonra kategori düzeni korunarak bir hedef klasöre taşınır; kategori başına hedeflerle diziler ve filmler ayrı paylaşımlara gönderilebilir. Paylaşıma ulaşılamazsa dosyalar yerinde kalır.</li>
         <li><b>Son işlem betikleri.</b> SABnzbd'nin SAB_* ortam sözleşmesine uyarlar, dolayısıyla halihazırdaki betiklerin olduğu gibi çalışır.</li>
@@ -189,11 +192,13 @@
         <li><b>Canlı grafikler, kütüphane yok.</b> Her şey saniyede bir yoklanır (bir verim alanı, sağlayıcı başına yığılmış alan, bir doğrulama sağlığı zaman çizelgesi, kuyruk erimesi, bir hız histogramı) ve tarayıcıyı genişlettikçe grafikler zaman pencerelerini genişletir.</li>
         <li><b>Kaynak monitörü:</b> CPU, bütçeye karşı RAM, disk yazmaları ve ağ tek bir grafikte, bir az-disk uyarısıyla.</li>
         <li><b>Sağlayıcı sıralaması.</b> Sunucular canlı performansa göre kendini yeniden sıralar; her biri oturum baytlarını, bağlantı sayısını, kullanımı ve güvenilirliği gösterir.</li>
-        <li><b>Kuyruk yönetimi:</b> yeniden sıralamak için sürükle, önceliği ve kategoriyi satır içinde ayarla, indirme başına bir çekmece aç, iyimser duraklat ya da "N dakika duraklat".</li>
+        <li><b>Kuyruk yönetimi:</b> yeniden sıralamak için sürükle, önceliği ve kategoriyi satır içinde ayarla, indirme başına bir çekmece aç, iyimser duraklat ya da "N dakika duraklat". Kuyrukta ya da geçmişte birçok satırı bir kerede seç ve hepsini birden işle - fareyle ya da klavyeden.</li>
+        <li><b>Her şeyi saklayan bir geçmiş.</b> Biten işler satır sınırı olmayan kendi deposuna gider, sayfalanmış ve aranabilir hâlde, ve yeniden başlatmalardan sağ çıkar. İstersen yaşa ve sayıya göre sınırlar var, ve kapalılar.</li>
       </ul>
       <ul class="plain">
         <li><b>Her şey tarayıcıda yapılandırılabilir:</b> sunucular (canlı bağlantı testleriyle), hız ve zamanlama, bağlantılar/pencere/kod çözücüler, disk ve kota, izleme klasörleri ve betikler, dizinleme geçitleri, kitaplık, RSS ve anahtar döndürmeli güvenlik. Ayarlar yeniden başlatmalardan sağ çıkar.</li>
-        <li><b>Gömülü tanılama:</b> arayüz içi bir günlük görüntüleyici, ağ, işlem ve disk tavanlarını bulup bunlar hakkında ne yapman gerektiğini söyleyen bir sistem kıyaslaması, sunucu çeşitliliği çözümleyicisi ve bağlantı merdiveni.</li>
+        <li><b>Gömülü HTTPS.</b> Ona bir sertifika ve anahtar göster, tek dinleyici http yerine https konuşur; hem pano hem API. Bozuk ya da süresi dolmuş bir sertifika, sonradan başka bir yerde tarayıcı hatası olarak çıkmak yerine, dosyayı adıyla söyleyip başlatmayı reddeder.</li>
+        <li><b>Gömülü tanılama:</b> etikete göre süzebildiğin ve dışa aktarabildiğin arayüz içi bir günlük görüntüleyici, indirme başına "bu neden yavaş?" sorusuna sınırlayan aşamayı adıyla söyleyen bir yanıt, ağ, işlem ve disk tavanlarını bulup bunlar hakkında ne yapman gerektiğini söyleyen bir sistem kıyaslaması, sunucu çeşitliliği çözümleyicisi ve bağlantı merdiveni.</li>
         <li><b>Veri kullanımı:</b> 14 günlük sağlayıcı başına yığılmış çubuklar, günlük geçmiş ve blok hesaplar için ömür boyu sayaçlar.</li>
         <li><b>28 dil.</b> Panel, sağdan sola yazılan alfabeler dahil tamamen yerelleştirilmiş olarak gelir; kılavuz ve bu site 16 dilde.</li>
         <li><b>Yaşam kalitesi.</b> Herhangi bir yere .nzb sürükle-bırak, masaüstü bildirimleri, tamamlanma sesleri, bir ilk çalıştırma sihirbazı ve <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Tek, kendi kendine yeten çalıştırılabilir dosya.</b> par2 ve RAR açma, ikilinin içine derlenmiş yerel koddur. İlk çalıştırmada hiçbir şey dışarı çıkarılmaz, uğraşacağın bir çalışma zamanı ya da kurucu yoktur.</li>
       <li><b>macOS, birinci sınıf:</b> Apple Silicon ve Intel için evrensel bir ikili, yerel bir SwiftUI menü çubuğu uygulaması, bir launchd birimi ve bir Homebrew formülü.</li>
       <li><b>Windows:</b> hazır Windows 10 ve 11'de çalışan, tamamen statik bir x64 exe; çift tıkla başlatıcı ve kılavuzlu kurulumla birlikte.</li>
-      <li><b>Linux, Docker ve NAS:</b> sağlamlaştırılmış bir systemd birimi, linuxserver tarzı PUID/PGID giriş noktalı çok aşamalı bir Docker imgesi, kutuda bir compose dosyası, bir Unraid şablonu ve bir Synology rehberi. <a href="download.tr.html">Tüm platformlar →</a></li>
+      <li><b>Linux, Docker ve NAS:</b> sağlamlaştırılmış bir systemd birimi, linuxserver tarzı PUID/PGID giriş noktalı çok aşamalı bir Docker imgesi, kutuda bir compose dosyası, bir Synology paketi, bir Unraid şablonu ve bir Synology rehberi. <a href="download.tr.html">Tüm platformlar →</a></li>
+      <li><b>Ayrıca yayımlandı, hâlâ beta:</b> amd64 ve arm64 için .deb ve .rpm paketleri, bir QNAP paketi, bir FreeBSD derlemesi, Raspberry Pi için 32 bit ARM ve ARM üzerinde Windows. Her biri her sürümle derlenir ve gerçek donanımda çalışana kadar beta etiketiyle kalır.</li>
       <li><b>Kendini asla güncellemez.</b> Yeni sürümler panelde bir bildirim olarak görünür; denetimi kapatırsan o kadarı bile olmaz. Güncelleme senin kararın olarak, senin takviminde kalır.</li>
       <li><b>Kılavuzlu kurulum.</b> <code>nzbfast setup</code> sihirbazını çalıştır ya da mevcut bir SABnzbd veya NZBGet yapılandırmasını otomatik algılamasına izin ver. İlk indirmen iki dakikadan kısa sürede çalışıyor olacak.</li>
     </ul>

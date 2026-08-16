@@ -52,7 +52,7 @@
   <div class="wrap">
     <div class="grid2">
       <ul class="feat">
-        <li><b>NNTP cu pipelining la viteza liniei:</b> <span class="d">8.31 Gbps măsurați pe 10 GbE.</span></li>
+        <li><b>NNTP cu pipelining la viteza liniei:</b> <span class="d">9.0-9.3 Gbps măsurați pe o linie de 10 GbE al cărei plafon propriu este 9.8.</span></li>
         <li><b>Pipeline într-o singură trecere:</b> <span class="d">decodarea, verificarea și extragerea se suprapun; volumele RAR nu ating niciodată discul; arhivele imbricate se despachetează în aceeași trecere.</span></li>
         <li><b>Disponibilitate prin uniune multi-provider:</b> <span class="d">complet din uniunea serverelor tale, sau abandon timpuriu.</span></li>
         <li><b>Buget de memorie:</b> <span class="d">RAM limitat, spill elegant, fără swap niciodată.</span></li>
@@ -74,10 +74,10 @@
     <h2>Motor și viteză</h2>
     <div class="grid2">
       <ul class="plain">
-        <li><b>NNTP cu pipelining.</b> Mai multe cereri ținute simultan în tranzit pe fiecare conexiune înving și latența dus-întors, și degradarea ferestrei de congestie TCP. Măsurăm între +12% și +270% față de preluarea serială, iar circa 8 conexiuni per server sunt de ajuns ca să saturăm linia.</li>
+        <li><b>NNTP cu pipelining.</b> Mai multe cereri ținute simultan în tranzit pe fiecare conexiune înving și latența dus-întors, și degradarea ferestrei de congestie TCP. Măsurăm între +64% și +270% față de preluarea serială, replicat la fiecare timp dus-întors, de la o legătură de centru de date de 14 ms până la 63 ms prin satelit.</li>
         <li><b>Decodarea yEnc SIMD</b> (rapidyenc, cu kernele NEON și AVX) rulează la 4.95 GB/s per nucleu, chiar pe loc, pe măsură ce octeții sosesc în calea de recepție.</li>
         <li><b>Coadă partajată între servere.</b> Providerii se autoechilibrează până la ~2% fără nicio reglare. Rata reală a fiecăruia e urmărită, iar coada unui job e expediată în dublu, ca un singur server lent să nu poată întârzia finalul.</li>
-        <li><b>Suprapunere între joburi.</b> Coada jobului N se suprapune cu începutul jobului N+1, așa că linia rămâne aprinsă de la un capăt la altul de-a lungul întregii cozi: 2% inactiv aici, față de 61% întuneric la SABnzbd în același benchmark.</li>
+        <li><b>Suprapunere între joburi.</b> Coada jobului N se suprapune cu începutul jobului N+1, așa că linia rămâne aprinsă de la un capăt la altul de-a lungul întregii cozi: 2% inactiv aici, față de 61% întuneric la SABnzbd 5.0.4 în același benchmark.</li>
         <li><b>Câine de pază pentru joburi lente.</b> O descărcare care se târăște pe un singur server lent, în timp ce restul stau degeaba, e trimisă la coada cozii (progresul se păstrează) și reia când coada se eliberează.</li>
         <li><b>Preîncărcare pe serverele inactive:</b> un server pe care jobul activ nu-l poate folosi, pentru că articolele lui nu sunt stocate acolo, pornește în schimb următorul job din coadă, în loc să stea degeaba.</li>
       </ul>
@@ -87,7 +87,7 @@
         <li><b>Limite de viteză și un planificator săptămânal:</b> plafoane ajustabile în timp real, un program în ora locală (sigur la trecerea la ora de vară) și o „pauză de N minute” care se reia singură.</li>
         <li><b>Buget de memorie.</b> Un singur buget global de RAM (automat: un sfert din RAM, plafonat, dar care poate fi suprascris). Când se strânge, se micșorează întâi bufferele, apoi datele trec pe disc și sunt citite înapoi odată ce jobul se așază. Nu face niciodată swap. Un job de 190 GB se încheie într-un buget de 1 GB, la ~1.1 GB RSS de vârf, iar pentru NAS-uri există un profil de 2 GB, măsurat și documentat.</li>
         <li><b>Contrapresiune.</b> Un disc lent frânează socketurile în loc să lase RAM-ul să se umple. Se menține în ±1% dintr-un plafon de scriere, iar RAM-ul chiar <i>scade</i> sub presiune.</li>
-        <li><b>Eliberarea memoriei după job:</b> odată inactiv, daemonul returnează memoria eliberată sistemului de operare și coboară la circa 8 MB între joburi pe macOS.</li>
+        <li><b>Eliberarea memoriei după job:</b> imediat ce un job se termină și daemonul rămâne inactiv, tampoanele și cache-urile pe care le crescuse se întorc la sistemul de operare în loc să fie ținute pentru următorul.</li>
       </ul>
     </div>
   </div>
@@ -103,10 +103,11 @@
         <li><b>Extragere directă:</b> postările RAR în mod store (majoritatea release-urilor scene) sunt mapate și extrase chiar în timpul descărcării, așa că volumele nu ajung deloc pe disc. Se scrie pe disc conținut × 1.0, iar discul necesar e 1×, acolo unde alții cer cam 2×.</li>
         <li><b>Arhive imbricate, iar adâncimea aproape nu costă nimic.</b> Arhivele din arhive - RAR în RAR, 7z într-un RAR, scări adânci de multe niveluri - sunt dezimbricate pe măsură ce sosesc octeții, în interiorul trecerii pe care oricum o făceam. Aici e toată diferența: un client care scrie fiecare strat pe disc, îl închide, îl redeschide și îl scanează din nou plătește o trecere întreagă per nivel, așa că fiecare strat coborât îl costă încă un drum dus-întors pe disc. Ale noastre merg în prima trecere, iar conținutul iese dintr-o scară de zece niveluri la fel cum iese dintr-una de un nivel. O copie pe disc, acolo unde scrie-și-rescanează ține două sau trei.</li>
         <li><b>Deobfuscare.</b> Postările obfuscate sunt redenumite din metadatele lor PAR2, numele amestecate cu ROT13 sunt recuperate, iar gunoiul cu nume de tip hash e clasificat și blocat.</li>
+        <li><b>Fișiere pur și simplu împărțite.</b> Seturile împărțite în stil HJSplit, în bucăți .001/.002 sau .1/.2 fără niciun antet de arhivă, sunt recunoscute și lipite la loc în fișierul original, în loc să ajungă pe disc ca bucăți răzlețe.</li>
       </ul>
       <ul class="plain">
         <li><b>Reparare exact potrivită.</b> Blocurile deteriorate sunt cunoscute pe măsură ce apar, așa că se preia doar setul de volume de recuperare cu cel mai mic număr de octeți (o rezolvare de tip rucsac), iar repararea atinge numai zonele deteriorate.</li>
-        <li><b>Înregistrări de recuperare RAR.</b> Când PAR2 e epuizat, sau nu a fost postat niciodată, înregistrările de recuperare RAR încorporate repară volumele deteriorate pe loc.</li>
+        <li><b>Înregistrări de recuperare RAR.</b> Când PAR2 e epuizat, sau nu a fost postat niciodată, înregistrările de recuperare RAR încorporate și volumele de recuperare .rev separate repară volumele deteriorate pe loc.</li>
         <li><b>Reparare la orice adâncime.</b> Un set PAR2 împachetat într-un strat interior e găsit și rulat la propriul lui nivel, iar o postare doar-par (datele șterse, lăsat în urmă un set cu recuperare 100%) e reconstruită întreagă și apoi despachetată.</li>
         <li><b>Rezervă pentru comprimat și criptat:</b> postările non-store se materializează și se dezarhivează prin motorul RAR nativ, totul de la RAR4 până la noul RAR7, suprapuse cu restul cozii. Seturile criptate sunt parcate cu un mesaj clar, în loc să eșueze în tăcere.</li>
         <li><b>Caută singur parola.</b> Majoritatea postărilor criptate nu au nevoie de tine. Încearcă metadatele NZB-ului și convenția de nume <code>{{pw}}</code>, API-ul *arr, apoi orice notiță text scurtă postată lângă fișiere și, în lipsa lor, numele release-ului și ale fișierelor. Reia căutarea la <i>fiecare</i> nivel: un lanț care ascunde parola fiecărui strat în stratul de deasupra - o parolă diferită la fiecare nivel - se deschide până la capăt fără să tastezi nimic. Ce rămâne cu adevărat trece prin deblocarea 🔑 din panou: deblochează în fundal, apoi arhivează normal.</li>
@@ -125,7 +126,7 @@
         <li><b>Rutare prin uniune.</b> Un articol e considerat lipsă abia după ce fiecare server activ l-a refuzat; până atunci, e direcționat către serverul care îl are. Backbone-urile diferă la retenție și la retrageri, așa că uniunea completează discret postări pe care niciun server luat singur nu le-ar putea completa.</li>
         <li><b>Jurnal sigur la blocare.</b> Jurnalul lucrează la granularitate de articol. Trimite un kill −9 în mijlocul unui job și revine, repreluând doar ce nu apucase să fie salvat; coada și istoricul supraviețuiesc repornirilor.</li>
         <li><b>Parcare și reîncercare:</b> joburile eșuate rămân parcate în istoric, iar o reîncercare preia doar bucățile încă lipsă.</li>
-        <li><b>Testat pentru haos.</b> Un server NNTP simulat rulează zece scenarii de eșec cap-la-cap (430-uri, corupere, trunchiere, blocaje, servere moarte, kill −9) la fiecare rulare de test.</li>
+        <li><b>Testat pentru haos.</b> Un server NNTP simulat joacă 33 de profiluri de defect, iar la fiecare rulare de test rulează opt trasee cap-la-cap: o linie de referință curată plus conexiuni căzute, liniște totală, căderi de tensiune, corupere, legături strangulate, trunchiere TLS și kill −9.</li>
       </ul>
       <ul class="plain">
         <li><b>Scor de fiabilitate a providerilor.</b> Ratele de completitudine per server sunt păstrate definitiv și afișate în panou, cu un avertisment sub 98%.</li>
@@ -148,10 +149,12 @@
         <li><b>Server Newznab.</b> Indexul tău local răspunde la t=search/tvsearch/movie, așa că *arr-urile pot trata propriile tale scanări ca pe un indexer.</li>
         <li><b>Preluare automată RSS:</b> fluxul unui indexator este același lucru la care se abonează un cititor de știri, doar că listează ce tocmai a fost postat pe Usenet. Tot ce se potrivește cu filtrele se descarcă singur. Feeduri filtrate cu un limbaj în stil NZBGet, adăugate și editate live din panou.</li>
         <li><b>Watchlist.</b> Enumeră serialele și filmele pe care le vrei, chiar și pe cele încă nedifuzate. Fiecare episod e preluat la prima apariție și îmbunătățit până atinge calitatea-țintă (de pildă, 720p → 1080p REMUX), iar copia înlocuită e ștearsă abia după ce upgrade-ul a fost verificat. Un calendar de difuzare arată ce urmează. Poate urmări și watchlist-ul tău Plex: conectează-ți contul sau lipește adresa listei, și tot ce adaugi acolo e urmărit și aici.</li>
+        <li><b>Notificări acolo unde te uiți oricum.</b> E-mail, Discord, Slack, Telegram, Pushover, ntfy, Gotify și orice server Apprise ai tu, pe lângă reîmprospătările de bibliotecă pentru Kodi, Plex și Jellyfin și un webhook al cărui șablon îl scrii singur.</li>
       </ul>
       <ul class="plain">
-        <li><b>Folder monitorizat.</b> Pui un .nzb înăuntru și se descarcă; fișierul dispare odată ce a fost preluat.</li>
+        <li><b>Folder monitorizat.</b> Pui un .nzb înăuntru și se descarcă; fișierul dispare odată ce a fost preluat. Și subfolderele sunt urmărite, iar un fișier pus în watch/tv ajunge în categoria tv.</li>
         <li><b>Foldere inteligente:</b> reguli de regex, cuvinte-cheie și dimensiune sortează descărcările pe categorii chiar la punerea în coadă, cu arhivare TV opțională în <code>Show/Season NN/Show - S01E02.ext</code>.</li>
+        <li><b>Comportament per categorie.</b> Fiecare categorie își poartă propriul folder de destinație, propria prioritate și propriul script de post-procesare, așa că serialele și filmele pot ajunge în locuri diferite, după reguli diferite.</li>
         <li><b>Reguli de curățare:</b> extensiile-gunoi sunt eliminate odată ce un job se finalizează.</li>
         <li><b>Mutare pe un NAS:</b> după dezarhivare și redenumire, descărcările finalizate merg într-un folder de destinație cu structura pe categorii păstrată, iar destinațiile per categorie pot trimite serialele și filmele pe share-uri diferite. Dacă share-ul nu e accesibil, fișierele rămân pe loc.</li>
         <li><b>Scripturi de post-procesare.</b> Respectă contractul de mediu SAB_* al SABnzbd, așa că scripturile pe care le ai deja rulează ca atare.</li>
@@ -189,11 +192,13 @@
         <li><b>Grafice live, fără biblioteci.</b> Totul se interoghează o dată pe secundă (o arie de debit, o arie stivuită per provider, o cronologie a sănătății verificării, un burn-down al cozii, o histogramă de viteză), iar graficele își lărgesc fereastra de timp pe măsură ce lărgești browserul.</li>
         <li><b>Monitor de resurse:</b> CPU, RAM față de buget, scrieri pe disc și rețea, toate pe un singur grafic, cu un avertisment de disc redus.</li>
         <li><b>Clasament al providerilor.</b> Serverele se resortează singure după performanța live, fiecare arătând octeții pe sesiune, numărul de conexiuni, gradul de utilizare și fiabilitatea.</li>
-        <li><b>Gestionarea cozii:</b> tragi pentru reordonare, setezi prioritatea și categoria pe loc, deschizi un sertar per descărcare, pui pauză optimist sau alegi „pauză de N minute”.</li>
+        <li><b>Gestionarea cozii:</b> tragi pentru reordonare, setezi prioritatea și categoria pe loc, deschizi un sertar per descărcare, pui pauză optimist sau alegi „pauză de N minute”. Selectezi multe rânduri deodată, în coadă sau în istoric, și acționezi asupra tuturor - cu mouse-ul sau de la tastatură.</li>
+        <li><b>Un istoric care păstrează tot.</b> Joburile terminate ajung în propriul lor depozit, fără limită de rânduri, paginat și căutabil, și supraviețuiesc repornirilor. Limite după vechime și după număr există dacă le vrei, și sunt oprite.</li>
       </ul>
       <ul class="plain">
         <li><b>Totul se configurează în browser:</b> servere (cu teste de conexiune live), viteză și program, conexiuni/fereastră/decodoare, disc și cotă, foldere monitorizate și scripturi, filtre de indexare, bibliotecă, RSS și securitate cu rotația cheilor. Setările supraviețuiesc repornirilor.</li>
-        <li><b>Diagnostice integrate:</b> un vizualizator de jurnal în interfață, un benchmark de sistem care îți găsește plafoanele de rețea, calcul și disc și îți spune ce să faci cu ele, analizorul de diversitate a serverelor și scara de conexiuni.</li>
+        <li><b>HTTPS încorporat.</b> Arată-i un certificat și o cheie, iar unicul ascultător răspunde https în loc de http, și panoul, și API-ul. Un certificat stricat sau expirat refuză pornirea și numește fișierul, în loc să iasă la iveală mai târziu ca o eroare de browser în altă parte.</li>
+        <li><b>Diagnostice integrate:</b> un vizualizator de jurnal în interfață, pe care îl poți filtra după etichetă și exporta, un răspuns per descărcare la „de ce merge încet?” care numește etapa care limitează, un benchmark de sistem care îți găsește plafoanele de rețea, calcul și disc și îți spune ce să faci cu ele, analizorul de diversitate a serverelor și scara de conexiuni.</li>
         <li><b>Consum de date:</b> bare stivuite pe 14 zile per provider, istoric zilnic și contoare pe toată durata de viață pentru conturile bloc.</li>
         <li><b>28 de limbi.</b> Panoul vine complet localizat, inclusiv scrierile de la dreapta la stânga; manualul și acest site sunt în 16.</li>
         <li><b>Confort de utilizare.</b> Tragi și plasezi un .nzb oriunde, notificări pe desktop, sunete la finalizare, un asistent la prima rulare și <code>serve --open</code>.</li>
@@ -209,7 +214,8 @@
       <li><b>Un singur executabil de sine stătător.</b> par2 și dezarhivarea RAR sunt cod nativ compilat în binar. Nimic nu se extrage la prima rulare și nu ai de-a face cu niciun runtime și niciun installer.</li>
       <li><b>macOS, de primă clasă:</b> un binar universal pentru Apple Silicon și Intel, o aplicație nativă SwiftUI în bara de meniu, o unitate launchd și o formulă Homebrew.</li>
       <li><b>Windows:</b> un exe x64 complet static care rulează pe Windows 10 și 11 standard, cu un launcher cu dublu-clic și o configurare ghidată.</li>
-      <li><b>Linux, Docker și NAS:</b> o unitate systemd întărită, o imagine Docker multi-etapă cu entrypoint PUID/PGID în stil linuxserver, un fișier compose inclus, un șablon Unraid și un ghid pentru Synology. <a href="download.ro.html">Toate platformele →</a></li>
+      <li><b>Linux, Docker și NAS:</b> o unitate systemd întărită, o imagine Docker multi-etapă cu entrypoint PUID/PGID în stil linuxserver, un fișier compose inclus, un pachet Synology, un șablon Unraid și un ghid pentru Synology. <a href="download.ro.html">Toate platformele →</a></li>
+      <li><b>Publicat de asemenea, încă în beta:</b> pachete .deb și .rpm pentru amd64 și arm64, un pachet QNAP, o compilare FreeBSD, ARM pe 32 de biți pentru Raspberry Pi și Windows pe ARM. Fiecare este construit la fiecare lansare și rămâne etichetat beta până rulează pe hardware real.</li>
       <li><b>Nu se actualizează niciodată singur.</b> Versiunile noi apar ca o notificare în panou, sau nici măcar atât dacă oprești verificarea. Actualizarea rămâne decizia ta, după programul tău.</li>
       <li><b>Configurare ghidată.</b> Rulează asistentul <code>nzbfast setup</code> sau lasă-l să detecteze automat o configurație SABnzbd sau NZBGet existentă. Vei avea prima descărcare în mai puțin de două minute.</li>
     </ul>

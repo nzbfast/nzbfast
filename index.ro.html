@@ -50,7 +50,7 @@
   Nu urmează nicio trecere de asamblare, nu mai rămâne nimic de verificat sau dezarhivat odată terminat. În clipa
   în care bara de progres se umple, fișierul e gata și demonstrabil intact.</p>
   <div class="chips">
-    <span class="chip"><b>8.31&nbsp;Gbps</b> pe o linie de 10&nbsp;GbE</span>
+    <span class="chip"><b>9.0-9.3&nbsp;Gbps</b> pe o linie de 10&nbsp;GbE</span>
     <span class="chip"><b>190&nbsp;GB → 4m33s</b> către un fișier verificat</span>
     <span class="chip">Volumele RAR <b>nu ating niciodată discul</b></span>
     <span class="chip"><b>Jumătate din discul</b> de care au nevoie concurenții</span>
@@ -129,7 +129,7 @@ socket ──TLS──▶ <b>rapidyenc SIMD decode</b> (in place - 4.95 GB/s per
     <a href="features.ro.html">pagina de funcții</a>.</p>
     <div class="grid2">
       <ul class="feat">
-        <li><b>Descărcări la viteza liniei:</b> <span class="d">NNTP cu pipelining măsurat la 8.31 Gbps pe 10 GbE; cel mai rapid client pe fiecare probă de benchmark curată, la orice dimensiune.</span></li>
+        <li><b>Descărcări la viteza liniei:</b> <span class="d">NNTP cu pipelining măsurat la 9.0-9.3 Gbps pe o linie de 10 GbE al cărei plafon propriu este 9.8; cel mai rapid client pe fiecare probă de benchmark curată, la orice dimensiune.</span></li>
         <li><b>Pipeline într-o singură trecere:</b> <span class="d">decodarea, verificarea și extragerea se suprapun; volumele de arhivă nu ating niciodată discul, fie că postarea e simplă, criptată sau imbricată; are nevoie de 1× disc unde alții au nevoie de ~2×. La o lansare criptată de 94 GB, asta înseamnă 90 GB scriși în loc de 180 GB.</span></li>
         <li><b>Disponibilitate prin uniune multi-provider:</b> <span class="d">rutare exactă la nivel de bloc între backbone-uri; verdicte preflight; reparare exact potrivită; abandon timpuriu al postărilor imposibile.</span></li>
         <li><b>Buget de memorie:</b> <span class="d">un singur buget global de RAM cu niveluri elegante de spill. Nu îți solicită niciodată swap-ul mașinii: un job de 190 GB se finalizează într-un buget de 1 GB (~1.1 GB RSS de vârf).</span></li>
