@@ -1237,10 +1237,22 @@ pub(super) fn spawn_http_workers(
                     continue;
                 }
                 // M21: NZBGet JSON-RPC facade - remote-control apps built for
-                // NZBGet (nzb360, LunaSea, …) work unmodified. Auth is HTTP
-                // Basic; the password must be the API key (any username).
-                if path == "/jsonrpc" || path.starts_with("/jsonrpc/") {
-                    handle_jsonrpc(&d, req, cur_apikey.as_deref(), cur_nzbkey.as_deref());
+                // NZBGet (LunaSea, NZBDonkey, …) work unmodified. Auth is
+                // HTTP Basic (any username, password = an API key) OR
+                // NZBGet's own URL form `/<user>:<pass>/jsonrpc`, which is
+                // the only shape LunaSea ever sends (§18): it builds the
+                // credentials into the path and sets no Authorization
+                // header, so a daemon without this route answers 404 and
+                // the app reports the server as unreachable.
+                let jr_path_pw = jsonrpc_path_password(path);
+                if path == "/jsonrpc" || path.starts_with("/jsonrpc/") || jr_path_pw.is_some() {
+                    handle_jsonrpc(
+                        &d,
+                        req,
+                        cur_apikey.as_deref(),
+                        cur_nzbkey.as_deref(),
+                        jr_path_pw.as_deref(),
+                    );
                     continue;
                 }
                 if path != "/api" {

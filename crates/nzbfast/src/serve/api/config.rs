@@ -211,6 +211,16 @@ fn m_get_config(
                             "idle_release_secs": s.idle_release_secs,
                             "idle_keep": s.idle_keep,
                             "max_source_ips": s.max_source_ips,
+                            // M32 route controls. The SOCKS spec is one
+                            // stored string that may end in a proxy
+                            // password, so it is echoed in the three
+                            // parts the editor shows, and the password is
+                            // masked like every other secret here.
+                            "bind_ip": s.bind_ip.clone().unwrap_or_default(),
+                            "socks5": super::super::servers::socks5_addr(s.socks5.as_deref()),
+                            "socks5_user": super::super::servers::socks5_creds(s.socks5.as_deref()).0,
+                            "has_socks5_pass":
+                                !super::super::servers::socks5_creds(s.socks5.as_deref()).1.is_empty(),
                             "idle_release_effective": {
                                 "secs": rel.after.map(|d| d.as_secs()).unwrap_or(0),
                                 "keep": rel.keep,
@@ -385,6 +395,17 @@ fn m_config(
             }));
         }
         match (name.as_deref(), value.as_deref()) {
+            // The countdown banner's Cancel button. Answers whether
+            // anything was actually pending, so a second click (or two
+            // browser tabs racing) reports honestly rather than claiming
+            // to have stopped a countdown that had already run.
+            (Some("queue_finished_cancel"), _) => {
+                let mut out = crate::serve::finish_action::cancel(d);
+                if let Some(o) = out.as_object_mut() {
+                    o.insert("status".into(), json!(true));
+                }
+                out
+            }
             (Some("set_pause"), Some(v)) => {
                 // SAB parity: config&name=set_pause&value=<minutes>.
                 timed_pause(d, v.parse().unwrap_or(0), true);

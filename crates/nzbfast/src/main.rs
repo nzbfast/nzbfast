@@ -239,6 +239,11 @@ enum Command {
         /// instead of extracting them in-stream).
         #[arg(long)]
         no_extract: bool,
+        /// Do not download sample/proof clips at all. A sample-named file
+        /// large enough to plausibly be the feature is still fetched, and
+        /// a job whose only video is sample-named is fetched whole.
+        #[arg(long)]
+        skip_samples: bool,
         /// Archive password for encrypted RAR sets. Usually unnecessary:
         /// a `<meta type="password">` in the NZB or a `{{password}}`
         /// suffix in the NZB filename is picked up automatically.
@@ -937,6 +942,7 @@ async fn run() -> Result<()> {
             verify,
             preflight,
             no_extract,
+            skip_samples,
             password,
         } => {
             let (fast_verify, verify_lean) = match verify.as_str() {
@@ -984,6 +990,7 @@ async fn run() -> Result<()> {
                 // keeps one behaviour across both front ends, and it
                 // only ever fires on a repair that verified.
                 true,
+                skip_samples,
                 password,
                 // No CLI consent prompt: `unpack_eat_volumes=low_disk`
                 // asks per job through the dashboard drawer, and there is

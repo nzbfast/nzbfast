@@ -72,9 +72,6 @@ body{margin:0;background:var(--bg);color:var(--fg);
 select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:7px 9px;font-size:12.5px;cursor:pointer}
 .count{color:var(--dim);font-size:12px;white-space:nowrap}
-.mtog{display:flex;align-items:center;gap:5px;color:var(--dim);font-size:12px;
-  white-space:nowrap;cursor:pointer;user-select:none}
-.mtog input{accent-color:var(--acc);margin:0}
 .chip{background:var(--surface);border:1px solid var(--line);color:var(--dim);
   font-size:11.5px;padding:4px 10px;border-radius:999px;cursor:pointer;white-space:nowrap}
 .chip:hover{color:var(--fg);border-color:var(--acc)}
@@ -119,6 +116,9 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
 .vpback{position:fixed;inset:0;z-index:29;display:none}
 .vpback.on{display:block}
 .sortwrap{display:flex;align-items:center;gap:8px}
+/* A toggle whose mode cannot apply under the current search scope. Grey
+   it, but keep pointer events - the tooltip is where the reason lives. */
+.mtog.off{opacity:.45}
 #dir .ic{transition:transform .15s}
 #dir.up .ic{transform:rotate(180deg)}
 .vpbody .sortwrap{width:100%}
@@ -567,6 +567,9 @@ body.noidx #views,body.noidx #strips,body.noidx #wall,
 body.noidx #suggest,body.noidx #chips,body.noidx #affnote,
 body.noidx #scope,body.noidx #sort,body.noidx #lsort,
 body.noidx #densctl,body.noidx #zoomwrap,body.noidx #unmChip,body.noidx #hidChip,
+/* No local index means nothing to group: wall2 groups this machine's
+   titles, and in this mode there are none. */
+body.noidx #grptog,
 body.noidx #viewPop{display:none!important}
 /* Nothing to search at all: built-in indexer off AND no indexer account.
    A class rather than inline styles because setView() runs after the
@@ -734,7 +737,7 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
     <label class="mtog" id="hovtog" data-i18n-title="wall.hover.title"
       title="Rest the pointer on a row for a poster and synopsis popup - everything from your own index">
       <input type="checkbox" id="hovPrev"> <span data-i18n="wall.hover">Hover previews</span></label>
-    <label class="mtog" data-i18n-title="wall.grpby.title"
+    <label class="mtog" id="grptog" data-i18n-title="wall.grpby.title"
       title="One row per title, its releases nested underneath">
       <input type="checkbox" id="grpTitle"> <span data-i18n="wall.grpby">Group by title</span></label>
   </div>
@@ -816,7 +819,7 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
     </div>
     <p id="keyerr" class="keyerr" role="alert" aria-live="assertive"></p>
     <p data-i18n="key.where">Find it on the machine running nzbfast: Settings &gt; Security &gt; API key (Show), or in the daemon's startup log. Once it checks out it is remembered in this browser only.</p>
-    <p data-i18n="key.where2">If the key was just changed, the browser where that happened shows the new one. If no browser does, it is on the apikey line of settings.json, in nzbfast's settings folder.</p>
+    <p data-i18n="key.where2">If the key was just changed, the browser where that happened shows the new one. If no browser does, look in nzbfast's settings folder: it is on the apikey line of settings.json, or in a file called apikey beside it.</p>
   </div>
   <div class="kfoot">
     <button class="act ghost" onclick="keyCancel()" data-i18n="key.notnow">Not now</button>
@@ -940,6 +943,21 @@ let key = localStorage.nzbfastKey || '';
 // next door has just rotated.
 let keyEpoch = 0;
 function adoptKey(v){ key = v; localStorage.nzbfastKey = v; keyEpoch++; }
+// §61d, same contract as the dashboard's launch handshake: a wall link
+// may arrive with ?apikey= (a bookmark, a second browser). Adopt it if
+// this browser holds no key, keep it aside if it disagrees with the
+// stored one, and scrub it from the URL bar either way so the key does
+// not sit in history or a shared screenshot.
+let urlKey = '';
+(function(){
+  const q = new URLSearchParams(location.search), k = q.get('apikey');
+  if(!k) return;
+  if(!key){ adoptKey(k); }
+  else if(k !== key) urlKey = k;
+  q.delete('apikey');
+  const qs = q.toString();
+  history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+})();
 // M31b: the sort is persisted so "For you" (affinity) sticks across
 // reloads; it also keeps the select's value in sync with sortBy given
 // affinity now leads the option list.
@@ -970,6 +988,18 @@ if(sortBy==='arrived' && localStorage.nzbfastWallSortChosen!=='1'){
 let dirFlip = localStorage.nzbfastWallDirFlip === 'on';
 // M28: the grid is server-paged (mode=wall2) - these track the window.
 let wtotal = 0, wseq = 0, wloading = false, wsig = '';
+// U4: what the empty wall should say. `idxGroups` is the server's count
+// of newsgroups chosen for indexing (-1 until the first wall2 answer);
+// `unmTotal` is how many entries a probe found hiding behind "Matched
+// only" when the filtered answer came back empty.
+// `idxPaused` is the daemon's own stand-down answer, which the same
+// reply carries: groups being chosen is not the same as the scanner
+// being able to run, and an install that is offline or paused claimed
+// to be scanning indefinitely on an empty page (Codex sweep 7, L1).
+// Deliberately the stand-down reason and not the mid-pass bit: that one
+// is false for the whole post-pass database section and the gap between
+// passes, so a healthy install would flip copy every poll.
+let idxGroups = -1, unmTotal = 0, idxPaused = false;
 // Matched-only filter (default ON): hide cards with no artwork AND no
 // enriched metadata - the unmatched/obfuscated clutter. Persisted.
 let matchedOnly = localStorage.nzbfastWallMatched !== 'off';
@@ -1116,8 +1146,9 @@ async function api(mode, extra, authKey){
   const sent = authKey != null ? authKey : key;
   const epoch = keyEpoch;
   // Issue #4: the key rides the X-Api-Key header, not the query string
-  // (keeps it out of proxy logs / history / Referer). Navigation links
-  // (/m3u, /getnzb) still use ?apikey= - links cannot carry headers.
+  // (keeps it out of proxy logs / history / Referer). The /m3u handoff
+  // and the .nzb download fetch with the header too and hand the file
+  // over as a blob download (m3uHandoff / dlRelNzb, §61d).
   let r;
   try {
     r = await fetch(`/api?mode=${mode}${extra||''}`, {headers: sent?{'X-Api-Key': sent}:{}});
@@ -1135,6 +1166,13 @@ async function api(mode, extra, authKey){
     if (keyEpoch !== epoch && key !== sent) return api(mode, extra);
     const stored = localStorage.nzbfastKey || '';
     if (stored && stored !== sent && stored !== key){ adoptKey(stored); return api(mode, extra); }
+    // Stored key refused but the launch URL carried a different one:
+    // the silent re-pair after a rotation, same as the dashboard.
+    if (urlKey && urlKey !== sent){
+      const uk = urlKey; urlKey = '';
+      adoptKey(uk);
+      return api(mode, extra);
+    }
     if (await ensureKey(sent)) return api(mode, extra);
   }
   return j;
@@ -1340,14 +1378,37 @@ function render(){
   _lastKind=null;
   if(!list.length){
     const q=document.getElementById('q').value.trim();
-    wall.innerHTML=`<div class="empty">${q||tab||genreSel||resSel||decSel?t('wall.nomatch','No matches.')
+    // U4: four stories, told apart. A user filter that matched nothing
+    // says so; "Matched only" hiding a real pile says so and offers the
+    // one click that reveals it; groups chosen but nothing indexed yet
+    // says the wall is filling; only a wall with no groups chosen sends
+    // the user to the indexing settings.
+    let msg;
+    if(q||tab||genreSel||resSel||decSel){
+      msg=t('wall.nomatch','No matches.');
+    } else if(matchedOnly && unmTotal>0){
+      msg=`${t('wall.empty.filtered','Everything indexed so far is unmatched, and Matched only hides it.')}`+
+        `<div style="margin-top:14px"><button class="chip" style="padding:7px 14px;font-size:13px" id="emptyUnm">`+
+        `${t('wall.empty.showunm','Show unmatched')}</button></div>`;
+    } else if(idxGroups>0 && idxPaused){
+      // Groups are chosen and the scanner is standing down: offline,
+      // paused, or held off while a download runs. Do not claim work
+      // that is not happening.
+      msg=t('wall.empty.paused','Indexing is not running just now. Posters appear here once it starts again.');
+    } else if(idxGroups>0){
+      msg=t('wall.empty.scanning','Scanning your newsgroups. Posters appear here as releases match.');
+    } else {
       // A wall with nothing on it used to answer with a CLI flag, on a
       // page whose whole point is not needing one. The indexing settings
       // (and the newsgroup browser inside them) are two clicks away, so
       // point there instead.
-      :`${t('wall.empty.none','Nothing indexed yet. Choose which newsgroups to index and the wall fills itself.')}`+
+      msg=`${t('wall.empty.none','Nothing indexed yet. Choose which newsgroups to index and the wall fills itself.')}`+
        `<div style="margin-top:14px"><a class="chip" style="padding:7px 14px;font-size:13px" href="/#settings/indexing">`+
-       `${t('wall.empty.cta','Choose newsgroups')}</a></div>`}</div>`;
+       `${t('wall.empty.cta','Choose newsgroups')}</a></div>`;
+    }
+    wall.innerHTML=`<div class="empty">${msg}</div>`;
+    const b=document.getElementById('emptyUnm');
+    if(b) b.addEventListener('click', showUnmatched);
     sayResult(wall.textContent);
     return;
   }
@@ -1736,7 +1797,7 @@ async function grab(id, play){
       // from the output folder, so this works from any browser, not just
       // one sitting at the daemon's own screen.
       toast(t('toast.handoff','Handing playback to your player…'));
-      location.href=`/m3u/${encodeURIComponent(chk.nzo_id)}?apikey=${encodeURIComponent(key)}`;
+      m3uHandoff(chk.nzo_id);
       return;
     }
     dupeOk='&dupe_ok=1';
@@ -1747,7 +1808,36 @@ async function grab(id, play){
   if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   const nzo=(j.nzo_ids||[])[0];
   toast(play?t('wall.queuedPlay','Queued: opening player…'):t('wall.queued','Queued for download'));
-  if(play&&nzo) location.href=`/m3u/${nzo}?apikey=${encodeURIComponent(key)}`;
+  if(play&&nzo) m3uHandoff(nzo);
+}
+
+// §61d: /m3u and /getnzb used to be plain links with ?apikey=, which
+// wrote the key into browser history, proxy access logs and Referer
+// headers. Fetch with the X-Api-Key header instead and hand the file
+// over as a blob download - the saved .m3u still opens in the default
+// player, and the /stream link inside it carries its own ?t= token.
+async function m3uHandoff(id){
+  try{
+    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
+    if(!r.ok){ toast(tErr('failed')); return; }
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(await r.blob());
+    a.download='nzbfast.m3u';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){ toast(tErr('could not reach nzbfast')); }
+}
+async function dlRelNzb(id){
+  try{
+    const r=await fetch('/getnzb/'+encodeURIComponent(id)+'.nzb', {headers:key?{'X-Api-Key':key}:{}});
+    if(!r.ok){ toast(tErr('failed')); return; }
+    const m=(r.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/);
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(await r.blob());
+    a.download=m?m[1]:id+'.nzb';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){ toast(tErr('could not reach nzbfast')); }
 }
 
 // ---- 24C: two surfaces - wall (discover) and releases (the table) ----
@@ -1794,6 +1884,22 @@ let spotRows=[];
 // free text, which would both spend a second metered API hit and answer
 // with worse matches than the id search it would be overwriting.
 let extPinned=false;
+// Where a search looks. One reader, because three different call sites
+// used to reach for the element themselves and one of them (browseFetch)
+// did it too late to matter.
+function curScope(){
+  const sc=document.getElementById('scope');
+  return sc?sc.value:'mine';
+}
+// Throw the external rows away, pin included. Every path that will NOT
+// render them has to call this: the pin is a one-shot promise that the
+// next flat render will show what "Search my indexers" just fetched, and
+// a pin left behind on a path that shows something else survives into a
+// LATER search, where it both suppresses the fresh indexer query and
+// staples the old title's rows under the new results.
+function dropExt(){
+  extPinned=false; extRows=[]; extNotes=[];
+}
 const LPAGE=50;
 // ---- poster density + zoom ------------------------------------------
 const ZOOM_MIN=84, ZOOM_MAX=320;
@@ -2035,6 +2141,32 @@ function healthCell(r){
 let grpTitle=localStorage.nzbfastWallGrpTitle==='on';
 let lgroups=null;
 const gexp=new Set(), relCache=new Map();
+// Grouping only means anything over the local index: wall2 groups this
+// machine's titles, and neither an indexer search nor a spot search has
+// a grouped form. The checkbox is therefore a preference, and grpOn() is
+// whether it is actually in force right now - every render path asks
+// this rather than the raw flag, so the table's shape and the table's
+// contents can never disagree about which mode is running.
+function grpOn(){ return grpTitle && curScope()==='mine'; }
+// Say so on the control itself. A toggle that is checked and disobeyed
+// is worse than one that is unavailable: this greys it out and swaps the
+// tooltip for the reason while another scope is chosen.
+function grpCtl(){
+  const box=document.getElementById('grpTitle'), lab=document.getElementById('grptog');
+  if(!box||!lab) return;
+  const ok=curScope()==='mine';
+  box.disabled=!ok;
+  lab.classList.toggle('off',!ok);
+  // Set the i18n key as well as the text: applyI18n re-reads
+  // data-i18n-title when a catalogue lands, so leaving the old key in
+  // place would put the English-or-translated "one row per title"
+  // sentence back on a disabled control.
+  const key=ok?'wall.grpby.title':'wall.grpby.off';
+  lab.dataset.i18nTitle=key;
+  lab.title=ok
+    ? t('wall.grpby.title','One row per title, its releases nested underneath')
+    : t('wall.grpby.off','Grouping works on this index only - the search scope you picked returns a flat list');
+}
 // The table's flat sorts, mapped onto the grouped (wall2) vocabulary;
 // the ones with no grouped equivalent fall back to newest-first.
 // Grouped mode has no server-side equivalent for `kind` or
@@ -2072,6 +2204,17 @@ function grpRow(c){
     </td>
   </tr>`;
 }
+// U4: a bare "No matches." with "Complete only" on hides its own cause.
+// Name the filter and offer the one click that lifts it. Spots ignore
+// the completeness filter, so that scope keeps the bare message.
+function emptyRowHtml(){
+  let h=t('wall.nomatch','No matches.');
+  const scope=(document.getElementById('scope')||{value:'mine'}).value;
+  if(scope!=='spots' && document.getElementById('onlyComplete').checked)
+    h+=` ${t('wall.empty.inc','Incomplete releases are hidden.')} `+
+       `<a href="#" data-show-inc>${t('wall.empty.showinc','Show incomplete')}</a>`;
+  return `<tr><td colspan="8" class="dim">${h}</td></tr>`;
+}
 function renderGroups(){
   const body=document.getElementById('lbody');
   hovHide();
@@ -2080,7 +2223,7 @@ function renderGroups(){
   document.getElementById('count').textContent=
     ltotal?tn('wall.count',ltotal,'{n} title','{n} titles'):'';
   if(!lgroups||!lgroups.length){
-    body.innerHTML=`<tr><td colspan="8" class="dim">${t('wall.nomatch','No matches.')}</td></tr>`;
+    body.innerHTML=emptyRowHtml();
   } else {
     // Same composite key toggleExp caches under, so nested rows always
     // match the filter the parent rows were fetched with.
@@ -2121,8 +2264,7 @@ async function toggleExp(k){
   }
   renderGroups();
 }
-async function groupFetch(){
-  const seq=++lseq;
+async function groupFetch(seq){
   try{
     const q=document.getElementById('q').value.trim();
     const sort=GRP_SORT[document.getElementById('lsort').value]||'latest';
@@ -2150,20 +2292,26 @@ async function browseFetch(){
   // Never drop a request (a dropped page-turn desyncs lpage from the
   // table); instead let only the LATEST response render, so a slow
   // earlier reply can't overwrite a newer page.
-  if(grpTitle) return groupFetch();
   const seq=++lseq;
   try{
     const q=document.getElementById('q').value.trim();
     const sort=document.getElementById('lsort').value;
     const complete=document.getElementById('onlyComplete').checked?1:0;
     const dir=curDesc()?'desc':'asc';
-    const scope=(document.getElementById('scope')||{value:'mine'}).value;
+    const scope=curScope();
     // Spots are their own scope, never merged into the local rows: a
     // spot is somebody's signed claim that they posted a thing, and the
     // index is what this machine saw on usenet. Mixing them would put
     // two different kinds of evidence in one list with no way to tell
     // them apart.
-    if(scope==='spots') return spotFetch(seq,q);
+    if(scope==='spots'){ dropExt(); return spotFetch(seq,q); }
+    // Grouping is a LOCAL shape - wall2 is this index's titles, and no
+    // other scope has an equivalent. So the scope decides first and
+    // grouping applies within it, rather than grouping short-circuiting
+    // the whole function and silently answering a different question
+    // than the one the scope select is showing. grpCtl() disables the
+    // toggle out here so the state is visible, not just obeyed.
+    if(grpOn()){ dropExt(); return groupFetch(seq); }
     // M35: 'idx'/'both' also asks the configured external indexers.
     // External search needs a query (an empty q would burn API-hit
     // budgets browsing) and is unpaged - it renders on the first page.
@@ -2182,7 +2330,10 @@ async function browseFetch(){
         : Promise.resolve(null),
     ]);
     if(seq!==lseq) return;
-    if(j.error){ toast(tErr(j.error)); return; }
+    // A failed local page renders nothing, so it cannot render the
+    // pinned rows either - spend the pin here rather than leave it for
+    // an unrelated later search to inherit.
+    if(j.error){ dropExt(); toast(tErr(j.error)); return; }
     if(wantLocal) updateCats(j.cats);
     ltotal=j.total||0;
     lrows=j.results||[];
@@ -2193,7 +2344,10 @@ async function browseFetch(){
       renderList(lrows);
       return;
     }
-    extNotes=[]; extRows=[];
+    // A fresh answer renumbers the rows, so which groups were open no
+    // longer means anything. (The extPinned path above returns before
+    // here on purpose: those rows are the ones already on screen.)
+    extNotes=[]; extRows=[]; xexp.clear();
     if(xj){
       if(!xj.status){ extNotes=[{error:xj.error||'?'}]; }
       else{
@@ -2209,6 +2363,7 @@ async function browseFetch(){
     renderList(lrows);
   }catch(e){
     if(seq!==lseq) return;
+    dropExt();
     document.getElementById('lbody').innerHTML=
       `<tr><td colspan="8" class="dim">${t('status.daemonDown','daemon unreachable')}</td></tr>`;
   }
@@ -2277,9 +2432,8 @@ function actCell(r){
     <button class="act ghost" data-info-key="${esc(r.key)}" data-i18n-skip
        title="${esc(t('wall.info.title','Show details and every release of this title'))}"
        aria-label="${esc(t('wall.info.title','Show details and every release of this title'))}">ⓘ</button>
-    <a class="act ghost" style="text-decoration:none"
-       href="/getnzb/${r.id}.nzb?apikey=${encodeURIComponent(key)}"
-       title="${esc(t('wall.getnzb.title','Download the .nzb file'))}">⬇ .nzb</a>
+    <button class="act ghost" onclick="dlRelNzb(${r.id})"
+       title="${esc(t('wall.getnzb.title','Download the .nzb file'))}">⬇ .nzb</button>
     <button class="act quiet" ${r.complete||!document.getElementById('onlyComplete').checked?'':'disabled'}
        onclick="grab(${r.id},false)">${t('wall.download','Download')}</button>
   </td>`;
@@ -2303,12 +2457,73 @@ function relRow(r,sub){
 // M35: one external-indexer result row. No ⓘ (nothing local to open),
 // no .nzb link and no checkbox - the token is the only handle, and the
 // daemon fetches the NZB itself on Download.
-function extRow(x){
-  const ts=x.age_days==null?0:Math.floor(Date.now()/1e3)-x.age_days*86400;
-  return `<tr class="ext">
+// Issue #44: the same release listed by several indexers is ONE row.
+// The row itself is the highest-priority copy, so a plain Download takes
+// exactly what it always took; the copies that lost the priority contest
+// fold up underneath it, each with its own indexer, age, size and
+// Download button. Taking a DIFFERENT copy is the point of opening the
+// group: when one indexer's NZB turns out to be dead, another's usually
+// is not.
+const xexp=new Set();
+// A DOM toggle rather than a re-render: the set is what carries the open
+// groups through a later repaint of the list, the direct mutation is
+// what makes the click instant.
+function toggleXsrc(gi){
+  const open=xexp.has(gi);
+  if(open) xexp.delete(gi); else xexp.add(gi);
+  document.querySelectorAll(`#lbody tr[data-xsrc="${gi}"]`)
+    .forEach(tr=>{ tr.style.display=open?'none':''; });
+  document.querySelectorAll(`#lbody [data-xexp="${gi}"]`).forEach(b=>{
+    b.setAttribute('aria-expanded', open?'false':'true');
+    if(b.classList.contains('exp')) b.textContent=open?'▸':'▾';
+  });
+}
+// One alternative copy, nested under its release the same way a title
+// group nests its releases.
+function extSrcRow(s,gi,headTitle){
+  const ts=s.age_days==null?0:Math.floor(Date.now()/1e3)-s.age_days*86400;
+  // Its own spelling of the name, whenever that differs from the
+  // headline's. The difference is precisely what the merge folded away,
+  // and showing it is how you check the fold was right.
+  const alt=(s.title||'')&&s.title!==headTitle
+    ?` <span class="dim">${esc(s.title)}</span>`:'';
+  return `<tr class="ext sub" data-xsrc="${gi}"${xexp.has(gi)?'':' style="display:none"'}>
     <td class="selcol"></td>
+    <td class="name"><span class="nbadge" data-i18n-skip
+      title="${esc(t('wall.ext.src','Found on your indexer account'))}">${esc(s.indexer||'')}</span>${alt}</td>
+    <td></td>
+    <td class="mono dim">${age(ts)}</td>
+    <td class="mono">${gb(s.size||0)}</td>
+    <td class="mono dim">–</td>
+    <td class="mono dim" title="${esc(t('wall.ext.grabs','How often this indexer’s users grabbed it'))}">${s.grabs?s.grabs+'↓':''}</td>
+    <td style="text-align:end;white-space:nowrap">
+      <button class="act quiet" onclick="grabExt('${esc(s.token)}',this)">${t('wall.download','Download')}</button>
+    </td>
+  </tr>`;
+}
+function extRow(x,gi){
+  const ts=x.age_days==null?0:Math.floor(Date.now()/1e3)-x.age_days*86400;
+  // A one-copy row still arrives with a one-entry list, so there is only
+  // ever one shape to read here.
+  const srcs=Array.isArray(x.sources)?x.sources:[];
+  const many=srcs.length>1;
+  const open=xexp.has(gi);
+  const tip=esc(t('wall.ext.exp','Show every indexer that has this release'));
+  return `<tr class="ext">
+    <td class="selcol">${many?`<button class="exp" data-i18n-skip data-xexp="${gi}"
+      aria-expanded="${open}" onclick="toggleXsrc(${gi})"
+      title="${tip}" aria-label="${tip}">${open?'▾':'▸'}</button>`:''}</td>
     <td class="name" title="${esc(x.title)}"><span class="stem">${esc(x.title)}</span>
       <div class="brow"><span class="nbadge" data-i18n-skip title="${esc(t('wall.ext.src','Found on your indexer account'))}">${esc(x.indexer)}</span>${
+        // The count is the discoverable half of this - the caret is a
+        // 12px glyph in a column nobody reads - so it clicks too. It is
+        // the SAME control as the caret, which is already labelled, so
+        // it stays out of the accessibility tree rather than announcing
+        // the group twice.
+        many?`<button class="nbadge" data-i18n-skip data-xexp="${gi}" aria-hidden="true"
+          tabindex="-1" onclick="toggleXsrc(${gi})"
+          title="${tip}">${esc(tn('wall.ext.srcn',srcs.length,'{n} indexer','{n} indexers'))}</button>`:''
+      }${
         // An IMDb id for a release the indexer listed without one -
         // the true-P2P groups scene sources never carry. Only ever
         // present on an exact release-name match.
@@ -2322,7 +2537,7 @@ function extRow(x){
     <td style="text-align:end;white-space:nowrap">
       <button class="act quiet" onclick="grabExt('${esc(x.token)}',this)">${t('wall.download','Download')}</button>
     </td>
-  </tr>`;
+  </tr>${many?srcs.slice(1).map(s=>extSrcRow(s,gi,x.title||'')).join(''):''}`;
 }
 // The Spots scope: only offered once the spot scanner is on, and the
 // adult toggle only while it is the scope in view.
@@ -2347,7 +2562,7 @@ async function spotFetch(seq,q){
   if(seq!==lseq) return;
   if(!j.status){ toast(tErr(j.error)); return; }
   ltotal=j.total||0;
-  lrows=[]; extRows=[]; extNotes=[];
+  lrows=[]; extRows=[]; extNotes=[]; xexp.clear();
   spotRows=j.results||[];
   renderList([]);
 }
@@ -2432,7 +2647,7 @@ function renderList(rows){
   }
   html+=extRows.map(extRow).join('');
   html+=spotRows.map(spotRow).join('');
-  body.innerHTML=html||`<tr><td colspan="8" class="dim">${t('wall.nomatch','No matches.')}</td></tr>`;
+  body.innerHTML=html||emptyRowHtml();
   markSortHeads();
   updateSelBar();
   pageFoot();
@@ -2443,7 +2658,7 @@ function markSortHeads(){
   // In grouped mode a sort the server cannot run is silently mapped to
   // `latest`, so mark the header that is REALLY in effect rather than
   // the one the dropdown names.
-  if(grpTitle && !GRP_REAL.has(cur)) cur='posted';
+  if(grpOn() && !GRP_REAL.has(cur)) cur='posted';
   document.querySelectorAll('#ltable th.sortable').forEach(th=>{
     const on = th.dataset.lsort===cur
       // Age answers for both date sorts - posted is the column, seen
@@ -3159,9 +3374,9 @@ async function applyCand(i){
   const cand=fixCands[i]; if(!cand||!openKey) return;
   toast(t('wall.applying','Applying match…'));
   const j=await apiPost('wall_fix',{key:openKey, kind:cand.kind, title:cand.title, year:cand.year,
-    meta:{id:cand.id, overview:cand.overview, rating:cand.rating, genres:cand.genres,
-          poster_url:cand.poster_url, backdrop_url:cand.backdrop_url, imdb:cand.imdb||'',
-          air_date:cand.air_date||''}});
+    meta:{id:cand.id, provider:cand.provider||'', overview:cand.overview, rating:cand.rating,
+          genres:cand.genres, poster_url:cand.poster_url, backdrop_url:cand.backdrop_url,
+          imdb:cand.imdb||'', air_date:cand.air_date||''}});
   if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   toast(t('wall.matchupdated','Match updated.'));
   wsig=''; await refresh();
@@ -3276,6 +3491,19 @@ async function wallFetch(reset){
     if(j.error){ toast(tErr(j.error)); return; }
     updateCats(j.cats);
     wtotal=j.total||0;
+    if(j.groups!==undefined) idxGroups=j.groups;
+    if(j.idxpaused!==undefined) idxPaused=!!j.idxpaused;
+    // U4: an empty answer with "Matched only" on and no other filter is
+    // ambiguous - hidden by the filter, or truly nothing indexed? One
+    // 1-row probe with the filter off tells the empty state which story
+    // to tell (and how big the hidden pile is).
+    if(reset && !wtotal && matchedOnly && !(q||tab||genreSel||resSel||decSel)){
+      try{
+        const p=await api('wall2','&cat=all&q=&limit=1&offset=0&matched=0&all=1');
+        if(seq!==wseq) return;
+        unmTotal=p.total||0;
+      }catch(e){ unmTotal=0; }
+    } else unmTotal=0;
     const page=(j.cards||[]).map(c=>({
       key:c.key, kind:c.kind, title:c.title, year:c.year||0, aired:c.aired||'',
       genres:c.genres, overview:c.overview, rating:c.rating,
@@ -3298,7 +3526,15 @@ async function wallFetch(reset){
       // Trade-off: a total that shrank under stale appended cards is
       // left alone until the next user-driven change, which moves qs
       // and re-renders anyway.
-      const sig=`${qs} ${JSON.stringify(page)}`;
+      // unmTotal rides in the sig: on an empty page it is the empty
+      // state's whole story, and a poll that moves it from 0 must
+      // repaint "Scanning" into "hidden by Matched only".
+      // The group count and the scan bit ride in it for the same
+      // reason: on an EMPTY page they are the whole story, and the page
+      // itself never changes, so choosing the first newsgroup in
+      // another tab left "Choose newsgroups" up forever (Codex sweep 7,
+      // L1). Every input to the empty state belongs in this signature.
+      const sig=`${qs} ${unmTotal} ${idxGroups} ${idxPaused?1:0} ${JSON.stringify(page)}`;
       if(sig===wsig && cards.length>=page.length){
         document.getElementById('count').textContent =
           wtotal ? tn('wall.count',wtotal,'{n} title','{n} titles') : '';
@@ -3466,13 +3702,20 @@ async function askIndexers(btn){
     toast(tErr(j.error)||t('wall.ask.none','No indexers configured - add one in Settings'));
     return;
   }
-  extRows=j.results||[]; extNotes=j.notes||[];
+  extRows=j.results||[]; extNotes=j.notes||[]; xexp.clear();
   extPinned=true;
   closeOvl();
   // Show them where the results are: the table, scoped to indexers,
   // with the search box carrying the query that produced them.
   const sc=document.getElementById('scope');
   if(sc){ sc.value='idx'; localStorage.nzbfastWallScope='idx'; }
+  // The scope just moved off "this index", so grouping is no longer in
+  // force - say so on the toggle, and make sure the fetch below takes
+  // the flat path that can actually SHOW these rows. Before this, an
+  // ask made while "Group by title" was ticked drew title groups
+  // instead, dropped the results on the floor, and left the pin set for
+  // the next unrelated search to inherit.
+  grpCtl();
   document.getElementById('q').value=name;
   lpage=0;
   // setView runs a browseFetch of its own; the pin above is what stops
@@ -3678,12 +3921,41 @@ document.getElementById('onlyComplete').addEventListener('change', ()=>{
   sc.addEventListener('change', ()=>{
     localStorage.nzbfastWallScope=sc.value;
     spotCtl();
+    grpCtl();
     lpage=0; browseFetch();
   });
   document.getElementById('spotAdult').addEventListener('change', ()=>{
     lpage=0; browseFetch();
   });
   spotCtl();
+  grpCtl();
+}
+// §U9: the nav pill, named from live config rather than hardcoded.
+// /wall is two surfaces in one - the poster grid over the local index,
+// and the table you search and grab from - and with the built-in
+// indexer off the grid is not one of them: `view` is forced to
+// 'releases' at boot whatever the spot switch says. So "wall" is a name
+// this page earns only while the built-in indexer is on. Below that,
+// whatever is left to reach (indexer accounts, spots, or both) is a
+// place you search and grab from, and the pill says that instead.
+//
+// A function for the same reason idxOffPage is one: it runs before the
+// catalogue arrives, so the loader calls it again. The label keeps a
+// data-i18n marker throughout, pointing at whichever key currently
+// names it, so both this retry and applyI18n can still find it.
+function navPillName(){
+  if(IDX_ON) return;
+  const pill=document.querySelector('.nav a[href="/wall"]');
+  if(!pill || !(IDX_COUNT||SPOT_ON)) return;
+  // Re-key the label rather than stripping its marker. Removing
+  // data-i18n left this call with nothing to find on the retry after
+  // the catalogue landed, so every translated locale kept the English
+  // word (Codex sweep 7, L4); handing it to applyI18n instead means
+  // the ordinary translation pass owns it from here on.
+  const lbl=pill.querySelector('[data-i18n="hdr.wall"],[data-i18n="hdr.find"]');
+  if(lbl){ lbl.textContent=t('hdr.find','find'); lbl.dataset.i18n='hdr.find'; }
+  pill.setAttribute('data-i18n-title','hdr.find.title');
+  pill.title=t('hdr.find.title','Search for releases and grab them');
 }
 // The built-in indexer is off. Say what this page is now, and - when
 // there is no indexer account either - say that instead of showing a
@@ -3692,17 +3964,11 @@ document.getElementById('onlyComplete').addEventListener('change', ()=>{
 // elements lose their data-i18n markup here, so applyI18n cannot fix
 // them up later - the loader calls this again instead.
 function idxOffPage(){
-  // Spots keep the poster wall alive (they are promoted into the
-  // release index), so the page only degrades to a bare search when
-  // BOTH local sources are off.
+  // Spots keep this page answerable on their own (they are promoted
+  // into the release index), so it only degrades to a search box with
+  // nothing behind it when BOTH local sources are off. The pill's name
+  // is a separate question - see navPillName.
   if(IDX_ON||SPOT_ON) return;
-  const pill=document.querySelector('.nav a[href="/wall"]');
-  if(pill){
-    const lbl=pill.querySelector('[data-i18n="hdr.wall"]');
-    if(lbl){ lbl.textContent=t('hdr.search','search'); lbl.removeAttribute('data-i18n'); }
-    pill.setAttribute('data-i18n-title','hdr.search.title');
-    pill.title=t('hdr.search.title','Search your indexer accounts');
-  }
   const q=document.getElementById('q');
   // phq() drops the keyboard hint on touch devices - it applies to
   // whichever placeholder this state calls for.
@@ -3714,6 +3980,7 @@ function idxOffPage(){
     n.innerHTML=t('wall.nothing','<b>Nothing to search yet.</b><br>The built-in indexer is off, and no indexer accounts are set up. Add an account under <a href="/#settings/pullsearch">Settings → Search indexers</a> to search from here, or switch the built-in indexer on under <a href="/#settings/indexing">Settings → Indexing</a> to scan newsgroups yourself.');
   }
 }
+navPillName();
 idxOffPage();
 document.getElementById('lprev').addEventListener('click', ()=>{ if(lpage>0){ lpage--; browseFetch(); } });
 document.getElementById('lnext').addEventListener('click', ()=>{ lpage++; browseFetch(); });
@@ -3722,13 +3989,15 @@ document.getElementById('matchedOnly').addEventListener('change', e=>{ viewBadge
   localStorage.nzbfastWallMatched=matchedOnly?'on':'off';
   wallFetch(true);
 });
-document.getElementById('unmChip').addEventListener('click', ()=>{
+// Shared by the bar chip and the empty state's "Show unmatched" button.
+function showUnmatched(){
   matchedOnly=false;
   document.getElementById('matchedOnly').checked=false;
   localStorage.nzbfastWallMatched='off';
   viewBadge();
   wallFetch(true);
-});
+}
+document.getElementById('unmChip').addEventListener('click', showUnmatched);
 document.getElementById('sort').addEventListener('change', e=>{
   sortBy=e.target.value; localStorage.nzbfastWallSort=sortBy;
   localStorage.nzbfastWallSortChosen='1';
@@ -3746,6 +4015,15 @@ for(const id of ['wall','strips']) document.getElementById(id).addEventListener(
 // interpolated into an inline onclick JS-string, where an attacker-supplied
 // key with a quote could break out.
 document.getElementById('lbody').addEventListener('click', e=>{
+  // Empty-state "Show incomplete": lift the filter through its own
+  // change handler, so the cache invalidation there runs too.
+  const a=e.target.closest('[data-show-inc]');
+  if(a){
+    e.preventDefault();
+    const c=document.getElementById('onlyComplete');
+    c.checked=false; c.dispatchEvent(new Event('change'));
+    return;
+  }
   const b=e.target.closest('[data-info-key]'); if(b) listInfo(b.dataset.infoKey);
 });
 // Group-by-title expander: the ▸ button or anywhere on the title row
@@ -3839,6 +4117,7 @@ document.getElementById('hovPrev').addEventListener('change', e=>{
 document.getElementById('grpTitle').addEventListener('change', e=>{
   grpTitle=e.target.checked;
   localStorage.nzbfastWallGrpTitle=grpTitle?'on':'off';
+  grpCtl();
   lpage=0; browseFetch();
 });
 // Both containers, matching the click handler above. The discovery
@@ -4041,10 +4320,11 @@ if(LOCALE!=='en'){
     // List rows repaint from the page we already hold rather than re-asking
     // the daemon; renderList is synchronous, so its count still lands last.
     renderChips();
+    navPillName();
     idxOffPage();
     render();
     if(view==='releases'){
-      if(grpTitle && lgroups) renderGroups();
+      if(grpOn() && lgroups) renderGroups();
       else if(lrows) renderList(lrows);
     }
     if(openKey) openCard(openKey);

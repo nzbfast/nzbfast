@@ -336,6 +336,73 @@ fn the_wall_poll_refuses_to_latch_a_failed_tip() {
     assert!(guard < latch, "the guard must precede the latch");
 }
 
+/// An empty wall may not claim a scan that is not happening, and it has
+/// to notice when the answer changes underneath it.
+///
+/// The empty state read only the group COUNT, so an install that was
+/// offline or paused said "Scanning your newsgroups" indefinitely; and
+/// the unchanged-page signature left out both the count and the scan
+/// state, so choosing the first newsgroup in another tab left "Choose
+/// newsgroups" up on an empty page forever, because the page itself
+/// never changed (Codex sweep 7, L1). Source-scanned for the same
+/// reason as the tip guard above: the HTML ships inside the binary.
+#[cfg(feature = "indexer")]
+#[test]
+fn the_empty_wall_reads_the_stand_down_answer_and_repaints_on_it() {
+    // The mid-pass bit is deliberately NOT what the copy turns on: it
+    // is false for the whole post-pass database section and the gap
+    // between passes, so a healthy install would flip copy every poll.
+    assert!(
+        WALL_HTML.contains("idxPaused=!!j.idxpaused"),
+        "the wall must read the daemon's stand-down answer, not infer one"
+    );
+    let ladder = WALL_HTML
+        .split("wall.empty.scanning")
+        .next()
+        .expect("the empty-state ladder moved");
+    assert!(
+        ladder.contains("idxGroups>0 && idxPaused"),
+        "a stood-down index must be told apart from one that is scanning"
+    );
+    let sig = WALL_HTML
+        .split("const sig=`")
+        .nth(1)
+        .and_then(|s| s.split('`').next())
+        .expect("the unchanged-page signature moved");
+    for input in ["idxGroups", "idxPaused"] {
+        assert!(
+            sig.contains(input),
+            "{input} decides what an empty wall says, so it belongs in the \
+             signature that decides whether to repaint one: {sig}"
+        );
+    }
+}
+
+/// The wall's nav pill keeps a translation marker while it is renamed.
+///
+/// `navPillName` runs before the catalogue arrives, so the loader calls
+/// it again afterwards - but it used to strip the element's only
+/// `data-i18n` selector on the first call, so the retry found nothing
+/// and every non-English locale kept the English word (Codex sweep 7,
+/// L4).
+#[cfg(feature = "indexer")]
+#[test]
+fn the_wall_nav_pill_keeps_a_selector_across_the_catalogue() {
+    let f = WALL_HTML
+        .split("function navPillName()")
+        .nth(1)
+        .and_then(|s| s.split("\nfunction ").next())
+        .expect("wall.html no longer has navPillName");
+    assert!(
+        !f.contains("removeAttribute('data-i18n')"),
+        "the label must keep a marker the retry (and applyI18n) can find"
+    );
+    assert!(
+        f.contains("dataset.i18n='hdr.find'"),
+        "the renamed label must be re-keyed to the string it now shows"
+    );
+}
+
 /// `compact_verdict` only answers "is a download running?" once, a
 /// moment before the rewrite starts - and the rewrite then holds the
 /// very gate a starting download waits on. A job arriving one moment

@@ -776,6 +776,9 @@ pub(super) fn apply_saved_settings(opts: &mut ServeOpts, path: &std::path::Path)
         opts.watch = opt_path(v);
     }
     if let Some(v) = s("script") {
+        // Raw chain text (§192) - `serve()` parses it into the ordered
+        // list. `opt_path` still does the right thing here: an empty
+        // value clears, and a one-script value is a plain path.
         opts.script = opt_path(v);
     }
     if let Some(v) = n("connections") {

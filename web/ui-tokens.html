@@ -278,4 +278,17 @@ body{zoom:var(--ui-zoom,1)}
   fill:none;stroke:currentColor;stroke-width:1.7;
   stroke-linecap:round;stroke-linejoin:round}
 .ic.solid{fill:currentColor;stroke:none}
+
+/* A checkbox and its label as ONE row: the secondary toggles under a
+   card's main controls. Lives here rather than in a page because it was
+   defined in wall.html alone while dashboard.html used it three times -
+   so on the dashboard it styled nothing, and the watchlist's three
+   toggles rendered as one run-on inline sentence
+   ("...wanted items [] Grab as soon as a match is posted At most [ ] of
+   those checks an hour"), with the number input marooned mid-sentence.
+   Reported by a tester on 1.1.5; measured in the page, all three labels
+   sat at the same `top`. */
+.mtog{display:flex;align-items:center;gap:5px;color:var(--dim);font-size:12px;
+  white-space:nowrap;cursor:pointer;user-select:none}
+.mtog input{accent-color:var(--acc);margin:0}
 </style>

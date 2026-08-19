@@ -149,7 +149,14 @@ pub(in crate::serve) fn move_winner(queue_seq: u64, hist_seq: u64) -> MoveWinner
 /// collide with another job's and cannot go backwards across a restart
 /// (the winning copy carries it, and the loser is removed).
 pub(in crate::serve) fn stamp_move(job: &Arc<Mutex<Job>>) {
-    job.lock_ok().move_seq += 1;
+    stamp_move_locked(&mut job.lock_ok());
+}
+
+/// The same, for a caller that already holds the record - and has to,
+/// because the check that says the stamp is still theirs to make must
+/// happen under the same hold (Codex sweep 6, N2).
+pub(in crate::serve) fn stamp_move_locked(job: &mut Job) {
+    job.move_seq += 1;
 }
 
 /// What [`reconcile_moves`] dropped, so the caller can make the

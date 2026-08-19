@@ -298,6 +298,15 @@ pub struct Daemon {
     /// would erase the prewrite - the durable copy a crash recovers the
     /// job from. Registered by `park` via `hist_inflight_begin`'s guard.
     pub(super) hist_inflight: Mutex<std::collections::HashSet<String>>,
+    /// When a rewrite that stood in for a REFUSED history append last
+    /// failed, in `now_ms` (0 = never). `history_publish` falls back to
+    /// the atomic rewrite when the append itself is refused, and the
+    /// rewrite serializes every live record - so a data folder that is
+    /// not coming back must not turn each job event into a full-store
+    /// write. One attempt a minute after a failure; a rewrite that
+    /// LANDS leaves this alone, because it heals the store and the next
+    /// caller simply appends.
+    pub(super) hist_rewrite_fail_ms: AtomicU64,
     /// §129 1b: discrete lifecycle events (job.completed, job.failed...)
     /// with a monotonic `seq`, so clients stop inferring toasts from
     /// snapshot diffs. Ring bounded at `histstore::LIFE_RING`; a client
@@ -309,6 +318,7 @@ pub struct Daemon {
     /// pick so it can be said again. Without the latch every park of a
     /// quiet queue would repeat it.
     pub queue_idle_latch: AtomicBool,
+    pub(super) finish: finish_action::FinishState,
     /// Issue #38 follow-up: the coalesced-save dirty flag. A completion
     /// used to call `save_queue` four times (postproc submit, finalize
     /// marker, finalize end, park), and at 14,500 jobs each rewrite
@@ -1082,6 +1092,12 @@ pub struct Daemon {
     /// Remove usenet junk (.par2/.nzb/.sfv/.nfo/… + sample clips) from a
     /// finished movie/TV folder (default on).
     pub rename_junk: std::sync::atomic::AtomicBool,
+    /// PLAN M32 leftover (sabnzbd#3475): skip sample/proof clips at
+    /// PLAN time, so their articles are never fetched. Distinct from
+    /// `rename_junk`, which deletes them AFTER they have been paid for.
+    /// Sampled once per job at download start, like the other live
+    /// settings beside it.
+    pub skip_samples: std::sync::atomic::AtomicBool,
     /// Aggressive: keep ONLY the media file(s), delete everything else
     /// (default off - irreversible).
     pub rename_media_only: std::sync::atomic::AtomicBool,
@@ -1597,8 +1613,12 @@ pub struct Daemon {
     /// default because it is the daemon's only outbound request to a host
     /// that is not the user's news provider.
     pub(super) group_desc_isc: std::sync::atomic::AtomicBool,
-    /// Post-processing script (None = off).
-    pub(super) script: Mutex<Option<PathBuf>>,
+    /// The post-processing script CHAIN (empty = off). §192: NZBGet
+    /// runs an ordered list, not one script, and the `script` setting
+    /// holds that list comma-separated; this is it, parsed. Order is
+    /// the list's, and a failing link does not stop the ones after it -
+    /// see [`Daemon::run_script_chain`] for both contracts.
+    pub(super) scripts: Mutex<Vec<PathBuf>>,
     /// Seconds before a post-processing script is killed. 0 = wait
     /// forever, which is what a multi-hour transcode wants; the default
     /// is generous but finite, because a script that hangs otherwise
@@ -1771,10 +1791,9 @@ pub struct DaemonEvent {
     /// throughput samples, so all three lay on top of each other.
     pub at_ms: u64,
     /// `pause` | `resume` | `limit` | `disk` | `quota` | `clear` |
-    /// `sidecar` | `indexer` | `late` | `finished` - the dashboard maps
-    /// these to severity classes (fault / recovery / phase / user
-    /// action), and `finished` is also what closes its "checking
-    /// files" phase shading.
+    /// `sidecar` | `indexer` | `late` | `finish` | `finished` - mapped by
+    /// the dashboard to severity classes (fault / recovery / phase / user
+    /// action); `finished` also closes its "checking files" phase shading.
     pub kind: &'static str,
     /// A whole sentence for the user, like the pool ring's details.
     pub detail: String,
@@ -1899,224 +1918,28 @@ pub struct ScanProgress {
     pub done: Arc<AtomicU64>,
 }
 
-// ---------------------------------------------------------------------------
-// M34: index size cap + eviction (daemon half)
-// ---------------------------------------------------------------------------
-
-/// The eviction orders the `index_evict_order` setting accepts, in the
-/// order the UI lists them. Kept as strings here because that is what
-/// crosses the settings/API boundary; `parse_evict_order` is the single
-/// place that turns one into the engine's enum.
+// M34 index size cap + eviction (daemon half) lives in
+// daemon_evict.rs - the vocabularies, their validators and the
+// opened-log are one subject with no reference to `Daemon`, so the
+// size gate moved them whole (the daemon_index.rs precedent just
+// below). Re-exported so every existing `daemon::` / `super::` path
+// still resolves here.
+#[path = "daemon_evict.rs"]
+mod daemon_evict;
 #[cfg(feature = "indexer")]
-pub const EVICT_ORDERS: [&str; 5] = ["ladder", "oldest", "newest", "largest", "smallest"];
-
-/// Release kinds the index stores, and so the only values
-/// `index_evict_kinds` may name. Anything else is a typo that would
-/// silently make the whole restriction match nothing.
+pub(in crate::serve) use daemon_evict::EVICT_MAX_PASSES;
 #[cfg(feature = "indexer")]
-pub const EVICT_KINDS: [&str; 4] = ["movie", "tv", "software", "other"];
-
-/// The parity scoreboard's sampling menu: newznab's standard top-level
-/// thousands, paired with the label the samples are stored and reported
-/// under. The daily run makes ONE request per category in this list, so
-/// its length is the scoreboard's whole cost, and `scoreboard_cats` can
-/// only ever pick a subset of it - four requests a day is the ceiling
-/// and one is the floor.
-///
-/// Not indexer-gated: the sampler that walks it is, but the setting
-/// that trims it, its validator and the API readout are not.
-pub const SCOREBOARD_CATEGORIES: [(u32, &str); 4] = [
-    (2000, "movies"),
-    (5000, "tv"),
-    (3000, "audio"),
-    (7000, "books"),
-];
-
-/// How long a deliberate touch (detail sheet, /getnzb, queue add) keeps a
-/// release safe from the size cap. The user asked for "recently opened"
-/// to be protected; a month is long enough that a title you browsed
-/// before the weekend is still there on Monday, short enough that a
-/// year of idle curiosity does not pin the whole database.
-#[cfg(feature = "indexer")]
-pub const OPENED_PROTECT_DAYS: i64 = 30;
-
-/// Don't rewrite index-opened.json for a key already touched this
-/// recently - browsing a card repeatedly is one signal, not fifty.
-#[cfg(feature = "indexer")]
-pub(super) const OPENED_COALESCE_SECS: i64 = 3_600;
-
-/// Ceiling on either half of the touch log, so a scripted crawl of the
-/// wall cannot grow the file without bound. Oldest touches drop first,
-/// which is exactly the order the protection window would have expired
-/// them in anyway.
-#[cfg(feature = "indexer")]
-pub(super) const OPENED_MAX_ENTRIES: usize = 5_000;
-
-/// There is deliberately NO ceiling on the protected set.
-///
-/// This used to refuse to evict at all past 30_000 protected keys, out of
-/// a fear that SQLite's 32_766-variable statement limit would silently
-/// truncate the list and delete something the user asked us to keep. That
-/// fear was misplaced: `Index::evict_to` binds at most 10_000 protected
-/// entries into the candidate query as an OPTIMISATION, and then re-checks
-/// every surviving candidate in Rust against the full, uncapped set before
-/// deleting it. Overflowing the bind cap costs a little scan work, nothing
-/// else, and `evict_protected_set_past_the_bind_limit_still_protects_everything`
-/// in index.rs pins that at 30_000 ids plus 30_000 keys.
-///
-/// So the ceiling only ever produced the worse outcome: a user with a
-/// large history got a cap that was never enforced, which is the failure
-/// mode the cap exists to prevent. Hand the engine the whole set.
-///
-/// Bound the pass count instead. The engine's byte estimator is
-/// deliberately conservative and can stop a little short of the target
-/// (its own doc calls the undershoot self-correcting, on the assumption
-/// that the next scan pass finishes the job). A user who pressed a button
-/// should not have to wait for a scan pass, so an on-demand eviction
-/// re-runs while it is still making progress, up to this many times. Each
-/// pass re-seeds its estimate from the measured file, so convergence is
-/// fast; the bound is only there so a pathological fixture cannot spin.
-#[cfg(feature = "indexer")]
-pub(super) const EVICT_MAX_PASSES: usize = 8;
-
-/// Deliberate user attention, remembered. See `Daemon::index_opened`.
-#[cfg(feature = "indexer")]
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct OpenedLog {
-    /// Wall title_key → unix seconds of the last detail-sheet open.
-    #[serde(default)]
-    pub titles: std::collections::HashMap<String, i64>,
-    /// Index release id → unix seconds of the last /getnzb or queue add.
-    #[serde(default)]
-    pub releases: std::collections::HashMap<i64, i64>,
-}
-
-#[cfg(feature = "indexer")]
-impl OpenedLog {
-    /// Record a touch. Returns true when the caller should persist -
-    /// i.e. this is new information, not the same card opened twice in a
-    /// row. Trims to `OPENED_MAX_ENTRIES`, oldest first.
-    pub(super) fn touch_title(&mut self, key: &str, now: i64) -> bool {
-        if key.is_empty() {
-            return false;
-        }
-        let fresh = self
-            .titles
-            .get(key)
-            .is_some_and(|t| now - *t < OPENED_COALESCE_SECS);
-        self.titles.insert(key.to_string(), now);
-        Self::trim(&mut self.titles);
-        !fresh
-    }
-
-    pub(super) fn touch_release(&mut self, id: i64, now: i64) -> bool {
-        if id < 0 {
-            return false;
-        }
-        let fresh = self
-            .releases
-            .get(&id)
-            .is_some_and(|t| now - *t < OPENED_COALESCE_SECS);
-        self.releases.insert(id, now);
-        Self::trim(&mut self.releases);
-        !fresh
-    }
-
-    pub(super) fn trim<K: Clone + std::hash::Hash + Eq>(m: &mut std::collections::HashMap<K, i64>) {
-        if m.len() <= OPENED_MAX_ENTRIES {
-            return;
-        }
-        let mut by_age: Vec<(K, i64)> = m.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        by_age.sort_by_key(|(_, t)| *t);
-        for (k, _) in by_age.into_iter().take(m.len() - OPENED_MAX_ENTRIES) {
-            m.remove(&k);
-        }
-    }
-
-    /// Drop touches that have aged out of the protection window. Called
-    /// before every save so the file self-limits.
-    pub(super) fn expire(&mut self, now: i64, window_secs: i64) {
-        self.titles.retain(|_, t| now - *t <= window_secs);
-        self.releases.retain(|_, t| now - *t <= window_secs);
-    }
-}
-
-/// The `index_evict_order` string → the engine's enum. `None` for
-/// anything else, which `apply_setting` refuses to store in the first
-/// place; the fallback at read time is Ladder.
-#[cfg(feature = "indexer")]
-pub fn parse_evict_order(s: &str) -> Option<nzbkit::index::EvictOrder> {
-    use nzbkit::index::EvictOrder as O;
-    Some(match s.trim().to_ascii_lowercase().as_str() {
-        "ladder" => O::Ladder,
-        "oldest" => O::Oldest,
-        "newest" => O::Newest,
-        "largest" => O::Largest,
-        "smallest" => O::Smallest,
-        _ => return None,
-    })
-}
-
-/// The `index_evict_kinds` comma list → validated lowercase kinds.
-/// `Err` names the offender: a typo here would restrict eviction to a
-/// kind no row carries, and the user would be left staring at a cap that
-/// never frees anything.
-#[cfg(feature = "indexer")]
-pub fn parse_evict_kinds(s: &str) -> std::result::Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in s.split(',') {
-        let k = raw.trim().to_ascii_lowercase();
-        if k.is_empty() {
-            continue;
-        }
-        if !EVICT_KINDS.contains(&k.as_str()) {
-            return Err(format!(
-                "unknown kind {k:?} (expected {})",
-                EVICT_KINDS.join(", ")
-            ));
-        }
-        if !out.contains(&k) {
-            out.push(k);
-        }
-    }
-    Ok(out)
-}
-
-/// The `scoreboard_cats` comma list → validated category labels.
-///
-/// The list may only ever REDUCE what the scoreboard asks for: every
-/// name has to be one of [`SCOREBOARD_CATEGORIES`], so there is no
-/// spelling of this setting that adds a request to the day. Empty is
-/// the default and means every category - the ceiling, not a hole - so
-/// the only way to spend less is to name the subset you want.
-///
-/// An unknown name is an error rather than a silent drop: the whole
-/// point of the control is that the user knows what they are paying
-/// for, and a typo that quietly halved the sample would be the exact
-/// opposite of that.
-pub fn parse_scoreboard_cats(s: &str) -> std::result::Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in s.split(',') {
-        let c = raw.trim().to_ascii_lowercase();
-        if c.is_empty() {
-            continue;
-        }
-        if !SCOREBOARD_CATEGORIES.iter().any(|(_, l)| *l == c) {
-            return Err(format!(
-                "unknown category {c:?} (expected {})",
-                SCOREBOARD_CATEGORIES
-                    .iter()
-                    .map(|(_, l)| *l)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !out.contains(&c) {
-            out.push(c);
-        }
-    }
-    Ok(out)
-}
+pub use daemon_evict::{
+    EVICT_ORDERS, OPENED_PROTECT_DAYS, OpenedLog, parse_evict_kinds, parse_evict_order,
+};
+pub use daemon_evict::{SCOREBOARD_CATEGORIES, parse_scoreboard_cats};
+// The opened-log's two bounds have no reader outside their own module
+// in a production build - only the suites reach them, through serve's
+// `use daemon::*` - so re-exporting them unconditionally is an unused
+// import, and this crate builds with `-D warnings`. Same shape, and
+// the same reason, as the daemon_index trio just below.
+#[cfg(all(test, feature = "indexer"))]
+pub(in crate::serve) use daemon_evict::{OPENED_COALESCE_SECS, OPENED_MAX_ENTRIES};
 
 // The protected-set trio (assemble_protected / watch_item_keys /
 // shrink_shortfall_reason) lives with its callers in daemon_index.rs
@@ -3423,194 +3246,6 @@ impl Daemon {
             }
         }
         best.map(|(_, j)| j)
-    }
-
-    /// §129 2b follow-up: every script this daemon can actually run for
-    /// a job - the global setting plus each category's own - keyed by
-    /// the BASENAME clients name them by. `mode=get_scripts` serves
-    /// these names, and `script=` on an add sends one back, so the two
-    /// must resolve through one list or the round trip breaks (it did:
-    /// the name came back and was run as a cwd-relative path). First
-    /// entry wins a basename tie, global first.
-    pub(super) fn known_scripts(&self) -> Vec<(String, PathBuf)> {
-        let mut out: Vec<(String, PathBuf)> = Vec::new();
-        let mut push = |p: &std::path::Path| {
-            if let Some(name) = p.file_name().map(|s| s.to_string_lossy().into_owned())
-                && !out.iter().any(|(n, _)| *n == name)
-            {
-                out.push((name, p.to_path_buf()));
-            }
-        };
-        if let Some(g) = self.script.lock_ok().as_deref() {
-            push(g);
-        }
-        for m in self.cat_meta.lock_ok().values() {
-            let s = m.script.trim();
-            if !s.is_empty() {
-                push(std::path::Path::new(s));
-            }
-        }
-        out
-    }
-
-    /// §129 2b: which script this job runs, if any. Resolution order:
-    /// the job's own `script=` param ("None" = explicitly none), the
-    /// category's script, the global setting.
-    pub(super) fn resolve_script(&self, job: &Arc<Mutex<Job>>) -> Option<PathBuf> {
-        let (over, cat) = {
-            let g = job.lock_ok();
-            (g.script_override.clone(), g.category.clone())
-        };
-        if over.eq_ignore_ascii_case("none") {
-            return None;
-        }
-        if !over.is_empty() {
-            return Some(PathBuf::from(over));
-        }
-        let cs = self
-            .cat_meta
-            .lock_ok()
-            .get(&cat)
-            .map(|m| m.script.clone())
-            .unwrap_or_default();
-        if !cs.is_empty() {
-            return Some(PathBuf::from(cs));
-        }
-        self.script.lock_ok().clone()
-    }
-
-    /// §129 2b: record the SAB add params the API used to accept and
-    /// silently drop (`pp=`, `script=`), and log the compatibility
-    /// mapping for the ones one-pass cannot honor literally - never
-    /// silently ignore (decision 5).
-    ///
-    /// `add_only` is true when the request authenticated with the
-    /// add-only NZB key rather than the full API key. That credential is
-    /// handed to browser push extensions by design, so it must not be
-    /// able to choose which program the daemon runs.
-    pub(super) fn record_add_params(
-        &self,
-        nzo_id: &str,
-        pp: Option<&str>,
-        script: Option<&str>,
-        add_only: bool,
-    ) {
-        let pp = sab_pp_param(pp);
-        let script = script
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            // A bare name is what SAB clients send back from
-            // mode=get_scripts, so it must resolve against the same
-            // list that answer came from - stored verbatim it became a
-            // cwd-relative path that ran nothing. A value with a path
-            // separator is an operator-typed location and stays as
-            // written; "none" is SAB's own null and suppresses the
-            // category/global ladder in resolve_script.
-            .and_then(|s| {
-                if s.eq_ignore_ascii_case("none") {
-                    return Some(s);
-                }
-                if s.contains('/') || s.contains('\\') {
-                    // An operator-typed absolute location, stored as
-                    // written - but ONLY for a full-key caller.
-                    // `addfile`/`addurl` are on the add-only allowlist,
-                    // so without this test the NZB key reached
-                    // `Command::new`: `resolve_script` returns
-                    // `script_override` verbatim and the job tail
-                    // executes it. That is the same escalation
-                    // `m_config`'s bootstrap check already refuses ("an
-                    // add-only credential escalating to arbitrary
-                    // config, and from there to code execution, because
-                    // `script` is run on the job tail and `addfile` is
-                    // itself add-only") - this was the door left open
-                    // beside it. The bare-name form below is safe for
-                    // either caller: it resolves against the configured
-                    // list and cannot name anything the operator has not
-                    // already installed.
-                    if add_only {
-                        warn!(
-                            target: "queue",
-                            "{nzo_id}: ignoring script={s:?} - a path may only be \
-                             set with the full API key, and this add came in on \
-                             the add-only NZB key (name a configured script \
-                             instead, or set it on the category)"
-                        );
-                        return None;
-                    }
-                    return Some(s);
-                }
-                match self.known_scripts().into_iter().find(|(n, _)| *n == s) {
-                    Some((_, p)) => Some(p.to_string_lossy().into_owned()),
-                    None => {
-                        warn!(
-                            target: "queue",
-                            "{nzo_id}: script {s:?} is not configured on this \
-                             daemon - the job runs with its category/global \
-                             script instead (set the script globally or on \
-                             the category to use it)"
-                        );
-                        None
-                    }
-                }
-            });
-        if pp.is_none() && script.is_none() {
-            return;
-        }
-        // The queue first, then history: an add can be answered with an
-        // id that never reached the queue at all - a pre-queue REJECT
-        // and dupe_action="fail" both file the job straight to history -
-        // and searching only the queue dropped the caller's pp/script on
-        // exactly those two paths. The record is the one a History retry
-        // brings back, so the params have to be on it or the retry runs
-        // with different post-processing than the add asked for (M15,
-        // 10 Aug sweep).
-        let queued = self
-            .queue
-            .lock_ok()
-            .iter()
-            .find(|j| j.lock_ok().nzo_id == nzo_id)
-            .cloned();
-        let parked = queued.is_none();
-        let Some(job) = queued.or_else(|| {
-            self.history
-                .lock_ok()
-                .iter()
-                .find(|j| j.lock_ok().nzo_id == nzo_id)
-                .cloned()
-        }) else {
-            return;
-        };
-        {
-            let mut g = job.lock_ok();
-            // §129 4a: fill, never clobber. At construction these are
-            // empty unless the pre-queue hook set them, and the hook's
-            // answer outranks the request's params (SAB semantics: the
-            // pre-queue output overrides the add).
-            let pp = pp.filter(|_| g.sab_pp.is_none());
-            let script = script.filter(|_| g.script_override.is_empty());
-            if let Some(p) = pp {
-                g.sab_pp = Some(p);
-                if p <= 1 {
-                    info!(
-                        target: "queue",
-                        "{nzo_id}: pp={p} requested - repair and unpack are integral \
-                         to the one-pass download, so the request is recorded and \
-                         shown on the job, and the download runs normally"
-                    );
-                }
-            }
-            if let Some(s) = script {
-                g.script_override = s.clone();
-                info!(target: "queue", "{nzo_id}: script={s} for this job");
-            }
-        }
-        if parked {
-            // A history record persists through its own store, and it
-            // is already filed - so this is the seam that has to see it.
-            let _ = self.history_upsert(std::slice::from_ref(&job));
-        } else {
-            self.save_queue();
-        }
     }
 
     /// Benchmark history: one JSON array in .spool, appended by every

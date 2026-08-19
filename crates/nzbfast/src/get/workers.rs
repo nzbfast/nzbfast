@@ -2254,6 +2254,7 @@ mod par_race_tests {
         Arc::new(FileSlot {
             hint: hint.into(),
             is_par2_main: false,
+            sample_skipped: false,
             par2_sniffed: AtomicBool::new(false),
             total_segments: 3,
             remaining: AtomicUsize::new(remaining),

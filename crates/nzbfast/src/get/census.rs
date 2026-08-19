@@ -521,6 +521,7 @@ mod tests {
         Arc::new(FileSlot {
             hint: hint.into(),
             is_par2_main,
+            sample_skipped: false,
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: total,
             remaining: AtomicUsize::new(remaining),

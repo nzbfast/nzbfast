@@ -1062,6 +1062,13 @@ all behave as the *arrs expect.</p>
 <li>nzbfast serves <code>caps</code>, <code>search</code>, <code>tvsearch</code> and
 <code>movie</code> queries from its own index of your watched groups, and
 <code>/getnzb/&lt;id&gt;</code> hands back the NZB.</li>
+<li>Searches can be by name or by id: series take a TVDB, IMDb or TVmaze
+id, films an IMDb or TMDB id, and the app reads which from
+<code>caps</code>. TVDB ids are offered only once the index has collected
+them, which happens on its own in the background.
+An id we hold nothing for answers with an empty result, and an id we
+cannot resolve at all is declined by name, so neither is ever answered
+with a list of unrelated releases.</li>
 </ol>
 <div class="note"><b>Switch the built-in indexer on first</b> (Settings → Indexing). It is
 off by default, and while it is off this facade answers every query with
@@ -1075,7 +1082,7 @@ under a real filename.</div>
 <h2 id="remotes">12 · Phone &amp; remote apps</h2>
 <p>nzbfast implements <em>both</em> major remote-control protocols, so nearly every
 mobile/tablet app works. Pick whichever protocol your app supports:</p>
-<h3>Apps that speak NZBGet (nzb360, LunaSea, NZB Unity…)</h3>
+<h3>Apps that speak NZBGet (LunaSea, NZB Unity…)</h3>
 <div class="tblwrap"><table>
 <tr><th>Field in the app</th><th>Value</th></tr>
 <tr><td>Type</td><td>NZBGet</td></tr>
@@ -1084,7 +1091,12 @@ mobile/tablet app works. Pick whichever protocol your app supports:</p>
 <tr><td>Password</td><td>your <b>API key</b></td></tr>
 </table></div>
 <p>The full JSON-RPC surface these apps use is served: status, queue with
-reorder/pause/delete, history, add-NZB, speed limit, pause/resume, log.</p>
+reorder/rename/pause/delete, history, add-NZB (file or URL), speed limit,
+pause/resume, log. The credentials may also ride in the URL, NZBGet's own
+<code>http://user:apikey@host:6789/</code> form, which is what LunaSea sends.</p>
+<p><b>nzb360 users:</b> add nzbfast as a <b>SABnzbd</b> server (next section).
+nzb360 talks to real NZBGet over XML-RPC, which nzbfast does not serve, so its
+NZBGet mode cannot connect.</p>
 <h3>Apps that speak SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Field in the app</th><th>Value</th></tr>

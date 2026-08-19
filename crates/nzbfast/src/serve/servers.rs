@@ -197,7 +197,94 @@ pub(super) fn normalized_server(
             Some(_) => return Err(format!("{k}: not a number")),
         }
     }
+    // M32 route controls. `bind_ip` is a local address and is echoed
+    // plainly; the SOCKS spec is stored as ONE string that may carry a
+    // proxy password, so the form edits it as three fields and this
+    // recombines them.
+    match incoming
+        .get("bind_ip")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("") => {
+            ob.remove("bind_ip");
+        }
+        Some(v) => {
+            if v.parse::<std::net::IpAddr>().is_err() {
+                return Err("bind address: not an IP address".into());
+            }
+            ob.insert("bind_ip".into(), json!(v));
+        }
+        None => {}
+    }
+    if let Some(addr) = incoming
+        .get("socks5")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        if addr.is_empty() {
+            ob.remove("socks5");
+        } else {
+            if addr.contains('@') {
+                // The address box is host:port only - a spec pasted whole
+                // would put the proxy password in the echoed field.
+                return Err("proxy address: put the user and password in their own boxes".into());
+            }
+            // Port 0 parses as a `u16` and is not a port anybody can
+            // connect to: accepted here it saved silently and then
+            // failed every connection through this provider with an OS
+            // error instead of a form message (Codex sweep 7, L5). The
+            // NNTP port above takes the same range.
+            if addr
+                .rsplit_once(':')
+                .and_then(|(h, p)| p.parse::<u16>().ok().filter(|p| *p > 0 && !h.is_empty()))
+                .is_none()
+            {
+                return Err("proxy address: expected host:port".into());
+            }
+            // Blank password keeps the stored one, exactly like the
+            // server password above: it never round-trips through the UI.
+            let (stored_user, stored_pass) = socks5_creds(ob.get("socks5").and_then(Value::as_str));
+            let user = incoming
+                .get("socks5_user")
+                .and_then(Value::as_str)
+                .map_or(stored_user.clone(), |v| v.trim().to_string());
+            let pass = match incoming.get("socks5_pass").and_then(Value::as_str) {
+                Some(p) if !p.is_empty() => p.to_string(),
+                // A cleared user means the credential is gone entirely,
+                // so the stored password must not survive it.
+                _ if user.is_empty() => String::new(),
+                _ => stored_pass,
+            };
+            ob.insert(
+                "socks5".into(),
+                json!(if user.is_empty() {
+                    addr.to_string()
+                } else {
+                    format!("{user}:{pass}@{addr}")
+                }),
+            );
+        }
+    }
     Ok(o)
+}
+
+/// The `user`, `pass` halves of a stored SOCKS spec ("" when it has no
+/// credentials). Parsed exactly as `nntp::socks5_connect` parses it, so
+/// what the editor shows is what the connection will use.
+pub(super) fn socks5_creds(spec: Option<&str>) -> (String, String) {
+    let Some((creds, _)) = spec.unwrap_or_default().rsplit_once('@') else {
+        return (String::new(), String::new());
+    };
+    let (u, p) = creds.split_once(':').unwrap_or((creds, ""));
+    (u.to_string(), p.to_string())
+}
+
+/// The `host:port` half of a stored SOCKS spec - the only part the UI is
+/// allowed to see, since the rest is a credential.
+pub(super) fn socks5_addr(spec: Option<&str>) -> String {
+    let spec = spec.unwrap_or_default();
+    spec.rsplit_once('@').map_or(spec, |(_, hp)| hp).to_string()
 }
 
 /// (mtime secs, len) of a watch-folder candidate - the signature the

@@ -405,6 +405,157 @@ pub(super) const MANUAL_HTML: &str = include_str!(concat!(
 mod tests {
     use super::{DASHBOARD_HTML, USER_CSS_FILE, user_css};
 
+    /// Body of `function NAME(` up to its balanced closing brace. The
+    /// page has no runtime under `cargo test`, so the tests below read
+    /// it as a string; `web/densepack_test.js` and `web/fmt_test.js`
+    /// exercise the same code under node, where a developer has one.
+    #[cfg(test)]
+    fn fn_body(name: &str) -> &'static str {
+        let at = DASHBOARD_HTML
+            .find(&format!("function {name}("))
+            .unwrap_or_else(|| panic!("no function {name} in the dashboard"));
+        let start = at + DASHBOARD_HTML[at..].find('{').expect("no body brace");
+        let mut depth = 0usize;
+        for (i, b) in DASHBOARD_HTML.as_bytes()[start..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &DASHBOARD_HTML[start..start + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body for {name}");
+    }
+
+    /// The cap chip may not read the cap ledger where there is none.
+    ///
+    /// `renderServers` computed the windowed low with
+    /// `kept.length ? min(...) : cl.granted_lo`, and `cl` is undefined
+    /// for any server that has never been refused a connection - which
+    /// is nearly every server, since the tuner map only gains a host
+    /// from a ladder probe or a refusal. The TypeError escaped the
+    /// row map, so `#srvlist` stayed blank and `loadSettings` never
+    /// reached schedules, feeds, indexers, smart folders, categories,
+    /// notifications or automation (Codex sweep 7, H1). The low is
+    /// meaningless with no day to attach it to, so it belongs inside
+    /// the guard that proves there is one.
+    #[test]
+    fn the_cap_chip_reads_the_ledger_only_where_it_is_known_to_exist() {
+        let b = fn_body("capChip");
+        // `cl` may be undefined, so only `cl &&` guarded reads of it are
+        // safe anywhere in here. The one that shipped was an unguarded
+        // ternary arm, which is what `web/capchip_test.js` exercises.
+        for (i, _) in b.match_indices("cl.") {
+            assert!(
+                b[..i].ends_with("(cl&&") || b[..i].ends_with("cl&&"),
+                "an unguarded read of the cap ledger, which most servers do not have: {}",
+                &b[i.saturating_sub(60)..(i + 20).min(b.len())]
+            );
+        }
+        assert!(
+            b.contains("if(!cdays.length) return ''"),
+            "with no day in the window there is nothing to say and nothing to read"
+        );
+    }
+
+    /// Everything that owns the whole appearance owns every key of it.
+    ///
+    /// The two density booleans drive the `compact` and `dense` body
+    /// classes but sat outside `LOOK_KEYS`, so Reset Appearance left
+    /// `uiDense` behind and factory defaults came back dense, while an
+    /// exported look could not carry the density it was chosen for
+    /// (Codex sweep 7, M8).
+    #[test]
+    fn reset_export_and_import_own_every_appearance_key() {
+        // Whatever `setDense` and `setUiCompact` write is appearance.
+        for f in ["setDense", "setUiCompact"] {
+            let body = fn_body(f);
+            for key in ["uiDense", "uiCompact"] {
+                if !body.contains(key) {
+                    continue;
+                }
+                let list = DASHBOARD_HTML
+                    .split("const LOOK_FLAGS = ")
+                    .nth(1)
+                    .and_then(|s| s.split(';').next())
+                    .expect("the appearance flag list");
+                assert!(
+                    list.contains(key),
+                    "{f} writes {key}, so reset/export/import must own it"
+                );
+            }
+        }
+        for f in ["exportLook", "importLook", "resetAppearance"] {
+            assert!(
+                fn_body(f).contains("LOOK_ALL"),
+                "{f} enumerates appearance keys and must use the complete list"
+            );
+        }
+        // A file that names no layout describes the shipped one. Leaving
+        // the recipient's in place made a hybrid the file never was.
+        assert!(
+            fn_body("importLook").contains("removeItem('layoutPrefs')"),
+            "an import with no layout must clear the receiving layout, not keep it"
+        );
+    }
+
+    /// A compound help tooltip has to be rebuilt when the catalogue
+    /// lands, and every one of them, not just the first.
+    ///
+    /// These are composed from TWO strings, so they carry no
+    /// `data-i18n-title` for applyI18n to follow, and injectHelp runs
+    /// before the fetch. The restamp named the Queue card by hand and
+    /// History was never added, so its tooltip and its accessible label
+    /// stayed English on all 27 translated locales while the key it
+    /// needed was already in every catalogue (Codex sweep 7, L4).
+    #[test]
+    fn every_compound_help_label_is_restamped_after_the_catalogue() {
+        let hints = fn_body("helpHints");
+        let cards: Vec<&str> = hints
+            .match_indices("Card:t(")
+            .map(|(i, _)| {
+                let line = &hints[..i];
+                let start = line
+                    .rfind(|c: char| !c.is_alphanumeric())
+                    .map_or(0, |j| j + 1);
+                &hints[start..i + 4]
+            })
+            .collect();
+        assert!(
+            cards.len() >= 2,
+            "expected the queue and history hints in helpHints: {hints}"
+        );
+        // One loop over the same map is what makes a third card safe.
+        assert!(
+            DASHBOARD_HTML.contains("for(const [card,hint] of Object.entries(helpHints()))"),
+            "the post-catalogue restamp must walk every compound hint, not name one"
+        );
+    }
+
+    /// A stack of pinned cards resolves however deep it runs.
+    ///
+    /// `densePack` deferred a card whose anchor was not placed yet and
+    /// drained that list exactly once, in DOM order - so a chain running
+    /// backwards through the page (C under B, B under A, DOM reading C,
+    /// B, A) auto-placed C while its menu still offered Unstack and the
+    /// announcement had already said where it sat (Codex sweep 7, M9).
+    #[test]
+    fn deferred_card_pins_are_drained_to_a_fixpoint() {
+        let b = fn_body("densePack");
+        let drain = b
+            .split("const wait=[]")
+            .nth(1)
+            .expect("the deferred-pin list");
+        assert!(
+            drain.contains("while(pend.length)"),
+            "the deferred pins must be drained until a round places nothing, not once"
+        );
+    }
+
     /// The user stylesheet is read from disk, so an edit takes effect on
     /// the next page load. If this ever became an `include_str!` the
     /// feature would silently turn into "rebuild to restyle" (§140).

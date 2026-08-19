@@ -7,6 +7,42 @@
 
 use super::*;
 
+/// What [`run_capped_inner`] does with the child's stdout. Three modes
+/// because three callers want three different SLICES of it, and none of
+/// them wants all of it: a script that prints for a living must not be
+/// able to spend the daemon's memory proving it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum StdoutMode {
+    /// The first [`SCRIPT_OUT_HEAD`] bytes. The pre-queue verdict.
+    Head,
+    /// Only the NZBGet command-channel lines, wherever they appear. See
+    /// [`super::nzbget_script::LineSieve`].
+    Sieve,
+}
+
+/// §129 4a: `run_capped`, but the FIRST [`SCRIPT_OUT_HEAD`] bytes of
+/// stdout are kept too - the pre-queue verdict is stdout's opening
+/// lines, so the head is the interesting end (where stderr keeps its
+/// tail: the last words before death). Everything past the head is
+/// drained and dropped under the same never-join discipline.
+pub(super) fn run_capped_capture(
+    cmd: std::process::Command,
+    secs: u64,
+) -> std::io::Result<(Option<std::process::ExitStatus>, String, String)> {
+    run_capped_inner(cmd, secs, StdoutMode::Head)
+}
+
+/// §192: `run_capped`, but the NZBGet `[NZB] ` command channel is sieved
+/// out of stdout. One line per kept command, in the order the script
+/// said them; see [`NzbCommands::parse`].
+pub(super) fn run_capped_sieve(
+    cmd: std::process::Command,
+    secs: u64,
+) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<String>, String)> {
+    let (status, out, stderr) = run_capped_inner(cmd, secs, StdoutMode::Sieve)?;
+    Ok((status, out.lines().map(str::to_string).collect(), stderr))
+}
+
 /// Run a child to completion with a deadline, draining its pipes.
 ///
 /// `Command::output()` has no timeout, so a post-processing script that
@@ -58,30 +94,10 @@ use super::*;
 ///    process group and the whole group is signalled. Windows keeps the
 ///    single-process kill (a job object is the equivalent, and is a
 ///    bigger change than this fix warrants).
-pub(super) fn run_capped(
-    cmd: std::process::Command,
-    secs: u64,
-) -> std::io::Result<(Option<std::process::ExitStatus>, String)> {
-    let (status, _, stderr) = run_capped_inner(cmd, secs, false)?;
-    Ok((status, stderr))
-}
-
-/// §129 4a: `run_capped`, but the FIRST [`SCRIPT_OUT_HEAD`] bytes of
-/// stdout are kept too - the pre-queue verdict is stdout's opening
-/// lines, so the head is the interesting end (where stderr keeps its
-/// tail: the last words before death). Everything past the head is
-/// drained and dropped under the same never-join discipline.
-pub(super) fn run_capped_capture(
-    cmd: std::process::Command,
-    secs: u64,
-) -> std::io::Result<(Option<std::process::ExitStatus>, String, String)> {
-    run_capped_inner(cmd, secs, true)
-}
-
 fn run_capped_inner(
     mut cmd: std::process::Command,
     secs: u64,
-    capture_stdout: bool,
+    mode: StdoutMode,
 ) -> std::io::Result<(Option<std::process::ExitStatus>, String, String)> {
     use std::process::Stdio;
     cmd.stdin(Stdio::null())
@@ -98,23 +114,28 @@ fn run_capped_inner(
     let mut child = cmd.spawn()?;
     let tail = Arc::new(Mutex::new(BoundedTail::default()));
     let head = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sieve = Arc::new(Mutex::new(crate::serve::nzbget_script::LineSieve::default()));
     // Detached on purpose, and leashed: see the doc comment. Each thread
     // owns its pipe and exits when the last writer closes it OR when
     // this flag says we have stopped caring, whichever comes first.
     let stop = Arc::new(AtomicBool::new(false));
     if let Some(r) = child.stdout.take() {
         let (stop, g) = (stop.clone(), DrainGuard::new());
-        if capture_stdout {
-            let head = head.clone();
-            std::thread::spawn(move || {
-                let _g = g;
-                drain_into_head(r, &stop, &head)
-            });
-        } else {
-            std::thread::spawn(move || {
-                let _g = g;
-                drain_to_nowhere(r, &stop)
-            });
+        match mode {
+            StdoutMode::Head => {
+                let head = head.clone();
+                std::thread::spawn(move || {
+                    let _g = g;
+                    drain_into_head(r, &stop, &head)
+                });
+            }
+            StdoutMode::Sieve => {
+                let sieve = sieve.clone();
+                std::thread::spawn(move || {
+                    let _g = g;
+                    drain_into_sieve(r, &stop, &sieve)
+                });
+            }
         }
     }
     if let Some(r) = child.stderr.take() {
@@ -153,7 +174,23 @@ fn run_capped_inner(
     std::thread::sleep(std::time::Duration::from_millis(50));
     stop.store(true, Ordering::Release);
     let stderr = tail.lock_ok().tail_text();
-    let stdout = String::from_utf8_lossy(&head.lock_ok()).into_owned();
+    let stdout = match mode {
+        StdoutMode::Sieve => {
+            let mut s = sieve.lock_ok();
+            s.finish();
+            if s.dropped > 0 {
+                warn!(
+                    target: "script",
+                    "{} more command/log lines than the {} this daemon keeps were \
+                     dropped - a post-processing script should say a handful, not \
+                     a stream",
+                    s.dropped, s.kept.len()
+                );
+            }
+            s.kept.join("\n")
+        }
+        _ => String::from_utf8_lossy(&head.lock_ok()).into_owned(),
+    };
     Ok((status, stdout, stderr))
 }
 
@@ -312,8 +349,12 @@ pub(super) fn drain_into(r: impl PipeRead, stop: &AtomicBool, tail: &Mutex<Bound
     drain(r, stop, |bytes| tail.lock_ok().push(bytes));
 }
 
-pub(super) fn drain_to_nowhere(r: impl PipeRead, stop: &AtomicBool) {
-    drain(r, stop, |_| {});
+pub(super) fn drain_into_sieve(
+    r: impl PipeRead,
+    stop: &AtomicBool,
+    sieve: &Mutex<crate::serve::nzbget_script::LineSieve>,
+) {
+    drain(r, stop, |bytes| sieve.lock_ok().push(bytes));
 }
 
 /// How much of a captured stdout's HEAD is kept - the pre-queue verdict
@@ -345,27 +386,63 @@ pub(super) enum Fence {
     RetriesOnly,
 }
 
+/// Everything one chain run needs off the job record, read under ONE
+/// hold so the whole chain describes one instant. See
+/// [`Daemon::run_script_chain`] for why that matters.
+pub(super) struct ScriptFacts {
+    out_dir: PathBuf,
+    name: String,
+    cat: String,
+    /// SAB pp-status: "0" = OK, "1" = failed verification.
+    status: &'static str,
+    fail_msg: String,
+    nzo_id: String,
+    bytes: u64,
+    downloaded: u64,
+    failure_link: String,
+    repaired: bool,
+    shape: String,
+    nzb_path: PathBuf,
+    dupe_key: String,
+    pp_params: Vec<(String, String)>,
+}
+
 impl Daemon {
     /// M14d: post-processing hook with SABnzbd's contract - the 8
     /// positional args and SAB_* env vars that the existing script
     /// ecosystem (notifiers, sorters, library refreshers) expects.
-    /// §129 4a adds the NZBGet side of the same ecosystem: NZBPP_* env
+    /// §129 4a added the NZBGet side of the same ecosystem: NZBPP_* env
     /// and the 93/94/95 exit-code vocabulary, as a documented mapping
-    /// (decision 5's rule - map, never silently ignore).
+    /// (decision 5's rule - map, never silently ignore). §192 completes
+    /// it: the `NZBOP_*` option mirror, the full 92/93/94/95 vocabulary
+    /// with its aggregate status, and this - an ordered CHAIN rather
+    /// than one script.
     ///
-    /// `gen0` fences the whole snapshot. The record is read ONCE, and
-    /// the generation is tested under that same hold, because the two
-    /// questions "is this still my job" and "what are its argv and env"
-    /// have to be answered against the same instant. The awaited caller
-    /// (`run_post_job_hooks_before_park`) tested neither: `post_job_owed`
-    /// checks the generation while it builds the plan, then the plan is
-    /// handed to a `spawn_blocking` that reads the record again later,
-    /// and `finalizing` has been cleared by then - so a delete plus a
-    /// Retry landing in between ran the OLD job's script against the NEW
-    /// generation's out_dir and name. The detached caller did test, but
-    /// one statement earlier than the read it was guarding, which leaves
-    /// the same gap a lock apart instead of a task apart. `None` is a
-    /// caller that wants no fence (Codex sweep 4, M4b).
+    /// The chain runs in list order, sequentially, and DOES NOT ABORT ON
+    /// FAILURE. That is NZBGet's contract, not a shortcut: its
+    /// `PostScriptController` records each link's status and runs the
+    /// next one regardless, and the catalogue is written against it -
+    /// a notifier placed after a sorter still notifies when the sort
+    /// failed, which is the case an operator most wants to hear about.
+    /// The one thing that stops a chain there is a link asking for a
+    /// par-check, which we cannot grant (see `analyse_exit`); we log the
+    /// refusal and keep going rather than swallow the rest of the chain
+    /// over a request that was never going to be honoured.
+    ///
+    /// `gen0` fences the whole snapshot. The record is read ONCE, for
+    /// the WHOLE chain, and the generation is tested under that same
+    /// hold, because the two questions "is this still my job" and "what
+    /// are its argv and env" have to be answered against the same
+    /// instant. The awaited caller (`run_post_job_hooks_before_park`)
+    /// tested neither: `post_job_owed` checks the generation while it
+    /// builds the plan, then the plan is handed to a `spawn_blocking`
+    /// that reads the record again later, and `finalizing` has been
+    /// cleared by then - so a delete plus a Retry landing in between ran
+    /// the OLD job's script against the NEW generation's out_dir and
+    /// name. The detached caller did test, but one statement earlier
+    /// than the read it was guarding, which leaves the same gap a lock
+    /// apart instead of a task apart. `None` is a caller that wants no
+    /// fence (Codex sweep 4, M4b).
     ///
     /// `fence` says WHICH question to ask, and the two callers genuinely
     /// differ. The awaited one runs before its own `park`, so its
@@ -379,84 +456,225 @@ impl Daemon {
     /// doc block in hooks.rs); passing the whole pair down here
     /// re-introduced it for the script half alone, which is why the
     /// worker's own guard passing was not enough (18 Aug sweep).
-    pub(super) fn run_script(
+    pub(super) fn run_script_chain(
         &self,
-        script: &std::path::Path,
+        chain: &[PathBuf],
         job: &Arc<Mutex<Job>>,
         gen0: Option<(u32, u64)>,
         fence: Fence,
     ) {
-        let Some((
-            out_dir,
-            name,
-            cat,
-            status,
-            fail_msg,
-            nzo_id,
-            bytes,
-            failure_link,
-            repaired,
-            shape,
-        )) = ({
-            let j = job.lock_ok();
-            let still_mine = match fence {
-                Fence::Generation => Self::same_generation(&j, gen0),
-                // Retries only: a finished job being filed into history
-                // is not a change of custody, and this caller's own park
-                // is what moves it.
-                Fence::RetriesOnly => gen0.is_none_or(|(retries, _)| j.retries == retries),
-            };
-            if !still_mine {
-                return;
-            }
-            Some((
-                j.out_dir.clone(),
-                j.name.clone(),
-                j.category.clone(),
-                // SAB pp-status: 0 = OK, 1 = failed verification.
-                if j.state == JobState::Completed {
-                    "0"
-                } else {
-                    "1"
-                },
-                j.fail_message.clone(),
-                j.nzo_id.clone(),
-                j.total_bytes,
-                j.failure_link.clone(),
-                j.bad_blocks.unwrap_or(0) > 0,
-                j.archive_shape.clone(),
-            ))
-        })
-        else {
+        let Some(facts) = self.script_facts(job, gen0, fence) else {
             return;
         };
-        let ok = status == "0";
+        let opts = self.nzbop_options();
+        let secs = self.script_timeout.load(Ordering::Relaxed);
+        // The chain's state, carried link to link. `final_dir` starts
+        // empty because nothing has moved anything yet - NZBGet reports
+        // NZBPP_FINALDIR empty until a script sets one, and a script
+        // that tests it for emptiness is asking exactly that.
+        let mut total = ScriptStatus::default();
+        let mut final_dir = String::new();
+        let mut directory = facts.out_dir.to_string_lossy().into_owned();
+        let mut params = facts.pp_params.clone();
+        for script in chain {
+            let cmd = self.script_command(
+                script, &facts, &opts, total, &final_dir, &directory, &params,
+            );
+            let (status, note, cmds) = match run_capped_sieve(cmd, secs) {
+                Ok((st, lines, stderr)) => {
+                    let code = st.and_then(|s| s.code());
+                    // One-pass verified and repaired during the
+                    // download, so a link asking for a par-check (92) is
+                    // always asking for one that has already happened.
+                    let (status, note) = analyse_exit(code, true);
+                    let note = match st {
+                        // We killed it at the deadline.
+                        None => format!(
+                            "still running after {secs}s - killed. Raise or clear \
+                             script_timeout_secs if it needs longer."
+                        ),
+                        // Something else killed it: no exit code, so
+                        // `analyse_exit` cannot tell this from our own
+                        // kill and would say the wrong thing.
+                        Some(st) if code.is_none() => format!("died: {st}"),
+                        _ if status == ScriptStatus::Failure && !stderr.trim().is_empty() => {
+                            format!("{note}: {}", stderr.trim())
+                        }
+                        _ => note,
+                    };
+                    (status, note, NzbCommands::parse(&lines))
+                }
+                // A launch failure is NZBGet's `-1` arm, which it also
+                // calls a failure. The chain continues: one uninstalled
+                // link must not silently cancel the ones after it.
+                Err(e) => (
+                    ScriptStatus::Failure,
+                    format!("failed to launch: {e}"),
+                    NzbCommands::default(),
+                ),
+            };
+            let id = &facts.nzo_id;
+            match status {
+                ScriptStatus::Failure => {
+                    warn!(target: "script", "{} {note} for {id}", script.display())
+                }
+                _ => info!(target: "script", "{} {note} for {id}", script.display()),
+            }
+            total = total.fold(status);
+            self.apply_nzb_commands(
+                script,
+                id,
+                cmds,
+                &mut final_dir,
+                &mut directory,
+                &mut params,
+            );
+        }
+        if chain.len() > 1 {
+            info!(
+                target: "script",
+                "{}: script chain of {} finished with status {}",
+                facts.nzo_id,
+                chain.len(),
+                total.as_str()
+            );
+        }
+    }
+
+    /// What a chain link said on its stdout, folded into the state the
+    /// NEXT link sees. Only the commands that change what a later script
+    /// would do are honoured; the rest is logged, because "my script
+    /// printed a command and nothing happened" must be answerable from
+    /// the daemon log alone.
+    fn apply_nzb_commands(
+        &self,
+        script: &std::path::Path,
+        nzo_id: &str,
+        cmds: NzbCommands,
+        final_dir: &mut String,
+        directory: &mut String,
+        params: &mut Vec<(String, String)>,
+    ) {
+        for m in &cmds.messages {
+            warn!(target: "script", "{} for {nzo_id}: {m}", script.display());
+        }
+        if let Some(d) = cmds.final_dir.or(cmds.directory) {
+            info!(
+                target: "script",
+                "{} for {nzo_id}: final dir is now {d} - later scripts in the \
+                 chain see it as NZBPP_FINALDIR",
+                script.display()
+            );
+            final_dir.clone_from(&d);
+            directory.clone_from(&d);
+        }
+        for (k, v) in cmds.params {
+            // Last writer wins, as NZBGet's parameter list does: a
+            // script setting a parameter twice means the second one.
+            match params.iter_mut().find(|(n, _)| *n == k) {
+                Some(slot) => slot.1 = v,
+                None => params.push((k, v)),
+            }
+        }
+        if cmds.mark_bad {
+            warn!(
+                target: "script",
+                "{} for {nzo_id}: asked to MARK=BAD, which this daemon does not \
+                 implement - the history row keeps the status the download \
+                 itself earned",
+                script.display()
+            );
+        }
+        for u in &cmds.unknown {
+            warn!(
+                target: "script",
+                "{} for {nzo_id}: unsupported command [NZB] {u}",
+                script.display()
+            );
+        }
+    }
+}
+
+impl Daemon {
+    /// The record, read ONCE and fenced under the same hold. `None` is
+    /// "this is no longer my job" and the chain does not start.
+    fn script_facts(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        gen0: Option<(u32, u64)>,
+        fence: Fence,
+    ) -> Option<ScriptFacts> {
+        let j = job.lock_ok();
+        let still_mine = match fence {
+            Fence::Generation => Self::same_generation(&j, gen0),
+            // Retries only: a finished job being filed into history is
+            // not a change of custody, and this caller's own park is
+            // what moves it.
+            Fence::RetriesOnly => gen0.is_none_or(|(retries, _)| j.retries == retries),
+        };
+        if !still_mine {
+            return None;
+        }
+        Some(ScriptFacts {
+            out_dir: j.out_dir.clone(),
+            name: j.name.clone(),
+            cat: j.category.clone(),
+            status: if j.state == JobState::Completed {
+                "0"
+            } else {
+                "1"
+            },
+            fail_msg: j.fail_message.clone(),
+            nzo_id: j.nzo_id.clone(),
+            bytes: j.total_bytes,
+            downloaded: j.downloaded_bytes,
+            failure_link: j.failure_link.clone(),
+            repaired: j.bad_blocks.unwrap_or(0) > 0,
+            shape: j.archive_shape.clone(),
+            nzb_path: j.nzb_path.clone(),
+            dupe_key: j.dupe_key.clone().unwrap_or_default(),
+            pp_params: j.pp_params.clone(),
+        })
+    }
+
+    /// One chain link's argv and environment: SABnzbd's contract, then
+    /// NZBGet's, then the chain state the previous links left behind.
+    #[allow(clippy::too_many_arguments)]
+    fn script_command(
+        &self,
+        script: &std::path::Path,
+        f: &ScriptFacts,
+        opts: &[NzbOpt],
+        total: ScriptStatus,
+        final_dir: &str,
+        directory: &str,
+        params: &[(String, String)],
+    ) -> std::process::Command {
+        let ok = f.status == "0";
+        let cat = if f.cat.is_empty() { "*" } else { &f.cat };
         let mut cmd = std::process::Command::new(script);
-        cmd.arg(&out_dir) // 1 final dir
-            .arg(format!("{name}.nzb")) // 2 original nzb name
-            .arg(&name) // 3 clean job name
+        cmd.arg(directory) // 1 final dir
+            .arg(format!("{}.nzb", f.name)) // 2 original nzb name
+            .arg(&f.name) // 3 clean job name
             .arg("") // 4 indexer report number
-            .arg(if cat.is_empty() { "*" } else { &cat }) // 5 category
+            .arg(cat) // 5 category
             .arg("") // 6 group
-            .arg(status) // 7 pp status
+            .arg(f.status) // 7 pp status
             // 8 failure URL. We have carried the X-DNZB failure link on
             // the job since the FailureLink work and were passing an
             // empty string here, so a SAB script that does its own dead-
             // post reporting had nothing to report to.
-            .arg(&failure_link)
-            .env("SAB_COMPLETE_DIR", &out_dir)
-            .env("SAB_FINAL_NAME", &name)
-            .env("SAB_FILENAME", format!("{name}.nzb"))
-            .env("SAB_CAT", if cat.is_empty() { "*" } else { &cat })
-            .env("SAB_PP_STATUS", status)
-            .env(
-                "SAB_STATUS",
-                if status == "0" { "Completed" } else { "Failed" },
-            )
-            .env("SAB_FAIL_MSG", &fail_msg)
-            .env("SAB_NZO_ID", &nzo_id)
-            .env("SAB_BYTES", bytes.to_string())
-            .env("SAB_URL", &failure_link)
+            .arg(&f.failure_link)
+            .env("SAB_COMPLETE_DIR", directory)
+            .env("SAB_FINAL_NAME", &f.name)
+            .env("SAB_FILENAME", format!("{}.nzb", f.name))
+            .env("SAB_CAT", cat)
+            .env("SAB_PP_STATUS", f.status)
+            .env("SAB_STATUS", if ok { "Completed" } else { "Failed" })
+            .env("SAB_FAIL_MSG", &f.fail_msg)
+            .env("SAB_NZO_ID", &f.nzo_id)
+            .env("SAB_BYTES", f.bytes.to_string())
+            .env("SAB_URL", &f.failure_link)
             .env("SAB_VERSION", SAB_VERSION)
             // The NZBGet dialect of the same facts, so a VideoSort-class
             // extension script runs unmodified. PARSTATUS/UNPACKSTATUS
@@ -465,11 +683,18 @@ impl Daemon {
             // completion says "0" (no par-check was owed) and a repaired
             // one says "2" (checked and repaired); unpack reports "2"
             // only when an archive was actually unpacked.
-            .env("NZBPP_DIRECTORY", &out_dir)
-            .env("NZBPP_FINALDIR", &out_dir)
-            .env("NZBPP_NZBNAME", &name)
-            .env("NZBPP_NZBFILENAME", format!("{name}.nzb"))
-            .env("NZBPP_CATEGORY", &cat)
+            .env("NZBPP_DIRECTORY", directory)
+            .env("NZBPP_FINALDIR", final_dir)
+            .env("NZBPP_NZBNAME", &f.name)
+            .env("NZBPP_NZBFILENAME", format!("{}.nzb", f.name))
+            .env("NZBPP_QUEUEDFILE", &f.nzb_path)
+            .env("NZBPP_CATEGORY", &f.cat)
+            .env("NZBPP_NZBID", &f.nzo_id)
+            // We hold no source URL for a job, and NZBGet's is the URL
+            // an nzb was fetched FROM. Empty rather than absent: a
+            // missing key is a KeyError, an empty one is "not from a
+            // URL", which is the truth for an uploaded nzb.
+            .env("NZBPP_URL", "")
             .env("NZBPP_TOTALSTATUS", if ok { "SUCCESS" } else { "FAILURE" })
             .env(
                 "NZBPP_STATUS",
@@ -479,7 +704,7 @@ impl Daemon {
                 "NZBPP_PARSTATUS",
                 if !ok {
                     "1"
-                } else if repaired {
+                } else if f.repaired {
                     "2"
                 } else {
                     "0"
@@ -487,39 +712,41 @@ impl Daemon {
             )
             .env(
                 "NZBPP_UNPACKSTATUS",
-                if ok && !shape.is_empty() { "2" } else { "0" },
-            );
-        let secs = self.script_timeout.load(Ordering::Relaxed);
-        match run_capped(cmd, secs) {
-            Ok((Some(st), _)) if st.success() => {
-                info!(target: "script", "{} ok for {nzo_id}", script.display());
-            }
-            // NZBGet extension scripts answer in exit codes: 93 =
-            // POSTPROCESS_SUCCESS, 95 = POSTPROCESS_NONE ("not for
-            // me"). Neither is a failure; 94 (POSTPROCESS_ERROR) and
-            // anything else falls through to the warn below.
-            Ok((Some(st), _)) if st.code() == Some(93) => {
-                info!(target: "script", "{} ok for {nzo_id} (exit 93, nzbget success)", script.display());
-            }
-            Ok((Some(st), _)) if st.code() == Some(95) => {
-                info!(target: "script", "{} declined {nzo_id} (exit 95, nzbget none)", script.display());
-            }
-            Ok((Some(st), stderr)) => {
-                warn!(
-                    target: "script",
-                    "{} exited {st} for {nzo_id}: {}",
-                    script.display(),
-                    stderr.trim()
-                );
-            }
-            // No exit status = we killed it at the deadline.
-            Ok((None, _)) => warn!(
-                target: "script",
-                "{} still running after {secs}s for {nzo_id} - killed. \
-                 Raise or clear script_timeout_secs if it needs longer.",
-                script.display()
-            ),
-            Err(e) => warn!(target: "script", "{} failed to launch: {e}", script.display()),
+                if ok && !f.shape.is_empty() { "2" } else { "0" },
+            )
+            // NZBGet's health is per-mille of articles that arrived. We
+            // count bytes, not articles, so this is the byte ratio - the
+            // same question at a different granularity, and the answer
+            // scripts actually branch on (1000 = nothing was missing).
+            .env("NZBPP_HEALTH", per_mille(ok, f.downloaded, f.bytes))
+            .env("NZBPP_CRITICALHEALTH", "0")
+            .env("NZBPP_HEALTHDELETED", "0")
+            .env("NZBPP_DUPEKEY", &f.dupe_key)
+            .env("NZBPP_DUPESCORE", "0")
+            .env("NZBPP_DUPEMODE", "SCORE")
+            // The chain's aggregate SO FAR, which is the whole reason an
+            // ordered list is different from a set: a notifier placed
+            // last can say "the sort before me failed".
+            .env("NZBPP_SCRIPTSTATUS", total.as_str());
+        for (name, value) in opts {
+            set_env_special(&mut cmd, "NZBOP", name, value);
         }
+        // Post-processing parameters: the ones the add attached (an
+        // *arr's `drone` GUID rides here) and any a previous link set
+        // with `[NZB] NZBPR_<name>=<value>`.
+        for (name, value) in params {
+            set_env_special(&mut cmd, "NZBPR", name, value);
+        }
+        cmd
     }
+}
+
+/// NZBGet's health scale: 1000 = every article arrived. A finished job
+/// has all of its bytes by definition, so success is flatly 1000 rather
+/// than a ratio that rounding could put at 999.
+fn per_mille(ok: bool, got: u64, total: u64) -> String {
+    if ok || total == 0 {
+        return "1000".to_string();
+    }
+    (got.min(total) * 1000 / total).to_string()
 }

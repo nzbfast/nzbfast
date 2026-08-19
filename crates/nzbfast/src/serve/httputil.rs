@@ -337,6 +337,24 @@ pub(super) fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// NZBGet's in-URL credential form, `/<user>:<pass>/jsonrpc[/…]`, with
+/// the password percent-decoded. This is how NZBGet itself documents
+/// authenticated RPC and the only form LunaSea sends (it never sets an
+/// Authorization header), so the /jsonrpc facade must recognise it or
+/// a keyed daemon is unreachable from that app (§18). The username is
+/// ignored, matching the facade's Basic-auth arm: nzbfast has keys,
+/// not accounts. Only the exact two-segment prefix matches - anything
+/// else stays on the normal 404 path.
+pub(super) fn jsonrpc_path_password(path: &str) -> Option<String> {
+    let mut seg = path.strip_prefix('/')?.split('/');
+    let cred = seg.next()?;
+    if seg.next()? != "jsonrpc" {
+        return None;
+    }
+    let (_user, pass) = cred.split_once(':')?;
+    Some(urldecode(pass))
+}
+
 /// A multipart part's header block is a handful of short ASCII lines
 /// (Content-Disposition with a name/filename, maybe a Content-Type).
 /// Bounding it BEFORE decoding matters more than usual here: this runs

@@ -140,19 +140,39 @@ fn the_percentage_cannot_divide_by_zero_or_pass_100() {
 /// `mode=get_scripts` and an add's `script=` both use.
 #[test]
 fn the_script_field_reports_the_script_that_will_run() {
-    use std::path::Path;
-    let global = Path::new("/opt/nzb/scripts/global.sh");
+    use std::path::PathBuf;
+    let global = vec![PathBuf::from("/opt/nzb/scripts/global.sh")];
+    let none: Vec<PathBuf> = Vec::new();
     // The ladder, top down.
     assert_eq!(
-        sab_script_name("/opt/nzb/scripts/job.py", "cat.sh", Some(global)),
+        sab_script_name("/opt/nzb/scripts/job.py", "cat.sh", &global),
         "job.py"
     );
-    assert_eq!(sab_script_name("", "cat.sh", Some(global)), "cat.sh");
-    assert_eq!(sab_script_name("", "", Some(global)), "global.sh");
-    assert_eq!(sab_script_name("", "", None), "None");
+    assert_eq!(sab_script_name("", "cat.sh", &global), "cat.sh");
+    assert_eq!(sab_script_name("", "", &global), "global.sh");
+    assert_eq!(sab_script_name("", "", &none), "None");
     // SAB's own null suppresses the whole ladder.
-    assert_eq!(sab_script_name("None", "cat.sh", Some(global)), "None");
-    assert_eq!(sab_script_name("none", "", Some(global)), "None");
+    assert_eq!(sab_script_name("None", "cat.sh", &global), "None");
+    assert_eq!(sab_script_name("none", "", &global), "None");
+    // §192: every rung may be a CHAIN, and the field has to name the
+    // whole of what runs. A client rendering only the first link tells
+    // the user the wrong thing about the other two.
+    assert_eq!(
+        sab_script_name("/opt/s/a.py,/opt/s/b.py", "cat.sh", &global),
+        "a.py,b.py"
+    );
+    assert_eq!(
+        sab_script_name("", "sort.sh;notify.sh", &global),
+        "sort.sh,notify.sh"
+    );
+    assert_eq!(
+        sab_script_name(
+            "",
+            "",
+            &[PathBuf::from("/o/one.sh"), PathBuf::from("/o/two.sh")]
+        ),
+        "one.sh,two.sh"
+    );
 }
 
 /// TODO §154: the no-servers hold carries no numbers, and must not

@@ -283,7 +283,9 @@ pub(super) const PATHS: &[Setting] = &[
     rw("cleanup_delete_mode", |_| {
         json!(crate::smart::cleanup_mode().as_str())
     }),
-    rw("script", |c| json!(path_str(&c.d.script.lock_ok()))),
+    rw("script", |c| {
+        json!(nzbget_script::chain_str(&c.d.scripts.lock_ok()))
+    }),
     rw("script_timeout_secs", |c| {
         json!(c.d.script_timeout.load(Ordering::Relaxed))
     }),
@@ -462,6 +464,9 @@ pub(super) const RENAME: &[Setting] = &[
     }),
     rw("rename_media_only", |c| {
         json!(c.d.rename_media_only.load(Ordering::Relaxed))
+    }),
+    rw("skip_samples", |c| {
+        json!(c.d.skip_samples.load(Ordering::Relaxed))
     }),
     rw("rename_from_nzb", |c| {
         json!(c.d.rename_from_nzb.load(Ordering::Relaxed))
@@ -903,6 +908,20 @@ pub(super) const AUTOMATION: &[Setting] = &[
         write: Write::Setting,
         log: Log::Targets,
     },
+    // What happens when the queue runs dry: none | script | sleep |
+    // shutdown. The three rows are one control: the action, the script
+    // it names, and how long the countdown runs before the two that end
+    // the session. See serve/finish_action.rs for why sleep and shutdown
+    // disarm themselves after firing and `script` does not.
+    rw("queue_finished_action", |c| {
+        json!(c.d.finish.action().as_str())
+    }),
+    rw("queue_finished_script", |c| {
+        json!(path_str(&c.d.finish.script()))
+    }),
+    rw("queue_finished_delay_secs", |c| {
+        json!(c.d.finish.delay_secs())
+    }),
 ];
 
 /// The dashboard itself, and update checking.
@@ -968,6 +987,15 @@ pub(super) const RUNTIME: &[Setting] = &[
     // before apply_setting ever sees it, and stores nothing.
     Setting {
         name: "set_pause",
+        expose: Expose::Hidden,
+        write: Write::Action,
+        log: Log::Plain,
+    },
+    // The countdown banner's Cancel button. An action, not a value: it
+    // stops a sleep or shutdown that has been announced and switches the
+    // arm off (see `finish_action::cancel` for why it does both).
+    Setting {
+        name: "queue_finished_cancel",
         expose: Expose::Hidden,
         write: Write::Action,
         log: Log::Plain,
@@ -1091,14 +1119,26 @@ fn set_speedlimit(
                 if pct >= 100 {
                     0
                 } else {
+                    // Percentage of the configured line speed - or,
+                    // when none is set, of the measured link peak.
+                    // Phone remotes (LunaSea, nzb360) send bare
+                    // percentages on installs that have never opened
+                    // Settings, and a refusal here surfaces in the app
+                    // as "failed to set the speed limit" (§18); the
+                    // learned peak is the same 100% anchor the
+                    // dashboard's graph already uses. Only when
+                    // NEITHER number exists is the honest answer
+                    // still an error - a percentage of nothing.
                     let line = d.line_speed.load(Ordering::Relaxed);
-                    if line == 0 {
+                    let (peak, _src, _hint) = d.link_peak.chart(line);
+                    let anchor = if line > 0 { line } else { peak };
+                    if anchor == 0 {
                         return Err(
                             "percentage limits need a Line speed (Settings → Speed & scheduling)"
                                 .into(),
                         );
                     }
-                    line * pct / 100
+                    anchor * pct / 100
                 }
             }
             _ => size()?,
@@ -2704,6 +2744,11 @@ pub(super) fn apply_setting(
             d.rename_media_only.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
+        "skip_samples" => {
+            let on = flag();
+            d.skip_samples.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
         "rename_from_nzb" => {
             let on = flag();
             d.rename_from_nzb.store(on, Ordering::Relaxed);
@@ -2753,9 +2798,14 @@ pub(super) fn apply_setting(
         "quota_period" => set_quota_period(d, name, v)?,
         "watch" => set_watch(d, name, v)?,
         "script" => {
-            let p = v.trim();
-            *d.script.lock_ok() = (!p.is_empty()).then(|| PathBuf::from(p));
-            (true, json!(p))
+            // §192: a comma- (or semicolon-) separated ORDERED chain,
+            // not one path. Stored parsed, read back joined by commas,
+            // so what the settings row shows is what the daemon will
+            // run and in what order.
+            let chain = nzbget_script::script_chain(v);
+            let out = nzbget_script::chain_str(&chain);
+            *d.scripts.lock_ok() = chain;
+            (true, json!(out))
         }
         "schedule" => set_schedule(d, name, v)?,
         "library_cats" => set_library_cats(d, name, v)?,

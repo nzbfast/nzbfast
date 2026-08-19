@@ -47,6 +47,34 @@ pub(super) fn apply_setting_tail(
             d.index_scan_par.store(n, Ordering::Relaxed);
             (true, json!(n))
         }
+        // What happens when the queue runs dry. Refused rather than
+        // read as "off" on an unknown word: this is the control that
+        // turns the machine off, and a typo that silently disarmed it
+        // would be indistinguishable from one that silently armed it.
+        "queue_finished_action" => {
+            let a = crate::serve::finish_action::FinishAction::parse(v).ok_or_else(|| {
+                format!(
+                    "{name}: one of none, script, sleep, shutdown (got {:?})",
+                    v.trim()
+                )
+            })?;
+            d.finish.set_action(a);
+            (true, json!(a.as_str()))
+        }
+        "queue_finished_script" => {
+            let p = v.trim();
+            d.finish
+                .set_script((!p.is_empty()).then(|| PathBuf::from(p)));
+            (true, json!(p))
+        }
+        // How long the countdown runs before a sleep or shutdown. Zero
+        // is allowed and means "no warning" - the banner still appears
+        // for the poll it takes to fire, and someone running headless
+        // has no use for a wait nobody is there to see.
+        "queue_finished_delay_secs" => {
+            let n = d.finish.set_delay_secs(uint()?);
+            (true, json!(n))
+        }
         // §129 4a: the pre-queue hook and its own deadline (an add
         // blocks on this one, so it is NOT the post-processing hour).
         "pre_queue_script" => {

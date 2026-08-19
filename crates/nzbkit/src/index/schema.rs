@@ -426,6 +426,64 @@ fn additive_migrations(db: &Connection) {
         // re-ask them forever. Rows enriched before air_date existed
         // default to 0, which is what makes them eligible for it.
         "ALTER TABLE titles ADD COLUMN air_tried INTEGER NOT NULL DEFAULT 0",
+        // TODO 187: TheTVDB series id, from TVmaze's `externals.thetvdb`.
+        // The newznab facade resolves a Sonarr `tvdbid` through it, and
+        // ONLY advertises the parameter once the column actually holds
+        // ids - an empty column plus a caps promise is a series search
+        // that answers empty forever, which Sonarr reads as "this
+        // indexer has nothing".
+        "ALTER TABLE titles ADD COLUMN tvdb INTEGER NOT NULL DEFAULT 0",
+        // Whether TVmaze has been asked for this show's TVDB id, on the
+        // same reasoning as air_tried: plenty of shows have no id to
+        // give, and 0 alone cannot tell "none published" from "never
+        // asked" - so the backfill lane would re-ask them forever.
+        "ALTER TABLE titles ADD COLUMN tvdb_tried INTEGER NOT NULL DEFAULT 0",
+        // Resolving a tvdbid is a single-row lookup on every series
+        // search Sonarr makes; without this it is a scan of the whole
+        // titles table.
+        //
+        // PARTIAL, so the lookup has to repeat the predicate to reach
+        // it: SQLite will not prove `tvdb=?1` implies `tvdb>0` (nor even
+        // `tvdb=81189`, measured), so a query without a literal `tvdb>0`
+        // term plans as SCAN titles and this index answers nothing. See
+        // `title_key_for_tvdb`, and the plan gate in plan_tests.rs that
+        // keeps the pairing honest.
+        "CREATE INDEX IF NOT EXISTS idx_titles_tvdb ON titles(tvdb) WHERE tvdb > 0",
+        // The same shape for Radarr's PRIMARY lookup, which had no index
+        // at all: `title_key_for_imdb` runs on every `t=movie&imdbid=`
+        // search, and on a 300 k-title table the scan measured 17.3 ms
+        // against 0.07 ms through this index. Partial on the same
+        // reasoning as the ids above - the empty string is the default
+        // for every title no provider has resolved, which on a fresh
+        // index is all of them, and none of those rows is ever a search
+        // target.
+        "CREATE INDEX IF NOT EXISTS idx_titles_imdb ON titles(imdb) WHERE imdb <> ''",
+        // And Radarr's fallback id, for a film with no IMDb id on its
+        // side. Same partial shape, same required guard; the column
+        // holds a TVmaze show id on TV rows, which is why every reader
+        // of it also filters `kind` (see `title_key_for_tmdb`).
+        "CREATE INDEX IF NOT EXISTS idx_titles_tmdb ON titles(tmdb_id) WHERE tmdb_id > 0",
+        // Which provider's numbering `tmdb_id` is in, as that provider's
+        // own name ('tvmaze' | 'tmdb' | 'anilist' | 'omdb' | 'wikidata' |
+        // 'musicbrainz' | 'openlibrary'). One column carries at least
+        // four unrelated dense-integer namespaces, and until this existed
+        // nothing recorded which - a TV row holds a TVmaze show id under
+        // the keyless default, an AniList media id when TVmaze missed the
+        // romaji title (the routine anime case, no key needed), and a
+        // TMDB series id when a TMDB key is configured; a movie row holds
+        // a TMDB movie id with a key and the bare IMDb NUMBER from OMDb
+        // without one. Readers guessed by `kind` alone and guessed wrong
+        // (Codex sweep 7, H2). The worst of it was a silent permanent
+        // write: the TVDB backfill asked TVmaze with an AniList media id,
+        // and its one guard - "the payload is about the show we asked
+        // about" - is satisfied whenever that number is also a live
+        // TVmaze show id, so an unrelated series' thetvdb id was stamped
+        // on the row for good.
+        //
+        // '' is the legacy value and every reader below keeps admitting
+        // it, because a row written before this column existed means
+        // exactly what its documentation said it meant then.
+        "ALTER TABLE titles ADD COLUMN id_src TEXT NOT NULL DEFAULT ''",
         // Scan low-water mark (history auto-deepen).
         "ALTER TABLE marks ADD COLUMN low INTEGER NOT NULL DEFAULT 0",
         // M25 browse view: classification + exact part counts, so

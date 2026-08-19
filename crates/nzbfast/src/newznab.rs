@@ -129,7 +129,16 @@ pub fn plan_query(caps: Option<&Caps>, q: &SearchQuery) -> SearchQuery {
         None => (&[][..], &[][..]),
     };
     // TV: keep tvdbid only if advertised; season/ep only if advertised.
-    if !q.tvdbid.is_empty() && has(tv, "tvdbid") {
+    //
+    // The id must not cost the episode filter. An indexer that takes
+    // `tvdbid` but not `season`/`ep` would answer a request for one
+    // episode with the whole series feed, where the free-text fold at
+    // the bottom still narrows it to s01e02 - so the id wins only when
+    // the episode fields either ride along or were never asked for.
+    // Untested and unreachable until the wall's pull-search learned to
+    // send an id at all (it had none to send before TODO 187).
+    let episode_ok = (q.season.is_none() && q.ep.is_none()) || (has(tv, "season") && has(tv, "ep"));
+    if !q.tvdbid.is_empty() && has(tv, "tvdbid") && episode_ok {
         out.imdbid.clear();
         return out;
     }
@@ -496,19 +505,125 @@ pub fn parse_rfc2822(s: &str) -> Option<i64> {
     Some(days_from_civil(year, mon, day) * 86_400 + h * 3600 + mi * 60 + sec - off)
 }
 
-/// Identity for cross-indexer dedupe: the same release posted once is
-/// listed by every indexer that scanned it, usually under the same
-/// release name with a size that differs only by par2/nzb overhead
-/// accounting. Case-folded name + 50 MB size bucket collapses those;
-/// two releases that genuinely share a name but differ in content land
-/// in different buckets.
+/// The name half of the cross-indexer identity: the same release posted
+/// once is listed by every indexer that scanned it, and they do not
+/// agree on how to write its name down. Dots against spaces against
+/// underscores, capitalisation, a trailing `.nzb` - all of it is one
+/// indexer's formatting of the same string, carrying no information
+/// about the release itself, so all of it is flattened away.
+///
+/// This is deliberately the SAME reduction the duplicate check uses
+/// (`serve::job::flatten_name`, behind `exact_dupe_key`), not a second
+/// fuzzy rule of its own: everything that survives it is a real
+/// difference. `Show.S01E02.1080p-GRP` and `Show S01E02 1080p-GRP` are
+/// one release; a 1080p and a 2160p, two cuts, or two groups keep their
+/// distinguishing token and never meet. String-similarity scoring is
+/// out of bounds here for the reason it is out of bounds in the dupe
+/// check: a rule loose enough to catch an appended tag is loose enough
+/// to read a spin-off as its parent, and hiding a release the user
+/// wanted is worse than listing it twice.
 #[cfg(feature = "indexer")]
-pub fn dedupe_key(title: &str, size: u64) -> String {
-    format!(
-        "{}#{}",
-        title.trim().to_ascii_lowercase(),
-        size / (50 * 1024 * 1024)
-    )
+pub fn release_ident(title: &str) -> String {
+    let t = title.trim();
+    // Some indexers hand back the NZB's filename rather than the
+    // release name. The extension is the only part of that which is
+    // theirs rather than the release's.
+    //
+    // char_indices, not a byte slice: the fourth-from-last CHARACTER is
+    // where the extension would start, and a raw `len - 4` splits a
+    // multi-byte one and panics.
+    let t = match t.char_indices().nth_back(3) {
+        Some((i, _)) if t[i..].eq_ignore_ascii_case(".nzb") => &t[..i],
+        _ => t,
+    };
+    let flat = crate::serve::job::flatten_name(t);
+    let ident = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A title with no letter or digit anywhere in it reduces to nothing,
+    // and an empty identity would fold every such title into one row.
+    // Fall back to the raw name: unmergeable is the honest answer when
+    // there is nothing left to compare.
+    if ident.is_empty() {
+        t.to_lowercase()
+    } else {
+        ident
+    }
+}
+
+/// How far two indexers' sizes for one release may differ and still be
+/// read as the same post. They rarely agree exactly: some count the
+/// par2 set and the nzb, some only the payload, and some repeat
+/// whatever the poster claimed.
+///
+/// A percentage rather than a fixed bucket, because the accounting
+/// differences scale with the release, with a floor so a small post
+/// still gets usable slack. The old key bucketed on `size / 50 MB`,
+/// which is not a tolerance at all: two sizes one byte apart landed in
+/// different buckets whenever they straddled a boundary, so the merge
+/// silently missed a share of the copies it was meant to catch.
+///
+/// 20%, widened from 2% on 19 Aug 2026 by a measured pair the reporter
+/// of #44 posted: one release, two indexers, 80.4 GB against 91.9 GB.
+/// That is +14.3%, and it is not two releases - it is payload against
+/// payload plus yEnc plus a par2 set (80.4 x 1.037 x 1.10 = 91.7). 2%
+/// had no example behind it and split the very case the merge exists
+/// for.
+///
+/// This only ever runs on copies whose titles ALREADY reduced to one
+/// `release_ident`, and by then size is weak evidence: what genuinely
+/// distinguishes two releases - group tag, REPACK, resolution, encode -
+/// lives in the title, which already matched byte for byte. So the
+/// guard is kept coarse rather than removed (a 1 GB and an 8 GB post
+/// under one name are not one release), but it should fire on a gap no
+/// accounting difference can explain, not on the ordinary ones.
+///
+/// The two errors are also not equally costly. Merging too eagerly
+/// costs one caret: every copy is listed under the row with its own
+/// size, so the reader still sees both. Splitting too eagerly is
+/// invisible, and looks exactly like the bug #44 reported. Prefer the
+/// recoverable error.
+#[cfg(feature = "indexer")]
+pub fn size_slack(size: u64) -> u64 {
+    (size / 5).max(50 * 1024 * 1024)
+}
+
+/// Cut a name group's copies into size clusters. `sizes` must be sorted
+/// ascending; the returned ranges index into it and cover it exactly.
+///
+/// Each cluster is anchored on its smallest member and admits everything
+/// within that member's slack. Anchoring rather than comparing
+/// neighbours is what stops a chain of near-misses from dragging one
+/// cluster arbitrarily wide.
+///
+/// Size 0 means "this indexer did not say", not "an empty release". An
+/// unknown size is no evidence AGAINST a name that already matches, so
+/// those copies join the first cluster rather than each becoming a row
+/// of its own; with nothing but unknowns, the name is all the evidence
+/// there is and they form a single cluster.
+#[cfg(feature = "indexer")]
+pub fn size_clusters(sizes: &[u64]) -> Vec<std::ops::Range<usize>> {
+    debug_assert!(
+        sizes.windows(2).all(|w| w[0] <= w[1]),
+        "sizes must be sorted"
+    );
+    let mut out = Vec::new();
+    if sizes.is_empty() {
+        return out;
+    }
+    let Some(first_known) = sizes.iter().position(|&s| s > 0) else {
+        out.push(0..sizes.len());
+        return out;
+    };
+    let mut anchor = sizes[first_known];
+    let mut start = 0;
+    for (i, &s) in sizes.iter().enumerate().skip(first_known) {
+        if s > anchor.saturating_add(size_slack(anchor)) {
+            out.push(start..i);
+            start = i;
+            anchor = s;
+        }
+    }
+    out.push(start..sizes.len());
+    out
 }
 
 /// Per-day hit/grab counters, persisted in `.spool/indexer-usage.json`.
@@ -645,6 +760,23 @@ mod tests {
         // drop the id.
         let p = plan_query(Some(&caps_with(&["q", "season", "ep"], &[])), &tvq);
         assert!(p.tvdbid.is_empty() && p.season == Some(1));
+
+        // tvdbid advertised but not season/ep: the id alone would widen
+        // an episode request to the whole series, so the episode marker
+        // in `q` wins instead.
+        let p = plan_query(Some(&caps_with(&["q", "tvdbid"], &[])), &tvq);
+        assert_eq!(p.q, "Show Name s01e02");
+        assert!(p.tvdbid.is_empty() && p.season.is_none());
+        // Same caps, no episode asked for: nothing to lose, id sent.
+        let p = plan_query(
+            Some(&caps_with(&["q", "tvdbid"], &[])),
+            &SearchQuery {
+                season: None,
+                ep: None,
+                ..tvq.clone()
+            },
+        );
+        assert_eq!(p.tvdbid.as_str(), "12345");
 
         // No tv-search at all: fold s01e02 into q and go free-text.
         let p = plan_query(Some(&caps_with(&[], &[])), &tvq);
@@ -796,16 +928,153 @@ mod tests {
         assert_eq!(parse_rfc2822("Tue, 21 Jul 1969 00:00:00 +0000"), None);
     }
 
+    /// The merge must fire on formatting disagreements and must NOT fire
+    /// on anything that distinguishes one release from another. Both
+    /// directions are pinned, because loosening this key is the failure
+    /// that hides a release the user wanted.
     #[cfg(feature = "indexer")]
     #[test]
-    fn dedupe_and_budgets() {
-        // Same release, par2-overhead size wobble: same bucket.
-        let a = dedupe_key("Show.S01E02.1080p.WEB", 3_221_225_472);
-        let b = dedupe_key("show.s01e02.1080p.web", 3_230_000_000);
-        assert_eq!(a, b);
-        // Genuinely different size: different bucket.
-        assert_ne!(a, dedupe_key("Show.S01E02.1080p.WEB", 1_000_000_000));
+    fn release_ident_folds_formatting_and_nothing_else() {
+        // Every way six indexers might write one release down.
+        let forms = [
+            "Show.Name.S01E02.1080p.WEB-DL.x264-GRP",
+            "Show Name S01E02 1080p WEB-DL x264-GRP",
+            "Show_Name_S01E02_1080p_WEB-DL_x264-GRP",
+            "SHOW.NAME.S01E02.1080P.WEB-DL.X264-GRP",
+            "Show.Name.S01E02.1080p.WEB-DL.x264-GRP.nzb",
+            "  Show.Name.S01E02.1080p.WEB-DL.x264-GRP  ",
+        ];
+        let want = release_ident(forms[0]);
+        for f in forms {
+            assert_eq!(release_ident(f), want, "{f} should fold onto the same row");
+        }
 
+        // ...and every real difference survives. A resolution, a codec, a
+        // source, a group, an episode, a sequel, an appended language
+        // tag: merging any of these would show the user one row and
+        // silently drop the copy they came for.
+        let base = "Show.Name.S01E02.1080p.WEB-DL.x264-GRP";
+        for other in [
+            "Show.Name.S01E02.2160p.WEB-DL.x264-GRP",
+            "Show.Name.S01E02.1080p.WEB-DL.x265-GRP",
+            "Show.Name.S01E02.1080p.BluRay.x264-GRP",
+            "Show.Name.S01E02.1080p.WEB-DL.x264-OTHER",
+            "Show.Name.S01E03.1080p.WEB-DL.x264-GRP",
+            "Show.Name.S01E02.1080p.WEB-DL.x264-GRP.GERMAN",
+            "Show.Name.2.S01E02.1080p.WEB-DL.x264-GRP",
+        ] {
+            assert_ne!(release_ident(base), release_ident(other), "{other}");
+        }
+
+        // The `.nzb` strip is a suffix, not a substring: a release whose
+        // name merely contains it keeps every token.
+        assert_ne!(
+            release_ident("Foo.nzb.Bar-GRP"),
+            release_ident("Foo.Bar-GRP")
+        );
+
+        // A name with no letter or digit in it reduces to nothing, and an
+        // empty identity would fold every such title into one row.
+        assert_ne!(release_ident("!!!"), release_ident("???"));
+
+        // Non-Latin names keep their identity (the flattener is
+        // Unicode-aware; see `flatten_name`'s CJK note).
+        assert_ne!(
+            release_ident("\u{7535}\u{5f71}\u{7532}.2024.1080p-GRP"),
+            release_ident("\u{7535}\u{5f71}\u{4e59}.2024.1080p-GRP")
+        );
+        assert_eq!(
+            release_ident("\u{7535}\u{5f71}\u{7532}.2024.1080p-GRP"),
+            release_ident("\u{7535}\u{5f71}\u{7532} 2024 1080P-grp")
+        );
+    }
+
+    /// The exact pair the reporter of issue #44 posted, carried through
+    /// both halves of the key at once: two indexers' copies of one
+    /// release, differing on the name axis only by dots against spaces,
+    /// and on the size axis by 14.3%.
+    ///
+    /// Kept as its own test because each half passing in isolation is
+    /// what made this look fixed when it was not: the titles reduced to
+    /// one ident from the day `release_ident` landed, and the row still
+    /// split, because 2% of slack could not hold a par2 set.
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn issue_44_reported_pair_lands_in_one_row() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let spaced =
+            "Anyone But You 2023 2160p UHD BluRay REMUX DV HDR10 HEVC TrueHD 7.1 Atmos + Multi-d3g";
+        let dotted =
+            "Anyone.But.You.2023.2160p.UHD.BluRay.REMUX.DV.HDR10.HEVC.TrueHD.7.1.Atmos.+.Multi-d3g";
+        assert_eq!(
+            release_ident(spaced),
+            release_ident(dotted),
+            "dots against spaces is a spelling difference, not a different release"
+        );
+        // Sorted ascending, as `size_clusters` requires: 80.4 GB from
+        // Tabula Rasa, 91.9 GB from altHUB.
+        let sizes = [80_400 * GB / 1000, 91_900 * GB / 1000];
+        let clusters = size_clusters(&sizes);
+        assert_eq!(clusters.len(), 1, "one release, one row: {clusters:?}");
+    }
+
+    /// Sizes cluster by tolerance, not by bucket. The bucket this
+    /// replaced split any pair that straddled a 50 MB boundary, however
+    /// close together they were.
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn size_clusters_tolerate_accounting_and_split_real_differences() {
+        const MB: u64 = 1024 * 1024;
+        // Spelled out rather than compared against a one-element list of
+        // Range, which clippy reads as a mistyped `[0; n]`.
+        let one = |v: &[u64]| {
+            let c = size_clusters(v);
+            c.len() == 1 && c[0] == (0..v.len())
+        };
+
+        // A par2-overhead wobble, sitting exactly across a 50 MB
+        // boundary: one release, one row.
+        assert!(one(&[50 * MB - 1, 50 * MB + 1]));
+        // Two genuinely different releases under one name: two rows.
+        assert_eq!(
+            size_clusters(&[1_000 * MB, 8_000 * MB]),
+            vec![0..1, 1..2],
+            "a 1 GB and an 8 GB post are not the same release"
+        );
+        // The pair the reporter of #44 posted: one release under one
+        // name, 80.4 GB from one indexer and 91.9 GB from another. The
+        // gap is payload against payload plus yEnc plus par2, not two
+        // releases, and at 2% slack this split - which was the whole
+        // complaint.
+        assert!(
+            one(&[80_400 * MB, 91_900 * MB]),
+            "one release's two indexers disagreeing by 14% is accounting, not a second release"
+        );
+        // A gap no accounting difference reaches is still two rows.
+        assert_eq!(size_clusters(&[40_000 * MB, 60_000 * MB]), vec![0..1, 1..2]);
+
+        // Anchored, not chained: sizes each within slack of the one
+        // before still split, or a long tail would drift a cluster
+        // arbitrarily wide.
+        assert_eq!(
+            size_clusters(&[1_000 * MB, 1_150 * MB, 1_300 * MB, 1_450 * MB]),
+            vec![0..2, 2..4]
+        );
+
+        // An indexer that reported no size at all rides with the first
+        // real cluster rather than becoming a row of its own.
+        assert_eq!(
+            size_clusters(&[0, 1_000 * MB, 9_000 * MB]),
+            vec![0..2, 2..3]
+        );
+        // Nothing but unknowns: the name is all the evidence there is.
+        assert!(one(&[0, 0]));
+        assert!(size_clusters(&[]).is_empty());
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn budgets() {
         let mut u = Usage::default();
         u.roll(20_655 * 86_400 + 100);
         let mut c = cfg("https://x");

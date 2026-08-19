@@ -136,7 +136,14 @@ fn is_furniture(p: &Path, zip_parts: &std::collections::HashSet<PathBuf>) -> boo
     let ext = ext_of(p);
     is_junk_ext(&ext)
         || SUBTITLE_EXTS.contains(&ext.as_str())
-        || is_sample_clip(p)
+        // By NAME. `main_payload` accepts an extensionless container
+        // since #43, and the extension-gated predicate let an
+        // extensionless `sample` through as ordinary payload - so a job
+        // whose feature was still packed (packed IS furniture) promoted
+        // the teaser to the release name (Codex sweep 6, N1). This is a
+        // rename decision; the junk sweep's is not, and keeps the
+        // narrower rule.
+        || is_sample_named(p)
         || is_packed_archive(p, zip_parts)
 }
 

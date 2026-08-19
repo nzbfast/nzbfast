@@ -228,7 +228,16 @@ async fn settle_with_set(
             // (bootstrap or deferred) is recovery data - the set
             // never claims it, and read-back would report every
             // deferred article as a bad block.
-            .filter(|(_, s)| !s.is_par2())
+            //
+            // A skipped sample sits out for the same reason and needs
+            // the same exemption. There is no file to read back, so
+            // read-back claimed its set entry and then reported EVERY
+            // block of it bad - which repair took at face value and
+            // rebuilt the whole teaser from parity, spending more
+            // recovery traffic than the download it was asked to skip.
+            // Left unclaimed instead, it reaches `unclaimed_files`,
+            // where it is struck off by name.
+            .filter(|(_, s)| !s.is_par2() && !s.sample_skipped)
             .map(|(i, _)| i)
             .collect();
         let next = AtomicUsize::new(0);
@@ -327,7 +336,40 @@ async fn settle_with_set(
     let live: u64 = reports.iter().map(|(_, r)| r.live_blocks).sum();
     let readback: u64 = reports.iter().map(|(_, r)| r.readback_blocks).sum();
     let bad: usize = reports.iter().map(|(_, r)| r.bad_blocks.len()).sum();
-    let missing_files = verifier.unclaimed_files();
+    // A file the sample skip declined is DELIBERATELY absent, and the
+    // recovery set has no way to know that: it lists the file the poster
+    // packed, so an unfetched teaser lands in `unclaimed_files` looking
+    // exactly like one the servers lost. Left there it would charge its
+    // whole length to `damage`, and repair would then pull recovery
+    // volumes off the wire to rebuild the very bytes the setting exists
+    // to not download - more traffic than simply fetching it, for a file
+    // the user asked not to have. So it is struck off here, once, at the
+    // source: everything downstream (`damage`, `needed`, the
+    // recreated-set test, the uncovered-hole rescan) reads the filtered
+    // list.
+    //
+    // Matched on the sanitized lowercase name, the same key the
+    // coverage tests either side of this use. An obfuscated post whose
+    // hint is a hash cannot match - and cannot have been skipped
+    // either, since the classifier needs a name to read.
+    let missing_files: Vec<String> = {
+        let skipped: std::collections::HashSet<String> = slots
+            .iter()
+            .filter(|s| s.sample_skipped)
+            .map(|s| nzbkit::disk::sanitize_filename(&s.hint).to_lowercase())
+            .collect();
+        verifier
+            .unclaimed_files()
+            .into_iter()
+            .filter(|n| {
+                let keep = !skipped.contains(&nzbkit::disk::sanitize_filename(n).to_lowercase());
+                if !keep {
+                    println!("  ▸ {n} - sample skipped on request, so not repaired either");
+                }
+                keep
+            })
+            .collect()
+    };
     // `damage` decides WHETHER repair runs; `needed` (the deficit
     // after slices already on hand) decides how much to FETCH.
     // Conflating them skipped repair entirely whenever on-hand

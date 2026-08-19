@@ -165,6 +165,11 @@ pub(crate) async fn get_with_progress(
     // arm below, which removes magic-sniffed volumes no extension rule
     // can ever match; named `*.par2` stays the job tail's business.
     par_cleanup: bool,
+    // PLAN M32 leftover (sabnzbd#3475): leave a job's sample/proof
+    // clips unfetched instead of downloading them and deleting them
+    // afterwards. Off by default - see the setting's own note for why
+    // ours differs from SABnzbd's.
+    skip_samples: bool,
     // Explicit archive password (CLI/API). NZB `<meta type="password">`
     // and the `Name{{password}}.nzb` filename convention are picked up
     // automatically; this overrides both.
@@ -230,6 +235,7 @@ pub(crate) async fn get_with_progress(
         resuming,
         bootstrap_vol,
         &resume_vols,
+        skip_samples,
     );
 
     // The verification rig - verifier, sniff control, the configured

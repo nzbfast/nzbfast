@@ -233,7 +233,23 @@ fn cap_json(c: &crate::conntune::Capped) -> Value {
 /// `None` until SOMETHING has heard a capacity refusal from this host.
 fn cap_payload(d: &Daemon, s: &nzbkit::pool::ServerLive) -> Option<Value> {
     let live = s.capped_since.load(Ordering::Relaxed);
-    let seen = d.capped_hosts.lock_ok().get(&s.host).cloned();
+    // Session memory has to be retired by the same proof the pool's own
+    // gauge is: holding MORE sessions than a recorded ceiling says that
+    // ceiling is no longer one. `ConnGauge::up` does this for the live
+    // gauge (sweep 5, L6) but can only retire a cap THAT gauge
+    // recorded, and the job which disproves a ceiling is usually the
+    // one AFTER the job that met it - whose gauge is empty. Without
+    // this half the row went on reading "using 100 of 38" until the
+    // daemon restarted, which is the wrong connection budget presented
+    // as a measurement (Codex sweep 6, N4).
+    let seen = {
+        let mut m = d.capped_hosts.lock_ok();
+        let held = s.connected.load(Ordering::Relaxed);
+        if m.get(&s.host).is_some_and(|c| c.disproven_by(held)) {
+            m.remove(&s.host);
+        }
+        m.get(&s.host).cloned()
+    };
     if live == 0 {
         return seen.as_ref().map(cap_json);
     }
@@ -674,7 +690,12 @@ fn m_eat_volumes(
                     // Durable before the caller's retry: the answer
                     // is given on a failed job and spent by a run
                     // that may be on the other side of a restart.
-                    d.history_upsert_if_present(&job);
+                    // Still `status: true` when the store refuses it:
+                    // the consent is live and the dashboard's very next
+                    // call is the retry that spends it. Answering false
+                    // stops that unpack over a consent the user would
+                    // at worst give again after a restart.
+                    d.history_publish_change(&job, "the extract-in-place consent");
                     d.save_queue();
                     json!({"status": true, "nzo_id": id})
                 }
@@ -773,7 +794,13 @@ fn m_set_password(
                         // if power dies mid-unlock. A locked record
                         // is a HISTORY record - the store is the
                         // history store.
-                        d.history_upsert_if_present(&job);
+                        // A refusal does not stop the unlock - the
+                        // password is live for the run being started
+                        // here, and only the crash window's copy is
+                        // lost - so it is reported through the log and
+                        // the event ring, not in an answer the
+                        // dashboard would read as a rejection.
+                        d.history_publish_change(&job, "the archive password");
                         d.save_queue();
                     }
                     // C1: the job may be DOWNLOADING right now.
@@ -864,6 +891,7 @@ fn m_set_password(
                                 j.move_failed.clear();
                                 j.move_attempts = 0;
                                 j.move_pending = d2.move_destination_configured(&j.category);
+                                let moved_to = done.moved.clone();
                                 if let Some(dest) = done.moved {
                                     j.filed = j.tv_sort && is_season_dir(&dest);
                                     // The suffix and episode title
@@ -876,7 +904,10 @@ fn m_set_password(
                                 }
                                 let owes_move = j.move_pending;
                                 drop(j);
-                                d2.history_upsert_if_present(&job2);
+                                // finalize_names may have MOVED the
+                                // payload, so this is the movers'
+                                // hazard on the unlock path.
+                                d2.history_publish_move(&job2, &out_dir, moved_to.as_deref());
                                 d2.save_queue();
                                 if owes_move {
                                     d2.mover_enqueue(&job2);
@@ -885,14 +916,21 @@ fn m_set_password(
                                 let mut j = job2.lock_ok();
                                 j.fail_message = "password did not unlock the archive".into();
                                 drop(j);
-                                d2.history_upsert_if_present(&job2);
+                                // Only the Reason line: the record is
+                                // already parked as password_required
+                                // and stays so. Log and carry on.
+                                d2.history_publish_change(&job2, "the wrong-password note");
                                 d2.save_queue();
                                 info!(target: "unlock", "{name:?}: password did not unlock");
                             }
                         });
                         json!({"status": true, "unpacking": true})
                     } else {
-                        d.history_upsert_if_present(&job);
+                        // Nothing is running: the password is stored
+                        // for whatever spends it later, a retry or a
+                        // manual unlock. Same reasoning as the locked
+                        // arm - the answer stays true.
+                        d.history_publish_change(&job, "the archive password");
                         d.save_queue();
                         json!({"status": true})
                     }
@@ -1495,6 +1533,17 @@ fn m_watch_failed_delete(
             },
         }
     })
+}
+
+/// §188: the user has read the "history display was updated" strip.
+fn m_hist_upgraded_dismiss(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    _params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    Some(json!({"status": d.dismiss_hist_migrate()}))
 }
 
 fn m_delete_kept_dismiss(
@@ -2112,6 +2161,12 @@ fn m_queue(
                     }
                 }
             }
+            // The two remote-app arms live in remote.rs (§18): rename
+            // (which is also how SAB spells set-password, value3) and
+            // whole-queue sort. LunaSea sends both.
+            Some("rename") => super::remote::rename_arm(d, params),
+            Some("sort") => super::remote::sort_arm(d, params),
+            Some("change_complete_action") => super::remote::complete_action_arm(params),
             Some("priority") => {
                 // SAB's priority dropdown has a "Default" entry
                 // and sends the -100 sentinel for it, so it has
@@ -2465,7 +2520,13 @@ fn m_history(
                     d.history_tombstone(&doomed_ids);
                     d.save_queue();
                 }
-                json!({"status": count > 0, "removed": count})
+                // A class sweep (all/completed/failed) is idempotent:
+                // asking for a state the history is already in is
+                // success, and LunaSea's clear-history dialog reads
+                // false as an error toast (§18). A per-id delete keeps
+                // reporting the miss - an unknown id is diagnosable.
+                let class_sweep = matches!(value.as_str(), "all" | "completed" | "failed");
+                json!({"status": count > 0 || class_sweep, "removed": count})
             }
             _ => history_json(d, params),
         }
@@ -2643,6 +2704,9 @@ pub(in crate::serve) fn dispatch(
         // step. The way to get a permanent delete is still to turn
         // "Deleted files go to the Trash" off and mean it.
         "delete_kept_dismiss" => return m_delete_kept_dismiss(d, req, params, ctx, api_body),
+        "hist_upgraded_dismiss" => {
+            return m_hist_upgraded_dismiss(d, req, params, ctx, api_body);
+        }
         // ...and the other half of that notice: add this release again,
         // from the spool copy the refused delete kept. The one action
         // the notice can offer that is not a permanent delete - it adds

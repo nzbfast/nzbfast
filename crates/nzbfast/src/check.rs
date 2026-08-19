@@ -857,6 +857,68 @@ async fn block_size_probe(
 /// must not be allowed to inflate this. Mis-splitting a single-set NZB
 /// would only drop the cap there - it refuses strictly less, never
 /// more - but it would quietly cost the benefit, so it is worth not
+/// Is this whitespace-delimited token a per-file counter (`01/02`)?
+fn is_counter_token(s: &str) -> bool {
+    s.split_once('/').is_some_and(|(a, b)| {
+        let (a, b) = (a.trim(), b.trim());
+        !a.is_empty()
+            && !b.is_empty()
+            && a.chars().all(|c| c.is_ascii_digit())
+            && b.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Everything before a bracketed counter, the counter itself, and
+/// everything after it - with the counter gone.
+fn strip_counter_brackets(stem: &str) -> String {
+    let mut out = String::with_capacity(stem.len());
+    let mut rest = stem;
+    while let Some(at) = rest.find(['[', '(']) {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let opener = from.chars().next().unwrap_or('[');
+        let closer = if opener == '[' { ']' } else { ')' };
+        let inner = from[opener.len_utf8()..].find(closer);
+        match inner {
+            Some(end) if is_counter_token(&from[opener.len_utf8()..opener.len_utf8() + end]) => {
+                rest = &from[opener.len_utf8() + end + closer.len_utf8()..];
+            }
+            _ => {
+                out.push(opener);
+                rest = &from[opener.len_utf8()..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One raw subject's PAR2 stem, with the per-file counter removed and
+/// nothing else.
+///
+/// The first fix for the counter problem took the LAST
+/// whitespace-delimited token of the prefix, which folds far more than
+/// a counter: "[01/03] - Feature - GROUP.par2" and "[01/02] - Extras -
+/// GROUP.par2" both reduce to "group", so two genuinely different
+/// recovery sets read as one. The cross-set guard then stops
+/// withdrawing the declared name cap, mismatched block sizes cap the
+/// wrong set, and the false Impossible that guard exists to prevent is
+/// back - a worse direction than the split it was fixing, because a
+/// refused post is a post the user does not get (Codex sweep 6, N9).
+///
+/// So only the counter goes: `[n/m]` and `(n/m)` wherever they sit,
+/// plus a bare `n/m` token, plus the whitespace and joining hyphen they
+/// leave behind. Everything a poster actually named the set stays.
+fn fold_raw_stem(stem: &str) -> String {
+    strip_counter_brackets(stem)
+        .split_whitespace()
+        .filter(|w| !is_counter_token(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| c == '-' || c == '_' || c == '.' || c.is_whitespace())
+        .to_string()
+}
+
 /// doing by accident.
 fn multiple_par2_sets(nzb: &Nzb) -> bool {
     let mut stems: Vec<String> = Vec::new();
@@ -894,15 +956,17 @@ fn multiple_par2_sets(nzb: &Nzb) -> bool {
         // per-file: "[01/02] - set.par2" and "[02/02] - set.vol000+51.par2"
         // are one set whose stems differ only by a counter, and comparing
         // the whole prefix split them and dropped a trustworthy declared
-        // cap. Whitespace is what ends a filename inside a subject - the
-        // rule par2_vol_suffix's own doc cites - so take the last
-        // whitespace-delimited token. Only for raw subjects: a QUOTED
-        // filename may legitimately contain spaces, and trimming those
-        // could merge two genuinely different sets, which is the unsafe
-        // direction (Codex sweep 5, L8).
+        // cap (Codex sweep 5, L8). Only the COUNTER is dropped: only for
+        // raw subjects, because a QUOTED filename may legitimately
+        // contain spaces, and merging two genuinely different sets is
+        // the unsafe direction.
+        let folded;
         let stem = match quoted {
             true => stem,
-            false => stem.rsplit(char::is_whitespace).next().unwrap_or(stem),
+            false => {
+                folded = fold_raw_stem(stem);
+                folded.as_str()
+            }
         };
         if stem.is_empty() {
             // An anonymous set - a bare ".vol-01.par2" with no prefix -

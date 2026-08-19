@@ -1370,6 +1370,155 @@ fn max_source_ips_round_trips_and_clears() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// M32's route controls (`bind_ip`, `socks5`) shipped in the engine in
+/// July and could only be set by hand-editing config.local.json until
+/// the server editor grew rows for them. The SOCKS spec is stored as ONE
+/// string that may end in a proxy password, so the editor edits it as
+/// three fields - and this pins the property that makes that safe: the
+/// password is never echoed, and a blank password box keeps the stored
+/// one instead of wiping it, exactly like the server password beside it.
+#[test]
+fn socks5_and_bind_ip_round_trip_without_echoing_the_proxy_password() {
+    let dir = scratch("socksbind");
+    let d = serve(&dir);
+    let srv = |port: u16| -> serde_json::Value {
+        settings_block(port)["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .find(|s| s["host"] == "news.routed.example")
+            .expect("saved server echoed")
+            .clone()
+    };
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":-1,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "bind_ip":"192.168.1.50","socks5":"127.0.0.1:1080",
+            "socks5_user":"pxu","socks5_pass":"pxsecret"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["bind_ip"], "192.168.1.50", "bind address must echo: {s}");
+    assert_eq!(
+        s["socks5"], "127.0.0.1:1080",
+        "only the proxy host:port may echo: {s}"
+    );
+    assert_eq!(s["socks5_user"], "pxu", "proxy user may echo: {s}");
+    assert_eq!(s["has_socks5_pass"], true, "presence flag only: {s}");
+    assert!(
+        !serde_json::Value::Object(settings_block(d.port))
+            .to_string()
+            .contains("pxsecret"),
+        "the proxy password must never reach the UI"
+    );
+    // What the connection actually uses, and the form the engine's
+    // socks5_connect parses: creds welded back onto the address.
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        disk.contains("pxu:pxsecret@127.0.0.1:1080"),
+        "stored spec must recombine: {disk}"
+    );
+
+    // The editor round-trip: a blank password box (the UI never receives
+    // the stored one, so it always posts blank) must not wipe it.
+    let again = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "bind_ip":"192.168.1.50","socks5":"127.0.0.1:1081",
+            "socks5_user":"pxu","socks5_pass":""}}"#,
+    );
+    assert!(again.contains("\"status\":true"), "resave failed: {again}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        disk.contains("pxu:pxsecret@127.0.0.1:1081"),
+        "a blank password box keeps the stored password: {disk}"
+    );
+
+    // Clearing the user name removes the whole credential - the stored
+    // password must not survive the user it belonged to.
+    let noauth = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "socks5":"127.0.0.1:1081","socks5_user":"","socks5_pass":"","bind_ip":""}}"#,
+    );
+    assert!(
+        noauth.contains("\"status\":true"),
+        "resave failed: {noauth}"
+    );
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("pxsecret"),
+        "clearing the user must drop the password too: {disk}"
+    );
+    assert!(
+        !disk.contains("bind_ip"),
+        "cleared field is removed: {disk}"
+    );
+
+    // A whole spec pasted into the address box would put the proxy
+    // password in the echoed field, so it is refused rather than stored.
+    let pasted = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "socks5":"u:p@127.0.0.1:1080"}}"#,
+    );
+    assert!(
+        pasted.contains("\"status\":false"),
+        "a spec with credentials must be refused: {pasted}"
+    );
+    let bad_ip = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "bind_ip":"not-an-ip"}}"#,
+    );
+    assert!(
+        bad_ip.contains("\"status\":false"),
+        "a bind address that is not an IP must be refused: {bad_ip}"
+    );
+
+    // Port 0 parses as a u16 and connects to nothing. Accepted, it saved
+    // and then failed every fetch through this provider with an OS error
+    // where the form should have said so (Codex sweep 7, L5). The
+    // boundaries either side of it stay valid.
+    let zero = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.routed.example","port":563,"connections":8,
+            "socks5":"127.0.0.1:0"}}"#,
+    );
+    assert!(
+        zero.contains("\"status\":false"),
+        "a zero proxy port must be refused: {zero}"
+    );
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("127.0.0.1:0\""),
+        "a refused proxy address must not persist: {disk}"
+    );
+    for edge in ["127.0.0.1:1", "127.0.0.1:65535"] {
+        let ok = http_post(
+            d.port,
+            "/api?mode=server_save&output=json",
+            &format!(
+                r#"{{"index":0,"server":{{"host":"news.routed.example","port":563,
+                    "connections":8,"socks5":"{edge}"}}}}"#
+            ),
+        );
+        assert!(
+            ok.contains("\"status\":true"),
+            "{edge} is a usable port: {ok}"
+        );
+    }
+
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A Flatpak install must be told apart from a container install, because
 /// the dashboard shows a DIFFERENT update recipe for each and the
 /// container one is Docker-specific to the last word - compose files,

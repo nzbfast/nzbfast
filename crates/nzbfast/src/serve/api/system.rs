@@ -220,7 +220,9 @@ fn m_open_dir(
             "out_dir" => Some(d.out_dir().clone()),
             "move_completed" => d.move_completed.read_ok().clone(),
             "watch" => d.watch_dir.lock_ok().clone(),
-            "script" => d.script.lock_ok().as_ref().and_then(|p| parent_of(p)),
+            // The chain's FIRST link names the scripts folder - the
+            // same one `nzbop_options` reports as NZBOP_ScriptDir.
+            "script" => d.scripts.lock_ok().first().and_then(|p| parent_of(p)),
             "password_file" => parent_of(&d.password_file.lock_ok()),
             #[cfg(feature = "indexer")]
             "index_db" => parent_of(&d.index_db),
@@ -908,16 +910,39 @@ pub(in crate::serve) fn dispatch(
         // a Restart item, and the honest answer is better than a
         // button that half works.
         "restart_daemon" => return m_restart_daemon(d, req, params, ctx, api_body),
-        "fullstatus" => json!({"status": {
-            "uptime": "0",
-            "color_scheme": "",
-            "version": SAB_VERSION,
-            "paused": d.paused.load(Ordering::Relaxed),
-            // Sonarr/Radarr resolve a relative complete_dir via
-            // "completedir" (no underscore); keep both spellings.
-            "complete_dir": out_dir_for(d, ctx),
-            "completedir": out_dir_for(d, ctx),
-        }}),
+        "fullstatus" => {
+            // §18: LunaSea's statistics page reads the two speed caps
+            // and both disks out of fullstatus, and its parser routes
+            // each through Dart's tryParse - which takes a String -
+            // so a missing key OR a JSON number throws and the page
+            // errors. Strings, as real SAB sends them.
+            let free = free_bytes(&d.out_dir()).unwrap_or(0) as f64 / 1e9;
+            let line = d.line_speed.load(Ordering::Relaxed);
+            let abs = d.hub.rate.get();
+            json!({"status": {
+                "uptime": "0",
+                "color_scheme": "",
+                "version": SAB_VERSION,
+                "paused": d.paused.load(Ordering::Relaxed),
+                // Sonarr/Radarr resolve a relative complete_dir via
+                // "completedir" (no underscore); keep both spellings.
+                "complete_dir": out_dir_for(d, ctx),
+                "completedir": out_dir_for(d, ctx),
+                // "" is SAB's "no cap set"; LunaSea shows it as
+                // unlimited, where "0" would read as a 0 B/s cap.
+                "speedlimit_abs": if abs == 0 { String::new() } else { abs.to_string() },
+                // Percentage of the line speed, "0" when either half
+                // is unknown - the queue body's convention.
+                "speedlimit": if line > 0 && abs > 0 {
+                    format!("{}", (abs as f64 * 100.0 / line as f64).round() as u64)
+                } else {
+                    "0".to_string()
+                },
+                // One filesystem serves both of SAB's disks here.
+                "diskspace1": format!("{free:.2}"),
+                "diskspace2": format!("{free:.2}"),
+            }})
+        }
         "sysbench" => return m_sysbench(d, req, params, ctx, api_body),
         // Update checker: force a check now. Notify-only - there
         // is no apply/install path; the banner links to the

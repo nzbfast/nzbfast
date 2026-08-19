@@ -993,3 +993,108 @@ fn a_sticky_cap_gauge_banks_one_episode_once() {
         .store(now_ms_for_test() + 60_000, Ordering::Relaxed);
     assert_eq!(fold(&d).len(), 1, "a second episode is a second event");
 }
+
+/// Codex sweep 6, N4: the idle Providers row reads `capped_hosts` and
+/// nothing else, so the disproof has to reach the map itself.
+///
+/// Job 1's refusal at 38 is banked. Job 2 is a fresh pool whose gauge
+/// has never recorded a cap - `retire_cap_if_exceeded` returns at its
+/// first line for it - and it holds 100 sessions. The fold is the only
+/// thing that sees both halves, so it is where the retirement has to
+/// happen or the number survives to the next idle poll.
+#[test]
+fn a_later_job_holding_more_retires_the_banked_ceiling() {
+    use crate::serve::tasks::stall::fold_caps_for_test as fold;
+    let dir = tdir("capretire");
+    let d = super::super::testutil::test_daemon(&dir);
+    let servers = vec![(srv("s.example", None), nzbkit::pool::PoolConfig::default())];
+
+    // Job 1: refused while holding 38.
+    let job1 = nzbkit::pool::LiveStats::for_servers(&servers);
+    job1.servers[0].budget.store(100, Ordering::Relaxed);
+    job1.servers[0].note_cap(38);
+    *d.hub.pool_live.lock_ok() = Some(job1);
+    assert_eq!(fold(&d).len(), 1, "precondition: the ceiling is banked");
+    assert_eq!(
+        d.capped_hosts
+            .lock_ok()
+            .get("s.example")
+            .map(|c| c.granted_hi),
+        Some(38)
+    );
+
+    // Job 2: a clean gauge, holding more than that ceiling.
+    let job2 = nzbkit::pool::LiveStats::for_servers(&servers);
+    job2.servers[0].budget.store(100, Ordering::Relaxed);
+    job2.servers[0].connected.store(100, Ordering::Relaxed);
+    *d.hub.pool_live.lock_ok() = Some(job2);
+    assert!(fold(&d).is_empty(), "nothing new to bank");
+    assert!(
+        d.capped_hosts.lock_ok().get("s.example").is_none(),
+        "and the disproven ceiling is gone, so the idle row cannot show it"
+    );
+}
+
+/// Codex sweep 6, N8: a job shorter than one watchdog tick could be
+/// refused and leave the lifetime ledger empty.
+///
+/// Banking lived only on the 1-5 s watchdog tick, and the next job
+/// replaces `pool_live` outright - so a ~200 ms job that bounced off a
+/// capacity limit was never folded at all, and the record a user sends
+/// their provider silently missed the day. The runner's own tail is the
+/// last moment `pool_live` still points at the job that just ended, so
+/// it folds there too. Driven through `settle_job_tail`, the production
+/// function, not through the fold helper.
+///
+/// Codex sweep 7, L2: the REFUSAL LINE rode the same tick and was left
+/// behind by that fix, which was cap-ledger-only. The retained pool
+/// covers the ordinary case - `pool_live` is not cleared when a job
+/// ends, so the idle Providers card still renders the live record and
+/// the watchdog copies it within a tick - but a refusal seen only
+/// inside a sub-tick job whose pool a later job replaces, or one on the
+/// last job before a queue-finished shutdown action ends the process,
+/// was never banked at all. Same window, same tail, so the copy folds
+/// beside the caps.
+#[test]
+fn a_job_shorter_than_a_watchdog_tick_still_banks_its_refusal() {
+    let dir = tdir("capsubtick");
+    let d = super::super::testutil::test_daemon(&dir);
+    let servers = vec![(srv("s.example", None), nzbkit::pool::PoolConfig::default())];
+    let live = nzbkit::pool::LiveStats::for_servers(&servers);
+    live.servers[0].budget.store(100, Ordering::Relaxed);
+    live.servers[0].note_cap(38);
+    *live.servers[0].refusal.lock_ok() = Some(nzbkit::pool::Refusal {
+        permanent: false,
+        source_ips: false,
+        line: "502 Too many connections".into(),
+    });
+    *d.hub.pool_live.lock_ok() = Some(live);
+
+    // No watchdog tick ever ran: this is the whole point.
+    assert!(
+        crate::conntune::load(&d.cfg_path)
+            .get("s.example")
+            .and_then(|t| t.capped.as_ref())
+            .is_none(),
+        "precondition: nothing banked yet"
+    );
+
+    let mut ledger = None;
+    let _ = super::runner::settle_job_tail(&d, "nzo-subtick", &mut ledger);
+
+    let c = crate::conntune::load(&d.cfg_path)
+        .get("s.example")
+        .and_then(|t| t.capped.clone())
+        .expect("the job tail banked the refusal");
+    assert_eq!(c.granted_hi, 38);
+    assert_eq!(c.days.len(), 1, "one day, one episode");
+    let kept = d.last_refusals.lock_ok();
+    let r = kept
+        .get("s.example")
+        .expect("the job tail kept the refusal LINE too");
+    assert_eq!(
+        r.line, "502 Too many connections",
+        "the server's own words are the whole point of keeping it"
+    );
+    assert!(!r.permanent);
+}

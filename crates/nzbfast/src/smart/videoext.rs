@@ -23,15 +23,71 @@ use std::path::Path;
 /// there would turn a directory those passes currently decline to touch
 /// into one they will delete from. That is a different decision from
 /// naming a file, and not this one's to make.
+/// One MPEG-TS packet. The sync byte repeats at exactly this stride,
+/// and that stride is the whole reason the format is recognisable.
+const TS_PACKET: usize = 188;
+
+/// How many consecutive packets must sync before a file is called a
+/// transport stream. Four is far past coincidence and still inside one
+/// read, and all four are REQUIRED: a file too short to hold them is
+/// not a transport stream under any reading. Scaling the count down to
+/// whatever the file happened to be long enough for accepted a single
+/// 0x47 at offset 0 from anything 188 to 375 bytes long - which is one
+/// byte of evidence, the very rule this constant exists to replace
+/// (Codex sweep 7, M7).
+const TS_SYNCS: usize = 4;
+
+/// Fill as much of `buf` as the file has, returning how many bytes
+/// landed. `read_exact` cannot be used: the buffer is now larger than
+/// plenty of legitimate short headers.
+fn read_head(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> {
+    use std::io::Read;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    (n >= 12).then_some(n)
+}
+
+/// Does this head sync like an MPEG transport stream?
+///
+/// It used to be `head[0] == 0x47` and nothing else, which is one byte
+/// of evidence: GIF87a/GIF89a open with 0x47 ("G"), as does every text
+/// file starting with a capital G. A hash-named GIF beside a hash-named
+/// feature therefore counted as a second video - `rename_movie` sees
+/// two and skips the rename, and `tv_sort` computes one canonical
+/// target for both - so an obfuscated release kept its hash because of
+/// a thumbnail. A lone one was offered to the user as `Title.ts`
+/// (Codex sweep 6, N6).
+///
+/// The sync repeating on the 188-byte stride is what actually
+/// identifies the format. `container_ext` has already declined the
+/// file, so nothing else is riding on this.
+///
+/// BDAV/m2ts, whose sync sits at offset 4 behind a timecode, is still
+/// unrecognised here - a coverage gap, and the safe side of one.
+fn is_transport_stream(head: &[u8]) -> bool {
+    head.len() >= TS_SYNCS * TS_PACKET && (0..TS_SYNCS).all(|i| head[i * TS_PACKET] == 0x47)
+}
+
 pub(super) fn video_ext(path: &Path) -> Option<String> {
     let named = ext_of(path);
     if !named.is_empty() {
         return VIDEO_EXTS.contains(&named.as_str()).then_some(named);
     }
-    use std::io::{Read, Seek};
-    let mut head = [0u8; 12];
+    use std::io::Seek;
+    // Enough to carry four MPEG-TS packets, which is what makes that
+    // format's one-byte sync distinguishable from any other file that
+    // happens to open with 0x47. Short files simply read short.
+    let mut buf = [0u8; TS_SYNCS * TS_PACKET];
     let mut f = std::fs::File::open(path).ok()?;
-    f.read_exact(&mut head).ok()?;
+    let n = read_head(&mut f, &mut buf)?;
+    let head: [u8; 12] = buf.get(..12)?.try_into().ok()?;
     let ext = match nzbkit::mediaprobe::container_ext(&head) {
         Some(e) => e,
         // `container_ext` knows EBML, AVI and ISO-BMFF - the containers
@@ -45,7 +101,7 @@ pub(super) fn video_ext(path: &Path) -> Option<String> {
         // whose callers ask "can the remuxer walk this", which for these
         // two is still no.
         None if head[..4] == [0x00, 0x00, 0x01, 0xBA] => return Some("mpg".to_string()),
-        None if head[0] == 0x47 => return Some("ts".to_string()),
+        None if is_transport_stream(&buf[..n]) => return Some("ts".to_string()),
         None => return None,
     };
     // Container magic cannot tell audio-only from video, and no number
@@ -142,12 +198,77 @@ mod tests {
             Some("mpg")
         );
 
-        // TS is a 188-byte-packet stream that opens with the 0x47 sync.
-        let ts = [0x47u8; 40];
+        // TS is a 188-byte-packet stream: the sync byte at the head of
+        // every packet is what identifies it, so the fixture is real
+        // packets rather than a run of 0x47.
+        let mut ts = Vec::new();
+        for _ in 0..TS_SYNCS {
+            ts.push(0x47u8);
+            ts.extend_from_slice(&[0x11u8; TS_PACKET - 1]);
+        }
         assert_eq!(video_ext(&at(&dir, "cc33dd44", &ts)).as_deref(), Some("ts"));
 
         // A named one is still judged on its name, not sniffed.
         assert_eq!(video_ext(&at(&dir, "x.nfo", &ps)), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One byte of evidence is not a transport stream.
+    ///
+    /// GIF87a/GIF89a opens with 0x47, and so does any text file
+    /// starting with a capital G. As `head[0] == 0x47`, a hash-named
+    /// thumbnail beside a hash-named feature was a SECOND video:
+    /// `rename_movie` sees two candidates and leaves both alone, so an
+    /// obfuscated release kept its hash because of a GIF, and a lone
+    /// one was renamed to `Title.ts` and offered as playable (Codex
+    /// sweep 6, N6).
+    #[test]
+    fn a_gif_is_not_a_transport_stream() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-vext-gif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[0u8; 1024]);
+        assert_eq!(
+            video_ext(&at(&dir, "8b21ff03", &gif)),
+            None,
+            "an extensionless GIF is not a video"
+        );
+        assert_eq!(
+            video_ext(&at(
+                &dir,
+                "8b21ff04",
+                b"Generated by the encoder, no video here at all."
+            )),
+            None,
+            "nor is a text file that happens to start with G"
+        );
+        // And the arm the 1030-byte fixture above never reached: a file
+        // long enough for ONE packet and no more used to have its sync
+        // count scaled down to one, which is `head[0] == 0x47` again
+        // under a longer name (Codex sweep 7, M7). 188 to 375 bytes is
+        // the window; 256 sits in the middle of it.
+        let mut short_gif = b"GIF89a".to_vec();
+        short_gif.extend_from_slice(&[0u8; 250]);
+        assert_eq!(
+            video_ext(&at(&dir, "8b21ff06", &short_gif)),
+            None,
+            "one packet of room is not four packets of evidence"
+        );
+
+        // The whole failing shape: the GIF must not make the feature
+        // stop being the lone video in the directory.
+        let mut feature = nzbkit::mediaprobe::testmux::mkv_full();
+        feature.extend_from_slice(&[0u8; 2048]);
+        std::fs::write(dir.join("8b21ff05"), &feature).unwrap();
+        assert_eq!(
+            crate::smart::nameless_video(&dir)
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+            Some("8b21ff05".to_string()),
+            "the feature is still the only video here"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

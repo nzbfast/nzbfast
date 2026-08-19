@@ -263,7 +263,7 @@ impl PostprocLane {
     ///
     /// Two things it deliberately does NOT do that [`Self::submit`]
     /// does. It does not mark the job `Finishing`: the terminal state
-    /// is already decided and set, `resolve_script` and the SAB_*
+    /// is already decided and set, `resolve_scripts` and the SAB_*
     /// environment are read FROM it, and a job that reads Finishing
     /// while its script runs would hand that script the wrong answer.
     /// And it emits no `job.finishing` lifecycle event, because no

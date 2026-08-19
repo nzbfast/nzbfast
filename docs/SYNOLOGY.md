@@ -303,8 +303,8 @@ download client:
   as `NZBFAST_APIKEY` on the container (Environment tab, or the commented
   line in the compose file).
 
-It also exposes the NZBGet JSON-RPC API, so nzb360 / LunaSea connect the
-same way.
+It also exposes the NZBGet JSON-RPC API for NZBGet remotes such as
+LunaSea; nzb360 connects with the same SABnzbd settings as the *arrs.
 
 ---
 

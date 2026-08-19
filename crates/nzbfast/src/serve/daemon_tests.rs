@@ -25,6 +25,11 @@ mod notice_tests;
 #[path = "daemon_tests/index_read_tests.rs"]
 mod index_read_tests;
 
+// `park_gen`'s three generation-fence windows, out for the ceiling and
+// carrying the same #[path] requirement.
+#[path = "daemon_tests/park_gen_tests.rs"]
+mod park_gen_tests;
+
 // §74's instant kick and its lock ordering, moved out for the ceiling
 // and carrying the same #[path] requirement.
 #[cfg(feature = "indexer")]
@@ -576,28 +581,40 @@ fn cat_meta_priority_dir_and_script_apply() {
             .find(|j| j.lock_ok().nzo_id == id)
             .cloned()
             .unwrap();
+        let one = |p: &str| vec![std::path::PathBuf::from(p)];
         assert_eq!(
-            d.resolve_script(&job),
-            Some(std::path::PathBuf::from("/scripts/tv.py")),
+            d.resolve_scripts(&job),
+            one("/scripts/tv.py"),
             "category script beats the (unset) global"
         );
-        *d.script.lock_ok() = Some(std::path::PathBuf::from("/scripts/global.py"));
+        *d.scripts.lock_ok() = one("/scripts/global.py");
         job.lock_ok().category = "movies".into();
         assert_eq!(
-            d.resolve_script(&job),
-            Some(std::path::PathBuf::from("/scripts/global.py")),
+            d.resolve_scripts(&job),
+            one("/scripts/global.py"),
             "no category script falls back to the global one"
         );
         job.lock_ok().script_override = "/scripts/mine.py".into();
         assert_eq!(
-            d.resolve_script(&job),
-            Some(std::path::PathBuf::from("/scripts/mine.py")),
+            d.resolve_scripts(&job),
+            one("/scripts/mine.py"),
             "the job's own script= wins"
         );
-        job.lock_ok().script_override = "None".into();
+        // §192: a rung is a CHAIN, and the first rung with anything
+        // wins WHOLE - the category's chain does not append to the
+        // global one.
+        job.lock_ok().script_override = "/scripts/a.py,/scripts/b.py".into();
         assert_eq!(
-            d.resolve_script(&job),
-            None,
+            d.resolve_scripts(&job),
+            vec![
+                std::path::PathBuf::from("/scripts/a.py"),
+                std::path::PathBuf::from("/scripts/b.py"),
+            ],
+            "the override chain runs in the order it was written"
+        );
+        job.lock_ok().script_override = "None".into();
+        assert!(
+            d.resolve_scripts(&job).is_empty(),
             "script=None means none at all"
         );
 
@@ -608,7 +625,7 @@ fn cat_meta_priority_dir_and_script_apply() {
         // (§129 4a: record_add_params FILLS, never clobbers - at add
         // time these fields are empty unless the pre-queue hook set
         // them, and the hook outranks the request. Clear the values the
-        // resolve_script cases above planted.)
+        // resolve_scripts cases above planted.)
         {
             let g = job_by(d, &id);
             let mut g = g.lock_ok();
@@ -651,7 +668,7 @@ fn cat_meta_priority_dir_and_script_apply() {
             "/elsewhere/mine.py"
         );
         // ...but ONLY for a full-key caller. `addfile`/`addurl` are on
-        // the add-only allowlist and `resolve_script` hands
+        // the add-only allowlist and `resolve_scripts` hands
         // `script_override` straight to `Command::new` on the job tail,
         // so accepting a path here let the NZB key - which ships to
         // browser push extensions - choose which program the daemon
@@ -672,7 +689,7 @@ fn cat_meta_priority_dir_and_script_apply() {
         clear();
         d.record_add_params(&id, None, Some("None"), false);
         assert_eq!(job_by(d, &id).lock_ok().script_override, "None");
-        assert_eq!(d.resolve_script(&job_by(d, &id)), None);
+        assert!(d.resolve_scripts(&job_by(d, &id)).is_empty());
     });
 }
 
@@ -2228,160 +2245,6 @@ fn a_lane_tail_never_parks_a_record_that_was_retried_out_from_under_it() {
     });
 }
 
-/// The same guard, but for the window rather than the entry.
-///
-/// `park_gen` checked the generation once, at the top, and then dropped
-/// the job guard to run `remove_job_files` - a recursive delete of a
-/// whole release, unbounded on a hung NAS. A retry landing in THAT gap
-/// bumped the generation after the only test had already passed, so the
-/// rest of park_gen ran against a record it no longer owned: it removed
-/// the live retry's activity row and went on to file or requeue it.
-///
-/// The tombstone two lines below was already re-read live for exactly
-/// this reason. The generation was not. Driven through PARK_GEN_BARRIER
-/// because the window is zero-width without a slow filesystem.
-/// M4c: the same stale tail must not strip the RETRY's custody entries.
-///
-/// `park_gen`'s generation re-read protects the terminal branches, and
-/// its own comment says it returns "WITHOUT touching the two custody
-/// maps, which is the one way it differs from the check at the top ...
-/// a remove() would take the live retry's activity row out of the queue
-/// - the exact damage this guard exists to prevent". The two removes
-/// sat ABOVE that re-read, so the guard could not guard them: by the
-/// time it returned, the damage was already done and the early return
-/// merely skipped undoing it. `remove_job_files` runs immediately
-/// before, unlocked and unbounded on a slow share, which is the window.
-#[test]
-fn a_stale_lane_tail_leaves_the_retrys_custody_entries_alone() {
-    with_daemon("park-generation-custody", |d| {
-        let out = d.out_dir().join("Custody.Release");
-        std::fs::create_dir_all(&out).expect("payload dir");
-        let job = jv(
-            "nzo-custody-1",
-            "Custody.Release",
-            serde_json::json!({ "out_dir": out.to_string_lossy() }),
-        );
-        let gen0 = Daemon::record_generation(&job.lock_ok());
-        d.history.lock_ok().push(job.clone());
-        {
-            let mut g = job.lock_ok();
-            g.state = JobState::Failed;
-            g.fail_message = "deleted from the queue".into();
-            g.finished_unix = Some(1);
-            g.delete_status = "MANUAL".into();
-        }
-
-        let open = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() =
-            Some(("nzo-custody-1".to_string(), open.clone(), release.clone()));
-
-        // Registered BEFORE the tail runs, and deliberately not
-        // re-registered at the barrier. The barrier sits AFTER the point
-        // the removes used to occupy, so an entry written at the barrier
-        // survives either way and proves nothing - the first cut of this
-        // test did exactly that and passed against the unfixed code.
-        // Both maps are keyed by job id alone and the new generation
-        // reuses that key, so an entry standing across the window is
-        // precisely what the retry's own registration looks like here.
-        d.hub
-            .activity
-            .lock_ok()
-            .insert("nzo-custody-1".to_string(), "preflight");
-
-        let d2 = d.clone();
-        let job2 = job.clone();
-        let tail = std::thread::spawn(move || d2.park_gen(job2, Some(gen0)));
-
-        // Inside the window: the retry lands, so the tail is now stale.
-        open.wait();
-        assert!(
-            d.retry("nzo-custody-1"),
-            "the filed delete row is retryable"
-        );
-        release.wait();
-        tail.join().expect("park tail");
-        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() = None;
-
-        assert_eq!(
-            d.hub.activity.lock_ok().get("nzo-custody-1").copied(),
-            Some("preflight"),
-            "the stale tail removed the live retry's activity row"
-        );
-    });
-}
-
-#[test]
-fn a_lane_tail_declines_a_retry_that_lands_while_it_is_deleting_files() {
-    with_daemon("park-generation-window", |d| {
-        let out = d.out_dir().join("Windowed.Release");
-        std::fs::create_dir_all(&out).expect("payload dir");
-        let job = jv(
-            "nzo-parkwin-1",
-            "Windowed.Release",
-            serde_json::json!({ "out_dir": out.to_string_lossy() }),
-        );
-        let gen0 = Daemon::record_generation(&job.lock_ok());
-        d.history.lock_ok().push(job.clone());
-        {
-            let mut g = job.lock_ok();
-            g.state = JobState::Failed;
-            g.fail_message = "deleted from the queue".into();
-            g.finished_unix = Some(1);
-            g.delete_status = "MANUAL".into();
-        }
-
-        let open = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() =
-            Some(("nzo-parkwin-1".to_string(), open.clone(), release.clone()));
-
-        let d2 = d.clone();
-        let job2 = job.clone();
-        let tail = std::thread::spawn(move || d2.park_gen(job2, Some(gen0)));
-
-        // The tail is now past its first generation check and past its
-        // file removal. This is the window.
-        open.wait();
-        assert!(
-            d.retry("nzo-parkwin-1"),
-            "the filed delete row is retryable"
-        );
-        assert!(
-            d.queue
-                .lock_ok()
-                .iter()
-                .any(|j| j.lock_ok().nzo_id == "nzo-parkwin-1"),
-            "the retry put it back in the queue"
-        );
-        release.wait();
-        tail.join().expect("park tail");
-        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() = None;
-
-        assert!(
-            d.queue
-                .lock_ok()
-                .iter()
-                .any(|j| j.lock_ok().nzo_id == "nzo-parkwin-1"),
-            "the stale tail pulled the freshly retried row out of the queue"
-        );
-        assert_eq!(
-            d.history
-                .lock_ok()
-                .iter()
-                .filter(|j| j.lock_ok().nzo_id == "nzo-parkwin-1")
-                .count(),
-            0,
-            "and filed it into history, consuming the retry the user pressed"
-        );
-        assert_eq!(
-            job.lock_ok().state,
-            JobState::Queued,
-            "the retry's own state was overwritten by the stale tail"
-        );
-    });
-}
-
 #[test]
 fn a_retried_delete_does_not_carry_its_removal_into_the_next_park() {
     with_daemon("delondrop-retry", |d| {
@@ -2863,6 +2726,52 @@ fn dupe_alias_meets_one_show_under_two_names_and_never_a_spinoff() {
         assert!(
             d.dupe_collision(spinoff).is_none(),
             "different show ids: a spin-off must never be its parent's duplicate"
+        );
+
+        // Codex sweep 7, H2: an equal NUMBER is not an equal show. The
+        // column those ids live in carries TVmaze, AniList and TMDB
+        // numbering, all small and dense, and under the keyless default
+        // an anime title lands in the AniList one for no reason the user
+        // ever chose. Two unrelated series colliding here is a download
+        // held as a duplicate of something it has nothing to do with.
+        let anime = "Some.Anime.S01E06.1080p.WEB.h264-CCC";
+        let other = "Some.Other.Series.S01E06.1080p.WEB.h264-DDD";
+        d.queue.lock_ok().push_back(jv(
+            "id-anime",
+            anime,
+            serde_json::json!({"dupe_key": dupe_key(anime)}),
+        ));
+        let fill_src = |ix: &nzbkit::index::Index, key: &str, id: i64, src: &str| {
+            ix.title_seed(key, "tv", "x", 0).unwrap();
+            ix.title_fill(
+                key,
+                &nzbkit::index::TitleFill {
+                    tmdb_id: id,
+                    id_src: src,
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        };
+        d.with_index(|ix| {
+            fill_src(ix, &title_key(anime), 5150, "anilist");
+            fill_src(ix, &title_key(other), 5150, "tvmaze");
+            Some(())
+        });
+        assert!(
+            d.dupe_collision(other).is_none(),
+            "two namespaces' ids collided into one show"
+        );
+        // ...and the same pair inside ONE namespace still meets, which
+        // is what keeps the oracle working for anime at all.
+        d.with_index(|ix| {
+            fill_src(ix, &title_key(other), 5150, "anilist");
+            Some(())
+        });
+        assert!(
+            d.dupe_collision(other).is_some(),
+            "two AniList rows with one media id are one show"
         );
     });
 }

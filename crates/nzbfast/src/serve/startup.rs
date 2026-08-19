@@ -76,6 +76,30 @@ fn restore_job_settings(
             Err(e) => warn!(target: "smart", "ignoring saved smart_folders: {e}"),
         }
     }
+    // Queue-finished action. Restored, unlike most one-shot state,
+    // because "shut down when this batch finishes" is routinely armed
+    // for an overnight run that a daemon restart (an update, a reboot of
+    // the NAS) sits in the middle of - and the two that end the session
+    // disarm THEMSELVES on firing, so what is on disk is only ever an
+    // arm nobody has spent yet. An unrecognised word is dropped rather
+    // than guessed at: this is the control that turns the machine off.
+    if let Some(v) = saved.get("queue_finished_action").and_then(Value::as_str) {
+        match finish_action::FinishAction::parse(v) {
+            Some(a) => daemon.finish.set_action(a),
+            None => warn!(target: "finish", "ignoring saved queue_finished_action {v:?}"),
+        }
+    }
+    if let Some(v) = saved.get("queue_finished_script").and_then(Value::as_str) {
+        daemon
+            .finish
+            .set_script((!v.trim().is_empty()).then(|| PathBuf::from(v.trim())));
+    }
+    if let Some(v) = saved
+        .get("queue_finished_delay_secs")
+        .and_then(Value::as_u64)
+    {
+        daemon.finish.set_delay_secs(v);
+    }
     if let Some(v) = saved.get("cleanup_exts") {
         match serde_json::from_value::<Vec<String>>(v.clone()) {
             Ok(list) => *daemon.cleanup_exts.lock_ok() = list,
@@ -420,6 +444,7 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
         ("rename_junk", &daemon.rename_junk),
         ("rename_media_only", &daemon.rename_media_only),
         ("rename_from_nzb", &daemon.rename_from_nzb),
+        ("skip_samples", &daemon.skip_samples),
     ] {
         if let Some(v) = saved.get(key).and_then(Value::as_bool) {
             field.store(v, Ordering::Relaxed);
@@ -1531,6 +1556,10 @@ pub(super) fn spawn_core_tasks(
     // container header so the row can say what the file IS, and warn
     // when that contradicts the name it was posted under.
     tasks::spawn_media_prober(daemon);
+    // §188: and the same chip on rows written by an OLDER build, whose
+    // labels a since-fixed derivation rule got wrong. Runs once per
+    // version, on its own thread, never blocking the daemon coming up.
+    super::histmigrate::spawn_history_media_migrate(daemon);
 
     tasks::spawn_slow_job_watchdog(daemon, config, mem_budget);
     tasks::spawn_live_tuner(daemon, config);
@@ -1564,6 +1593,7 @@ pub(super) fn spawn_aux_tasks(daemon: &Arc<Daemon>, config: &Path) {
     tasks::spawn_update_checker(daemon);
     tasks::spawn_scheduled_bench(daemon, config);
     tasks::spawn_auto_connections(daemon, config);
+    finish_action::spawn_finish_watcher(daemon);
 }
 
 pub(super) fn announce_ready(
@@ -1938,9 +1968,11 @@ fn build_daemon(
         queue_rev: AtomicU64::new(1),
         history_rev: AtomicU64::new(1),
         hist_inflight: Mutex::new(std::collections::HashSet::new()),
+        hist_rewrite_fail_ms: AtomicU64::new(0),
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
+        finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
         saver_armed: AtomicBool::new(false),
@@ -2109,6 +2141,14 @@ fn build_daemon(
         media_chip_color: std::sync::atomic::AtomicBool::new(true),
         shape_chip_color: std::sync::atomic::AtomicBool::new(true),
         rename_junk: std::sync::atomic::AtomicBool::new(true),
+        // Default OFF, where SABnzbd's equivalent is on. Skipping is
+        // irreversible within the job - the bytes are gone from the
+        // wire, and a wrong call cannot be undone by a later pass -
+        // while `rename_junk` (on by default) already removes real
+        // samples once the download is done. The default therefore
+        // costs a teaser's worth of bandwidth and nothing else; turning
+        // it on trades that for the risk a name always carries.
+        skip_samples: std::sync::atomic::AtomicBool::new(false),
         rename_media_only: std::sync::atomic::AtomicBool::new(false),
         rename_from_nzb: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
@@ -2261,7 +2301,13 @@ fn build_daemon(
         #[cfg(feature = "indexer")]
         group_sampling: Mutex::new(std::collections::HashSet::new()),
         group_desc_isc: std::sync::atomic::AtomicBool::new(group_desc_isc),
-        script: Mutex::new(script),
+        // The CLI/settings value is the raw chain text (§192); the
+        // daemon holds it parsed.
+        scripts: Mutex::new(nzbget_script::script_chain(
+            &script
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )),
         script_timeout: AtomicU64::new(3600),
         pre_queue_script: Mutex::new(None),
         pre_queue_timeout: AtomicU64::new(30),

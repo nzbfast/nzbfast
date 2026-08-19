@@ -35,7 +35,34 @@ pub(super) fn build_fetch_plan(
     resuming: bool,
     bootstrap_vol: Option<usize>,
     resume_vols: &HashMap<usize, PathBuf>,
+    // The "skip sample files" setting, sampled once for this job. On, a
+    // file the sample classifier recognises has NONE of its articles
+    // queued - the point of the setting is that its bytes never cross
+    // the wire, so the decision has to be made here and nowhere later.
+    skip_samples: bool,
 ) -> FetchPlan {
+    // Which DATA files this run will decline to fetch. Computed over the
+    // whole file list up front because the answer is comparative: a
+    // sample is only a sample beside something bigger, so no single file
+    // can be judged on its own as the loop reaches it. PAR2 entries are
+    // dropped first - recovery data is never a sample - and their slots
+    // read `false` through the `is_par2` arm below.
+    let sample_skip: Vec<bool> = if skip_samples {
+        let data: Vec<(String, u64)> = nzb
+            .files
+            .iter()
+            .map(|f| {
+                if f.kind() == FileKind::Data {
+                    (f.filename_hint().unwrap_or_default().to_string(), f.bytes())
+                } else {
+                    (String::new(), 0)
+                }
+            })
+            .collect();
+        crate::smart::skippable_samples(&data)
+    } else {
+        vec![false; nzb.files.len()]
+    };
     let mut resume_sniffed_slots: Vec<usize> = Vec::new();
     let mut resume_deferred_arts = 0usize;
     let mut resume_deferred_bytes = 0u64;
@@ -44,6 +71,13 @@ pub(super) fn build_fetch_plan(
     // progress counter) so the queue row can pick the bar up where the
     // last run left it - see the publish site for why the two stay apart.
     let mut resume_have_bytes = 0u64;
+    // What the sample skip declined, for the banner. Deliberately NOT
+    // folded into `resume_deferred_*`: those seed the in-stream PAR2
+    // deferral ledger, which reports itself as "recovery data not
+    // downloaded", and a teaser is not recovery data.
+    let mut skipped_sample_arts = 0usize;
+    let mut skipped_sample_bytes = 0u64;
+    let mut skipped_sample_names: Vec<String> = Vec::new();
     let mut slots: Vec<Arc<FileSlot>> = Vec::new();
     let mut id_to_slot: crate::unpack::IdSlots = HashMap::new();
     // UX §15 honest percentage. `fetch_plan` is the declared NZB byte
@@ -83,6 +117,9 @@ pub(super) fn build_fetch_plan(
             continue;
         }
         let is_par2_main = f.kind() == FileKind::Par2Main || is_bootstrap;
+        // A bootstrap volume is recovery data by election, so it can
+        // never be a skipped sample however it is named.
+        let sample_skipped = sample_skip[fi] && !is_par2_main;
         let idx = slots.len();
         let resume_sniffed = !is_par2_main && resume_vols.contains_key(&idx);
         if resume_sniffed {
@@ -95,6 +132,7 @@ pub(super) fn build_fetch_plan(
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("file{idx:03}")),
             is_par2_main,
+            sample_skipped,
             par2_sniffed: std::sync::atomic::AtomicBool::new(resume_sniffed),
             // A parser-dropped segment (empty or wire-unsafe message-id)
             // is one this slot can never fetch: it counts toward the
@@ -109,6 +147,9 @@ pub(super) fn build_fetch_plan(
             abandoned: AtomicUsize::new(0),
             capture: std::sync::Mutex::new(is_par2_main.then(Vec::new)),
         }));
+        if sample_skipped {
+            skipped_sample_names.push(slots[idx].hint.clone());
+        }
         let mut arts: Vec<(u64, String)> = Vec::new();
         let mut enc_cum = 0u64;
         for (si, seg) in f.segments.iter().enumerate() {
@@ -147,6 +188,25 @@ pub(super) fn build_fetch_plan(
                 arts.push((enc_cum, bracketed.clone()));
             }
             enc_cum = enc_cum.saturating_add(seg.bytes);
+            // The sample skip, ahead of the resume and sniff branches
+            // because it is a decision about the FILE rather than about
+            // this article: a job resumed after the setting was turned
+            // on must stop fetching the rest of the teaser, not finish
+            // it because some of it is already down.
+            //
+            // Booked exactly as a resume-recognised recovery volume is -
+            // off `remaining`, onto `deferred` - so every consumer that
+            // already knows "deferred is a choice, not damage" needs no
+            // teaching: the census's completeness walk sees zero missing
+            // and zero unresolved, its size-lie scan sits the slot out,
+            // and settle's uncovered-hole partition never picks it up.
+            if sample_skipped {
+                slots[idx].remaining.fetch_sub(1, Ordering::Relaxed);
+                slots[idx].deferred.fetch_add(1, Ordering::Relaxed);
+                skipped_sample_arts += 1;
+                skipped_sample_bytes = skipped_sample_bytes.saturating_add(seg.bytes);
+                continue;
+            }
             // On resume, journal-completed data articles are skipped -
             // their bytes are on disk and the settle pass verifies them.
             // Par2-main articles always refetch (tiny; activation needs
@@ -195,13 +255,28 @@ pub(super) fn build_fetch_plan(
         .as_ref()
         .map(|h| h.fetch_done.clone())
         .unwrap_or_default();
+    if skipped_sample_arts > 0 {
+        println!(
+            "  ▸ skipping {} sample file(s) - {} article(s), {:.1} MB never fetched: {}",
+            skipped_sample_names.len(),
+            skipped_sample_arts,
+            skipped_sample_bytes as f64 / 1e6,
+            skipped_sample_names.join(", ")
+        );
+    }
     // Seeded with what is in hand before a byte moves: the articles the
     // journal already satisfied, plus the recovery volumes a resume
-    // recognised on disk and deliberately never queued. Both are bytes of
+    // recognised on disk and deliberately never queued, plus the samples
+    // this run has decided not to fetch at all. All three are bytes of
     // the plan this run is responsible for, so a resumed job's bar
-    // continues from where it stopped instead of restarting at 0%.
+    // continues from where it stopped instead of restarting at 0% - and
+    // no terminal outcome will ever credit a skipped article back, so
+    // without the third the percentage and the SAB-compatible
+    // `Remaining` would sit short by the sample for the whole job.
     fetch_done.store(
-        resume_have_bytes.saturating_add(resume_deferred_bytes),
+        resume_have_bytes
+            .saturating_add(resume_deferred_bytes)
+            .saturating_add(skipped_sample_bytes),
         Ordering::Relaxed,
     );
     if let Some(h) = hub.as_ref() {
@@ -217,7 +292,10 @@ pub(super) fn build_fetch_plan(
         let mut data_slots: Vec<usize> = slots
             .iter()
             .enumerate()
-            .filter(|(_, s)| !s.is_par2_main)
+            // A skipped sample has no queued articles, so letting it
+            // win "first" or "last" here would spend the burst on
+            // nothing and leave the real opening volume unprioritised.
+            .filter(|(_, s)| !s.is_par2_main && !s.sample_skipped)
             .map(|(i, _)| i)
             .collect();
         data_slots.sort_by_key(|&i| nzbkit::extract::vol_sort_key(&slots[i].hint));
@@ -655,6 +733,16 @@ mod tests {
         bootstrap_vol: Option<usize>,
         resume_vols: &HashMap<usize, PathBuf>,
     ) -> FetchPlan {
+        plan_with(n, completed, bootstrap_vol, resume_vols, false)
+    }
+
+    fn plan_with(
+        n: &Arc<Nzb>,
+        completed: &HashSet<String>,
+        bootstrap_vol: Option<usize>,
+        resume_vols: &HashMap<usize, PathBuf>,
+        skip_samples: bool,
+    ) -> FetchPlan {
         build_fetch_plan(
             n,
             &None,
@@ -662,6 +750,7 @@ mod tests {
             !completed.is_empty(),
             bootstrap_vol,
             resume_vols,
+            skip_samples,
         )
     }
 
@@ -725,6 +814,94 @@ mod tests {
         assert!(p.slot_arts[1].0.is_empty());
         // Fresh run: nothing pre-credited on the progress counter.
         assert_eq!(p.fetch_done.load(Ordering::Relaxed), 0);
+    }
+
+    /// The sample skip, end to end at plan level: the teaser's articles
+    /// never reach the queue, its slot carries the flag settle reads,
+    /// and its bytes are credited to the progress counter up front - a
+    /// skipped article gets no terminal outcome, so nothing else ever
+    /// will, and the bar would otherwise sit short of 100% for the
+    /// whole job.
+    #[test]
+    fn a_skipped_sample_is_never_queued() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"Movie.2024.1080p-GRP.mkv" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="800000" number="1">a@t</segment>
+   <segment bytes="800000" number="2">b@t</segment>
+  </segments>
+ </file>
+ <file subject='"Movie.2024.1080p-GRP-sample.mkv" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="1000" number="1">s1@t</segment>
+   <segment bytes="1000" number="2">s2@t</segment>
+  </segments>
+ </file>
+</nzb>"#);
+        // Off: today's behaviour, every article queued.
+        let off = plan(&n, &HashSet::new(), None, &HashMap::new());
+        assert_eq!(ids_of(&off).len(), 4);
+        assert!(!off.slots[1].sample_skipped);
+        assert_eq!(off.fetch_done.load(Ordering::Relaxed), 0);
+
+        // On: the teaser's two articles are gone from the queue.
+        let on = plan_with(&n, &HashSet::new(), None, &HashMap::new(), true);
+        assert_eq!(ids_of(&on), ["<a@t>", "<b@t>"]);
+        assert!(on.slots[1].sample_skipped);
+        assert!(!on.slots[0].sample_skipped, "the feature is untouched");
+        // Booked as a CHOICE, not damage: this is what keeps the census
+        // and the uncovered-hole scan from failing the job over it.
+        assert_eq!(on.slots[1].deferred.load(Ordering::Relaxed), 2);
+        assert_eq!(on.slots[1].missing.load(Ordering::Relaxed), 0);
+        assert_eq!(on.slots[1].remaining.load(Ordering::Relaxed), 0);
+        // The slot still exists and still declares its segments - the
+        // manifest must not shrink, or a skipped file would be
+        // indistinguishable from one the NZB never named.
+        assert_eq!(on.slots[1].total_segments, 2);
+        assert_eq!(on.fetch_done.load(Ordering::Relaxed), 2000);
+    }
+
+    /// The two ways the classifier declines, at plan level: a
+    /// sample-named file big enough to be the feature, and a job whose
+    /// ONLY video is sample-named. Both fetch in full with the setting
+    /// on - the gate errs toward downloading, and the post-download
+    /// sweep (which can read the running time) decides from there.
+    #[test]
+    fn the_gate_errs_toward_downloading() {
+        let sole = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"Proof.2005.1080p.BluRay-GRP.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="900000" number="1">v@t</segment></segments>
+ </file>
+ <file subject='"Proof.2005.1080p.BluRay-GRP.nfo" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="900" number="1">n@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan_with(&sole, &HashSet::new(), None, &HashMap::new(), true);
+        assert_eq!(ids_of(&p), ["<v@t>", "<n@t>"]);
+        assert!(p.slots.iter().all(|s| !s.sample_skipped));
+
+        // Sample-named, but 40% of the feature: too much to throw away
+        // on a name.
+        let big = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"Movie.2024.1080p-GRP.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="1000000" number="1">a@t</segment></segments>
+ </file>
+ <file subject='"Movie.2024.1080p-GRP.sample.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="400000" number="1">s@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan_with(&big, &HashSet::new(), None, &HashMap::new(), true);
+        assert_eq!(ids_of(&p), ["<a@t>", "<s@t>"]);
+        assert!(p.slots.iter().all(|s| !s.sample_skipped));
     }
 
     /// A repeated message-id is fetched once, under its FIRST owner. The

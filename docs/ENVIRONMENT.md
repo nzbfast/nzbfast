@@ -79,6 +79,7 @@ with any value.
 | `NZBFAST_NO_INSTREAM_DECRYPT` | `1`: decrypt encrypted store-mode RAR in a finish pass instead of in-stream during download | unset (in-stream) | Debug-only |
 | `NZBFAST_DECRYPT_ENOSPC_ONCE` | Fault injection for the finish decrypt (TODO 100 retry e2e): `pre` fails once per process with a disk-full error before any ciphertext is touched, `post` fails once after every publish landed - the journal state a real unpack-stage ENOSPC leaves behind | unset (no injection) | Debug-only |
 | `NZBFAST_POSTPROC_INLINE` | `1`: bisection kill-switch for the §129 post-processing lane - forces lane width 1 AND worker-blocking submission, byte-for-byte the pre-lane scheduling envelope (the download worker waits for each job's tail again) | unset (lane on, width `postproc_jobs`) | Debug-only |
+| `NZBFAST_FINISH_DRY_RUN` | `1`: the queue-finished sleep/shutdown action announces itself and stops there, without running the platform command. Lets a test arm a real shutdown and prove the trigger fires only when it should, on a machine that has to stay on | unset (the command runs) | Debug-only |
 | `NZBFAST_NO_NESTED_ONEPASS` | `1`: turn off one-pass routing of nested archives | unset (on) | Debug-only |
 | `NZBFAST_NO_NESTED_CHASE` | `1`: disable the chasing decompressor for nested compressed RAR (inner archive lands on disk instead) | unset (on) | Debug-only |
 | `NZBFAST_NO_NESTED_7Z` | `1`: demote an inner .7z to a disk pass instead of chasing it | unset (on) | Debug-only |

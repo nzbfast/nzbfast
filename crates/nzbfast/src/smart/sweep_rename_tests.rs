@@ -1859,3 +1859,58 @@ fn every_naming_route_can_see_an_extensionless_feature() {
         "the sample keeps its own name rather than being renamed"
     );
 }
+
+/// Codex sweep 6, N1: sweep 5's M4 fix reached `tv_rename` and season
+/// filing, and left the other two selectors on the extension-gated
+/// predicate.
+///
+/// `nameless_video` is what identify and synthesised naming ask before
+/// they spend any network, and `main_payload` is what the .nzb-name
+/// route renames. Both counted an extensionless `sample` as ordinary
+/// payload, so the feature stayed hashed on one route and the teaser
+/// took the release name on the other.
+#[test]
+fn an_extensionless_sample_loses_the_other_naming_routes_too() {
+    let root = scratch("extless-sample");
+    let mkv = |n: usize| {
+        let mut v = vec![0x1A, 0x45, 0xDF, 0xA3];
+        v.extend(std::iter::repeat_n(0u8, n));
+        v
+    };
+
+    // --- identify / synthesised naming: the feature is still lone ---
+    let one = root.join("job1");
+    std::fs::create_dir_all(&one).unwrap();
+    // Sample first, so read_dir order favours the wrong answer.
+    std::fs::write(one.join("sample"), mkv(64)).unwrap();
+    std::fs::write(one.join("c0ffee1234"), mkv(8192)).unwrap();
+    assert_eq!(
+        nameless_video(&one).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+        Some("c0ffee1234".to_string()),
+        "two videos means 'cannot tell', so the feature never gets identified at all"
+    );
+
+    // --- the .nzb-name route: the teaser is not the main file ---
+    // The feature is still PACKED, which is furniture by design, so the
+    // sample is the largest thing left - the shape where the name
+    // actually lands on it.
+    let two = root.join("Some.Release.2024-GRP");
+    std::fs::create_dir_all(&two).unwrap();
+    std::fs::write(two.join("sample"), mkv(4096)).unwrap();
+    std::fs::write(two.join("payload.part01.rar"), vec![0u8; 65_536]).unwrap();
+    // The folder takes the name either way; only the FILE is at issue.
+    let two = nzbname::rename_from_nzb(&root, &two, "Some Release 2024 GRP.nzb").unwrap_or(two);
+    assert!(
+        two.join("sample").exists(),
+        "the sample keeps its own name; got {:?}",
+        std::fs::read_dir(&two)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !two.join("Some Release 2024 GRP.mkv").exists(),
+        "and the release name was not put on a teaser"
+    );
+}

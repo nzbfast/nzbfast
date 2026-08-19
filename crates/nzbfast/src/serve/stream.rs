@@ -455,16 +455,45 @@ pub(super) fn open_live_media(
 /// season folder is not, and only the episode this job filed may be read
 /// out of it.
 pub(super) fn finished_media_path(d: &Daemon, job: &Arc<Mutex<Job>>) -> Option<PathBuf> {
+    finished_media_path_checked(d, job).ok().flatten()
+}
+
+/// The same lookup, with the reason a miss was a miss still attached.
+///
+/// `Ok(None)` means the output directory resolved and simply holds no
+/// media file of ours - a deleted payload, a season pack that never
+/// filed, a failed download. `Err` means we could not look: the volume
+/// is not mounted under a parent that IS, the OS declined the folder
+/// (a launchd-started daemon reaching a TCC-gated Downloads folder), a
+/// network mount has not woken, a handle went stale. Everything below
+/// erased both into `None`, and the history re-derivation then recorded
+/// "no payload" for a disk it had never managed to read (Codex sweep 7,
+/// M6).
+///
+/// The check is at the ROOT of the walk on purpose. That is where a
+/// volume that is absent, asleep or forbidden announces itself, and it
+/// costs one `opendir` that the walk is about to do anyway. An I/O
+/// error partway down a subdirectory still reads as "not found", which
+/// is the same answer as before and no worse.
+pub(super) fn finished_media_path_checked(
+    d: &Daemon,
+    job: &Arc<Mutex<Job>>,
+) -> std::io::Result<Option<PathBuf>> {
     let (dir, filed, stem, tail) = {
         let j = job.lock_ok();
         let sfx = delete_tail(&j, || d.job_suffix(filed_stem(&j)));
         (j.out_dir.clone(), j.filed, filed_stem(&j).to_string(), sfx)
     };
-    if filed {
+    match std::fs::read_dir(&dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    Ok(if filed {
         crate::smart::find_filed_episode_media(&dir, &stem, &tail)
     } else {
         find_completed_media(&dir)
-    }
+    })
 }
 
 /// One `GET /preview/probe/{nzo_id}` - what the file IS, from whatever

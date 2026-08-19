@@ -195,7 +195,6 @@ BASELINE_FILES = {
     # to rar/tests.rs beside v4_header_tests.rs, and the fixture writers
     # (a public module, its `nzbkit::rar::fixtures` path unchanged) to
     # rar/fixtures.rs. 2,494, under the ceiling, so its entry is GONE.
-    "crates/nzbfast/src/wall.rs": 3911,
     "crates/nzbkit/src/nntp.rs": 3688,
     # release.rs was here at 3,505 and reached 3,586 as the dark-verdict
     # and year-is-an-extension rounds landed. Its inline `mod tests` was

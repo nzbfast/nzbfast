@@ -2123,6 +2123,18 @@ pub(crate) struct FileSlot {
     /// so it must exempt the sparse-slot census like a deferral while
     /// still reading as damage evidence for the repair branches.
     pub(crate) abandoned: std::sync::atomic::AtomicUsize,
+    /// The user asked for sample files to be skipped and this slot's
+    /// posted name plus declared size said it is one
+    /// (`smart::skippable_samples`), so NONE of its articles were
+    /// queued. Decided once at plan time and never revised: the
+    /// segments are booked into `deferred` - a choice, not damage -
+    /// exactly as a resume-recognised recovery volume's are, which is
+    /// what keeps the census and the uncovered-hole scan from failing
+    /// the job over a file nobody wanted. The flag itself is read by
+    /// the settle pass, which has to strike the file off the PAR2 set's
+    /// missing list as well, or repair would fetch recovery volumes to
+    /// rebuild the very bytes the setting declined.
+    pub(crate) sample_skipped: bool,
     /// Par2-main slots capture decoded bytes in memory so the recovery set
     /// activates mid-download without re-reading from disk. `Some` from
     /// build time for slots the NZB names as par2; installed at sniff time

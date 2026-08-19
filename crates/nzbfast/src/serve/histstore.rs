@@ -63,6 +63,27 @@ static HIST_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(super) static COMPACT_BARRIER: std::sync::Mutex<Option<(String, Arc<std::sync::Barrier>)>> =
     std::sync::Mutex::new(None);
 
+/// What a `_if_present` upsert actually did.
+///
+/// The helper answered a bare bool, and its false conflates two
+/// opposite things: "the record left history while you were working, so
+/// nothing was owed" - the ordinary mover/unlock/prober race, and the
+/// reason the guard exists - and "the record is right here and the
+/// store refused the line". Only the second is a fault, and a caller
+/// that logs or reports on a bool logs the daemon's healthy races too
+/// (Codex sweep 7, M5 follow-up).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum HistWrite {
+    /// The record's current state is on disk.
+    Wrote,
+    /// The record is not in history: nothing was written, and nothing
+    /// was owed.
+    Absent,
+    /// The record IS in history and could not be written. Its current
+    /// state is live in memory and nowhere else.
+    Refused,
+}
+
 impl Daemon {
     pub(super) fn history_store_path(&self) -> PathBuf {
         self.spool.join("history.jsonl")
@@ -155,13 +176,148 @@ impl Daemon {
     /// 10 Aug sweep). A delete either finishes first (the check sees the
     /// record gone and writes nothing) or waits here for the lock and
     /// tombstones after (the tombstone stays last).
-    pub(super) fn history_upsert_if_present(&self, job: &Arc<Mutex<Job>>) {
+    ///
+    /// Returns what happened. The outcome used to be dropped by a
+    /// semicolon, and `history_write_locked` is the only append path
+    /// there is: a store that cannot be appended to logs an error and
+    /// carries on, which is right for a live daemon but left every
+    /// caller believing its mutation had persisted (Codex sweep 7, M5).
+    /// [`HistWrite`] rather than a bool because the not-present arm
+    /// writes nothing either, and that one is not a fault - see the
+    /// enum's own note.
+    ///
+    /// Most callers want [`Daemon::history_publish`], which stands the
+    /// atomic rewrite in for a refused append and says what the refusal
+    /// cost. This is the raw one, for the bulk migration pass whose
+    /// answer to a refusal is to leave its version stamp alone.
+    pub(super) fn history_upsert_if_present(&self, job: &Arc<Mutex<Job>>) -> HistWrite {
         let _g = HIST_IO.lock_ok();
         if !self.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, job)) {
-            return;
+            return HistWrite::Absent;
         }
         let line = job_json(&job.lock_ok()).to_string();
-        self.history_write_locked(&[line]);
+        match self.history_write_locked(&[line]) {
+            true => HistWrite::Wrote,
+            false => HistWrite::Refused,
+        }
+    }
+
+    /// Persist a history record the caller has just mutated, and say
+    /// what a refusal costs when it cannot be persisted at all.
+    ///
+    /// Three outcomes, and the middle one is why this exists:
+    ///
+    ///  * the append lands, which is every ordinary call;
+    ///  * the append is REFUSED and the atomic rewrite publishes the
+    ///    record instead. The asymmetry that hid M5 is also the way out
+    ///    of it: `history_write_locked` appends to the file, so it needs
+    ///    write permission ON THE FILE, while `history_compact` goes
+    ///    through `persist::write_atomic` - private temp file, rename -
+    ///    and needs only the DIRECTORY. A store left 0444, owned by a
+    ///    uid this daemon no longer runs as (one `sudo nzbfast` is
+    ///    enough) or holding an immutable flag is REPLACED by a file
+    ///    this daemon owns, so the append after it works too. The record
+    ///    is in `self.history` by construction here - the append just
+    ///    checked - so the rewrite's memory snapshot carries it;
+    ///  * both refuse, which is a data folder this daemon cannot write
+    ///    at all. Nothing is left to try, so `cost` names what the
+    ///    record loses at the next start. It is logged, and raised on
+    ///    the event ring so it reaches the dashboard rather than only a
+    ///    log file nobody is reading at 3am.
+    ///
+    /// `cost` is a closure because the ordinary path must not pay to
+    /// format a sentence nobody will read. Callers carry on either way:
+    /// a live daemon whose disk went read-only still has a queue to run,
+    /// and the in-memory record is correct - what was lost is its
+    /// survival across a restart.
+    pub(super) fn history_publish(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        cost: impl FnOnce() -> String,
+    ) -> HistWrite {
+        match self.history_upsert_if_present(job) {
+            HistWrite::Refused => {}
+            settled => return settled,
+        }
+        // The rewrite writes every live record, so a folder that is not
+        // coming back must not turn each job event into a full-store
+        // write: one attempt a minute after a failed one. A rewrite that
+        // LANDS clears nothing, because it heals the store and the next
+        // caller is back to appending.
+        let now = nzbkit::pool::now_ms();
+        let last = self.hist_rewrite_fail_ms.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < 60_000 {
+            error!(target: "queue", "history store refused the write - {}", cost());
+            return HistWrite::Refused;
+        }
+        if self.history_compact() {
+            return HistWrite::Wrote;
+        }
+        self.hist_rewrite_fail_ms
+            .store(now.max(1), Ordering::Relaxed);
+        let cost = cost();
+        error!(target: "queue", "history store refused the write - {cost}");
+        self.note_event("disk", format!("history not saved - {cost}"));
+        HistWrite::Refused
+    }
+
+    /// [`Daemon::history_publish`] with the ordinary cost sentence, for
+    /// the callers whose whole loss is "this change goes back to the
+    /// line already in the store at the next start" - a media chip, a
+    /// verdict a later pass will reach again, a password.
+    ///
+    /// `what` names the change from the user's side, so the log line
+    /// reads as a consequence rather than as a stack of field names.
+    /// The callers that owe a SHARPER sentence - the movers, whose
+    /// refused line leaves the record pointing at a folder the payload
+    /// has left - call `history_publish` directly and name both paths.
+    pub(super) fn history_publish_change(&self, job: &Arc<Mutex<Job>>, what: &str) -> HistWrite {
+        self.history_publish(job, || {
+            format!(
+                "{}: {what} did not reach the store - a restart undoes the change",
+                job.lock_ok().name
+            )
+        })
+    }
+
+    /// `history_publish` for the three callers that publish a MOVED
+    /// payload's new folder: the mover step, its redrive, and the
+    /// unlock re-run whose `finalize_names` relocated the files.
+    ///
+    /// Their loss is the sharp one, which is why they get a sentence of
+    /// their own. The other refusals here cost a field the next pass
+    /// re-derives; this one leaves the record naming a folder the
+    /// payload has left, and the row - and the delete, retry, play and
+    /// *arr import that read it - points at nothing from the next start
+    /// on. `from` is where the record said the files were, `to` where
+    /// they went (None when nothing moved after all).
+    ///
+    /// Moving the bytes back was considered and rejected: a second bulk
+    /// copy that can itself fail part way turns a record with the wrong
+    /// path into a payload split across two folders, which is the worse
+    /// state - it is the one `move_split` exists to warn about.
+    pub(super) fn history_publish_move(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        from: &std::path::Path,
+        to: Option<&std::path::Path>,
+    ) -> HistWrite {
+        self.history_publish(job, || {
+            let name = job.lock_ok().name.clone();
+            match to {
+                Some(dest) => format!(
+                    "{name}: the payload moved to {} but its history row still says \
+                     {} - after a restart the row points at a folder the files have \
+                     left",
+                    dest.display(),
+                    from.display()
+                ),
+                None => format!(
+                    "{name}: the move outcome did not reach the store - a restart \
+                     undoes the change"
+                ),
+            }
+        })
     }
 
     /// §158 item 7: a park's history row, written BEFORE the row leaves
@@ -1020,6 +1176,109 @@ mod store_tests {
                 "round {round}: the deleted record came back"
             );
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A store that refuses the append is REWRITTEN instead, and the
+    /// record survives the restart.
+    ///
+    /// The asymmetry M5 turned up is physical: the append needs write
+    /// permission on `history.jsonl` itself, while the rewrite renames
+    /// a fresh private file over it and needs only the directory. So a
+    /// store left 0444 - or owned by a uid this daemon no longer runs
+    /// as, one `sudo nzbfast` being enough to arrange that - loses every
+    /// mutation until someone notices, and the way out is a path the
+    /// daemon already has. It heals, too: the file that ends up there
+    /// is one this daemon owns, so the next append is ordinary.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_append_is_published_by_the_rewrite_instead() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("refused");
+        let d = test_daemon(&dir);
+        let job = filed(&d, "movedjob");
+        assert!(d.history_upsert(std::slice::from_ref(&job)));
+
+        let store = d.history_store_path();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o444)).unwrap();
+        job.lock_ok().out_dir = "/nas/Some.Release".into();
+        let out = d.history_publish_move(
+            &job,
+            std::path::Path::new("/tmp/o"),
+            Some(std::path::Path::new("/nas/Some.Release")),
+        );
+        // Restored first, so a failing assertion cannot leave an
+        // unwritable file behind for the next run.
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(out, HistWrite::Wrote, "the rewrite had to stand in");
+        let (rows, _) = d.history_replay();
+        assert_eq!(
+            rows.iter()
+                .find(|j| j.nzo_id == "movedjob")
+                .map(|j| j.out_dir.clone()),
+            Some("/nas/Some.Release".into()),
+            "the moved payload's new folder never reached the store"
+        );
+        assert_eq!(mode, 0o600, "the replacement must be the private one");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ...and when the DIRECTORY is unwritable too there is nothing left
+    /// to try, so the caller is told rather than reassured.
+    ///
+    /// The rewrite is a fallback, not a guarantee: it fails exactly
+    /// where a full volume, a read-only mount or a data folder this uid
+    /// cannot write fails. `Refused` is what the movers' log line and
+    /// the event ring hang off.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_no_rewrite_can_reach_answers_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("norewrite");
+        let d = test_daemon(&dir);
+        let job = filed(&d, "stuck");
+        assert!(d.history_upsert(std::slice::from_ref(&job)));
+
+        let store = d.history_store_path();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let out = d.history_publish_change(&job, "the media chip");
+        std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(out, HistWrite::Refused);
+        // ...and the next refusal inside the minute does not pay for a
+        // second whole-store rewrite. The record is unchanged either
+        // way; what this pins is that the guard, not the disk, is what
+        // answers.
+        assert!(
+            d.hist_rewrite_fail_ms.load(Ordering::Relaxed) > 0,
+            "a failed rewrite has to arm the guard"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A record that left history while its caller was working is not a
+    /// refusal, and must not be reported as one.
+    ///
+    /// This is the ordinary mover/unlock/prober race - a delete pulling
+    /// the row - and the whole reason the guard exists. A bool could not
+    /// tell it from a store that refused the line, so every caller that
+    /// logged on false logged the daemon's healthy races too.
+    #[test]
+    fn a_deleted_record_answers_absent_not_refused() {
+        let dir = tmp("absent");
+        let d = test_daemon(&dir);
+        let job = filed(&d, "gone");
+        assert!(d.history_upsert(std::slice::from_ref(&job)));
+        d.history.lock_ok().retain(|j| !Arc::ptr_eq(j, &job));
+
+        assert_eq!(
+            d.history_publish_change(&job, "the media chip"),
+            HistWrite::Absent
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

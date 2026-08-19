@@ -128,10 +128,12 @@ impl Daemon {
             .get(category)
             .map(|m| m.script.clone())
             .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| self.script.lock_ok().clone())
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-            .unwrap_or_default();
+            .map(|s| nzbget_script::script_chain(&s))
+            .unwrap_or_else(|| self.scripts.lock_ok().clone())
+            .iter()
+            .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join(",");
         // The pp the CALLER asked for, so a policy can branch on the
         // requested post-processing mode (SAB's contract). "" = the add
         // named none. Recording it on the job still happens after the
@@ -199,23 +201,31 @@ impl Daemon {
         // `script=` add param. A path-bearing value stays as written -
         // the operator installed the hook, the hook may name a path.
         // An unknown bare name is a logged compat note, never a broken
-        // override.
+        // override. §192: the answer may be a CHAIN, and each link goes
+        // through the same rule, so a hook can select an ordered list
+        // the same way the setting does.
         if let Some(s) = v.script.take() {
-            v.script = if s.eq_ignore_ascii_case("none") || s.contains('/') || s.contains('\\') {
+            v.script = if s.eq_ignore_ascii_case("none") {
                 Some(s)
             } else {
-                match self.known_scripts().into_iter().find(|(n, _)| *n == s) {
-                    Some((_, p)) => Some(p.to_string_lossy().into_owned()),
-                    None => {
-                        warn!(
+                let mut out: Vec<String> = Vec::new();
+                for link in nzbget_script::script_chain(&s) {
+                    let link = link.to_string_lossy().into_owned();
+                    if link.contains('/') || link.contains('\\') {
+                        out.push(link);
+                        continue;
+                    }
+                    match self.known_scripts().into_iter().find(|(n, _)| *n == link) {
+                        Some((_, p)) => out.push(p.to_string_lossy().into_owned()),
+                        None => warn!(
                             target: "prequeue",
-                            "{nzo_id}: pre-queue script named {s:?}, which is not \
-                             configured on this daemon - keeping the category/global \
-                             script"
-                        );
-                        None
+                            "{nzo_id}: pre-queue script named {link:?}, which is not \
+                             configured on this daemon - it is dropped from the \
+                             chain this add will run"
+                        ),
                     }
                 }
+                (!out.is_empty()).then(|| out.join(","))
             };
         }
         if let Some(g) = &v.group {

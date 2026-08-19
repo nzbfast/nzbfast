@@ -194,16 +194,19 @@ impl Daemon {
                 Some(src) => src.to_string_lossy().to_string(),
                 None => String::new(),
             };
-            if let Some(dest) = moved {
-                j.filed = j.tv_sort && is_season_dir(&dest);
-                j.out_dir = dest;
+            if let Some(dest) = &moved {
+                j.filed = j.tv_sort && is_season_dir(dest);
+                j.out_dir = dest.clone();
             }
             // Arms the NEXT rung, or stops the ladder. The disarm above
             // ran before the attempt, so this is the only thing that
             // can leave a stamp behind.
             d.settle_move_attempt(&mut j);
             drop(j);
-            d.history_upsert_if_present(&job2);
+            // The mover's hazard exactly (see `mover_process`), plus
+            // the ladder's own stamps: without them a restart retries a
+            // move that already landed.
+            d.history_publish_move(&job2, &out_dir, moved.as_deref());
             d.save_queue();
         });
         true

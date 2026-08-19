@@ -1358,3 +1358,860 @@ async fn a_read_the_index_could_not_answer_is_an_error_not_an_empty_feed() {
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// TODO 187: a TV id parameter is either HONOURED or REFUSED - never
+/// dropped on the floor.
+///
+/// The fault this pins was measured against the live daemon on 1.1.5:
+/// `t=tvsearch&tvdbid=121361&season=1&ep=1` and
+/// `t=tvsearch&tvdbid=999999999&season=1&ep=1` answered with the SAME
+/// 100 items, because the facade read `imdbid` and `tmdbid` and nothing
+/// else. A client cannot tell that dump from a set of matches - it asked
+/// about one series and got every series' first episode - so the one
+/// answer we must never give is an unfiltered list. Ids we can resolve
+/// (`imdbid`, and `tvmazeid` through the TVmaze show id the enricher
+/// records) filter; ids we hold no mapping for at all (`tvdbid`, `rid`)
+/// are an <error>.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_tv_id_params_are_honoured_or_refused() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nnids-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    // Two series, so an id that resolves to one of them has something to
+    // exclude: an "it filtered" assertion over a single-series index
+    // passes just as well when nothing filtered at all.
+    let key = {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        for (n, stem) in [
+            "Cat.Show.S02E01.1080p",
+            "Cat.Show.S02E02.1080p",
+            "Dog.Show.S02E01.1080p",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let a = (n as u64 + 1) * 10;
+            ix.ingest(
+                "alt.binaries.teevee",
+                &[
+                    over(
+                        a,
+                        &format!("\"{stem}.rar\" yEnc (1/1)"),
+                        &format!("<{a}a@x>"),
+                        1000,
+                    ),
+                    over(
+                        a + 1,
+                        &format!("\"{stem}.par2\" yEnc (1/1)"),
+                        &format!("<{a}b@x>"),
+                        200,
+                    ),
+                ],
+                1_700_000_000,
+            )
+            .unwrap();
+        }
+        // The enriched title row the ids resolve through. Read the parse
+        // key off a release rather than spelling it here, so the seeded
+        // row is provably the one those releases carry.
+        let (cards, _) = ix
+            .browse_cards(
+                &nzbkit::index::BrowseQuery {
+                    q: "Cat.Show".into(),
+                    limit: 1,
+                    ..Default::default()
+                },
+                nzbkit::index::CardSort::Latest,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        let key = cards[0].title_key.clone();
+        ix.title_seed(&key, "tv", "Cat Show", 0).unwrap();
+        ix.title_fill(
+            &key,
+            &nzbkit::index::TitleFill {
+                // `tmdb_id` carries the TVmaze SHOW id on a TV row - the
+                // same column, a different numbering scheme, which is
+                // why the tvmaze resolver has to filter on kind.
+                tmdb_id: 4242,
+                imdb: "tt0090001",
+                ..Default::default()
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        key
+    };
+    assert!(key.starts_with("t:"), "not a TV parse key: {key}");
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // Baseline: unfiltered, this index answers with all three.
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Show");
+        assert_eq!(items(&body), 3, "{body}");
+
+        // ---- ids we hold: they FILTER --------------------------------
+        let (code, body) = http_get(port, "/api?t=tvsearch&imdbid=tt0090001");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            items(&body),
+            2,
+            "imdbid did not narrow to one series: {body}"
+        );
+        assert!(
+            !body.contains("Dog.Show"),
+            "another series leaked in: {body}"
+        );
+
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=4242&season=2&ep=1");
+        assert_eq!(items(&body), 1, "tvmazeid + SxxEyy: {body}");
+        assert!(body.contains("Cat.Show.S02E01"), "{body}");
+
+        // An id we hold nothing for is an EMPTY feed, never the index.
+        // This is the measured fault in its sharpest form: a nonsense id
+        // used to answer exactly what a real one did.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=999999&season=2&ep=1");
+        assert_eq!(items(&body), 0, "an unknown tvmazeid returned rows: {body}");
+        assert!(body.contains("total=\"0\""), "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&imdbid=tt9999999");
+        assert_eq!(items(&body), 0, "an unknown imdbid returned rows: {body}");
+
+        // ---- tvdbid: honoured, but promised only when held ----------
+        // The column is empty on this index, so caps must NOT offer the
+        // parameter. Sonarr switches to tvdbid the moment caps does, and
+        // against an empty column every series search would answer
+        // nothing - read as "this indexer has nothing", which is worse
+        // than the name search it would otherwise have run.
+        let (_, body) = http_get(port, "/api?t=caps");
+        assert!(
+            !body.contains("tvdbid"),
+            "caps promised tvdbid against an empty column: {body}"
+        );
+        // Honoured all the same, so an id we hold nothing for is an
+        // empty feed rather than a dump - the fault this whole test
+        // exists for.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=121361&season=2&ep=1");
+        assert_eq!(items(&body), 0, "an unknown tvdbid returned rows: {body}");
+        assert!(body.contains("total=\"0\""), "{body}");
+
+        // A TVmaze id is not a TMDB id even when it is the same number:
+        // one column holds both, so a movie-side param on a TV search
+        // must not resolve through it.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tmdbid=4242");
+        assert!(
+            body.contains("<error code=\"201\""),
+            "tmdbid on a tvsearch must be refused, not resolved: {body}"
+        );
+
+        // ---- ids we cannot speak at all: they REFUSE -----------------
+        // Distinct from the empty feeds above, and the distinction is
+        // the point: "we do not speak this id" is permanent and belongs
+        // in an error, "we have nothing filed under it" is a fact about
+        // the catalogue that a client may retry tomorrow.
+        for q in [
+            "t=tvsearch&rid=1234&q=Show",
+            "t=tvsearch&tvrageid=1234&q=Show",
+            "t=movie&tvdbid=121361",
+        ] {
+            let (code, body) = http_get(port, &format!("/api?{q}"));
+            assert_eq!(code, 200, "newznab errors ride HTTP 200: {body}");
+            assert_eq!(items(&body), 0, "{q} was answered with a dump: {body}");
+            assert!(
+                body.contains("<error code=\"201\""),
+                "{q} must be refused by name, not ignored: {body}"
+            );
+        }
+        // Empty is not "sent": Sonarr omits a param it has no value for
+        // by sending it blank, and that must stay a plain search.
+        let (_, body) = http_get(port, "/api?t=tvsearch&rid=&q=Show");
+        assert_eq!(items(&body), 3, "a blank id refused a good search: {body}");
+
+        // ---- and caps say exactly what is honoured -------------------
+        let (_, body) = http_get(port, "/api?t=caps");
+        let tv = body
+            .lines()
+            .find(|l| l.contains("<tv-search"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(tv.contains("imdbid") && tv.contains("tvmazeid"), "{tv}");
+        assert!(
+            !tv.contains("rid,"),
+            "caps must never advertise a param the facade refuses: {tv}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 187, the other side of the caps gate: once the index actually
+/// holds TVDB ids, the facade advertises `tvdbid` and Sonarr's primary
+/// series lookup works.
+///
+/// The gate is data, not code, and that is deliberate. Sonarr switches
+/// to tvdbid the moment caps offers it, so the promise has to follow the
+/// column the enrichment backfill fills - never a release note. Its
+/// companion `newznab_tv_id_params_are_honoured_or_refused` pins the
+/// empty-column half: same facade, no promise.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_advertises_tvdbid_once_the_index_holds_them() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nntvdb-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        for (n, stem) in ["Cat.Show.S02E01.1080p", "Dog.Show.S02E01.1080p"]
+            .iter()
+            .enumerate()
+        {
+            let a = (n as u64 + 1) * 10;
+            ix.ingest(
+                "alt.binaries.teevee",
+                &[
+                    over(
+                        a,
+                        &format!("\"{stem}.rar\" yEnc (1/1)"),
+                        &format!("<{a}a@x>"),
+                        1000,
+                    ),
+                    over(
+                        a + 1,
+                        &format!("\"{stem}.par2\" yEnc (1/1)"),
+                        &format!("<{a}b@x>"),
+                        200,
+                    ),
+                ],
+                1_700_000_000,
+            )
+            .unwrap();
+        }
+        let (cards, _) = ix
+            .browse_cards(
+                &nzbkit::index::BrowseQuery {
+                    q: "Cat.Show".into(),
+                    limit: 1,
+                    ..Default::default()
+                },
+                nzbkit::index::CardSort::Latest,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        let key = cards[0].title_key.clone();
+        ix.title_seed(&key, "tv", "Cat Show", 0).unwrap();
+        // What the backfill lane writes after one exact TVmaze call.
+        ix.title_set_tvdb(&key, 81189).unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // The promise, now that it is true.
+        let (_, body) = http_get(port, "/api?t=caps");
+        let tv = body
+            .lines()
+            .find(|l| l.contains("<tv-search"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            tv.contains("tvdbid"),
+            "caps withheld a real capability: {tv}"
+        );
+        // ...and only on the TV side. A movie search has no TVDB id to
+        // resolve, so offering it there would be the same false promise
+        // in the other half of the index.
+        let movie = body
+            .lines()
+            .find(|l| l.contains("<movie-search"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(!movie.contains("tvdbid"), "{movie}");
+
+        // Sonarr's lookup: the id names the series, and the season/ep
+        // narrow within it.
+        let (code, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(items(&body), 1, "tvdbid did not resolve: {body}");
+        assert!(body.contains("Cat.Show.S02E01"), "{body}");
+        assert!(
+            !body.contains("Dog.Show"),
+            "another series leaked in: {body}"
+        );
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189&season=2&ep=1");
+        assert_eq!(items(&body), 1, "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189&season=9&ep=9");
+        assert_eq!(items(&body), 0, "{body}");
+
+        // An id we hold nothing for stays an empty feed even now that
+        // the parameter is advertised.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=999999999");
+        assert_eq!(items(&body), 0, "{body}");
+        assert!(body.contains("total=\"0\""), "{body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 187's second measurement: `q + season + ep` answering ZERO.
+///
+/// It is not a fault, and this test is here so nobody "fixes" it into
+/// one. The live probe asked for `Star Trek s04e04` against an index
+/// that held S04E01-E03; zero was the correct answer. An episode we DO
+/// hold narrows to exactly that episode, and an episode we do not hold
+/// is empty - never a fall back to the season, which would hand Sonarr
+/// twelve wrong grabs for the one it asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_episode_narrowing_is_exact() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nnep-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        for (n, stem) in ["Cat.Show.S04E01.1080p", "Cat.Show.S04E03.1080p"]
+            .iter()
+            .enumerate()
+        {
+            let a = (n as u64 + 1) * 10;
+            ix.ingest(
+                "alt.binaries.teevee",
+                &[
+                    over(
+                        a,
+                        &format!("\"{stem}.rar\" yEnc (1/1)"),
+                        &format!("<{a}a@x>"),
+                        1000,
+                    ),
+                    over(
+                        a + 1,
+                        &format!("\"{stem}.par2\" yEnc (1/1)"),
+                        &format!("<{a}b@x>"),
+                        200,
+                    ),
+                ],
+                1_700_000_000,
+            )
+            .unwrap();
+        }
+    }
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // The AIOStreams "Forced Query" shape, which is q + season + ep.
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Cat+Show");
+        assert_eq!(items(&body), 2, "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Cat+Show&season=4");
+        assert_eq!(items(&body), 2, "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Cat+Show&season=4&ep=1");
+        assert_eq!(items(&body), 1, "an episode we hold: {body}");
+        assert!(body.contains("S04E01"), "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Cat+Show&season=4&ep=3");
+        assert_eq!(items(&body), 1, "{body}");
+        assert!(body.contains("S04E03"), "{body}");
+        // The measured "zero", reproduced honestly: nothing to return.
+        let (_, body) = http_get(port, "/api?t=tvsearch&q=Cat+Show&season=4&ep=4");
+        assert_eq!(
+            items(&body),
+            0,
+            "the season leaked past the episode: {body}"
+        );
+        assert!(body.contains("total=\"0\""), "{body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// POST a JSON body and return (status, body). The id plumbing is only
+/// half readable from GETs: the wall's fix-match flow is a POST, and
+/// what it does to a title row is what the *arr surfaces then answer
+/// with.
+fn http_post_json(port: u16, req: &str, body: &str) -> (u16, String) {
+    let mut last = String::new();
+    for attempt in 0..5u32 {
+        let once = || -> std::io::Result<(u16, String)> {
+            let mut s = TcpStream::connect(("127.0.0.1", port))?;
+            write!(
+                s,
+                "POST {req} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            let mut out = String::new();
+            let read = s.read_to_string(&mut out);
+            if out.is_empty() {
+                return Err(read.err().unwrap_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "closed without answering",
+                    )
+                }));
+            }
+            let status: u16 = out
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            Ok((
+                status,
+                out.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
+            ))
+        };
+        match once() {
+            Ok(out) => return out,
+            Err(e) => {
+                last = e.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(
+                    100 * u64::from(attempt) + 50,
+                ));
+            }
+        }
+    }
+    panic!("daemon on :{port} never served POST {req}: {last}");
+}
+
+/// Ingest one 2-file release under `stem` at article base `a`.
+///
+/// Sized like a real post on purpose. `junk_score` puts any media-shaped
+/// stem under 10 MB at 55 - and an HD-tagged movie under 200 MB with it -
+/// which is over the wall's default 50 line, and the enricher's backfill
+/// queues only consider titles the wall would list. A 1 KB fixture is
+/// therefore invisible to every lane that reads `VISIBLE`, so a test
+/// about those lanes has to weigh something.
+fn seed_release(ix: &mut nzbkit::index::Index, a: u64, stem: &str) {
+    ix.ingest(
+        "alt.binaries.teevee",
+        &[
+            over(
+                a,
+                &format!("\"{stem}.rar\" yEnc (1/1)"),
+                &format!("<{a}a@x>"),
+                300 << 20,
+            ),
+            over(
+                a + 1,
+                &format!("\"{stem}.par2\" yEnc (1/1)"),
+                &format!("<{a}b@x>"),
+                1 << 20,
+            ),
+        ],
+        1_700_000_000,
+    )
+    .unwrap();
+}
+
+/// The parse key the index filed a release under, read back rather than
+/// spelled out - so the enriched row is provably the one those releases
+/// carry.
+fn key_of(ix: &nzbkit::index::Index, q: &str) -> String {
+    let (cards, _) = ix
+        .browse_cards(
+            &nzbkit::index::BrowseQuery {
+                q: q.into(),
+                limit: 1,
+                ..Default::default()
+            },
+            nzbkit::index::CardSort::Latest,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    cards
+        .first()
+        .unwrap_or_else(|| panic!("no card for {q}"))
+        .title_key
+        .clone()
+}
+
+/// The scratch daemon these id suites all run against.
+fn id_suite_daemon(dir: &Path, db: &Path) -> impl Fn(u16) -> Command + use<> {
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let (dir, db) = (dir.to_path_buf(), db.to_path_buf());
+    move |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(dir.join("config.json"))
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    }
+}
+
+/// Codex sweep 7, H2 + M4 + M1: what an external id means, over the wire.
+///
+/// `titles.tmdb_id` is one column carrying four unrelated numbering
+/// schemes, and until it recorded WHICH, `kind` was the only clue - so a
+/// TV row enriched by AniList (the keyless anime path: no API key, and
+/// the routine case for a romaji title TVmaze lacks) answered a Sonarr
+/// `tvmazeid=`, and a movie row enriched by OMDb - which writes the bare
+/// IMDb number into that column - answered a Radarr `tmdbid=`.
+///
+/// Three more things this pins, all of them about the same request:
+/// an id resolves to EVERY key filed under it (one show under two
+/// spellings is two keys, and answering with one of them hid the rest of
+/// the series); an id we cannot resolve does not throw away a `q` the
+/// client sent with it; and with no `q` it is still an empty feed, which
+/// is TODO 187's guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_ids_respect_their_namespace_and_reach_every_key() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nnns-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        for (n, stem) in [
+            "Cat.Show.S02E01.1080p",
+            "Cat.Show.S02E02.1080p",
+            "Cat.Show.The.Reckoning.S02E03.1080p",
+            "Anime.Show.S01E01.1080p",
+            "Dog.Show.S02E01.1080p",
+            "An.Omdb.Film.2010.1080p.BluRay.x264",
+        ]
+        .iter()
+        .enumerate()
+        {
+            seed_release(&mut ix, (n as u64 + 1) * 10, stem);
+        }
+        let fill = |ix: &nzbkit::index::Index, key: &str, kind: &str, id: i64, src: &str| {
+            ix.title_seed(key, kind, "x", 0).unwrap();
+            ix.title_fill(
+                key,
+                &nzbkit::index::TitleFill {
+                    tmdb_id: id,
+                    id_src: src,
+                    ..Default::default()
+                },
+                1_700_000_000,
+            )
+            .unwrap();
+        };
+        // One show, two spellings, two parse keys - and both enrich to
+        // the same TVmaze show id, which is exactly the shape the
+        // duplicate check's alias oracle is built on.
+        let cat = key_of(&ix, "Cat.Show.S02E01");
+        let cat_alt = key_of(&ix, "Reckoning");
+        assert_ne!(cat, cat_alt, "the two spellings collapsed into one key");
+        fill(&ix, &cat, "tv", 777, "tvmaze");
+        fill(&ix, &cat_alt, "tv", 777, "tvmaze");
+        // The keyless anime path: an AniList MEDIA id on a tv row.
+        fill(&ix, &key_of(&ix, "Anime.Show"), "tv", 4242, "anilist");
+        // The keyless movie path: OMDb has no TMDB id to give, so what
+        // lands here is the numeric half of the tconst.
+        fill(&ix, &key_of(&ix, "Omdb.Film"), "movie", 111_161, "omdb");
+    }
+
+    let d = serve(&dir, id_suite_daemon(&dir, &db)).await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // ---- M4: an id reaches every key filed under it --------------
+        let (code, body) = http_get(port, "/api?t=tvsearch&tvmazeid=777");
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(items(&body), 3, "half the show was unreachable: {body}");
+        for stem in ["Cat.Show.S02E01", "Cat.Show.S02E02", "Reckoning"] {
+            assert!(body.contains(stem), "{stem} missing from: {body}");
+        }
+        assert!(body.contains("total=\"3\""), "total disagreed: {body}");
+        assert!(!body.contains("Dog.Show"), "another series leaked: {body}");
+
+        // ---- H2: an AniList media id is not a TVmaze show id ---------
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=4242");
+        assert_eq!(
+            items(&body),
+            0,
+            "an AniList id answered a tvmazeid lookup: {body}"
+        );
+        assert!(body.contains("total=\"0\""), "{body}");
+
+        // ---- H2, movie side: an IMDb number is not a TMDB id ---------
+        let (_, body) = http_get(port, "/api?t=movie&tmdbid=111161");
+        assert_eq!(
+            items(&body),
+            0,
+            "an OMDb-supplied IMDb number answered a tmdbid lookup: {body}"
+        );
+
+        // ---- M1: an unresolved id does not discard the query ---------
+        // Our coverage of an id namespace is not the client's problem:
+        // it asked for a series BY NAME as well, and we hold it.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=4242&q=Anime+Show");
+        assert_eq!(items(&body), 1, "the q was thrown away with the id: {body}");
+        assert!(body.contains("Anime.Show.S01E01"), "{body}");
+        assert!(
+            !body.contains("Cat.Show"),
+            "the fallback ran unfiltered: {body}"
+        );
+        let (_, body) = http_get(port, "/api?t=movie&tmdbid=111161&q=Omdb+Film");
+        assert_eq!(items(&body), 1, "{body}");
+        assert!(body.contains("An.Omdb.Film"), "{body}");
+
+        // ...and with NO query it is still an empty feed. That refusal
+        // is TODO 187's guard, and a bare season/ep is not a query: it
+        // narrows an id search, it does not replace one.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=999999");
+        assert_eq!(items(&body), 0, "{body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=999999&season=2&ep=1");
+        assert_eq!(items(&body), 0, "a season/ep became a search: {body}");
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=999999&q=+");
+        assert_eq!(items(&body), 0, "a blank q became a search: {body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex sweep 7, M1: the `tvdbid` promise follows COVERAGE, not the
+/// first row to land.
+///
+/// The caps gate is data rather than code on purpose (TODO 187), but it
+/// asked `EXISTS(tvdb > 0)` while the data behind it is filled six rows
+/// at a time by an idle backfill lane. So one id anywhere flipped the
+/// promise on for the whole catalogue, and Sonarr - which switches to
+/// tvdbid the moment caps offers it - then asked about every series the
+/// lane had not reached yet and was told the indexer has nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_promises_tvdbid_only_once_the_backfill_has_drained() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nndrain-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        for (n, stem) in ["Cat.Show.S02E01.1080p", "Dog.Show.S02E01.1080p"]
+            .iter()
+            .enumerate()
+        {
+            seed_release(&mut ix, (n as u64 + 1) * 10, stem);
+        }
+        for (q, tvdb) in [("Cat.Show", 81189), ("Dog.Show", 0)] {
+            let key = key_of(&ix, q);
+            ix.title_seed(&key, "tv", "x", 0).unwrap();
+            // Enriched by TVmaze, so both rows carry the show id the
+            // backfill lane would ask WITH - the state that makes the
+            // second one queued rather than unaskable.
+            ix.title_fill(
+                &key,
+                &nzbkit::index::TitleFill {
+                    tmdb_id: 700 + tvdb,
+                    id_src: "tvmaze",
+                    ..Default::default()
+                },
+                1_700_000_000,
+            )
+            .unwrap();
+            if tvdb > 0 {
+                ix.title_set_tvdb(&key, tvdb).unwrap();
+            }
+        }
+    }
+
+    let d = serve(&dir, id_suite_daemon(&dir, &db)).await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let (_, body) = http_get(port, "/api?t=caps");
+        let tv = body
+            .lines()
+            .find(|l| l.contains("<tv-search"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !tv.contains("tvdbid"),
+            "caps promised tvdbid with the backfill still running: {tv}"
+        );
+        // Honoured all the same - the promise can only ever be narrower
+        // than what the search path delivers, never wider.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189");
+        assert_eq!(items(&body), 1, "{body}");
+        assert!(body.contains("Cat.Show.S02E01"), "{body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex sweep 7, M3: correcting a card's identity drops the TVDB id
+/// that belonged to the series it USED to be.
+///
+/// `title_fill` never writes `tvdb` by design - one writer, the lane
+/// that asked TVmaze - and the wall's candidate arm fills without
+/// resetting. So a card corrected from series A to series B kept A's
+/// TVDB id: `tvdbid=<A>` handed Sonarr B's releases, `tvdbid=<B>`
+/// answered nothing, and the row could never heal itself because the
+/// backfill queue wants `tvdb_tried = 0 AND tvdb = 0`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wall_identity_correction_drops_the_superseded_tvdb_id() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nnfix-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    let key = {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        seed_release(&mut ix, 10, "Cat.Show.S02E01.1080p");
+        let key = key_of(&ix, "Cat.Show");
+        ix.title_seed(&key, "tv", "Cat Show", 0).unwrap();
+        ix.title_fill(
+            &key,
+            &nzbkit::index::TitleFill {
+                tmdb_id: 777,
+                id_src: "tvmaze",
+                ..Default::default()
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        ix.title_set_tvdb(&key, 81189).unwrap();
+        key
+    };
+
+    let d = serve(&dir, id_suite_daemon(&dir, &db)).await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // The row as the backfill lane left it.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189");
+        assert_eq!(items(&body), 1, "{body}");
+
+        // A human presses a candidate in the wall's fix-match list: this
+        // card is not Cat Show, it is Dog Show. The provider id moves.
+        let (code, body) = http_post_json(
+            port,
+            "/api?mode=wall_fix",
+            &format!(
+                "{{\"key\":{},\"kind\":\"tv\",\"title\":\"Dog Show\",\"year\":0,\
+                  \"meta\":{{\"id\":888,\"provider\":\"tvmaze\",\"overview\":\"\",\
+                  \"rating\":0,\"genres\":\"\",\"poster_url\":\"\",\"backdrop_url\":\"\",\
+                  \"imdb\":\"\",\"air_date\":\"\"}}}}",
+                serde_json::to_string(&key).unwrap()
+            ),
+        );
+        assert_eq!(code, 200, "{body}");
+        assert!(
+            body.contains("\"status\":true"),
+            "the fix was refused: {body}"
+        );
+
+        // The superseded id must no longer name this card. Answering
+        // with it is the fault: Sonarr asked about the series that
+        // really is 81189 and would have been handed Dog Show's grabs.
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvdbid=81189");
+        assert_eq!(
+            items(&body),
+            0,
+            "the old series' tvdbid still resolves to this card: {body}"
+        );
+        assert!(body.contains("total=\"0\""), "{body}");
+
+        // ...and the NEW provider id is filed under the namespace the
+        // candidate came from. The endpoint has always handed the
+        // candidate's `provider` to the UI and always taken it back in
+        // this payload; it simply dropped it on the way to the column,
+        // leaving an unlabelled id (Codex sweep 7, H2).
+        let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=888");
+        assert_eq!(items(&body), 1, "the corrected id did not resolve: {body}");
+        assert!(body.contains("Cat.Show.S02E01"), "{body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

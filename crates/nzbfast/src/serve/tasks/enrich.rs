@@ -60,6 +60,55 @@ pub(in crate::serve) fn lane_kind(kind: &str) -> crate::wall::Kind {
     }
 }
 
+/// How many keys in backoff one over-fetch is willing to see past. A
+/// bound on the query, not a policy: past a couple of hundred the lane
+/// is not starved, it is offline.
+#[cfg(feature = "indexer")]
+const OVER_FETCH_CAP: usize = 200;
+
+/// The rows a lane may actually work this pass, drawn through `fetch`.
+///
+/// Asking for exactly `want` and filtering afterwards is starvation, not
+/// a rounding error, and the shape of these queues is what makes it one:
+/// every lane's priority order is head-stable, and a row only leaves the
+/// set when a provider ANSWERS about it. So `want` permanently
+/// unanswerable rows at the head - a TVmaze 404, a merged show id -
+/// occupy the whole batch on every pass forever, and the eligible rows
+/// behind them are never even fetched. A transient outage does the same
+/// thing for up to the backoff ceiling (Codex sweep 7, M2: the TVDB
+/// queue was the one lane still filtering after its LIMIT).
+///
+/// So: over-fetch by the number of keys currently in backoff, drop those,
+/// and take `want` of what is left.
+#[cfg(feature = "indexer")]
+fn eligible_batch<T>(
+    want: usize,
+    unreached: &std::collections::HashMap<String, (u32, std::time::Instant)>,
+    now: std::time::Instant,
+    key: impl Fn(&T) -> &str,
+    fetch: impl FnOnce(u32) -> Vec<T>,
+) -> Vec<T> {
+    let rows = fetch(want as u32 + unreached.len().min(OVER_FETCH_CAP) as u32);
+    eligible(rows, unreached, now, key, want)
+}
+
+/// The eligibility half on rows already in hand - the viewport queue,
+/// which is a set of cards on screen rather than a priority order, so
+/// nothing at its head can starve anything behind it.
+#[cfg(feature = "indexer")]
+fn eligible<T>(
+    rows: Vec<T>,
+    unreached: &std::collections::HashMap<String, (u32, std::time::Instant)>,
+    now: std::time::Instant,
+    key: impl Fn(&T) -> &str,
+    want: usize,
+) -> Vec<T> {
+    rows.into_iter()
+        .filter(|r| unreached.get(key(r)).is_none_or(|(_, next)| *next <= now))
+        .take(want)
+        .collect()
+}
+
 #[cfg(feature = "indexer")]
 pub(in crate::serve) fn wall_enrich_lane(
     d: Arc<Daemon>,
@@ -122,58 +171,110 @@ pub(in crate::serve) fn wall_enrich_lane(
             d.with_index(|ix| ix.titles_hot(&hot_keys, lane).ok())
                 .unwrap_or_default()
         };
+        let now_i = std::time::Instant::now();
+        // Batch of 12 (was 6): fewer db round-trips, and it costs
+        // nothing in pacing - the per-title sleeps are gone, the rate
+        // now lives in the per-provider buckets, which do not care how
+        // many titles a batch holds. A fresh priority order is re-read
+        // every batch anyway.
         let batch: Vec<_> = if !hot.is_empty() {
             {
                 let mut q = d.enrich_hot.lock_ok();
                 q.retain(|k| !hot.iter().any(|t| &t.key == k));
             }
-            hot
+            eligible(
+                hot,
+                &unreached,
+                now_i,
+                |r: &nzbkit::index::TitleRow| r.key.as_str(),
+                12,
+            )
         } else {
-            d
-                // Batch of 12 (was 6): fewer db round-trips, and it costs
-                // nothing in pacing - the per-title sleeps are gone, the
-                // rate now lives in the per-provider buckets, which do
-                // not care how many titles a batch holds. A fresh
-                // priority order is re-read every batch anyway.
-                //
-                // Over-fetched by the number of keys currently in
-                // backoff, so a run of skipped rows at the head of the
-                // priority order cannot starve the eligible rows
-                // behind them.
-                .with_index(|ix| {
-                    ix.titles_pending_lane(12 + unreached.len().min(200) as u32, lane)
-                        .ok()
-                })
-                .unwrap_or_default()
+            eligible_batch(
+                12,
+                &unreached,
+                now_i,
+                |r: &nzbkit::index::TitleRow| r.key.as_str(),
+                |n| {
+                    d.with_index(|ix| ix.titles_pending_lane(n, lane).ok())
+                        .unwrap_or_default()
+                },
+            )
         };
-        let now_i = std::time::Instant::now();
-        let batch: Vec<_> = batch
-            .into_iter()
-            .filter(|r| unreached.get(&r.key).is_none_or(|(_, next)| *next <= now_i))
-            .take(12)
-            .collect();
         if batch.is_empty() {
+            // TODO 187: idle time also fills the TVDB ids the newznab
+            // facade's `tvdbid` search resolves through. Shows lane
+            // only - nothing else has one - and one exact
+            // `/shows/<tvmaze id>` GET per row rather than a search,
+            // because the row already carries the id that names the
+            // show. It retires itself once every show has been asked,
+            // and until it has run at least once the facade does not
+            // advertise the parameter at all.
+            let mut did_tvdb = false;
+            if lane == nzbkit::index::Lane::Shows {
+                // Over-fetched then filtered, like its sibling lanes -
+                // it used to be the one queue that took its six rows
+                // first and skipped them afterwards, so six shows TVmaze
+                // permanently 404s on pinned the lane for good (Codex
+                // sweep 7, M2).
+                let tv = eligible_batch(
+                    6,
+                    &unreached,
+                    now_i,
+                    |r: &nzbkit::index::TitleRow| r.key.as_str(),
+                    |n| {
+                        d.with_index(|ix| ix.titles_missing_tvdb(n).ok())
+                            .unwrap_or_default()
+                    },
+                );
+                did_tvdb = !tv.is_empty();
+                let _busy = d.busy.hold("enriching");
+                for row in tv {
+                    crate::wall::clear_unreachable();
+                    match crate::wall::tvmaze_tvdb_id(row.tmdb_id) {
+                        // An answer, id or no id. Recorded either way:
+                        // "TVmaze publishes none for this show" is what
+                        // stops the lane returning to it forever.
+                        Some(id) => {
+                            unreached.remove(&row.key);
+                            let _ = d.with_index(|ix| ix.title_set_tvdb(&row.key, id).ok());
+                        }
+                        // Not an answer. tvdb_tried is as permanent as
+                        // the enricher's checked stamp, so a row we
+                        // could not reach a provider for must stay
+                        // eligible rather than be retired unasked.
+                        None => {
+                            let fails = unreached.get(&row.key).map_or(0, |(n, _)| *n) + 1;
+                            unreached.insert(row.key.clone(), (fails, backoff_after(fails)));
+                        }
+                    }
+                }
+            }
             // Idle time goes on backfilling release dates onto titles
             // enriched before we stored them - otherwise the wall's
             // release-date sort would only ever work for titles indexed
             // from this version on, and an existing library would sort by
             // year forever. Only the date column is written, so artwork
             // and any hand-corrected metadata are left alone.
-            let back: Vec<_> = d
-                .with_index(|ix| {
-                    ix.titles_missing_date(6 + unreached.len().min(200) as u32, lane)
-                        .ok()
-                })
-                .unwrap_or_default()
-                .into_iter()
-                // Same backoff as the enrichment batch above: a title
-                // whose backfill could not reach a provider waits its
-                // turn instead of being re-asked every pass.
-                .filter(|r| unreached.get(&r.key).is_none_or(|(_, next)| *next <= now_i))
-                .take(6)
-                .collect();
+            // Same backoff as the enrichment batch above: a title whose
+            // backfill could not reach a provider waits its turn instead
+            // of being re-asked every pass.
+            let back = eligible_batch(
+                6,
+                &unreached,
+                now_i,
+                |r: &nzbkit::index::TitleRow| r.key.as_str(),
+                |n| {
+                    d.with_index(|ix| ix.titles_missing_date(n, lane).ok())
+                        .unwrap_or_default()
+                },
+            );
             if back.is_empty() {
-                if !stop.sleep(std::time::Duration::from_secs(15)) {
+                // Only idle when BOTH passes had nothing: a tvdb pass
+                // that just drained six rows should come straight back
+                // for the next six, not wait 15s per batch and take
+                // hours to make the facade's promise true.
+                if !did_tvdb && !stop.sleep(std::time::Duration::from_secs(15)) {
                     return;
                 }
                 continue;
@@ -341,7 +442,11 @@ pub(in crate::serve) fn wall_enrich_lane(
                             let w = wiki.unwrap_or_default();
                             if imdb.is_some() || !w.extract.is_empty() || !w.image.is_empty() {
                                 m = Some(wall::TitleMeta {
+                                    // A Wikipedia-only card: no provider
+                                    // resolved an id, so there is no
+                                    // namespace to record either.
                                     tmdb_id: 0,
+                                    id_src: String::new(),
                                     overview: w.extract,
                                     rating: 0.0,
                                     genres: String::new(),
@@ -414,6 +519,9 @@ pub(in crate::serve) fn wall_enrich_lane(
                                 &row.key,
                                 &nzbkit::index::TitleFill {
                                     tmdb_id: m.tmdb_id,
+                                    // The id is unreadable without it -
+                                    // see TitleFill::id_src.
+                                    id_src: &m.id_src,
                                     overview: &m.overview,
                                     rating: m.rating,
                                     genres: &m.genres,
@@ -1040,5 +1148,113 @@ pub(in crate::serve) fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                 }
             }
         });
+    }
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod eligibility_tests {
+    use super::{eligible, eligible_batch};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    /// A backoff map holding `keys`, none of them due for a long while.
+    fn backing_off(keys: &[&str]) -> HashMap<String, (u32, Instant)> {
+        let next = Instant::now() + Duration::from_secs(3_600);
+        keys.iter().map(|k| ((*k).to_string(), (1, next))).collect()
+    }
+
+    /// Codex sweep 7, M2: a run of skipped rows at the HEAD of a lane's
+    /// priority order must not starve the eligible rows behind them.
+    ///
+    /// The queues this draws from are head-stable - the order is fixed
+    /// and a row only leaves the set when a provider answers about it -
+    /// so a batch fetched at exactly the batch size and filtered
+    /// afterwards is not merely thinner, it is empty on every pass
+    /// forever. Permanently unanswerable heads are ordinary: TVmaze
+    /// 404s a show it has dropped, and returns another show's payload
+    /// for a merged id, and both are `None` for good.
+    #[test]
+    fn a_blocked_head_does_not_starve_the_queue_behind_it() {
+        // Six unanswerable rows at the head of a queue of thirty.
+        let queue: Vec<String> = (0..30).map(|i| format!("t:show {i:02}")).collect();
+        let unreached = backing_off(&[
+            "t:show 00",
+            "t:show 01",
+            "t:show 02",
+            "t:show 03",
+            "t:show 04",
+            "t:show 05",
+        ]);
+        let mut asked = 0u32;
+        let got = eligible_batch(
+            6,
+            &unreached,
+            Instant::now(),
+            |r: &String| r.as_str(),
+            |n| {
+                asked = n;
+                queue.iter().take(n as usize).cloned().collect()
+            },
+        );
+        assert_eq!(asked, 12, "the fetch was not over-fetched past the backoff");
+        assert_eq!(
+            got,
+            [
+                "t:show 06",
+                "t:show 07",
+                "t:show 08",
+                "t:show 09",
+                "t:show 10",
+                "t:show 11"
+            ],
+            "the lane worked nothing at all behind its blocked head"
+        );
+    }
+
+    /// The over-fetch is bounded, and an empty backoff map costs
+    /// nothing: the ordinary pass asks for exactly what it wants.
+    #[test]
+    fn the_over_fetch_is_bounded_and_free_when_nothing_is_backing_off() {
+        let mut asked = 0u32;
+        let _: Vec<String> = eligible_batch(
+            6,
+            &HashMap::new(),
+            Instant::now(),
+            |r: &String| r.as_str(),
+            |n| {
+                asked = n;
+                Vec::new()
+            },
+        );
+        assert_eq!(asked, 6);
+
+        let many: Vec<&str> = Vec::new();
+        let mut unreached = backing_off(&many);
+        let next = Instant::now() + Duration::from_secs(3_600);
+        for i in 0..500 {
+            unreached.insert(format!("k{i}"), (1, next));
+        }
+        let _: Vec<String> = eligible_batch(
+            6,
+            &unreached,
+            Instant::now(),
+            |r: &String| r.as_str(),
+            |n| {
+                asked = n;
+                Vec::new()
+            },
+        );
+        assert_eq!(asked, 6 + super::OVER_FETCH_CAP as u32);
+    }
+
+    /// A backoff whose wait has EXPIRED is not a skip - that is what
+    /// lets a title retried after an outage back into the queue.
+    #[test]
+    fn an_expired_backoff_is_eligible_again() {
+        let mut unreached = backing_off(&["t:a"]);
+        unreached.insert("t:b".into(), (3, Instant::now() - Duration::from_secs(60)));
+        let rows = vec!["t:a".to_string(), "t:b".to_string(), "t:c".to_string()];
+        let got = eligible(rows, &unreached, Instant::now(), |r: &String| r.as_str(), 9);
+        assert_eq!(got, ["t:b", "t:c"]);
     }
 }

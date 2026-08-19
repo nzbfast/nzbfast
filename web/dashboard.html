@@ -132,6 +132,21 @@ button.mini{padding:1px 7px;font-size:11.5px;line-height:1.5;margin-inline-start
    hover/focus, so this is a hint and not a disabled control. */
 button.dimbtn{opacity:.55}
 button.dimbtn:hover,button.dimbtn:focus-visible{opacity:1}
+/* §186c The row's own facts, on hover. A native title cannot lay out a
+   grid, waits about a second, and shows one string - this is the
+   drawer's headline set without the click, for the pointer that is
+   already resting on the name. pointer-events:none so it can never take
+   a click meant for the row under it, and it sits UNDER #ctxmenu: a
+   menu the user opened outranks a card that opened itself. */
+#histhov{position:fixed;z-index:68;max-width:min(460px,92vw);pointer-events:none;
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 14px 40px rgba(0,0,0,.45);padding:9px 11px;font-size:12.5px;line-height:1.45}
+#histhov .hn{font-weight:600;word-break:break-all;margin-bottom:6px}
+#histhov dl{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0}
+#histhov dt{color:var(--dim);font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.04em;padding-top:2px;white-space:nowrap}
+#histhov dd{margin:0;min-width:0;overflow-wrap:anywhere}
+#histhov .foot{color:var(--dim);margin-top:7px;font-size:11.5px}
 #ctxmenu{position:fixed;background:var(--surface);border:1px solid var(--line);border-radius:10px;
   padding:5px;z-index:99;min-width:220px;box-shadow:0 10px 34px rgba(0,0,0,.5)}
 #ctxmenu button{display:block;width:100%;text-align:start;background:none;color:var(--fg);
@@ -202,6 +217,21 @@ button.warn:hover{background:color-mix(in srgb,var(--warn) 12%,transparent)}
   font-variant-numeric:tabular-nums}
 .hero .num small{font-size:15px;color:var(--dim);font-weight:400}
 .hero .sub{color:var(--dim);font-size:13px;margin-bottom:4px}
+/* The equivalence line holds its row whether or not it has text in it:
+   a figure that appears the moment a download starts and vanishes when
+   it ends would otherwise resize the hero card twice per job. Height,
+   not visibility - an empty box costs one line and never shifts.
+
+   width:0 + min-width:100% is the horizontal half of the same promise,
+   and it is not optional. Full/Classic pin this column at 168px, but
+   DENSE lets it size to its content - so a line of nowrap text that
+   appears when a download starts was measured shoving the chart canvas
+   110px to the right, and back again when it ended. Zero specified
+   width keeps the text out of the column's intrinsic size; the
+   percentage min-width paints it across whatever the column settles
+   at. Same rule the fixed 168px above exists for. */
+.hero #speedEquiv{font-size:11px;line-height:14px;height:14px;margin-top:3px;
+  width:0;min-width:100%;overflow:hidden;white-space:nowrap}
 /* min-width:0, NOT width:100% - full-width made the canvas overflow the
    card to the right of its fixed-width sibling. */
 .hero .chartwrap{flex:1;min-width:0;height:88px}
@@ -422,6 +452,11 @@ body.nojobs #tiles,body.nojobs #usageCard,body.nojobs #pipecard{display:none}
    held in JS - so both copies always agree and neither one owns it. */
 .rolepick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 0}
 .rolepick button.on{border-color:var(--acc);color:var(--acc)}
+/* The preset the user is on. Same treatment the role picker and the
+   filter bar already use for "this one is selected", so the three
+   Classic/Full/Dense buttons stop being three identical unlit buttons
+   with nothing saying which is in force. */
+button[data-preset].on{border-color:var(--acc);color:var(--acc)}
 .rolerecs{margin:12px 0 0;border-top:1px solid var(--line);padding-top:4px}
 .roledone{font-size:12.5px;color:var(--dim);padding:6px 0 0}
 .rolelinks{display:flex;flex-wrap:wrap;gap:6px 14px;margin:10px 0 0;font-size:12.5px}
@@ -500,14 +535,24 @@ body:not(.noidx) .idxoff{display:none!important}
    control, draws a glyph, or teaches an operation: the caret and the
    ring point at the link, and the link is what the user still has
    tomorrow. */
-#layoutTip{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:var(--surface-2);
+#layoutTip,#evTip{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:var(--surface-2);
   border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12.5px;color:var(--dim);
   position:relative}
-#layoutTip b{color:var(--fg);font-weight:600}
-#layoutTip .lead{flex:1 1 220px;min-width:0;color:var(--fg)}
-#layoutTip .ok{flex:0 0 auto;font-size:12px;line-height:1.6;padding:2px 12px;cursor:pointer;
+#layoutTip b,#evTip b{color:var(--fg);font-weight:600}
+#layoutTip .lead,#evTip .lead{flex:1 1 220px;min-width:0;color:var(--fg)}
+#layoutTip .ok,#evTip .ok{flex:0 0 auto;font-size:12px;line-height:1.6;padding:2px 12px;cursor:pointer;
   border:1px solid var(--line);border-radius:99px;background:none;color:var(--dim)}
-#layoutTip .ok:hover{color:var(--fg);border-color:var(--acc)}
+#layoutTip .ok:hover,#evTip .ok:hover{color:var(--fg);border-color:var(--acc)}
+/* §U7 first-event marker callout. Shares the nudge's box because it is
+   the same kind of thing - one sentence, one dismissal, gone for good -
+   but it carries no caret: it sits directly under the chart it explains,
+   so there is nothing to point at. The key it holds is CLONED from
+   #evLegend rather than restated, so the colours and the words can never
+   drift apart, and it renders at the tip's own reading size instead of
+   the legend's 10px. It sits BELOW the chart in the card's flow and so
+   takes none of the chart's height. */
+#evTip{margin-top:8px}
+#evTip .evkey{flex:0 1 auto;color:var(--fg);font-size:12.5px}
 /* The caret sits under the link in the #layoutBar directly below, so the
    sentence and the door read as one gesture instead of as a notice
    floating above unrelated furniture. Its offset is MEASURED off that
@@ -550,6 +595,13 @@ body:not(.noidx) .idxoff{display:none!important}
 body.compact #dashview .card,#dashview .card.compact{padding:9px 11px}
 body.compact #dashview .card h3,#dashview .card.compact h3{margin:0 0 6px;font-size:11.5px}
 body.compact #dashview .hint,#dashview .card.compact .hint{display:none}
+/* U1: the sentences that explain a stalled bar survive Compact. The
+   activity line under a queue row's bar and the hold banner (#qspace)
+   are deliberately NOT .hint - the hint hide above drops secondary
+   prose, and these are the only place a stuck row says why. This pin
+   keeps the actline shown even if a tidy ever folds it into .hint;
+   #qspace shows and hides by inline style, so its guard is this note. */
+body.compact #dashview .actline,#dashview .card.compact .actline{display:block}
 body.compact #dashview{gap:9px}
 body.compact .tiles{gap:8px;grid-template-columns:repeat(auto-fit,minmax(118px,1fr))}
 body.compact .tile{padding:7px 10px}
@@ -602,15 +654,16 @@ body.dense #heroTiles>#heroCard{flex:1 1 50%;min-width:0;padding:8px 14px}
 body.dense #heroTiles>.tiles{flex:1 1 50%;min-width:0;align-content:center}
 /* A card is never allowed to paint over its column neighbour: wide
    tables scroll inside their own card instead (History's release names
-   were bleeding across the gutter). */
+   were bleeding across the gutter). The scroller's half of that is
+   general now - see .cardscroll further down - because a comfortable
+   card was bleeding in exactly the same way (§186). */
 body.dense #dashview .card{overflow:hidden}
-body.dense #dashview .cardscroll{overflow-x:auto}
 /* In a 360px column a release name cannot have the whole row: fixed
    table layout + ellipsis keeps one line per entry, and the name's own
    title attribute already carries the full text. Queue spans all
    columns, so it keeps its natural layout. */
 body.dense #histCard table,body.dense #browseCard table,body.dense #usageCard table{table-layout:fixed;width:100%}
-body.dense #histCard td,body.dense #browseCard td,body.dense #usageCard td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+body.dense #histCard td:not(.hacts),body.dense #browseCard td,body.dense #usageCard td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* ...but a drawer is a detail panel, not a row. The one-line rule above
    inherits into it, and `white-space:nowrap` beats the `word-break` on
    .histdet dd - so dense clipped the failure Reason at 188px of a
@@ -620,16 +673,45 @@ body.dense #histCard td,body.dense #browseCard td,body.dense #usageCard td{overf
 body.dense #histCard tr.drawer td,body.dense #browseCard tr.drawer td,body.dense #usageCard tr.drawer td{overflow:visible;text-overflow:clip;white-space:normal}
 body.dense #idx th:first-child{width:52%}
 body.dense #usageTbl th:first-child{width:40%}
-/* History: fixed layout splits leftover width evenly, which starved the
-   name next to the size column - the name is the row, give it the room. */
-body.dense #hist th:nth-child(2){width:55%}
+/* History in a 360px column: the size cell keeps its number and clips
+   the timing line under it (the drawer carries both), the button strip
+   keeps the width it needs, and the name is what gives way - the same
+   order of loss as every other width, just less of it to go round.
+   These were th:nth-child(2){width:55%}, which sizes whichever column
+   was last dragged into second place rather than the name. */
+body.dense #hist th.hsize{width:86px}
+body.dense #hist th.hacts{width:var(--hactw,132px)}
 body.dense .hero{align-items:center;gap:14px}
 body.dense .hero>div:first-child{width:auto;display:flex;align-items:baseline;gap:8px}
-body.dense .hero .num{font-size:22px}
+/* The judder guard from the comfortable hero, at dense's type. Dense
+   drops the 168px column pin above (label and number sit INLINE here,
+   and "Throughput" is a different width in every locale), so the
+   reservation goes on the number alone: without it a readout growing
+   "0.0" -> "112.4" shoved the chart canvas 27.5px sideways every tick.
+   104px clears the widest number-plus-unit any locale renders ("999.9
+   Mbit/s" in Cyrillic, measured 103.7px); min-width, not width, so a
+   short font metric elsewhere degrades to today rather than clipping. */
+body.dense .hero .num{font-size:22px;min-width:104px}
 body.dense .hero .num small{font-size:12px}
 body.dense .hero .sub{margin-bottom:0;font-size:11.5px}
 body.dense .hero .chartwrap{height:36px!important}
 body.dense #evLegend{display:none!important}
+/* U10's equivalence line goes the same way, and for a structural reason.
+   The rule up at .hero #speedEquiv reserves its row with width:0 +
+   min-width:100%, which is exactly right while the line is a block
+   UNDER the number: no intrinsic width, painted across whatever the
+   column settles at. Dense makes that column a horizontal flex row, so
+   the line becomes a third item BESIDE the number and the percentage
+   resolves against the column it is now inside - measured at 1280x900,
+   170px of "about 900 Mb/s" laid straight over the chart canvas.
+   Keeping it inline is not the fix either: the text exists only while a
+   download runs, so a content-sized slot next to the number moves the
+   chart every time a job starts or ends - the judder every fixed width
+   in this hero exists to prevent - and no one fixed slot fits a line
+   that is translated into 27 languages. The headline number carries the
+   rate anyway; dense drops the event key and the histogram on the same
+   grounds. */
+body.dense #speedEquiv{display:none}
 /* The speed histogram is a direct child wrap of the hero card (the
    speed chart's wrap sits inside .hero, so this cannot catch it). */
 body.dense #heroCard>.chartwrap{display:none!important}
@@ -713,7 +795,14 @@ body.dense #dashview .chgrip{display:none}
 .lane .lbl{color:var(--dim);text-transform:capitalize}
 .bar{height:9px;border-radius:5px;background:var(--surface-2);overflow:hidden}
 .bar i{display:block;height:100%;border-radius:5px;background:var(--acc);transition:width .5s ease}
-.actline{font-size:11.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+/* One line, ellipsized to the cell it sits in. width:0 keeps the nowrap
+   sentence out of the auto-layout width algorithm (a 60-char whyslow
+   clause would otherwise widen the Progress column to fit itself);
+   min-width:100% then fills whatever width the column actually got -
+   the th default or the user's stored colgroup width - so widening the
+   column widens the sentence. The old fixed max-width:150px cut phase
+   sentences to a few words no matter how wide the cell was. */
+.actline{font-size:11.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:0;min-width:100%}
 .lane.verify .bar i{background:var(--ok)}.lane.extract .bar i{background:var(--acc2)}
 .lane .note{color:var(--dim);font-variant-numeric:tabular-nums}
 /* Provider rows flow into columns so the card stays wide, not tall. */
@@ -1067,6 +1156,54 @@ button.hlp{background:transparent;padding:0;font-weight:600;transition:filter .1
 /* min-width:0 lets the flex item actually shrink, so the ellipsis can
    engage outside dense too instead of the name widening the table. */
 #hist .nmtxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* §186 A row is a width BUDGET, not a sum. Auto layout hands every
+   column its content minimum, and the name's minimum is the WHOLE name
+   - the nowrap above is what defeats the overflow-wrap:anywhere on the
+   cell - so the name kept its 841px at every window size and the size,
+   the timing line and the row's own buttons were pushed off the end:
+   28+841+235+132 = 1236 inside a 1202 card, with .cardscroll on
+   overflow-x:visible so nothing clipped or scrolled what hung out.
+   Fixed layout in EVERY mode (the 16 Aug version of this was
+   body.dense-scoped, so a reporter on Comfortable never saw a line of
+   it) makes the name the column that gives way instead: everything
+   else holds its width, the name ellipsises and hands the rest back.
+   It is the right one to lose and the only one - its full text is on
+   its own title, and the row opens a drawer that spells it out.
+   Widths ride CLASSES rather than :nth-child because the headings are
+   user-movable (colgrab): a positional rule sizes whichever column was
+   dragged into that slot. Plain px and plain % are also the only
+   widths the fixed algorithm takes here - min(), clamp() and a calc()
+   holding a percentage are all ignored, and the column silently falls
+   back to an even share of the leftover (measured 19 Aug). */
+#hist{table-layout:fixed}
+#hist th.hsize{width:240px}
+#hist th.hacts{width:var(--hactw,150px)}
+/* The ellipsis is on .nmtxt; this is the backstop for everything else
+   in the cell, clipped at its own column rather than painted over the
+   next one. */
+#hist td.hname{overflow:hidden}
+/* The width above is only the value before the strip has been measured.
+   A row carries three buttons, or four when it failed, or five with a
+   password on top, and a locale spells each of them out - Croatian
+   needs 202px of strip where English needs 132 - so the number that
+   belongs here is not knowable from a stylesheet. fitHistActs() sizes
+   --hactw from the buttons actually on screen, so they stay on ONE line
+   at any width that can hold them and the name pays for it.
+   The wrap is what is left when even that will not fit: past a floor of
+   name the column is capped and the strip takes a second line, which
+   costs a taller row. Dense's overflow:hidden did not FIT the strip, it
+   HID it - the one outcome worth avoiding. */
+#hist td.hacts{white-space:normal}
+/* Touch: every button is a 44px target under (pointer:coarse), so the
+   same three buttons need 169px there. */
+@media(pointer:coarse){#hist th.hacts{width:var(--hactw,176px)}}
+/* A floor under the table, so the name reduces but never vanishes: a
+   stored column width (the resize handles persist them) can outrun a
+   window narrowed afterwards, and past this the card scrolls sideways
+   instead of running the name down to nothing. Not on phones - there
+   the rows are stacked blocks, and a table min-width would put a
+   horizontal scrollbar under every one of them. */
+@media(min-width:641px){#hist{min-width:520px}body.dense #hist{min-width:320px}}
 /* Colour is opt-out (set.ui.histcolor): red/green on every row is a lot
    of colour for anyone who does not want status shouted at them. */
 body.histcolor #hist tbody tr.done .nmtxt{color:var(--ok)}
@@ -1112,6 +1249,13 @@ body.histcolor #hist tbody tr.fail .nmtxt{color:var(--bad)}
 .cardgrip.on::after,.cardgrip:focus-visible::after{
   background:repeating-linear-gradient(135deg,var(--acc) 0 1.5px,transparent 1.5px 4px)}
 @media not (pointer:fine){.cardgrip{display:none}}
+/* §186 The guard under every table in a card: a width budget that IS
+   blown - a column width the user stored at a wider window, a locale
+   needing more than the stylesheet reserved - becomes a sideways scroll
+   they can reach, never a row painting over the card's neighbour or off
+   the edge of it (History's action buttons hung 34px out of a 1202px
+   card, with nothing to clip or scroll them). */
+.cardscroll{overflow-x:auto}
 /* Card resize, for any card that grows with the number of things in it.
    The scroll goes on a WRAPPER, never on the table, and the card is a
    flex column - so the heading and controls stay put, the wrapper takes
@@ -1142,7 +1286,7 @@ body.histcolor #hist tbody tr.fail .nmtxt{color:var(--bad)}
    the telling; nothing here paints anything, so there is exactly one
    explanation of this on screen and not two. */
 .card.capped{display:flex;flex-direction:column}
-.card.capped .cardscroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+.card.capped .cardscroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto}
 /* Sticky works against the scrolling ancestor, so the header stays
    without the table having to stop being a table. */
 .card.capped .cardscroll thead th{position:sticky;top:0;background:var(--surface);z-index:1}
@@ -1191,6 +1335,15 @@ body.histcolor #hist tbody tr.fail .nmtxt{color:var(--bad)}
    kind of thing as the open-API one: the daemon is fine right now and
    will not be after a restart. It has to outlive a toast - the user is
    about to walk over to Sonarr with a key that may not survive. */
+/* Queue-finished countdown. The same strip as the two below, in the
+   fault colour rather than the warning one: those two say "this will be
+   wrong later", this one says the machine is about to turn itself off in
+   the next minute and the button beside it is the only way to stop it. */
+#finishbar{display:none;padding:8px 16px;border-bottom:1px solid var(--line);
+  font-size:12px;color:var(--fg);background:color-mix(in srgb,var(--bad) 15%,transparent)}
+#finishbar.on{display:block}
+#finishbar button{margin-inline-start:6px}
+#finishbar .cd{font-variant-numeric:tabular-nums;font-weight:600}
 #durnotice{display:none;padding:8px 16px;border-bottom:1px solid var(--line);
   font-size:12px;color:var(--fg);background:color-mix(in srgb,var(--warn) 13%,transparent)}
 #durnotice.on{display:block}
@@ -1603,9 +1756,12 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   .selwrap{flex:1 1 auto;min-width:0}
   .selwrap select.ctl{flex:1 1 auto;min-width:0;width:100%}
   #pauseBtn{flex:0 0 auto}
-  /* Online/offline. The dot carries the state, the word confirms it:
-     colour alone is not a signal for a red-green colourblind user, and
-     this control decides whether downloads can run at all. */
+  /* Online/offline. The dot carries the state, the first word confirms
+     it, and the second word says what clicking DOES: colour alone is not
+     a signal for a red-green colourblind user, and a bare "Online" with a
+     light beside it reads as a status lamp nobody thinks to press (audit
+     U2) - which is why the one control that frees the account for another
+     machine went unfound. */
   #netBtn{flex:0 0 auto;display:inline-flex;align-items:center;gap:7px}
   #netDot{width:8px;height:8px;border-radius:50%;flex:none;
     background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent)}
@@ -1674,6 +1830,13 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
        container and another everywhere else, so a static key here would
        flip it to the wrong wording on every locale change. -->
   <span class="pill" id="updChip" style="display:none;cursor:pointer"></span>
+  <!-- Armed queue-finished action. The setting is two cards deep in
+       Settings, and "why did the NAS turn itself off overnight?" has to be
+       answerable BEFORE it happens - so an arm that will end the session
+       says so where the user already looks, and switches itself off when
+       clicked. Only sleep and shutdown get the chip: a script that runs on
+       every drain is not a surprise worth a permanent badge. -->
+  <span class="pill" id="finChip" style="display:none;cursor:pointer"></span>
   <!-- One nav, same four destinations in the same order, on this page and
        on the wall. The current one is marked .on rather than renamed or
        removed: a nav that changes shape as you use it is why "go to the
@@ -1732,9 +1895,10 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
        only one or two addresses at once, so "let me use this from my
        laptop" needs the second one, and needs it without waiting out an
        idle timeout. -->
-  <button class="ghost" id="netBtn" onclick="toggleOffline()" data-i18n-title="hdr.online.title" title="Online - connected to your providers. Click to go offline: hangs up every connection so you can use the account from another machine.">
-    <span class="dot" id="netDot" aria-hidden="true"></span><span id="netTxt" data-i18n="hdr.online">Online</span></button>
+  <button class="ghost" id="netBtn" onclick="toggleOffline()" data-i18n-title="hdr.online.title" title="Online - connected to your providers. Disconnect hangs up every connection, so another machine or another app can use the account. Downloads pause and pick up where they left off.">
+    <span class="dot" id="netDot" aria-hidden="true"></span><span id="netTxt" data-i18n="hdr.online">Online · disconnect</span></button>
 </header>
+<div id="finishbar"></div>
 <div id="keynotice"></div>
 <div id="opennotice"></div>
 <div id="durnotice"></div>
@@ -1764,9 +1928,9 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <p style="margin:0 0 8px"><b data-i18n="welcome.look.title">Your dashboard</b><br>
     <span class="dim" data-i18n="welcome.look.hint">Untick anything you would rather not see - the graphs and extra cards are optional. Any of them can be brought back later from the Hidden bar at the bottom of the dashboard.</span></p>
     <p style="margin:0 0 10px;display:flex;gap:8px;flex-wrap:wrap">
-      <button class="ghost" onclick="applyPreset('classic')" data-i18n="welcome.look.classic">Classic - plain and minimal</button>
-      <button class="ghost" onclick="applyPreset('full')" data-i18n="welcome.look.full">Full - graphs and all</button>
-      <button class="ghost" onclick="applyPreset('dense')" data-i18n="welcome.look.dense">Dense - everything, small</button>
+      <button class="ghost" data-preset="classic" onclick="applyPreset('classic')" data-i18n="welcome.look.classic">Classic - plain and minimal</button>
+      <button class="ghost" data-preset="full" onclick="applyPreset('full')" data-i18n="welcome.look.full">Full - graphs and all</button>
+      <button class="ghost" data-preset="dense" onclick="applyPreset('dense')" data-i18n="welcome.look.dense">Dense - everything, small</button>
     </p>
     <div id="welcomeLookBoxes" style="display:flex;flex-wrap:wrap;gap:6px 18px"></div>
   </div>
@@ -1789,6 +1953,10 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <div>
       <div class="sub" data-i18n="hero.throughput">Throughput</div>
       <div class="num" id="speed">0 <small>MB/s</small></div>
+      <!-- U10: the same speed in the units an ISP quotes. Its row is
+           reserved in CSS, so appearing and going does not move the
+           card. -->
+      <div class="dim" id="speedEquiv"></div>
     </div>
     <div class="chartwrap"><canvas id="speedChart"></canvas></div>
   </div>
@@ -1802,6 +1970,12 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <span style="color:var(--acc2)">●</span> <span data-i18n="ev.leg.phase">phase</span>&ensp;
     <span style="color:var(--acc)">●</span> <span data-i18n="ev.leg.user">your action</span>
   </div>
+  <!-- §U7: the one-time callout that says, at reading size and once
+       per browser, what those tick colours mean. Empty and display:none
+       until renderEvTip fills it - see there for why it exists and what
+       retires it. role=note because it arrives after load and is a
+       remark about the chart above it, not a control. -->
+  <div id="evTip" role="note" style="display:none"></div>
   <div class="chartwrap" style="height:50px;margin-top:10px;display:none"><canvas id="histChart" data-i18n-title="hero.hist.title2" title="How this session's speed samples distribute - height is time spent at that speed, left is slow, right is peak"></canvas></div>
   <div id="active" style="margin-top:12px"></div>
 </div>
@@ -1847,7 +2021,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 </div>
 
 <div class="card half" id="pipecard" style="display:none" data-fixedh="1">
-  <h3 data-i18n="pipe.title">Pipeline <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400" data-i18n="pipe.sub">· stages overlap</span></h3>
+  <h3 data-i18n="pipe.title">What this download is doing now <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400" data-i18n="pipe.sub">· these run at the same time</span></h3>
   <div id="lanes"></div>
 </div>
 <div class="card" id="provcard" style="display:none">
@@ -1891,7 +2065,10 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 </div>
   <div class="chartwrap" style="height:52px;margin-bottom:8px;display:none"><canvas id="burnChart" data-i18n-title="queue.burn.title" title="What is still to download across the whole queue - the burn-down to zero"></canvas></div>
   <div id="qspace" class="warn" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
-  <div id="watchFailed" class="dim" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
+  <!-- U8: no blanket dim - each row classes itself (warn for a real
+       failure, dim for the housekeeping notes), same family as the
+       #qspace hold banner above it. -->
+  <div id="watchFailed" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
 <!-- §129 2f: bulk actions for the checked rows. Appears only while
      something is selected. Pause/resume/priority/delete ride the API's
      own comma-separated value= (SAB's convention, already honoured by
@@ -1905,7 +2082,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <button class="ghost mini" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
   <button class="ghost mini" onclick="selClear('q')" data-i18n="sel.clear">Clear selection</button>
 </div>
-  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:120px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table></div>
+  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table></div>
   <div class="cardgrip" data-card="queueCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
 
@@ -2002,6 +2179,11 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
        no space to wrap at - it would widen the card and take the document
        with it. -->
   <div id="deleteKept" class="warn" style="display:none;font-size:12.5px;margin-bottom:8px;overflow-wrap:anywhere"></div>
+<!-- §188: the one-time note after an upgrade re-derived the quality
+     labels on old history rows. Not `warn`: nothing is wrong and there
+     is nothing to fix, it just explains why a label the user may have
+     complained about has changed by itself. -->
+  <div id="histUpgraded" class="dim" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
   <div class="filterbar" id="histFilter"></div>
 <!-- §129 2f: bulk actions for the checked history rows. Delete rides the
      API's comma-separated value= in one call (trash-aware server-side,
@@ -2013,7 +2195,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <button class="ghost mini" onclick="hBulkDeleteFiles()" data-i18n-title="sel.hfiles.title" title="Remove the selected entries AND delete their downloaded files from disk" data-i18n="sel.delfiles">Remove + delete files</button>
   <button class="ghost mini" onclick="selClear('h')" data-i18n="sel.clear">Clear selection</button>
 </div>
-  <div class="cardscroll"><table id="hist"><thead><tr><th class="selcol"><input type="checkbox" id="hSelAll" onclick="selAllClick(this,'h')" data-i18n-title="sel.h.all" title="Select every history entry listed" aria-label="Select every history entry listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th style="width:90px"></th></tr></thead><tbody></tbody></table>
+  <div class="cardscroll"><table id="hist"><thead><tr><th class="selcol"><input type="checkbox" id="hSelAll" onclick="selAllClick(this,'h')" data-i18n-title="sel.h.all" title="Select every history entry listed" aria-label="Select every history entry listed"></th><th data-i18n="col.name">Name</th><th class="hsize" data-i18n="col.size">Size</th><th class="hacts"></th></tr></thead><tbody></tbody></table>
   <div id="histMore" style="margin-top:6px"></div></div>
   <div class="cardgrip" id="histGrip" data-card="histCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
@@ -2096,9 +2278,10 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <span class="badge scope" data-i18n="badge.thisbrowser">this browser only</span></h3>
   <div class="row"><label data-i18n="set.look.preset">Preset<span class="hint" data-i18n="set.look.preset.hint">Classic is a plain, light, compact dashboard with just the queue and history - the graphs and extra cards are hidden. Full brings the default back: auto theme, regular spacing, everything shown. Dense keeps everything but shrinks it - small cards several to a row, short graphs, made for big screens. Each simply sets the controls on this page and the dashboard cards, so any part can be adjusted afterwards; stored in this browser</span></label>
     <span style="display:flex;gap:8px">
-      <button class="ghost" onclick="applyPreset('classic')" data-i18n="set.look.classic">Classic</button>
-      <button class="ghost" onclick="applyPreset('full')" data-i18n="set.look.full">Full</button>
-      <button class="ghost" onclick="applyPreset('dense')" data-i18n="set.look.dense">Dense</button>
+      <button class="ghost" data-preset="classic" onclick="applyPreset('classic')" data-i18n="set.look.classic">Classic</button>
+      <button class="ghost" data-preset="full" onclick="applyPreset('full')" data-i18n="set.look.full">Full</button>
+      <button class="ghost" data-preset="dense" onclick="applyPreset('dense')" data-i18n="set.look.dense">Dense</button>
+      <span id="presetNow" class="dim" style="align-self:center;font-size:12px"></span>
     </span></div>
   <div class="row"><label data-i18n="set.look.theme">Theme<span class="hint" data-i18n="set.look.theme.hint">Auto follows your system's light or dark setting</span></label>
     <select class="sel" id="s_theme" onchange="setTheme(this.value)">
@@ -2126,6 +2309,13 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <option value="compact" data-i18n="set.look.density.compact">Compact</option>
       <option value="spacious" data-i18n="set.look.density.spacious">Spacious</option>
     </select></div>
+  <!-- §6e Fill gaps. Browser-local like every look control, but stored
+       in layoutPrefs rather than a LOOK_KEY: it is an arrangement choice,
+       so Reset layout clears it and the appearance export carries it with
+       the card order. OFF by default - unticked, placement stays the CSS
+       auto-flow and the JS packer never runs. -->
+  <div class="row"><label data-i18n="set.look.fill">Fill gaps<span class="hint" data-i18n="set.look.fill.hint">Dense preset only. Lets the dashboard drop to fewer, wider columns when that leaves less empty space under short cards; the page itself can come out a little taller. You can also stack a card by hand: right-click its heading and choose Stack under</span></label>
+    <input type="checkbox" id="s_fillgaps" onchange="setDenseBalance(this.checked)"></div>
   <div class="row"><label data-i18n="set.look.corners">Corners<span class="hint" data-i18n="set.look.corners.hint">how rounded cards, buttons and panels are</span></label>
     <select class="sel" id="s_corners" style="max-width:200px" onchange="setLook('Corners',this.value)">
       <option value="" data-i18n="set.look.corners.soft">Soft</option>
@@ -2174,7 +2364,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <button class="ghost" onclick="document.getElementById('lookFile').click()" data-i18n="set.look.import">Load from a file</button>
       <input type="file" id="lookFile" accept="application/json,.json" style="display:none" onchange="importLook(this)">
     </span></div>
-  <div class="row"><label data-i18n="set.look.reset">Start again<span class="hint" data-i18n="set.look.reset.hint">clears everything on this card AND your card layout, in one go: there were two separate resets in two places before</span></label>
+  <div class="row"><label data-i18n="set.look.reset">Reset the look<span class="hint" data-i18n="set.look.reset.hint">puts the appearance and your card layout back to defaults. Your servers, folders, watchlists and every other setting are untouched: this card is stored in this browser only</span></label>
     <span><button class="ghost" onclick="resetAppearance()" data-i18n="set.look.reset.btn">Reset appearance to defaults</button></span></div>
 </div>
 
@@ -2221,11 +2411,11 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <input type="checkbox" id="sv_pin"></div>
     <div class="row"><label data-i18n="set.srv.level">Tier / level<span class="hint" data-i18n="set.srv.level.hint">0 = primary; a level-N server only fetches articles every lower level missed: fill/backup economics</span></label>
       <input class="txt sm" type="number" min="0" max="99" id="sv_level" value="0" oninput="paidSuggest()"></div>
-    <div class="row"><label data-i18n="set.srv.group">Backbone group<span class="hint" data-i18n="set.srv.group.hint">servers sharing a name are mirrors of one backbone (optional)</span></label>
+    <div class="row"><label data-i18n="set.srv.group">Provider network<span class="hint" data-i18n="set.srv.group.hint">servers you give the same name here are treated as one source: many brands resell the same network (optional)</span></label>
       <input class="txt" id="sv_group"></div>
     <div class="row"><label data-i18n="set.srv.ret">Retention (days)<span class="hint" data-i18n="set.srv.ret.hint">0 = unlimited; older articles route to deeper servers</span></label>
       <input class="txt sm" type="number" min="0" id="sv_ret" value="0"></div>
-    <div class="row"><label data-i18n="set.srv.block">Block size (GB)<span class="hint" data-i18n="set.srv.block.hint">prepaid block account: nzbfast tracks lifetime usage and stops using the server when the block is spent. 0 = flatrate. Pair with a tier ≥1 so the block only fills what primaries miss</span></label>
+    <div class="row"><label data-i18n="set.srv.block">Block size (GB)<span class="hint" data-i18n="set.srv.block.hint">for an account where you paid up front for a fixed amount of data: nzbfast counts what it has used and stops using this server when that data is gone. 0 = an unlimited plan. Give it a tier of 1 or more so it only fills in what your main servers missed</span></label>
       <input class="txt sm" type="number" min="0" id="sv_block" value="0"></div>
     <div class="row" id="sv_blockrefrow" style="display:none"><label data-i18n="set.srv.blockref">Bought a new block<span class="hint" data-i18n="set.srv.blockref.hint">when you top up this account, press the button to restart the used counter at zero. The usage history is kept</span></label>
       <span><button class="ghost sm" onclick="blockRefilled(this)" data-i18n="set.srv.blockref.btn">Block refilled</button>
@@ -2237,7 +2427,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <span><input type="checkbox" id="sv_warm">
       <button class="ghost sm" onclick="benchWarm(this)" data-i18n="set.srv.warm.bench">Measure</button>
       <span class="hint" id="sv_warmres"></span></span></div>
-    <div class="row"><label data-i18n="set.srv.ips">Addresses allowed at once<span class="hint" data-i18n="set.srv.ips.hint">how many places may use this account at the same time, from your provider's plan. Not the same as connections above: that is how many sockets ONE machine opens, this is how many machines, sites or homes may connect at all. Leave blank if you do not know and nzbfast will use a safe guess</span></label>
+    <div class="row"><label data-i18n="set.srv.ips">Addresses allowed at once<span class="hint" data-i18n="set.srv.ips.hint">how many places may use this account at the same time, from your provider's plan. Not the same as connections above: that is how many connections ONE machine opens, this is how many machines, sites or homes may connect at all. Leave blank if you do not know and nzbfast will use a safe guess</span></label>
       <input class="txt sm" type="number" min="0" max="999" id="sv_maxips" data-i18n-placeholder="set.srv.ips.ph" placeholder="unknown"></div>
     <div class="infobox" id="sv_ipsnote">
       <b data-i18n="set.srv.ips.where.t">Where to find this</b>
@@ -2250,46 +2440,20 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <span class="hint" id="sv_idlereleff"></span></span></div>
     <div class="row"><label data-i18n="set.srv.idlekeep">Connections to keep warm<span class="hint" data-i18n="set.srv.idlekeep.hint">how many connections survive that hang-up, so the next download still starts warm. Blank = choose for me. On a provider that limits ADDRESSES this makes no difference: this machine is one address whether it holds one connection or sixty, so keeping any at all leaves the account occupied and the sensible answer there is none</span></label>
       <input class="txt sm" type="number" min="0" max="64" id="sv_idlekeep" data-i18n-placeholder="set.srv.auto" placeholder="auto"></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.bindip">Go out from this address<span class="hint" data-i18n="set.srv.bindip.hint">the local IP address this server's connections leave from, for a machine with more than one internet link (two lines on a router, or a VPN alongside the normal one). Blank lets the system choose. The kind of address decides the kind it reaches: an IPv4 address here connects to the server over IPv4</span></label>
+      <input class="txt" id="sv_bindip" data-i18n-placeholder="set.srv.bindip.ph" placeholder="e.g. 192.168.1.50"></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.socks">Through a SOCKS5 proxy<span class="hint" data-i18n="set.srv.socks.hint">send this server's traffic through a SOCKS5 proxy, as host:port. The proxy looks up the server's name for you, so the lookup does not leak past it. Blank connects directly. Each server has its own, so one provider can go through a proxy while the others do not</span></label>
+      <input class="txt" id="sv_socks" data-i18n-placeholder="set.srv.socks.ph" placeholder="e.g. 127.0.0.1:1080"></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.socksauth">Proxy sign-in<span class="hint" data-i18n="set.srv.socksauth.hint">only if your proxy asks for a user name and password. Leave both blank for an open proxy. Like the server password above, a stored proxy password is never shown: leave it blank to keep it, or clear the user name to remove both</span></label>
+      <span><input class="txt sm" id="sv_socksuser" data-i18n-placeholder="set.srv.socksauth.user" placeholder="user" autocomplete="off">
+      <input class="txt sm" type="password" id="sv_sockspass" data-i18n-placeholder="set.srv.socksauth.pass" placeholder="password" autocomplete="new-password">
+      <span class="hint" id="sv_sockspasshint"></span></span></div>
     <div class="savebar">
       <button onclick="saveServer(this)" data-i18n="set.srv.save">Save server</button>
       <button class="ghost" onclick="testServer(this)" data-i18n="set.srv.testconn">Test connection</button>
       <button class="ghost" onclick="document.getElementById('srvform').style.display='none'" data-i18n="btn.cancel">Cancel</button>
     </div>
   </div>
-</div>
-
-<div class="card set" data-sg="start" data-sk="tuning" id="ladderCard">
-  <h3 data-i18n="ladder.title">Connection tuning
-    <span class="h3tools">
-      <select class="sel" id="ladderSrv" style="min-width:200px"
-        data-i18n-title="ladder.srv.title" title="Which server to test" aria-label="Which server to test"></select>
-      <input class="txt" id="ladderN" type="number" min="1" max="150" data-i18n-placeholder="ladder.n.ph" placeholder="auto" data-i18n-title="ladder.n.title" title="test exactly this many connections (blank = automatic ladder)" style="width:74px">
-      <button class="ghost" onclick="runLadder(this)" data-i18n="ladder.test">Test</button>
-      <button class="ghost" onclick="runLadderAll(this)" data-i18n="ladder.testall">Test all</button>
-      <!-- Only while a run is in flight: a Cancel that is always there
-           invites the question "cancel what?". -->
-      <button class="ghost" id="ladderCancel" style="display:none" onclick="cancelLadder(this)" data-i18n="ladder.cancel">Cancel</button>
-    </span>
-  </h3>
-  <div id="ladderOut" class="dim" style="font-size:13px" data-i18n-html="ladder.blurb">Measures a provider at rising connection counts (~30 s each) and
-    recommends a setting - more sockets help until the provider or your line saturates. <b>Test all</b> compares every
-    provider (~30 s each), then bursts them all TOGETHER to see whether the pool saturates your line.</div>
-  <div id="tuneState" class="dim" style="font-size:12px;margin-top:6px"></div>
-  <!-- Live ladder: the phase line says what is happening RIGHT NOW, the
-       chart draws the curve as it is discovered. Hidden until a run
-       starts, and it stays up afterwards holding the finished curve. -->
-  <div id="ladderLive" style="display:none;margin-top:10px">
-    <div class="lphase"><span class="lspin" aria-hidden="true"></span><span id="lphaseTxt"></span><span id="lphaseEl" class="dim"></span></div>
-    <div class="lchartwrap"><canvas id="ladderChart" height="150"></canvas>
-      <div id="ladderTip" class="ltip" hidden></div></div>
-  </div>
-  <table id="ladderTbl" style="margin-top:8px;display:none"><tbody></tbody></table>
-</div>
-
-<div class="card set" data-sg="start" data-sk="diversity" id="divCard">
-  <h3 data-i18n="div.title">Server diversity <button class="ghost" style="float:inline-end;margin-top:-4px" onclick="runDiv(this)" data-i18n="div.analyse">Analyze</button></h3>
-  <div id="divOut" class="dim" style="font-size:13px" data-i18n="div.blurb">Checks whether your providers share a backbone (redundant for
-    recovery) or genuinely diversify your article coverage.</div>
 </div>
 
 <div class="card set" data-sg="download" data-sk="speed">
@@ -2398,7 +2562,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_watch_recursive" onchange="setCfg('watch_recursive',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.rejected">Move unusable files aside<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.rejected.hint">a file that is not a usable NZB is moved into a "rejected" folder inside the watch folder, with a small text file beside it saying what was wrong. Off: the file stays where you put it and the reason is shown above the queue. A file that merely looks incomplete is always left in place, because it may still be arriving</span></label>
     <input type="checkbox" id="s_watch_move_rejected" onchange="setCfg('watch_move_rejected',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.watchdir.script">Post-processing script<span class="hint" data-i18n="set.watchdir.script.hint">runs after every job with SABnzbd's args + SAB_* env vars; empty = off</span></label>
+  <div class="row"><label data-i18n="set.watchdir.script">Post-processing scripts<span class="hint" data-i18n="set.watchdir.script.hint">runs after every job. Both contracts are spoken, so a script written for either downloader works unchanged: SABnzbd's 8 arguments and SAB_* variables, and NZBGet's NZBPP_ / NZBOP_ / NZBPR_ variables with the 93/94/95 exit codes. Name several, separated by commas, to run them in that order - each one sees what the one before it did, and a failure part-way through does not cancel the rest. Empty = off</span></label>
     <div class="pathrow"><input class="txt" id="s_script" onchange="setCfg('script',this.value)"><button class="mini" onclick="browseDir('script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button><button class="mini" onclick="openDir('script')" data-i18n-title="set.watchdir.openscript.title" title="Open the folder containing this script" aria-label="Open the folder containing this script">📂</button></div></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.scripttimeout">Give the script at most<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.scripttimeout.hint">a script still running after this is killed, and a line saying so goes in the log; the download itself is unaffected either way. Seconds; 0 = wait as long as it takes, which is what a long transcode wants. Default 3600. With no limit, one script that hangs holds a thread for as long as nzbfast runs, and every job that finishes after it holds another</span></label>
     <input class="txt sm" type="number" min="0" max="604800" id="s_script_timeout_secs" onchange="setCfg('script_timeout_secs',this.value)"></div>
@@ -2406,6 +2570,17 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <div class="pathrow"><input class="txt" id="s_pre_queue_script" onchange="setCfg('pre_queue_script',this.value)"><button class="mini" onclick="browseDir('pre_queue_script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button></div></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.prequeuetimeout">Give the pre-queue script at most<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.prequeuetimeout.hint">an add waits on this script, so its budget is short. A script still over it is killed and the add proceeds untouched. Seconds; 0 = no limit; default 30</span></label>
     <input class="txt sm" type="number" min="0" max="3600" id="s_pre_queue_timeout_secs" onchange="setCfg('pre_queue_timeout_secs',this.value)"></div>
+  <div class="row"><label data-i18n="set.watchdir.finish">When the queue finishes<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.finish.hint">what to do once every download is finished, including its repair and unpack. Sleep and shut down warn first, with a countdown across the top of this page and a button to stop it, and switch themselves back to "nothing" once they have run, so a machine that wakes up does not go straight back to sleep. Neither fires while a paused download is still in the queue. Running a script is left on and runs every time. Most installs have no permission to sleep or shut down the machine; if it fails, nzbfast says so in the log and leaves everything running</span></label>
+    <select class="sel" id="s_queue_finished_action" style="max-width:280px" onchange="setCfg('queue_finished_action',this.value)">
+      <option value="none" data-i18n="set.watchdir.finish.none">nothing</option>
+      <option value="script" data-i18n="set.watchdir.finish.script">run a script</option>
+      <option value="sleep" data-i18n="set.watchdir.finish.sleep">sleep this machine</option>
+      <option value="shutdown" data-i18n="set.watchdir.finish.shutdown">shut this machine down</option>
+    </select></div>
+  <div class="row"><label data-i18n="set.watchdir.finishscript">Queue-finished script<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.finishscript.hint">run when the queue empties, if the choice above is "run a script". It gets no download to work on - there is no single job - so it is handed NZBFAST_EVENT=queue_finished and nothing else. The post-processing script above is the one that runs per download. It shares the time limit set for that script</span></label>
+    <div class="pathrow"><input class="txt" id="s_queue_finished_script" onchange="setCfg('queue_finished_script',this.value)"><button class="mini" onclick="browseDir('queue_finished_script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button></div></div>
+  <div class="row" data-adv="1"><label data-i18n="set.watchdir.finishdelay">Warn before sleeping or shutting down for<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.finishdelay.hint">how long the countdown across the top of the page runs before the machine sleeps or shuts down, so you have time to stop it. Seconds, 0 to 3600; default 60. Set 0 if nobody is at the screen anyway</span></label>
+    <input class="txt sm" type="number" min="0" max="3600" id="s_queue_finished_delay_secs" onchange="setCfg('queue_finished_delay_secs',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.parclean">Delete recovery files<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.parclean.hint">a download's .par2 repair files have done their job once everything verifies, so they are removed when it completes successfully. Turn off to keep them in the download folder</span></label>
     <input type="checkbox" id="s_par_cleanup" onchange="setCfg('par_cleanup',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.cleanup">Cleanup after download<span class="hint" data-i18n="set.watchdir.cleanup.hint">file extensions deleted from a job's folder once it completes successfully, e.g. sfv, srr, url; empty = off. Recovery files have their own switch above</span></label>
@@ -2440,6 +2615,47 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input class="txt sm" type="number" min="0" max="10080" id="s_auto_retry_mins" onchange="setCfg('auto_retry_mins',this.value)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.outage">Give up on a server that is not answering after<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.outage.hint">when a server stops accepting connections - it is unreachable, or your account is at its connection limit - anything only that server has is stuck until it comes back. This is how long a download waits, counting up all the time that server has been out, before carrying on without it. The download then ends as a connection failure, which is retried on its own a couple of minutes later and picks up where it left off, so nothing is lost. Minutes; default 15. Set 0 to wait however long it takes instead: the download will sit there rather than ever come back failed, which is what you want for something you may not find again - other downloads still go ahead of it. Either way its row names the server and how long it has been out</span></label>
     <input class="txt sm" type="number" min="0" max="10080" id="s_server_outage_mins" onchange="setCfg('server_outage_mins',this.value)"></div>
+</div>
+
+<!-- Measurement tools, not first-run setup: both spend real traffic (the
+     ladder runs paid block bytes through a provider) and their copy talks
+     backbones and saturation. They live with the download settings they
+     inform - Connections & performance above points at Connection tuning -
+     rather than in Getting started, which should only answer "will this
+     download start?". Deep links still land here: goSetting resolves by
+     data-sk, not group. -->
+<div class="card set" data-sg="download" data-sk="tuning" id="ladderCard">
+  <h3 data-i18n="ladder.title">Connection tuning
+    <span class="h3tools">
+      <select class="sel" id="ladderSrv" style="min-width:200px"
+        data-i18n-title="ladder.srv.title" title="Which server to test" aria-label="Which server to test"></select>
+      <input class="txt" id="ladderN" type="number" min="1" max="150" data-i18n-placeholder="ladder.n.ph" placeholder="auto" data-i18n-title="ladder.n.title" title="test exactly this many connections (leave blank to try a range for you)" style="width:74px">
+      <button class="ghost" onclick="runLadder(this)" data-i18n="ladder.test">Test</button>
+      <button class="ghost" onclick="runLadderAll(this)" data-i18n="ladder.testall">Test all</button>
+      <!-- Only while a run is in flight: a Cancel that is always there
+           invites the question "cancel what?". -->
+      <button class="ghost" id="ladderCancel" style="display:none" onclick="cancelLadder(this)" data-i18n="ladder.cancel">Cancel</button>
+    </span>
+  </h3>
+  <div id="ladderOut" class="dim" style="font-size:13px" data-i18n-html="ladder.blurb">Tries a provider at more and more connections (about 30 s each) and
+    tells you which number to use - more connections help until the provider or your line runs out of room. <b>Test all</b>
+    compares every provider (about 30 s each), then runs them all TOGETHER to see whether they fill your line.</div>
+  <div id="tuneState" class="dim" style="font-size:12px;margin-top:6px"></div>
+  <!-- Live ladder: the phase line says what is happening RIGHT NOW, the
+       chart draws the curve as it is discovered. Hidden until a run
+       starts, and it stays up afterwards holding the finished curve. -->
+  <div id="ladderLive" style="display:none;margin-top:10px">
+    <div class="lphase"><span class="lspin" aria-hidden="true"></span><span id="lphaseTxt"></span><span id="lphaseEl" class="dim"></span></div>
+    <div class="lchartwrap"><canvas id="ladderChart" height="150"></canvas>
+      <div id="ladderTip" class="ltip" hidden></div></div>
+  </div>
+  <table id="ladderTbl" style="margin-top:8px;display:none"><tbody></tbody></table>
+</div>
+
+<div class="card set" data-sg="download" data-sk="diversity" id="divCard">
+  <h3 data-i18n="div.title">Server diversity <button class="ghost" style="float:inline-end;margin-top:-4px" onclick="runDiv(this)" data-i18n="div.analyse">Analyze</button></h3>
+  <div id="divOut" class="dim" style="font-size:13px" data-i18n="div.blurb">Checks whether your providers are really the same network under
+    different brands, or genuinely different sources. Different sources are what rescue a post one of them is missing.</div>
 </div>
 
 <div class="card set" data-sg="alerts" data-sk="notifications">
@@ -2491,6 +2707,8 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <div class="row" style="grid-template-columns:1fr"><span class="hint" id="renameExample" style="font-style:italic"></span></div>
   <div class="row" data-adv="1"><label data-i18n="set.rename.identity">Ask public databases what a finished download is<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.rename.identity.hint">when a job finishes, look the release up in two free public databases (srrdb and xREL) to recover the name it was posted under. At most one request to each per download, no account and no key, and a failure is silent. On by default. Off means names come only from what is inside the files, which is what a post with its name stripped off does not have</span></label>
     <input type="checkbox" id="s_identity_lookup" onchange="setCfg('identity_lookup',this.checked?1:0)"></div>
+  <div class="row"><label data-i18n="set.skipsample">Skip sample files<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.skipsample.hint">do not download sample and proof clips at all, so you never pay for a teaser you were only going to delete. A file counts as a sample only if its name says so and it is a small slice of the release, so a full-length film whose title happens to contain the word, and a job whose only video is sample-named, are always fetched in full. A skipped file is treated as deliberately absent: repair leaves it alone and the job still completes normally. Off by default, because before the bytes arrive the name is the only evidence there is and a skip cannot be undone. Leaving it off costs a teaser's worth of bandwidth, and "Remove junk files" below already deletes samples once the download has finished. Samples packed inside the archive are not affected either way</span></label>
+    <input type="checkbox" id="s_skip_samples" onchange="setCfg('skip_samples',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.rename.junk">Remove junk files<span class="hint" data-i18n="set.rename.junk.hint">delete leftover .par2, .nzb, .sfv, .nfo and sample clips from finished movie/TV folders, never the video or its subtitles</span></label>
     <input type="checkbox" id="s_rename_junk" onchange="setCfg('rename_junk',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.rename.mediaonly">Keep only the media file<span class="hint" data-i18n="set.rename.mediaonly.hint">⚠ permanently deletes everything except the video(s) and subtitles; every episode of a season pack is kept</span></label>
@@ -3146,7 +3364,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
          browser, both pointers above are dead ends - Settings needs the
          key itself, and the startup log predates the rotation. Point at
          the two places the new key actually is. -->
-    <p class="dim" data-i18n="key.where2">If the key was just changed, the browser where that happened shows the new one. If no browser does, it is on the apikey line of settings.json, in nzbfast's settings folder.</p>
+    <p class="dim" data-i18n="key.where2">If the key was just changed, the browser where that happened shows the new one. If no browser does, look in nzbfast's settings folder: it is on the apikey line of settings.json, or in a file called apikey beside it.</p>
   </div>
   <div class="fsfoot">
     <span class="grow"></span>
@@ -3608,6 +3826,20 @@ stripKbdHint();
 // matching anchor. The manual ships inside the binary, so this is a local,
 // version-matched, offline-safe help - no round-trip to GitHub Pages.
 // Runs once at boot; data-i18n-title lets the tooltip localise like the rest.
+// The one line of "how do I drive this card" that hangs off a card's ?
+// link. Kept in its own function because these compose a tooltip out of
+// TWO strings, which leaves no `data-i18n-title` for applyI18n to
+// follow: the catalogue arrives after injectHelp has already run, so
+// each one has to be rebuilt afterwards. Restamping them by hand meant
+// History was left announcing English on all 27 translated locales
+// while Queue was fine (Codex sweep 7, L4). Both sides now read the
+// same map, so a third card cannot be half-wired.
+function helpHints(){
+  return {
+    queueCard:t('queue.hint','click a row for detail · drag to reorder; Force/High still download first'),
+    histCard:t('hist.hint','click a row for detail · ⋯ opens the rest · double-click plays, right-click opens the same menu'),
+  };
+}
 function injectHelp(){
   const HELP={
     // dashboard cards → manual anchor
@@ -3627,6 +3859,13 @@ function injectHelp(){
     'set.sec.title':'settings',
   };
   const title=t('hlp.title','Open the manual for this section');
+  // Card hints: the one line of "how do I drive this card" that used to
+  // sit in the header full-time (queue) or on every ROW (history, where
+  // §186d found the browser drawing it over the hover card's own data).
+  // Here it is one hover away, on demand, on a header that has nothing
+  // under it to cover - and a screen reader announces it ONCE for the
+  // card rather than once per download.
+  const HINT=helpHints();
   for(const [k,anchor] of Object.entries(HELP)){
     let h3;
     if(k.includes('.')) h3=document.querySelector(`#settingsview h3[data-i18n="${k}"]`);
@@ -3637,10 +3876,8 @@ function injectHelp(){
     // a plain click opens the in-page drawer instead.
     a.className='hlp'; a.href=manualUrl(anchor); a.rel='noopener';
     a.textContent='?'; a.title=title; a.setAttribute('aria-label',title);
-    if(k==='queueCard'){
-      // The reorder/priority hint used to sit in the card header full-time;
-      // it lives here now, one hover away instead of always-on.
-      a.title=t('queue.hint','click a row for detail · drag to reorder; Force/High still download first')+'\n'+title;
+    if(HINT[k]){
+      a.title=HINT[k]+'\n'+title;
       a.setAttribute('aria-label',a.title);
     } else a.dataset.i18nTitle='hlp.title';
     a.onclick=e=>{ if(e.metaKey||e.ctrlKey||e.shiftKey||e.button) return;
@@ -3913,6 +4150,71 @@ function openApiNotice(open){
     + ' <button class="ghost mini" onclick="openApiHush()">' + esc(t('open.later','Not now')) + '</button>';
   el.classList.add('on');
 }
+// §Queue-finished countdown. The daemon has ANNOUNCED a sleep or shutdown
+// and is counting down; this is the only place a user can stop it, so it
+// sits above every other strip and stays put until the countdown ends one
+// way or the other.
+//
+// Redrawn on every poll rather than change-gated like the two strips
+// below it: the seconds are the whole point, and they move each tick. The
+// button is rebuilt with them, which is fine - it is not focusable
+// furniture anyone can be mid-interaction with, and a stale onclick
+// closure over an old countdown would be worse.
+let finishBarOn = false;
+// The armed-but-not-yet-counting-down half of the same state.
+let finChipFor = '';
+function finishChip(fa){
+  const el = document.getElementById('finChip');
+  if(!el) return;
+  // While the banner is up it IS the notice, with a live countdown and a
+  // stop button - a second badge saying the same thing quieter is noise.
+  const armed = (fa && !(fa.in_secs>0) && (fa.armed==='sleep'||fa.armed==='shutdown')) ? fa.armed : '';
+  if(armed===finChipFor) return;   // the poll runs every second
+  finChipFor = armed;
+  if(!armed){ el.style.display='none'; el.textContent=''; return; }
+  el.style.display='';
+  el.textContent = '⏻ '+(armed==='sleep'
+    ? t('finish.chip.sleep','sleeps when the queue finishes')
+    : t('finish.chip.shutdown','shuts down when the queue finishes'));
+  el.title = t('finish.chip.title','Click to switch this off.');
+  el.onclick = ()=>cancelFinish();
+}
+function finishNotice(fa){
+  const el = document.getElementById('finishbar');
+  if(!el) return;
+  const secs = fa && fa.in_secs;
+  if(!(secs>0)){
+    if(finishBarOn){ finishBarOn=false; el.classList.remove('on'); el.innerHTML=''; }
+    return;
+  }
+  finishBarOn = true;
+  const what = fa.armed==='sleep'
+    ? t('finish.bar.sleep','The queue has finished. This machine goes to sleep in')
+    : t('finish.bar.shutdown','The queue has finished. This machine shuts down in');
+  el.innerHTML = '⏻ '+esc(what)+' <span class="cd">'+esc(t('finish.bar.secs','{n}s',{n:secs}))+'</span>. '
+    + '<button class="ghost mini" onclick="cancelFinish(this)" title="'
+    + escA(t('finish.bar.stop.title','Stop this, and switch the finish action back to "nothing". Arm it again from Settings when you want it.'))
+    + '">' + esc(t('finish.bar.stop','Stop')) + '</button>';
+  el.classList.add('on');
+}
+async function cancelFinish(btn){
+  if(btn) btn.disabled = true;
+  const j = await api('config','&name=queue_finished_cancel&value=1');
+  // Hide it here rather than waiting for the next poll: the user pressed
+  // stop and a banner still counting down for another second reads as the
+  // button not having worked.
+  finishNotice(null);
+  // Two facts, two sentences: the banner's user stopped a countdown, the
+  // header chip's user switched off an arm that had not fired. Telling
+  // the second one their countdown had already ended, over a click that
+  // did exactly what they asked, is how a control loses trust.
+  const did = j && (j.cancelled || j.disarmed);
+  toast(j && j.cancelled
+    ? t('toast.finishStopped','Stopped. The finish action is switched off.')
+    : did ? t('toast.finishDisarmed','Switched off. nzbfast leaves this machine alone when the queue finishes.')
+    : t('toast.finishGone','That was already switched off.'), !did);
+  loadSettings();
+}
 // The launcher owns the port on a container, a compose service or the
 // Synology package: the mapping, the healthcheck and DSM's Open button all
 // name it, and nothing in here can move those. The field would otherwise
@@ -4137,8 +4439,9 @@ async function api(mode, extra, authKey, post){
   const epoch = keyEpoch;
   // Issue #4: the key rides the X-Api-Key header, not the query string,
   // so it stays out of reverse-proxy access logs, browser history and
-  // Referer headers. Navigations (the /m3u player handoff) still use
-  // ?apikey= - a location.href cannot carry a header.
+  // Referer headers. The /m3u player handoff fetches with the header
+  // too (m3uHandoff, §61d); the only key still in a URL is the per-job
+  // ?t= stream token inside the playlist itself.
   let r;
   try {
     r = await fetch(`/api?mode=${mode}${extra||''}`,
@@ -4216,7 +4519,7 @@ let offline=false;
 async function toggleOffline(){
   const going=!offline;
   if(going && !confirm(t('hdr.offline.confirm',
-      'Go offline?\n\nEvery connection to your providers is closed, so you can use the account from another machine. Downloads pause and keep what they have already fetched - nothing is lost, and they carry on where they left off when you come back online.')))
+      'Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause and keep what they have already fetched - nothing is lost, and they carry on where they left off when you reconnect.')))
     return;
   offline=going;
   paintNet();
@@ -4235,10 +4538,10 @@ function paintNet(){
   // "Online" back over an offline daemon.
   x.dataset.i18n = offline?'hdr.offline':'hdr.online';
   b.dataset.i18nTitle = offline?'hdr.offline.title':'hdr.online.title';
-  x.textContent = offline?t('hdr.offline','Offline'):t('hdr.online','Online');
+  x.textContent = offline?t('hdr.offline','Offline · reconnect'):t('hdr.online','Online · disconnect');
   b.title = offline
-    ? t('hdr.offline.title','Offline - not connected to any provider, and your account is free for other machines. Click to come back online and resume.')
-    : t('hdr.online.title','Online - connected to your providers. Click to go offline: hangs up every connection so you can use the account from another machine.');
+    ? t('hdr.offline.title','Offline - not connected to any provider, so another machine or another app can use the account. Click to reconnect and resume.')
+    : t('hdr.online.title','Online - connected to your providers. Disconnect hangs up every connection, so another machine or another app can use the account. Downloads pause and pick up where they left off.');
 }
 async function pauseNow(){
   // Immediate abort - free the line at once; in-flight articles re-download.
@@ -4326,12 +4629,41 @@ let UNIT_BITS = false;
 // exactly as long as each says which it is.
 const UNIT_EN={MB:'MB',GB:'GB',TB:'TB',MiB:'MiB',GiB:'GiB',TiB:'TiB',MBs:'MB/s',GBs:'GB/s',Mbs:'Mb/s',Gbs:'Gb/s'};
 function unit(k){ return t('unit.'+k, UNIT_EN[k]); }
-function rateParts(mbps){
+// `bits` overrides the display choice for ONE call. It exists for the
+// hero's Mb/s equivalence, which has to print the other unit while the
+// page as a whole stays on the user's setting - and doing that here,
+// rather than with a second formatter beside this one, is the whole
+// point of this function being the only place a speed grows a unit.
+function rateParts(mbps, bits){
   mbps = mbps || 0;
-  if(UNIT_BITS){ const mb = mbps*8; return mb>=1000 ? {v:mb/1000, u:unit('Gbs'), d:2} : {v:mb, u:unit('Mbs'), d:0}; }
+  if(bits===undefined) bits = UNIT_BITS;
+  if(bits){ const mb = mbps*8; return mb>=1000 ? {v:mb/1000, u:unit('Gbs'), d:2} : {v:mb, u:unit('Mbs'), d:0}; }
   return mbps>=1000 ? {v:mbps/1000, u:unit('GBs'), d:2} : {v:mbps, u:unit('MBs'), d:0};
 }
-function fmtRate(mbps){ const p=rateParts(mbps); return num(p.v, p.d)+' '+p.u; }
+function fmtRate(mbps, bits){ const p=rateParts(mbps, bits); return num(p.v, p.d)+' '+p.u; }
+// An ISP sells megaBITS. Someone on a 900 Mbps line watches the hero
+// read 110 MB/s and concludes nzbfast is running at an eighth of what
+// they pay for, because nothing on the page connects the two numbers -
+// only the Line speed hint does, and that is three screens away in
+// Settings. So while bytes are the displayed unit the hero carries the
+// same figure in the units the line was sold in.
+//
+// Two significant figures, deliberately. This is a reassurance, not a
+// second reading to hold the first one to: a jittering exact conversion
+// would just be the same number twice, arguing with itself.
+function bitsEquivalent(mbps){
+  const mb = (mbps||0)*8;
+  if(!(mb>0)) return '';
+  const step = Math.pow(10, Math.floor(Math.log10(mb))-1);
+  const p = rateParts(Math.round(mb/step)*step/8, true);
+  // The value carries two figures by the line above, so rateParts' own
+  // two decimals would print zeros claiming a precision this reading
+  // does not have - "about 32.00 Gb/s" off a number rounded to 32.
+  // renderSpeedNumber() overrides `.d` for its own reasons too; the
+  // unit and its localisation still come from rateParts, which is the
+  // part that must never be written twice.
+  return num(p.v, p.v<10 && p.v%1 ? 1 : 0)+' '+p.u;
+}
 // A value already in Gbps (bench/tuning report bits) → the shared MB/s space.
 function gbpsToMbps(g){ return (g||0)*125; }
 // Relabel the speed-limit presets to the current unit - the option VALUES
@@ -4638,6 +4970,7 @@ const EVENT_STYLE = {
   pause:     {cls:'user',     label:()=>t('ev.pause','paused')},
   resume:    {cls:'user',     label:()=>t('ev.resume','resumed')},
   limit:     {cls:'user',     label:()=>t('ev.limit','speed limit')},
+  finish:    {cls:'user',     label:()=>t('ev.finish','queue-finished action')},
 };
 // Lay the pool's events over the throughput trace at the moment they
 // happened. A dip with a red tick under it is a provider dropping
@@ -4702,6 +5035,72 @@ function drawEventMarks(m){
     else { ctx.fillStyle=col; ctx.fill(); }
   });
   ctx.restore();
+}
+// §U7 first-event callout. The persistent key above the ticks is 10px,
+// right-aligned, hidden until the first event, and its meaning is
+// hover-only - and the Dense preset hides it outright
+// (`body.dense #evLegend`), so a dense dashboard draws coloured ticks
+// with no key at all. So the first time a tick ever appears in this
+// browser, say once, at reading size, what the colours mean.
+//
+// It is a callout, NOT a second legend:
+//   - it fires once per browser (evKeySeen) and never returns, so it
+//     cannot become furniture the way a permanent second key would.
+//   - it sits below the chart in the card's flow, so it takes none of
+//     the chart's height. Growing the legend into the trace was the
+//     other obvious fix and is the one that costs the thing the legend
+//     is explaining.
+//   - the five colour/word pairs are CLONED from #evLegend, not written
+//     out again. One source for the taxonomy means the callout cannot
+//     name a colour the chart stopped drawing, and the clones keep their
+//     data-i18n attributes so applyI18n reaches them on a locale switch
+//     exactly as it reaches the original.
+//   - Dense is left alone. What Dense suppresses is the PERSISTENT key,
+//     to keep the card small for good; a callout that appears once and
+//     never again does not fight that, and dense is precisely where
+//     nothing else ever explains the ticks.
+//
+// The flag is written when it is SHOWN, not when it is dismissed: "once
+// per browser" has to mean once, and a nudge that returns on every load
+// until someone clicks it is the nag this is trying not to be. Whoever
+// ignores it still has the legend and the hover text.
+function dismissEvTip(){
+  const el=document.getElementById('evTip');
+  if(!el) return;
+  el.style.display='none'; el.replaceChildren(); delete el.dataset.on;
+}
+function renderEvTip(){
+  const el=document.getElementById('evTip');
+  if(!el || el.dataset.on || localStorage.evKeySeen) return;
+  // Onboarding owns the screen while it is up, and the hero is not what
+  // it is asking about. Same guard the layout nudge uses.
+  const b=document.body.classList;
+  if(b.contains('firstrun') || b.contains('nojobs')) return;
+  const lg=document.getElementById('evLegend');
+  if(!lg || !lg.childNodes.length) return;
+  localStorage.evKeySeen='1';
+  const lead=document.createElement('span');
+  lead.className='lead'; lead.dataset.i18n='ev.tip.lead';
+  lead.textContent=t('ev.tip.lead',
+    'Those ticks on the chart mark what shaped the speed line. Hover the chart for what happened, in plain words.');
+  const key=document.createElement('span');
+  key.className='evkey';
+  for(const n of lg.childNodes) key.appendChild(n.cloneNode(true));
+  const ok=document.createElement('button');
+  ok.className='ok';
+  // Deliberately the layout nudge's key, not a second one: it is the
+  // same one-word dismissal, and two keys for "Got it" is two strings
+  // that some catalogue eventually translates differently.
+  ok.dataset.i18n='layout.tip.ok';
+  ok.textContent=t('layout.tip.ok','Got it');
+  ok.onclick=dismissEvTip;
+  el.replaceChildren(lead, key, ok);
+  el.style.display='';
+  el.dataset.on='1';
+  // Hovering the chart IS what the callout is teaching, so doing it
+  // retires the sentence that asked for it.
+  const cv=document.getElementById('speedChart');
+  if(cv) cv.addEventListener('mouseenter', dismissEvTip, {once:true});
 }
 // Stacked area of per-provider rates (same right-anchored scroll).
 function drawStacked(cv, hosts, frac=0){
@@ -5125,6 +5524,9 @@ addEventListener('visibilitychange',()=>{
 async function tick(){
   if(ticking) return;                 // never stack overlapping polls
   ticking=true;
+  // Cheap: a handful of localStorage reads and a string compare, and it
+  // repaints only on a change. See `watchPresetState`.
+  try{ watchPresetState(); }catch(_){}
   try{
     // One revisioned round-trip for everything the page shows: an
     // unchanged queue/history comes back null (stats always ride), and
@@ -5193,6 +5595,17 @@ async function tick(){
     // it. Only consulted when nothing is actually downloading: while a
     // tail overlaps the next job's fetch, the download is the headline.
     const tailNow = (!downloading && q.slots) ? q.slots.find(isTail) : null;
+    // The same untruth one layer earlier: a job can spend minutes in a
+    // pipeline phase while its STATUS still reads Downloading (activity
+    // carries the truth), and the pill said "downloading" over a wire
+    // with nothing on it. When the one active job is in such a phase,
+    // borrow the tail vocabulary - the status.* words the pill already
+    // speaks - rather than minting new ones. Only when it is alone:
+    // beside a second job that is fetching, the download is the
+    // headline, same rule as the tail above.
+    const dlNow = downloading ? q.slots.filter(s=>s.status==='Downloading') : [];
+    const postWord = dlNow.length===1
+      ? {verifying:'Verifying',repairing:'Repairing',extracting:'Extracting',finalizing:'Moving'}[dlNow[0].activity]||'' : '';
     const busy = downloading || !!tailNow;
     // A held queue is not "idle": the scheduler is refusing to start
     // (low disk / spent quota) and saying so beats a pill that reads
@@ -5219,6 +5632,7 @@ async function tick(){
         : pmin? ` · ${t('status.minleft','{n}m left',{n:pmin})}` : '')
       : (visibleHold(q) && !busy ? t('status.held','held')
       : tailNow ? tStatus(tailNow.status)
+      : postWord ? tStatus(postWord)
       : tStatus(downloading?'Downloading':'Idle'));
     // Work in progress gets the pulsing dot - a still one beside
     // "Extracting" reads as an unpack that has stopped. Idle is still.
@@ -5268,6 +5682,8 @@ async function tick(){
     // operator's deliberate choice.
     openApiNotice(!!q.open_api && !q.open_optin);
     portLockNotice(q.port_locked);
+    finishNotice(q.finish_action);
+    finishChip(q.finish_action);
     // Reflect the daemon's limit state unless the user has the menu open.
     // A custom limit (e.g. set via the settings page or API) gets its own
     // option instead of a silently blank select.
@@ -5423,6 +5839,13 @@ async function tick(){
       const hs=histFull[el.dataset.dspace];
       if(hs) setHtml(el, histSpaceHtml(hs));
     }
+    // ...and the row-level twins, off the summary the list rendered
+    // from - the list only re-renders when the history revision moves,
+    // and free space moves without it.
+    for(const el of document.querySelectorAll('[data-rspace]')){
+      const hs=(lastHistSlots||[]).find(x=>x.nzo_id===el.dataset.rspace);
+      if(hs) setHtml(el, histRowSpace(hs));
+    }
     // "Ask at once" (password_prompt=now): the moment a running
     // download raises password_needed, prompt - once per job, so a
     // Cancel is respected and the 🔑 row badge and drawer button carry
@@ -5443,7 +5866,14 @@ async function tick(){
     const wf=q.watch_failed||[];
     const wfEl=document.getElementById('watchFailed');
     wfEl.style.display=wf.length?'':'none';
-    if(wf.length) setHtml(wfEl, wf.map(watchFailRow).join(''));
+    // U8: same contract as the hold banner - the control that answers
+    // the sentence, beside the sentence. Only when a REAL failure is
+    // on the strip (`ingested` rows are housekeeping, their files are
+    // in hand); the responsible settings live on the Watch folder card.
+    if(wf.length) setHtml(wfEl, wf.map(watchFailRow).join('')
+      +(wf.some(f=>!f.ingested)
+        ? `<div style="margin:2px 0"><button class="ghost mini" title="${escA(t('queue.wf.settings.title','Open the Watch folder settings.'))}" onclick="landOnRow('s_watch')">⚙ ${esc(t('queue.wf.settings','Watch folder settings'))}</button></div>`
+        : ''));
     // Watch-folder pickups, toasted as they happen. The daemon consumed
     // the user's file (a browser then lists its download as "Removed"),
     // so the moment needs its own sentence naming the folder - without
@@ -5507,6 +5937,15 @@ async function tick(){
       else if(fresh.length) toast(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:fresh.length}), true);
     }
     dkSeen=new Set(dk.map(dkKey));
+
+    // §188: the history re-derivation's one-time note. Kept until
+    // dismissed rather than toasted, because the pass that raises it
+    // runs at startup - after an auto-update, that is a daemon nobody
+    // is watching, and a toast into an empty room is not telling
+    // anyone anything.
+    const hu=q.hist_upgraded, huEl=document.getElementById('histUpgraded');
+    huEl.style.display=hu?'':'none';
+    if(hu) setHtml(huEl, histUpgradedRow(hu));
 
     const h=lastHist||{slots:[],noofslots:0,counts:{}};
     // §129 1b: toasts/sounds/notifications come from the daemon's own
@@ -5795,7 +6234,14 @@ function identSource(src){ return IDENT_SRC[src]||''; }
 // No label - a second name after a separator needs no explaining, and
 // the drawer says where it came from.
 function identName(s){
-  return s.identity_name ? ` <span class="dim">· ${esc(s.identity_name)}</span>` : '';
+  // The second name on the row was bare dim text: it looks like part of
+  // the release name, and nothing said where it came from or why it
+  // disagrees with what is beside it. The drawer names the source that
+  // answered; this says what KIND of thing it is, which is the question
+  // asked in passing.
+  return s.identity_name
+    ? ` <span class="dim" title="${escA(t('hist.identity.tip','What an identity check says this release actually is. It is a second opinion beside the name you submitted, never a replacement - open the row to see which source answered.'))}">· ${esc(s.identity_name)}</span>`
+    : '';
 }
 // Truth-audit I: which Smart Folder rule chose this job's category. A
 // rule can move a download into a folder the user did not pick, and
@@ -5878,6 +6324,12 @@ function renderHistory(slots){
   // rows the user can see.
   const selGuard=document.querySelector('#hist tbody input:focus, #hselbar :focus');
   if(!selGuard) for(const id of [...hSel]) if(!rows.some(s=>s.nzo_id===id)) hSel.delete(id);
+  // §186b One sample of each distinct button set, for fitHistActs below
+  // to measure. Taken from the render itself rather than rebuilt beside
+  // it, so the strip it measures is the strip that is on the row - a
+  // second copy of the label logic would drift the first time one of
+  // these buttons changes.
+  const actSamples={};
   if(!selGuard)
   setHtml(document.querySelector('#hist tbody'), rows.map(s=>{
       const failed=s.status!=='Completed';
@@ -5901,8 +6353,16 @@ function renderHistory(slots){
         : (retryDim?t('hist.retry.local','This failed on this machine. Fix the cause first, or the retry runs straight into it again.')
                    :t('hist.retry.title','Retry: the journal resumes from what already downloaded'));
       const retryable=failed&&!rotted;
+      const actSig=(s.password_required?'k':'')+((leadSearch||rotted)?'f':'')+(retryable?'r':'');
       const ctl=(s.password_required?`<button class="ghost mini" title="${escA(t('hist.unlock.title','Archive is password-protected: enter the password to unpack the verified volumes'))}" onclick="event.stopPropagation();unlockJob('${s.nzo_id}')">🔑 ${t('hist.unlock','unlock')}</button>`:'')+
         ((leadSearch||rotted)?`<button class="ghost mini" title="${escA(t('hist.find.title','Search the wall and your indexers for another release of this title'))}" onclick="event.stopPropagation();findAnother('${escA(s.nzo_id)}')">🔎 ${t('hist.find','find another')}</button>`:'')+
+        // U8: when the daemon's one useful move is a settings row or
+        // the output folder, put that control ON the row - the same
+        // verbs the drawer's histFixBtn offers, so the row and drawer
+        // stay one action system. The dimmed Retry beside it keeps its
+        // "fix the cause first" title; now the fix is one click left.
+        ((act==='servers'||act==='retention')?`<button class="ghost mini" title="${escA(t('hist.act.servers.title','Open the server list - this failure was decided by your own server setup'))}" onclick="event.stopPropagation();goSetting('servers')">⚙ ${t('hist.act.servers','Server settings')}</button>`:'')+
+        (act==='path'?`<button class="ghost mini" title="${escA(t('hist.act.folder.title','Open this job’s output folder, where the evidence is'))}" onclick="event.stopPropagation();openItem('${s.nzo_id}','folder')">📂 ${t('hist.act.folder','Show the folder')}</button>`:'')+
         (retryable?`<button class="ghost mini${retryDim?' dimbtn':''}" title="${escA(retryTip)}" onclick="event.stopPropagation();retryJob('${s.nzo_id}')">↻ ${t('hist.retry','retry')}</button>`:'')+
         `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
         // The same menu the right-click opens - as a visible button,
@@ -5910,14 +6370,18 @@ function renderHistory(slots){
         // (play, show in folder, change category, delete files) had no
         // other route at all.
         `<button class="ghost mini" aria-haspopup="menu" title="${escA(t('hist.more.title','More: play, show in folder, change category, remove with files'))}" aria-label="${escA(t('hist.more.title','More: play, show in folder, change category, remove with files'))}" onclick="event.stopPropagation();histMenu(event,'${s.nzo_id}',${retryable})">⋯</button>`;
+      if(actSamples[actSig]===undefined) actSamples[actSig]=ctl;
       // The sub-line under the size: when it finished, then how long it
       // took and how fast. The when carries its full stamp on hover -
       // the row has no room for a spelled-out date.
       const sub=[];
       const when=histWhen(s);
-      if(when) sub.push(`<span title="${escA(histWhen(s,true))}">${esc(when)}</span>`);
+      // §186 The cell is a fixed width now, so this line wraps rather
+      // than widening the row: each fact is nowrap, the break goes
+      // between them. The sentences below are left to wrap normally.
+      if(when) sub.push(`<span class="nowrap" title="${escA(histWhen(s,true))}">${esc(when)}</span>`);
       if(s.elapsed_secs>0.5&&s.downloaded_bytes>0)
-        sub.push(esc(`${fmtEta(s.elapsed_secs)} · ${fmtRate(s.downloaded_bytes/1e6/s.elapsed_secs)}`));
+        sub.push(`<span class="nowrap">${esc(`${fmtEta(s.elapsed_secs)} · ${fmtRate(s.downloaded_bytes/1e6/s.elapsed_secs)}`)}</span>`);
       // M32: the daemon has already scheduled its own retry - without
       // this line the user sees a hard failure, then watches the row
       // silently vanish and re-queue minutes later.
@@ -5935,7 +6399,13 @@ function renderHistory(slots){
           ?t('hist.moveretry','not moved yet - trying again in {m} min',{m:Math.max(1,Math.ceil((s.auto_retry_at*1000-Date.now())/60000))})
           :t('hist.movestopped','not moved - automatic retries have stopped'))}</span>`);
       }
-      const st=sub.length?`<br><span class="dim">${sub.join(' · ')}</span>`:'';
+      // U8: a disk-full failure gets its space verdict ON the row, not
+      // just in the drawer - the ↻ beside it is the verb, this is
+      // whether it can work yet. Live: the span re-renders every poll
+      // (see the [data-rspace] loop in tick).
+      if(failed&&s.fail_action==='space')
+        sub.push(`<span data-rspace="${escA(s.nzo_id)}">${histRowSpace(s)}</span>`);
+      const st=sub.length?`<br><span class="dim histsub">${sub.join(' · ')}</span>`:'';
       // Completed, but something in it is still packed (no unpacker for
       // the format). Not a failure - every byte arrived - but the folder
       // does not hold what the user expects, so it is neither green nor
@@ -5984,17 +6454,24 @@ function renderHistory(slots){
       // the control's own activation.
       return `<tr class="item ${cls}" data-id="${escA(s.nzo_id)}" onclick="toggleHistRow(this)" tabindex="0"
         onkeydown="if((event.key==='Enter'||event.key===' ')&&event.target===this){event.preventDefault();toggleHistRow(this);}"
-        ondblclick="openItem('${s.nzo_id}','file')" oncontextmenu="return histMenu(event,'${s.nzo_id}',${retryable})"
-        title="${escA(t('hist.row.title3','Click the row for details. Every action is on the row itself: ⋯ opens the rest. Double-click plays, right-click opens the same menu.'))}">
+        ondblclick="openItem('${s.nzo_id}','file')" oncontextmenu="return histMenu(event,'${s.nzo_id}',${retryable})">
         <td class="selcol"><input type="checkbox" class="rowsel" data-sel="${escA(s.nzo_id)}"${hSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'h',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.name}))}"></td>
-        <td><span class="nm"><span class="caret">▶</span><span class="sdot" role="img" aria-label="${escA(dotLabel)}"></span><span class="nmtxt">${esc(s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.category)}${originGlyph(s.origin)}${needsPw?` <span class="warn">· ${t('hist.needpw','needs a password')}</span>`:''}${split?` <span class="warn">· ${t('hist.split','part of it did not move')}</span>`:''}${moveFail?` <span class="warn">· ${t('hist.movefail','not moved to its destination')}</span>`:''}${movingNow?` <span class="dim">· ${t('hist.moving','moving to its destination…')}</span>`:''}</span></span></td>
-        <td class="nowrap">${s.bytes!=null?fmtSize(s.bytes):esc(s.size||'')}${st}</td>
-        <td class="nowrap" style="text-align:end">${ctl}</td></tr>`;
+        <td class="hname"><span class="nm"><span class="caret">▶</span><span class="sdot" role="img" title="${escA(dotLabel)}" aria-label="${escA(dotLabel)}"></span><span class="nmtxt" data-full="${escA(s.name)}">${esc(s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.category)}${originGlyph(s.origin)}${needsPw?` <span class="warn">· ${t('hist.needpw','needs a password')}</span>`:''}${split?` <span class="warn">· ${t('hist.split','part of it did not move')}</span>`:''}${moveFail?` <span class="warn">· ${t('hist.movefail','not moved to its destination')}</span>`:''}${movingNow?` <span class="dim">· ${t('hist.moving','moving to its destination…')}</span>`:''}</span></span></td>
+        <td class="hsize"><span class="nowrap">${s.bytes!=null?fmtSize(s.bytes):esc(s.size||'')}</span>${st}</td>
+        <td class="hacts" style="text-align:end">${ctl}</td></tr>`;
     }).join('')
       ||`<tr><td colspan="4" class="dim">${(count('all')||histSearch||cur!=='all')
           ? t('hist.noneFilter','nothing with this status')
           : t('hist.none.new','Finished downloads are listed here, newest first.')}</td></tr>`);
   updateSelBar('h');
+  fitHistActs(actSamples);
+  histTitles();
+  histHoverInit();
+  // The card is built from the row it opened on: when that row is gone
+  // from the list, so is the card. Only ever after a render that
+  // actually changed something - setHtml is change-aware, so a card the
+  // user is reading is not flickered away every second.
+  if(hovId&&!rows.some(s=>s.nzo_id===hovId)) histHoverHide();
   restoreKbdFocus();
   // Say what is being withheld rather than just stopping - a list that
   // ends silently at 10 of 17 reads as lost downloads. `total` is the
@@ -6009,6 +6486,206 @@ function renderHistory(slots){
     : (histExpanded()&&total>histRows()
         ? `<button class="ghost mini" onclick="setHistExpanded(false)">${esc(t('hist.less','show fewer'))}</button>`:''));
   applyAllCardCaps();
+}
+// §186b The action strip is the one column a stylesheet cannot size. A
+// fixed-layout column takes a LENGTH, and the length this one needs is
+// whatever the buttons on the widest row come to: three on a finished
+// row, four on a failed one, five with a password on top - each spelled
+// out in the reader's own language, where "retry" alone runs from 132px
+// of strip in English to 202px in Croatian. A flat width therefore
+// wrapped the failed row onto a second line at EVERY window size, on a
+// 2560px screen as surely as on a laptop, which is not what a budget
+// should do with room to spare.
+//
+// So it is measured: one hidden probe per distinct button set - there
+// are at most a handful on screen, and each answer is cached until the
+// locale, the text size or the density moves it - and the column is set
+// to the widest of them through --hactw. The NAME pays for it, which is
+// the order of loss this whole card is built on, and it keeps a floor
+// of NAME_FLOOR px. Past that the width is capped and the strip wraps
+// again, exactly as it did before: a taller row is the one honest
+// outcome left when the width genuinely is not there.
+const HACT_W={};                                  // font+locale+set -> px
+let histActNeed=0;                                // last measured widest
+function fitHistActs(samples){
+  const tb=document.getElementById('hist');
+  const cell=tb&&tb.querySelector('tbody td.hacts');
+  // Nothing rendered, or the card is not on screen to be measured
+  // against (a hidden card measures 0 and would pin an absurd width).
+  if(!tb||!cell||tb.clientWidth<200) return;
+  // A width the user dragged for themselves outranks any measurement:
+  // applyCols writes it into a colgroup that wins over the th anyway,
+  // so setting one here would only make the two disagree.
+  if(colPrefs('hist').w[2]!=null){ tb.style.removeProperty('--hactw'); return; }
+  const cs=getComputedStyle(cell);
+  const key=LOCALE+'|'+cs.font+'|';
+  let p=document.getElementById('hactprobe');
+  if(!p){
+    p=document.createElement('div');
+    p.id='hactprobe'; p.setAttribute('aria-hidden','true');
+    document.body.appendChild(p);
+  }
+  p.style.cssText='position:absolute;left:-9999px;top:0;white-space:nowrap;'
+    +'visibility:hidden;pointer-events:none;font:'+cs.font;
+  let need=0;
+  for(const sig in samples){
+    if(HACT_W[key+sig]==null){
+      p.innerHTML=samples[sig];
+      HACT_W[key+sig]=p.getBoundingClientRect().width;
+    }
+    need=Math.max(need, HACT_W[key+sig]);
+  }
+  // A tick that skipped the re-render (a focused checkbox) brings no
+  // samples with it - keep the width the rows on screen were measured
+  // for, and still redo the cap below, which is what a resize moves.
+  if(!need) need=histActNeed;
+  if(!need){ tb.style.removeProperty('--hactw'); return; }
+  histActNeed=need;
+  const NAME_FLOOR=72;                            // caret, dot, a few characters
+  let lead=0;
+  for(const th of tb.tHead.rows[0].cells)
+    if(th.classList.contains('selcol')) lead+=th.getBoundingClientRect().width;
+  const sizeTh=tb.querySelector('thead th.hsize');
+  const room=tb.clientWidth-lead-(sizeTh?sizeTh.getBoundingClientRect().width:0)-NAME_FLOOR;
+  const want=Math.ceil(need+parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight));
+  // Take the width only where taking it BUYS the single line. Where it
+  // does not - a dense 360px column with a failed row in it - the strip
+  // is going to wrap whichever number goes here, and then the name may
+  // as well keep the room: the stylesheet's own value stands and this
+  // hands nothing over for nothing. (It is also how the column gets
+  // SMALLER than the stylesheet: a history of finished rows carries two
+  // buttons, wants 77px, and gives the name the other 73.)
+  if(want<=room) tb.style.setProperty('--hactw', want+'px');
+  else tb.style.removeProperty('--hactw');
+}
+// §186c Tooltips, only where they are earned. A `title` on text you can
+// already read is noise that also delays the one that matters, so the
+// name and the timing line under the size carry theirs only while the
+// text is actually cut off - re-checked after every render, and after a
+// resize by the next one (this runs at 1 Hz).
+function histTitles(){
+  const tb=document.getElementById('hist'); if(!tb) return;
+  // The name's native tooltip is the fallback for the pointers that
+  // never get the hover card below; where the card runs it carries the
+  // whole name already, and two tooltips for one name is one too many.
+  for(const n of tb.querySelectorAll('tbody .nmtxt')){
+    if(HOVER_FINE.matches||n.scrollWidth<=n.clientWidth+1) n.removeAttribute('title');
+    else n.title=n.dataset.full||n.textContent.trim();
+  }
+  // §186d ...and one level up, the same rule for the ROW's own title.
+  // It taught the row's actions on every row, which meant the browser
+  // drew it AT THE CURSOR, over the hover card, covering the title and
+  // the status and reason lines the card exists to show - a native
+  // tooltip's timing, position and z-order are the browser's, so the
+  // only lever we have is whether the attribute is there at all. Where
+  // the card runs it is also redundant: the card's foot already says the
+  // row opens. The rest of what it taught is on the card header's `?`.
+  // Coarse pointers get no card, so there it stays as the fallback.
+  for(const tr of tb.querySelectorAll('tbody tr.item')){
+    if(HOVER_FINE.matches) tr.removeAttribute('title');
+    else tr.title=t('hist.row.title3','Click the row for details. Every action is on the row itself: ⋯ opens the rest. Double-click plays, right-click opens the same menu.');
+  }
+  // The timing line is an inline span: it does not clip ITSELF, the cell
+  // does (dense puts every history cell on one line), so the cell is
+  // what has to be asked whether anything was lost. Measure the span
+  // instead and the answer is always no.
+  for(const td of tb.querySelectorAll('tbody td.hsize')){
+    const sub=td.querySelector('.histsub'); if(!sub) continue;
+    if(td.scrollWidth>td.clientWidth+1) sub.title=sub.textContent.trim();
+    else sub.removeAttribute('title');
+  }
+}
+
+// §186c The hover card: the drawer's headline facts, without the click.
+// The row summary already holds every one of them, so this costs no
+// request - and it deliberately stops at what the summary knows. The
+// drawer stays the place for the whole record, which is why the card
+// ends by saying the row opens.
+const HOVER_FINE=matchMedia('(pointer:fine)');
+let hovTimer=null, hovId='', hovX=0, hovY=0;
+function histHoverHide(){
+  clearTimeout(hovTimer); hovTimer=null; hovId='';
+  const el=document.getElementById('histhov'); if(el) el.remove();
+}
+function histHoverHtml(s){
+  const failed=s.status!=='Completed';
+  const rows=[];
+  // The verdict first, with the caveat that makes an amber row amber -
+  // a green "Completed" over a folder that is still packed, or still
+  // locked, is the row lying by omission.
+  const caveat=s.password_required?t('hist.needpw','needs a password')
+    :s.unpack_blocked_by?t('hist.packed','still packed: {name}',{name:s.unpack_blocked_by})
+    :s.move_split?t('hist.split','part of it did not move')
+    :s.move_failed?t('hist.movefail','not moved to its destination')
+    :s.move_pending?t('hist.moving','moving to its destination…'):'';
+  rows.push([t('col.status','Status'),
+    `<span class="${failed?'bad':'ok'}">${esc(tStatus(s.status))}</span>`
+    +(caveat?` <span class="warn">· ${esc(caveat)}</span>`:'')]);
+  // Somebody else's text, and a failure message can be a paragraph:
+  // escaped, and cut at a length that keeps the card a card.
+  if(failed&&s.fail_message){
+    const m=String(s.fail_message);
+    rows.push([t('hist.why','Reason'), esc(m.length>240?m.slice(0,240)+'…':m)]);
+  }
+  if(s.bytes!=null||s.size) rows.push([t('col.size','Size'),
+    esc(s.bytes!=null?fmtSize(s.bytes):s.size)]);
+  if(s.completed){
+    const rate=(s.elapsed_secs>0.5&&s.downloaded_bytes>0)
+      ? ` <span class="dim">· ${esc(fmtEta(s.elapsed_secs))} · ${esc(fmtRate(s.downloaded_bytes/1e6/s.elapsed_secs))}</span>`:'';
+    rows.push([t('hist.finished','Finished'), esc(histWhen(s,true))+rate]);
+  }
+  rows.push([t('col.category','Category'), esc(s.category||'*')]);
+  if(s.identity_name) rows.push([t('hist.identity','Identified as'), esc(s.identity_name)]);
+  const where=s.moved_to||s.storage;
+  if(where) rows.push([t('col.location','Location'), esc(where)]);
+  return `<div class="hn">${esc(s.name)}</div><dl>`
+    +rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')
+    +`</dl><div class="foot">${esc(t('hist.hover.more','Click the row for the whole record.'))}</div>`;
+}
+function histHoverShow(tr){
+  // A menu the user opened owns the pointer; so does a drawer that is
+  // already showing everything this card would say.
+  if(document.getElementById('ctxmenu')||tr.classList.contains('open')) return;
+  const s=(lastHistSlots||[]).find(x=>x.nzo_id===tr.dataset.id);
+  if(!s||!tr.isConnected) return;
+  const el=document.createElement('div');
+  el.id='histhov'; el.setAttribute('aria-hidden','true');
+  el.innerHTML=histHoverHtml(s);
+  document.body.appendChild(el);
+  // Beside the pointer, flipped above it rather than off the bottom, and
+  // clamped either way - the same shape as placeMenu, and the clamp is
+  // what stops a card being placed where nobody can read it.
+  const top=hovY+20+el.offsetHeight>innerHeight ? hovY-el.offsetHeight-14 : hovY+20;
+  el.style.left=Math.max(8,Math.min(hovX+16, innerWidth-el.offsetWidth-8))+'px';
+  el.style.top=Math.max(8,Math.min(top, innerHeight-el.offsetHeight-8))+'px';
+}
+function histHoverInit(){
+  const tb=document.querySelector('#hist tbody');
+  if(!tb||tb.dataset.hov) return;
+  tb.dataset.hov='1';                              // the tbody outlives every render
+  tb.addEventListener('mousemove',e=>{ hovX=e.clientX; hovY=e.clientY; });
+  tb.addEventListener('mouseover',e=>{
+    if(!HOVER_FINE.matches) return;
+    const td=e.target.closest&&e.target.closest('td.hname');
+    const tr=td&&td.closest('tr.item');
+    if(!tr) return histHoverHide();
+    // Anything carrying a tooltip of its own keeps it: the media chip
+    // and the shape badge say more about themselves than this could.
+    for(let n=e.target; n&&n!==td; n=n.parentElement)
+      if(n.hasAttribute&&n.hasAttribute('title')) return histHoverHide();
+    if(tr.dataset.id===hovId) return;              // already armed or shown
+    histHoverHide();
+    hovId=tr.dataset.id; hovX=e.clientX; hovY=e.clientY;
+    hovTimer=setTimeout(()=>histHoverShow(tr),420);
+  });
+  tb.addEventListener('mouseout',e=>{
+    const to=e.relatedTarget;
+    if(!to||!to.closest||!to.closest('td.hname')) histHoverHide();
+  });
+  // Anything that moves the page out from under the card closes it.
+  addEventListener('scroll',histHoverHide,true);
+  addEventListener('click',histHoverHide,true);
+  addEventListener('keydown',e=>{ if(e.key==='Escape') histHoverHide(); });
 }
 // Expand first; every press after that raises the window by 200 rows -
 // real paging against the store, not a slice of a capped payload.
@@ -6467,10 +7144,26 @@ async function pvWhyRemuxFailed(){
 }
 // The handoff that has always existed, from inside the player: the
 // .m3u the user's own player follows.
+// §61d: fetched with the X-Api-Key header and handed over as a blob
+// download, not a location.href with ?apikey= - the key must stay out
+// of browser history, proxy access logs and Referer headers. The saved
+// playlist opens in the default player exactly as the navigation did;
+// the /stream link inside it carries its own per-job ?t= token.
+async function m3uHandoff(id){
+  try{
+    const r=await fetch('/m3u/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
+    if(!r.ok){ toast(tErr('failed'), true); return; }
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(await r.blob());
+    a.download='nzbfast.m3u';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){ toast(tErr('could not reach nzbfast'), true); }
+}
 function pvHandoff(){
   if(!pvJob) return;
   toast(t('toast.handoff','Handing playback to your player…'));
-  location.href=`/m3u/${encodeURIComponent(pvJob)}${key?`?apikey=${encodeURIComponent(key)}`:''}`;
+  m3uHandoff(pvJob);
 }
 
 // The live body of the drawer's "Disk space" row for a disk-full unpack
@@ -6500,6 +7193,18 @@ function histSpaceHtml(s){
       `onclick="event.stopPropagation();eatUnpack('${escA(s.nzo_id)}')">${esc(t('hist.space.eat','extract in place'))}</button>`
     : '';
   return `${state} · <span class="warn">${esc(t('hist.space.wait','free about {short} GB more, then hit Retry',{short:(needGB-freeGB).toFixed(1)}))}</span>${eat}`;
+}
+// U8: the row's compact twin of histSpaceHtml. The drawer keeps the
+// full arithmetic and the extract-in-place offer; the row says only
+// which side of the line the disk is on right now, from the SAME
+// recorded space_needed and the same live free-space number. The
+// sentences are the drawer's own two, so the row and drawer never
+// disagree about what Retry would do.
+function histRowSpace(s){
+  const needGB=(s.space_needed||s.bytes||0)/1e9, freeGB=parseFloat(lastQ&&lastQ.diskspace1)||0;
+  return freeGB>=needGB
+    ? `<span class="ok">${esc(t('hist.space.ok','enough space now - nothing is re-downloaded, Retry re-runs just the unpack'))}</span>`
+    : `<span class="warn">${esc(t('hist.space.wait','free about {short} GB more, then hit Retry',{short:(needGB-freeGB).toFixed(1)}))}</span>`;
 }
 // TODO 101: record this download's consent, then retry it. Two calls
 // and not one, because consent is durable and the retry is not: if the
@@ -6914,12 +7619,12 @@ function pipeline(s,mbps,queued,done,failed){
   const pc=document.getElementById('pipecard');
   if(s.active){
     pc.style.display='';
-    let L=lane('',t('lane.download','download'),s.downloaded,s.total,`${gb(s.downloaded)} / ${gb(s.total)} ${unit('GB')}`);
+    let L=lane('',t('lane.download','downloading'),s.downloaded,s.total,`${gb(s.downloaded)} / ${gb(s.total)} ${unit('GB')}`);
     if(s.verify && s.verify.blocks_total>0)
-      L+=lane('verify',t('lane.verify','verify'),s.verify.blocks_done,s.verify.blocks_total,
+      L+=lane('verify',t('lane.verify','verifying'),s.verify.blocks_done,s.verify.blocks_total,
         `${s.verify.blocks_done}/${s.verify.blocks_total} ${t('lane.blk','blk')}${s.verify.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:s.verify.blocks_bad})}</span>`:''}`);
     const ew=(s.files||[]).reduce((a,f)=>a+f.written,0), es=(s.files||[]).reduce((a,f)=>a+f.size,0);
-    if(es>0) L+=lane('extract',t('lane.extract','extract'),ew,es,`${gb(ew)} / ${gb(es)} ${unit('GB')}`);
+    if(es>0) L+=lane('extract',t('lane.extract','unpacking'),ew,es,`${gb(ew)} / ${gb(es)} ${unit('GB')}`);
     setHtml('lanes',L);
   } else pc.style.display='none';
 
@@ -6938,6 +7643,11 @@ function pipeline(s,mbps,queued,done,failed){
   if(poolEvents.length){
     const lg=document.getElementById('evLegend');
     if(lg && lg.style.display==='none') lg.style.display='';
+    // §U7: outside the guard above, which fires only on the very first
+    // reveal of the legend - the callout has its own once-per-browser
+    // flag, and on a later visit the legend is already shown while the
+    // callout has still never been seen.
+    renderEvTip();
   }
   // §G: refusals kept by the daemon past the pool that saw them. The
   // live list above is empty whenever nothing is downloading, which used
@@ -7136,12 +7846,22 @@ function pipeline(s,mbps,queued,done,failed){
     // was. Keep the card, drop the chart and the legend (there is no
     // rate to draw), and show the refusals on their own - this is the
     // state a user is in when they come to ask why nothing downloaded.
+    //
+    // The badge takes the same `source_ips` branch as the live row. It
+    // did not, so a "max simultaneous IP addresses reached" refusal
+    // read "at its connection limit" at a glance while the sentence
+    // directly beneath it correctly talked about addresses - the exact
+    // misdirect the split was written to stop, on the card people
+    // actually reach for when nothing is downloading (Codex sweep 6,
+    // N5).
     provc.style.display='';
     document.getElementById('provsum').textContent=t('prov.idle','not downloading right now');
     setHtml('servers', srefs.map(r=>`<div class="srv" data-host="${escA(r.host)}">
       <span class="host" title="${escA(r.host)}">${esc(r.host.replace(/^(news|reader)\./,''))}</span>
       <span><span class="${r.permanent?'bad':'warn'}">${r.permanent
         ? t('prov.stat.rejected','sign-in rejected')
+        : r.source_ips
+        ? t('prov.stat.capped.ips','too many addresses')
         : t('prov.stat.capped','at its connection limit')}</span>${
         r.at?` <span class="dim">· ${esc(shortWhen(r.at))}</span>`:''}</span>
       <span></span><span></span>${refusalDetailHtml(r.host, r.line, r.permanent, !!r.source_ips)}</div>`).join(''));
@@ -7349,7 +8069,11 @@ function actLine(s){
     case 'verifying':return t('queue.act.verifying','verifying');
     case 'repairing':return t('queue.act.repairing','repairing');
     case 'extracting':return t('queue.act.extracting','unpacking');
-    case 'finalizing':return t('queue.act.finalizing','moving files');
+    // U1: the write-out tail in plain words. A row at 100% saying
+    // nothing but "Moving · moving files" read as a hang; the sentence
+    // says the download itself is over. Front-loaded so the actline's
+    // ellipsis keeps the part that matters.
+    case 'finalizing':return t('queue.act.tailwrite','writing the last files to your folder - the download itself is done');
   }
   return '';
 }
@@ -7360,10 +8084,15 @@ function actSub(s){
   // "line" and "unknown" stay silent here - a row running at line
   // speed needs no caveat, and a verdict still forming is not news.
   const w=lastQ&&lastQ.whyslow;
-  const why=(s.status==='Downloading'&&w&&w.nzo_id===s.nzo_id
+  const whyTxt=(s.status==='Downloading'&&w&&w.nzo_id===s.nzo_id
     &&['provider','cpu','client','disk','limit','missing'].includes(w.layer))
-    ?`<span class="dim"> · ${whyPhrase(w)}</span>`:'';
-  return (txt||why)?`<div class="dim actline" title="${escA(txt)}">${txt}${why}</div>`:'';
+    ?whyPhrase(w):'';
+  const why=whyTxt?`<span class="dim"> · ${whyTxt}</span>`:'';
+  // The tooltip carries the WHOLE line, whyslow clause included - the
+  // visible line ellipsizes to the column, and a tooltip that repeats
+  // only the two-word phase answers nothing the truncation asked.
+  const tip=[txt,whyTxt].filter(Boolean).join(' · ');
+  return (txt||why)?`<div class="dim actline" title="${escA(tip)}">${txt}${why}</div>`:'';
 }
 // §129 4b: the verdict phrase for a whyslow payload. Tokens and
 // numbers come from the daemon (serve/whyslow.rs); every sentence is
@@ -7583,6 +8312,8 @@ function renderQueue(){
   setHtml(tb, slots.map((s,i)=>{
     const cum=finishMb[s.nzo_id], eta=(mbps>0&&cum!=null)?cum/mbps:Infinity;
     const dl=s.status==='Downloading', pz=s.status==='Paused', tail=isTail(s), open=openDrawer===s.nzo_id;
+    // U1: the write-out tail gets the plain "not stuck" ETA tooltip.
+    const wtail=tail&&(s.finishing||s.status==='Moving');
     // Per-item controls: stop (active) / remove only (finishing) /
     // pause·force·remove (queued).
     //
@@ -7660,11 +8391,22 @@ function renderQueue(){
     // already carries the localized stage token, so the status chip
     // says what the ROW is rather than repeating the stage twice.
     const tailWord=tail?esc(s.finishing?t('queue.state.finishing','Finishing'):tStatus(s.status)):'';
+    // An active row whose activity is a pipeline phase, not a fetch:
+    // nothing is on the wire, so bytes-over-rate has no answer and the
+    // ETA cell showed a number that could only mislead (or ∞). Say the
+    // phase instead - same words actLine puts under the bar, no second
+    // vocabulary. Fetch-shaped stalls (connecting, waiting, capacity)
+    // keep the time: the download is still the thing being waited on.
+    const actWord=dl&&['verifying','repairing','extracting'].includes(s.activity)
+      ?actLine(s)
+      // finalizing's actLine is now a whole sentence (tailwrite); the
+      // cell keeps the short word.
+      :dl&&s.activity==='finalizing'?t('queue.act.finalizing','moving files'):'';
     // §129 2f: the checkbox renders its state straight from the Set, so
     // selection survives every setHtml tbody re-render by construction.
     const selBox=`<td class="selcol"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
     return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" draggable="${dl||tail?'false':'true'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
-      <td class="nowrap dim">${fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(tail?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:pz?'-':fmtEta(eta)}</td>
+      <td class="nowrap dim">${fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':fmtEta(eta)}</td>
       <td><div class="bar"><i style="width:${s.percentage}%"></i></div>${actSub(s)}</td>
       <td class="nowrap" style="text-align:end">${ctl}</td></tr>`+
       (open?`<tr class="drawer"><td colspan="7">${drawerHtml(s)}</td></tr>`:'');
@@ -7830,8 +8572,21 @@ const LOOK_ATTRS = {Corners:'corners', Border:'border', Palette:'palette',
 const LOOK_COLORS = {userbg:'--user-bg', usersurface:'--user-surface', userfg:'--user-fg'};
 const LOOK_KEYS = ['nzbfastTheme','nzbfastAccent','nzbfastFontScale','nzbfastDensity',
   ...Object.keys(LOOK_ATTRS).map(k=>'nzbfast'+k), ...Object.keys(LOOK_COLORS).map(k=>'nzbfast'+k)];
+// The two older boolean flags spell the same thing under different
+// names, and they are what `applyDensity` actually reads to put
+// `compact` and `dense` on the body. Left out of the list above, Reset
+// Appearance cleared `uiCompact` and not `uiDense`, so factory defaults
+// came back as the dense grid without the compact spacing it is built
+// to sit on, and an exported Dense look arrived somewhere else as
+// neither (Codex sweep 7, M8). Everything that owns the whole look -
+// export, import, reset - drives off LOOK_ALL.
+const LOOK_FLAGS = ['uiCompact','uiDense'];
+const LOOK_ALL = LOOK_KEYS.concat(LOOK_FLAGS);
 
 function setLook(key, value){
+  // Any look write can move the user off a preset, so the indicator is
+  // refreshed from here rather than from each individual control.
+  setTimeout(renderPresetState, 0);
   const r=document.documentElement, attr=LOOK_ATTRS[key];
   if(key==='Density'){
     if(value==='comfortable'){ localStorage.removeItem('nzbfastDensity'); r.removeAttribute('data-density'); }
@@ -7883,6 +8638,7 @@ function paletteSwatch(){
 function loadLookControls(){
   const g=id=>document.getElementById(id);
   if(g('s_density')) g('s_density').value=localStorage.nzbfastDensity||'comfortable';
+  if(g('s_fillgaps')) g('s_fillgaps').checked=layoutPrefs().balance===true;
   for(const [key,attr] of Object.entries(LOOK_ATTRS)){
     const el=g('s_'+attr); if(el) el.value=localStorage.getItem('nzbfast'+key)||'';
   }
@@ -7897,8 +8653,11 @@ function loadLookControls(){
 }
 function exportLook(){
   const look={};
-  for(const k of LOOK_KEYS) if(localStorage.getItem(k)!==null) look[k]=localStorage.getItem(k);
-  const blob={nzbfast:'appearance', v:1, look, layout:localStorage.layoutPrefs||null};
+  for(const k of LOOK_ALL) if(localStorage.getItem(k)!==null) look[k]=localStorage.getItem(k);
+  // v2 carries the density flags. A v1 file could not describe them, so
+  // it imports as the shipped spacing rather than as whatever the
+  // receiving browser happened to be set to.
+  const blob={nzbfast:'appearance', v:2, look, layout:localStorage.layoutPrefs||null};
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(blob,null,1)],{type:'application/json'}));
   a.download='nzbfast-appearance.json'; a.click();
@@ -7912,18 +8671,30 @@ async function importLook(input){
     if(j.nzbfast!=='appearance') throw new Error('shape');
     // Only keys we own are written back: an imported file must not be
     // able to set arbitrary localStorage on this origin.
-    for(const k of LOOK_KEYS) localStorage.removeItem(k);
+    for(const k of LOOK_ALL) localStorage.removeItem(k);
+    // An imported look is not one of our presets. Left behind, the two
+    // keys make Settings claim a preset the file never named.
+    localStorage.removeItem('nzbfastPreset'); localStorage.removeItem('nzbfastPresetSig');
     for(const [k,v] of Object.entries(j.look||{}))
-      if(LOOK_KEYS.includes(k) && typeof v==='string' && v.length<64) localStorage.setItem(k,v);
+      if(LOOK_ALL.includes(k) && typeof v==='string' && v.length<64) localStorage.setItem(k,v);
+    // A file that names no layout describes the shipped one, so the
+    // receiving browser's own arrangement goes with it. Skipping the
+    // write instead left the recipient's cards under the sender's
+    // palette - a hybrid the file never described (Codex sweep 7, M8).
     if(typeof j.layout==='string') localStorage.layoutPrefs=j.layout;
+    else localStorage.removeItem('layoutPrefs');
     toast(t2('toast.lookimported','Appearance loaded. Reloading…'));
     setTimeout(()=>location.reload(), 600);
   }catch(_){ toast(t2('toast.looknotours',"That file isn't an nzbfast appearance file."), true); }
 }
 function resetAppearance(){
   setTheme('auto'); setAccent(''); setFontScale(100);
-  for(const k of LOOK_KEYS) localStorage.removeItem(k);
-  localStorage.removeItem('uiCompact'); localStorage.removeItem('layoutPrefs');
+  for(const k of LOOK_ALL) localStorage.removeItem(k);
+  localStorage.removeItem('layoutPrefs');
+  // The preset identity goes with the look it named. Left behind, the
+  // fingerprint no longer matches anything and factory defaults read
+  // back as "Dense (modified)" (Codex sweep 6, N10).
+  localStorage.removeItem('nzbfastPreset'); localStorage.removeItem('nzbfastPresetSig');
   toast(t2('toast.lookreset','Appearance reset to defaults.'));
   setTimeout(()=>location.reload(), 500);
 }
@@ -8085,7 +8856,7 @@ function drawerHtml(s){
         <span class="dim mono nowrap">${fmtSize(f.written)} / ${fmtSize(f.size)}</span></div>`;
     }).join('')||`<div class="dim" style="font-size:12.5px">${t('drawer.readingfiles','reading file list…')}</div>`;
     const v=st.verify||{};
-    const vline=v.blocks_total>0?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verify')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
+    const vline=v.blocks_total>0?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verifying')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
     const srv=(st.servers||[]).map(x=>({host:x.host,b:Math.max(0,(x.bytes||0)-(jobBase.bytes[x.host]||0))})).filter(x=>x.b>0);
     const tot=srv.reduce((a,x)=>a+x.b,0);
     const sline=tot>0?`<div class="dsrv">${srv.map(x=>`<span>${esc(x.host.replace(/^(news|reader)\./,''))} <b>${fmtBytes(x.b)}</b> · ${(100*x.b/tot).toFixed(0)}%</span>`).join('')}</div>`:'';
@@ -8106,7 +8877,7 @@ function drawerHtml(s){
   // phase it is in and, if the verifier left a count, what it found.
   if(isTail(s)){
     const v=(lastStats||{}).verify||{};
-    const vline=(s.status!=='Moving'&&v.blocks_total>0)?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verify')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
+    const vline=(s.status!=='Moving'&&v.blocks_total>0)?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verifying')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
     return `<div style="font-size:12.5px">${t('drawer.finishing','Downloaded. {phase} - nothing more is being downloaded for this job.',{phase:esc(tStatus(s.status))})}</div>`
       +vline
       +(dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'')
@@ -9034,7 +9805,11 @@ function watchFailRow(f){
   const extra=kind==='kept' ? String(f.error||'').split(': ').slice(1).join(': ') : f.error;
   const raw=(kind==='kept'||kind==='rejected')&&extra
     ? ` <span class="dim">${esc(extra)}</span>` : '';
-  return `<div style="margin:2px 0">${info?'ℹ':'⚠'} ${msg}${raw} ${btn}</div>`;
+  // U8: a real failure joins the hold-banner family - warn colour, not
+  // the dim footnote it was. The four success shapes stay dim: they are
+  // housekeeping notes, and painting them amber would teach the eye to
+  // ignore this strip exactly when it matters.
+  return `<div class="${info?'dim':'warn'}" style="margin:2px 0">${info?'ℹ':'⚠'} ${msg}${raw} ${btn}</div>`;
 }
 // One "the record went, the files did not" notice. The PATH is the point
 // of the row: the user asked to delete a download, the list stopped
@@ -9074,6 +9849,31 @@ function deleteKeptRow(f){
   // additive (it adds a download), where dismiss ends the row.
   const again=f.retry?`<button class="ghost mini" title="${escA(t('hist.kept.again.title','Add this release to the queue again, from the copy of the NZB kept when the delete could not remove the files. Nothing already on disk is touched.'))}" data-p="${escA(f.path)}" onclick="retryDeleteKept(this,this.dataset.p)">⬇ ${esc(t('hist.kept.again','download it again'))}</button> `:'';
   return `<div style="margin:2px 0">⚠ ${msg}${why} ${again}${btn}</div>`;
+}
+// The note itself. Two sentences at most, and the second one only when
+// it is true: some rows could NOT be re-checked, and saying "your
+// history was updated" without saying that would imply a completeness
+// this pass cannot deliver. A download whose files are gone has nothing
+// left to read, so its label stays exactly as it was written - which is
+// the honest answer, and worth one clause to say out loud.
+function histUpgradedRow(h){
+  const n=h.corrected||0, k=h.kept||0;
+  // tn(), not a hand-rolled ternary: the count decides the sentence, and
+  // an English one/many split picks the wrong catalogue form in every
+  // language with more than two (see the hist.vh.bad note above).
+  const main=t('hist.upg.lead','The history display was updated.')+' '
+    +tn('hist.upg', n,
+      '{n} download now shows the quality read from the file itself.',
+      '{n} downloads now show the quality read from the file itself.');
+  const kept=!k ? '' : ' '+tn('hist.upg.kept', k,
+    '{n} download whose files are no longer on disk keeps the label it was saved with.',
+    '{n} downloads whose files are no longer on disk keep the labels they were saved with.');
+  const btn=`<button class="ghost mini" title="${escA(t('hist.upg.dismiss.title','Stop showing this note. Nothing in your history changes either way'))}" onclick="dismissHistUpgraded()">✕ ${esc(t('hist.upg.dismiss','dismiss'))}</button>`;
+  return `<div style="margin:2px 0">${esc(main)}${esc(kept)} ${btn}</div>`;
+}
+async function dismissHistUpgraded(){
+  await api('hist_upgraded_dismiss','');
+  tick();
 }
 async function dismissDeleteKept(path){
   await api('delete_kept_dismiss','&value='+encodeURIComponent(path));
@@ -9438,7 +10238,8 @@ async function openDir(key){
 // picked off any drive. 'dir' mode picks a folder; 'file' mode picks a file.
 let fsCtx={key:null,mode:'dir',path:'',parent:null};
 const FS_TITLES=()=>({out_dir:t('fs.t.out','Choose the download folder'),watch:t('fs.t.watch','Choose the watch folder'),
-  script:t('fs.t.script','Choose the post-processing script'),index_db:t('fs.t.db','Choose the index database file'),
+  script:t('fs.t.script','Choose the post-processing script'),
+  queue_finished_script:t('fs.t.finishscript','Choose the script to run when the queue finishes'),index_db:t('fs.t.db','Choose the index database file'),
   move_completed:t('fs.t.move','Choose where completed downloads go'),
   password_file:t('fs.t.pwfile','Choose the archive passwords file')});
 function fsClose(){ document.getElementById('fsov').classList.remove('on');
@@ -9518,12 +10319,18 @@ async function fsNewFolder(){
 }
 function fsApply(path){
   const el=fsCtx.el||document.getElementById('s_'+fsCtx.key);
-  if(el) el.value=path;
+  // The post-processing setting holds an ordered CHAIN, comma-separated
+  // (TODO 192), so browsing to a second script must ADD a link rather
+  // than throw the first one away. Every other picker replaces, which is
+  // what "choose this folder" means.
+  const chain = fsCtx.key==='script' && el && el.value.trim();
+  const val = chain ? el.value.trim().replace(/,\s*$/,'')+','+path : path;
+  if(el) el.value=val;
   // A row in a table has no setting of its own - its Apply writes the
   // whole list - so only the keyed form saves here.
-  if(fsCtx.key) setCfg(fsCtx.key,path);
+  if(fsCtx.key) setCfg(fsCtx.key,val);
   fsClose();
-  toast(t('toast.setto','Set to {p}',{p:path}));
+  toast(t('toast.setto','Set to {p}',{p:val}));
 }
 function fsChoose(){ if(fsCtx.mode!=='file') fsApply(fsCtx.path); }  // pick current folder
 function fsPick(path){ fsApply(path); }                              // pick a file
@@ -10073,11 +10880,29 @@ function cardMenu(e, id, anchor){
   // six cards that have no grip.
   m.setAttribute('aria-label', t('layout.menu.label','Layout options for {card}',{card:cardLabel(c)}));
   const it=(attrs,body)=>`<button type="button" role="menuitem" ${attrs}>${body}</button>`;
+  // §6e stacking exists only where columns do (the Dense preset), and a
+  // full-width strip can neither stack nor be stacked under. The item
+  // names the actual anchor - "Stack under Data usage" - because "the
+  // previous card" is exactly the thing a menu with no visible anchor
+  // cannot point at. The anchor is the nearest column card ABOVE this
+  // one in the move sequence, skipping full-width strips like the queue.
+  let stackIt='';
+  if(uiDense() && !denseFull(c)){
+    if(layoutPrefs().stack[id]){
+      stackIt=it(`onclick="cardStack('${id}','')"`,`⤴&nbsp; ${t('layout.menu.unstack','Unstack')}`);
+    }else{
+      let an=null;
+      for(let k=i-1;k>=0;k--) if(!denseFull(seq[k])){ an=seq[k]; break; }
+      if(an) stackIt=it(`onclick="cardStack('${id}','${an.id}')"`,
+        `⤵&nbsp; ${t('layout.menu.stack','Stack under {card}',{card:esc(cardLabel(an))})}`);
+    }
+  }
   m.innerHTML=
     it(`${noUp?'disabled ':''}onclick="cardMove('${id}',-1)"`,`↑&nbsp; ${t('layout.menu.up','Move up')}`)+
     it(`${noDown?'disabled ':''}onclick="cardMove('${id}',1)"`,`↓&nbsp; ${t('layout.menu.down','Move down')}`)+
     it(`onclick="toggleCardDensity('${id}')"`,`▤&nbsp; ${t('layout.menu.dense','Compact')}`)+
     (grip?it(`onclick="cardResize('${id}')"`,`↕&nbsp; ${t('layout.menu.resize','Resize')}`):'')+
+    stackIt+
     `<hr>`+it(`onclick="hideCard('${id}',true)"`,`✕&nbsp; ${t('layout.menu.hide','Hide')}`)+
     // The way out to §6c's mode, last and in its own group: the four
     // items above are what someone who right-clicked came for, and
@@ -10526,7 +11351,7 @@ async function runLadder(btn){ await busy(btn,t('busy.testing','Testing…'), as
   // to spend - but it has to say so before it does.
   const bs=srvList[+idx]||{};
   if((bs.block_account||bs.block_bytes) &&
-     !confirm(t('ladder.blockconfirm','{host} is a block account, so this test will spend paid bytes from it. The test downloads real articles for up to a few minutes. Run it anyway?',{host:bs.host||''}))) return;
+     !confirm(t('ladder.blockconfirm','{host} is an account you paid for up front, so this test will spend data you bought. The test downloads real articles for up to a few minutes. Run it anyway?',{host:bs.host||''}))) return;
   const fixed=parseInt(document.getElementById('ladderN').value)||0;
   const o=document.getElementById('ladderOut'), tbl=document.getElementById('ladderTbl');
   o.textContent=fixed?t('ladder.fixed','Testing exactly {n} connections…',{n:fixed}):t('ladder.running','Downloading test articles at each connection count…');
@@ -10576,15 +11401,15 @@ async function runLadder(btn){ await busy(btn,t('busy.testing','Testing…'), as
   const last=steps[steps.length-1], prev=steps[steps.length-2];
   let extra='';
   if(last&&last.granted&&last.granted+2<last.connections)
-    extra=' '+t('ladder.ceiling',"The provider only granted ~{n} sockets - that's the account's real ceiling.",{n:last.granted});
+    extra=' '+t('ladder.ceiling',"The provider only allowed about {n} connections - that is the account's real limit.",{n:last.granted});
   else if(last&&prev&&last.gbps>prev.gbps*1.12)
-    extra=' '+t('ladder.gaining','Still gaining at the top step: the true knee may be higher (the line was likely the limit today).');
+    extra=' '+t('ladder.gaining','Still gaining at the top step: the best number may be higher (your line was probably the limit today).');
   // A jagged run measured the SAME line at wildly different rates, so no
   // single rung on it means much. Say so rather than dressing one of the
   // samples up as a verdict - and it caps nothing until a re-probe on
   // the short clock agrees.
   const verdict=j.jagged
-    ? t('ladder.verdictnoisy','<b>{host}</b>: these readings disagree with each other - the rate fell well below the best rung and then came back. Best guess is ~<b>{n}</b> connections, but nothing has been applied. Re-run this when nothing else is using the line.',{host:esc(j.host),n:j.recommended})
+    ? t('ladder.verdictnoisy','<b>{host}</b>: these readings disagree with each other - the rate fell well below the best step and then came back. Best guess is ~<b>{n}</b> connections, but nothing has been applied. Re-run this when nothing else is using the line.',{host:esc(j.host),n:j.recommended})
     : t('ladder.verdict','<b>{host}</b>: use ~<b>{n}</b> connections; beyond that this provider/line stopped gaining.',{host:esc(j.host),n:j.recommended});
   o.innerHTML=verdict+
     (j.account_limit?` <span class="dim">${t('ladder.configured','Configured limit {n}.',{n:j.account_limit})}</span>`:'')+esc(extra)+
@@ -10621,7 +11446,7 @@ async function runLadderAll(btn){ await busy(btn,t('busy.testing','Testing…'),
   // Same warning the single Test gives: paid bytes are paid bytes.
   const flagged=(srvList||[]).filter(s=>s.block_account||s.block_bytes).map(s=>s.host);
   if(flagged.length &&
-     !confirm(t('ladder.blockconfirm.all','{hosts}: these are block accounts, so testing them will spend paid bytes. The tests download real articles for up to a few minutes per server. Run them anyway?',{hosts:flagged.join(', ')}))) return;
+     !confirm(t('ladder.blockconfirm.all','{hosts}: you paid for these up front, so testing them will spend data you bought. The tests download real articles for up to a few minutes per server. Run them anyway?',{hosts:flagged.join(', ')}))) return;
   const o=document.getElementById('ladderOut'), tbl=document.getElementById('ladderTbl');
   const ALL=t('ladder.all','ALL TOGETHER'), WAIT=t('ladder.waiting','waiting…');
   tbl.style.display='';
@@ -10674,7 +11499,7 @@ async function runLadderAll(btn){ await busy(btn,t('busy.testing','Testing…'),
       (lr?(wins?t('ladder.poolwins.plain','the pool beats any single provider.')
               :t('ladder.poolflat.plain','barely above the best single provider.'))
          :(wins?t('ladder.poolwins','the pool beats any single provider; your line is the limit.')
-              :t('ladder.poolflat','barely above the best single provider: one fast provider already saturates this line.')))+lr+
+              :t('ladder.poolflat','barely above the best single provider: one fast provider already fills this line.')))+lr+
       ` <button class="ghost mini" onclick="sortServersBySpeed(this)" title="${escA(t('ladder.sort.title','Persist a fastest-first server order from these results'))}">${t('ladder.sort','Sort servers fastest-first')}</button>`;
   }
 }); }
@@ -10755,7 +11580,7 @@ async function loadBenchHist(){
 loadBenchHist();
 async function runDiv(btn){ await busy(btn,t('busy.analysing','Analyzing…'), async()=>{
   const o=document.getElementById('divOut');
-  o.textContent=t('div.running','STAT-sweeping all servers across article ages…');
+  o.textContent=t('div.running','Asking every server about articles of several ages…');
   const j=await api('diversity');
   if(j.error){ o.innerHTML=`<span class="bad">${esc(tErr(j.error))}</span>`; return; }
   let html='<table><tbody>';
@@ -10764,7 +11589,7 @@ async function runDiv(btn){ await busy(btn,t('busy.analysing','Analyzing…'), a
       <td class="mono">${fmtRate(gbpsToMbps(s.speed_gbps))}</td><td class="dim mono">${s.rtt_ms.toFixed(0)} ms</td></tr>`;
   html+='</tbody></table>';
   if(j.pairs && j.pairs.length){
-    html+=`<div style="margin-top:6px" class="dim">${t('div.overlap','Infrastructure overlap:')}</div><table><tbody>`;
+    html+=`<div style="margin-top:6px" class="dim">${t('div.overlap','Providers that look like the same network:')}</div><table><tbody>`;
     for(const p of j.pairs){
       const cls=p.missing_jaccard>=0.8?'bad':(p.missing_jaccard>=0.4?'warn':'ok');
       html+=`<tr><td>${esc(p.a)} ↔ ${esc(p.b)}</td>
@@ -11418,7 +12243,7 @@ async function uploadNzbsWith(nzbs, stream, opt){
         // queue-diff watcher doesn't play it a second time next poll.
         snd('added'); say('added', t('say.added','Download added: {name}.',{name:sayShort(f.name)}));
         (j.nzo_ids||[]).forEach(id=>qSeen&&qSeen.add(id));
-        if(wantStream&&j.m3u){ toast(t('toast.handoff','Handing playback to your player…')); location.href=`/m3u/${j.nzo_ids[0]}?apikey=${encodeURIComponent(key)}`; }
+        if(wantStream&&j.m3u){ toast(t('toast.handoff','Handing playback to your player…')); m3uHandoff(j.nzo_ids[0]); }
       }
       else toast(`${f.name}: ${tErr(j.error)||t('err.rejected','rejected')}`, true);
     }catch(e){ toast(`${f.name}: ${e.message}`, true); }
@@ -12369,6 +13194,7 @@ async function loadSettings(){
    ['s_rename_year_parens',c.rename_year_parens],['s_rename_quality_brackets',c.rename_quality_brackets],
    ['s_rename_extra_words',c.rename_extra_words],['s_rename_identify',c.rename_identify],
    ['s_rename_episode_titles',c.rename_episode_titles],
+   ['s_skip_samples',c.skip_samples],
    ['s_rename_junk',c.rename_junk],['s_rename_media_only',c.rename_media_only],
    // Not a rename-sub either: it is the OTHER answer to what a finished
    // download is called, so it stays readable with auto-rename off.
@@ -12409,6 +13235,9 @@ async function loadSettings(){
   put('s_dupe_scope', c.dupe_scope||'smart');
   put('s_nested_max_depth', c.nested_max_depth??5);
   put('s_watch', c.watch); put('s_script', c.script);
+  put('s_queue_finished_action', c.queue_finished_action||'none');
+  put('s_queue_finished_script', c.queue_finished_script);
+  put('s_queue_finished_delay_secs', c.queue_finished_delay_secs??60);
   put('s_watch_interval_secs', c.watch_interval_secs??5);
   put('s_script_timeout_secs', c.script_timeout_secs??3600);
   put('s_pre_queue_script', c.pre_queue_script);
@@ -12610,7 +13439,7 @@ async function loadSettings(){
   // LAN URLs and QR codes. Same fact, same volume, in both places.
   const ob=document.getElementById('secOpenBadge'); if(ob) ob.style.display=c.has_apikey?'none':'';
   const on=document.getElementById('remoteOpenNote'); if(on) on.style.display=c.has_apikey?'none':'';
-  noteServerConfig(c); renderServers(); renderSetup(c);
+  noteServerConfig(c); renderServers(); renderSetup(c); renderPresetState();
   if(!document.querySelector('#schedrows :focus')) renderSched(parseSchedText(c.schedule));
   if(!document.querySelector('#feedrows :focus')) renderFeeds(c.feeds||[]);
   if(!document.querySelector('#idxrows :focus')) renderIdx(c.indexers||[]);
@@ -12965,7 +13794,7 @@ function catFileRowHtml(name, dir, meta){
     <div class="pathrow"><input class="txt" data-k="dir" value="${escA(dir||m.dir||'')}" placeholder="${escA(t('set.disk.cats.dir.ph','a subfolder of the download root'))}" title="${escA(t('set.disk.cats.dir.title','where this category lands. Blank = its own subfolder of the download root; a plain name = that subfolder instead; a full path = downloads land in the root as usual and finished jobs move there'))}" oninput="catFileCheck(this)"><button class="mini" onclick="browseDir(this.previousElementSibling,'dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button></div>
     <select class="sel" data-k="prio" title="${escA(t('set.disk.cats.prio.title','default priority for downloads added in this category; an add that names its own priority wins'))}">
       ${popt('',t('set.disk.cats.prio.def','priority: default'))}${popt('2',t('set.disk.cats.prio.force','force'))}${popt('1',t('set.disk.cats.prio.high','high'))}${popt('0',t('set.disk.cats.prio.normal','normal'))}${popt('-1',t('set.disk.cats.prio.low','low'))}${popt('-2',t('set.disk.cats.prio.paused','add paused'))}</select>
-    <input class="txt" data-k="script" value="${escA(m.script||'')}" placeholder="${escA(t('set.disk.cats.script.ph','script'))}" title="${escA(t('set.disk.cats.script.title','post-processing script for this category, instead of the global one; blank = the global script'))}">
+    <input class="txt" data-k="script" value="${escA(m.script||'')}" placeholder="${escA(t('set.disk.cats.script.ph','script'))}" title="${escA(t('set.disk.cats.script.title','post-processing script for this category, instead of the global one (several, comma-separated, run in that order); blank = the global script'))}">
     <select class="sel" data-k="nzb" title="${escA(t('set.disk.cats.nzbname.title','name finished downloads in this category after their .nzb file. "default" follows the switch in Auto-rename & cleanup, so a category is how you allow or disallow it for one kind of download'))}">
       ${nopt('',t('set.disk.cats.nzbname.def','.nzb name: default'))}${nopt('on',t('set.disk.cats.nzbname.on','.nzb name: on'))}${nopt('off',t('set.disk.cats.nzbname.off','.nzb name: off'))}</select>
     <button class="ghost" onclick="this.closest('.catfilerow').remove()"${fixed?' disabled':''} title="${fixed?why:escA(t('set.disk.cats.remove.title','Delete this category'))}" aria-label="${fixed?why:escA(t('set.disk.cats.remove.title','Delete this category'))}">×</button>
@@ -13311,12 +14140,41 @@ function renderSetup(c){
   const conns=c.auto_connections
     ? t('setup.conns.auto','Auto-tuned per provider')
     : t('setup.conns.manual','Manual · up to {n}/provider',{n:c.connections||'-'});
+  // Indexing is the one optional subsystem that is OFF on a new install
+  // AND takes its own name off the page when it is: body.noidx hides the
+  // Browse card, the wall pill and the wall, so a dashboard with it off
+  // holds no word for the feature anywhere. §183 item 2 - a tester on
+  // 1.1.5 found the switch only by going looking in Settings, which is
+  // the state most new installs are in.
+  //
+  // This strip is where that belongs, and the header is not. A config
+  // summary states facts, so "Off" reads here exactly like the "Update
+  // notices · Off" cell beside it: one row in a list of rows, no colour,
+  // nothing to act on and nothing to dismiss. Switched off is not a
+  // fault, and a header pill saying so on every page load for someone
+  // who chose off is furniture inside a day - the same rule the
+  // provider row's drops/held chips are written to, where a healthy run
+  // stays quiet.
+  //
+  // The value is a link and the other cells' are not, for a reason that
+  // holds only here: every other fact names something the reader
+  // already understands - a folder, a count, an API key. Someone who
+  // does not know what indexing IS has nowhere else on this page to
+  // find out, so the one row that says the word also opens the card
+  // that explains it (and that card is an explanation ending in a
+  // switch, not a switch on its own).
+  const idxN=(c.index_groups||[]).length;
+  const idxState=!IDX_ON ? t('setup.off','Off')
+    : idxN ? tn('setup.idx.groups',idxN,'On · {n} newsgroup','On · {n} newsgroups')
+           : t('setup.idx.nogroups','On · nothing chosen yet');
   g.innerHTML=[
     cell(t('setup.k.conns','Connections'),conns),
-    cell(t('setup.k.providers','Providers'),tn('setup.providersN',(c.servers||[]).length,'{n} backbone','{n} backbones')),
+    cell(t('setup.k.providers','Providers'),tn('setup.providersN',(c.servers||[]).length,'{n} server','{n} servers')),
     cell(t('setup.k.out','Downloads'),esc(c.out_dir||'-')),
     cell(t('setup.k.watch','Watch folder'),esc(c.watch||'-')),
     cell(t('setup.k.api','Remote API'),c.has_apikey?t('setup.api.on','key set'):t('setup.api.off','open on LAN')),
+    cell(t('setup.k.index','Indexing'),
+      `<a href="#" onclick="return goSetting('indexing')">${esc(idxState)}</a>`),
     cell(t('setup.k.updchecks','Update notices'),c.update_checks?t('setup.on','On'):t('setup.off','Off')),
   ].join('');
 }
@@ -13337,6 +14195,67 @@ async function loadSetup(){
 // callers were rendering the wrong thing anyway.)
 loadSetup();
 // Server editor.
+// The LIFETIME cap ledger, which is a different job from the Providers
+// row's: that one answers "what is happening now" and takes a session
+// window, so a cap the provider lifts next week stops haunting it. This
+// one is evidence for a support ticket - "capped on 14 of the last 20
+// days" is the sentence that gets a provider to look - and it belongs
+// where somebody has come looking for it, not on the card everybody
+// sees. Written only off capacity-classified refusals
+// (conntune::note_capped).
+//
+// A function of (ledger, connections, today) so it can be exercised
+// without a browser: `web/capchip_test.js` runs it over the ledger
+// shapes below, which is how a page that throws on the commonest one of
+// them stops shipping.
+function capChip(cl, conns, today){
+  const allDays=(cl&&cl.days)||[];
+  // The ledger retains the last 30 EVENTS, not 30 days, so a refusal
+  // 100 days ago plus one today rendered as "2 of the last 30 days".
+  // Drop what the sentence is not about before counting it.
+  //
+  // The LOW has to come from the same days the count does. The ledger
+  // keeps `granted_lo` as a lifetime minimum and nothing raises it when
+  // old days drain, so a refusal at 10 a hundred days ago and one at 38
+  // today rendered as "capped at 10 today" - the oldest number in the
+  // file, presented as this morning's observation (Codex sweep 6, N7).
+  // `day_lo` is index-for-index with `days`. A ledger from before it
+  // existed has none, and the days it recorded carry conntune's
+  // DAY_LO_UNKNOWN once the column is aligned: those days are real and
+  // the count still counts them, but no number was ever observed for
+  // them, so the sentence drops the figure rather than borrowing the
+  // lifetime one (Codex sweep 7, H1b).
+  const allLo=(cl&&cl.day_lo)||[], perDay=allLo.length===allDays.length;
+  const UNKNOWN_LO=Number.MAX_SAFE_INTEGER;
+  const kept=allDays.map((d,i)=>[d, perDay?allLo[i]:UNKNOWN_LO]).filter(p=>p[0]>today-30);
+  const cdays=kept.map(p=>p[0]);
+  // Nothing to say, and - the part that mattered - nothing to read off
+  // a ledger that is not there. A server that has never been refused
+  // has none, which is nearly every provider, nearly always. Reaching
+  // into it for a fallback nothing would have read threw on the FIRST
+  // row, so the whole list went unassigned and Settings showed no
+  // servers at all; loadSettings died there too, leaving the schedule,
+  // feed, indexer, category and notify rows empty behind it (hit live
+  // on a six-server install, 19 Aug; Codex sweep 7, H1).
+  if(!cdays.length) return '';
+  const lows=kept.map(p=>p[1]).filter(v=>v<UNKNOWN_LO);
+  const capLo=lows.length?Math.min(...lows):null;
+  // The window is however long we have been watching, up to the 30 days
+  // the ledger keeps - "14 of the last 20 days" must not read as 14 of
+  // 30 when the record is 20 days old.
+  const span=Math.max(cdays.length,Math.min(30,today-cdays[0]+1));
+  // A record one day old has no window to be a fraction of: "1 of the
+  // last 1 days" is arithmetically true and reads like a bug.
+  const capTitle = capLo!==null
+    ? t('set.srv.capped.title','on these days this provider refused another connection while it was already serving {g}, out of the {m} set here. Nothing is wrong with the account. If it does not match what you pay for, this is the record to send them.',{g:capLo,m:conns})
+    : t('set.srv.capped.title.nolo','on these days this provider refused another connection while it was already serving fewer than the {m} set here. These days were recorded before nzbfast kept the figure for each one, so how many it allowed is not known for them. Nothing is wrong with the account. If it does not match what you pay for, this is the record to send them.',{m:conns});
+  const capText = capLo!==null
+    ? (span>1 ? t('set.srv.capped','capped at {g} on {n} of the last {d} days',{g:capLo,n:cdays.length,d:span})
+              : t('set.srv.capped.today','capped at {g} today',{g:capLo}))
+    : (span>1 ? t('set.srv.capped.nolo','capped on {n} of the last {d} days',{n:cdays.length,d:span})
+              : t('set.srv.capped.today.nolo','capped today'));
+  return ` · <span class="warn" title="${escA(capTitle)}">${capText}</span>`;
+}
 function renderServers(){
   const on=srvList.filter(s=>s.enabled!==false).length;
   document.getElementById('srvcount').textContent=srvList.length?` · ${t('set.srv.count','{on} of {n} active',{on,n:srvList.length})}`:'';
@@ -13408,32 +14327,7 @@ function renderServers(){
     }else if(asked0&&asked0<s.connections){
       tuneNote=` · <span class="dim" title="${escA(t('set.srv.capset.title','downloads use at most {n} connections per server, from the Connections setting in Settings; this account allows {m}. Raise Connections to use more of its allowance.',{n:asked0,m:s.connections}))}">${t('set.srv.capset','capped at {n} by the Connections setting',{n:asked0})}</span>`;
     }
-    // The LIFETIME cap ledger, which is a different job from the
-    // Providers row's: that one answers "what is happening now" and
-    // takes a session window, so a cap the provider lifts next week
-    // stops haunting it. This one is evidence for a support ticket -
-    // "capped on 14 of the last 20 days" is the sentence that gets a
-    // provider to look - and it belongs where somebody has come looking
-    // for it, not on the card everybody sees. Written only off
-    // capacity-classified refusals (conntune::note_capped).
-    let capNote='';
-    const cl=kn0&&kn0.capped, allDays=(cl&&cl.days)||[];
-    // The ledger retains the last 30 EVENTS, not 30 days, so a refusal
-    // 100 days ago plus one today rendered as "2 of the last 30 days".
-    // Drop what the sentence is not about before counting it.
-    const today=Math.floor(Date.now()/864e5);
-    const cdays=allDays.filter(d=>d>today-30);
-    if(cdays.length){
-      // The window is however long we have been watching, up to the 30
-      // days the ledger keeps - "14 of the last 20 days" must not read
-      // as 14 of 30 when the record is 20 days old.
-      const span=Math.max(cdays.length,Math.min(30,today-cdays[0]+1));
-      // A record one day old has no window to be a fraction of: "1 of
-      // the last 1 days" is arithmetically true and reads like a bug.
-      capNote=` · <span class="warn" title="${escA(t('set.srv.capped.title','on these days this provider refused another connection while it was already serving {g}, out of the {m} set here. Nothing is wrong with the account. If it does not match what you pay for, this is the record to send them.',{g:cl.granted_lo,m:s.connections}))}">${span>1
-        ? t('set.srv.capped','capped at {g} on {n} of the last {d} days',{g:cl.granted_lo,n:cdays.length,d:span})
-        : t('set.srv.capped.today','capped at {g} today',{g:cl.granted_lo})}</span>`;
-    }
+    const capNote=capChip(kn0&&kn0.capped, s.connections, Math.floor(Date.now()/864e5));
     return `
     <div class="srvrow" id="srvrow${i}"${en?'':' style="opacity:.45"'}>
       <span>${esc(s.host)}:${s.port}${s.tls?` <span class="dim" title="${escA(t('set.srv.tls.title','Encrypted connection to this server'))}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lock"/></svg></span>`:''}${en?'':` <span class="warn">· ${t('set.srv.disabled','disabled')}</span>`}${s.level>0?` <span class="dim">· ${t('set.srv.fill','fill level {n}',{n:s.level})}</span>`:''}${s.block_account?` <span class="dim" title="${escA(t('set.srv.paid.chip.title','every byte from this server is billed, so nzbfast never sends it traffic of its own: no automatic connection tests, no benchmark traffic, no header scans'))}">· ${t('set.srv.paid.chip','billed per byte')}</span>`:''}${s.group?` <span class="dim">· ${esc(s.group)}</span>`:''}${block}${comp}
@@ -13580,6 +14474,13 @@ function editServer(i){
   put('sv_idlerel', opt(s.idle_release_secs));
   put('sv_idlekeep', opt(s.idle_keep));
   showIdleEffective(s.idle_release_effective);
+  // M32 route controls. The proxy password never round-trips - the
+  // daemon echoes only whether one is stored, same contract as the
+  // server password above.
+  put('sv_bindip', s.bind_ip||''); put('sv_socks', s.socks5||'');
+  put('sv_socksuser', s.socks5_user||''); put('sv_sockspass','');
+  document.getElementById('sv_sockspasshint').textContent=
+    (i>=0&&s.has_socks5_pass)?t('set.srv.pass.keep','stored: leave blank to keep'):'';
   document.getElementById('srvform').style.display='';
   document.getElementById('sv_host').focus();
 }
@@ -13658,7 +14559,12 @@ function srvFormData(){
     // anyone opened this form.
     max_source_ips:intOrBlank(g('sv_maxips')),
     idle_release_secs:intOrBlank(g('sv_idlerel')),
-    idle_keep:intOrBlank(g('sv_idlekeep')) };
+    idle_keep:intOrBlank(g('sv_idlekeep')),
+    bind_ip:g('sv_bindip'), socks5:g('sv_socks'),
+    socks5_user:g('sv_socksuser'),
+    // Not trimmed: a proxy password may legitimately start or end with
+    // a space, and blank means "keep the stored one" either way.
+    socks5_pass:document.getElementById('sv_sockspass').value };
 }
 // '' for a blank or non-numeric box (the daemon clears the key), the
 // number otherwise - including 0. NOT named num(): that is the page's
@@ -14343,6 +15249,66 @@ function welcomeLookAll(on){ welcomeLookIds().forEach(id=>hideCard(id,!on)); ren
 // changed back individually afterwards. Dense parks Setup and Benchmark
 // via the ordinary hideCard - they are reference cards, not monitoring,
 // and the Hidden bar brings either back with one click.
+// What the look is, reduced to one string: every appearance key this
+// page stores, plus the compact flag and the card layout. Compared
+// against the fingerprint taken when a preset was applied, so ANY later
+// change - theme, accent, text size, hiding a card, moving one - is
+// enough to stop claiming the user is still on that preset.
+//
+// `uiDense` is deliberately NOT in here, unlike in LOOK_ALL. Its only
+// writer is applyPreset, which moves uiCompact and the card layout in
+// the same breath and re-stamps the fingerprint straight afterwards, so
+// it cannot move on its own; and any string added here invalidates every
+// fingerprint already in a browser, which is the "Dense (modified)"
+// falsehood N10 existed to end. A future writer that moves density
+// alone has to be added here, and to LOOK_ALL, at the same time.
+function presetSig(){
+  const g=k=>{ try{ return localStorage.getItem(k)||'' }catch(e){ return '' } };
+  return [...LOOK_KEYS.map(g), g('uiCompact'), g('layoutPrefs')].join('\u0001');
+}
+
+// The look has more writers than `setLook`: theme, accent, text size,
+// the custom colour pickers, the compact checkbox, hiding a card and
+// moving one all move `presetSig` without passing through it. Teaching
+// each of them to refresh the indicator is how three were missed - Dense
+// stayed lit and still read "Dense" after the theme had been changed
+// under it - so the signature is WATCHED instead, from the poll loop,
+// and the row is redrawn only when it has actually moved (Codex sweep 6,
+// N10).
+let lastPresetSig=null;
+function watchPresetState(){
+  const sig=presetSig();
+  if(sig===lastPresetSig) return;
+  lastPresetSig=sig;
+  renderPresetState();
+}
+
+// Light the preset the user is on, and say when they have moved off it.
+// Runs over BOTH button sets (Settings and the welcome card) - they are
+// the same choice shown twice, and one going stale is how a user ends up
+// trusting the wrong one.
+function renderPresetState(){
+  let now='', modified=false;
+  try{
+    now=localStorage.getItem('nzbfastPreset')||'';
+    modified = !!now && localStorage.getItem('nzbfastPresetSig') !== presetSig();
+  }catch(e){}
+  document.querySelectorAll('button[data-preset]').forEach(b=>{
+    const on = b.dataset.preset===now && !modified;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on?'true':'false');
+  });
+  const lbl=document.getElementById('presetNow');
+  if(lbl){
+    lbl.textContent = !now ? ''
+      : modified ? t('set.look.preset.modified','{p} (modified)',{p:presetName(now)})
+                 : presetName(now);
+  }
+}
+const presetName=w=> w==='classic'?t('set.look.classic','Classic')
+                   : w==='dense'?t('set.look.dense','Dense')
+                   : t('set.look.full','Full');
+
 function applyPreset(which){
   const classic = which==='classic', dense = which==='dense';
   setTheme(classic?'light':'auto');
@@ -14354,6 +15320,16 @@ function applyPreset(which){
   const st=document.getElementById('s_theme'); if(st) st.value=classic?'light':'auto';
   LOOK_CARDS.filter(id=>document.getElementById(id))
     .forEach(id=>hideCard(id, classic || (dense && (id==='setupCard'||id==='benchCard'))));
+  // Remember WHICH preset, and a fingerprint of the state it produced.
+  // The fingerprint is what lets the row say "(modified)" honestly: a
+  // preset only SETS the controls, so the moment one is changed the user
+  // is no longer on it, and a button that stayed lit would be claiming
+  // otherwise.
+  try{
+    localStorage.setItem('nzbfastPreset', which);
+    localStorage.setItem('nzbfastPresetSig', presetSig());
+  }catch(e){}
+  renderPresetState();
   renderWelcomeLook();
   toast(classic?t('preset.classic.done','Classic look applied: light, compact, queue and history only.')
        :dense?t('preset.dense.done','Dense look applied: small cards, short graphs, the whole picture on one screen.')
@@ -14405,12 +15381,30 @@ function renderStartRoutes(c){
     +`<button class="ghost mini" onclick="copyStartUrl(this)">${esc(t('start.arr.copy','Copy the address'))}</button>`
     +`<button class="ghost mini" onclick="goSetting('security')">${esc(t('start.arr.key','Where the API key is'))}</button>`
     +`<a class="ghost mini" style="text-decoration:none" target="_blank" rel="noopener" href="${escA(manualUrl('arr'))}">${esc(t('start.arr.manual','How to set it up ↗'))}</a>`));
-  // 4. The wall, only with the built-in indexer on. Off, it is empty by
-  //    construction and pointing at it would be a dead end.
-  if(IDX_ON) out.push(row(
-    t('start.wall','Browse what your servers carry'),
-    t('start.wall.hint','The wall fills from the groups you chose to index; click a poster to download it.'),
-    `<a class="ghost mini" style="text-decoration:none" href="/wall">${esc(t('start.wall.cta','Open the wall'))}</a>`));
+  // 4. The wall. On, this points at it. Off, it points at the switch.
+  //
+  //    Off used to mean no row at all - an empty wall is a dead end -
+  //    and that omission is most of why the feature is invisible to
+  //    anyone who never turned it on (§183 item 2). The switch is not a
+  //    dead end, and this list is the right place to offer it: its whole
+  //    job is telling a new user what this thing can do, the server is
+  //    already configured so the answer is actually usable, and the
+  //    whole surface retires itself for good the moment a first job
+  //    exists (`jobs_ever`, §129 4c). So the feature is named ONCE, at
+  //    the moment it is useful, and can never become the standing nag a
+  //    permanent header pill would be - with no dismissal state to
+  //    store and nothing to remember not to say twice.
+  //
+  //    The checklist above (state A) is deliberately left alone: it runs
+  //    before any server exists, and indexing with no provider to scan
+  //    would be a question asked in the wrong order.
+  out.push(IDX_ON
+    ? row(t('start.wall','Browse what your servers carry'),
+          t('start.wall.hint','The wall fills from the groups you chose to index; click a poster to download it.'),
+          `<a class="ghost mini" style="text-decoration:none" href="/wall">${esc(t('start.wall.cta','Open the wall'))}</a>`)
+    : row(t('start.wall.off','Search and browse Usenet from here, with no indexer account'),
+          t('start.wall.off.hint','Optional, and off until you turn it on: nzbfast can scan newsgroups you choose, straight from your own provider, and fill a browsable wall from what it finds. It reads posts uploaded under a real name, so it works alongside an indexer account rather than replacing one.'),
+          `<button class="ghost mini" onclick="goSetting('indexing')">${esc(t('start.wall.off.cta','See what it does'))}</button>`));
   host.innerHTML=`<p style="margin:0 0 4px"><b>${esc(t('start.title','Start your first download'))}</b><br>`
     +`<span class="dim">${esc(t('start.hint','Your server is set up. Any of these puts a download in the queue - the graphs and totals appear with it.'))}</span></p>`
     +out.join('');
@@ -14501,7 +15495,7 @@ function roleDefs(){ return [
           ['categories',t('role.link.cats','Categories')],
           ['watch',t('role.link.watch','Watch folder, post-processing script and passwords file')]]},
   {id:'nzbget', label:t('role.nzbget','Moving from NZBGet'), imp:'nzbget',
-   blurb:t('role.nzbget.blurb','The same one button: nzbfast reads the nzbget.conf already on this machine and brings over the servers, the categories and their folders, and the passwords file. Post-processing scripts keep working - they are given the NZBPP_ variables and the 93/95 exit codes they expect.'),
+   blurb:t('role.nzbget.blurb','The same one button: nzbfast reads the nzbget.conf already on this machine and brings over the servers, the categories and their folders, and the passwords file. Post-processing scripts keep working - they are given the NZBPP_, NZBOP_ and NZBPR_ variables and the 93/94/95 exit codes they expect, and a comma-separated list of them runs in order.'),
    recs:[],
    links:[['servers',t('role.link.srv','Usenet servers')],
           ['categories',t('role.link.cats','Categories')],
@@ -14695,6 +15689,19 @@ function renderSpeedNumber(){
   const el=document.getElementById('speed');
   const p=rateParts(shownSpeed);
   el.innerHTML=`${num(p.v,1)} <small>${p.u}${speedSuffix}</small>`;
+  renderSpeedEquiv();
+}
+// Shown only while something is actually moving, and only when the hero
+// is reading in bytes - with the page already set to bits this would be
+// the headline number a second time, to two fewer figures.
+// targetSpeed, not shownSpeed: the tween is still gliding down for a
+// second after a job ends, and the line should go when the download
+// does, not trail it.
+function renderSpeedEquiv(){
+  const el=document.getElementById('speedEquiv'); if(!el) return;
+  const eq = (!UNIT_BITS && targetSpeed>0) ? bitsEquivalent(shownSpeed) : '';
+  const s = eq ? t('hero.equiv','about {n}', {n:eq}) : '';
+  if(el.textContent!==s) el.textContent=s;
 }
 function drawAllCharts(frac){
   drawSpeed(frac);
@@ -14846,9 +15853,13 @@ function layoutPrefs(){
     // Migrate, don't discard - an arrangement someone made by hand would
     // otherwise come back one column out.
     if(p && p.v===3){ p.v=4; p.cols=colShiftV4(p.cols||{}); saveLayoutPrefs(p); }
-    if(p && p.v===4){ p.density=p.density||{}; p.cols=p.cols||{}; return p; }
+    // §6e stack pins and the Fill-gaps flag are additive: an old v4 blob
+    // gets the defaults, and a blob that carries them is still readable
+    // by older code, which just ignores the extra fields. No bump.
+    if(p && p.v===4){ p.density=p.density||{}; p.cols=p.cols||{};
+      p.stack=(p.stack&&typeof p.stack==='object')?p.stack:{}; p.balance=p.balance===true; return p; }
   }catch(e){}
-  return {v:4, order:[], hidden:[], chartH:{}, density:{}, cols:{}};
+  return {v:4, order:[], hidden:[], chartH:{}, density:{}, cols:{}, stack:{}, balance:false};
 }
 function saveLayoutPrefs(p){ localStorage.layoutPrefs=JSON.stringify(p); }
 function resetLayout(){ delete localStorage.layoutPrefs; toast(t('toast.layoutReset','Layout reset.')); setTimeout(()=>location.reload(), 300); }
@@ -15137,15 +16148,214 @@ function denseSpan(c){
   if(!document.body.classList.contains('dense')||!c.offsetHeight){ c.style.gridRowEnd=''; return; }
   c.style.gridRowEnd='span '+Math.max(1,Math.ceil((c.offsetHeight+10)/8));
 }
+// ---- §6e stack pins and Fill gaps, both OFF by default ----------------
+// Two opt-ins change WHO places the cards: a stack pin ("Stack under X"
+// on the card menu) glues one card into another card's column, and the
+// Fill-gaps toggle (Settings → Appearance) lets the packer drop to fewer,
+// wider columns when that strands less space under short cards. While
+// neither is set, placement stays the stylesheet's own auto-flow and none
+// of the code below runs - the default view cannot drift from what
+// shipped. Both live in layoutPrefs, so Reset layout clears them and the
+// appearance export carries them with the card order.
+const DENSE_FULL=['welcomeCard','heroTiles','queueCard','layoutTip','layoutBar','hiddenBar'];
+function denseFull(el){ return DENSE_FULL.includes(el.id) || !el.classList.contains('card'); }
+// The saved pins, sanitised per read. A pin whose anchor is hidden stays
+// SAVED (the pack pass ignores it until the anchor returns), but a pin
+// onto a card that no longer exists, onto a full-width strip or onto
+// itself is meaningless and is dropped here.
+function denseStackMap(){
+  const s=layoutPrefs().stack, out={};
+  for(const id in s){
+    const c=document.getElementById(id), an=document.getElementById(s[id]);
+    if(c&&an&&id!==s[id]&&!denseFull(c)&&!denseFull(an)) out[id]=s[id];
+  }
+  return out;
+}
+// One packing pass over the visible children, in 8px grid rows: first
+// fit, row-major scan - the same order the stylesheet's `row dense`
+// auto-placement uses, so with no pins and the natural column count this
+// reproduces the browser's own layout. A full-width strip starts below
+// every column; the space it strands stays on the per-column free lists,
+// so a later card can still rise into a hole above the strip, which is
+// what the auto-flow does too. A pinned card goes into its anchor's
+// column at the first free row past the anchor; a pin whose anchor sits
+// later in DOM order waits, and the waiting set is drained repeatedly
+// until a round places nothing, so a chain of any depth resolves in any
+// DOM order. Only a genuine cycle degrades to auto placement.
+function densePack(items,K,pins){
+  const free=Array.from({length:K},()=>[]), tail=new Array(K).fill(0);
+  const placed={}; let cells=0;
+  const fit=(col,s,min)=>{
+    for(const g of free[col]){ const r=Math.max(g[0],min); if(r+s<=g[1]) return r; }
+    return Math.max(tail[col],min);
+  };
+  const take=(col,r,s)=>{
+    for(let i=0;i<free[col].length;i++){
+      const g=free[col][i];
+      if(r>=g[0]&&r+s<=g[1]){
+        const keep=[];
+        if(r>g[0]) keep.push([g[0],r]);
+        if(r+s<g[1]) keep.push([r+s,g[1]]);
+        free[col].splice(i,1,...keep);
+        return;
+      }
+    }
+    // Gaps are created strictly below the old tail, so appending keeps
+    // each free list sorted - fit() relies on that.
+    if(r>tail[col]) free[col].push([tail[col],r]);
+    tail[col]=Math.max(tail[col],r+s);
+  };
+  const put=(it,col,min)=>{ const r=fit(col,it.span,min); take(col,r,it.span);
+    placed[it.id]={row:r,col,end:r+it.span}; cells+=it.span; };
+  const auto=it=>{ let col=0,best=Infinity;
+    for(let c2=0;c2<K;c2++){ const r=fit(c2,it.span,0); if(r<best){ best=r; col=c2; } }
+    put(it,col,0); };
+  const wait=[];
+  for(const it of items){
+    if(it.full){
+      const r=Math.max(0,...tail);
+      for(let c2=0;c2<K;c2++){ if(r>tail[c2]) free[c2].push([tail[c2],r]); tail[c2]=r+it.span; }
+      placed[it.id]={row:r,col:0,end:r+it.span,full:true}; cells+=it.span*K;
+      continue;
+    }
+    const a=pins[it.id], ap=a&&placed[a];
+    if(ap&&!ap.full) put(it,ap.col,ap.end);
+    else if(a&&items.some(x=>x.id===a&&!x.full)) wait.push(it);
+    else auto(it);
+  }
+  // Drain the deferred set to a fixpoint, not once. One pass resolves
+  // one level of the chain, and the drain keeps DOM order, so a chain
+  // whose links run backwards through the page - C under B, B under A,
+  // with the DOM reading C, B, A, which three Move down presses
+  // produce - met C while B was still unplaced and auto-placed it. The
+  // card then sat somewhere else entirely while its menu still offered
+  // Unstack and the announcement had already said it sits under B
+  // (Codex sweep 7, M9). A round that places nothing is the real cycle,
+  // and only that falls back to auto.
+  let pend=wait;
+  while(pend.length){
+    const again=[]; let moved=false;
+    for(const it of pend){
+      const ap=placed[pins[it.id]];
+      if(ap&&!ap.full){ put(it,ap.col,ap.end); moved=true; } else again.push(it);
+    }
+    if(!moved){ again.forEach(auto); break; }
+    pend=again;
+  }
+  const H=Math.max(0,...tail);
+  // Hc = the rows the COLUMN cards stand in, excluding the full-width
+  // strips, which cost the same rows at every K. The tolerance test in
+  // denseColumns must compare Hc, not H: measured against H, a page
+  // whose full strips dominate lets the one-column packing (waste 0 by
+  // definition) inside the band, and Fill gaps collapses the whole
+  // dashboard to a single column - found live on a near-empty install.
+  const fullRows=items.reduce((a,it)=>a+(it.full?it.span:0),0);
+  return {placed,H,Hc:H-fullRows,waste:K*H-cells};
+}
+// Fill gaps: how many columns. Fewer, wider columns can strand less space
+// under short cards at the price of a somewhat taller page, so a count
+// only qualifies while its packing stays within 15% of the shortest one;
+// among those the least-waste count wins, ties to the wider spread. The
+// choice is cached against everything that should legitimately move it -
+// width, the visible cards and their order, the pins - and deliberately
+// NOT against card heights: heights change on every tick, and a count
+// re-derived from them could flap forever, because column width feeds
+// card height feeds the count. A stale count self-corrects on the next
+// resize or rearrangement.
+let balK=0, balSig='';
+function denseColumns(items,W,N,pins,balance){
+  if(!balance||N<2||items.length<2) return N;
+  const sig=W+'|'+items.map(i=>i.id).join(',')+'|'+JSON.stringify(pins);
+  if(sig===balSig) return balK;
+  const packs=[]; let floor=Infinity;
+  for(let k=1;k<=N;k++){ packs[k]=densePack(items,k,pins); floor=Math.min(floor,packs[k].Hc); }
+  let best=N, bw=Infinity;
+  for(let k=N;k>=1;k--){
+    if(packs[k].Hc>Math.ceil(floor*1.15)) continue;
+    if(packs[k].waste<bw){ bw=packs[k].waste; best=k; }
+  }
+  balSig=sig; balK=best;
+  return best;
+}
+let denseCustom=false, densePackRAF=0;
+function scheduleDensePack(){
+  if(densePackRAF) return;
+  densePackRAF=requestAnimationFrame(()=>{ densePackRAF=0; applyDenseMasonry(); });
+}
 function applyDenseMasonry(){
-  const kids=[...document.getElementById('dashview').children];
+  const dash=document.getElementById('dashview');
+  const kids=[...dash.children];
+  const clearPlace=()=>{ kids.forEach(c=>{ c.style.gridRowStart=''; c.style.gridColumnStart=''; });
+    dash.style.gridTemplateColumns=''; };
   if(!document.body.classList.contains('dense')){
     kids.forEach(c=>{ c.style.gridRowEnd=''; });
+    clearPlace();
     if(denseRO){ denseRO.disconnect(); denseRO=null; }
+    denseCustom=false;
     return;
   }
-  if(!denseRO) denseRO=new ResizeObserver(es=>es.forEach(e=>denseSpan(e.target)));
-  kids.forEach(c=>{ denseSpan(c); denseRO.observe(c); });
+  const pins=denseStackMap(), balance=layoutPrefs().balance===true;
+  denseCustom=balance||Object.keys(pins).length>0;
+  // One observer for both modes: a height change re-spans that card
+  // alone in auto mode, and re-packs everything (coalesced to a frame)
+  // in custom mode - placement there is global, one card growing can
+  // move its neighbours.
+  if(!denseRO) denseRO=new ResizeObserver(es=>{
+    if(denseCustom) scheduleDensePack();
+    else es.forEach(e=>denseSpan(e.target));
+  });
+  kids.forEach(c=>denseRO.observe(c));
+  if(!denseCustom){ clearPlace(); kids.forEach(denseSpan); return; }
+  // All reads before any write, so this is one layout pass. Writing the
+  // placement never changes an element's own size (every column is the
+  // same 1fr width), so the observer cannot re-trigger this - except
+  // once, when the column COUNT changes width, and that settles because
+  // the count is cached above.
+  const items=[]; let idx=0;
+  for(const c of kids){
+    if(!c.offsetHeight) continue;
+    items.push({ id:c.id||('i'+idx), el:c, full:denseFull(c),
+      span:Math.max(1,Math.ceil((c.offsetHeight+10)/8)) });
+    idx++;
+  }
+  kids.forEach(c=>{ if(!c.offsetHeight){ c.style.gridRowStart=''; c.style.gridRowEnd=''; c.style.gridColumnStart=''; } });
+  // The natural track count, the same arithmetic as the stylesheet's
+  // repeat(auto-fill,minmax(360px,1fr)) with its 10px column gap. The
+  // explicit template below always replaces the auto-fill while custom
+  // placement is on, so the two counts never have to agree to the pixel.
+  const W=dash.clientWidth, N=Math.max(1,Math.floor((W+10)/370));
+  const K=denseColumns(items,W,N,pins,balance);
+  const pack=densePack(items,K,pins);
+  dash.style.gridTemplateColumns='repeat('+K+',minmax(0,1fr))';
+  for(const it of items){
+    const p2=pack.placed[it.id];
+    it.el.style.gridRowStart=String(p2.row+1);
+    it.el.style.gridRowEnd='span '+it.span;
+    // Full-width strips keep their stylesheet grid-column:1/-1.
+    it.el.style.gridColumnStart = p2.full ? '' : String(p2.col+1);
+  }
+}
+// §6e the pin itself, from the card menu. By id, not position, so the
+// pinned card follows its anchor wherever the anchor is moved. An empty
+// anchorId clears the pin.
+function cardStack(id, anchorId){
+  const p=layoutPrefs();
+  if(anchorId) p.stack[id]=anchorId; else delete p.stack[id];
+  saveLayoutPrefs(p);
+  applyDenseMasonry();
+  dismissLayoutTip();
+  const c=document.getElementById(id);
+  announce(anchorId
+    ? t('layout.stacked','{card} now sits under {anchor}',
+        {card:cardLabel(c), anchor:cardLabel(document.getElementById(anchorId))})
+    : t('layout.unstacked','{card} is placed automatically again',{card:cardLabel(c)}));
+}
+// The Fill-gaps toggle (Settings → Appearance).
+function setDenseBalance(on){
+  const p=layoutPrefs();
+  p.balance=on===true;
+  saveLayoutPrefs(p);
+  applyDenseMasonry();
 }
 function applyDensity(){
   document.body.classList.toggle('compact', uiCompact());
@@ -15637,6 +16847,10 @@ function persistOrder(){
   saveLayoutPrefs(p);
   renderCardMgr();   // a drag and a manager press are the same change
   dismissLayoutTip();
+  // §6e: with explicit placement on, moving a card in the DOM changes
+  // nothing on screen by itself - the inline grid positions pin every
+  // card where it was. Re-pack, or the move looks like it did nothing.
+  if(denseCustom) scheduleDensePack();
 }
 function persistChartH(){
   // Never measure a degenerate viewport (hidden embedded webviews report
@@ -15733,7 +16947,19 @@ function applyCols(id, wOver){
     while(cg.children.length<s.n+s.lead) cg.appendChild(document.createElement('col'));
     ord.forEach((ci,vi)=>{ cg.children[vi+s.lead].style.width = (ci!==0&&w[ci]) ? Math.round(w[ci])+'px' : ''; });
     s.tb.style.tableLayout='fixed';
-  } else { if(cg) cg.remove(); s.tb.style.tableLayout=''; }
+    // §186 A stored width is the user's and it wins over the stylesheet
+    // - but the flexible first column may not vanish behind it. Widths
+    // stored at one window size outlive a narrowing, and the leftover
+    // they leave the name is what runs to zero first. So the table
+    // keeps a floor of every fixed column plus a readable 120px, and
+    // the card scrolls sideways past that (.cardscroll is
+    // overflow-x:auto) rather than showing a nameless row.
+    let fixed=0;
+    for(const ci of ord) if(ci!==0&&w[ci]) fixed+=w[ci];
+    for(const th of s.hr.cells)
+      if(th.classList.contains('selcol')) fixed+=th.getBoundingClientRect().width;
+    s.tb.style.minWidth=Math.round(fixed+120)+'px';
+  } else { if(cg) cg.remove(); s.tb.style.tableLayout=''; s.tb.style.minWidth=''; }
   colApplyRows(id);
 }
 // Re-apply the permutation to the body rows. Runs from the observer
@@ -16071,6 +17297,9 @@ function initLayout(){
     if(!over || over===dragCard || !byId[over.id]) return;
     const r=over.getBoundingClientRect();
     dash.insertBefore(dragCard, e.clientY < r.top+r.height/2 ? over : over.nextSibling);
+    // §6e: same reason as persistOrder - under explicit placement the
+    // live drag preview only moves if each reorder re-packs.
+    if(denseCustom) scheduleDensePack();
   });
   dash.addEventListener('drop', e=>{ if(dragCard) e.preventDefault(); });
   // §6d: the strip is inert markup until the tools exist, so it is
@@ -16155,22 +17384,35 @@ initUnitMode();
 // The per-tick renders (queue, tiles, providers…) pick t() up on their
 // next pass within a second or two.
 injectHelp();
-// The wall pill with the built-in indexer off. /wall is two surfaces in
-// one: the poster grid over the local index, and the search that asks
-// your third-party indexer accounts. Only the first goes away here, so
-// the pill goes away only when there is no second - and when it stays,
-// it says what it now is, because "wall" would be a lie with no wall
-// behind it. Runs before the catalogue fetch below, and again after, so
+// §U9: the wall pill, named from live config rather than hardcoded.
+// /wall is two surfaces in one - the poster grid over the local index,
+// and the table you search and grab from, which asks your third-party
+// indexer accounts and the spots your servers carry. Only the first
+// goes away with the built-in indexer, so the pill goes away only when
+// there is no second; and when it stays it has to stop saying "wall",
+// because the wall is exactly the half that went. It is not merely that
+// there is no local index to lay out - wall.html forces `view` to
+// 'releases' whenever the built-in indexer is off, spots or no spots,
+// so the poster grid is not on the page to be named.
+//
+// Spots used to buy the pill its old name back on the argument that
+// they are promoted into the release index. They are, and that is why
+// the pill survives on spots alone - but what they fill is the table,
+// not the wall, so they get the same search-and-grab name the indexer
+// accounts do.
+//
+// The stamped tokens this reads are the daemon's live answer at page
+// render (ui_shell_state), and flipping the built-in indexer reloads
+// the page, so there is no third state where the name and the config
+// disagree. Runs before the catalogue fetch below, and again after, so
 // a non-English page relabels too.
 function idxNavPill(){
-  // With spots on there is a real wall behind the pill, so it keeps
-  // its name.
-  const a=document.getElementById('navWall'); if(!a||IDX_ON||SPOT_ON||!IDX_COUNT) return;
-  a.href='/wall#search';
+  const a=document.getElementById('navWall');
+  if(!a || IDX_ON || !(IDX_COUNT||SPOT_ON)) return;
   const lbl=document.getElementById('navWallLbl');
-  if(lbl){ lbl.textContent=t('hdr.search','search'); lbl.removeAttribute('data-i18n'); }
-  const tip=t('hdr.search.title','Search your indexer accounts');
-  a.title=tip; a.setAttribute('data-i18n-title','hdr.search.title');
+  if(lbl){ lbl.textContent=t('hdr.find','find'); lbl.removeAttribute('data-i18n'); }
+  const tip=t('hdr.find.title','Search for releases and grab them');
+  a.title=tip; a.setAttribute('data-i18n-title','hdr.find.title');
 }
 idxNavPill();
 if(LOCALE!=='en'){
@@ -16193,10 +17435,11 @@ if(LOCALE!=='en'){
     restamp('.cardhide', t('layout.hide.title','hide this card: bring it back from the Hidden bar at the bottom, or Settings → Interface → Reset layout'));
     restamp('.chgrip', t('chart.resize','Drag to make this chart taller or shorter'));
     restamp('.cardgrip[data-wired]', t('card.grip','Drag to make this list shorter or taller'));
-    // The queue card's ? carries a compound tooltip (row hint + manual
-    // line), so it has no data-i18n-title for applyI18n to follow -
-    // rebuild it the same way injectHelp composed it.
-    restamp('#queueCard h3 a.hlp', t('queue.hint','click a row for detail · drag to reorder; Force/High still download first')+'\n'+t('hlp.title','Open the manual for this section'));
+    // Every card ? that carries a compound tooltip (row hint + manual
+    // line) has no data-i18n-title for applyI18n to follow, so each is
+    // rebuilt the way injectHelp composed it, off the same map.
+    for(const [card,hint] of Object.entries(helpHints()))
+      restamp('#'+card+' h3 a.hlp', hint+'\n'+t('hlp.title','Open the manual for this section'));
     colRelabel();   // table headings were named before the catalogue landed
     // Both of these are built entirely in JS, so the data-i18n pass
     // above reaches nothing in them. A rebuild restamps every title AND

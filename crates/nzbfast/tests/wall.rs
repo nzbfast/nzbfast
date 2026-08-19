@@ -575,6 +575,92 @@ async fn wall_groups_dedupes_and_serves() {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], false, "{body}");
 
+        // A replaced poster must replace what the GRID loads, which is
+        // the lazily cached `/art/thumb_<name>` derivative and not the
+        // file the upload wrote. Both PNGs below are 1x1, and make_thumb
+        // hands a poster that small back verbatim, so the thumbnail's
+        // bytes ARE the uploaded bytes and "which picture is the wall
+        // showing" is a byte comparison.
+        let red = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\
+                    \x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\
+                    \x00\x00\x00\x0c\x49\x44\x41\x54\x78\xda\x63\xf8\xcf\xc0\x00\x00\x03\
+                    \x01\x01\x00\xf7\x03\x41\x43\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\
+                    \x60\x82";
+        let blue = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\
+                     \x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\
+                     \x00\x00\x00\x0c\x49\x44\x41\x54\x78\xda\x63\x60\x60\xf8\x0f\x00\x01\
+                     \x03\x01\x00\x36\x74\x11\x40\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\
+                     \x60\x82";
+        let upload = |bytes: &[u8]| {
+            let (code, body) = http_post(
+                port,
+                &format!("/api?mode=wall_art&key={key}&apikey=sekrit"),
+                "multipart/form-data; boundary=artb",
+                &multipart("artb", "p.png", bytes),
+            );
+            assert_eq!(code, 200, "{body}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+                true,
+                "{body}"
+            );
+        };
+        let thumb = || http_get(port, "/art/thumb_m_the_matrix_1999.jpg");
+        upload(red);
+        assert_eq!(
+            thumb(),
+            (200, String::from_utf8_lossy(red).into_owned()),
+            "the thumbnail did not come from the poster just uploaded"
+        );
+        upload(blue);
+        assert_eq!(
+            thumb(),
+            (200, String::from_utf8_lossy(blue).into_owned()),
+            "the grid is still serving the PREVIOUS poster: the cached \
+             thumbnail outlived the poster it was made from"
+        );
+
+        // The candidate arm of wall_fix, which used to be two separate
+        // index writes: the rename and the picked series' metadata must
+        // arrive together, and the art of the series this card just
+        // stopped being must not.
+        let (code, body) = http_post(
+            port,
+            "/api?mode=wall_fix&apikey=sekrit",
+            "application/json",
+            br#"{"key":"m:the matrix:1999","kind":"movie","title":"The Matrix Reloaded",
+                 "year":2003,"meta":{"id":604,"overview":"Neo returns.","rating":7.2,
+                 "genres":"Action","imdb":"tt0234215","air_date":"2003-05-15"}}"#,
+        );
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+            true,
+            "{body}"
+        );
+        let fixed = cards_of("/api?mode=wall2&all=1&matched=0&apikey=sekrit");
+        let m = by_title(&fixed, "The Matrix Reloaded").expect("the renamed card");
+        assert_eq!(
+            (
+                m["year"].as_u64(),
+                m["overview"].as_str(),
+                m["genres"].as_str(),
+                m["aired"].as_str()
+            ),
+            (
+                Some(2003),
+                Some("Neo returns."),
+                Some("Action"),
+                Some("2003-05-15")
+            ),
+            "the rename landed without the metadata that goes with it: {m}"
+        );
+        // No poster_url in the candidate: the art goes, thumbnail
+        // included, rather than the old film's picture staying under the
+        // new name.
+        assert_eq!(m["poster_full"].as_str(), Some(""), "{m}");
+        assert_eq!(thumb().0, 404, "the fixed card kept its old thumbnail");
+
         // OMDb key: live setting round-trip (masked in get_config as
         // has_omdb) and signup email validation.
         let (_, body) = http_get(

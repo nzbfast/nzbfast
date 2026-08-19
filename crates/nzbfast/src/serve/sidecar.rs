@@ -449,6 +449,7 @@ pub(super) fn spawn_sidecar(
         let fast_verify = d.fast_verify.load(Ordering::Relaxed);
         let verify_lean = d.verify_lean.load(Ordering::Relaxed);
         let par_cleanup = d.par_cleanup.load(Ordering::Relaxed);
+        let skip_samples = d.skip_samples.load(Ordering::Relaxed);
         tokio::spawn(async move {
             let t0 = Instant::now();
             let res = if cancelled.load(Ordering::Relaxed) {
@@ -465,6 +466,7 @@ pub(super) fn spawn_sidecar(
                     verify_lean,
                     false,
                     par_cleanup,
+                    skip_samples,
                     password,
                     // The sidecar prefetches ANOTHER job; its consent
                     // travels with that job's record, not this one's.

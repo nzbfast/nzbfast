@@ -561,6 +561,13 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         "auto_retry_at": j.auto_retry_at,
         "password_required": j.password_required,
         "has_password": j.password.is_some(),
+        // U8: the list row shows the disk-space state for a `space`
+        // failure without opening the drawer, so it needs the same two
+        // facts the full record carries - the verdict and what the
+        // retry actually needs free (see the full-record twins for why
+        // space_needed is not the set size).
+        "disk_full": j.state == JobState::Failed && disk_full_failure(&j.fail_message),
+        "space_needed": unpack_space_needed(0, j.total_bytes, &j.archive_shape),
         "media": j.media,
         "archive_shape": j.archive_shape,
         "identity_name": j.identity_name,
@@ -917,7 +924,7 @@ fn history_row(d: &Daemon, j: &Job) -> Value {
                     .get(&j.category)
                     .map(|m| m.script.clone())
                     .unwrap_or_default(),
-                d.script.lock_ok().as_deref(),
+                &d.scripts.lock_ok(),
             ),
             // SAB reuses `report` to flag a URL-fetch job ("future")
             // and leaves it empty otherwise; nothing here fetches by

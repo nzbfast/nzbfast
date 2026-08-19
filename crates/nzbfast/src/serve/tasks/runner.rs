@@ -655,6 +655,20 @@ pub(super) fn settle_job_tail(
     // are not billed twice here.
     d.flush_run_usage();
     d.add_reliability(&per_server_rel);
+    // ...and this job's connection ceilings, in the same window and for
+    // the same reason: `pool_live` is still THIS job's. Banking was
+    // watchdog-only, so a job shorter than one 1-5 s tick could be
+    // refused and leave nothing at all in the lifetime ledger (Codex
+    // sweep 6, N8). One episode banks once, whichever caller reaches it
+    // first.
+    super::stall::fold_and_bank_caps(d);
+    // ...and the refusal LINE, which rode the same tick and was left
+    // behind by that fix. The retained pool covers the ordinary case,
+    // since `pool_live` is not cleared when a job ends - but a refusal
+    // seen only inside a sub-tick job whose pool a later job replaces,
+    // or one on the last job before a queue-finished shutdown action
+    // ends the process, was banked nowhere (Codex sweep 7, L2).
+    super::stall::bank_refusals(d);
     // M29 oracle: take this job's per-article outcomes off the hub
     // before the next job installs its own sink. The FOLD into the
     // ledger rides on the ticket and happens on the lane.

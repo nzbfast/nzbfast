@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: nzbfast.nzbfast
+PackageVersion: 1.1.5
+InstallerLocale: en-US
+Platform:
+- Windows.Desktop
+InstallerType: inno
+Scope: machine
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: 2026-08-19
+AppsAndFeaturesEntries:
+- DisplayName: nzbfast
+  Publisher: nzbfast
+  DisplayVersion: 1.1.5
+  ProductCode: '{72B5B673-54D7-46ED-BDDC-C7D3E571D242}_is1'
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/nzbfast/nzbfast/releases/download/v1.1.5/nzbfast-1.1.5-windows-x64-setup.exe
+  InstallerSha256: BF4E37C97B09B3B8C5F2ED8728A2906C0C17E2C0E5A75BE02B4AFE03761D9090
+ManifestType: installer
+ManifestVersion: 1.12.0

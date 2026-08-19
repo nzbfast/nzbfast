@@ -1260,7 +1260,7 @@ pub(super) async fn finalize_completed_gen(
         // Outside the job lock - save_queue locks every job in turn.
         // The identity/cleanup stamps land on a record that may already
         // be parked (an unlock re-run) - keep its store line current.
-        d.history_upsert_if_present(job);
+        d.history_publish_change(job, "the post-processing stamps and folder");
         d.save_queue_soon();
     }
 }
@@ -2402,7 +2402,7 @@ pub(super) fn exact_dupe_key(name: &str) -> String {
 /// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
 /// they always did; `to_lowercase` differs from `to_ascii_lowercase`
 /// only on characters the old filter was deleting anyway.
-fn flatten_name(name: &str) -> String {
+pub(crate) fn flatten_name(name: &str) -> String {
     name.to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })

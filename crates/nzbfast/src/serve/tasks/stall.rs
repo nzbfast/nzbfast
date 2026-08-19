@@ -132,12 +132,83 @@ pub(in crate::serve) fn fold_caps_for_test(d: &Arc<Daemon>) -> Vec<(String, usiz
     fold_caps(d)
 }
 
+/// §G: copy any provider refusal somewhere that outlives the pool.
+///
+/// The Providers card reads it from the live pool, which is gone the
+/// moment the queue drains - so the one sentence explaining why a
+/// paid-for provider did nothing disappeared exactly when the user went
+/// looking for it. Sampled from the daemon rather than in the stats
+/// handler because a headless run has no dashboard polling it.
+///
+/// The clear arm is deliberately "moved bytes or holds a connection",
+/// not "has no refusal right now": every server starts each job with an
+/// empty refusal slot, so clearing on that alone would wipe the record a
+/// second after the next job began and refill it a second later. Bytes
+/// or a live connection are proof it authenticated.
+///
+/// Called from the runner's tail as well as the watchdog tick, for the
+/// reason `fold_and_bank_caps` below is: the tick sleeps 1-5 s first, so
+/// a refusal seen only inside a shorter job whose pool a later job
+/// replaces was never copied at all, and neither was one on the last job
+/// before a queue-finished shutdown action ended the process (Codex
+/// sweep 7, L2). Idempotent - the record is keyed by host and rewritten
+/// wholesale, so both callers reaching it costs one map insert.
+pub(in crate::serve) fn bank_refusals(d: &Arc<Daemon>) {
+    let live = d.hub.pool_live.lock_ok();
+    let Some(l) = live.as_ref() else { return };
+    let mut keep = d.last_refusals.lock_ok();
+    for s in &l.servers {
+        if let Some(r) = s.refusal.lock_ok().as_ref() {
+            keep.insert(
+                s.host.clone(),
+                ServerRefusal {
+                    permanent: r.permanent,
+                    source_ips: r.source_ips,
+                    line: r.line.clone(),
+                    at: unix_now(),
+                },
+            );
+        } else if s.connected.load(Ordering::Relaxed) > 0 || s.bytes.load(Ordering::Relaxed) > 0 {
+            keep.remove(&s.host);
+        }
+    }
+}
+
+/// Fold this job's ceilings and bank what the fold hands back.
+///
+/// The watchdog's own tick does exactly this, and it was the ONLY
+/// caller - so a job shorter than one tick (1-5 s) could be refused,
+/// finish, and have the next job replace `pool_live` before anything
+/// ever looked. The lifetime ledger, whose whole job is to be the
+/// record a user sends their provider, silently missed the day (Codex
+/// sweep 6, N8). Called from the runner's tail as well, where
+/// `pool_live` still points at the job that has just ended.
+///
+/// Idempotent: `fold_caps` banks one EPISODE once, keyed on the
+/// refusal's own stamp, so the tail call and the next tick cannot
+/// double-count.
+pub(in crate::serve) fn fold_and_bank_caps(d: &Arc<Daemon>) {
+    for (host, granted) in fold_caps(d) {
+        crate::conntune::note_capped(&d.cfg_path, &host, granted, unix_now().max(0) as u64);
+    }
+}
+
 fn fold_caps(d: &Arc<Daemon>) -> Vec<(String, usize)> {
     let live = d.hub.pool_live.lock_ok().clone();
     let Some(l) = live else { return Vec::new() };
     let mut seen = d.capped_hosts.lock_ok();
     let mut out = Vec::new();
     for s in &l.servers {
+        // A fleet HOLDING more than a recorded ceiling has disproven it.
+        // Done here as well as in the payload builder because the idle
+        // `planned_servers` row has no live gauge to consult at all: it
+        // reads this map alone, so a ceiling only the payload builder
+        // retired came back the moment the queue drained (Codex sweep 6,
+        // N4).
+        let held = s.connected.load(Ordering::Relaxed);
+        if seen.get(&s.host).is_some_and(|c| c.disproven_by(held)) {
+            seen.remove(&s.host);
+        }
         let since = s.capped_since.load(Ordering::Relaxed);
         if since == 0 {
             continue;
@@ -221,43 +292,7 @@ fn observe_transfer_and_outages(
                 .collect()
         })
         .unwrap_or_default();
-    // §G: copy any refusal somewhere that outlives the pool.
-    // The Providers card reads it from the live pool, which
-    // is gone the moment the queue drains - so the one
-    // sentence explaining why a paid-for provider did
-    // nothing disappeared exactly when the user went looking
-    // for it. Sampled here rather than in the stats handler
-    // because a headless run has no dashboard polling it.
-    //
-    // The clear arm is deliberately "moved bytes or holds a
-    // connection", not "has no refusal right now": every
-    // server starts each job with an empty refusal slot, so
-    // clearing on that alone would wipe the record a second
-    // after the next job began and refill it a second later.
-    // Bytes or a live connection are proof it authenticated.
-    {
-        let live = d.hub.pool_live.lock_ok();
-        if let Some(l) = live.as_ref() {
-            let mut keep = d.last_refusals.lock_ok();
-            for s in &l.servers {
-                if let Some(r) = s.refusal.lock_ok().as_ref() {
-                    keep.insert(
-                        s.host.clone(),
-                        ServerRefusal {
-                            permanent: r.permanent,
-                            source_ips: r.source_ips,
-                            line: r.line.clone(),
-                            at: unix_now(),
-                        },
-                    );
-                } else if s.connected.load(Ordering::Relaxed) > 0
-                    || s.bytes.load(Ordering::Relaxed) > 0
-                {
-                    keep.remove(&s.host);
-                }
-            }
-        }
-    }
+    bank_refusals(d);
     // Deliberately NOT inside the block above, and `fold_caps` clones
     // the Arc out before it merges: banking a ceiling in the lifetime
     // ledger is a read-modify-write of conntune.json, and holding
@@ -265,9 +300,7 @@ fn observe_transfer_and_outages(
     // across a disk write is how a mutex becomes a wedge. This runs on
     // the watchdog's 1-5 s tick and writes only when the day or the
     // ceiling has actually moved.
-    for (host, granted) in fold_caps(d) {
-        crate::conntune::note_capped(&d.cfg_path, &host, granted, unix_now().max(0) as u64);
-    }
+    fold_and_bank_caps(d);
     // Servers granting nothing right now. The `warn!` below
     // is the first thing anywhere that says a provider is
     // dead WHILE the job that needs it is still running -

@@ -1,5 +1,5 @@
 //! serve tests: the API surface, the settings reflection guards, and
-//! the process plumbing (run_capped, the body budget, redaction).//!
+//! the process plumbing (run_capped_sieve, the body budget, redaction).//!
 //! Split out of serve/mod.rs's inline `mod tests` by TODO 106 phase 4;
 //! attached to serve as a sibling child module, so `super` still means
 //! `serve` exactly as it did inline.
@@ -9,7 +9,7 @@ use super::*;
 // plumbing they cover is a unix path. Ungated, the import is dead on
 // Windows and `-D warnings` turns that into a build error there.
 #[cfg(unix)]
-use script::{SCRIPT_ERR_TAIL, run_capped};
+use script::{SCRIPT_ERR_TAIL, run_capped_sieve};
 
 /// M5 (Codex sweep 5 Aug): a recategorize that physically moved the
 /// payload and then could not write the queue file answered
@@ -204,7 +204,7 @@ fn a_script_that_never_stops_talking_is_bounded_and_still_killed() {
     cmd.arg("-c")
         .arg("while :; do printf 'noise noise noise\\n' >&2; done");
     let t0 = Instant::now();
-    let (status, err) = run_capped(cmd, 1).unwrap();
+    let (status, _, err) = run_capped_sieve(cmd, 1).unwrap();
     assert!(status.is_none(), "the deadline must have killed it");
     assert!(
         t0.elapsed() < std::time::Duration::from_secs(10),
@@ -415,7 +415,7 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
             pidfile.display()
         ));
         let t0 = Instant::now();
-        let (status, _) = run_capped(cmd, 5).unwrap();
+        let (status, _, _) = run_capped_sieve(cmd, 5).unwrap();
         let took = t0.elapsed();
         assert!(
             status.is_some_and(|s| s.success()),
@@ -538,7 +538,7 @@ fn a_scan_pass_may_only_publish_into_the_index_it_started_in() {
 fn a_failing_script_reports_its_status_and_stderr() {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c").arg("echo ignored; echo boom >&2; exit 3");
-    let (status, err) = run_capped(cmd, 30).unwrap();
+    let (status, _, err) = run_capped_sieve(cmd, 30).unwrap();
     assert_eq!(status.and_then(|s| s.code()), Some(3));
     assert_eq!(err.trim(), "boom");
 }
@@ -1699,6 +1699,78 @@ async fn mover_process_moves_a_pending_job_and_clears_the_marker() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// C: the mover step's record has to follow the bytes even when the
+/// store refuses the line (Codex sweep 7, M5 follow-up).
+///
+/// `mover_process` is the sharpest of the callers that dropped
+/// `history_upsert_if_present`'s answer: it publishes the payload's NEW
+/// folder. A refused append left the store holding the old one, so the
+/// next start replayed a row pointing at an emptied directory while the
+/// files sat somewhere else - and every later delete, retry, play and
+/// *arr import followed the row. The store here is 0444 with a writable
+/// spool beside it, which is exactly the shape that made the failure
+/// invisible: the append needs the FILE, the rewrite that stands in for
+/// it needs only the DIRECTORY.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_survives_a_store_that_refuses_the_append() {
+    use crate::serve::job::job_from_json;
+    use crate::serve::testutil::test_daemon;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("nzbfast-moverstore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = test_daemon(&dir);
+    let nas = dir.join("nas");
+    *d.move_completed.write_ok() = Some(nas.clone());
+    let job_dir = dir.join("out").join("Some.Release");
+    std::fs::create_dir_all(&job_dir).unwrap();
+    std::fs::write(job_dir.join("payload.bin"), b"bytes").unwrap();
+    let job = Arc::new(Mutex::new(
+        job_from_json(&json!({
+            "nzo_id": "SABnzbd_nzo_moverstore",
+            "name": "Some.Release",
+            "nzb_path": dir.join("some.nzb").to_string_lossy(),
+            "out_dir": job_dir.to_string_lossy(),
+            "state": "Completed",
+            "category": "",
+            "move_pending": true,
+        }))
+        .unwrap(),
+    ));
+    d.history.lock_ok().push(job.clone());
+    assert!(d.history_upsert(std::slice::from_ref(&job)));
+
+    let store = d.history_store_path();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let requeue = tokio::task::spawn_blocking({
+        let d = d.clone();
+        let job = job.clone();
+        move || d.mover_process(&job)
+    })
+    .await
+    .unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(!requeue);
+    assert_eq!(
+        job.lock_ok().out_dir,
+        nas.join("Some.Release"),
+        "precondition: the move itself has to have landed"
+    );
+    let (rows, _) = d.history_replay();
+    assert_eq!(
+        rows.iter()
+            .find(|j| j.nzo_id == "SABnzbd_nzo_moverstore")
+            .map(|j| j.out_dir.clone()),
+        Some(nas.join("Some.Release")),
+        "the restart would send every later delete, retry and import to \
+         the folder the payload has left"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// C: the mover's byte budget - three modes, one setting.
 #[test]
 fn mover_budget_follows_the_mode() {
@@ -1968,6 +2040,60 @@ fn an_arr_grabbed_row_stays_completed_when_the_arr_cleaned_up_its_folder() {
     job.lock_ok().origin = "arrival".into();
     let r = facade_row(&d);
     assert_eq!(r["status"], "Failed", "{r}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// U8: the compact history row draws the disk-space state for a `space`
+/// failure without opening the drawer, so the summary shape must carry
+/// the same verdict and space figure the full record does - and the
+/// figure must be the RETRY's need (payload, doubled for an encrypted
+/// set), not the set size, or the row lights Retry a payload too early.
+#[test]
+fn summary_row_carries_the_disk_full_verdict_and_space_figure() {
+    use crate::serve::job::job_from_json;
+    use crate::serve::testutil::test_daemon;
+    let dir = std::env::temp_dir().join(format!("nzbfast-histspace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = test_daemon(&dir);
+    let job = Arc::new(Mutex::new(
+        job_from_json(&json!({
+            "nzo_id": "SABnzbd_nzo_histspace",
+            "name": "Big.Set",
+            "nzb_path": dir.join("big.nzb").to_string_lossy(),
+            "out_dir": dir.join("Big.Set").to_string_lossy(),
+            "state": "Failed",
+            "fail_message": "could not write the download: disk full",
+            "total_bytes": 5_000_000_000u64,
+            "archive_shape": "rar encrypted",
+        }))
+        .unwrap(),
+    ));
+    d.history.lock_ok().push(job.clone());
+    let summary_row = |d: &Daemon| {
+        let q = HistQuery {
+            failed_only: false,
+            category: None,
+            ids: None,
+            search: None,
+            bucket: None,
+            start: 0,
+            limit: 0,
+        };
+        history_page(d, &q, true).0[0].clone()
+    };
+    let s = summary_row(&d);
+    assert_eq!(s["fail_action"], "space", "{s}");
+    assert_eq!(s["disk_full"], true, "{s}");
+    // Encrypted: payload twice over, exactly the full record's figure.
+    assert_eq!(s["space_needed"], 10_000_000_000u64, "{s}");
+
+    // A failure that was not the disk keeps the verdict false, so the
+    // row cannot dress a transport error in the space copy.
+    job.lock_ok().fail_message = "download failed on connection errors".into();
+    let s = summary_row(&d);
+    assert_eq!(s["disk_full"], false, "{s}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

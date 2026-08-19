@@ -381,7 +381,7 @@ pub(super) fn sab_units(n: f64) -> String {
 /// its category's script - or the global one - was published to every
 /// SAB client as having no script at all, and a client's "which jobs run
 /// my script" view answered wrongly for the whole ordinary case (L4,
-/// 10 Aug sweep). The ladder is `resolve_script`'s: an explicit "none"
+/// 10 Aug sweep). The ladder is `resolve_scripts`'s: an explicit "none"
 /// suppresses everything, an override wins, then the category, then the
 /// global script. Basename because that is SAB's vocabulary - the same
 /// name `mode=get_scripts` lists and an add's `script=` sends back - and
@@ -389,7 +389,7 @@ pub(super) fn sab_units(n: f64) -> String {
 pub(super) fn sab_script_name(
     over: &str,
     cat_script: &str,
-    global: Option<&std::path::Path>,
+    global: &[std::path::PathBuf],
 ) -> String {
     let base = |s: &str| -> String {
         std::path::Path::new(s)
@@ -400,16 +400,31 @@ pub(super) fn sab_script_name(
     if over.eq_ignore_ascii_case("none") {
         return "None".into();
     }
+    // §192: every rung may be a CHAIN, and the name a client shows for
+    // the job has to be the whole of what will run - a client that
+    // renders only the first link tells the user the wrong thing about
+    // the other two.
+    let chain = |s: &str| -> String {
+        super::nzbget_script::script_chain(s)
+            .iter()
+            .map(|p| base(&p.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     if !over.is_empty() {
-        return base(over);
+        return chain(over);
     }
     if !cat_script.is_empty() {
-        return base(cat_script);
+        return chain(cat_script);
+    }
+    if global.is_empty() {
+        return "None".into();
     }
     global
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "None".into())
+        .iter()
+        .map(|p| base(&p.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The active download's counters as `(decoded, declared total, left)`,
@@ -621,6 +636,7 @@ struct QueueNotices {
     giveup_tripped: Vec<Value>,
     watch_upgraded: Vec<Value>,
     delete_kept: Vec<Value>,
+    hist_upgraded: Value,
 }
 
 fn queue_notices(d: &Daemon) -> QueueNotices {
@@ -683,6 +699,16 @@ fn queue_notices(d: &Daemon) -> QueueNotices {
                    "retry": !n.nzb.is_empty()})
         })
         .collect();
+    // §188: the one-time strip after a history re-derivation. Same
+    // "kept until dismissed" contract as delete_kept above and for a
+    // related reason - it reports a state the user can still act on
+    // (rows that kept their original labels), not a moment that passed.
+    // Null when there is nothing owed, which is every run but the first
+    // after an upgrade that changed something.
+    let hist_upgraded = d
+        .hist_notice()
+        .map(|n| json!({"corrected": n.corrected, "kept": n.kept, "at": n.at}))
+        .unwrap_or(Value::Null);
     QueueNotices {
         watch_failed,
         watch_picked,
@@ -690,6 +716,7 @@ fn queue_notices(d: &Daemon) -> QueueNotices {
         giveup_tripped,
         watch_upgraded,
         delete_kept,
+        hist_upgraded,
     }
 }
 
@@ -734,7 +761,7 @@ struct SlotCtx {
     /// else is: the row reports which script it will run (L4) and must
     /// not reach back into the daemon under the queue lock to find out.
     cat_scripts: std::collections::HashMap<String, String>,
-    global_script: Option<PathBuf>,
+    global_script: Vec<PathBuf>,
 }
 
 /// One SABnzbd queue slot, built from the row's own state and the payload
@@ -947,7 +974,7 @@ fn slot_json(
         "script": sab_script_name(
             &j.script_override,
             cat_scripts.get(&j.category).map(String::as_str).unwrap_or(""),
-            global_script.as_deref(),
+            global_script,
         ),
         // Always empty, deliberately: M24's contract is that
         // the password itself never leaves the daemon, only
@@ -1191,7 +1218,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
             .filter(|(_, m)| !m.script.is_empty())
             .map(|(name, m)| (name.clone(), m.script.clone()))
             .collect(),
-        global_script: d.script.lock_ok().clone(),
+        global_script: d.scripts.lock_ok().clone(),
     };
     let mut remaining_bytes: u64 = 0;
     // ...and the whole queue's declared bytes, on the same walk and for
@@ -1334,6 +1361,13 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         "pause_source": if paused_now { json!(pause_source) } else { Value::Null },
         "resume_at": resume_at,
         "limit_source": limit_source,
+        // What is armed to happen when the queue runs dry, and the
+        // seconds left if a sleep or shutdown has already been
+        // announced. Here rather than in get_config for the same reason
+        // as `password_prompt` above it: the countdown banner and its
+        // cancel button are drawn off the queue poll, and get_config is
+        // only fetched when the settings view is open.
+        "finish_action": crate::serve::finish_action::payload(d),
         // Update banner state: the dashboard already polls the queue
         // every second, so the chip appears without a dedicated poll.
         "update_version": d
@@ -1421,6 +1455,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         "giveup_tripped": notices.giveup_tripped,
         "watch_upgraded": notices.watch_upgraded,
         "delete_kept": notices.delete_kept,
+        "hist_upgraded": notices.hist_upgraded,
         // Direct id selection bypasses the start/limit window (SAB
         // semantics; see nzo_ids_param).
         "slots": if ids.is_some() { slots } else { paginate(slots, params) },
@@ -1951,6 +1986,52 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                 }
             })
             .unwrap_or_default();
+        // NZBGet also accepts a URL as the Content and fetches it
+        // itself; LunaSea's add-by-URL sends exactly that, with an
+        // empty NZBFileName, so the base64-only reading below answered
+        // 0 - "failed" - for every URL add (§18). The category
+        // heuristic above is tuned for base64 bodies (a short URL
+        // would itself pass the length test and be taken for a
+        // category), so this arm reads the v13+ positional Category
+        // instead of `category`.
+        let trimmed = content.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            let cat = params.get(2).and_then(Value::as_str).unwrap_or("");
+            return match fetch_url(trimmed) {
+                Ok(f) => {
+                    // An explicit NZBFilename wins; otherwise name from
+                    // the fetch (Content-Disposition first), the same
+                    // ladder mode=addurl walks - naming from the URL
+                    // alone titles indexer grabs with an id hash.
+                    let jobname = Some(name)
+                        .filter(|n| !n.trim().is_empty())
+                        .map(str::to_string)
+                        .or_else(|| name_from_fetch(&f, trimmed))
+                        .unwrap_or_else(|| "download.nzb".to_string());
+                    match d.enqueue_fetched(
+                        &f,
+                        &jobname,
+                        cat,
+                        priority,
+                        None,
+                        None,
+                        0,
+                        &api_origin(ua_hdr, "arr"),
+                        false,
+                    ) {
+                        Ok(nzo) => json!(nzo_int(&nzo)),
+                        Err(e) => {
+                            warn!(target: "jsonrpc", "append url: {e}");
+                            json!(0)
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "jsonrpc", "append url: {e}");
+                    json!(0)
+                }
+            };
+        }
         match b64_decode(content).filter(|b| !b.is_empty()) {
             None => json!(0),
             Some(bytes) => match d.enqueue(
@@ -2019,47 +2100,10 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
         let hit_id = |id: &str| ids.contains(&nzo_int(id));
         let mut ok = false;
         match cmd {
+            // Body in api/remote.rs, with the tail-guard, suspend and
+            // idle-announce rationale on it (Codex sweeps 3 + 14 Aug).
             "GroupPause" | "GroupResume" => {
-                if cmd == "GroupPause" {
-                    // Pausing a job also stops its prefetch (same as
-                    // the /api handler): the sidecar is the one part
-                    // of a "paused" job that would keep downloading.
-                    d.poke_sidecar(hit_id);
-                }
-                // Through the shared transition, not a bare flag
-                // write (Codex sweep 2, 3 Aug M4). Setting `paused`
-                // on a job in its verify/repair/unpack tail changes
-                // nothing about the tail - it runs to completion -
-                // but the flag STAYS, and an auto-retry then
-                // requeued the job with `paused` still true, where
-                // `pick_job` skips it forever. The /api arm has
-                // refused that since the tail guard landed; this
-                // one had its own copy and never got it.
-                for j in d.queue.lock_ok().iter() {
-                    let mut g = j.lock_ok();
-                    if ids.contains(&nzo_int(&g.nzo_id))
-                        && super::api::queue::apply_pause(d, &mut g, cmd == "GroupPause")
-                    {
-                        ok = true;
-                    }
-                }
-                // The flag alone only bites when the job next enters
-                // the queue, so pausing the item that is actually
-                // downloading did nothing while answering success.
-                if cmd == "GroupPause" {
-                    d.suspend_matching(true, |g| ids.contains(&nzo_int(&g.nzo_id)));
-                }
-                // Pausing the last runnable job idles the queue with no
-                // park, and this facade answered true without saying so
-                // while the REST arm has announced it since the 10 Aug
-                // sweep (Codex sweep 14 Aug M4). Resume takes the same
-                // call as the REST arm does, deliberately: it never
-                // EMITS on its own (the latch keeps a still-idle queue
-                // silent), and the re-arm a resume owes lives inside
-                // `apply_pause`, under the queue lock the loop holds.
-                if ok {
-                    d.note_queue_idle();
-                }
+                ok = super::api::remote::pause_by_ids(d, &ids, cmd == "GroupPause");
             }
             "GroupDelete" | "GroupDupeDelete" | "GroupFinalDelete" | "GroupParkDelete" => {
                 // M5 (14 Aug sweep): one arm, four distinct NZBGet
@@ -2369,7 +2413,32 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     *q = rest;
                 }
             }
-            "GroupSetCategory" => {
+            // The four editqueue subcommands LunaSea sends that the
+            // *arrs never do; their bodies live in api/remote.rs (§18).
+            "GroupMoveOffset" => {
+                ok = super::api::remote::move_by_offset(
+                    d,
+                    &ids,
+                    param_str.trim().parse::<i64>().unwrap_or(0),
+                );
+            }
+            "GroupSetName" => {
+                ok = super::api::remote::rename_by_ids(d, &ids, param_str.trim());
+            }
+            "GroupSetParameter" => {
+                ok = super::api::remote::set_parameter(d, &ids, &param_str);
+            }
+            // NZBGet spells the sort "<key>+"/"<key>-"; the shared
+            // helper also serves SAB's queue&name=sort.
+            "GroupSort" => {
+                let t = param_str.trim();
+                let (key, asc) = match t.strip_suffix(['+', '-']) {
+                    Some(k) => (k, t.ends_with('+')),
+                    None => (t, true),
+                };
+                ok = super::api::remote::sort_queue(d, key, asc);
+            }
+            "GroupSetCategory" | "GroupApplyCategory" => {
                 // Untrusted category must never escape out_root at
                 // completion (tv_organize joins it onto the root). Force
                 // a single contained path component, like enqueue and
@@ -2548,6 +2617,11 @@ pub(super) fn handle_jsonrpc(
     mut req: tiny_http::Request,
     apikey: Option<&str>,
     nzbkey: Option<&str>,
+    // NZBGet's `/<user>:<pass>/jsonrpc` URL credential, already
+    // percent-decoded by the router. LunaSea sends ONLY this form -
+    // no Authorization header - so it stands in for the Basic
+    // password everywhere below (§18).
+    path_pw: Option<&str>,
 ) {
     // Basic auth: the password must match a configured key. Gate on ANY
     // configured key - the old code only checked `apikey`, so an install
@@ -2579,7 +2653,8 @@ pub(super) fn handle_jsonrpc(
         let cred_pw = auth_credentials(&req, "basic")
             .and_then(|b| b64_decode(&b))
             .and_then(|raw| String::from_utf8(raw).ok())
-            .and_then(|cred| cred.split_once(':').map(|(_, p)| p.to_string()));
+            .and_then(|cred| cred.split_once(':').map(|(_, p)| p.to_string()))
+            .or_else(|| path_pw.map(str::to_string));
         // ct_eq, matching every other auth comparison in this file (/api,
         // /stream, /getnzb, /newznab). This facade was the one that stayed on
         // `==`, which short-circuits on the first differing byte.
@@ -2639,7 +2714,8 @@ pub(super) fn handle_jsonrpc(
         let cred_pw = auth_credentials(&req, "basic")
             .and_then(|b| b64_decode(&b))
             .and_then(|raw| String::from_utf8(raw).ok())
-            .and_then(|cred| cred.split_once(':').map(|(_, p)| p.to_string()));
+            .and_then(|cred| cred.split_once(':').map(|(_, p)| p.to_string()))
+            .or_else(|| path_pw.map(str::to_string));
         // Still open right now: no key exists, so the surface stays
         // open exactly as it was at the request line.
         if now_keys.is_empty() {
@@ -2668,15 +2744,18 @@ pub(super) fn handle_jsonrpc(
         }
     }
     let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
-    // Method from the body, or from a GET /jsonrpc/<method> path.
+    // Method from the body, or from a GET /jsonrpc/<method> path. The
+    // path may carry a leading `/<user>:<pass>` credential segment, so
+    // the method is whatever FOLLOWS the "jsonrpc" segment rather than
+    // a fixed position from the front.
     let method = body
         .get("method")
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            req.url()
-                .split('/')
-                .nth(2)
+            let mut seg = req.url().split('/').skip_while(|s| *s != "jsonrpc");
+            seg.next(); // the "jsonrpc" segment itself
+            seg.next()
                 .map(|m| m.split('?').next().unwrap_or(m).to_string())
         })
         .unwrap_or_default()
@@ -2724,6 +2803,17 @@ pub(super) fn handle_jsonrpc(
         "resumedownload" | "resumedownload2" => {
             set_paused_cancel_timer(d, false);
             persist_pause(d);
+            json!(true)
+        }
+        // NZBGet's "resume in N seconds". LunaSea's pause-for dialog is
+        // pausedownload followed by this, so without it the app pauses
+        // the queue and then reports the whole operation as failed -
+        // leaving the user paused with no timer they asked for (§18).
+        // The timer only fires if no manual pause/resume lands in
+        // between, same as SAB's set_pause.
+        "scheduleresume" => {
+            let secs = params.first().and_then(Value::as_u64).unwrap_or(0);
+            arm_pause_timer(d, std::time::Duration::from_secs(secs));
             json!(true)
         }
         "rate" => {

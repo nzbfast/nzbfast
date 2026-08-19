@@ -45,14 +45,50 @@ pub(in crate::serve) fn newznab_xml(
             "nzbfast's built-in indexer is switched off (Settings → Indexing)",
         );
     }
+    // `supportedParams` is a PROMISE, and the *arrs read it once and
+    // cache it: a param listed here is one a client will send and expect
+    // filtered results from, and a param missing is one it will not send
+    // at all. So this list must be exactly the set the search path below
+    // honours - advertising more is how AIOStreams came to report
+    // "ID search: none (series)" while tvsearch quietly ignored the
+    // tvdbid it was handed (TODO 187).
+    //
+    // `tvdbid` is the one entry that depends on DATA rather than on
+    // code, and that is the whole ordering story of TODO 187. Sonarr
+    // switches to tvdbid the moment caps offers it, so promising it
+    // against a column the enrichment backfill has not filled yet would
+    // answer every series search with nothing - which Sonarr reads as
+    // "this indexer has nothing", strictly worse than the name search it
+    // would otherwise have done. One id present means the lane has run
+    // and the promise is real. The search path honours the parameter
+    // either way, so this can only ever promise LESS than we deliver,
+    // never more. `rid` (TVRage, long dead) stays absent for good.
     if t == "caps" {
-        return r#"<?xml version="1.0" encoding="UTF-8"?>
+        // A read we could not make is not a promise we can keep, so
+        // anything but a plain yes leaves the parameter out.
+        // ...and "the lane has run" means DRAINED, not started. The
+        // backfill fills six rows per idle pass, so the first id to land
+        // used to flip the promise on for the whole catalogue while
+        // almost none of it was resolvable - Sonarr switches to tvdbid
+        // the moment caps offers it, and every series the lane had not
+        // reached yet then answered empty (Codex sweep 7, M1). One
+        // unfilled row is enough to keep the promise back; the search
+        // path honours the parameter regardless, so this can only ever
+        // promise less than we deliver.
+        let tvdb = match d.index_read_checked(|ix| {
+            Some(ix.has_tvdb_ids().ok()? && !ix.tvdb_backfill_pending().ok()?)
+        }) {
+            Ok(Some(true)) => "tvdbid,",
+            _ => "",
+        };
+        return format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <caps>
   <server title="nzbfast" version="1.0"/>
   <limits max="200" default="100"/>
   <searching>
     <search available="yes" supportedParams="q,cat"/>
-    <tv-search available="yes" supportedParams="q,season,ep,cat"/>
+    <tv-search available="yes" supportedParams="q,imdbid,{tvdb}tvmazeid,season,ep,cat"/>
     <movie-search available="yes" supportedParams="q,imdbid,tmdbid,cat"/>
   </searching>
   <categories>
@@ -62,7 +98,7 @@ pub(in crate::serve) fn newznab_xml(
     <category id="8000" name="Other"/>
   </categories>
 </caps>"#
-            .to_string();
+        );
     }
     // Function dispatch. Everything that searches shares one path; the
     // categories we carry no rows for get the spec's own "not available"
@@ -170,29 +206,86 @@ pub(in crate::serve) fn newznab_xml(
     // an empty one. An <error> element is retryable at the client; a
     // total="0" is not.
     let mut unready = None;
-    let title_key = ["imdbid", "tmdbid"].iter().find_map(|p| {
-        let raw = params.get(*p)?.trim().to_string();
-        if raw.is_empty() {
-            return None;
-        }
-        let found = match d.index_read_checked(|ix| {
-            if *p == "imdbid" {
-                ix.title_key_for_imdb(&raw).ok().flatten()
-            } else {
-                ix.title_key_for_tmdb(raw.parse().unwrap_or(0))
-                    .ok()
-                    .flatten()
-            }
+    // Which ids THIS function can actually resolve, and - just as
+    // important - which it cannot. `imdbid` reaches both halves of the
+    // index because an IMDb id is unique across them; the other two are
+    // namespaced, and `titles.tmdb_id` holds a TMDB movie id on a movie
+    // row and a TVmaze show id on a TV row, so each resolver names the
+    // kind it means (see `title_key_for_tvmaze`).
+    let honoured: &[&str] = match t {
+        "movie" => &["imdbid", "tmdbid"],
+        "tvsearch" => &["imdbid", "tvdbid", "tvmazeid"],
+        _ => &["imdbid", "tmdbid", "tvdbid", "tvmazeid"],
+    };
+    // Every id parameter the protocol has a spelling for. One we cannot
+    // honour is REFUSED, never ignored: an ignored id turns "find me
+    // this series" into "give me everything", and a client reads that
+    // dump as matches. Measured on 1.1.5 (TODO 187): `tvdbid=121361`
+    // and `tvdbid=999999999` answered with the same 100 rows - every
+    // series' first episode, presented to Sonarr as one series'. 201 is
+    // the spec's "Incorrect parameter"; the description names the
+    // parameter, which is the part Sonarr and Prowlarr surface.
+    //
+    // An id we CAN resolve but hold no row for is a different answer: an
+    // empty feed, from `id_missing` below. That distinction is the point
+    // - "we do not speak this id" is permanent and belongs in an error,
+    // "we have nothing filed under it" is a fact about the catalogue.
+    //
+    // Nothing well-behaved trips this: the *arrs send only what `t=caps`
+    // advertises, and caps advertises exactly `honoured`. What trips it
+    // is a client that guessed - which is precisely the case that used
+    // to be answered with a dump.
+    const ID_PARAMS: [&str; 8] = [
+        "imdbid", "tmdbid", "tvdbid", "tvmazeid", "rid", "tvrageid", "traktid", "doubanid",
+    ];
+    if let Some(bad) = ID_PARAMS.iter().find(|p| {
+        // Blank is not "sent": a client that fills its template with an
+        // id it does not have leaves the value empty, and that has to
+        // stay an ordinary search.
+        !honoured.contains(*p) && params.get(**p).is_some_and(|v| !v.trim().is_empty())
+    }) {
+        return newznab_error(
+            201,
+            &format!(
+                "{bad} is not a search parameter nzbfast can honour here - use {} or q",
+                honoured.join("/")
+            ),
+        );
+    }
+    // The SET of keys the id names, not one of them. Two title keys can
+    // genuinely carry one external id - a show posted under two
+    // spellings, or a film keyed with and without its year - and
+    // resolving to an arbitrary single key answered with one arbitrary
+    // half of the title's releases (Codex sweep 7, M4). The first id
+    // parameter that actually RESOLVES wins, exactly as before: a sent
+    // id we hold nothing for still lets a later one be tried.
+    let mut title_keys: Vec<String> = Vec::new();
+    for p in honoured {
+        let Some(raw) = params
+            .get(*p)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        let found = match d.index_read_checked(|ix| match *p {
+            "imdbid" => ix.title_key_for_imdb(&raw).ok(),
+            "tvdbid" => ix.title_key_for_tvdb(raw.parse().unwrap_or(0)).ok(),
+            "tvmazeid" => ix.title_key_for_tvmaze(raw.parse().unwrap_or(0)).ok(),
+            _ => ix.title_key_for_tmdb(raw.parse().unwrap_or(0)).ok(),
         }) {
-            Ok(found) => found,
+            Ok(found) => found.unwrap_or_default(),
             Err(why) => {
                 unready = Some(why);
-                None
+                Vec::new()
             }
         };
-        id_missing = found.is_none();
-        found
-    });
+        id_missing = found.is_empty();
+        if !found.is_empty() {
+            title_keys = found;
+            break;
+        }
+    }
     // An id we could not LOOK UP is not an id we hold nothing for, so
     // this has to be answered before `id_missing` is allowed to mean
     // "empty feed".
@@ -207,12 +300,28 @@ pub(in crate::serve) fn newznab_xml(
         kind,
         complete_only: true,
         newer_than,
-        title_key,
+        title_keys,
         limit,
         offset,
         ..Default::default()
     };
-    let (hits, total) = if unavailable || id_missing {
+    // An unresolved id no longer throws away a query the client sent
+    // alongside it (Codex sweep 7, M1). The id search is a NARROWING of
+    // the request, and our coverage of the id namespace is not the
+    // client's problem: `tvdbid` is filled six rows at a time by an idle
+    // backfill lane, so a series we hold releases for is routinely one
+    // the id column has not reached yet - and answering "nothing" to a
+    // request that also said `q=Some Show` is a coverage gap reported as
+    // a fact about the catalogue. Dropping the key set still leaves q,
+    // the kind and any season/ep narrowing in force, so nothing
+    // unfiltered can escape.
+    //
+    // Deliberately the RAW `q` parameter rather than `bq.q`: a bare
+    // `season=`/`ep=` has already been folded into the latter, and an id
+    // plus an episode number with no query is exactly the shape TODO
+    // 187's regression guard pins at zero. No query typed, no fallback.
+    let q_given = params.get("q").is_some_and(|v| !v.trim().is_empty());
+    let (hits, total) = if unavailable || (id_missing && !q_given) {
         (Vec::new(), 0)
     } else {
         match d.index_read_checked(|ix| ix.browse(&bq).ok()) {

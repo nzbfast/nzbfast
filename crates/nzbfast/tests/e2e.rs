@@ -12,6 +12,7 @@ mod scratch;
 // so this file stays inside its size-gate baseline.
 mod e2e_chip6;
 mod e2e_repair;
+mod e2e_sample;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

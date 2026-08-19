@@ -625,7 +625,19 @@ pub(super) fn finish_job(
     // and not a delete. Deliberately AFTER the reextract_failed arm,
     // whose files really were verified and whose message says so.
     quarantine_failed_payload(out_dir, extracted, unhealed_slots, slots, extractor);
-    if incomplete > 0 || derrs > 0 || recovery_errs > 0 {
+    // Recovery errors are deliberately NOT an entry condition. M6 added
+    // them here so corrupt parity beside a MISSING payload article kept
+    // its automatic retry, and the marker that does that lives in the
+    // `incomplete > 0` arm - so this clause never needed widening. What
+    // widening cost: a failure with every payload article present and
+    // only the parity damaged took the `incomplete == 0` opening, which
+    // talks about decode/write errors that are zero, does not start
+    // "download incomplete" or contain "repair could not complete", and
+    // therefore classifies FailKind::Local. Local is not transient, so
+    // the one automatic retry - which is exactly what would fetch clean
+    // parity - never armed. Left to the repair openings below, which
+    // classify Unrepairable and do retry (Codex sweep 6, N3).
+    if incomplete > 0 || derrs > 0 {
         let causes = LossCauses {
             missing_430: missing_430.load(Ordering::Relaxed),
             retention_excluded: retention_skipped,
@@ -1240,6 +1252,45 @@ mod tests {
         )
     }
 
+    /// The same, with the recovery-error count the census hands over.
+    fn run_finish_recovery(
+        dir: &Path,
+        incomplete: usize,
+        derrs: u64,
+        recovery_errs: u64,
+    ) -> Result<()> {
+        let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
+        finish_job(
+            false,
+            dir,
+            &[],
+            Arc::new(j),
+            &[],
+            &[],
+            None,
+            incomplete,
+            derrs,
+            recovery_errs,
+            &Arc::new(AtomicU64::new(0)),
+            0,
+            &Arc::new(AtomicU64::new(0)),
+            &Arc::new(std::sync::Mutex::new(None)),
+            &Arc::new(std::sync::Mutex::new(None)),
+            &[],
+            &[],
+            &Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            0,
+            0,
+            0,
+            &[],
+            0,
+            None,
+            &[],
+            None,
+            &Arc::new(nzbkit::extract::Extractor::new(dir, 0, true)),
+        )
+    }
+
     /// The same again, with the slots and extractor the downloaded-file
     /// quarantine reads.
     #[allow(clippy::too_many_arguments)]
@@ -1286,6 +1337,53 @@ mod tests {
             None,
             extractor,
         )
+    }
+
+    /// Codex sweep 6, N3: damage confined to the RECOVERY volumes must
+    /// keep the retry that fetches clean parity.
+    ///
+    /// M6 taught the retry-preserving marker about recovery errors,
+    /// which was right, and also put them in this clause's entry
+    /// condition, which was not: with every payload article present and
+    /// decoded (`incomplete == 0`, `derrs == 0`) the message that comes
+    /// back talks about decode/write errors that are zero and reads as
+    /// a LOCAL fault - not transient, so `auto_retry_eligible` never
+    /// arms and the failure goes final. This walks the production
+    /// chain, census to verdict, because each link was individually
+    /// green while the chain was not.
+    #[test]
+    fn recovery_only_damage_keeps_its_retry() {
+        use crate::serve::{FailKind, fail_kind};
+        let d = tdir("recoveryonly");
+        let msg = run_finish_recovery(&d, 0, 0, 4).unwrap_err().to_string();
+        assert!(
+            !msg.contains("decode/write error"),
+            "every payload article arrived; this is not a disk problem: {msg}"
+        );
+        assert!(
+            msg.contains("repair could not complete"),
+            "corrupt parity is a repair failure: {msg}"
+        );
+        assert_eq!(
+            fail_kind(&msg),
+            FailKind::Unrepairable,
+            "which classifies as retryable, so fresh parity can be fetched: {msg}"
+        );
+        assert!(
+            fail_kind(&msg).transient(),
+            "and Local would suppress the one automatic retry entirely"
+        );
+
+        // The M6 shape itself must be untouched: a MISSING payload
+        // article beside corrupt parity still opens "download
+        // incomplete" and still carries the retry-preserving marker.
+        let both = run_finish_recovery(&d, 1, 0, 4).unwrap_err().to_string();
+        assert!(both.starts_with("download incomplete"), "{both}");
+        assert!(
+            both.contains("damaged articles rather than absent ones"),
+            "M6's marker still fires for the shape it was written for: {both}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A good finish retires the journal and returns Ok.
@@ -1471,6 +1569,7 @@ mod tests {
         Arc::new(FileSlot {
             hint: String::new(),
             is_par2_main: is_par2,
+            sample_skipped: false,
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: 1,
             remaining: AtomicUsize::new(0),

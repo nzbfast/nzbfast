@@ -16,7 +16,9 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
-mod job;
+// `flatten_name` is the house release-name reduction and the pull
+// search's cross-indexer merge reads it too, so this is crate-visible.
+pub(crate) mod job;
 pub use job::*;
 
 // The idle-server prefetch sidecar, moved out of job.rs by TODO 106. A
@@ -45,6 +47,7 @@ use daemon::*;
 mod dupe;
 
 mod giveup;
+mod histmigrate;
 mod histstore;
 mod moveseq;
 #[cfg(feature = "indexer")]
@@ -738,7 +741,13 @@ use httputil::*;
 mod sabcompat;
 use sabcompat::*;
 
+mod nzbget_script;
+use nzbget_script::*;
+
 mod script;
+
+// Queue-finished actions (none / script / sleep / shut down).
+mod finish_action;
 
 mod hooks;
 mod prequeue;

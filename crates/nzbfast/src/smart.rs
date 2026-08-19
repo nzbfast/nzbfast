@@ -3591,7 +3591,14 @@ pub fn nameless_video(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && !is_sample_clip(p) && video_ext(p).is_some())
+        // By NAME, like every other rename path: since #43 a sample need
+        // not carry an extension, and an extensionless `sample` that
+        // sniffs as EBML counted as a second video here - so the lone
+        // feature stopped being lone, this returned None, and the
+        // feature kept its hash through both identify and synthesised
+        // naming (Codex sweep 6, N1). The DELETE sweep stays on
+        // `is_sample_clip`; nothing here removes a file.
+        .filter(|p| p.is_file() && !is_sample_named(p) && video_ext(p).is_some())
         .collect();
     // More than one and we cannot tell which is the feature; renaming
     // either would be a guess, and CD1/CD2 sets collide.
@@ -3909,6 +3916,7 @@ pub fn unlock(dir: &Path, password: &str) -> bool {
 // topic: filing and the mover in `tests`, sweeping and renaming in
 // `sweep_rename_tests`, with what both need in `testkit`.
 mod sample;
+pub(crate) use sample::skippable_samples;
 use sample::{is_deletable_sample, is_sample_clip, is_sample_named};
 mod videoext;
 use videoext::video_ext;

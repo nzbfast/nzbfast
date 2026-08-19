@@ -172,7 +172,11 @@ impl Daemon {
         let my_id = self.tv_show_id(&parsed.key)?;
         cands.into_iter().find(|c| {
             let q = nzbkit::release::parse_release(&c.name);
-            q.kind == nzbkit::release::Kind::Tv && self.tv_show_id(&q.key) == Some(my_id)
+            // The whole (provider, id) pair, never the number alone: one
+            // column carries TVmaze, AniList and TMDB numbering, all of
+            // them small and dense, so an equal number across two
+            // namespaces means nothing at all (Codex sweep 7, H2).
+            q.kind == nzbkit::release::Kind::Tv && self.tv_show_id(&q.key).as_ref() == Some(&my_id)
         })
     }
 

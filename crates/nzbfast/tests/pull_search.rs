@@ -216,10 +216,24 @@ struct MockIndexer {
 }
 
 fn mock_indexer() -> MockIndexer {
+    mock_items(
+        r#"<item><title>Kill.Bill.Vol.1.2003.1080p.BluRay.x264</title><guid>mock-1</guid>
+<enclosure url="http://127.0.0.1:1/nzb/mock-1" length="8000000000" type="application/x-nzb"/>
+<newznab:attr name="category" value="2000"/></item>"#,
+    )
+}
+
+/// The same stand-in, serving a caller-supplied set of `<item>`s - and a
+/// real (if tiny) NZB at any `/nzb/` path, so a grab against ANY of the
+/// copies it lists completes rather than dying on the fetch.
+fn mock_items(items: &str) -> MockIndexer {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = seen.clone();
+    // `item()` writes the enclosure against a `{PORT}` it cannot know
+    // yet; this is the only place the bound port exists.
+    let items = items.replace("{PORT}", &port.to_string());
     std::thread::spawn(move || {
         for stream in l.incoming() {
             let Ok(mut s) = stream else { break };
@@ -228,30 +242,55 @@ fn mock_indexer() -> MockIndexer {
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
             let line = req.lines().next().unwrap_or("").to_string();
             log.lock().unwrap().push(line.clone());
-            let body = if line.contains("t=caps") {
-                r#"<?xml version="1.0"?><caps><server title="MockDex"/>
+            let (ctype, body) = if line.contains("t=caps") {
+                (
+                    "application/rss+xml",
+                    r#"<?xml version="1.0"?><caps><server title="MockDex"/>
 <limits max="100" default="100"/>
 <searching><search available="yes" supportedParams="q"/>
-<tv-search available="yes" supportedParams="q,season,ep"/>
+<tv-search available="yes" supportedParams="q,tvdbid,season,ep"/>
 <movie-search available="yes" supportedParams="q,imdbid"/></searching>
 <categories><category id="2000" name="Movies"/></categories></caps>"#
-                    .to_string()
+                        .to_string(),
+                )
+            } else if line.contains("/nzb/") {
+                (
+                    "application/x-nzb",
+                    r#"<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+<file poster="p@x" date="1700000000" subject="&quot;mock.part01.rar&quot; yEnc (1/1)">
+<groups><group>alt.binaries.test</group></groups>
+<segments><segment bytes="100" number="1">seg1@mock</segment></segments>
+</file></nzb>"#
+                        .to_string(),
+                )
             } else {
-                r#"<?xml version="1.0"?><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel>
-<item><title>Kill.Bill.Vol.1.2003.1080p.BluRay.x264</title><guid>mock-1</guid>
-<enclosure url="http://127.0.0.1:1/nzb/mock-1" length="8000000000" type="application/x-nzb"/>
-<newznab:attr name="category" value="2000"/></item></channel></rss>"#
-                    .to_string()
+                (
+                    "application/rss+xml",
+                    format!(
+                        r#"<?xml version="1.0"?><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel>
+{items}</channel></rss>"#
+                    ),
+                )
             };
             let _ = write!(
                 s,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/rss+xml\r\n\
+                "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
         }
     });
     MockIndexer { port, seen }
+}
+
+/// One `<item>` for `mock_items`.
+fn item(title: &str, guid: &str, size: u64) -> String {
+    format!(
+        r#"<item><title>{title}</title><guid>{guid}</guid>
+<enclosure url="http://127.0.0.1:{{PORT}}/nzb/{guid}" length="{size}" type="application/x-nzb"/>
+<newznab:attr name="category" value="5000"/></item>"#
+    )
 }
 
 /// M35 phase 2: a film searched from its title page is matched on its
@@ -338,6 +377,108 @@ async fn a_title_page_search_uses_the_imdb_id() {
         assert!(
             lines.iter().any(|l| l.contains("t=search")) && !lines.iter().any(|l| l.contains("imdbid=")),
             "an unknown title should not carry an id: {lines:?}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The TV half of the same rule (TODO 187 follow-up): a series searched
+/// from its card carries its TheTVDB id.
+///
+/// This path sent no id at all for years, under a comment saying the
+/// only TV id we store is a TVmaze show id in a different namespace -
+/// true when it was written, and untrue since `titles.tvdb` and its
+/// backfill lane landed. A stale comment is a capability nobody
+/// notices missing, so the id goes on the wire in a test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_series_page_search_uses_the_tvdb_id() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-pulltv-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    let db = dir.join("index.db");
+    {
+        let ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.title_seed("t:breaking bad", "tv", "Breaking Bad", 0)
+            .unwrap();
+        // The TVmaze show id and the TVDB series id are different
+        // numbers in different namespaces, and only one of them is a
+        // tvdbid. Both are set here so a fix that reached for the wrong
+        // column would be visible on the wire.
+        ix.title_fill(
+            "t:breaking bad",
+            &nzbkit::index::TitleFill {
+                tmdb_id: 431,
+                ..Default::default()
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        ix.title_set_tvdb("t:breaking bad", 81189).unwrap();
+    }
+    let mock = mock_indexer();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.with_file_name("settings.json"),
+        "{\"index_enabled\": true}",
+    )
+    .unwrap();
+    let d = serve(&dir, |port| daemon_cmd(&dir, &cfg, &db, port, &[])).await;
+    let port = d.port;
+    let mport = mock.port;
+    let seen = mock.seen.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let entry =
+            format!(r#"[{{"name":"mock","url":"http://127.0.0.1:{mport}/api","apikey":"k"}}]"#);
+        let (_, r) = http_get(
+            port,
+            &format!(
+                "/api?mode=config&name=indexers&value={}&output=json",
+                pct(&entry)
+            ),
+        );
+        assert!(r.contains("true"), "{r}");
+
+        let (_, s) = http_get(
+            port,
+            "/api?mode=indexer_search&q=Breaking+Bad&kind=tv\
+             &title_key=t%3Abreaking+bad&season=1&ep=1&output=json",
+        );
+        assert!(s.contains("\"status\":true"), "{s}");
+        let lines = seen.lock().unwrap().clone();
+        let search = lines
+            .iter()
+            .find(|l| l.contains("t=tvsearch"))
+            .unwrap_or_else(|| panic!("no t=tvsearch request; the id was not used:\n{lines:?}"));
+        assert!(search.contains("tvdbid=81189"), "{search}");
+        // The TVmaze show id shares a column with movie TMDB ids and is
+        // NOT a tvdbid; it must never be the number sent.
+        assert!(!search.contains("tvdbid=431"), "{search}");
+        // The episode fields ride along, because this indexer takes them.
+        assert!(
+            search.contains("season=1") && search.contains("ep=1"),
+            "{search}"
+        );
+
+        // A series we hold no TVDB id for sends none, and narrows with
+        // the episode marker instead.
+        seen.lock().unwrap().clear();
+        let (_, s2) = http_get(
+            port,
+            "/api?mode=indexer_search&q=Unknown+Show&kind=tv\
+             &title_key=t%3Aunknown+show&season=2&ep=3&output=json",
+        );
+        assert!(s2.contains("\"status\":true"), "{s2}");
+        let lines = seen.lock().unwrap().clone();
+        assert!(
+            !lines.iter().any(|l| l.contains("tvdbid=")),
+            "an unknown series should not carry an id: {lines:?}"
         );
     })
     .await
@@ -650,6 +791,160 @@ async fn pull_search_grabs_from_a_second_nzbfast() {
         let s3v: serde_json::Value = serde_json::from_str(&s3).unwrap_or_default();
         assert_eq!(s3v["results"].as_array().map(Vec::len), Some(0), "{s3}");
         assert!(s3.contains("daily API budget reached"), "{s3}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #44: the same release listed by several indexers comes back as
+/// ONE row carrying every copy, and the merge fires on the differences
+/// that are only formatting while refusing the ones that are not.
+///
+/// Three indexers at three priorities, and four items between them:
+///
+/// - `top` (priority 1) and `mid` (5) both list the 1080p at ~3 GB,
+///   spelled differently and sized differently. ONE row, headline
+///   `top`, `mid` kept as its alternate.
+/// - `low` (9) lists the 2160p at almost exactly the same size. A
+///   SEPARATE row: a size coincidence must never fold a resolution the
+///   user did not ask for into the one they did.
+/// - `mid` also lists a 1080p under the identical name at 9 GB. Also a
+///   separate row: one name can still be two posts.
+///
+/// Then the alternate's own token is grabbed, and the job that lands
+/// carries `mid`'s spelling of the name - which is the point of the
+/// feature, not a detail of it: a dead NZB on your best indexer is
+/// meant to be one click away from a live one somewhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_of_one_release_group_into_one_row_with_a_grab_each() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-pullgrp-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    const GB: u64 = 1_000_000_000;
+    let top = mock_items(&item(
+        "Show.Name.S01E02.1080p.WEB-DL.x264-GRP",
+        "t1",
+        3 * GB,
+    ));
+    // Dots for spaces, all lower case, a trailing `.nzb`, and 40 MB of
+    // par2 accounting between them: four ways of saying the same thing.
+    let mid = mock_items(&format!(
+        "{}\n{}",
+        item(
+            "show name s01e02 1080p web-dl x264-grp.nzb",
+            "m1",
+            3 * GB + 40_000_000
+        ),
+        item("Show.Name.S01E02.1080p.WEB-DL.x264-GRP", "m2", 9 * GB),
+    ));
+    let low = mock_items(&item(
+        "Show.Name.S01E02.2160p.WEB-DL.x264-GRP",
+        "l1",
+        3 * GB + 5_000_000,
+    ));
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    let db = dir.join("index.db");
+    let d = serve(&dir, |port| daemon_cmd(&dir, &cfg, &db, port, &[])).await;
+    let port = d.port;
+    let (pt, pm, pl) = (top.port, mid.port, low.port);
+
+    tokio::task::spawn_blocking(move || {
+        let entry = format!(
+            r#"[{{"name":"top","url":"http://127.0.0.1:{pt}/api","apikey":"k","priority":1}},
+                {{"name":"mid","url":"http://127.0.0.1:{pm}/api","apikey":"k","priority":5}},
+                {{"name":"low","url":"http://127.0.0.1:{pl}/api","apikey":"k","priority":9}}]"#
+        );
+        let (_, r) = http_get(
+            port,
+            &format!(
+                "/api?mode=config&name=indexers&value={}&output=json",
+                pct(&entry)
+            ),
+        );
+        assert!(r.contains("true"), "{r}");
+
+        let (_, s) = http_get(port, "/api?mode=indexer_search&q=show+name&output=json");
+        let sv: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+        assert_eq!(sv["status"], true, "{s}");
+        let rows = sv["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 3, "four copies, three releases:\n{s}");
+
+        let find = |needle: &str, size: u64| {
+            rows.iter()
+                .find(|r| {
+                    r["title"].as_str().unwrap_or("").contains(needle)
+                        && r["size"].as_u64().unwrap_or(0) == size
+                })
+                .unwrap_or_else(|| panic!("no {needle} row at {size}:\n{s}"))
+        };
+
+        // The merged row: two copies, the priority-1 indexer heading it.
+        let merged = find("1080p", 3 * GB);
+        assert_eq!(
+            merged["indexer"], "top",
+            "highest priority heads the row:\n{s}"
+        );
+        let srcs = merged["sources"].as_array().expect("sources array");
+        assert_eq!(srcs.len(), 2, "both copies survive the merge:\n{s}");
+        assert_eq!(
+            srcs[0]["indexer"], "top",
+            "sources[0] is the headline:\n{s}"
+        );
+        assert_eq!(
+            srcs[1]["indexer"], "mid",
+            "alternates follow in priority order:\n{s}"
+        );
+        assert_eq!(
+            srcs[0]["token"], merged["token"],
+            "the row grabs its headline:\n{s}"
+        );
+        assert_ne!(
+            srcs[1]["token"], merged["token"],
+            "each copy needs its own token:\n{s}"
+        );
+        // The alternate carries its OWN facts, not the headline's.
+        assert_eq!(srcs[1]["size"].as_u64(), Some(3 * GB + 40_000_000), "{s}");
+        assert_eq!(
+            srcs[1]["title"], "show name s01e02 1080p web-dl x264-grp.nzb",
+            "{s}"
+        );
+
+        // ...and the two that must NOT have been folded in are rows of
+        // their own, each a single-copy list rather than no list at all.
+        for (needle, size, who) in [
+            ("2160p", 3 * GB + 5_000_000, "low"),
+            ("1080p", 9 * GB, "mid"),
+        ] {
+            let row = find(needle, size);
+            assert_eq!(row["indexer"], who, "{s}");
+            assert_eq!(
+                row["sources"].as_array().map(Vec::len),
+                Some(1),
+                "a lone copy still ships a one-entry list:\n{s}"
+            );
+        }
+
+        // Grab the ALTERNATE. It is `mid`'s copy that must land, under
+        // `mid`'s spelling of the name.
+        let alt = srcs[1]["token"].as_str().expect("alternate token");
+        let (_, g) = http_get(
+            port,
+            &format!("/api?mode=indexer_grab&token={alt}&priority=1&output=json"),
+        );
+        let gv: serde_json::Value = serde_json::from_str(&g).unwrap_or_default();
+        assert_eq!(gv["status"], true, "grabbing an alternate failed: {g}");
+        let (_, q) = http_get(port, "/api?mode=queue&output=json");
+        assert!(
+            q.contains("show name s01e02 1080p web-dl x264-grp"),
+            "the alternate's own copy should have been queued:\n{q}"
+        );
     })
     .await
     .unwrap();

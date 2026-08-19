@@ -11,6 +11,7 @@ pub(in crate::serve) mod config;
 pub(in crate::serve) mod index;
 pub(in crate::serve) mod playback;
 pub(in crate::serve) mod queue;
+pub(in crate::serve) mod remote;
 pub(in crate::serve) mod servers;
 pub(in crate::serve) mod system;
 #[cfg(feature = "indexer")]
@@ -50,7 +51,8 @@ pub(in crate::serve) fn dispatch(
         .or_else(|| system::dispatch(d, req, params, mode, ctx, api_body))
         .or_else(|| config::dispatch(d, req, params, mode, ctx, api_body))
         .or_else(|| servers::dispatch(d, req, params, mode, ctx, api_body))
-        .or_else(|| playback::dispatch(d, req, params, mode, ctx, api_body));
+        .or_else(|| playback::dispatch(d, req, params, mode, ctx, api_body))
+        .or_else(|| remote::dispatch(d, req, params, mode, ctx, api_body));
     #[cfg(feature = "indexer")]
     let hit = hit
         .or_else(|| index::dispatch(d, req, params, mode, ctx, api_body))

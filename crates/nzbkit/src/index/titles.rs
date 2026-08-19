@@ -26,6 +26,22 @@ use super::*;
 /// research/indexer-realtime-and-enrichment-plan-2026-07-26.md §11.1).
 const VISIBLE: &str = "EXISTS (SELECT 1 FROM releases r WHERE r.title_key = t.key AND r.junk < 50)";
 
+/// What it means for a title to be waiting on the TVDB backfill lane,
+/// as one predicate over the `t`-aliased `titles` row.
+///
+/// One literal because two callers have to agree about it exactly: the
+/// lane that DRAINS this queue, and the caps gate that will not promise
+/// `tvdbid` until it is empty (Codex sweep 7, M1). A drifted second copy
+/// would advertise the parameter against rows the lane is never going to
+/// reach, which is the false promise TODO 187 exists to prevent. See
+/// [`Index::titles_missing_tvdb`] for what each clause is doing.
+fn tvdb_queue_where() -> String {
+    format!(
+        "kind = 'tv' AND checked > 0 AND tvdb_tried = 0 AND tvdb = 0
+           AND tmdb_id <> 0 AND id_src IN ('tvmaze','') AND {VISIBLE}"
+    )
+}
+
 /// What a lookup learned about one title. A struct rather than the ten
 /// positional arguments this used to take: the "found nothing" callers
 /// passed a row of bare `""`s in which nothing said which field was
@@ -33,6 +49,16 @@ const VISIBLE: &str = "EXISTS (SELECT 1 FROM releases r WHERE r.title_key = t.ke
 #[derive(Debug, Clone, Default)]
 pub struct TitleFill<'a> {
     pub tmdb_id: i64,
+    /// Which provider's numbering `tmdb_id` above is in - that provider's
+    /// own name, '' when nothing resolved one. It travels WITH the id
+    /// because it is the only thing that makes the id readable: the
+    /// column carries a TVmaze show id, an AniList media id, a TMDB id
+    /// and an OMDb-supplied IMDb number, and a reader that guesses from
+    /// `kind` alone resolves one namespace's id in another's (Codex
+    /// sweep 7, H2). Anything that PRESERVES `tmdb_id` across a write -
+    /// the manual wall-fix arm, a poster upload - must preserve this
+    /// with it, or the id silently reverts to unlabelled.
+    pub id_src: &'a str,
     pub overview: &'a str,
     pub rating: f64,
     pub genres: &'a str,
@@ -156,6 +182,10 @@ pub struct TitleRow {
     /// Original release / first-air date, ISO `YYYY-MM-DD`, or empty when
     /// the provider had none. `year` is the coarse fallback.
     pub air_date: String,
+    /// Which provider's numbering `tmdb_id` is in - see
+    /// [`TitleFill::id_src`]. '' on a row written before the column
+    /// existed.
+    pub id_src: String,
 }
 
 impl Index {
@@ -193,11 +223,12 @@ impl Index {
             imdb: r.get(11)?,
             actors: r.get(12)?,
             air_date: r.get(13)?,
+            id_src: r.get(14)?,
         })
     }
 
     const TITLE_COLS: &'static str = "key, kind, title, year, tmdb_id, overview, rating, genres,
-         poster, backdrop, checked, imdb, actors, air_date";
+         poster, backdrop, checked, imdb, actors, air_date, id_src";
 
     /// All cached title rows (the wall joins them to parsed releases).
     pub fn titles(&self) -> rusqlite::Result<Vec<TitleRow>> {
@@ -373,6 +404,26 @@ impl Index {
     /// lookups search under and the wall displays) without touching the
     /// cached metadata/art columns. Upserts so it also works for keys the
     /// enricher hasn't seeded yet.
+    ///
+    /// The ONE exception is `tvdb`, which is cleared whenever the
+    /// identity actually changes. It is not a cached detail of the old
+    /// title, it is a claim about WHICH SERIES this row is, and
+    /// [`Self::title_fill`] deliberately never rewrites it - so
+    /// correcting a card from series A to series B left A's TVDB id
+    /// behind, `tvdbid=<A>` answered Sonarr with B's releases,
+    /// `tvdbid=<B>` answered with nothing, and the row could never
+    /// self-heal because [`Self::titles_missing_tvdb`] wants
+    /// `tvdb_tried = 0 AND tvdb = 0` (Codex sweep 7, M3). `tvdb_tried`
+    /// goes with it, which is what puts the row back in the backfill
+    /// queue; clearing is NOT conditional on being able to refill,
+    /// because a wrong id is worse than a missing one.
+    ///
+    /// Only on a real change, which is why the CASE is here rather than
+    /// an unconditional clear: the same call is how a metadata refresh
+    /// re-states an unchanged identity, and retiring a correct id on
+    /// every one of those would keep the backfill lane re-asking TVmaze
+    /// forever. In SQLite every assignment's right-hand side sees the
+    /// ORIGINAL row, so the comparison reads the stored values.
     pub fn title_set_identity(
         &self,
         key: &str,
@@ -382,10 +433,68 @@ impl Index {
     ) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO titles(key, kind, title, year) VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(key) DO UPDATE SET kind=?2, title=?3, year=?4",
+             ON CONFLICT(key) DO UPDATE SET kind=?2, title=?3, year=?4,
+               tvdb = CASE WHEN titles.kind<>?2 OR titles.title<>?3 OR titles.year<>?4
+                           THEN 0 ELSE titles.tvdb END,
+               tvdb_tried = CASE WHEN titles.kind<>?2 OR titles.title<>?3 OR titles.year<>?4
+                                 THEN 0 ELSE titles.tvdb_tried END",
             rusqlite::params![key, kind, title, year],
         )?;
         Ok(())
+    }
+
+    /// M16 wall-fix: the identity write and the metadata that belongs to
+    /// the NEW identity, both or neither.
+    ///
+    /// The wall-fix endpoint ran these as two autocommitting writes, and
+    /// the second one can lose the writer (a scan chunk or a retention
+    /// prune holding it past the 10 s busy timeout) after the first has
+    /// landed. That leaves the row renamed to the picked series wearing
+    /// the OLD series' poster, overview, rating and ids - and nothing
+    /// will ever prompt a re-fix, because the card now reads as a title
+    /// somebody already identified. The same unrecoverable-rather-than-
+    /// untidy shape as [`Self::merge_title`], and the same remedy.
+    ///
+    /// `unchecked_transaction` is deferred, which is safe here for the
+    /// reason the custom-category cursor needed IMMEDIATE and this does
+    /// not: the first statement inside is itself a write, so the write
+    /// lock is taken with the busy timeout applied rather than upgraded
+    /// from a read (a deferred upgrade returns SQLITE_BUSY at once).
+    pub fn title_set_identity_and_fill(
+        &self,
+        key: &str,
+        kind: &str,
+        title: &str,
+        year: u32,
+        m: &TitleFill<'_>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        self.title_set_identity(key, kind, title, year)?;
+        self.title_fill(key, m, now)?;
+        tx.commit()
+    }
+
+    /// The re-fetch arm of the same endpoint: rename, then hand the row
+    /// back to the enricher, both or neither.
+    ///
+    /// Atomic for a sharper reason than the fill above. The reset is what
+    /// sets `checked=0`, and `checked=0` is the ONLY thing that puts the
+    /// row back in the enrichment queue - so a rename that commits
+    /// without it produces a row that is renamed, still stamped as
+    /// checked, and therefore never re-enriched. The user pressed
+    /// "re-fetch" and got a rename with no fetch, permanently.
+    pub fn title_set_identity_and_reset(
+        &self,
+        key: &str,
+        kind: &str,
+        title: &str,
+        year: u32,
+    ) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        self.title_set_identity(key, kind, title, year)?;
+        self.title_reset(key)?;
+        tx.commit()
     }
 
     /// M16 wall-refresh: wipe a title's cached metadata and mark it
@@ -393,9 +502,9 @@ impl Index {
     /// the release rows are untouched. Returns whether the row existed.
     pub fn title_reset(&self, key: &str) -> rusqlite::Result<bool> {
         let n = self.db.execute(
-            "UPDATE titles SET tmdb_id=0, overview='', rating=0, genres='',
+            "UPDATE titles SET tmdb_id=0, id_src='', overview='', rating=0, genres='',
                     poster='', backdrop='', imdb='', actors='', air_date='',
-                    air_tried=0, checked=0
+                    air_tried=0, tvdb=0, tvdb_tried=0, checked=0
              WHERE key=?1",
             [key],
         )?;
@@ -406,9 +515,9 @@ impl Index {
     /// whole wall). Returns how many rows were reset.
     pub fn titles_reset_all(&self) -> rusqlite::Result<usize> {
         self.db.execute(
-            "UPDATE titles SET tmdb_id=0, overview='', rating=0, genres='',
+            "UPDATE titles SET tmdb_id=0, id_src='', overview='', rating=0, genres='',
                     poster='', backdrop='', imdb='', actors='', air_date='',
-                    air_tried=0, checked=0",
+                    air_tried=0, tvdb=0, tvdb_tried=0, checked=0",
             [],
         )
     }
@@ -434,6 +543,79 @@ impl Index {
         rows.collect()
     }
 
+    /// TV titles the enricher matched but never asked for a TVDB id -
+    /// every row enriched before the column existed, which on a live
+    /// index is all of them. Sonarr's primary series lookup is
+    /// `tvdbid`, and the newznab facade will not advertise the
+    /// parameter until this lane has put ids in the column (TODO 187),
+    /// so this backfill is what turns the feature on for an existing
+    /// library rather than only for titles indexed from here on.
+    ///
+    /// `tmdb_id <> 0` is not a nicety: the backfill asks TVmaze with
+    /// that number, so a row without one has no cheap question to ask.
+    ///
+    /// `id_src IN ('tvmaze','')` is what makes asking TVmaze with it
+    /// safe. Under the keyless default a TV row holds an AniList media
+    /// id whenever TVmaze missed the title (the routine anime case), and
+    /// with a TMDB key it holds a TMDB series id - neither addresses
+    /// TVmaze. The consequence was not a miss but a permanent wrong
+    /// write: `tvdb_of_show`'s only guard is that the payload is about
+    /// the show we asked about, which a foreign id satisfies exactly
+    /// whenever it is also a live TVmaze show id, so an unrelated
+    /// series' thetvdb id was stamped on the row with `tvdb_tried=1` and
+    /// Sonarr's `tvdbid=` then resolved to the wrong title key (Codex
+    /// sweep 7, H2). '' is the legacy value and keeps the meaning this
+    /// doc-comment carried before the column existed.
+    ///
+    /// The `t.key` tie-break is not cosmetic either: this queue is
+    /// head-stable, so ties left to SQLite's row order make the head SET
+    /// itself undefined, and the lane's backoff bookkeeping is reasoning
+    /// about which rows it just skipped (Codex sweep 7, M2).
+    pub fn titles_missing_tvdb(&self, limit: u32) -> rusqlite::Result<Vec<TitleRow>> {
+        let mut stmt = self.db.prepare(&format!(
+            "SELECT {} FROM titles t WHERE {}
+             ORDER BY COALESCE((SELECT MAX(r.first_posted) FROM releases r
+                                WHERE r.title_key=t.key AND r.junk < 50), 0) DESC,
+                      t.key ASC
+             LIMIT ?1",
+            Self::TITLE_COLS,
+            tvdb_queue_where(),
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![limit], Self::title_row)?;
+        rows.collect()
+    }
+
+    /// Does the TVDB backfill lane still have work? The caps gate's
+    /// question, and the reason it is not `titles_missing_tvdb(1)`:
+    /// that query orders by newest release first, which means computing
+    /// a correlated MAX for every candidate row, and `t=caps` is a
+    /// request an *arr can make at any time. `EXISTS` stops at the
+    /// first row and needs no ordering at all - the caps gate does not
+    /// care WHICH row is outstanding, only whether one is (Codex sweep
+    /// 7, M1).
+    pub fn tvdb_backfill_pending(&self) -> rusqlite::Result<bool> {
+        self.db.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM titles t WHERE {})",
+                tvdb_queue_where()
+            ),
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n != 0),
+        )
+    }
+
+    /// Store a backfilled TVDB id. `0` records only that TVmaze was
+    /// asked and published none, which is what stops the backfill lane
+    /// returning to the same show on every pass - the same contract
+    /// [`Self::title_set_air_date`] has for an empty date.
+    pub fn title_set_tvdb(&self, key: &str, tvdb: i64) -> rusqlite::Result<()> {
+        self.db.execute(
+            "UPDATE titles SET tvdb=?2, tvdb_tried=1 WHERE key=?1",
+            rusqlite::params![key, tvdb.max(0)],
+        )?;
+        Ok(())
+    }
+
     /// Store a backfilled release date. An empty `date` records only that
     /// the provider was asked and had none, which is what stops the
     /// backfill lane asking about the same title on every pass.
@@ -447,15 +629,23 @@ impl Index {
 
     /// Record a lookup result (tmdb_id=0 ⇒ nothing found; checked stamps
     /// the attempt either way).
+    ///
+    /// Deliberately does not touch `tvdb`. Only TVmaze publishes a TVDB
+    /// id and only [`Self::title_set_tvdb`] writes one, so the column
+    /// has exactly one writer - the lane that actually ASKED. A zero
+    /// written from here would mean "this provider does not carry it",
+    /// and stamping `tvdb_tried` with it would retire the row from
+    /// [`Self::titles_missing_tvdb`] unasked: how a column stays empty
+    /// while every row claims to have been filled.
     pub fn title_fill(&self, key: &str, m: &TitleFill<'_>, now: i64) -> rusqlite::Result<()> {
         self.db.execute(
             "UPDATE titles SET tmdb_id=?2, overview=?3, rating=?4, genres=?5,
                     poster=?6, backdrop=?7, imdb=?8, actors=?9, air_date=?10,
-                    air_tried=1, checked=?11
+                    id_src=?11, air_tried=1, checked=?12
              WHERE key=?1",
             rusqlite::params![
                 key, m.tmdb_id, m.overview, m.rating, m.genres, m.poster, m.backdrop, m.imdb,
-                m.actors, m.air_date, now
+                m.actors, m.air_date, m.id_src, now
             ],
         )?;
         Ok(())
@@ -882,6 +1072,214 @@ mod tests {
     use super::*;
     use crate::index::testutil::{entry, teardown};
 
+    /// TODO 187: the TVDB backfill lane's eligibility, and the trap
+    /// underneath it.
+    ///
+    /// The lane is what makes `tvdbid` work on an existing library, so
+    /// what retires a row from it matters as much as what it fills. A
+    /// provider that does not carry TVDB ids at all (every one in the
+    /// chain except TVmaze, plus the wall's own match-fixing path) must
+    /// not be able to stamp `tvdb_tried` by writing a 0 - that is how a
+    /// column stays empty while every row claims to have been asked.
+    #[test]
+    fn the_tvdb_backfill_only_retires_a_row_that_was_asked() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-tvdb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest(
+            "alt.binaries.test",
+            &[
+                entry(
+                    "\"Breaking.Bad.S01E01.720p.WEB.x264-GRP.mkv\" yEnc (1/1)",
+                    "c@c",
+                    "b1",
+                    1 << 30,
+                ),
+                entry(
+                    "\"Top.Gun.Maverick.2022.1080p.BluRay.x264-GRP.mkv\" yEnc (1/1)",
+                    "a@a",
+                    "t1",
+                    1 << 30,
+                ),
+            ],
+            1_000,
+        )
+        .unwrap();
+        let key = |s: &str| {
+            ix.browse_cards(
+                &BrowseQuery::default(),
+                CardSort::Latest,
+                false,
+                false,
+                None,
+            )
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|c| c.title_key.contains(s))
+            .unwrap_or_else(|| panic!("no card for {s}"))
+            .title_key
+        };
+        let (bb, tg) = (key("breaking"), key("maverick"));
+        ix.title_seed(&bb, "tv", "Breaking Bad", 0).unwrap();
+        ix.title_seed(&tg, "movie", "Top Gun Maverick", 2022)
+            .unwrap();
+        let pending = |ix: &Index| -> Vec<String> {
+            ix.titles_missing_tvdb(10)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.key)
+                .collect()
+        };
+
+        // Unenriched: nothing to ask TVmaze WITH, so not yet eligible.
+        assert!(pending(&ix).is_empty());
+
+        // Enriched: the row now carries the TVmaze show id the lane
+        // asks WITH, so it becomes eligible. Enrichment itself never
+        // writes tvdb - one writer, and it is the lane that asked.
+        ix.title_fill(
+            &bb,
+            &TitleFill {
+                tmdb_id: 431,
+                ..Default::default()
+            },
+            5,
+        )
+        .unwrap();
+        ix.title_fill(
+            &tg,
+            &TitleFill {
+                tmdb_id: 361743,
+                ..Default::default()
+            },
+            5,
+        )
+        .unwrap();
+        // Movies are never in this lane: only TV rows have a TVDB id.
+        assert_eq!(pending(&ix), vec![bb.clone()]);
+
+        // TVmaze answered "no id for this show". That IS an answer, and
+        // it retires the row - otherwise the lane asks forever.
+        ix.title_set_tvdb(&bb, 0).unwrap();
+        assert!(pending(&ix).is_empty());
+        assert!(ix.title_key_for_tvdb(0).unwrap().is_empty());
+
+        // And an id fills the column, resolves, and stays out of the
+        // lane.
+        ix.title_set_tvdb(&bb, 81189).unwrap();
+        assert_eq!(
+            ix.title_key_for_tvdb(81189).unwrap(),
+            std::slice::from_ref(&bb)
+        );
+        assert!(pending(&ix).is_empty());
+        assert!(ix.has_tvdb_ids().unwrap());
+        // An id we hold nothing for is None, which the facade renders as
+        // an empty feed - never as the whole index.
+        assert!(ix.title_key_for_tvdb(999_999).unwrap().is_empty());
+
+        // The reverse direction, which the wall's pull-search asks with
+        // (a card knows its title key, not its ids). Same kind filter,
+        // for the same reason: a movie row must not be able to
+        // contribute something called a tvdbid.
+        assert_eq!(ix.tvdb_id_for_title(&bb).unwrap(), Some(81189));
+        assert_eq!(ix.tvdb_id_for_title(&tg).unwrap(), None);
+        assert_eq!(ix.tvdb_id_for_title("nope").unwrap(), None);
+        assert_eq!(ix.tvdb_id_for_title("").unwrap(), None);
+
+        // A re-enrichment must not wipe the id it has no opinion about
+        // - it is not the writer of this column.
+        ix.title_fill(&bb, &TitleFill::default(), 6).unwrap();
+        assert_eq!(
+            ix.title_key_for_tvdb(81189).unwrap(),
+            std::slice::from_ref(&bb)
+        );
+
+        // A hand-triggered reset is the one thing that DOES clear it,
+        // and it puts the row back in the lane.
+        ix.title_reset(&bb).unwrap();
+        assert!(!ix.has_tvdb_ids().unwrap());
+        ix.title_fill(
+            &bb,
+            &TitleFill {
+                tmdb_id: 431,
+                ..Default::default()
+            },
+            7,
+        )
+        .unwrap();
+        assert_eq!(pending(&ix), vec![bb.clone()]);
+
+        // Codex sweep 7, H2: the lane asks TVmaze `/shows/<tmdb_id>`, so
+        // a row whose id belongs to somebody else's numbering must never
+        // be offered. This is the worst of the namespace mixing, because
+        // it is a permanent WRONG WRITE rather than a miss: `tvdb_of_show`
+        // only checks that the payload is about the show we asked about,
+        // which any AniList media id that is also a live TVmaze show id
+        // satisfies exactly - so an unrelated series' thetvdb id gets
+        // stamped on this row with tvdb_tried=1, and Sonarr's `tvdbid=`
+        // then resolves to the wrong title key for good.
+        ix.title_reset(&bb).unwrap();
+        ix.title_fill(
+            &bb,
+            &TitleFill {
+                tmdb_id: 431,
+                id_src: "anilist",
+                ..Default::default()
+            },
+            8,
+        )
+        .unwrap();
+        assert!(
+            pending(&ix).is_empty(),
+            "an AniList media id was queued to be asked of TVmaze"
+        );
+        // The caps gate reads the same queue through a cheaper door, and
+        // the two must never disagree about what is outstanding.
+        assert!(!ix.tvdb_backfill_pending().unwrap());
+        // ...and the same row, once TVmaze is what actually answered.
+        ix.title_fill(
+            &bb,
+            &TitleFill {
+                tmdb_id: 431,
+                id_src: "tvmaze",
+                ..Default::default()
+            },
+            9,
+        )
+        .unwrap();
+        assert_eq!(pending(&ix), vec![bb.clone()]);
+        assert!(ix.tvdb_backfill_pending().unwrap());
+
+        // Codex sweep 7, M3: the id is a claim about WHICH SERIES this
+        // row is, so an identity correction has to drop it - the wall's
+        // candidate arm swaps the provider identity and title_fill will
+        // never rewrite this column, so series A's TVDB id used to
+        // survive onto series B with no way back (the queue above wants
+        // tvdb_tried=0 AND tvdb=0).
+        ix.title_set_tvdb(&bb, 81189).unwrap();
+        assert!(pending(&ix).is_empty());
+        // Re-stating the SAME identity is a metadata refresh, not a
+        // correction, and must keep it - or the lane re-asks TVmaze
+        // about the same show on every refresh forever.
+        ix.title_set_identity(&bb, "tv", "Breaking Bad", 0).unwrap();
+        assert_eq!(
+            ix.title_key_for_tvdb(81189).unwrap(),
+            std::slice::from_ref(&bb)
+        );
+        assert!(pending(&ix).is_empty());
+        // A real change drops it, and puts the row back in the queue.
+        ix.title_set_identity(&bb, "tv", "Better Call Saul", 0)
+            .unwrap();
+        assert!(
+            ix.title_key_for_tvdb(81189).unwrap().is_empty(),
+            "the superseded series' tvdbid still names this row"
+        );
+        assert_eq!(pending(&ix), vec![bb]);
+        teardown(&dir, ix);
+    }
+
     #[test]
     fn people_identity_credits_and_the_search_leg() {
         let dir = std::env::temp_dir().join(format!("nzbfast-index-people-{}", std::process::id()));
@@ -1115,6 +1513,7 @@ mod tests {
                 imdb: "tt0133093",
                 actors: "Keanu",
                 air_date: "1999-03-30",
+                id_src: "tmdb",
             },
             111,
         )
@@ -1275,6 +1674,128 @@ mod tests {
             pending.contains(&"m:hidden:2024".to_string()),
             "a title that became visible was skipped for good: {pending:?}"
         );
+        teardown(&dir, ix);
+    }
+
+    /// A wall-fix that loses the writer half way through must leave the
+    /// row exactly as it was.
+    ///
+    /// The endpoint's two arms each used to autocommit the rename and
+    /// then its second half separately, and the failure is silent and
+    /// permanent rather than merely untidy: a renamed row wearing the
+    /// previous series' metadata reads as a title somebody has already
+    /// identified, so nothing ever prompts a re-fix. The injected
+    /// failures below are what a scan chunk or a retention prune holding
+    /// the writer past the busy timeout does to the second statement.
+    #[test]
+    fn a_refused_wall_fix_leaves_no_half_renamed_row() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-titles-fix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        fn fill<'a>(tmdb: i64, plot: &'a str, art: &'a str) -> TitleFill<'a> {
+            TitleFill {
+                tmdb_id: tmdb,
+                overview: plot,
+                poster: art,
+                ..Default::default()
+            }
+        }
+        ix.title_set_identity("t:showa", "tv", "Show A", 2001)
+            .unwrap();
+        ix.title_fill("t:showa", &fill(11, "A's plot", "a.jpg"), 100)
+            .unwrap();
+
+        // The candidate arm: the fill half fails. `UPDATE OF tmdb_id`
+        // cannot be tripped by the identity upsert, which sets only
+        // kind/title/year.
+        ix.db
+            .execute_batch(
+                "CREATE TRIGGER fix_fail_fill AFTER UPDATE OF tmdb_id ON titles
+                   WHEN new.tmdb_id = 22
+                 BEGIN SELECT RAISE(ABORT, 'injected fill failure'); END;",
+            )
+            .unwrap();
+        let out = ix.title_set_identity_and_fill(
+            "t:showa",
+            "tv",
+            "Show B",
+            2019,
+            &fill(22, "B's plot", "b.jpg"),
+            200,
+        );
+        assert!(
+            out.is_err(),
+            "the injected failure did not surface: {out:?}"
+        );
+        ix.db.execute_batch("DROP TRIGGER fix_fail_fill").unwrap();
+
+        // Two autocommitting writes left ("Show B", 2019) here with all
+        // of A's metadata under it.
+        let t = ix.title_get("t:showa").unwrap().unwrap();
+        assert_eq!(
+            (
+                t.title.as_str(),
+                t.year,
+                t.tmdb_id,
+                t.overview.as_str(),
+                t.poster.as_str(),
+                t.checked
+            ),
+            ("Show A", 2001, 11, "A's plot", "a.jpg", 100),
+            "a refused fill left the row renamed"
+        );
+
+        // Unobstructed, both halves land.
+        ix.title_set_identity_and_fill(
+            "t:showa",
+            "tv",
+            "Show B",
+            2019,
+            &fill(22, "B's plot", "b.jpg"),
+            200,
+        )
+        .unwrap();
+        let t = ix.title_get("t:showa").unwrap().unwrap();
+        assert_eq!(
+            (t.title.as_str(), t.year, t.tmdb_id, t.checked),
+            ("Show B", 2019, 22, 200)
+        );
+
+        // The re-fetch arm, where the stakes are sharper: `checked=0` is
+        // the only thing that puts the row back in the enrichment queue,
+        // so a rename committing without the reset is a rename that
+        // never fetches. `air_tried` separates the two statements -
+        // the reset writes 0, every fill writes 1.
+        ix.db
+            .execute_batch(
+                "CREATE TRIGGER fix_fail_reset AFTER UPDATE OF air_tried ON titles
+                   WHEN new.air_tried = 0
+                 BEGIN SELECT RAISE(ABORT, 'injected reset failure'); END;",
+            )
+            .unwrap();
+        let out = ix.title_set_identity_and_reset("t:showa", "tv", "Show C", 2020);
+        assert!(
+            out.is_err(),
+            "the injected failure did not surface: {out:?}"
+        );
+        ix.db.execute_batch("DROP TRIGGER fix_fail_reset").unwrap();
+        let t = ix.title_get("t:showa").unwrap().unwrap();
+        assert_eq!(
+            (t.title.as_str(), t.year, t.tmdb_id, t.checked),
+            ("Show B", 2019, 22, 200),
+            "a refused reset left the row renamed and still stamped as checked"
+        );
+
+        // And unobstructed: renamed, wiped, pending.
+        ix.title_set_identity_and_reset("t:showa", "tv", "Show C", 2020)
+            .unwrap();
+        let t = ix.title_get("t:showa").unwrap().unwrap();
+        assert_eq!(
+            (t.title.as_str(), t.year, t.tmdb_id, t.checked),
+            ("Show C", 2020, 0, 0)
+        );
+        assert!(t.overview.is_empty() && t.poster.is_empty());
         teardown(&dir, ix);
     }
 }

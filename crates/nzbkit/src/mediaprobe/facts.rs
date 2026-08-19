@@ -78,6 +78,38 @@ pub struct MediaFacts {
     /// are what could be read so far. Mirrors [`MediaInfo::complete`],
     /// and tells the prober whether to come back.
     pub complete: bool,
+    /// The main video's coded frame size - the RAW INPUT [`res_label`]
+    /// reduces to [`MediaFacts::res`], kept beside its own conclusion.
+    ///
+    /// Every other field here is a derived label and this pair is not,
+    /// which is the whole reason it exists. A bucketing rule is a
+    /// judgement call that gets corrected: 67f212a4 fixed `res_label`
+    /// promoting a full-height scope encode (2592x1080) to 1440p, and
+    /// every row already written was then stuck with the wrong word
+    /// forever, because the dimensions the rule had misread were gone.
+    /// Correcting one cost a re-probe of the file, which only works
+    /// while the file is still on disk - and for a failed or deleted
+    /// download it never is.
+    ///
+    /// Stored, the next such fix is [`rederive_res`]: arithmetic over
+    /// two integers, no disk, and it works on a row whose payload was
+    /// deleted years ago.
+    ///
+    /// `None` on every row written before this field existed, and on a
+    /// container whose video track has not been read yet. Absent rather
+    /// than zero: "not recorded" and "a zero-width frame" are different
+    /// answers, and only the first one means fall back to the file.
+    ///
+    /// Only the resolution family is covered. The audio and codec labels
+    /// reduce their own raw inputs (channel counts, layouts, codec ids)
+    /// and keep none of them, so a future fix THERE wants the same
+    /// treatment applied to those inputs - this field is the pattern,
+    /// not the whole of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// The coded frame height. See [`MediaFacts::width`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 /// One contradiction, as two statements the UI can put in a sentence.
@@ -295,7 +327,64 @@ pub fn summarise(info: &MediaInfo) -> MediaFacts {
             .and_then(|v| v.as_str().map(str::to_string)),
         mismatch: Vec::new(),
         complete: info.complete,
+        width: v.map(|v| v.width),
+        height: v.map(|v| v.height),
     }
+}
+
+/// Re-run the resolution derivation over the frame size a row already
+/// carries, for a row written by a build whose [`res_label`] was wrong.
+///
+/// This is the cheap half of the history re-derivation: a row with
+/// [`MediaFacts::width`] needs no file on disk and no probe, because the
+/// only inputs `res_label` ever had are both right here. Returns whether
+/// anything actually changed, so a caller can skip the write.
+///
+/// It re-derives the resolution MISMATCH too, and it has to. The old
+/// label is half of that sentence - a 2592x1080 encode named 1080p was
+/// labelled 1440p and therefore also accused of lying about it - so
+/// correcting the label while leaving the accusation standing would swap
+/// one wrong statement for a worse one. The claim is re-parsed from
+/// `name` and the same stand-down `check` applies.
+///
+/// Nothing else is touched. The audio, codec and HDR labels keep no raw
+/// inputs, so this cannot second-guess them, and their mismatches are
+/// left exactly as the probe recorded them.
+pub fn rederive_res(facts: &mut MediaFacts, name: &str) -> bool {
+    let (Some(w), Some(h)) = (facts.width, facts.height) else {
+        return false;
+    };
+    let res = res_label(w, h);
+    let claim = crate::release::parse_release(name);
+    let want = match (&claim.res, &res) {
+        (Some(claimed), Some(actual))
+            if claimed != actual && !four_by_three_at_class_width(w, h, claimed) =>
+        {
+            Some(Mismatch {
+                field: Field::Resolution,
+                claimed: claimed.clone(),
+                actual: actual.clone(),
+            })
+        }
+        _ => None,
+    };
+    let mut mismatch: Vec<Mismatch> = facts
+        .mismatch
+        .iter()
+        .filter(|m| m.field != Field::Resolution)
+        .cloned()
+        .collect();
+    // Resolution leads the list `check` builds; keep it there so a
+    // re-derived row and a freshly probed one compare equal.
+    if let Some(m) = want {
+        mismatch.insert(0, m);
+    }
+    if facts.res == res && facts.mismatch == mismatch {
+        return false;
+    }
+    facts.res = res;
+    facts.mismatch = mismatch;
+    true
 }
 
 // ---------------------------------------------------------------------------

@@ -394,6 +394,25 @@ pub struct Capped {
     pub banked: u64,
 }
 
+impl Capped {
+    /// Has a fleet that HELD `held` sessions disproven this ceiling?
+    ///
+    /// The session twin of [`ServerLive::retire_cap_if_exceeded`], and
+    /// keyed on the same evidence: sessions we actually GOT. Every idle
+    /// provider sits below its ceiling and says nothing either way, so
+    /// only a count above it is proof.
+    ///
+    /// Needed separately because the pool's gauge can only retire a cap
+    /// IT recorded - the next job starts with an empty one, so a fleet
+    /// that quietly holds 100 after a plan upgrade left the row reading
+    /// "using 100 of 38" until the daemon restarted (Codex sweep 6, N4).
+    ///
+    /// [`ServerLive::retire_cap_if_exceeded`]: nzbkit::pool::ServerLive::retire_cap_if_exceeded
+    pub fn disproven_by(&self, held: usize) -> bool {
+        self.granted_hi > 0 && held > self.granted_hi
+    }
+}
+
 /// The LIFETIME cap ledger for one host: "capped on 14 of the last 20
 /// days" is evidence for a support ticket, which is a different job
 /// from the row's, and it belongs where somebody has gone looking for
@@ -413,7 +432,31 @@ pub struct CapSeen {
     /// of local midnight a refusal landed). Ascending, distinct,
     /// trimmed to the most recent [`CAP_DAYS`].
     pub days: Vec<u32>,
+    /// The lowest ceiling observed on each of those days, index for
+    /// index with `days`.
+    ///
+    /// `granted_lo` is a LIFETIME low and nothing raises it when old
+    /// days drain, so the chip - which filters `days` to the last 30
+    /// calendar days - read "capped at 10 today" off a refusal a
+    /// hundred days old while today's was 38. A number that old,
+    /// presented as today's observation, is the opposite of the
+    /// evidence this ledger exists to be (Codex sweep 6, N7).
+    ///
+    /// `default` so a ledger written before this field existed still
+    /// loads; a length that does not match `days` means exactly that,
+    /// and those days carry `DAY_LO_UNKNOWN` once the column is
+    /// aligned. Handing them the lifetime figure instead would have
+    /// re-told exactly the lie above, permanently and in a column that
+    /// now claims to be per-day (Codex sweep 7, H1b).
+    #[serde(default)]
+    pub day_lo: Vec<usize>,
 }
+
+/// A day recorded before this ledger kept a per-day figure. Zero is a
+/// real observation here - the account was in use elsewhere and we were
+/// granted nothing at all - so the unknown has to sit at the other end.
+/// Readers show the day and not a number for it.
+pub const DAY_LO_UNKNOWN: usize = usize::MAX;
 
 /// How much of the cap ledger is kept. A month is long enough to show a
 /// pattern to a provider and short enough that the file cannot grow.
@@ -864,8 +907,19 @@ pub fn note_capped(config: &Path, host: &str, granted: usize, now: u64) -> bool 
         ..Default::default()
     });
     let fresh_day = c.days.last() != Some(&day);
+    // An older ledger has no per-day column at all. Align it, but mark
+    // those days unknown: the lifetime low is not what any of them was
+    // granted, and writing it here would preserve that misattribution
+    // for as long as the day is retained (Codex sweep 7, H1b).
+    if c.day_lo.len() != c.days.len() {
+        c.day_lo = vec![DAY_LO_UNKNOWN; c.days.len()];
+    }
+    // A lower ceiling on a day already recorded still has to land, even
+    // when the LIFETIME low does not move - that day's own number is
+    // what the windowed chip reads (Codex sweep 6, N7).
+    let day_moved = !fresh_day && c.day_lo.last().is_some_and(|&lo| granted < lo);
     let moved = granted > c.granted_hi || granted < c.granted_lo;
-    if !fresh_day && !moved {
+    if !fresh_day && !moved && !day_moved {
         return false;
     }
     c.granted_hi = c.granted_hi.max(granted);
@@ -879,8 +933,12 @@ pub fn note_capped(config: &Path, host: &str, granted: usize, now: u64) -> bool 
     c.last = now;
     if fresh_day {
         c.days.push(day);
+        c.day_lo.push(granted);
         let over = c.days.len().saturating_sub(CAP_DAYS);
         c.days.drain(..over);
+        c.day_lo.drain(..over);
+    } else if let Some(lo) = c.day_lo.last_mut() {
+        *lo = (*lo).min(granted);
     }
     save(config, &map);
     true
@@ -1829,6 +1887,108 @@ mod tests {
         let c = load(&cfg)["gn.example.com"].capped.clone().expect("ledger");
         assert_eq!(c.days.len(), CAP_DAYS);
         assert_eq!(*c.days.last().unwrap(), 20_039);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex sweep 6, N7: the chip shows a WINDOW of days, so the
+    /// number beside it has to come from the same window.
+    ///
+    /// `granted_lo` is a lifetime minimum and nothing raises it when old
+    /// days drain out of the ledger's 30-event retention, and the
+    /// dashboard then filters that list to the last 30 CALENDAR days.
+    /// A refusal at 10 a hundred days ago plus one at 38 today therefore
+    /// rendered "capped at 10 today" - the oldest number in the file,
+    /// presented as this morning's observation, on the one row that
+    /// exists to be evidence.
+    #[test]
+    fn each_capped_day_carries_its_own_low() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-capdaylo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        let d0 = 20_000u64;
+
+        // A hundred days ago: refused at 10.
+        assert!(note_capped(&cfg, "gn.example.com", 10, d0 * 86_400));
+        // Today: refused at 38, then at 30 - the same day's own low
+        // moves even though the LIFETIME low (10) does not.
+        assert!(note_capped(&cfg, "gn.example.com", 38, (d0 + 100) * 86_400));
+        assert!(
+            note_capped(&cfg, "gn.example.com", 30, (d0 + 100) * 86_400 + 3_600),
+            "a lower ceiling on a day already recorded is still news"
+        );
+
+        let c = load(&cfg)["gn.example.com"].capped.clone().expect("ledger");
+        assert_eq!(c.days, vec![d0 as u32, d0 as u32 + 100]);
+        assert_eq!(
+            c.day_lo,
+            vec![10, 30],
+            "index for index with the days the chip filters"
+        );
+        assert_eq!(c.granted_lo, 10, "the lifetime figure is unchanged");
+
+        // The two columns stay aligned when the window trims.
+        for d in 101..140u64 {
+            note_capped(
+                &cfg,
+                "gn.example.com",
+                20 + (d % 5) as usize,
+                (d0 + d) * 86_400,
+            );
+        }
+        let c = load(&cfg)["gn.example.com"].capped.clone().expect("ledger");
+        assert_eq!(c.days.len(), CAP_DAYS);
+        assert_eq!(c.day_lo.len(), c.days.len(), "trimmed in lockstep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A ledger written before the per-day column existed still loads,
+    /// and the days already in it are marked unknown rather than given
+    /// a number none of them was observed at.
+    ///
+    /// Codex sweep 7, H1b: backfilling those days with the LIFETIME low
+    /// told N7's lie again, in a column that from then on claims to be
+    /// per-day - so the invented figure outlived the transitional state
+    /// that produced it and was believed by every later reader.
+    #[test]
+    fn an_older_cap_ledger_gains_the_per_day_column() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-capdayold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        let d0 = 20_000u64;
+        // Long ago and far lower than anything since: the lifetime low.
+        note_capped(&cfg, "h", 10, d0 * 86_400);
+        note_capped(&cfg, "h", 22, (d0 + 1) * 86_400);
+
+        // Strip the column, as a ledger from before 1.1.5 has it.
+        {
+            let mut m = load(&cfg);
+            let c = m.get_mut("h").unwrap().capped.as_mut().unwrap();
+            c.day_lo.clear();
+            save(&cfg, &m);
+        }
+        assert!(note_capped(&cfg, "h", 38, (d0 + 2) * 86_400));
+        let c = load(&cfg)["h"].capped.clone().expect("ledger");
+        assert_eq!(
+            c.day_lo,
+            vec![DAY_LO_UNKNOWN, DAY_LO_UNKNOWN, 38],
+            "unknown for what was never recorded, per day from here on"
+        );
+        assert_eq!(
+            c.granted_lo, 10,
+            "the lifetime figure is still the lifetime figure"
+        );
+        assert!(
+            !c.day_lo[..2].contains(&c.granted_lo),
+            "the lifetime low must not be presented as any day's own observation"
+        );
+
+        // A second refusal on a day that is only there as unknown takes
+        // the real number: `min` against the sentinel is the observation.
+        assert!(note_capped(&cfg, "h", 31, (d0 + 2) * 86_400 + 3_600));
+        let c = load(&cfg)["h"].capped.clone().expect("ledger");
+        assert_eq!(c.day_lo, vec![DAY_LO_UNKNOWN, DAY_LO_UNKNOWN, 31]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

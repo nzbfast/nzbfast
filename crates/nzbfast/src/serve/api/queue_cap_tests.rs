@@ -87,3 +87,58 @@ fn the_session_and_the_job_merge_by_high_water() {
     assert_eq!(cap_payload(&d, s).expect("both")["granted_hi"], 44);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A ceiling the session remembers is retired by proof that it is
+/// wrong, exactly as the live gauge's is.
+///
+/// Sweep 5's L6 taught `ConnGauge::up` to retire the POOL's gauge, and
+/// its test asserts on `ServerLive` alone. That covers only the job
+/// which both met a cap and then exceeded it. The shape users hit is
+/// the other one: job 1 is refused at 38, the session banks it, the
+/// plan is upgraded, and job 2 quietly holds 100 on a gauge that has
+/// never recorded a cap of its own - so `retire_cap_if_exceeded`
+/// returns at its first line and the row went on serving "capped at 38
+/// of 100" from session memory until the daemon restarted (Codex sweep
+/// 6, N4).
+#[test]
+fn a_fleet_holding_more_than_the_ceiling_retires_the_session_copy() {
+    let dir = tmp("retire");
+    let d = test_daemon(&dir);
+    d.capped_hosts.lock_ok().insert(
+        "gn.example.com".into(),
+        crate::conntune::Capped {
+            granted_hi: 38,
+            capped_at: 100,
+            since: 1_000,
+            banked: 0,
+        },
+    );
+    let l = live("gn.example.com");
+    let s = &l.servers[0];
+    // Precondition: this job's own gauge is clean, so the pool-side
+    // retirement cannot fire for it.
+    assert_eq!(s.capped_since.load(Ordering::Relaxed), 0);
+    assert_eq!(s.capped_at.load(Ordering::Relaxed), 0);
+
+    // Under the ceiling: the session's number still stands. A provider
+    // merely sitting below its cap proves nothing either way.
+    s.connected.store(38, Ordering::Relaxed);
+    assert_eq!(
+        cap_payload(&d, s).expect("still capped")["granted_hi"],
+        38,
+        "38 held is the ceiling met, not exceeded"
+    );
+
+    // Above it: the ceiling is disproven and must not be presented as a
+    // measurement any more.
+    s.connected.store(100, Ordering::Relaxed);
+    assert!(
+        cap_payload(&d, s).is_none(),
+        "100 sessions held disproves a ceiling of 38"
+    );
+    assert!(
+        d.capped_hosts.lock_ok().get("gn.example.com").is_none(),
+        "and the session forgets it, so the idle plan row cannot revive it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

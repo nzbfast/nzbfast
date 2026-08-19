@@ -194,7 +194,22 @@ Object.assign(out, {
   'err.no such server': 'no such server',
   'err.unknown server index': 'unknown server index',
   'err.connect timed out (12 s)': 'connect timed out (12 s)',
+  // M32 route controls (serve/servers.rs): these landed in the
+  // reference by hand without joining this list, so the next regen
+  // silently dropped them - they must live HERE to survive extract.
+  'err.bind address: not an IP address': 'bind address: not an IP address',
+  'err.proxy address: expected host:port': 'proxy address: expected host:port',
+  'err.proxy address: put the user and password in their own boxes':
+    'proxy address: put the user and password in their own boxes',
   'err.move failed (files in use, or target exists?)': 'move failed (files in use, or target exists?)',
+  // M32's route controls. These reach the form through the same tErr()
+  // path; hand-editing them into en.reference.json instead left them out
+  // of this list, so the next extract silently dropped all three
+  // (Codex sweep 7, L4).
+  'err.bind address: not an IP address': 'bind address: not an IP address',
+  'err.proxy address: expected host:port': 'proxy address: expected host:port',
+  'err.proxy address: put the user and password in their own boxes':
+    'proxy address: put the user and password in their own boxes',
   // Not from serve.rs: api() mints this one when the request never gets
   // an answer at all (ERR_UNREACHABLE), so it rides the same tErr() path
   // as the wire strings.

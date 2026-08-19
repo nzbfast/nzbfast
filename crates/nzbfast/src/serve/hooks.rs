@@ -85,7 +85,8 @@ pub(in crate::serve) static HOOKS_GEN_BARRIER: Mutex<
 /// then discharged - the post-processing script, the notification
 /// targets, and whether a failure report is due on top.
 struct PostJobOwed {
-    script: Option<PathBuf>,
+    /// §192: the ordered chain, empty = no script.
+    script: Vec<PathBuf>,
     targets: Vec<crate::notify::Target>,
     failing: bool,
     /// Snapshotted beside the plan, never re-read in the worker - see
@@ -176,10 +177,11 @@ impl Daemon {
         let Some(mut owed) = self.post_job_owed(job, gen0) else {
             return;
         };
-        if let Some(script) = owed.script.take() {
+        let chain = std::mem::take(&mut owed.script);
+        if !chain.is_empty() {
             let (d, j) = (self.clone(), job.clone());
             if let Err(e) = tokio::task::spawn_blocking(move || {
-                d.run_script(&script, &j, gen0, Fence::Generation)
+                d.run_script_chain(&chain, &j, gen0, Fence::Generation)
             })
             .await
             {
@@ -207,7 +209,7 @@ impl Daemon {
         job: &Arc<Mutex<Job>>,
         gen0: Option<(u32, u64)>,
     ) -> Option<PostJobOwed> {
-        let script = self.resolve_script(job);
+        let script = self.resolve_scripts(job);
         let targets = self.notify_targets.lock_ok().clone();
         let mode = self.failure_link.lock_ok().clone();
         let secs = self.auto_retry_secs.load(Ordering::Relaxed);
@@ -250,7 +252,7 @@ impl Daemon {
             cx,
             gen0,
         } = owed;
-        if script.is_none() && targets.is_empty() && !failing {
+        if script.is_empty() && targets.is_empty() && !failing {
             return;
         }
         let d = self.clone();
@@ -287,14 +289,14 @@ impl Daemon {
                 if retried_since(&job.lock_ok(), gen0) {
                     return;
                 }
-                if let Some(script) = script {
+                if !script.is_empty() {
                     // gen0 again, inside: the check above is a statement
                     // earlier than the record read it guards.
                     // RetriesOnly, NOT the pair: this caller parked the
                     // instant it spawned us, and park stamps a move of
                     // its own. Asking the pair here is the race
                     // `retried_since` above exists to avoid.
-                    d.run_script(&script, &job, gen0, Fence::RetriesOnly);
+                    d.run_script_chain(&script, &job, gen0, Fence::RetriesOnly);
                 }
                 if !targets.is_empty() && !retried_since(&job.lock_ok(), gen0) {
                     // §G: keep what each delivery did, so the settings
@@ -1190,7 +1192,7 @@ mod tests {
 
         // The pair fence: refuses, which is the bug when the caller is
         // the detached worker.
-        d.run_script(&script, &job, gen0, Fence::Generation);
+        d.run_script_chain(std::slice::from_ref(&script), &job, gen0, Fence::Generation);
         assert!(
             !ran.exists(),
             "the pair fence cannot tell a park from a retry, so it declines"
@@ -1198,7 +1200,12 @@ mod tests {
 
         // The retry-half fence: runs, which is what the user configured
         // the script for.
-        d.run_script(&script, &job, gen0, Fence::RetriesOnly);
+        d.run_script_chain(
+            std::slice::from_ref(&script),
+            &job,
+            gen0,
+            Fence::RetriesOnly,
+        );
         assert!(
             ran.exists(),
             "an ordinary completion must still run its post-processing script"

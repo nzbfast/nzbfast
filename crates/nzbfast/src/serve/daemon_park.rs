@@ -54,6 +54,18 @@ pub(in crate::serve) static PARK_GEN_BARRIER: Mutex<
     Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
 > = Mutex::new(None);
 
+/// Test seam: `park_gen` trips it AFTER its second generation check,
+/// its move stamp and its durable history prewrite, and before the
+/// queue retain. `PARK_GEN_BARRIER` sits before that second check, so a
+/// retry staged there is seen and declined - which is exactly why the
+/// stretch behind it went unexercised while the suite stayed green. The
+/// prewrite is disk I/O, so this is a real window and a zero-width one
+/// without a seam. Same keyed two-stage shape, for the same reason.
+#[cfg(test)]
+pub(in crate::serve) static PARK_PREWRITE_BARRIER: Mutex<
+    Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+> = Mutex::new(None);
+
 /// Keeps a finished prefetch's detached completion tail registered as
 /// an owner of its directory for as long as that tail runs. See
 /// [`Daemon::sidecar_tail_begin`].
@@ -586,6 +598,90 @@ impl Daemon {
         self.hub.tail_cancel.lock_ok().remove(id);
     }
 
+    /// Spend a delete that was deferred until the download drained,
+    /// removing the payload and the spooled .nzb the request could not
+    /// touch while the job was live.
+    ///
+    /// Lifted out of `park_gen` whole under the size gate (TODO 106).
+    /// It takes no decision of its own: everything it needs is on the
+    /// record, and it returns nothing, which is why it lifts cleanly.
+    // The active-download delete deferred its file removal to here: by
+    // now the fetch has drained and no writer can recreate the dir. A
+    // tombstoned job is dropped (not filed to history), so its spooled
+    // .nzb is dead weight too - remove it (history retry keeps its own).
+    fn spend_deferred_delete(&self, job: &Arc<Mutex<Job>>) {
+        // Set when a refused removal handed this job's spooled NZB
+        // to a kept-files notice: the drop below must then leave it
+        // where it is - see `note_delete_kept`.
+        let mut kept_nzb: Option<std::path::PathBuf> = None;
+        // Snapshot what the removal needs, then RELEASE the guard
+        // before touching the filesystem. Recursive deletion of a
+        // whole release is slow (and on a hung NAS, unbounded), and
+        // the queue -> job lock order means anyone walking the queue
+        // - save_queue, pick_job, the API - would park behind this
+        // one job's mutex for the duration. The job is terminal and
+        // its fetch has drained, so nothing rewrites these fields
+        // between the snapshot and the removal.
+        let (del, gone_nzb) = {
+            let mut g = job.lock_ok();
+            let del = g.del_on_drop.then(|| {
+                (
+                    delete_tail(&g, || self.job_suffix(filed_stem(&g))),
+                    g.out_dir.clone(),
+                    filed_stem(&g).to_string(),
+                    g.filed,
+                )
+            });
+            // One request, one deletion: the flag is spent here.
+            // M5 lets a deleted record LIVE ON as a retryable
+            // history row, and this is the same Arc that gets filed
+            // and later re-queued - so a flag left set carried the
+            // user's old delete forward into the RETRY's own park,
+            // which removed a freshly completed release just before
+            // filing its Completed row (Codex sweep 14 Aug H1).
+            // Cleared unconditionally, not only when the removal
+            // reported the files gone: a Trash refusal already
+            // reaches the user through `note_delete_kept` below, and
+            // re-arming a later park would be this same bug with an
+            // extra step.
+            g.del_on_drop = false;
+            // M5: a delete verb that files a history row keeps the
+            // spooled .nzb - the row is retryable and retry reads
+            // the spool. Only the history-less delete drops it.
+            (
+                del,
+                (g.tombstone && g.delete_status.is_empty()).then(|| g.nzb_path.clone()),
+            )
+        };
+        if let Some((tail, out_dir, stem, filed)) = del {
+            // The user pressed delete-with-files on a LIVE download
+            // and this is where it finally happens, long after the
+            // request answered - so a refusal here has no response
+            // left to ride back on, and the notice is the only way it
+            // reaches them at all.
+            if let FilesGone::Kept(why) = remove_job_files(&out_dir, &stem, filed, &tail) {
+                // ...and the spool copy becomes the notice's offer to
+                // run it again - but ONLY where `gone_nzb` already
+                // says this park is the last thing naming that file.
+                // The M5 arm below files a RETRYABLE history row that
+                // reads the same copy, so sharing it let a dismiss
+                // break the retry: see `note_delete_kept` (M11).
+                if self.note_delete_kept(&stem, &out_dir, &why, gone_nzb.as_deref()) {
+                    kept_nzb = gone_nzb.clone();
+                }
+            }
+            // The other end of the reservation the delete took when
+            // it set this flag: the directory is only safe to hand
+            // out once its files are actually gone.
+            self.reserved.lock_ok().remove(&out_dir);
+        }
+        if let Some(nzb) = gone_nzb
+            && kept_nzb.as_ref() != Some(&nzb)
+        {
+            let _ = std::fs::remove_file(&nzb);
+        }
+    }
+
     /// Park a finished job in history (NZBGet-style: failures are parked,
     /// not lost - mode=retry sends them back through the queue and the
     /// journal resumes from what already landed), on the generation the
@@ -647,82 +743,7 @@ impl Daemon {
             self.release_custody_if_unclaimed(&id);
             return;
         }
-        // The active-download delete deferred its file removal to here: by
-        // now the fetch has drained and no writer can recreate the dir. A
-        // tombstoned job is dropped (not filed to history), so its spooled
-        // .nzb is dead weight too - remove it (history retry keeps its own).
-        {
-            // Set when a refused removal handed this job's spooled NZB
-            // to a kept-files notice: the drop below must then leave it
-            // where it is - see `note_delete_kept`.
-            let mut kept_nzb: Option<std::path::PathBuf> = None;
-            // Snapshot what the removal needs, then RELEASE the guard
-            // before touching the filesystem. Recursive deletion of a
-            // whole release is slow (and on a hung NAS, unbounded), and
-            // the queue -> job lock order means anyone walking the queue
-            // - save_queue, pick_job, the API - would park behind this
-            // one job's mutex for the duration. The job is terminal and
-            // its fetch has drained, so nothing rewrites these fields
-            // between the snapshot and the removal.
-            let (del, gone_nzb) = {
-                let mut g = job.lock_ok();
-                let del = g.del_on_drop.then(|| {
-                    (
-                        delete_tail(&g, || self.job_suffix(filed_stem(&g))),
-                        g.out_dir.clone(),
-                        filed_stem(&g).to_string(),
-                        g.filed,
-                    )
-                });
-                // One request, one deletion: the flag is spent here.
-                // M5 lets a deleted record LIVE ON as a retryable
-                // history row, and this is the same Arc that gets filed
-                // and later re-queued - so a flag left set carried the
-                // user's old delete forward into the RETRY's own park,
-                // which removed a freshly completed release just before
-                // filing its Completed row (Codex sweep 14 Aug H1).
-                // Cleared unconditionally, not only when the removal
-                // reported the files gone: a Trash refusal already
-                // reaches the user through `note_delete_kept` below, and
-                // re-arming a later park would be this same bug with an
-                // extra step.
-                g.del_on_drop = false;
-                // M5: a delete verb that files a history row keeps the
-                // spooled .nzb - the row is retryable and retry reads
-                // the spool. Only the history-less delete drops it.
-                (
-                    del,
-                    (g.tombstone && g.delete_status.is_empty()).then(|| g.nzb_path.clone()),
-                )
-            };
-            if let Some((tail, out_dir, stem, filed)) = del {
-                // The user pressed delete-with-files on a LIVE download
-                // and this is where it finally happens, long after the
-                // request answered - so a refusal here has no response
-                // left to ride back on, and the notice is the only way it
-                // reaches them at all.
-                if let FilesGone::Kept(why) = remove_job_files(&out_dir, &stem, filed, &tail) {
-                    // ...and the spool copy becomes the notice's offer to
-                    // run it again - but ONLY where `gone_nzb` already
-                    // says this park is the last thing naming that file.
-                    // The M5 arm below files a RETRYABLE history row that
-                    // reads the same copy, so sharing it let a dismiss
-                    // break the retry: see `note_delete_kept` (M11).
-                    if self.note_delete_kept(&stem, &out_dir, &why, gone_nzb.as_deref()) {
-                        kept_nzb = gone_nzb.clone();
-                    }
-                }
-                // The other end of the reservation the delete took when
-                // it set this flag: the directory is only safe to hand
-                // out once its files are actually gone.
-                self.reserved.lock_ok().remove(&out_dir);
-            }
-            if let Some(nzb) = gone_nzb
-                && kept_nzb.as_ref() != Some(&nzb)
-            {
-                let _ = std::fs::remove_file(&nzb);
-            }
-        }
+        self.spend_deferred_delete(&job);
         // Read LIVE, not from the snapshot above: everything between the two
         // is unlocked, and file removal is slow. A queue or JSON-RPC delete
         // landing in that window used to be decided against a stale
@@ -835,7 +856,21 @@ impl Daemon {
         // reading as a tie. The demote arm has already returned by here,
         // so a requeued job is never stamped; a tombstoned one is stamped
         // and dropped, which is inert because it reaches neither store.
-        moveseq::stamp_move(&job);
+        //
+        // Read and stamped under ONE hold of the job lock. A retry
+        // slipping between the two would have bumped `retries` (and
+        // stamped its own `move_seq`) FIRST, and this stamp would then
+        // land a HIGHER counter on a history row the retry has already
+        // superseded - which resolves the wrong way at the next
+        // `load_queue` and quietly undoes the retry. Combining them
+        // makes that ordering unrepresentable (Codex sweep 6, N2).
+        {
+            let mut g = job.lock_ok();
+            if gen0.is_some_and(|g0| Self::record_generation(&g) != g0) {
+                return;
+            }
+            moveseq::stamp_move_locked(&mut g);
+        }
         // Q2: from the prewrite until the record is filed into
         // `self.history` below, its only durable copy is the disk row the
         // prewrite is about to append - and `history_compact` snapshots
@@ -867,7 +902,38 @@ impl Daemon {
         // AFTER the prewrite - the row is still in the queue until the
         // retain, and a durable write has no business under this lock -
         // and released by each arm the moment it files the record.
+        // The harness's window for the LAST unguarded stretch: from the
+        // stamp above to the retain below, this park does history.jsonl
+        // I/O with no generation check at all.
+        #[cfg(test)]
+        {
+            let seam = PARK_PREWRITE_BARRIER
+                .lock_ok()
+                .clone()
+                .filter(|(k, _, _)| *k == id);
+            if let Some((_, open, release)) = seam {
+                open.wait();
+                release.wait();
+            }
+        }
         let mut publish = Some(self.add_lock.lock_ok());
+        // The generation once more, and this time under the hold that
+        // makes it a guard rather than a guess: `retry` takes
+        // `add_lock` for its whole critical section, so a retry is
+        // either fully visible here or cannot land until the retain is
+        // done. Without this the durable prewrite above - unbounded on
+        // a slow disk - was a window in which a retry could push the
+        // SAME record back onto the queue, only for the retain to pull
+        // it straight out again by id and the arms below to file it
+        // into history. The user's retry vanished (Codex sweep 6, N2).
+        //
+        // `retries` alone, not the whole generation: this park has just
+        // stamped its own `move_seq`, so the tuple no longer matches by
+        // construction. `retries` is the half a retry moves and park
+        // never does.
+        if gen0.is_some_and(|(r0, _)| job.lock_ok().retries != r0) {
+            return;
+        }
         self.queue.lock_ok().retain(|j| j.lock_ok().nzo_id != id);
         // The harness's window: the row has just left the queue and every
         // store write park still owes is ahead of it.
@@ -1164,6 +1230,11 @@ impl Daemon {
                 .is_ok()
         {
             self.life_emit("queue.idle", json!({}));
+            // The queue-finished action hangs off this exact CAS, so
+            // "once per drain" is the latch's property and not a second
+            // copy of the same reasoning. Store-and-return only: we are
+            // under the queue lock, and the lane does the rest.
+            self.finish.note_drained();
         }
     }
 

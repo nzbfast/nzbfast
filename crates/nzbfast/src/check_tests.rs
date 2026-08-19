@@ -2193,6 +2193,63 @@ fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
         vec![(100_000u64, None), (50_000_000u64, None)],
         "so neither volume is capped by the other's declared count"
     );
+
+    // TWO sets in one NZB whose unquoted subjects happen to end on the
+    // same token - here the release group, which every set in a post
+    // shares. Taking the last whitespace token folded both to "group",
+    // so a genuine second set stopped registering, the declared cap
+    // stayed alive, and a foreign block size could cap the wrong
+    // volumes back into a false Impossible - a worse direction than the
+    // split L8 was fixing (Codex sweep 6, N9).
+    let two_sets_one_group = parse(format!(
+        "{}{}{}{}",
+        raw("[01/03] - Feature - GROUP.par2 yEnc (1/1)", 100_000, "fm@x"),
+        raw(
+            "[02/03] - Feature - GROUP.vol000+51.par2 yEnc (1/1)",
+            50_000_000,
+            "fv@x"
+        ),
+        raw("[01/02] - Extras - GROUP.par2 yEnc (1/1)", 100_000, "em@x"),
+        raw(
+            "[02/02] - Extras - GROUP.vol000+02.par2 yEnc (1/1)",
+            30_000_000,
+            "ev@x"
+        ),
+    ));
+    assert!(
+        multiple_par2_sets(&two_sets_one_group),
+        "Feature and Extras are two sets, whatever group posted them"
+    );
+    assert_eq!(
+        live_volumes(&two_sets_one_group, &[]),
+        vec![(50_000_000u64, None), (30_000_000u64, None)],
+        "so neither set's declared count caps the other's volumes"
+    );
+
+    // And the counter is dropped wherever it sits, not only at the
+    // front - one set stays one set.
+    let counter_mid = parse(format!(
+        "{}{}",
+        raw(
+            "Cool Movie 2024 (1/2) - Cool.par2 yEnc (1/1)",
+            100_000,
+            "cm@x"
+        ),
+        raw(
+            "Cool Movie 2024 (2/2) - Cool.vol000+51.par2 yEnc (1/1)",
+            50_000_000,
+            "cv@x"
+        ),
+    ));
+    assert!(
+        !multiple_par2_sets(&counter_mid),
+        "a counter inside the subject is still not a second set"
+    );
+    assert_eq!(
+        live_volumes(&counter_mid, &[]),
+        vec![(50_000_000u64, Some(51usize))],
+        "one set keeps its declared cap"
+    );
 }
 
 /// M2 again, one layer down: the cap is withdrawn at BOTH ceilings or

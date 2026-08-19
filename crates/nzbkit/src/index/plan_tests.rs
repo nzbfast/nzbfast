@@ -1,5 +1,6 @@
 //! The query-plan gate: statements that run on a user-facing path must
-//! never full-scan `releases`.
+//! never full-scan `releases` - or, for the *arr id lookups at the
+//! bottom of this file, `titles`.
 //!
 //! `releases` is the table that grows without bound - 38 million rows in
 //! a 55.9 GB database on a long-running install by 16 Aug 2026 - and
@@ -119,6 +120,88 @@ fn no_hot_path_statement_full_scans_the_releases_table() {
         bad.is_empty(),
         "these statements full-scan `releases` - see the note at the top of \
          plan_tests.rs for why that is a wedge and not a slowdown:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// Every id an *arr client searches by must reach an index on `titles`.
+///
+/// These are the whole of Sonarr's and Radarr's primary lookup path: one
+/// per search, on the request the user is waiting for. `titles` is
+/// smaller than `releases` (tens of thousands of rows, not tens of
+/// millions) so a scan here is a slowdown rather than the wedge the note
+/// at the top describes - but it is a slowdown on the hottest *arr
+/// statement there is, and it hid in plain sight twice over.
+///
+/// `idx_titles_tvdb` shipped with TODO 187 for one of these queries and
+/// answered NOTHING: a partial index is reachable only when the
+/// statement's own WHERE implies its predicate, and SQLite does not
+/// derive `tvdb>0` from `tvdb=?1`. The guard terms in query.rs are
+/// load-bearing and look redundant, which is the combination this test
+/// exists to protect.
+///
+/// And the plan of a miss NAMES an index either way: with the sweep 7
+/// `ORDER BY key` tail, the unguarded shapes plan as `SCAN titles USING
+/// INDEX sqlite_autoindex_titles_1` - a full pass over the primary key,
+/// which reads like an index lookup in a log. So each row below names
+/// the index it must actually use, rather than only forbidding "SCAN".
+#[test]
+fn every_arr_id_lookup_reaches_an_index_on_titles() {
+    let d = dir("titleids");
+    let ix = Index::open(&d.join("index.db")).unwrap();
+    // WHERE clauses copied verbatim from the call sites in query.rs; the
+    // tail is the one `title_keys` appends, because the planner sees the
+    // whole statement and the ORDER BY is what makes the primary key
+    // look attractive.
+    let tail = format!(" ORDER BY key LIMIT {}", Index::ID_KEY_CAP);
+    let lookups = [
+        (
+            "title_key_for_imdb",
+            "SELECT key FROM titles WHERE imdb <> '' AND (imdb=?1 OR imdb=?2)",
+            "idx_titles_imdb",
+        ),
+        (
+            "title_key_for_tvdb",
+            "SELECT key FROM titles WHERE tvdb=?1 AND tvdb > 0 AND kind='tv'",
+            "idx_titles_tvdb",
+        ),
+        (
+            "title_key_for_tmdb",
+            "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='movie'
+               AND id_src IN ('tmdb','')",
+            "idx_titles_tmdb",
+        ),
+        (
+            "title_key_for_tvmaze",
+            "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='tv'
+               AND id_src IN ('tvmaze','')",
+            "idx_titles_tmdb",
+        ),
+        (
+            "tvdb_id_for_title",
+            "SELECT tvdb FROM titles WHERE key=?1 AND kind='tv' AND tvdb > 0",
+            "sqlite_autoindex_titles_1",
+        ),
+    ];
+    let mut bad: Vec<String> = Vec::new();
+    for (what, sql, index) in lookups {
+        // The per-key reverse lookup is a primary-key seek and carries no
+        // ORDER BY; every resolver goes through `title_keys`.
+        let sql = if what == "tvdb_id_for_title" {
+            sql.to_string()
+        } else {
+            format!("{sql}{tail}")
+        };
+        let p = plan(&ix, &sql);
+        if p.contains("SCAN titles") || !p.contains(index) {
+            bad.push(format!("{what}: wanted {index}, got {p}"));
+        }
+    }
+    crate::index::testutil::teardown(&d, ix);
+    assert!(
+        bad.is_empty(),
+        "these *arr id lookups no longer reach their index on `titles` - a partial \
+         index needs its predicate repeated in the statement:\n  {}",
         bad.join("\n  ")
     );
 }

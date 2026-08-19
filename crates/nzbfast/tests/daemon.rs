@@ -7,6 +7,9 @@
 mod daemon_authkey;
 // §123 chip-6 fault x lifecycle cross product (sibling dir, size gate).
 mod daemon_chip6;
+// Queue-finished actions: the once-per-drain edge and its refusals
+// (sibling dir, size gate).
+mod daemon_finish;
 // §138 opt-in give-up legs (sibling dir, size gate).
 mod daemon_health;
 // The four NZBGet delete verbs and the prefetch-delete leg (sibling
@@ -354,7 +357,7 @@ fn delete_without_the_trash(cfg: &Path) {
 ///  - Did the daemon reach `run_script`? It warns on every non-success -
 ///    a launch failure (`failed to launch`), a non-zero exit, and the
 ///    deadline kill - so the absence of any `[script]` line means the
-///    hook was never invoked at all (resolve_script said None, or the
+///    hook was never invoked at all (resolve_scripts said none, or the
 ///    post-job hooks never fired) rather than invoked and broken. The
 ///    success line is `info`, which the default level drops.
 ///  - Is the script still on disk and executable? A hook the daemon

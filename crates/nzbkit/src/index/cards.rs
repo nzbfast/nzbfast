@@ -239,16 +239,20 @@ impl Index {
         // title's card (hover preview, group-by-title header row) by
         // its stored parse key instead of re-deriving it from a page
         // query - same field browse() already honors.
-        if let Some(tk) = &q.title_key {
-            let p = bind(&mut params, Box::new(tk.clone()));
-            wheres.push(format!("{{}}title_key = {p}"));
+        if !q.title_keys.is_empty() {
+            let ps: Vec<String> = q
+                .title_keys
+                .iter()
+                .map(|tk| bind(&mut params, Box::new(tk.clone())))
+                .collect();
+            wheres.push(format!("{{}}title_key IN ({})", ps.join(", ")));
         }
         // The people leg. Release stems are all the FTS index covers, so
         // "tom cruise" used to find nothing at all unless a filename
         // happened to say it. A title credited to a matching person is
         // just as much a hit as one whose stem matches, hence OR rather
         // than a separate query - one search box, one result set.
-        let people_m = if self.people_fts && !q.title_key.is_some() {
+        let people_m = if self.people_fts && q.title_keys.is_empty() {
             fts_match(&q.q)
         } else {
             String::new()

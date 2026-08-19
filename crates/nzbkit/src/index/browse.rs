@@ -29,8 +29,18 @@ pub struct BrowseQuery {
     pub offset: u32,
     /// M28: hide releases whose junk score is >= this (None = show all).
     pub max_junk: Option<u32>,
-    /// M28: restrict to one grid card's releases (exact parse-key match).
-    pub title_key: Option<String>,
+    /// M28: restrict to the releases of one or more grid cards (exact
+    /// parse-key match). Empty = no restriction.
+    ///
+    /// A SET rather than one key because the newznab facade fills it
+    /// from an external id, and an id genuinely resolves to several
+    /// keys: one show posted under two spellings parses into two, and a
+    /// film is keyed `m:<norm>:<year>` or `m:<norm>` depending on
+    /// whether its stem carried the year. Answering with one of them
+    /// hid the rest of the title's releases from Sonarr and Radarr, and
+    /// `total` agreed with the truncated page so nothing looked wrong
+    /// (Codex sweep 7, M4).
+    pub title_keys: Vec<String>,
     /// M30: apply the user's wall curation (per-title hides + hide
     /// rules). Wall/list views set this; API facades (newznab, *arrs)
     /// stay uncurated.
@@ -130,7 +140,7 @@ impl Default for BrowseQuery {
             limit: 50,
             offset: 0,
             max_junk: None,
-            title_key: None,
+            title_keys: Vec::new(),
             curated: false,
             hide_adult: false,
             genre: None,
@@ -270,10 +280,18 @@ impl Index {
             wheres.push(format!("{{}}junk < {p}"));
         }
         // M28: exact card filter (the detail sheet lists one title's
-        // releases via its stored parse key).
-        if let Some(tk) = &q.title_key {
-            let p = bind(&mut params, Box::new(tk.clone()));
-            wheres.push(format!("{{}}title_key = {p}"));
+        // releases via its stored parse key). Rendered into the SAME
+        // `wheres` list as everything else, so the `IN` propagates
+        // identically into the representative-copy subquery and into
+        // `total` - which is what keeps a multi-key id search paged
+        // honestly in SQL.
+        if !q.title_keys.is_empty() {
+            let ps: Vec<String> = q
+                .title_keys
+                .iter()
+                .map(|tk| bind(&mut params, Box::new(tk.clone())))
+                .collect();
+            wheres.push(format!("{{}}title_key IN ({})", ps.join(", ")));
         }
         // M30: user curation (hides + rules). It already takes the alias
         // as an argument, so the placeholder passes straight through.
@@ -1483,7 +1501,7 @@ mod tests {
         let (one, total) = ix
             .browse_cards(
                 &BrowseQuery {
-                    title_key: Some(alpha.title_key.clone()),
+                    title_keys: vec![alpha.title_key.clone()],
                     ..Default::default()
                 },
                 CardSort::Latest,

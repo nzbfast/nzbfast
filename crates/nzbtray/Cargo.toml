@@ -2,7 +2,7 @@
 name = "nzbtray"
 # Keep in lockstep with crates/nzbfast (the version source of truth) -
 # the installer stamps that string on both exes' packaging.
-version = "1.1.5"
+version = "1.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

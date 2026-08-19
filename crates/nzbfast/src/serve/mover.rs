@@ -457,8 +457,8 @@ impl Daemon {
             None => String::new(),
         };
         self.settle_move_attempt(&mut j);
-        if let Some(dest) = moved {
-            j.filed = j.tv_sort && is_season_dir(&dest);
+        if let Some(dest) = &moved {
+            j.filed = j.tv_sort && is_season_dir(dest);
             j.out_dir = dest.clone();
             drop(j);
             // The modes go on after the payload stops moving (#20),
@@ -469,14 +469,17 @@ impl Daemon {
                     .move_dest_root(&cat)
                     .map(|(r, _)| r)
                     .unwrap_or_else(|| self.out_root.read_ok().clone());
-                crate::smart::apply_out_umask(&dest, Some(&root), umask);
+                crate::smart::apply_out_umask(dest, Some(&root), umask);
             }
         } else {
             drop(j);
         }
         // The record it just rewrote is a HISTORY record (movers run
-        // post-park) - its store line has to follow the bytes.
-        self.history_upsert_if_present(job);
+        // post-park) - its store line has to follow the bytes, and a
+        // line the store refuses is the sharpest of these losses:
+        // `history_publish_move` says what it costs, after standing the
+        // atomic rewrite in for the refused append.
+        self.history_publish_move(job, &out_dir, moved.as_deref());
         self.save_queue();
         false
     }

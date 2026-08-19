@@ -260,23 +260,69 @@ impl Index {
     /// Newznab carries the bare number (`imdbid=0468569`) while we store
     /// the canonical `tt`-prefixed form, and IMDb widened from 7 digits
     /// to 8 - so both the zero-padded and the as-given widths are tried.
-    /// `None` means "we hold nothing for that id", which the facade must
-    /// answer with an empty feed rather than an unfiltered one.
-    pub fn title_key_for_imdb(&self, imdb: &str) -> rusqlite::Result<Option<String>> {
+    /// An empty list means "we hold nothing for that id", which the
+    /// facade must answer with an empty feed rather than an unfiltered
+    /// one.
+    ///
+    /// EVERY key, not one: a film keyed both `m:<norm>:<year>` and
+    /// `m:<norm>` (the parser writes whichever the stem supports, by
+    /// design) enriches to one IMDb id on two rows, and the old `LIMIT 1`
+    /// then returned one arbitrary half of that film's releases while
+    /// `total` agreed with it, so nothing looked wrong (Codex sweep 7,
+    /// M4).
+    ///
+    /// `imdb <> ''` looks redundant next to two equality terms and is
+    /// the only thing that makes this a lookup rather than a scan - the
+    /// rule every resolver here now follows. `idx_titles_imdb` is
+    /// PARTIAL, and SQLite reaches a partial index only when the
+    /// statement's own WHERE clause implies its predicate, which an
+    /// `imdb=?1` term does not, whatever is bound to it (nor does a
+    /// literal `imdb='tt0468569'` - measured both ways). With the guard
+    /// the OR folds to an IN over the index and both spellings are still
+    /// tried; without it Radarr's primary lookup reads the whole titles
+    /// table on every search, 32.6 ms against 0.10 ms at 300 k titles.
+    ///
+    /// And [`Self::title_keys`]'s `ORDER BY key` tail is what makes that
+    /// miss invisible: the plan reads `SCAN titles USING INDEX
+    /// sqlite_autoindex_titles_1`, which names an index while scanning
+    /// every row of it. plan_tests.rs asserts the pairing per resolver.
+    pub fn title_key_for_imdb(&self, imdb: &str) -> rusqlite::Result<Vec<String>> {
         let digits: String = imdb.chars().filter(|c| c.is_ascii_digit()).collect();
         if digits.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let padded = format!("tt{digits:0>7}");
         let bare = format!("tt{digits}");
-        self.db
-            .query_row(
-                "SELECT key FROM titles WHERE imdb=?1 OR imdb=?2 LIMIT 1",
-                rusqlite::params![padded, bare],
-                |r| r.get(0),
-            )
-            .optional()
+        self.title_keys(
+            "SELECT key FROM titles WHERE imdb <> '' AND (imdb=?1 OR imdb=?2)",
+            rusqlite::params![padded, bare],
+        )
     }
+
+    /// The shared tail of the four external-id resolvers: every key the
+    /// id names, oldest row first, capped.
+    ///
+    /// The cap is a bound on the `IN (...)` list `browse` builds from
+    /// this, not a policy - a title with more than [`Self::ID_KEY_CAP`]
+    /// spellings is a parser fault to fix, not a query to widen. `ORDER
+    /// BY key` only so the answer is stable across calls; the caller
+    /// filters with a set, so the order carries no meaning of its own.
+    fn title_keys(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .db
+            .prepare(&format!("{sql} ORDER BY key LIMIT {}", Self::ID_KEY_CAP))?;
+        stmt.query_map(params, |r| r.get(0))?.collect()
+    }
+
+    /// How many title keys one external id may resolve to. See
+    /// [`Self::title_keys`]. Crate-visible so plan_tests.rs can build
+    /// the statement in the exact shape `title_keys` runs it - the
+    /// `ORDER BY key LIMIT` tail is part of what the planner reads.
+    pub(crate) const ID_KEY_CAP: u32 = 32;
 
     /// Resolve a newznab `tmdbid` to its parse-key - the
     /// [`Self::title_key_for_imdb`] counterpart for the id Radarr sends
@@ -288,22 +334,138 @@ impl Index {
     /// small dense integers, so collisions are not a corner case but the
     /// expected state of a populated index. Unfiltered, a Radarr
     /// `t=movie&tmdbid=N` could resolve a TV series that merely happens
-    /// to be TVmaze #N and answer with its episodes; with both rows
-    /// present, `LIMIT 1` picked between them arbitrarily.
+    /// to be TVmaze #N and answer with its episodes.
     ///
-    /// An id we hold no MOVIE for answers None, which the caller turns
-    /// into an empty feed - never a fall-through to the other namespace.
-    pub fn title_key_for_tmdb(&self, tmdb: i64) -> rusqlite::Result<Option<String>> {
+    /// `kind` alone was not enough, because the movie half is not one
+    /// namespace either: with no TMDB key the keyless chain runs OMDb,
+    /// which has no TMDB id to give and writes the bare IMDb NUMBER into
+    /// this column instead. So `id_src` names the namespace and this
+    /// resolver takes only its own ('' being the legacy, unlabelled
+    /// value - Codex sweep 7, H2).
+    ///
+    /// Returns EVERY movie key filed under the id, not one of them.
+    /// Nothing constrains the column to be unique and two shapes make it
+    /// genuinely repeat - a remade-title split, and the `m:<norm>:<year>`
+    /// / `m:<norm>` pair the parser keys by design - so the old `LIMIT 1`
+    /// silently answered with one arbitrary half of a film's releases
+    /// (Codex sweep 7, M4). Empty means we hold nothing for that id,
+    /// which the caller turns into an empty feed - never a fall-through
+    /// to the other namespace.
+    ///
+    /// `tmdb_id > 0` / `tvdb > 0` earn the partial index the same way
+    /// [`Self::title_key_for_imdb`] documents; the early return does not
+    /// stand in for it, because the planner reads the statement.
+    pub fn title_key_for_tmdb(&self, tmdb: i64) -> rusqlite::Result<Vec<String>> {
         if tmdb <= 0 {
+            return Ok(Vec::new());
+        }
+        self.title_keys(
+            "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='movie'
+               AND id_src IN ('tmdb','')",
+            rusqlite::params![tmdb],
+        )
+    }
+
+    /// Resolve a newznab `tvmazeid` to its parse-key - the TV-side
+    /// counterpart of [`Self::title_key_for_tmdb`], and the inverse of
+    /// [`Self::tv_show_id`].
+    ///
+    /// The `kind='tv'` filter is not tidiness, it is the same collision
+    /// `title_key_for_tmdb` documents from the other side: `tmdb_id`
+    /// carries a TMDB MOVIE id on a movie row and a TVmaze SHOW id on a
+    /// TV row, two unrelated dense-integer schemes in one column. A
+    /// tvsearch that resolved through a movie row would answer with a
+    /// film that merely happens to be TMDB #N.
+    ///
+    /// And `kind='tv'` alone is still not enough, because the TV half is
+    /// three namespaces rather than one: TVmaze under the keyless
+    /// default, AniList whenever TVmaze missed the title (no key needed
+    /// - anime posted under a romaji title is the routine case), and
+    /// TMDB when a key is configured. `id_src` is what tells them apart,
+    /// so a `tvmazeid=` takes only TVmaze-sourced rows and the legacy
+    /// unlabelled ones (Codex sweep 7, H2).
+    ///
+    /// Returns every matching key: one show posted under two spellings
+    /// parses into two title keys that enrich to the SAME show id, which
+    /// is precisely what the duplicate check's alias oracle relies on,
+    /// so answering with one of them arbitrarily hid half a series from
+    /// Sonarr (Codex sweep 7, M4). Empty = we hold no TV title for that
+    /// id, which the facade turns into an empty feed - never a
+    /// fall-through to the whole index (TODO 187).
+    ///
+    /// `tmdb_id > 0` / `tvdb > 0` earn the partial index the same way
+    /// [`Self::title_key_for_imdb`] documents; the early return does not
+    /// stand in for it, because the planner reads the statement.
+    pub fn title_key_for_tvmaze(&self, id: i64) -> rusqlite::Result<Vec<String>> {
+        if id <= 0 {
+            return Ok(Vec::new());
+        }
+        self.title_keys(
+            "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='tv'
+               AND id_src IN ('tvmaze','')",
+            rusqlite::params![id],
+        )
+    }
+
+    /// Resolve a newznab `tvdbid` to its parse-key.
+    ///
+    /// Its own column, unlike the two id lookups above: TheTVDB numbers
+    /// nothing but series, so there is no namespace to collide with and
+    /// the `kind='tv'` filter is belt only. The id arrives from TVmaze's
+    /// `externals.thetvdb` at enrichment, or from the backfill lane for
+    /// rows enriched before the column existed.
+    ///
+    /// `tmdb_id > 0` / `tvdb > 0` earn the partial index the same way
+    /// [`Self::title_key_for_imdb`] documents; the early return does not
+    /// stand in for it, because the planner reads the statement.
+    pub fn title_key_for_tvdb(&self, tvdb: i64) -> rusqlite::Result<Vec<String>> {
+        if tvdb <= 0 {
+            return Ok(Vec::new());
+        }
+        self.title_keys(
+            "SELECT key FROM titles WHERE tvdb=?1 AND tvdb > 0 AND kind='tv'",
+            rusqlite::params![tvdb],
+        )
+    }
+
+    /// The TheTVDB series id we hold for one title key - the reverse of
+    /// [`Self::title_key_for_tvdb`].
+    ///
+    /// The pull-search's precision id when the user searches third-party
+    /// indexers from a card. `kind='tv'` for the reason
+    /// [`Self::tv_show_id`] documents in full: the id columns on a title
+    /// row are per-kind, and answering with anything but a series id
+    /// under a parameter named `tvdbid` asks confidently for the wrong
+    /// thing.
+    pub fn tvdb_id_for_title(&self, key: &str) -> rusqlite::Result<Option<i64>> {
+        if key.is_empty() {
             return Ok(None);
         }
         self.db
             .query_row(
-                "SELECT key FROM titles WHERE tmdb_id=?1 AND kind='movie' LIMIT 1",
-                rusqlite::params![tmdb],
+                "SELECT tvdb FROM titles WHERE key=?1 AND kind='tv' AND tvdb > 0",
+                rusqlite::params![key],
                 |r| r.get(0),
             )
             .optional()
+    }
+
+    /// Does this index hold ANY TVDB id at all?
+    ///
+    /// The newznab caps document is gated on this, and that gate is the
+    /// whole ordering story of TODO 187: Sonarr switches to `tvdbid` the
+    /// moment caps offers it, so advertising the parameter against an
+    /// empty column would answer every series search with nothing and
+    /// be read as "this indexer has nothing". One id present means the
+    /// backfill lane has run and the promise is real. Cheap by
+    /// construction - it is an EXISTS against the partial index, so it
+    /// stops at the first row.
+    pub fn has_tvdb_ids(&self) -> rusqlite::Result<bool> {
+        self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM titles WHERE tvdb > 0)",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n != 0),
+        )
     }
 
     /// The TVmaze show id the enricher recorded for a TV title key, or
@@ -316,17 +478,38 @@ impl Index {
     /// to `kind='tv'` for the reason `title_key_for_tmdb` documents:
     /// this column holds a TMDB movie id on movie rows, an unrelated
     /// numbering scheme that would collide.
-    pub fn tv_show_id(&self, key: &str) -> rusqlite::Result<Option<i64>> {
+    ///
+    /// The id therefore comes back WITH its namespace, and the caller
+    /// compares the pair. That matters more here than anywhere else,
+    /// because two rows are called one show on the strength of one equal
+    /// number: an AniList media id that happens to equal another show's
+    /// TVmaze id would otherwise make the duplicate check hold a
+    /// download as an alias of something unrelated (Codex sweep 7, H2).
+    /// Comparing the pair - rather than admitting only TVmaze rows -
+    /// also keeps the oracle working for anime, which under the keyless
+    /// default is AniList-sourced whenever TVmaze lacked the romaji
+    /// title, and that is most of it.
+    ///
+    /// A legacy '' reads as 'tvmaze': that is what the column meant
+    /// before the provenance existed, so rows of both vintages still
+    /// meet.
+    pub fn tv_show_id(&self, key: &str) -> rusqlite::Result<Option<(String, i64)>> {
         if key.is_empty() {
             return Ok(None);
         }
-        self.db
+        let row = self
+            .db
             .query_row(
-                "SELECT tmdb_id FROM titles WHERE key=?1 AND kind='tv' AND tmdb_id > 0",
+                "SELECT id_src, tmdb_id FROM titles
+                 WHERE key=?1 AND kind='tv' AND tmdb_id > 0",
                 rusqlite::params![key],
-                |r| r.get(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
-            .optional()
+            .optional()?;
+        Ok(row.map(|(src, id)| {
+            let src = if src.is_empty() { "tvmaze" } else { &src }.to_string();
+            (src, id)
+        }))
     }
 
     /// The one year the index knows a movie title by - or None when it
@@ -389,22 +572,131 @@ mod tests {
         put("t:a series", "tv", 1399);
         put("m:a film", "movie", 1399);
         assert_eq!(
-            ix.title_key_for_tmdb(1399).unwrap().as_deref(),
-            Some("m:a film"),
+            ix.title_key_for_tmdb(1399).unwrap(),
+            ["m:a film"],
             "the movie row is the only one a tmdbid may resolve to"
         );
 
         // An id we hold only a TV row for is NOT a movie we have. The
-        // caller turns None into an empty feed; falling through to the
-        // TV row would answer a movie search with episodes.
+        // caller turns the empty list into an empty feed; falling
+        // through to the TV row would answer a movie search with
+        // episodes.
         put("t:another series", "tv", 82856);
-        assert_eq!(ix.title_key_for_tmdb(82856).unwrap(), None);
+        assert!(ix.title_key_for_tmdb(82856).unwrap().is_empty());
 
         // A movie-only id still resolves, which is the ordinary case.
         put("m:another film", "movie", 603);
+        assert_eq!(ix.title_key_for_tmdb(603).unwrap(), ["m:another film"]);
+
+        // The same collision from the TV side (TODO 187): a newznab
+        // `tvmazeid` reads the very same column, so it has to refuse the
+        // movie row for id 1399 exactly as the movie lookup refuses the
+        // series. An id we hold no TV title for is None - which the
+        // facade renders as an empty feed, never as the whole index.
         assert_eq!(
-            ix.title_key_for_tmdb(603).unwrap().as_deref(),
-            Some("m:another film")
+            ix.title_key_for_tvmaze(1399).unwrap(),
+            ["t:a series"],
+            "the tv row is the only one a tvmazeid may resolve to"
+        );
+        assert!(ix.title_key_for_tvmaze(603).unwrap().is_empty());
+        assert!(ix.title_key_for_tvmaze(4242).unwrap().is_empty());
+        // A missing param arrives here as 0 (unparsable id, blank
+        // value), and must not become "the first TV row we hold".
+        put("t:unresolved", "tv", 0);
+        assert!(ix.title_key_for_tvmaze(0).unwrap().is_empty());
+        assert!(ix.title_key_for_tvmaze(-1).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex sweep 7, H2: `titles.tmdb_id` is FOUR namespaces in one
+    /// column, and `kind` names only two of them. On a TV row it holds a
+    /// TVmaze show id under the keyless default, an AniList media id
+    /// whenever TVmaze missed the title (anime under a romaji title
+    /// needs no key to reach this), and a TMDB series id when a key is
+    /// configured; on a movie row it holds the bare IMDb NUMBER when the
+    /// keyless chain ran OMDb. So each resolver takes its own namespace
+    /// and the legacy unlabelled rows, and nothing else.
+    #[test]
+    fn an_external_id_resolves_only_within_its_own_namespace() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-idsrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        let put = |key: &str, kind: &str, id: i64, src: &str| {
+            ix.db
+                .execute(
+                    "INSERT INTO titles(key, kind, title, year, tmdb_id, id_src)
+                     VALUES(?1, ?2, ?3, 0, ?4, ?5)",
+                    rusqlite::params![key, kind, "x", id, src],
+                )
+                .unwrap();
+        };
+        // The anime case, which needs no API key and is routine: TVmaze
+        // had no romaji title, AniList did, and its MEDIA id landed in
+        // the same column a `tvmazeid=` reads.
+        put("t:an anime", "tv", 4242, "anilist");
+        assert!(
+            ix.title_key_for_tvmaze(4242).unwrap().is_empty(),
+            "an AniList media id answered a tvmazeid lookup"
+        );
+        // ...and a TMDB series id, which a configured key writes to the
+        // very same place.
+        put("t:a series", "tv", 1399, "tmdb");
+        assert!(ix.title_key_for_tvmaze(1399).unwrap().is_empty());
+        // What a tvmazeid IS for, plus the legacy rows that predate the
+        // provenance column and mean what they always did.
+        put("t:a tvmaze show", "tv", 82856, "tvmaze");
+        put("t:a legacy show", "tv", 33333, "");
+        assert_eq!(ix.title_key_for_tvmaze(82856).unwrap(), ["t:a tvmaze show"]);
+        assert_eq!(ix.title_key_for_tvmaze(33333).unwrap(), ["t:a legacy show"]);
+
+        // The movie side of the same fault: with no TMDB key the chain
+        // runs OMDb, which has no TMDB id and writes the numeric half of
+        // the tconst instead - straight into the column Radarr's
+        // `tmdbid=` resolves against.
+        put("m:an omdb film", "movie", 111_161, "omdb");
+        assert!(
+            ix.title_key_for_tmdb(111_161).unwrap().is_empty(),
+            "an IMDb number answered a tmdbid lookup"
+        );
+        put("m:a tmdb film", "movie", 603, "tmdb");
+        assert_eq!(ix.title_key_for_tmdb(603).unwrap(), ["m:a tmdb film"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex sweep 7, M4: nothing makes an external id unique across
+    /// title keys, and two production shapes routinely repeat one - a
+    /// film keyed with and without its year, and a show posted under two
+    /// spellings. `LIMIT 1` answered with one arbitrary half of the
+    /// title.
+    #[test]
+    fn an_external_id_resolves_every_key_filed_under_it() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-idset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        let put = |key: &str, kind: &str, id: i64, imdb: &str| {
+            ix.db
+                .execute(
+                    "INSERT INTO titles(key, kind, title, year, tmdb_id, imdb, id_src)
+                     VALUES(?1, ?2, ?3, 0, ?4, ?5, 'tmdb')",
+                    rusqlite::params![key, kind, "x", id, imdb],
+                )
+                .unwrap();
+        };
+        // `release.rs` keys a movie `m:<norm>:<year>` when the stem
+        // carries a year and `m:<norm>` when it does not, by design, so
+        // one film with mixed stems really does hold two keys.
+        put("m:a film:2010", "movie", 27205, "tt1375666");
+        put("m:a film", "movie", 27205, "tt1375666");
+        assert_eq!(
+            ix.title_key_for_tmdb(27205).unwrap(),
+            ["m:a film", "m:a film:2010"],
+            "half the film's releases were unreachable by tmdbid"
+        );
+        assert_eq!(
+            ix.title_key_for_imdb("1375666").unwrap(),
+            ["m:a film", "m:a film:2010"]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -431,11 +723,36 @@ mod tests {
         put("t:a series", "tv", 1399);
         put("t:unresolved", "tv", 0);
         put("m:a film", "movie", 77);
-        assert_eq!(ix.tv_show_id("t:a series").unwrap(), Some(1399));
+        // A legacy row - no provenance recorded - reads as TVmaze,
+        // which is what the column meant before id_src existed.
+        assert_eq!(
+            ix.tv_show_id("t:a series").unwrap(),
+            Some(("tvmaze".into(), 1399))
+        );
         assert_eq!(ix.tv_show_id("t:unresolved").unwrap(), None);
         assert_eq!(ix.tv_show_id("t:absent").unwrap(), None);
         assert_eq!(ix.tv_show_id("m:a film").unwrap(), None);
         assert_eq!(ix.tv_show_id("").unwrap(), None);
+        // Codex sweep 7, H2: the alias oracle calls two rows one show on
+        // the strength of one equal number, so the number alone is not
+        // enough - an AniList media id equal to another show's TVmaze id
+        // would hold an unrelated download as a duplicate.
+        ix.db
+            .execute(
+                "INSERT INTO titles(key, kind, title, year, tmdb_id, id_src)
+                 VALUES('t:an anime', 'tv', 'x', 0, 1399, 'anilist')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            ix.tv_show_id("t:an anime").unwrap(),
+            Some(("anilist".into(), 1399))
+        );
+        assert_ne!(
+            ix.tv_show_id("t:an anime").unwrap(),
+            ix.tv_show_id("t:a series").unwrap(),
+            "two namespaces' ids collided into one show"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -545,7 +862,7 @@ mod tests {
         // Card-scoped browse (detail sheet) sees both copies.
         let (rows, n) = ix
             .browse(&BrowseQuery {
-                title_key: Some(inception.title_key.clone()),
+                title_keys: vec![inception.title_key.clone()],
                 ..Default::default()
             })
             .unwrap();

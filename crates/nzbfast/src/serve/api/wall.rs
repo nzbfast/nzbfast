@@ -81,6 +81,25 @@ fn m_wall_search(
     })
 }
 
+/// A candidate's `provider` as an id namespace we will actually store.
+///
+/// The list is the one `wall::Candidate::provider` can hold, and an
+/// allowlist rather than a pass-through because the value arrives in a
+/// request body: an unrecognised name would be stored verbatim and then
+/// match no reader at all, which is a row whose id nothing can resolve.
+/// Unlabelled is the honest answer for anything else, and it is exactly
+/// what a client too old to send the field produces.
+fn id_source(provider: &str) -> &'static str {
+    match provider {
+        "tmdb" => "tmdb",
+        "tvmaze" => "tvmaze",
+        "omdb" => "omdb",
+        "anilist" => "anilist",
+        "wikidata" => "wikidata",
+        _ => "",
+    }
+}
+
 fn m_wall_fix(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -104,10 +123,9 @@ fn m_wall_fix(
             .map(|t| t.as_secs() as i64)
             .unwrap_or(1);
         // The manual arm's "keep what you were not editing" read, taken
-        // BEFORE the identity write below. A busy read pool stops the
-        // whole edit (see the arm itself), and an identity that had
-        // already landed left the row renamed with the rest of the edit
-        // refused - half of what the user pressed Save for.
+        // BEFORE the write below because a busy read pool has to stop
+        // the whole edit rather than contribute a blank to it - see the
+        // arm itself for what an absent `old` would do to the row.
         let manual = !body.get("meta").is_some_and(Value::is_object)
             && body["refetch"].as_bool() != Some(true);
         let old = if manual && !key.is_empty() && !title.is_empty() {
@@ -125,67 +143,124 @@ fn m_wall_fix(
         };
         if key.is_empty() || title.is_empty() {
             json!({"status": false, "error": "key and title are required"})
-        } else if d
-            .with_index(|ix| ix.title_set_identity(&key, kind, &title, year).ok())
-            .is_none()
-        {
-            json!({"status": false, "error": "index unavailable"})
         } else {
             let art = d.spool.join("art");
             let _ = std::fs::create_dir_all(&art);
-            if let Some(meta) = body.get("meta").filter(|m| m.is_object()) {
+            // Every arm writes the identity AND the metadata that goes
+            // with it as ONE index write (`title_set_identity_and_fill`,
+            // `title_set_identity_and_reset`). The rename used to
+            // autocommit on its own, ahead of the branch: losing the
+            // writer for the second half then left the card renamed to
+            // the picked series wearing the PREVIOUS series' poster,
+            // overview, rating and ids - with nothing to prompt a
+            // re-fix, because the card now reads as a title somebody
+            // already identified.
+            let ok = if let Some(meta) = body.get("meta").filter(|m| m.is_object()) {
                 // Art fetch happens OUTSIDE with_index - never
                 // hold the index lock across the network.
-                let save = |url: &str, backdrop: bool| -> String {
-                    let name = crate::wall::art_name(&key, backdrop);
-                    let path = art.join(&name);
-                    match crate::wall::fetch_image(url) {
-                        Some(bytes) if std::fs::write(&path, &bytes).is_ok() => name,
-                        _ => {
-                            let _ = std::fs::remove_file(&path);
-                            String::new()
-                        }
-                    }
-                };
+                //
+                // Bytes now, files after the commit. An art path is
+                // derived from the title key, so the candidate's poster
+                // lands exactly where the current one is: written before
+                // the index write, a refused edit would leave the old
+                // identity wearing the new series' picture - the same
+                // half-applied result, moved to the disk.
+                //
                 // Poster and backdrop come off CDNs - fetch
                 // them concurrently (this is a user click;
                 // two serial 15 s timeouts felt like a hang).
-                let (poster, backdrop) = std::thread::scope(|s| {
-                    let bd = s.spawn(|| save(meta["backdrop_url"].as_str().unwrap_or(""), true));
+                let (poster_img, backdrop_img) = std::thread::scope(|s| {
+                    let bd = s.spawn(|| {
+                        crate::wall::fetch_image(meta["backdrop_url"].as_str().unwrap_or(""))
+                    });
                     (
-                        save(meta["poster_url"].as_str().unwrap_or(""), false),
+                        crate::wall::fetch_image(meta["poster_url"].as_str().unwrap_or("")),
                         bd.join().unwrap_or_default(),
                     )
                 });
-                let ok = d.with_index(|ix| {
-                    ix.title_fill(
-                        &key,
-                        &nzbkit::index::TitleFill {
-                            tmdb_id: meta["id"].as_i64().unwrap_or(0),
-                            overview: meta["overview"].as_str().unwrap_or(""),
-                            rating: meta["rating"].as_f64().unwrap_or(0.0),
-                            genres: meta["genres"].as_str().unwrap_or(""),
-                            poster: &poster,
-                            backdrop: &backdrop,
-                            imdb: meta["imdb"].as_str().unwrap_or(""),
-                            // Cast isn't in search results; a
-                            // per-title Refresh re-enriches it.
-                            actors: "",
-                            air_date: meta["air_date"].as_str().unwrap_or(""),
-                        },
-                        now,
-                    )
-                    .ok()
-                });
+                // A filename is stored only for art we actually hold. A
+                // fetch that came back with nothing clears the column
+                // and deletes the file below: the image sitting there
+                // belongs to the series this row just stopped being.
+                let named = |img: &Option<Vec<u8>>, backdrop: bool| match img {
+                    Some(_) => crate::wall::art_name(&key, backdrop),
+                    None => String::new(),
+                };
+                let (poster, backdrop) = (named(&poster_img, false), named(&backdrop_img, true));
+                let ok = d
+                    .with_index(|ix| {
+                        ix.title_set_identity_and_fill(
+                            &key,
+                            kind,
+                            &title,
+                            year,
+                            &nzbkit::index::TitleFill {
+                                tmdb_id: meta["id"].as_i64().unwrap_or(0),
+                                // The candidate list this id came from
+                                // already names its provider, and the
+                                // endpoint already hands that name to
+                                // the UI - it was simply dropped on the
+                                // way back, leaving an unlabelled id in
+                                // a column four namespaces share (Codex
+                                // sweep 7, H2). Anything we do not
+                                // recognise is stored as unlabelled
+                                // rather than trusted.
+                                id_src: id_source(meta["provider"].as_str().unwrap_or("")),
+                                overview: meta["overview"].as_str().unwrap_or(""),
+                                rating: meta["rating"].as_f64().unwrap_or(0.0),
+                                genres: meta["genres"].as_str().unwrap_or(""),
+                                poster: &poster,
+                                backdrop: &backdrop,
+                                imdb: meta["imdb"].as_str().unwrap_or(""),
+                                // Cast isn't in search results; a
+                                // per-title Refresh re-enriches it.
+                                actors: "",
+                                air_date: meta["air_date"].as_str().unwrap_or(""),
+                            },
+                            now,
+                        )
+                        .ok()
+                    })
+                    .is_some();
+                if ok {
+                    for (img, backdrop) in [(poster_img, false), (backdrop_img, true)] {
+                        let path = art.join(crate::wall::art_name(&key, backdrop));
+                        match img {
+                            Some(bytes) if std::fs::write(&path, &bytes).is_ok() => {}
+                            // Absent beats stale. The row names this
+                            // file, and a card whose named art is not on
+                            // disk draws its placeholder (every card
+                            // builder gates the URL on `is_file`), so a
+                            // failed write costs a poster until the next
+                            // Refresh instead of showing the wrong one.
+                            _ => {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                    // The thumbnails the grid actually loads are cached
+                    // per title key, so the new poster is invisible
+                    // until they go.
+                    crate::wall::drop_art_thumbs(&art, &key);
+                }
                 info!(target: "wall", "fix {key} → {title} ({year}) via candidate");
-                json!({"status": ok.is_some()})
+                ok
             } else if body["refetch"].as_bool() == Some(true) {
-                let ok = d.with_index(|ix| ix.title_reset(&key).ok());
-                for bd in [false, true] {
-                    let _ = std::fs::remove_file(art.join(crate::wall::art_name(&key, bd)));
+                let ok = d
+                    .with_index(|ix| {
+                        ix.title_set_identity_and_reset(&key, kind, &title, year)
+                            .ok()
+                    })
+                    .is_some();
+                // Only once the reset is committed. The art belongs to
+                // the row's metadata, and dropping it against an edit
+                // the index refused would blank a card that still holds
+                // the identity that art matches.
+                if ok {
+                    crate::wall::drop_art(&art, &key);
                 }
                 info!(target: "wall", "fix {key} → {title} ({year}), re-fetching");
-                json!({"status": ok.is_some()})
+                ok
             } else {
                 // Manual: keep id/rating/art/imdb/cast, take
                 // the typed text; absent fields keep their
@@ -199,11 +274,16 @@ fn m_wall_fix(
                 // imdb id and cast the user was not editing. A
                 // saturated read pool must stop the edit and say
                 // so, never strip it silently.
-                let (oid, orating, opost, obd, oview, ogen, oimdb, oact, oair) = old
+                //
+                // `id_src` rides with `oid` because it is the only
+                // thing that makes it readable: keeping the id while
+                // dropping its namespace would quietly demote the row
+                // to legacy-unlabelled on every manual save.
+                let (oid, osrc, orating, opost, obd, oview, ogen, oimdb, oact, oair) = old
                     .map(|t| {
                         (
-                            t.tmdb_id, t.rating, t.poster, t.backdrop, t.overview, t.genres,
-                            t.imdb, t.actors, t.air_date,
+                            t.tmdb_id, t.id_src, t.rating, t.poster, t.backdrop, t.overview,
+                            t.genres, t.imdb, t.actors, t.air_date,
                         )
                     })
                     .unwrap_or_default();
@@ -212,26 +292,41 @@ fn m_wall_fix(
                     .map(str::to_string)
                     .unwrap_or(oview);
                 let genres = body["genres"].as_str().map(str::to_string).unwrap_or(ogen);
-                let ok = d.with_index(|ix| {
-                    ix.title_fill(
-                        &key,
-                        &nzbkit::index::TitleFill {
-                            tmdb_id: oid,
-                            overview: &overview,
-                            rating: orating,
-                            genres: &genres,
-                            poster: &opost,
-                            backdrop: &obd,
-                            imdb: &oimdb,
-                            actors: &oact,
-                            air_date: &oair,
-                        },
-                        now,
-                    )
-                    .ok()
-                });
+                let ok = d
+                    .with_index(|ix| {
+                        ix.title_set_identity_and_fill(
+                            &key,
+                            kind,
+                            &title,
+                            year,
+                            &nzbkit::index::TitleFill {
+                                tmdb_id: oid,
+                                id_src: &osrc,
+                                overview: &overview,
+                                rating: orating,
+                                genres: &genres,
+                                poster: &opost,
+                                backdrop: &obd,
+                                imdb: &oimdb,
+                                actors: &oact,
+                                air_date: &oair,
+                            },
+                            now,
+                        )
+                        .ok()
+                    })
+                    .is_some();
                 info!(target: "wall", "fix {key} → {title} ({year}), manual");
-                json!({"status": ok.is_some()})
+                ok
+            };
+            if ok {
+                json!({"status": true})
+            } else {
+                // One error for the whole edit, because there is no
+                // longer a state between "nothing happened" and "all of
+                // it did" for the user to be told about: the write was
+                // refused, and pressing Save again is the whole fix.
+                json!({"status": false, "error": "index unavailable"})
             }
         }
     })
@@ -316,6 +411,7 @@ fn m_wall_art(
                                     &key,
                                     &nzbkit::index::TitleFill {
                                         tmdb_id: t.tmdb_id,
+                                        id_src: &t.id_src,
                                         overview: &t.overview,
                                         rating: t.rating,
                                         genres: &t.genres,
@@ -329,6 +425,12 @@ fn m_wall_art(
                                 )
                                 .ok()
                             });
+                            // The grid loads `/art/thumb_<name>`, a
+                            // derivative cached under a name of its own,
+                            // so a hand-picked poster written over the
+                            // old file is invisible on the wall until
+                            // the stale thumbnail goes.
+                            crate::wall::drop_art_thumbs(&art, &key);
                             info!(
                                 target: "wall",
                                 "custom poster for {key} ({} KB via {src})",
@@ -392,9 +494,7 @@ fn m_wall_refresh(
             let ok = d
                 .with_index(|ix| ix.title_reset(&target).ok())
                 .unwrap_or(false);
-            for bd in [false, true] {
-                let _ = std::fs::remove_file(art.join(crate::wall::art_name(&target, bd)));
-            }
+            crate::wall::drop_art(&art, &target);
             if ok {
                 json!({"status": true})
             } else {
@@ -422,10 +522,11 @@ fn m_wall_merge(
             let n = d
                 .with_index(|ix| ix.merge_title(&src, &dst).ok())
                 .unwrap_or(0);
-            let art = d.spool.join("art");
-            for bd in [false, true] {
-                let _ = std::fs::remove_file(art.join(crate::wall::art_name(&src, bd)));
-            }
+            // Thumbnails included: the source key is gone, so nothing
+            // will ever ask for its derivatives again and a file the
+            // headshot eviction pass deliberately never touches would
+            // sit in the cache for the life of the install.
+            crate::wall::drop_art(&d.spool.join("art"), &src);
             info!(target: "wall", "merged '{src}' into '{dst}' ({n} releases)");
             json!({"status": n > 0, "moved": n})
         }

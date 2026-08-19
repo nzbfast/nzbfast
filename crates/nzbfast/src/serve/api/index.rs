@@ -1261,7 +1261,7 @@ fn m_wall2(
         // title "recently opened" (hovering is not opening -
         // index_browse's title_key path is where that lives).
         if let Some(k) = params.get("key").filter(|k| !k.is_empty()) {
-            bq.title_key = Some(k.clone());
+            bq.title_keys = vec![k.clone()];
         }
         // M30: genre chip + category grouping + decade range.
         if let Some(g) = params.get("genre").filter(|g| !g.is_empty()) {
@@ -1293,7 +1293,7 @@ fn m_wall2(
         // something and we are on the first page of it. A `key=`
         // fetch is one card's hover preview, and page 4 is the same
         // search as page 1.
-        let note = (!bq.q.trim().is_empty() && bq.offset == 0 && bq.title_key.is_none())
+        let note = (!bq.q.trim().is_empty() && bq.offset == 0 && bq.title_keys.is_empty())
             .then(|| (bq.q.clone(), bq.kind.clone().unwrap_or_default()));
         // index_read_checked, not with_index_read: a saturated read
         // pool is not an empty wall, and drawing one as the other is
@@ -1385,6 +1385,21 @@ fn m_wall2(
                 json!({
                     "total": total,
                     "offset": bq.offset,
+                    // U4: the empty wall needs to say WHY it is empty.
+                    // `groups` separates "no newsgroups chosen" from
+                    // "chosen, index still filling"; `scanning` says a
+                    // scan pass is mid-flight right now.
+                    //
+                    // `scanning` alone is the wrong question for the
+                    // empty state: it is false for the whole post-pass
+                    // SQLite section and the gap between passes, so a
+                    // healthy install reads as idle half the time. What
+                    // that state has to tell apart is scanning-in-
+                    // progress from scanning-not-happening-at-all, and
+                    // that is the stand-down reason (Codex sweep 7, L1).
+                    "groups": d.index_groups.lock_ok().len(),
+                    "scanning": d.scan_active.load(Ordering::Relaxed),
+                    "idxpaused": d.indexing_pause_reason().is_some(),
                     // 24D: the dynamic category set - the UI
                     // renders one tab chip per entry.
                     "cats": d.custom_categories.read_ok().iter()
@@ -1501,7 +1516,7 @@ fn m_index_browse(
         // M28: card-scoped listing (a wall card's releases)
         // and the junk ceiling (all=1 shows everything).
         if let Some(tk) = params.get("title_key").filter(|t| !t.is_empty()) {
-            bq.title_key = Some(tk.clone());
+            bq.title_keys = vec![tk.clone()];
             // M34: a title_key-scoped browse IS the card's
             // detail sheet - the user opened this title. The
             // schema has no "last seen on the wall" column
@@ -1512,14 +1527,14 @@ fn m_index_browse(
             // the same card does not rewrite the log.
             d.touch_opened_title(tk);
         }
-        if get("all") != "1" && bq.title_key.is_none() {
+        if get("all") != "1" && bq.title_keys.is_empty() {
             bq.max_junk = Some(50);
         }
         // M30: curation applies to the list view but never to
         // a card's own sheet (title_key-scoped) - the sheet
         // shows everything a title has, rule-hit dubs
         // included, so the user can see what a rule does.
-        bq.curated = bq.title_key.is_none();
+        bq.curated = bq.title_keys.is_empty();
         // Same tier, same scope: the adult filter is a browsing
         // filter over the list, and the wall's grouped endpoint
         // above has always set it. This one did not, so turning
@@ -1572,7 +1587,7 @@ fn m_index_browse(
         let qprefs = d.quality_prefs.lock_ok().clone();
         // §131 D3, same rule as wall2: a typed query, first page, not
         // a card's own sheet.
-        let note = (!bq.q.trim().is_empty() && bq.offset == 0 && bq.title_key.is_none())
+        let note = (!bq.q.trim().is_empty() && bq.offset == 0 && bq.title_keys.is_empty())
             .then(|| (bq.q.clone(), bq.kind.clone().unwrap_or_default()));
         match d.with_index_read(|ix| ix.browse(&bq).ok()) {
             Some((rows, total)) => {
@@ -1839,23 +1854,39 @@ fn m_indexer_search(
         // card JSON carries one), and a client-supplied id
         // would be a claim about someone else's data.
         //
-        // There is deliberately no tvdbid: the only TV id we
-        // store is a TVmaze show id (titles.tmdb_id, reused
-        // for TV), which is a DIFFERENT namespace to
-        // TheTVDB's. Sending it as tvdbid would silently ask
-        // for the wrong series. TV therefore rides
-        // season/ep, which plan_query folds into the query
-        // text when an indexer cannot take them.
+        // TV rides a tvdbid where we have one. There deliberately was
+        // none for a long time, and the reason is still worth keeping:
+        // the only TV id this index held was a TVmaze SHOW id
+        // (titles.tmdb_id, reused for TV), a different namespace to
+        // TheTVDB's, and sending that as tvdbid asks confidently for
+        // the wrong series. TODO 187 added titles.tvdb - a real
+        // TheTVDB series id, written only by the lane that asked
+        // TVmaze for it - so the id exists now and the comment that
+        // said otherwise outlived it. Season/ep still ride alongside,
+        // and plan_query decides between all three against the
+        // indexer's caps.
         let season = params.get("season").and_then(|v| v.parse::<u32>().ok());
         let ep = params.get("ep").and_then(|v| v.parse::<u32>().ok());
-        let imdbid = match params.get("title_key") {
+        let (imdbid, tvdbid) = match params.get("title_key") {
             Some(k) if !k.is_empty() => d
-                .with_index_read(|ix| ix.title_get(k).ok().flatten())
-                .map(|t| t.imdb)
+                .with_index_read(|ix| {
+                    let imdb = ix.title_get(k).ok().flatten()?.imdb;
+                    // Its own lookup rather than a field on the row:
+                    // the getter is what enforces `kind='tv'`, so a
+                    // movie can never contribute a tvdbid.
+                    let tvdb = ix.tvdb_id_for_title(k).ok().flatten().unwrap_or(0);
+                    Some((
+                        imdb,
+                        if tvdb > 0 {
+                            tvdb.to_string()
+                        } else {
+                            String::new()
+                        },
+                    ))
+                })
                 .unwrap_or_default(),
-            _ => String::new(),
+            _ => Default::default(),
         };
-        let tvdbid = String::new();
         let list: Vec<crate::newznab::IndexerConfig> = d
             .indexers
             .lock()
@@ -1946,11 +1977,24 @@ fn m_indexer_search(
                     (outs, xh.and_then(|h| h.join().ok()).unwrap_or_default())
                 });
             let xrel_ids = crate::xrel::by_dirname(&xrel_hits);
-            // Merge: same release listed by several indexers
-            // collapses to the highest-priority (lowest
-            // number) copy; ties keep the first seen.
-            struct Merged {
+            // Merge (issue #44): the same release listed by several
+            // indexers collapses to ONE row. Identity is the release
+            // name reduced to the differences that mean something
+            // (`release_ident`) plus a size the two indexers agree on
+            // within their accounting slack (`size_clusters`).
+            //
+            // The highest-priority copy (lowest number) is the row's
+            // headline, exactly as before - nothing about a default
+            // grab changes. What is new is that the losing copies are
+            // KEPT and ride along as the row's alternates, so the user
+            // can take a different one when an indexer's NZB is dead.
+            struct Copy {
                 prio: i32,
+                /// Arrival order across the fan-out. A priority tie
+                /// keeps the first-seen copy, and this is what makes
+                /// that deterministic: the grouping below walks a
+                /// HashMap, whose order is randomised per process.
+                seq: usize,
                 indexer: String,
                 /// That indexer's configured URL and the addresses it
                 /// answered this search from - the origin its enclosure
@@ -1958,32 +2002,25 @@ fn m_indexer_search(
                 origin: SourceOrigin,
                 item: crate::newznab::SearchResult,
             }
-            let mut merged: std::collections::HashMap<String, Merged> =
+            let mut groups: std::collections::HashMap<String, Vec<Copy>> =
                 std::collections::HashMap::new();
             {
                 let mut rt = d.indexer_rt.lock_ok();
                 let now = Instant::now();
+                let mut seq = 0usize;
                 for (cfg, outcome) in outcomes {
                     match outcome {
                         Ok((items, origin)) => {
                             for item in items {
-                                let key = crate::newznab::dedupe_key(&item.title, item.size);
-                                let cand = Merged {
+                                let key = crate::newznab::release_ident(&item.title);
+                                groups.entry(key).or_default().push(Copy {
                                     prio: cfg.priority,
+                                    seq,
                                     indexer: cfg.name.clone(),
                                     origin: origin.clone(),
                                     item,
-                                };
-                                match merged.entry(key) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        if cand.prio < e.get().prio {
-                                            e.insert(cand);
-                                        }
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(cand);
-                                    }
-                                }
+                                });
+                                seq += 1;
                             }
                         }
                         Err(e) => {
@@ -1997,13 +2034,33 @@ fn m_indexer_search(
                     }
                 }
             }
-            let mut rows: Vec<Merged> = merged.into_values().collect();
-            // Newest first; unknown ages sink to the bottom.
+            // One name can still be two releases, so each name group is
+            // cut into size clusters and every cluster is a row.
+            let mut rows: Vec<Vec<Copy>> = Vec::with_capacity(groups.len());
+            for (_, mut group) in groups {
+                group.sort_by_key(|c| (c.item.size, c.prio, c.seq));
+                let sizes: Vec<u64> = group.iter().map(|c| c.item.size).collect();
+                // Drained back to front so each range still indexes the
+                // vec it was measured against.
+                for r in crate::newznab::size_clusters(&sizes).into_iter().rev() {
+                    let mut cluster: Vec<Copy> = group.drain(r).collect();
+                    // Headline first: highest priority, ties first seen.
+                    cluster.sort_by_key(|c| (c.prio, c.seq));
+                    rows.push(cluster);
+                }
+            }
+            // Newest first; unknown ages sink to the bottom. The last
+            // two keys are what make that a TOTAL order - without them
+            // equal-aged rows come back in the randomised order the
+            // HashMap walk above produced them in, and the same search
+            // run twice lists them differently.
             rows.sort_by(|a, b| {
-                b.item
+                b[0].item
                     .posted
-                    .cmp(&a.item.posted)
-                    .then(b.item.grabs.cmp(&a.item.grabs))
+                    .cmp(&a[0].item.posted)
+                    .then(b[0].item.grabs.cmp(&a[0].item.grabs))
+                    .then(a[0].item.title.cmp(&b[0].item.title))
+                    .then(a[0].seq.cmp(&b[0].seq))
             });
             rows.truncate(500);
             let now_ts = unix_now();
@@ -2025,21 +2082,55 @@ fn m_indexer_search(
                         break;
                     }
                 }
-                for m in rows {
-                    let token = fresh_secret();
-                    rt.results.insert(
-                        token.clone(),
-                        IndexerHit {
-                            url: m.item.link.clone(),
-                            title: m.item.title.clone(),
-                            indexer: m.indexer.clone(),
-                            origin: m.origin.clone(),
-                            at: now,
-                        },
-                    );
-                    rt.order.push_back(token.clone());
+                for row in rows {
+                    // Every copy gets its own grab token: taking a
+                    // different indexer's copy is the whole point of the
+                    // group, so a source the UI shows but cannot grab
+                    // would be worse than not showing it.
+                    //
+                    // Capped, and the cap is why the tokens minted by one
+                    // search cannot push that search's own earliest rows
+                    // out of the LRU: 500 rows x 8 stays clear of
+                    // INDEXER_HIT_CAP. The copies are in priority order,
+                    // so a cap past 8 configured indexers drops the ones
+                    // ranked last.
+                    const MAX_SOURCES: usize = 8;
+                    let sources: Vec<Value> = row
+                        .iter()
+                        .take(MAX_SOURCES)
+                        .map(|m| {
+                            let token = fresh_secret();
+                            rt.results.insert(
+                                token.clone(),
+                                IndexerHit {
+                                    url: m.item.link.clone(),
+                                    title: m.item.title.clone(),
+                                    indexer: m.indexer.clone(),
+                                    origin: m.origin.clone(),
+                                    at: now,
+                                },
+                            );
+                            rt.order.push_back(token.clone());
+                            json!({
+                                "token": token,
+                                "indexer": m.indexer,
+                                // Its OWN title: the copies agree on the
+                                // release, not on how to spell it, and
+                                // the difference is worth seeing.
+                                "title": m.item.title,
+                                "size": m.item.size,
+                                "age_days": (m.item.posted > 0)
+                                    .then(|| (now_ts - m.item.posted).max(0) / 86_400),
+                                "grabs": m.item.grabs,
+                            })
+                        })
+                        .collect();
+                    let m = &row[0];
                     out.push(json!({
-                        "token": token,
+                        // The headline copy's own fields stay at the top
+                        // level exactly as they were, so every existing
+                        // reader of this answer is untouched by grouping.
+                        "token": sources[0]["token"],
                         "indexer": m.indexer,
                         "title": m.item.title,
                         // '' unless xREL named this exact
@@ -2054,6 +2145,10 @@ fn m_indexer_search(
                         "age_days": (m.item.posted > 0)
                             .then(|| (now_ts - m.item.posted).max(0) / 86_400),
                         "grabs": m.item.grabs,
+                        // The headline is sources[0]; a single-copy row
+                        // carries a one-entry list rather than none, so
+                        // the caller never has two shapes to handle.
+                        "sources": sources,
                     }));
                 }
                 while rt.order.len() > INDEXER_HIT_CAP {

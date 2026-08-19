@@ -520,19 +520,21 @@ impl Daemon {
         })
     }
 
-    /// The TVmaze show id the enricher recorded for a TV title key -
-    /// the duplicate check's alias oracle (see `Index::tv_show_id`).
-    /// Read-only path on purpose: `dupe_collision` sits on the add
-    /// path, and an add must never park behind an ingest.
+    /// The show id the enricher recorded for a TV title key, with the
+    /// provider whose numbering it is in - the duplicate check's alias
+    /// oracle (see `Index::tv_show_id`, which explains why the pair and
+    /// not the bare number). Read-only path on purpose:
+    /// `dupe_collision` sits on the add path, and an add must never park
+    /// behind an ingest.
     #[cfg(feature = "indexer")]
-    pub(in crate::serve) fn tv_show_id(&self, title_key: &str) -> Option<i64> {
+    pub(in crate::serve) fn tv_show_id(&self, title_key: &str) -> Option<(String, i64)> {
         self.with_index_read(|ix| ix.tv_show_id(title_key).ok().flatten())
     }
 
     /// Slim builds carry no index, so no title ever has a known show id
     /// and the alias arm of the duplicate check simply never fires.
     #[cfg(not(feature = "indexer"))]
-    pub(in crate::serve) fn tv_show_id(&self, _title_key: &str) -> Option<i64> {
+    pub(in crate::serve) fn tv_show_id(&self, _title_key: &str) -> Option<(String, i64)> {
         None
     }
 
