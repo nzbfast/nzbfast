@@ -395,6 +395,25 @@ impl Index {
         // each is one index-endpoint seek. Asked separately: SQLite only
         // applies that optimization to a query with exactly ONE
         // aggregate, and `SELECT MIN(x), MAX(x)` would scan.
+        //
+        // NOT filtered by `junk < 50`, though matching the seeks below
+        // is the obvious-looking change and it was tried. It breaks the
+        // sampler. The backward seek runs ONLY as a fallback when the
+        // forward one comes back empty (`if hit.is_empty()` below), so
+        // the draw has to be able to land ABOVE the newest visible row
+        // for it to fire at all - and an unfiltered `hi`, which junk
+        // rows routinely push up, is what makes that happen. Filter it
+        // and the forward seek always matches the topmost visible row,
+        // the backward arm never runs, and the sampler stops reaching
+        // anything older than the draw. `oracle_pick_prefers_the_
+        // unsampled_and_skips_junk` catches it, which is how this is
+        // known.
+        //
+        // So the population mismatch is left standing deliberately: it
+        // is a bias in which rows get drawn, and the fix for it is a
+        // real change to the seek strategy, not a WHERE clause. The
+        // defect actually filed here was the per-row table fetch, and
+        // that is fixed in `idx_rel_visible_posted` (sweep 4, L3b).
         let lo: i64 = self.db.query_row(
             "SELECT COALESCE(MIN(first_posted), 0) FROM releases",
             [],

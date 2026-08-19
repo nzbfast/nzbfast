@@ -128,7 +128,7 @@ pub struct Chaos {
     pub slow_conn: Option<(u64, u64)>,
     /// IP/connection cap: while this many connections are already live,
     /// a further accept is greeted with the provider's own capacity
-    /// refusal ("502 max number of simultaneous IP addresses reached")
+    /// refusal ("502 max connections reached")
     /// and closed. With `drop_after` this reproduces the flap shape: the
     /// few winners keep dying, the rest keep bouncing off the cap.
     pub accept_cap: Option<u64>,
@@ -773,10 +773,14 @@ impl MockServer {
                         let (_, mut w) = sock.into_split();
                         let _ = w
                             .write_all(
-                                format!(
-                                    "502 max number of simultaneous IP addresses reached: {cap}\r\n"
-                                )
-                                .as_bytes(),
+                                // A CONNECTION limit, which is what
+                                // `accept_cap` models. It used to say
+                                // "simultaneous IP addresses", which is
+                                // a different fact - and since those two
+                                // stopped sharing telemetry (Codex sweep
+                                // 5, M9) the wording has to match what
+                                // is being simulated.
+                                format!("502 max connections reached: {cap}\r\n").as_bytes(),
                             )
                             .await;
                         ts.active.fetch_sub(1, Ordering::Relaxed);

@@ -2001,6 +2001,7 @@ fn build_daemon(
         // OFF until the §129 real-line gate passes (design §9 step 4).
         live_tune: std::sync::atomic::AtomicBool::new(false),
         shaped_hosts: Mutex::new(Default::default()),
+        capped_hosts: Mutex::new(Default::default()),
         wall_hide_adult: std::sync::atomic::AtomicBool::new(true),
         auto_defer: std::sync::atomic::AtomicBool::new(true),
         post_health: std::sync::atomic::AtomicBool::new(true),

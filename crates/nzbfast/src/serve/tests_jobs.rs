@@ -14,6 +14,7 @@ pub(super) fn no_causes() -> crate::LossCauses<'static> {
         transport_failed: 0,
         transport_sample: None,
         decode_sample: None,
+        recovery_errs: 0,
         dead_servers: &[],
         par2_slots: 1,
         stalled: false,

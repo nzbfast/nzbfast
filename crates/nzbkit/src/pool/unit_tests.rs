@@ -76,14 +76,14 @@ fn flap_window_trims_old_deaths_before_judging() {
     // A lone server is never clamped: churn beats zero throughput when
     // there is no alternative.
     assert!(!sh.other_live(0));
-    sh.note_cap_bounce(0);
+    sh.note_cap_bounce(0, sh.sessions[0].load(Ordering::Acquire));
     assert_eq!(
         sh.flap_keeper_target(0, &PoolConfig::default()),
         1,
         "no session was held at bounce time, so no cap was observed"
     );
     sh.sessions[0].store(2, Ordering::Release);
-    sh.note_cap_bounce(0);
+    sh.note_cap_bounce(0, sh.sessions[0].load(Ordering::Acquire));
     // Pinned, not defaulted: Default reads NZBFAST_FLAP_CAP_KEEPERS
     // (TODO 121.3), and this test is about the target math, not the env.
     let cfg = PoolConfig {
@@ -2929,4 +2929,38 @@ fn give_up_covered_claims_queue_and_flight_and_seals_the_run() {
     );
     // The in-flight walker's eventual verdict lands as a no-op.
     assert!(!sh.claim_done("<b@x>"));
+}
+
+/// Codex sweep 5, L6: a recorded ceiling must not outlive proof that it
+/// is wrong. Session memory deliberately survives a job so the next one
+/// does not rediscover a cap - but after a plan upgrade a fleet that
+/// holds MORE than the old number has disproven it, and the row was
+/// still saying "capped at 38 of 100" while showing "using 100".
+#[test]
+fn a_live_fleet_larger_than_the_cap_retires_it() {
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let live = LiveStats::for_servers(&servers);
+    let s = &live.servers[0];
+    s.budget.store(100, Ordering::Relaxed);
+    s.note_cap(38);
+    assert_eq!(s.granted_hi.load(Ordering::Acquire), 38);
+    assert_ne!(s.capped_at.load(Ordering::Acquire), 0, "a cap was recorded");
+
+    // Idling below the cap proves nothing and must not clear it.
+    s.retire_cap_if_exceeded(12);
+    assert_ne!(
+        s.capped_at.load(Ordering::Acquire),
+        0,
+        "an idle provider below its ceiling is not evidence"
+    );
+
+    // Actually holding more than the ceiling is evidence.
+    s.retire_cap_if_exceeded(64);
+    assert_eq!(
+        s.capped_at.load(Ordering::Acquire),
+        0,
+        "the cap is disproven and retired"
+    );
+    assert_eq!(s.granted_hi.load(Ordering::Acquire), 64);
+    assert_eq!(s.capped_since.load(Ordering::Acquire), 0);
 }

@@ -44,6 +44,7 @@
 //!   on [`RETRY_AFTER`]'s backoff, then drop with a warning. Every
 //!   outcome lands in `notify_health`, so the settings row shows it.
 
+use super::script::Fence;
 use super::*;
 use std::time::Duration;
 
@@ -177,7 +178,11 @@ impl Daemon {
         };
         if let Some(script) = owed.script.take() {
             let (d, j) = (self.clone(), job.clone());
-            if let Err(e) = tokio::task::spawn_blocking(move || d.run_script(&script, &j)).await {
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                d.run_script(&script, &j, gen0, Fence::Generation)
+            })
+            .await
+            {
                 // A panicking script runner must not take the tail (and
                 // with it `park`) down: the job is finished either way,
                 // and a record stuck outside both stores is the worse
@@ -283,7 +288,13 @@ impl Daemon {
                     return;
                 }
                 if let Some(script) = script {
-                    d.run_script(&script, &job);
+                    // gen0 again, inside: the check above is a statement
+                    // earlier than the record read it guards.
+                    // RetriesOnly, NOT the pair: this caller parked the
+                    // instant it spawned us, and park stamps a move of
+                    // its own. Asking the pair here is the race
+                    // `retried_since` above exists to avoid.
+                    d.run_script(&script, &job, gen0, Fence::RetriesOnly);
                 }
                 if !targets.is_empty() && !retried_since(&job.lock_ok(), gen0) {
                     // §G: keep what each delivery did, so the settings
@@ -1112,6 +1123,90 @@ mod tests {
     ///
     /// Both halves in one test on purpose: a fence that declined
     /// everything would pass the first assert and silence every real
+    /// The DETACHED worker's script must survive its own caller's park.
+    ///
+    /// 18 Aug sweep. `retried_since` exists because the hook worker is
+    /// spawned and then its caller parks immediately, and park stamps a
+    /// queue -> history move that bumps `move_seq` - so the worker
+    /// cannot ask the whole `(retries, move_seq)` pair without racing
+    /// it. The worker's own guard did ask only the retry half, but it
+    /// then handed the whole pair to `run_script`, whose fence asked
+    /// the pair again: an ordinary un-retried completion silently ran
+    /// no post-processing script, at random and biased toward dropping.
+    /// That is the documented race, re-introduced for the script half.
+    ///
+    /// This pins the DECISION rather than the plumbing: same job, same
+    /// gen0, move_seq bumped exactly as park bumps it, one fence each
+    /// way. `sonarr_style_cycle` covers the awaited caller only and did
+    /// not catch this.
+    ///
+    /// `cfg(unix)` like every other script-executing test here: the body
+    /// is a `#!/bin/sh` file and production `run_script` launches the
+    /// path directly, so Windows has neither the executable bit nor a
+    /// guaranteed shell and the marker would never appear. Same rule,
+    /// and the same reason, as the note at tests_api.rs:8 (Codex sweep 5
+    /// M11 - the first version of this test was ungated and would have
+    /// reddened the Windows lane).
+    #[cfg(unix)]
+    #[test]
+    fn a_parked_move_must_not_cancel_the_detached_workers_script() {
+        let dir = scratch("fence");
+        let d = testutil::test_daemon(&dir);
+        let ran = dir.join("it-ran");
+        let script = dir.join("hook.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch {}\n", ran.to_string_lossy()),
+        )
+        .expect("write script");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let job = Arc::new(Mutex::new(
+            job_from_json(&json!({
+                "nzo_id": "fenced",
+                "name": "fenced",
+                "nzb_path": dir.join("f.nzb").to_string_lossy(),
+                "out_dir": dir.to_string_lossy(),
+                "state": "Completed",
+            }))
+            .expect("job"),
+        ));
+
+        // The round the worker was planned on, then the park that the
+        // caller performs the instant the worker is spawned.
+        let g0 = Daemon::record_generation(&job.lock_ok());
+        let gen0 = Some(g0);
+        job.lock_ok().move_seq += 1;
+        assert!(
+            !Daemon::same_generation(&job.lock_ok(), gen0),
+            "precondition: a park makes the PAIR differ"
+        );
+        assert_eq!(
+            job.lock_ok().retries,
+            g0.0,
+            "precondition: but the retry half is untouched - nobody re-queued this"
+        );
+
+        // The pair fence: refuses, which is the bug when the caller is
+        // the detached worker.
+        d.run_script(&script, &job, gen0, Fence::Generation);
+        assert!(
+            !ran.exists(),
+            "the pair fence cannot tell a park from a retry, so it declines"
+        );
+
+        // The retry-half fence: runs, which is what the user configured
+        // the script for.
+        d.run_script(&script, &job, gen0, Fence::RetriesOnly);
+        assert!(
+            ran.exists(),
+            "an ordinary completion must still run its post-processing script"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// completion notification.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_hook_fan_out_is_fenced_and_describes_the_round_it_was_planned_from() {

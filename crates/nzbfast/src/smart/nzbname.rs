@@ -144,7 +144,17 @@ fn is_furniture(p: &Path, zip_parts: &std::collections::HashSet<PathBuf>) -> boo
 /// says what the file IS) and takes no sidecars with it: only the main
 /// file is renamed.
 fn rename_main_file(file: &Path, base: &str) {
-    let ext = ext_of(file);
+    // The extension it should CARRY. `main_payload` accepts an
+    // extensionless container since #43, but deriving the target from
+    // `ext_of` alone produced "Chosen Name" with no extension - friendly
+    // and still invisible to completed-media discovery and to any
+    // library that scans by extension. This route is mutually exclusive
+    // with auto-rename and disables the later identify rung, so nothing
+    // downstream was going to rescue it (Codex sweep 5, M3).
+    let ext = match ext_of(file) {
+        e if !e.is_empty() => e,
+        _ => super::video_ext(file).unwrap_or_default(),
+    };
     let want = if ext.is_empty() {
         base.to_string()
     } else {

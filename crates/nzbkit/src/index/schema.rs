@@ -589,6 +589,28 @@ fn additive_migrations(db: &Connection) {
            ON releases(grp, pesto_ctr_min) WHERE pesto_ctr_min IS NOT NULL",
         [],
     );
+    // The oracle sampler's seeks, which `idx_rel_posted` could not
+    // serve. They order by `first_posted` but filter `junk < 50`, and
+    // no index carried `junk` - it arrives by ALTER TABLE with no index
+    // of its own - so SQLite walked idx_rel_posted from the drawn
+    // instant doing a rowid table fetch PER ENTRY to test junk, with no
+    // upper bound on the forward statement and no wall-clock budget in
+    // the draw loop. A long recent run of junk rows above the draw
+    // therefore cost one fetch each until three visible rows turned up
+    // or the index ended. The existing plan gate cannot see it: it
+    // forbids the literal string "SCAN releases", and this plans as a
+    // SEARCH with a post-filter, which passes.
+    //
+    // Partial on the same predicate the seeks use, so the walk stays
+    // inside rows that already qualify and junk rows are not in the
+    // index at all. Matches the sampler's WHERE exactly - widen one
+    // without the other and it silently stops being used (Codex sweep
+    // 4, L3 mechanism B).
+    let _ = db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rel_visible_posted
+           ON releases(first_posted) WHERE junk < 50",
+        [],
+    );
     // `spots.release_id` dangled across release deletion: releases.id
     // has no AUTOINCREMENT, so the freed top rowid is reused by the
     // next insert, and a promoted spot silently rebound to an unrelated

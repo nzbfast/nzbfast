@@ -330,6 +330,21 @@ pub(super) fn drain_into_head(r: impl PipeRead, stop: &AtomicBool, head: &Mutex<
     });
 }
 
+/// Which half of a record's generation a script run is fenced on.
+///
+/// Not a bool: `run_script(.., true)` at a call site says nothing about
+/// what is being asked, and this exact distinction has now been got
+/// wrong twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fence {
+    /// The whole `(retries, move_seq)` pair. For callers that run BEFORE
+    /// their own park.
+    Generation,
+    /// The retry half only. For the detached worker, whose caller parks
+    /// the instant it has been spawned.
+    RetriesOnly,
+}
+
 impl Daemon {
     /// M14d: post-processing hook with SABnzbd's contract - the 8
     /// positional args and SAB_* env vars that the existing script
@@ -337,10 +352,64 @@ impl Daemon {
     /// §129 4a adds the NZBGet side of the same ecosystem: NZBPP_* env
     /// and the 93/94/95 exit-code vocabulary, as a documented mapping
     /// (decision 5's rule - map, never silently ignore).
-    pub(super) fn run_script(&self, script: &std::path::Path, job: &Arc<Mutex<Job>>) {
-        let (out_dir, name, cat, status, fail_msg, nzo_id, bytes, failure_link, repaired, shape) = {
+    ///
+    /// `gen0` fences the whole snapshot. The record is read ONCE, and
+    /// the generation is tested under that same hold, because the two
+    /// questions "is this still my job" and "what are its argv and env"
+    /// have to be answered against the same instant. The awaited caller
+    /// (`run_post_job_hooks_before_park`) tested neither: `post_job_owed`
+    /// checks the generation while it builds the plan, then the plan is
+    /// handed to a `spawn_blocking` that reads the record again later,
+    /// and `finalizing` has been cleared by then - so a delete plus a
+    /// Retry landing in between ran the OLD job's script against the NEW
+    /// generation's out_dir and name. The detached caller did test, but
+    /// one statement earlier than the read it was guarding, which leaves
+    /// the same gap a lock apart instead of a task apart. `None` is a
+    /// caller that wants no fence (Codex sweep 4, M4b).
+    ///
+    /// `fence` says WHICH question to ask, and the two callers genuinely
+    /// differ. The awaited one runs before its own `park`, so its
+    /// `move_seq` half is still meaningful against a concurrent delete
+    /// verb and it asks [`Fence::Generation`]. The DETACHED one is
+    /// spawned and then its caller parks immediately - and `park` stamps
+    /// a queue -> history move of its own, bumping `move_seq` - so the
+    /// pair is guaranteed to differ by the time the worker runs, and
+    /// asking it dropped the pp-script of every ordinary completion at
+    /// random. That is the race `retried_since` was written for (see its
+    /// doc block in hooks.rs); passing the whole pair down here
+    /// re-introduced it for the script half alone, which is why the
+    /// worker's own guard passing was not enough (18 Aug sweep).
+    pub(super) fn run_script(
+        &self,
+        script: &std::path::Path,
+        job: &Arc<Mutex<Job>>,
+        gen0: Option<(u32, u64)>,
+        fence: Fence,
+    ) {
+        let Some((
+            out_dir,
+            name,
+            cat,
+            status,
+            fail_msg,
+            nzo_id,
+            bytes,
+            failure_link,
+            repaired,
+            shape,
+        )) = ({
             let j = job.lock_ok();
-            (
+            let still_mine = match fence {
+                Fence::Generation => Self::same_generation(&j, gen0),
+                // Retries only: a finished job being filed into history
+                // is not a change of custody, and this caller's own park
+                // is what moves it.
+                Fence::RetriesOnly => gen0.is_none_or(|(retries, _)| j.retries == retries),
+            };
+            if !still_mine {
+                return;
+            }
+            Some((
                 j.out_dir.clone(),
                 j.name.clone(),
                 j.category.clone(),
@@ -356,7 +425,10 @@ impl Daemon {
                 j.failure_link.clone(),
                 j.bad_blocks.unwrap_or(0) > 0,
                 j.archive_shape.clone(),
-            )
+            ))
+        })
+        else {
+            return;
         };
         let ok = status == "0";
         let mut cmd = std::process::Command::new(script);

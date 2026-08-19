@@ -818,6 +818,119 @@ async fn block_size_probe(
     (None, tried)
 }
 
+/// Does this NZB carry more than one PAR2 recovery SET?
+///
+/// The question the declared-count cap has to ask before it may trust a
+/// volume's name. `block_size_probe` picks the cheapest Main or volume
+/// anywhere in the NZB and hands back a block size with no recovery-set
+/// identity on it (`ProbedSet` has no set field), and `live_volumes`
+/// then takes EVERY `Par2Volume` the NZB carries. On a single-set NZB
+/// that is exactly right. On a two-set one it can size set B's volumes
+/// with set A's block size.
+///
+/// That used to be harmless, and the reason it stopped is worth stating
+/// because a previous review refuted this very case on it. The old
+/// ceiling was the bare `max_recovery_blocks(bytes, block_size)`, and
+/// `measured_verdict`'s rule divides through: `floor(margined / bs) >
+/// sum(floor(V_i / bs))` cancels to a comparison of bytes, so a wrong
+/// block size dropped out on both sides and could not by itself flip a
+/// verdict. The `min(by_bytes, declared)` cap broke that cancellation -
+/// `declared` comes off a filename and does not scale with `bs` at all.
+/// So with a block size smaller than the volumes' true one the deficit
+/// inflates while the ceiling saturates at the declared sum, and a
+/// repairable set can be condemned before it is ever fetched. (The cap
+/// and that refutation landed on branches that were not ancestors of
+/// each other and met in a merge, which is how the two crossed without
+/// anyone reconciling them.)
+///
+/// Reported by name rather than by set identity because carrying set
+/// identity from the probe through the volumes and the payload, and
+/// adjudicating each set on its own, is a far larger change than the
+/// bug warrants. Dropping the cap on multi-set NZBs restores the
+/// scale-invariant behaviour exactly where it was safe, and keeps the
+/// cap's whole benefit on the single-set NZBs that are very nearly all
+/// real posts.
+///
+/// Unparseable par2 names are IGNORED rather than counted as sets of
+/// their own. A name too obfuscated to yield a stem is also too
+/// obfuscated to yield a declared count, so it can never be capped and
+/// must not be allowed to inflate this. Mis-splitting a single-set NZB
+/// would only drop the cap there - it refuses strictly less, never
+/// more - but it would quietly cost the benefit, so it is worth not
+/// doing by accident.
+fn multiple_par2_sets(nzb: &Nzb) -> bool {
+    let mut stems: Vec<String> = Vec::new();
+    // A PAR2 file whose name reduces to nothing at all.
+    let mut anonymous = false;
+    for f in &nzb.files {
+        if !matches!(f.kind(), FileKind::Par2Main | FileKind::Par2Volume) {
+            continue;
+        }
+        let quoted = f.filename_hint().is_some();
+        let name = f.filename_hint().unwrap_or(&f.subject).to_ascii_lowercase();
+        // `.volNNN+MM.par2` -> the stem in front of `.vol`; a bare
+        // `.par2` Main -> the stem in front of that. Same two shapes
+        // `par2_vol_count` reads, so the two cannot disagree about what
+        // a volume of a set is called.
+        let stem = match nzbkit::nzb::par2_vol_suffix(&name) {
+            Some(vol) => &name[..vol],
+            // kind()'s OWN rule for a Main, not `strip_suffix(".par2")`:
+            // `.par2` ending the name or followed by whitespace. The two
+            // have to agree, and with strip_suffix they did not - a Main
+            // classified from an unquoted raw subject ("setb.par2 yEnc
+            // (1/1)") is a Par2Main to kind() and was skipped here, so a
+            // second set represented ONLY by such a Main left cross_set
+            // false and the declared-count cap alive. That cap can
+            // refuse a genuinely repairable post (18 Aug sweep).
+            None => match name.match_indices(".par2").find(|(i, _)| {
+                let rest = &name[i + ".par2".len()..];
+                rest.is_empty() || rest.starts_with(char::is_whitespace)
+            }) {
+                Some((i, _)) => &name[..i],
+                None => continue,
+            },
+        };
+        // A RAW subject carries more than the filename, and the extra is
+        // per-file: "[01/02] - set.par2" and "[02/02] - set.vol000+51.par2"
+        // are one set whose stems differ only by a counter, and comparing
+        // the whole prefix split them and dropped a trustworthy declared
+        // cap. Whitespace is what ends a filename inside a subject - the
+        // rule par2_vol_suffix's own doc cites - so take the last
+        // whitespace-delimited token. Only for raw subjects: a QUOTED
+        // filename may legitimately contain spaces, and trimming those
+        // could merge two genuinely different sets, which is the unsafe
+        // direction (Codex sweep 5, L8).
+        let stem = match quoted {
+            true => stem,
+            false => stem.rsplit(char::is_whitespace).next().unwrap_or(stem),
+        };
+        if stem.is_empty() {
+            // An anonymous set - a bare ".vol-01.par2" with no prefix -
+            // cannot be name-capped itself, which is why it was skipped.
+            // But it can still supply the GLOBAL block-size probe and
+            // cap somebody else's set with a foreign block size, which
+            // is the false-Impossible this detector exists to prevent.
+            // Seeing one alongside any named stem is therefore already
+            // two sets (Codex sweep 5, L2).
+            anonymous = true;
+            if !stems.is_empty() {
+                return true;
+            }
+            continue;
+        }
+        if anonymous {
+            return true;
+        }
+        if !stems.iter().any(|s| s == stem) {
+            stems.push(stem.to_string());
+            if stems.len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Encoded bytes of every recovery volume the sweep did NOT prove absent
 /// - the budget that actually exists on Usenet rather than the one the
 /// NZB promises. Partial availability counts as fully present, the
@@ -828,15 +941,21 @@ async fn block_size_probe(
 /// the rows answers the one question that needs no block size at all -
 /// whether any recovery data is left standing.
 fn live_volumes(nzb: &Nzb, absent_volumes: &[usize]) -> Vec<(u64, Option<usize>)> {
+    // One question for the whole NZB, not one per volume: the cap is
+    // only trustworthy when every volume here belongs to the set whose
+    // block size sized it. See `multiple_par2_sets`.
+    let cross_set = multiple_par2_sets(nzb);
     nzb.files
         .iter()
         .enumerate()
         .filter(|(fi, f)| f.kind() == FileKind::Par2Volume && !absent_volumes.contains(fi))
         .map(|(_, f)| {
-            (
-                f.bytes(),
-                vol_count_from_name(f.filename_hint().unwrap_or(&f.subject)),
-            )
+            let declared = if cross_set {
+                None
+            } else {
+                vol_count_from_name(f.filename_hint().unwrap_or(&f.subject))
+            };
+            (f.bytes(), declared)
         })
         .collect()
 }
@@ -1199,6 +1318,10 @@ pub(crate) async fn check(
     // an abort cannot invent a verdict in any case: the verdict is
     // recomputed from the finished matrix below, and a sweep cut short
     // has strictly fewer articles proved missing everywhere.
+    // Asked once for the whole NZB and shared by both ceilings below,
+    // so the abort and the verdict cannot disagree about whether a
+    // declared count may be trusted.
+    let cross_set_par2 = multiple_par2_sets(&nzb);
     let plan = if fast {
         let abort = if recovery_unknown {
             probed_early
@@ -1206,15 +1329,29 @@ pub(crate) async fn check(
                 .map(|p| p.block_size)
                 .map(|block_size| AbortBudget {
                     // Bytes, because that is what the measured route
-                    // weighs: the share of its file's encoded size that each
-                    // sampled id stands for - the same arithmetic
-                    // `missing_payload_bytes` does below, id by id instead
-                    // of file by file.
+                    // weighs - and the SEGMENT's own declared bytes, which
+                    // is the identical quantity `missing_payload_bytes`
+                    // sums below, id by id.
+                    //
+                    // It used to be `file.bytes() / sampled_of[fi]`: the
+                    // share of the whole file each sampled id stood for.
+                    // That is an EXTRAPOLATION, and it silently broke the
+                    // invariant three doc blocks in this file claim - that
+                    // an abort cannot cost the post its measured verdict.
+                    // At the shipped 10% sample it charged each proven miss
+                    // ten times what the verdict would count, so the sweep
+                    // stopped after ~9 misses on a deficit the verdict then
+                    // recomputed as ~9 MiB and called repairable, where the
+                    // full 100-article sample would have condemned the
+                    // post. Weighing exactly what the verdict sums is the
+                    // whole fix; it can only ever DELAY an abort, never
+                    // manufacture one.
                     weights: file_of
                         .iter()
-                        .map(|&fi| {
-                            if counts_as_deficit(fi) && sampled_of[fi] > 0 {
-                                nzb.files[fi].bytes() as f64 / sampled_of[fi] as f64
+                        .zip(seg_of.iter())
+                        .map(|(&fi, &si)| {
+                            if counts_as_deficit(fi) {
+                                nzb.files[fi].segments[si].bytes as f64
                             } else {
                                 0.0
                             }
@@ -1240,8 +1377,15 @@ pub(crate) async fn check(
                                 // caps it - the two ceilings must agree
                                 // or the abort could stand down on a
                                 // budget the verdict then reads larger.
+                                // Which means this must decline the cap
+                                // on the same condition `live_volumes`
+                                // declines it, or they disagree in the
+                                // one case that matters.
                                 let by_bytes =
                                     nzbkit::par2::max_recovery_blocks(f.bytes(), block_size);
+                                if cross_set_par2 {
+                                    return by_bytes;
+                                }
                                 match vol_count_from_name(f.filename_hint().unwrap_or(&f.subject)) {
                                     Some(n) => by_bytes.min(n as u64),
                                     None => by_bytes,
@@ -1260,11 +1404,14 @@ pub(crate) async fn check(
             // `block_size_could_condemn` makes after the sweep, so a
             // stand-down cannot cost the post its measured verdict.
             Some(AbortBudget {
+                // Segment bytes, not a file-wide share - see the twin
+                // above for why the extrapolated form was wrong.
                 weights: file_of
                     .iter()
-                    .map(|&fi| {
-                        if counts_as_deficit(fi) && sampled_of[fi] > 0 {
-                            nzb.files[fi].bytes() as f64 / sampled_of[fi] as f64
+                    .zip(seg_of.iter())
+                    .map(|(&fi, &si)| {
+                        if counts_as_deficit(fi) {
+                            nzb.files[fi].segments[si].bytes as f64
                         } else {
                             0.0
                         }

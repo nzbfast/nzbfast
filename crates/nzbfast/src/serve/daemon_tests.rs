@@ -2184,8 +2184,26 @@ fn a_lane_tail_never_parks_a_record_that_was_retried_out_from_under_it() {
             "the retry put it back in the queue"
         );
 
+        // The retry registers its custody the moment it starts.
+        let hid = || "nzo-parkgen-1".to_string();
+        d.hub.activity.lock_ok().insert(hid(), "downloading");
+        let sc = Arc::new(crate::repair::SideCancel::new());
+        d.hub.tail_cancel.lock_ok().insert(hid(), sc);
+
         // NOW the old lane tail finishes and parks. It must decline.
         d.park_gen(job.clone(), Some(gen0));
+
+        // Codex sweep 5, M5: the stale branch dropped both maps
+        // unconditionally, so a delayed old tail stripped the LIVE
+        // retry's entries - see release_custody_if_unclaimed.
+        assert!(
+            d.hub.activity.lock_ok().contains_key("nzo-parkgen-1"),
+            "the stale tail took the live retry's activity token"
+        );
+        assert!(
+            d.hub.tail_cancel.lock_ok().contains_key("nzo-parkgen-1"),
+            "the stale tail took the retry's tail-cancel handle"
+        );
         assert!(
             d.queue
                 .lock_ok()
@@ -2222,6 +2240,77 @@ fn a_lane_tail_never_parks_a_record_that_was_retried_out_from_under_it() {
 /// The tombstone two lines below was already re-read live for exactly
 /// this reason. The generation was not. Driven through PARK_GEN_BARRIER
 /// because the window is zero-width without a slow filesystem.
+/// M4c: the same stale tail must not strip the RETRY's custody entries.
+///
+/// `park_gen`'s generation re-read protects the terminal branches, and
+/// its own comment says it returns "WITHOUT touching the two custody
+/// maps, which is the one way it differs from the check at the top ...
+/// a remove() would take the live retry's activity row out of the queue
+/// - the exact damage this guard exists to prevent". The two removes
+/// sat ABOVE that re-read, so the guard could not guard them: by the
+/// time it returned, the damage was already done and the early return
+/// merely skipped undoing it. `remove_job_files` runs immediately
+/// before, unlocked and unbounded on a slow share, which is the window.
+#[test]
+fn a_stale_lane_tail_leaves_the_retrys_custody_entries_alone() {
+    with_daemon("park-generation-custody", |d| {
+        let out = d.out_dir().join("Custody.Release");
+        std::fs::create_dir_all(&out).expect("payload dir");
+        let job = jv(
+            "nzo-custody-1",
+            "Custody.Release",
+            serde_json::json!({ "out_dir": out.to_string_lossy() }),
+        );
+        let gen0 = Daemon::record_generation(&job.lock_ok());
+        d.history.lock_ok().push(job.clone());
+        {
+            let mut g = job.lock_ok();
+            g.state = JobState::Failed;
+            g.fail_message = "deleted from the queue".into();
+            g.finished_unix = Some(1);
+            g.delete_status = "MANUAL".into();
+        }
+
+        let open = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() =
+            Some(("nzo-custody-1".to_string(), open.clone(), release.clone()));
+
+        // Registered BEFORE the tail runs, and deliberately not
+        // re-registered at the barrier. The barrier sits AFTER the point
+        // the removes used to occupy, so an entry written at the barrier
+        // survives either way and proves nothing - the first cut of this
+        // test did exactly that and passed against the unfixed code.
+        // Both maps are keyed by job id alone and the new generation
+        // reuses that key, so an entry standing across the window is
+        // precisely what the retry's own registration looks like here.
+        d.hub
+            .activity
+            .lock_ok()
+            .insert("nzo-custody-1".to_string(), "preflight");
+
+        let d2 = d.clone();
+        let job2 = job.clone();
+        let tail = std::thread::spawn(move || d2.park_gen(job2, Some(gen0)));
+
+        // Inside the window: the retry lands, so the tail is now stale.
+        open.wait();
+        assert!(
+            d.retry("nzo-custody-1"),
+            "the filed delete row is retryable"
+        );
+        release.wait();
+        tail.join().expect("park tail");
+        *super::daemon_park::PARK_GEN_BARRIER.lock_ok() = None;
+
+        assert_eq!(
+            d.hub.activity.lock_ok().get("nzo-custody-1").copied(),
+            Some("preflight"),
+            "the stale tail removed the live retry's activity row"
+        );
+    });
+}
+
 #[test]
 fn a_lane_tail_declines_a_retry_that_lands_while_it_is_deleting_files() {
     with_daemon("park-generation-window", |d| {

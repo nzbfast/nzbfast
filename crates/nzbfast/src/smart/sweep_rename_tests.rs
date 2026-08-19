@@ -1676,3 +1676,186 @@ fn name_password_conventions() {
     assert_eq!(name_password("Plain.Release.2020.1080p"), None);
     assert_eq!(name_password("Rel{}"), None); // empty braces = nothing
 }
+
+/// Twelve bytes of Matroska: the EBML magic plus enough padding that a
+/// head read of a real container's length succeeds. Body content is
+/// irrelevant - every path under test sniffs the head and nothing else.
+fn mkv_bytes() -> Vec<u8> {
+    let mut v = vec![0x1A, 0x45, 0xDF, 0xA3];
+    v.extend_from_slice(&[0u8; 64]);
+    v
+}
+
+/// Issue #43, the reporter's exact shape: an indexer that obfuscates
+/// the filenames INSIDE the NZB posts the feature as a bare hash with
+/// no extension at all. The PAR2 set on that report covered only the
+/// NFO, so PAR2 deobfuscation named the NFO and had nothing to say
+/// about the feature - which then reached `tv_rename` still nameless
+/// and was skipped, because an empty extension is not in `VIDEO_EXTS`.
+///
+/// The release name was never in doubt: it named the directory
+/// correctly the whole time.
+#[test]
+fn an_extensionless_obfuscated_episode_is_renamed_from_the_release() {
+    let root = scratch("issue43-tv");
+    let stem = "Reacher.S04E03.GERMAN.DL.1080P.WEB.H264-WAYNE";
+    let out = root.join("job");
+    std::fs::create_dir_all(&out).unwrap();
+    let hash = "86d19367bf4e808ece4c08397985233152af296813a8";
+    std::fs::write(out.join(hash), mkv_bytes()).unwrap();
+
+    assert_eq!(
+        tv_rename(&out, stem, "", &EpisodeTitles::default()),
+        1,
+        "the feature is renamed, not skipped for having no extension"
+    );
+    let filed = out.join("Reacher - S04E03.mkv");
+    assert!(
+        filed.is_file(),
+        "expected {filed:?}, dir holds {:?}",
+        std::fs::read_dir(&out)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(!out.join(hash).exists(), "the hash name is gone");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same payload shape down the movie / no-kind arm, which reaches
+/// the release name through `rename_obfuscated_video`. The extension
+/// has to come from the BYTES: taking it from the (empty) on-disk one
+/// produced a trailing-dot name that no player would open.
+#[test]
+fn an_extensionless_obfuscated_feature_takes_the_release_name_and_a_real_extension() {
+    let out = &scratch("issue43-movie");
+    let rel = "Example.Movie.2024.1080p.BluRay.x264-GRP";
+    let hash = "0f3a91c4bd77e25a8c1b60de4f2a9917";
+    std::fs::write(out.join(hash), mkv_bytes()).unwrap();
+    std::fs::write(out.join(format!("{hash}.en.srt")), b"subs").unwrap();
+
+    assert!(rename_obfuscated_video(out, rel));
+    assert!(
+        out.join(format!("{rel}.mkv")).exists(),
+        "sniffed .mkv, not a trailing dot"
+    );
+    assert!(
+        out.join(format!("{rel}.en.srt")).exists(),
+        "the sidecar still follows a stem that never had an extension"
+    );
+    assert!(!out.join(hash).exists());
+}
+
+/// The guard that keeps this from being a licence to sniff everything.
+/// A NAMED extension is authoritative: a file called `.nfo` or `.txt`
+/// is not a video however its bytes open, so no rename pass may claim
+/// it. Only a file naming NOTHING gets the magic.
+#[test]
+fn a_named_extension_is_never_second_guessed_by_the_sniff() {
+    let out = &scratch("issue43-named");
+    // Matroska bytes wearing a .nfo name: still not the feature.
+    std::fs::write(out.join("a3f9c2e1b7d04839.nfo"), mkv_bytes()).unwrap();
+    assert_eq!(
+        nameless_video(out),
+        None,
+        "a named non-video extension is not sniffed into being a video"
+    );
+    assert!(!rename_obfuscated_video(
+        out,
+        "Example.Movie.2024.1080p.BluRay.x264-GRP"
+    ));
+    assert!(out.join("a3f9c2e1b7d04839.nfo").exists());
+
+    // And an extensionless file that is NOT a container stays put too.
+    let out = &scratch("issue43-notvideo");
+    std::fs::write(out.join("b4e0d1a2c3f59687"), b"just some bytes here").unwrap();
+    assert_eq!(nameless_video(out), None);
+}
+
+/// Codex sweep 5, M1/M2/M4: the issue-43 extensionless classifier
+/// reached `tv_rename` and nothing else, so every OTHER naming route
+/// still selected by extension and walked straight past the very file
+/// the job is about.
+///
+/// Each arm below is a route Codex named, driven through its own
+/// function rather than through a fixture with a named `.mkv` - which
+/// is exactly why the original #43 tests missed all three.
+#[test]
+fn every_naming_route_can_see_an_extensionless_feature() {
+    let _steady = trash_globals_steady();
+    let root = scratch("extless");
+    // Real EBML so `video_ext` sniffs it, big enough to beat a sample.
+    let mkv = |n: usize| {
+        let mut v = vec![0x1A, 0x45, 0xDF, 0xA3];
+        v.extend(std::iter::repeat_n(0u8, n));
+        v
+    };
+
+    // --- M1: season filing must give it the canonical episode NAME ---
+    let out = root.join("job1");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("9f2c1ab7d0"), mkv(4096)).unwrap();
+    let dest = tv_organize(
+        &root.join("tv"),
+        "Some Show S01E02 1080p WEB-GRP",
+        &out,
+        "",
+        &EpisodeTitles::default(),
+    )
+    .expect("filed");
+    assert!(
+        dest.join("Some Show - S01E02.mkv").exists(),
+        "an extensionless episode must arrive in the shared season folder \
+         under the canonical name, or Play and delete cannot own it; got {:?}",
+        std::fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // --- M2: the ordinary movie arm must rename the FILE, not just the folder ---
+    let mov = root.join("Some.Movie.2019.1080p-GRP");
+    std::fs::create_dir_all(&mov).unwrap();
+    std::fs::write(mov.join("a1b2c3d4e5"), mkv(4096)).unwrap();
+    let moved = rename_movie(&root, &mov, "Some Movie (2019)").expect("renamed dir");
+    assert!(
+        moved.join("Some Movie (2019).mkv").exists(),
+        "the movie route renamed the folder and left the feature under its hash; got {:?}",
+        std::fs::read_dir(&moved)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // --- M4: a nameless SAMPLE must not win the episode name ---
+    let two = root.join("job2");
+    std::fs::create_dir_all(&two).unwrap();
+    // Written sample-first so read_dir order favours the wrong file on
+    // any filesystem that preserves creation order.
+    std::fs::write(two.join("sample"), mkv(64)).unwrap();
+    std::fs::write(two.join("ff00ee11dd"), mkv(8192)).unwrap();
+    assert_eq!(
+        tv_rename(
+            &two,
+            "Some Show S01E03 1080p WEB-GRP",
+            "",
+            &EpisodeTitles::default()
+        ),
+        1,
+        "exactly one file may take the canonical name"
+    );
+    let named = two.join("Some Show - S01E03.mkv");
+    assert!(named.exists(), "the feature must be the one that got named");
+    assert_eq!(
+        std::fs::metadata(&named).unwrap().len(),
+        mkv(8192).len() as u64,
+        "the FEATURE took the episode name, not the sample"
+    );
+    assert!(
+        two.join("sample").exists(),
+        "the sample keeps its own name rather than being renamed"
+    );
+}

@@ -564,6 +564,14 @@ pub struct Daemon {
     /// poll never re-reads the file. Seeded at spawn, updated on every
     /// raise/clear.
     pub shaped_hosts: Mutex<std::collections::HashMap<String, crate::conntune::Shaped>>,
+    /// Hosts this DAEMON SESSION has seen refuse us connections, and
+    /// the ceiling each granted; see [`crate::conntune::Capped`]. Same
+    /// shape and reasoning as `last_refusals` below: the pool's gauges
+    /// are per JOB and the number outlives the job that measured it, so
+    /// the next download says "capped at 38" from its first second
+    /// instead of rediscovering a cap it already knew. Session, not
+    /// lifetime - that ledger is in conntune.json, shown in Settings.
+    pub capped_hosts: Mutex<std::collections::HashMap<String, crate::conntune::Capped>>,
     /// Leave adult titles out of the poster wall and the release list
     /// (settings key `wall_hide_adult`, default ON).
     ///
@@ -1875,12 +1883,12 @@ pub struct ServerRefusal {
     /// True when retrying cannot help (a bad credential); false when the
     /// account is fine and the server is simply at a connection or IP cap.
     pub permanent: bool,
-    /// The server's own status line, verbatim. Not paraphrased on
-    /// purpose: "max simultaneous IP addresses reached" tells the user
-    /// what to do and our summary of it would not.
+    /// WHERE the account is used from, not its socket count (M9).
+    pub source_ips: bool,
+    /// The server's own status line, verbatim - a paraphrase would lose
+    /// the words that tell the user what to do.
     pub line: String,
-    /// Unix seconds when it was last seen.
-    pub at: i64,
+    pub at: i64, // unix seconds, last seen
 }
 
 /// What the scan loop is doing right now - the shared counter is bumped

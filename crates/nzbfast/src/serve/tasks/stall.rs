@@ -103,6 +103,72 @@ impl StallTracker {
     }
 }
 
+/// Copy this job's observed connection ceilings somewhere that outlives
+/// the pool, and bank them in the lifetime ledger.
+///
+/// The same reasoning as the refusal copy above, one number further on:
+/// the Providers row reads the ceiling from the live pool, which is gone
+/// the moment the queue drains, and the whole point of the number is
+/// that it survives to be read. Sampled here rather than in the stats
+/// handler because a headless run has no dashboard polling it - and the
+/// Giganews day this feature exists for was headless for most of its
+/// length.
+///
+/// Only ever off a gauge a CAPACITY refusal wrote (`capped_since` is
+/// the pool's own gate): nothing here compares `connected` against
+/// `budget`, because every idle provider is under its budget and idle
+/// must never be shown as refused.
+///
+/// The session map is max-merged, so it can be folded at any cadence
+/// and from more than one caller; `note_capped` writes the disk ledger
+/// only when the day or the ceiling actually moves, so a tick a second
+/// for the length of a download is not a disk write a second.
+///
+/// Returns what the CALLER must bank on disk - (host, ceiling) per
+/// capped provider. Nothing here touches the filesystem, so no pool
+/// mutex is held across one.
+#[cfg(test)]
+pub(in crate::serve) fn fold_caps_for_test(d: &Arc<Daemon>) -> Vec<(String, usize)> {
+    fold_caps(d)
+}
+
+fn fold_caps(d: &Arc<Daemon>) -> Vec<(String, usize)> {
+    let live = d.hub.pool_live.lock_ok().clone();
+    let Some(l) = live else { return Vec::new() };
+    let mut seen = d.capped_hosts.lock_ok();
+    let mut out = Vec::new();
+    for s in &l.servers {
+        let since = s.capped_since.load(Ordering::Relaxed);
+        if since == 0 {
+            continue;
+        }
+        let granted = s.granted_hi.load(Ordering::Relaxed);
+        let e = seen.entry(s.host.clone()).or_default();
+        // First refusal of the SESSION wins, not of the job: the row's
+        // "since" is how long this daemon has been capped, and a second
+        // job restarting the clock would say the cap was minutes old
+        // when it had been hours.
+        if e.since == 0 {
+            e.since = since;
+        }
+        e.granted_hi = e.granted_hi.max(granted);
+        e.capped_at = e.capped_at.max(s.capped_at.load(Ordering::Relaxed));
+        // Bank the EPISODE, not the level. This gauge is sticky and the
+        // watchdog re-reads it every tick, so emitting on every read
+        // stamped today's date on a refusal that happened days ago - an
+        // idle daemon could turn one Monday event into "capped on 30 of
+        // the last 30 days", which is exactly the sentence meant to be
+        // evidence for a provider (Codex sweep 5, M7). `since` is
+        // first-write-wins per episode, so it identifies one.
+        if e.banked == since {
+            continue;
+        }
+        e.banked = since;
+        out.push((s.host.clone(), granted));
+    }
+    out
+}
+
 /// One watchdog tick's OBSERVATION half: copy any provider refusal
 /// somewhere that outlives the pool, warn once per server-outage
 /// episode, and open/clear the transfer-stall episode for the active
@@ -179,6 +245,7 @@ fn observe_transfer_and_outages(
                         s.host.clone(),
                         ServerRefusal {
                             permanent: r.permanent,
+                            source_ips: r.source_ips,
                             line: r.line.clone(),
                             at: unix_now(),
                         },
@@ -190,6 +257,16 @@ fn observe_transfer_and_outages(
                 }
             }
         }
+    }
+    // Deliberately NOT inside the block above, and `fold_caps` clones
+    // the Arc out before it merges: banking a ceiling in the lifetime
+    // ledger is a read-modify-write of conntune.json, and holding
+    // `pool_live` - which the fetch path and every stats poll take -
+    // across a disk write is how a mutex becomes a wedge. This runs on
+    // the watchdog's 1-5 s tick and writes only when the day or the
+    // ceiling has actually moved.
+    for (host, granted) in fold_caps(d) {
+        crate::conntune::note_capped(&d.cfg_path, &host, granted, unix_now().max(0) as u64);
     }
     // Servers granting nothing right now. The `warn!` below
     // is the first thing anywhere that says a provider is

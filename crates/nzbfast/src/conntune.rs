@@ -368,7 +368,58 @@ pub struct Shaped {
     pub ref_per_conn_bps: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A provider's connection cap as this DAEMON SESSION has seen it -
+/// the row's window (see [`CapSeen`] for the lifetime one).
+///
+/// Session, not lifetime, on purpose: a cap Giganews lifts next week
+/// must not haunt the Providers row for months. A row that lies is
+/// worse than a row that is quiet.
+///
+/// In memory only. It describes this daemon's run, and the first
+/// capacity refusal of the next run rebuilds it within seconds.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Capped {
+    /// The most sessions this provider was serving us at the moment it
+    /// refused another - the ceiling it actually grants.
+    pub granted_hi: usize,
+    /// The connection count we were asking for when it refused.
+    pub capped_at: usize,
+    /// Unix ms of the first refusal this session.
+    pub since: u64,
+    /// The episode already written to the lifetime ledger, as its
+    /// `capped_since` stamp. The watchdog re-reads a STICKY gauge every
+    /// tick, so banking on every read turned one Monday refusal on an
+    /// idle daemon into a 30-of-30-day support record. Banking an
+    /// EPISODE once is the fix (Codex sweep 5, M7).
+    pub banked: u64,
+}
+
+/// The LIFETIME cap ledger for one host: "capped on 14 of the last 20
+/// days" is evidence for a support ticket, which is a different job
+/// from the row's, and it belongs where somebody has gone looking for
+/// it rather than on the card everybody sees.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapSeen {
+    /// The largest ceiling ever observed - the best this account has
+    /// been given.
+    pub granted_hi: usize,
+    /// The smallest, which is the number a support ticket is about.
+    pub granted_lo: usize,
+    /// Unix secs first and last observed.
+    pub first: u64,
+    pub last: u64,
+    /// Days on which this host capped us, as whole days since the unix
+    /// epoch (UTC - a support window of weeks does not care which side
+    /// of local midnight a refusal landed). Ascending, distinct,
+    /// trimmed to the most recent [`CAP_DAYS`].
+    pub days: Vec<u32>,
+}
+
+/// How much of the cap ledger is kept. A month is long enough to show a
+/// pattern to a provider and short enough that the file cannot grow.
+pub const CAP_DAYS: usize = 30;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tuned {
     /// Recommended connection count (smallest reaching ≥90% of the
     /// ladder's peak rate).
@@ -437,6 +488,11 @@ pub struct Tuned {
     /// The decay flag; see [`Shaped`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shaped: Option<Shaped>,
+    /// The lifetime cap ledger; see [`CapSeen`]. Written only by
+    /// [`note_capped`], and only ever off a capacity-classified auth
+    /// refusal from this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capped: Option<CapSeen>,
 }
 
 /// The connection ceiling a job would actually hand this server: the
@@ -720,6 +776,7 @@ pub fn update_bucket(config: &Path, host: &str, idx: u8, u: BucketUpdate) {
         pending: None,
         buckets: Vec::new(),
         shaped: None,
+        capped: None,
     });
     let b = bucket_entry(&mut t.buckets, idx);
     // Evidence does not accumulate across an expiry gap: a bucket
@@ -772,6 +829,63 @@ pub fn set_shaped(config: &Path, host: &str, shaped: Option<Shaped>, reprobe: bo
     save(config, &map);
 }
 
+/// Bank one host's observed connection ceiling in the lifetime ledger.
+///
+/// `granted` is the sessions the provider was serving us when it
+/// refused another; `now` is unix seconds. Called only off a
+/// CAPACITY-classified refusal - never off `connected < configured`,
+/// which is true of every idle provider and would fill this ledger with
+/// days nothing was wrong.
+///
+/// Returns true when the file was written. A no-op when the day is
+/// already recorded and the ceiling has not moved, because the caller
+/// runs on a 30 s tick for the whole length of a download and a
+/// read-modify-write of conntune.json per tick is a disk write per tick
+/// for a fact that changes once.
+///
+/// Creates the host's entry if no ladder has ever run against it: a
+/// provider capping us is exactly the kind that never got a clean
+/// probe. The synthetic entry carries `connections: 0`, which every
+/// consumer of a knee already reads as "nothing measured" - the probe
+/// scheduler's verdict for it is identical to the one it gives a host
+/// with no entry at all.
+pub fn note_capped(config: &Path, host: &str, granted: usize, now: u64) -> bool {
+    let _g = LOCK.lock_ok();
+    let mut map = load(config);
+    let t = map.entry(host.to_string()).or_insert_with(|| Tuned {
+        v: SCHEMA,
+        ..Default::default()
+    });
+    let day = (now / 86_400) as u32;
+    let c = t.capped.get_or_insert_with(|| CapSeen {
+        granted_hi: granted,
+        granted_lo: granted,
+        first: now,
+        ..Default::default()
+    });
+    let fresh_day = c.days.last() != Some(&day);
+    let moved = granted > c.granted_hi || granted < c.granted_lo;
+    if !fresh_day && !moved {
+        return false;
+    }
+    c.granted_hi = c.granted_hi.max(granted);
+    // `min` against a zeroed low would pin every ledger at 0 forever,
+    // and 0 is a real observation (the account is in use elsewhere, so
+    // we were granted nothing at all) - seed it instead of comparing.
+    c.granted_lo = match c.days.is_empty() {
+        true => granted,
+        false => c.granted_lo.min(granted),
+    };
+    c.last = now;
+    if fresh_day {
+        c.days.push(day);
+        let over = c.days.len().saturating_sub(CAP_DAYS);
+        c.days.drain(..over);
+    }
+    save(config, &map);
+    true
+}
+
 /// What actually gets stored, given what was already there.
 ///
 /// A SUSPECT measurement must never replace an APPLIED one. Jobs skip
@@ -809,6 +923,10 @@ fn reconcile(prev: Option<&Tuned>, new: Tuned) -> Tuned {
             // the knee says nothing about the buckets' live evidence.
             buckets: p.buckets.clone(),
             shaped: p.shaped.clone(),
+            // A ladder verdict says nothing about the cap ledger
+            // either: it is a record of what the PROVIDER refused, and
+            // only a refusal may write it.
+            capped: p.capped.clone(),
         },
         _ => {
             let mut t = new;
@@ -824,6 +942,11 @@ fn reconcile(prev: Option<&Tuned>, new: Tuned) -> Tuned {
                 // confirmed by a ladder, becomes the new normal. A
                 // suspect one decided nothing and clears nothing.
                 t.shaped = if t.suspect { p.shaped.clone() } else { None };
+                // The cap ledger is the provider's record, not the
+                // ladder's: a fresh knee neither proves nor disproves
+                // that the account was refused connections last week,
+                // so it carries across unchanged.
+                t.capped = p.capped.clone();
             }
             t
         }
@@ -1267,6 +1390,7 @@ mod tests {
             pending: None,
             buckets: Vec::new(),
             shaped: None,
+            capped: None,
             limit: 24,
             v: SCHEMA,
         }
@@ -1375,6 +1499,7 @@ mod tests {
             pending: None,
             buckets: Vec::new(),
             shaped: None,
+            capped: None,
         }
     }
 
@@ -1656,6 +1781,91 @@ mod tests {
         assert_eq!(k.connections, 16);
     }
 
+    /// The lifetime cap ledger: one row per DAY, the worst ceiling
+    /// kept, and no disk write when nothing moved.
+    ///
+    /// The last part is not tidiness. The caller folds on a watchdog
+    /// tick for the whole length of a download, so a ledger that
+    /// rewrote itself on every call would be a read-modify-write of
+    /// conntune.json a second, forever, for a fact that changes once a
+    /// day.
+    #[test]
+    fn cap_ledger_banks_a_day_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-capledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        let day = 20_000u64 * 86_400;
+        // First sighting creates the host entry outright: a provider
+        // that caps us is exactly the kind no clean ladder ever ran
+        // against.
+        assert!(note_capped(&cfg, "gn.example.com", 38, day + 3_600));
+        // Same day, same ceiling - nothing to say, nothing written.
+        assert!(!note_capped(&cfg, "gn.example.com", 38, day + 7_200));
+        // A WORSE ceiling the same day is news even though the day is not.
+        assert!(note_capped(&cfg, "gn.example.com", 21, day + 9_000));
+        assert!(note_capped(&cfg, "gn.example.com", 40, day + 86_400));
+
+        let c = load(&cfg)["gn.example.com"].capped.clone().expect("ledger");
+        assert_eq!(
+            c.days,
+            vec![20_000, 20_001],
+            "one row per day, not per call"
+        );
+        assert_eq!(c.granted_hi, 40);
+        // The low is the number a support ticket is about.
+        assert_eq!(c.granted_lo, 21);
+        assert_eq!(c.first, day + 3_600);
+        assert_eq!(c.last, day + 86_400);
+        // The knee half stays empty, which every knee consumer already
+        // reads as "nothing measured" - the ledger must not fabricate
+        // a connection count nothing ever probed.
+        assert_eq!(load(&cfg)["gn.example.com"].connections, 0);
+
+        // The window is bounded, oldest dropped.
+        for d in 2..40u64 {
+            note_capped(&cfg, "gn.example.com", 38, day + d * 86_400);
+        }
+        let c = load(&cfg)["gn.example.com"].capped.clone().expect("ledger");
+        assert_eq!(c.days.len(), CAP_DAYS);
+        assert_eq!(*c.days.last().unwrap(), 20_039);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A ladder verdict says nothing about what the provider refused
+    /// last week, so it must not erase the ledger on its way past.
+    #[test]
+    fn a_ladder_result_does_not_wipe_the_cap_ledger() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-capkeep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        note_capped(&cfg, "h", 38, 20_000 * 86_400);
+        record(
+            &cfg,
+            "h",
+            Tuned {
+                connections: 12,
+                granted: 12,
+                asked: 16,
+                gbps: 4.0,
+                checked: 9,
+                source: "auto".into(),
+                limit: 20,
+                v: SCHEMA,
+                ..Default::default()
+            },
+        );
+        let t = &load(&cfg)["h"];
+        assert_eq!(t.connections, 12, "the ladder result landed");
+        assert_eq!(
+            t.capped.as_ref().map(|c| c.granted_hi),
+            Some(38),
+            "the ladder wiped a record only a refusal may write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn record_and_load_round_trip() {
         let dir = std::env::temp_dir().join(format!("nzbfast-conntune-{}", std::process::id()));
@@ -1679,6 +1889,7 @@ mod tests {
                 pending: None,
                 buckets: Vec::new(),
                 shaped: None,
+                capped: None,
             },
         );
         record(
@@ -1697,6 +1908,7 @@ mod tests {
                 pending: None,
                 buckets: Vec::new(),
                 shaped: None,
+                capped: None,
             },
         );
         let m = load(&cfg);
@@ -1913,6 +2125,7 @@ mod tests {
             pending: None,
             buckets: Vec::new(),
             shaped: None,
+            capped: None,
         };
         record(&cfg, "near.example.com", mk(20, 24)); // 20 of 24: agrees
         record(&cfg, "low.example.com", mk(6, 24)); // already judged at 24

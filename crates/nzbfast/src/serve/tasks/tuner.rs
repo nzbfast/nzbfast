@@ -572,10 +572,16 @@ pub(in crate::serve) fn update_tune_hint(
         .copied()
         .filter(|s| s.may_spend_on_measurement())
         .collect();
-    if expected_bps > 0
-        && !measured.is_empty()
-        && measured.iter().all(|s| tuned.contains_key(&s.host))
-    {
+    // Key presence is NOT proof of measurement. `note_capped` creates an
+    // entry for a host that has never run a ladder - the whole point is
+    // to remember a cap on a provider that never got a clean probe - and
+    // it carries `connections: 0`, which every knee consumer already
+    // reads as "nothing measured". Treating it as measured summed its
+    // zero Gbps, so the hint could claim the fleet covers half the line
+    // and recommend a faster provider on the strength of a host nobody
+    // had timed (Codex sweep 5, M8).
+    let is_measured = |h: &str| tuned.get(h).is_some_and(|t| t.connections > 0);
+    if expected_bps > 0 && !measured.is_empty() && measured.iter().all(|s| is_measured(&s.host)) {
         let cap_bytes: f64 = measured.iter().map(|s| tuned[&s.host].gbps).sum::<f64>() * 1e9 / 8.0;
         let pct = (100.0 * cap_bytes / expected_bps as f64).round() as u64;
         if cap_bytes > expected_bps as f64 * 1.1 {
@@ -1075,6 +1081,7 @@ pub(in crate::serve) fn spawn_auto_connections(daemon: &Arc<Daemon>, config: &st
                             pending: None,
                             buckets: Vec::new(),
                             shaped: None,
+                            capped: None,
                         },
                     );
                     mirror_shaped(&d, &cfg_path, &srv.host);

@@ -1016,6 +1016,7 @@ fn m_connladder(
                                                 pending: None,
                                                 buckets: Vec::new(),
                                                 shaped: None,
+                                                capped: None,
                                                 limit: ceiling,
                                                 v: crate::conntune::SCHEMA,
                                             },

@@ -209,6 +209,9 @@ pub(super) async fn dial_session(
             {
                 *sl.refusal.lock_ok() = Some(Refusal {
                     permanent: kind == crate::nntp::AuthRefusal::Permanent,
+                    source_ips: kind == crate::nntp::AuthRefusal::Capacity
+                        && crate::nntp::capacity_limit(&line)
+                            == crate::nntp::CapacityLimit::SourceIps,
                     line: line.clone(),
                 });
                 // Same fact on the LIVE outage gauge, so the queue row
@@ -310,7 +313,27 @@ pub(super) async fn dial_session(
                     // right now - that count IS the observed accept
                     // cap, and it is what widens the flap clamp past
                     // one keeper.
-                    shared.note_cap_bounce(ctx.idx);
+                    // `held` is the ONE sample taken above, deliberately
+                    // not re-read (Codex sweep 5, L7).
+                    shared.note_cap_bounce(ctx.idx, held);
+                    // ...and price it for the person, not just for the
+                    // clamp: the sessions we hold at a refusal ARE the
+                    // ceiling this provider grants, and until now that
+                    // number reached nothing but the log.
+                    // ...and price it for the person, but ONLY when the
+                    // refusal is about connection count. A
+                    // simultaneous-IP limit is about where the account is
+                    // being used from: the sessions we happened to hold
+                    // are incidental, and recording them as the ceiling
+                    // told the user to ask their provider about
+                    // connection tiers when the answer lay elsewhere
+                    // (Codex sweep 5, M9). The clamp above still widens
+                    // either way - backing off is right for both.
+                    if crate::nntp::capacity_limit(&line) == crate::nntp::CapacityLimit::Connections
+                        && let Some(sl) = cfg.live.as_ref().and_then(|l| l.servers.get(ctx.idx))
+                    {
+                        sl.note_cap(held);
+                    }
                     // The account is fine; the server will not give us
                     // ANOTHER session. Retrying at the same connection
                     // count re-provokes exactly the limit being hit, so

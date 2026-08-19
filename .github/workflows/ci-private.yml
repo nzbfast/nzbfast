@@ -425,7 +425,24 @@ jobs:
         # job: clippy compiles the dependency graph to rlib/rmeta exactly
         # as the test build needs it, so the build below reuses that work
         # rather than paying for it twice in two jobs.
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        #
+        # --locked, and it is load-bearing for this whole job, not a
+        # habit: without it cargo will happily RE-RESOLVE a manifest edit
+        # whose Cargo.lock was never staged, so the gate goes green
+        # against a dependency graph that exists on nobody else's disk.
+        # Worse here than elsewhere, because the cache key above hashes
+        # the COMMITTED Cargo.lock (tools/dep-cache-key.py) - artifacts
+        # built from the re-resolution would be banked under the stale
+        # lock's key and handed to every later run. release.yml,
+        # nightly.yml, pr-check.yml, coverage.yml, fuzz-smoke.yml and
+        # provenance-release.yml all pass it already; this file was the
+        # hole, which is how a lock mismatch reached the release
+        # workflow instead of the push that created it.
+        #
+        # Consequence to expect: re-running an OLD commit whose lock
+        # predates a manifest edit now fails where it used to pass. That
+        # is the flag doing its job, not a regression.
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
       # Prebuilt binary pinned by version and checked by SHA256 rather
       # than trusted, same pattern (and rationale) as the cargo-deny
       # step below.
@@ -475,10 +492,16 @@ jobs:
       # 5-8 MINUTES, from serialised `cargo test` timings - `cargo test`
       # runs test BINARIES sequentially while nextest schedules across
       # them. Never cost a nextest job from cargo-test numbers.
+      #
+      # --locked for the reason spelled out at the clippy step: this is
+      # the archive all four shards then run, so if cargo re-resolved an
+      # unstaged manifest edit here the entire Linux suite would pass
+      # against a graph that is not in the repo - and the cache key that
+      # banks it is derived from the committed lock.
       - name: build test archive
         id: archive
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.nextest.outcome == 'success' }}
-        run: cargo nextest archive --workspace --archive-file nextest-archive.tar.zst
+        run: cargo nextest archive --locked --workspace --archive-file nextest-archive.tar.zst
       # `always()`, and immediately after the build - see the restore
       # note above. A failed suite must not cost the next run its
       # dependency artifacts.
@@ -523,8 +546,17 @@ jobs:
       - name: cargo deny
         # The gate this job lost for four days in the 7-10 Aug outage,
         # for being last in the file.
+        #
+        # --locked, same reason as clippy and the archive: an advisory
+        # and license verdict against a graph cargo re-resolved on the
+        # fly does not describe what we ship. Note the POSITION - it
+        # goes before the subcommand. cargo-deny puts its manifest flags
+        # on the top-level parser and does not mark them global, so
+        # `cargo deny check --locked` is an unknown-argument error and
+        # would redden this step outright. Verified against the 0.20.2
+        # tag pinned in the install step above.
         if: ${{ !cancelled() && steps.deny.outcome == 'success' }}
-        run: cargo deny check
+        run: cargo deny --locked check
 
   # The Linux suite, four ways, off `check`'s archive. This job compiles
   # NOTHING: no toolchain step, no cache, no target/ - `cargo-nextest`
@@ -798,11 +830,15 @@ jobs:
       # The Windows half of "build once". Identical expression to the
       # Linux archive step - same `--workspace`, same absent
       # heavy-tests feature - because the two legs must archive the same
-      # test set or one of them is quietly narrower.
+      # test set or one of them is quietly narrower. That includes
+      # --locked: the two legs must build the COMMITTED dependency graph
+      # or one of them is testing a resolution the repo does not
+      # contain, and this leg banks its artifacts under a cache key
+      # derived from that same committed lock.
       - name: build test archive
         id: archive
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.nextest.outcome == 'success' }}
-        run: cargo nextest archive --workspace --archive-file nextest-archive.tar.zst
+        run: cargo nextest archive --locked --workspace --archive-file nextest-archive.tar.zst
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ always() && steps.cache.outputs.cache-hit != 'true' && steps.archive.outcome != 'skipped' }}
         with:
@@ -1010,8 +1046,15 @@ jobs:
       # If you are tempted to add it back: measure the JOB, not the
       # clippy step. The step does get slightly faster; the job does
       # not, because the restore is on the clock too.
+      #
+      # --locked for the reason given at the clippy step in `check`: a
+      # gate that lets cargo re-resolve an unstaged manifest edit is
+      # green about a tree that is not in the repo. This job caches
+      # nothing, so here it buys only the assertion - which is the half
+      # that matters on a lane whose whole job is to lint cfg(windows)
+      # code nobody else compiles.
       - name: clippy (windows-gated code)
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
 
   # The ARM64 gate. `cargo clippy --target` runs in check mode - it
   # never links - so an x64 runner covers aarch64-pc-windows-msvc with
@@ -1070,7 +1113,10 @@ jobs:
           } catch {
             Write-Host "Defender exclusions unavailable, continuing: $($_.Exception.Message)"
           }
+      # --locked, as at every other cargo gate in this file: the graph
+      # this cross-check compiles must be the committed one, because the
+      # committed one is what release.yml builds the ARM64 package from.
       - name: cross-check aarch64-pc-windows-msvc (ARM64 beta target)
         run: |
           rustup target add aarch64-pc-windows-msvc
-          cargo clippy --target aarch64-pc-windows-msvc -p nzbfast -p nzbtray --no-deps -- -D warnings
+          cargo clippy --target aarch64-pc-windows-msvc --locked -p nzbfast -p nzbtray --no-deps -- -D warnings

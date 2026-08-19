@@ -381,6 +381,7 @@ fn tuned(gbps: f64, asked: usize, connections: usize) -> crate::conntune::Tuned 
         pending: None,
         buckets: Vec::new(),
         shaped: None,
+        capped: None,
     }
 }
 
@@ -953,4 +954,42 @@ async fn index_gate_rendezvous_bounds_the_runners_wait() {
     });
     assert!(super::index_gate_rendezvous(&gate, Duration::from_secs(5)).await);
     release.await.unwrap();
+}
+
+/// Codex sweep 5, M7: the cap gauge is STICKY and the watchdog re-reads
+/// it every tick, so banking on every read stamped a fresh date on an
+/// old refusal. An idle daemon could turn one Monday event into "capped
+/// on 30 of the last 30 days" - which is the sentence a user sends their
+/// provider as evidence. One episode banks once.
+#[test]
+fn a_sticky_cap_gauge_banks_one_episode_once() {
+    use crate::serve::tasks::stall::fold_caps_for_test as fold;
+    let now_ms_for_test = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let dir = tdir("capfold");
+    let d = super::super::testutil::test_daemon(&dir);
+    let servers = vec![(srv("s.example", None), nzbkit::pool::PoolConfig::default())];
+    let live = nzbkit::pool::LiveStats::for_servers(&servers);
+    live.servers[0].budget.store(100, Ordering::Relaxed);
+    live.servers[0].note_cap(38);
+    *d.hub.pool_live.lock_ok() = Some(live.clone());
+
+    assert_eq!(fold(&d).len(), 1, "the refusal is banked once");
+    assert!(
+        fold(&d).is_empty(),
+        "and NOT re-banked on the next tick, or an idle daemon invents days"
+    );
+
+    // A genuinely new episode - the gauge cleared and capped again - is
+    // a new event and must be banked. Stamped explicitly rather than via
+    // note_cap: two episodes inside one millisecond would carry the same
+    // `since`, and the identity IS the stamp.
+    live.servers[0]
+        .capped_since
+        .store(now_ms_for_test() + 60_000, Ordering::Relaxed);
+    assert_eq!(fold(&d).len(), 1, "a second episode is a second event");
 }

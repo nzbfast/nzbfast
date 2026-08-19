@@ -419,19 +419,19 @@ async fn flap_keeper_target_follows_observed_cap() {
 
     // Two sessions held when the dial bounced: target 2.
     shared.sessions[0].store(2, Ordering::Release);
-    shared.note_cap_bounce(0);
+    shared.note_cap_bounce(0, shared.sessions[0].load(Ordering::Acquire));
     assert_eq!(shared.flap_keeper_target(0, &servers[0].1), 2);
 
     // A later bounce against ghost-held slots (fewer of OUR
     // sessions live) must not shrink the estimate.
     shared.sessions[0].store(0, Ordering::Release);
-    shared.note_cap_bounce(0);
+    shared.note_cap_bounce(0, shared.sessions[0].load(Ordering::Acquire));
     assert_eq!(shared.flap_keeper_target(0, &servers[0].1), 2);
 
     // The connection budget is a hard ceiling - the account's own
     // limits (and max_source_ips-derived caps) already landed there.
     shared.sessions[0].store(30, Ordering::Release);
-    shared.note_cap_bounce(0);
+    shared.note_cap_bounce(0, shared.sessions[0].load(Ordering::Acquire));
     assert_eq!(shared.flap_keeper_target(0, &servers[0].1), 8);
 
     // Knob off: shipped behavior, one keeper, whatever was seen.

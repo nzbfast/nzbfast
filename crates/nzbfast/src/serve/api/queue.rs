@@ -215,6 +215,36 @@ pub(in crate::serve) fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) 
     true
 }
 
+/// One host's observed connection ceiling, as the dashboard reads it.
+fn cap_json(c: &crate::conntune::Capped) -> Value {
+    json!({"granted_hi": c.granted_hi, "capped_at": c.capped_at, "since": c.since})
+}
+
+/// The running job's view of a provider's ceiling, merged with what
+/// this daemon session already knew.
+///
+/// Both halves are high-waters of the same measurement, so the merge is
+/// a max - and either half can be the fresher one. The pool's is newer
+/// while a job runs and the cap tightens; the session's is newer for
+/// the first seconds of a job, before this provider has been asked for
+/// more than it will give, which is exactly the window the row used to
+/// spend saying "using 12 of 100".
+///
+/// `None` until SOMETHING has heard a capacity refusal from this host.
+fn cap_payload(d: &Daemon, s: &nzbkit::pool::ServerLive) -> Option<Value> {
+    let live = s.capped_since.load(Ordering::Relaxed);
+    let seen = d.capped_hosts.lock_ok().get(&s.host).cloned();
+    if live == 0 {
+        return seen.as_ref().map(cap_json);
+    }
+    let (g0, a0, t0) = seen.map_or((0, 0, u64::MAX), |c| (c.granted_hi, c.capped_at, c.since));
+    Some(json!({
+        "granted_hi": s.granted_hi.load(Ordering::Relaxed).max(g0),
+        "capped_at": s.capped_at.load(Ordering::Relaxed).max(a0),
+        "since": live.min(t0),
+    }))
+}
+
 /// What the NEXT download would open on each configured server.
 ///
 /// The live `servers` list comes from the job pool, so it is empty
@@ -244,6 +274,7 @@ fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Value> {
     let bkt = crate::conntune::bucket_of(crate::conntune::local_hour());
     let now = epoch_secs();
     let shaped = d.shaped_hosts.lock_ok();
+    let capped = d.capped_hosts.lock_ok();
     let global = d.connections.load(Ordering::Relaxed).max(1);
     c.servers
         .iter()
@@ -271,6 +302,10 @@ fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Value> {
                 // under half its usual per-connection rate.
                 "shaped": shaped.get(&s.host).map(|sh| json!({
                     "since": sh.since, "ref_per_conn_bps": sh.ref_per_conn_bps})),
+                // Nothing is downloading, so there is no pool half to
+                // merge: this is purely what the session has already
+                // seen this provider refuse.
+                "capped": capped.get(&s.host).map(cap_json),
             })
         })
         .collect()
@@ -1031,7 +1066,7 @@ fn m_stats(
                             // paying for it on every download
                             // with nothing anywhere saying so.
                             "refused": s.refusal.lock_ok().as_ref().map(|r| {
-                                json!({"permanent": r.permanent, "line": r.line})
+                                json!({"permanent": r.permanent, "source_ips": r.source_ips, "line": r.line})
                             }),
                             // Granting NO sessions right now, and since
                             // when. `connected: 0` says the same about a
@@ -1069,6 +1104,24 @@ fn m_stats(
                             // sustained multi-stretch quorum.
                             "shaped": d.shaped_hosts.lock_ok().get(&s.host).map(|sh| json!({
                                 "since": sh.since, "ref_per_conn_bps": sh.ref_per_conn_bps})),
+                            // The connection ceiling this provider
+                            // actually grants, when it has refused us
+                            // one. `granted_hi` is the most sessions it
+                            // was serving at a refusal, `capped_at` the
+                            // count we were asking for then, and
+                            // `since` the unix ms of the first refusal
+                            // - absent entirely until a
+                            // CAPACITY-classified refusal has been
+                            // heard, so a row can never read a cap off
+                            // an idle provider.
+                            //
+                            // Merged with the DAEMON's session map, not
+                            // read from the pool alone: the pool is
+                            // per-job, and a provider that granted 38
+                            // of 100 during the last download is still
+                            // granting 38 during this one. Max on both
+                            // halves - either can be the fresher.
+                            "capped": cap_payload(d, s),
                         })
                     })
                     .collect()
@@ -1134,7 +1187,7 @@ fn m_stats(
             rows.into_iter()
                 .filter_map(|h| {
                     keep.get(h).map(|r| {
-                        json!({"host": h, "permanent": r.permanent,
+                        json!({"host": h, "permanent": r.permanent, "source_ips": r.source_ips,
                                    "line": r.line, "at": r.at})
                     })
                 })
@@ -2711,6 +2764,10 @@ pub(in crate::serve) fn requeue_category(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "queue_cap_tests.rs"]
+mod cap_payload_tests;
 
 #[cfg(test)]
 mod queue_custody_tests {

@@ -1766,6 +1766,148 @@ async fn a_capacity_refusal_yields_connections_instead_of_hammering() {
     );
 }
 
+/// The Providers card's cap gauge: what a provider ACTUALLY grants.
+///
+/// Giganews granted 38 sessions against a Diamond account provisioned
+/// for 100 (18 Aug 2026). It took a day to find because the only place
+/// the 38 existed was daemon.log - the dashboard row read "using 0 of
+/// 100", the configured number and the live number and neither of the
+/// two that mattered, and when support asked for a screenshot there
+/// was nothing to screenshot.
+///
+/// The mock's `accept_cap` is that shape exactly: two sessions get in,
+/// every further dial bounces off a 502 capacity refusal at the
+/// greeting. `granted_hi` must come out as the sessions the server was
+/// serving when it refused - not as the configured count, and not as
+/// zero.
+///
+/// The mock words its accept cap as a CONNECTION limit, which is what
+/// `accept_cap` models. Since Codex sweep 5 M9 a simultaneous-IP refusal
+/// is deliberately NOT recorded as a connection ceiling - the sessions
+/// held at one are incidental, and calling them the account's cap sends
+/// the user at the wrong remedy - so the wording has to be accurate.
+///
+/// Dials are staggered because a simultaneous fleet races the mock's
+/// live count past its own cap before any accept task checks it (the
+/// note on `payout_flap_breaker_collapses_ip_cap_churn`): with every
+/// dial bouncing, no session is ever held and the honest answer really
+/// is zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capacity_refusal_records_what_the_provider_granted() {
+    use crate::mock::{Chaos, MockServer};
+    const CAP: u64 = 2;
+    const CONNS: usize = 6;
+    let data: Vec<u8> = (0..240_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("cap.bin", &data, 10_000, "gr", &mut articles);
+    let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            accept_cap: Some(CAP),
+            // Slow enough that the whole fleet gets to dial before the
+            // two winners have finished the work. Without it the run is
+            // over in 20 ms, workers 3..6 never dial, nothing bounces,
+            // and the test proves only that a fast job is fast.
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 60_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut server = srv.server_config();
+    server.connections = CONNS as u32;
+    let live = LiveStats::for_servers(&[(server.clone(), PoolConfig::default())]);
+    let cfg = PoolConfig {
+        connections: CONNS,
+        ramp_delay: Duration::from_millis(50),
+        connect_backoff: Duration::from_millis(5),
+        live: Some(live.clone()),
+        ..Default::default()
+    };
+    let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        fetch_all_multi(&[(server, cfg)], reqs, tx),
+    )
+    .await
+    .expect("run hung on a capped server");
+    let seen = tally(&mut rx);
+    assert_exactly_one_outcome_each(&ids, &seen);
+
+    let s = &live.servers[0];
+    // The gate: nothing is claimed until a capacity refusal is heard.
+    // Every idle provider satisfies `connected < configured`, so
+    // arithmetic must never be what sets this.
+    assert!(
+        s.capped_since.load(Ordering::Relaxed) > 0,
+        "a 502 capacity refusal left no cap stamp"
+    );
+    let granted = s.granted_hi.load(Ordering::Relaxed);
+    assert!(
+        granted > 0 && granted as u64 <= CAP,
+        "granted_hi should be the sessions held at the refusal (<= {CAP}), got {granted}"
+    );
+    // And the ask that was refused, which is what makes "capped at 2 of
+    // 6" a sentence rather than a number.
+    assert_eq!(
+        s.capped_at.load(Ordering::Relaxed),
+        CONNS,
+        "capped_at should be the count we were asking for"
+    );
+}
+
+/// The other half of the same rule, stated as a negative: a healthy
+/// server that simply never needs its whole fleet must leave the cap
+/// gauge untouched.
+///
+/// This is the 7 Aug mistake in the shape it would take here. 38
+/// pre-byte-budget rotations painted red fault dots on a flawless 3.3
+/// Gbps run because a deliberate act was counted as a failure; a row
+/// that reads "capped at 4 of 16" off an idle provider would be the
+/// same error with a different gauge, and it would be told on every
+/// download rather than once.
+#[tokio::test]
+async fn an_idle_provider_never_reads_as_capped() {
+    use crate::mock::{Chaos, MockServer};
+    let data: Vec<u8> = (0..30_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("easy.bin", &data, 10_000, "ez", &mut articles);
+    let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+    let srv = MockServer::start(articles, Chaos::default()).await;
+    let mut server = srv.server_config();
+    // Far more connections than there is work for: every one of them
+    // will sit idle, which is precisely the state that must not be
+    // reported as a refusal.
+    server.connections = 16;
+    let live = LiveStats::for_servers(&[(server.clone(), PoolConfig::default())]);
+    let cfg = PoolConfig {
+        connections: 16,
+        live: Some(live.clone()),
+        ..Default::default()
+    };
+    let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
+    let (tx, mut rx) = mpsc::channel(16);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        fetch_all_multi(&[(server, cfg)], reqs, tx),
+    )
+    .await
+    .expect("run hung on a healthy server");
+    let seen = tally(&mut rx);
+    assert_exactly_one_outcome_each(&ids, &seen);
+    let s = &live.servers[0];
+    assert_eq!(
+        s.capped_since.load(Ordering::Relaxed),
+        0,
+        "an idle fleet must not look like a refused one"
+    );
+    assert_eq!(s.granted_hi.load(Ordering::Relaxed), 0);
+}
+
 /// §34: a dead server must not hold the run open after the work is
 /// done. Measured on the bench farm, one dead provider in a
 /// six-server config DOUBLED per-job time (4.1 s vs 2.0 s): the bytes

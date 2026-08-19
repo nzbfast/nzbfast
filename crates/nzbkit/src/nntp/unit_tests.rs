@@ -1224,6 +1224,72 @@ async fn a_refusal_at_the_user_line_is_classified_not_just_reported() {
     }
 }
 
+/// Refusal lines copied VERBATIM off the wire, not paraphrased, because
+/// the classification turns on a provider's exact choice of words and a
+/// tidied-up version of the string is a test of nothing. Giganews's own
+/// line is the reason this test exists: "maximum number of connections"
+/// slipped past both "maximum connections" and "max connections", so a
+/// capacity refusal read as a dead credential and the pool benched a
+/// provider that was working (18 Aug 2026). The account tag in the
+/// line below is redacted - only its SHAPE matters to the matcher.
+#[test]
+fn real_provider_refusal_lines_land_on_the_right_arm() {
+    use crate::nntp::{AuthRefusal, classify_auth_refusal};
+    const CAPACITY: &[&str] = &[
+        "481 (remote) (aucl:gn;gnXXXXXXX) exceeded maximum number of connections per user",
+        "481 max simultaneous IP addresses reached",
+        "502 max number of simultaneous IP addresses reached",
+        "481 Connection limit reached",
+        "502 too many connections",
+    ];
+    for line in CAPACITY {
+        assert_eq!(
+            classify_auth_refusal(line),
+            AuthRefusal::Capacity,
+            "should be a capacity refusal: {line}"
+        );
+    }
+    // The conservative default still has to hold: anything not
+    // recognisably about capacity stays Permanent, because retrying a
+    // bad credential forever is the worse failure.
+    const PERMANENT: &[&str] = &[
+        "481 authentication failed",
+        "481 Invalid username or password",
+        "502 Authentication rejected",
+    ];
+    for line in PERMANENT {
+        assert_eq!(
+            classify_auth_refusal(line),
+            AuthRefusal::Permanent,
+            "should stay permanent: {line}"
+        );
+    }
+
+    // Same control-flow arm, different FACT. Telemetry that reads an
+    // IP-limit refusal as a socket count reports an incidental number as
+    // the account's connection ceiling and offers the wrong remedy
+    // (Codex sweep 5, M9).
+    use crate::nntp::{CapacityLimit, capacity_limit};
+    assert_eq!(
+        capacity_limit("481 max simultaneous IP addresses reached"),
+        CapacityLimit::SourceIps
+    );
+    assert_eq!(
+        capacity_limit("502 max number of simultaneous IP addresses reached"),
+        CapacityLimit::SourceIps
+    );
+    assert_eq!(
+        capacity_limit(
+            "481 (remote) (aucl:gn;gnXXXXXXX) exceeded maximum number of connections per user"
+        ),
+        CapacityLimit::Connections
+    );
+    assert_eq!(
+        capacity_limit("502 too many connections"),
+        CapacityLimit::Connections
+    );
+}
+
 // ---------------------------------------------------------------------
 // SOCKS5 (RFC 1928 CONNECT + RFC 1929 user/pass). M32 routes ALL traffic
 // through it, DNS included - the hostname goes to the proxy verbatim as

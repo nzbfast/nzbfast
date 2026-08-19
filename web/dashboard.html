@@ -736,7 +736,11 @@ body.dense #dashview .chgrip{display:none}
 .srv .srvwhy{grid-column:1/-1;font-size:12px;line-height:1.45;margin:3px 0 1px;
   display:flex;flex-wrap:wrap;gap:4px 8px;overflow-wrap:anywhere}
 .srv .srvwhy a{color:var(--acc)}
-.srv .util{font-size:11px;color:var(--dim)}
+/* Inline after the rate, not on a line of its own: the rate and "using M
+   of N" are one sentence about one provider, and the old <br> spent a
+   third line of the card on every row. It still wraps naturally in a
+   narrow column - the break is now the layout's decision, not a tag. */
+.srv .util{font-size:11px;color:var(--dim);margin-inline-start:6px}
 .srv .gb{text-align:end;color:var(--dim);font-variant-numeric:tabular-nums}
 /* Queue: draggable rows + the per-download detail drawer. */
 #queue tbody tr[draggable="true"]{cursor:grab}
@@ -806,7 +810,15 @@ select.ctl:focus{outline:1px solid var(--acc)}
    look is what makes the reserved room real on every engine - which then
    costs us the platform's own indicator, so .selcaret draws one back. */
 .selwrap select.ctl{-webkit-appearance:none;appearance:none;
-  padding-inline-start:26px;padding-inline-end:24px}
+  padding-inline-start:24px;padding-inline-end:19px;
+  /* A native select is as wide as its LONGEST option, always - so the
+     speed control reserved room for "auto · yield to LAN" while showing
+     "no limit", and the header ran out of room and wrapped its buttons
+     onto a second line. Capping the closed control is the only way to
+     get that space back: the popup list still opens at its natural
+     width, so every option stays fully readable where it is chosen, and
+     only the one long label ellipsises once selected. */
+  max-width:118px;text-overflow:ellipsis}
 .selwrap .selcaret{position:absolute;inset-inline-end:7px;pointer-events:none;color:var(--dim);
   width:.9em;height:.9em}
 /* Card-header toolbar (Connection tuning): floats right on desktop. */
@@ -1840,7 +1852,12 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 </div>
 <div class="card" id="provcard" style="display:none">
   <h3 data-i18n="prov.title">Providers <span class="dim" id="provsum" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h3>
-  <div class="legend" id="provLegend"></div>
+<!-- No colour key above the chart. Every series has a row below carrying
+     the same swatch and the same host name, so a key here stated the
+     mapping a second time - a tester read the two as different facts and
+     asked which one was authoritative. The rows ARE the key: they are
+     pinned to hostOrder like the chart is, so a row keeps its colour
+     wherever the speed re-sort moves it. -->
   <div class="chartwrap" id="provChartWrap" style="height:60px;margin-bottom:8px"><canvas id="provChart"></canvas></div>
 <!-- The provider blocks are the growable part: one per configured
      server, and a refused one grows a .srvwhy paragraph under it. The
@@ -6942,7 +6959,6 @@ function pipeline(s,mbps,queued,done,failed){
   const anyLive = servers.some(x=>!x.idle);
   provLive = anyLive;
   document.getElementById('provChartWrap').style.display = anyLive?'':'none';
-  document.getElementById('provLegend').style.display = anyLive?'':'none';
   if(servers.length){
     provc.style.display='';
     if(!hostOrder.length) hostOrder=servers.map(x=>x.host);
@@ -6955,10 +6971,6 @@ function pipeline(s,mbps,queued,done,failed){
     });
     const agg=Object.values(rates).reduce((a,b)=>a+b,0);
     document.getElementById('provsum').textContent=tn('prov.backbones',servers.length,'{n} backbone','{n} backbones')+' · '+fmtRate(agg);
-    setHtml('provLegend',servers.map(sv=>{
-      const col=PC[hostOrder.indexOf(sv.host)%PC.length];
-      return `<span><i aria-hidden="true" style="background:${col}"></i>${esc(sv.host.replace(/^(news|reader)\./,''))}</span>`;
-    }).join(''));
     drawStacked(document.getElementById('provChart'), hostOrder);
     // Display order: re-sorted by performance every provSortSecs (0 =
     // keep server order). Colors stay pinned to hostOrder (first-seen),
@@ -6994,7 +7006,39 @@ function pipeline(s,mbps,queued,done,failed){
       // (ramp, tuner verdicts, capacity yields, flap clamps), so the
       // row reads "using M of N": M = live sockets, N = the account
       // fact. Falls back to the job budget until get_config lands.
-      const mx=srvMax[sv.host]||sv.budget;
+      const cfgN=srvMax[sv.host]||sv.budget;
+      // The provider's OWN ceiling, when it has refused us connections
+      // (`sv.capped`, written only off a capacity-classified refusal -
+      // never inferred from connected<configured, which is true of
+      // every idle provider). Giganews granting 38 against a Diamond
+      // account configured for 100 took a day to find because this row
+      // said "using 0 of 100": the configured number and the live
+      // number, and neither of the two that mattered.
+      //
+      // Worth saying only when it is BELOW the account fact - a
+      // provider that grants everything configured has capped nothing -
+      // and only when it granted us something: at 0 the row is already
+      // carrying "sign-in refused" or "no connection for Ns", which say
+      // it better.
+      const cap=sv.capped, capped=(cap&&cap.granted_hi>0&&cap.granted_hi<cfgN)?cap:null;
+      // Once capped, the ceiling in "using M of N" is the granted count,
+      // not the configured one: 38 is the real limit for as long as the
+      // provider holds it, and "using 31 of 100" would be a lie told on
+      // every poll.
+      const mx=capped?capped.granted_hi:cfgN;
+      // The ask is only a third number when the tuner had already
+      // lowered it below what the account allows; the usual case asks
+      // for the configured count, which "of {n}" already carries.
+      const capAsk=capped&&capped.capped_at>capped.granted_hi&&capped.capped_at<cfgN;
+      // warn, not bad: a cap is a FACT about the account, not a fault.
+      // bad is reserved for a cap that actually cost articles, which is
+      // the "no connection for Ns" chip below - a ceiling we never
+      // reached is nothing to alarm anyone about.
+      const capChip=capped?` · <span class="warn" title="${escA(capAsk
+        ? t('prov.capped.asked.title','{g} connections is the most this provider would give at once, out of the {n} set for it here. Downloads were asking for {a} at the time. Nothing is wrong with the account - the provider is holding it to a lower number than the plan suggests. Worth a support ticket if it does not match what you pay for.',{g:capped.granted_hi,a:capped.capped_at,n:cfgN})
+        : t('prov.capped.title','{g} connections is the most this provider would give at once, out of the {n} set for it here. Nothing is wrong with the account - the provider is holding it to a lower number than the plan suggests. Worth a support ticket if it does not match what you pay for.',{g:capped.granted_hi,n:cfgN}))}">${capAsk
+        ? t('prov.capped.asked','capped at {g}, asked {a} of {n}',{g:capped.granted_hi,a:capped.capped_at,n:cfgN})
+        : t('prov.capped','capped at {g} of {n}',{g:capped.granted_hi,n:cfgN})}</span>`:'';
       // Lifetime article completion (reliability ledger), dim; colored
       // only once it drops below the warn/bad thresholds.
       const c=sv.completion_pct;
@@ -7031,8 +7075,9 @@ function pipeline(s,mbps,queued,done,failed){
         const perm=!!sv.refused.permanent;
         stat=` · <span class="${perm?'bad':'warn'}">${
           perm?t('prov.stat.rejected','sign-in rejected')
+              :sv.refused.source_ips?t('prov.stat.capped.ips','too many addresses')
               :t('prov.stat.capped','at its connection limit')}</span>`;
-        detail=refusalDetailHtml(sv.host, sv.refused.line, perm);
+        detail=refusalDetailHtml(sv.host, sv.refused.line, perm, !!sv.refused.source_ips);
       } else if(sv.down){
         // The other half of the same silent double-cost: a server whose
         // DIAL fails leaves no refusal line to show, so it fell through
@@ -7063,7 +7108,9 @@ function pipeline(s,mbps,queued,done,failed){
         <span class="host" title="${escA(sv.host)}"><span class="sw" aria-hidden="true" style="background:${col}"></span>${esc(sv.host.replace(/^(news|reader)\./,''))}</span>
         <span>${sv.idle
           ? `<span class="util">${t('prov.willuse','up to {n} connections next download',{n:sv.budget})}${tuned}</span>`
-          : `<span class="rate">${fmtRate(r)}</span><br><span class="util"><span title="${escA(t('prov.using.title','{m} connections in use right now. {n} is the most your provider account allows, set per server in Settings. The number in use varies during a download.',{m:sv.connected,n:mx}))}">${t('prov.using','using {m} of {n}',{m:sv.connected,n:mx})}</span>${comp}${tuned}${stat}${drops}${held}</span>`}</span>
+          : `<span class="rate">${fmtRate(r)}</span> <span class="util"><span title="${escA(capped
+            ? t('prov.using.capped.title','{m} connections in use right now. {n} is the most this provider will actually give at once - your account here is set to {c}. The number in use varies during a download.',{m:sv.connected,n:mx,c:cfgN})
+            : t('prov.using.title','{m} connections in use right now. {n} is the most your provider account allows, set per server in Settings. The number in use varies during a download.',{m:sv.connected,n:mx}))}">${t('prov.using','using {m} of {n}',{m:sv.connected,n:mx})}</span>${capChip}${comp}${tuned}${stat}${drops}${held}</span>`}</span>
         <span class="mono dim">${share.toFixed(0)}%</span>
         <span class="gb">${gb(sv.bytes)} ${unit('GB')}</span>${detail}</div>`;
     }).join(''));
@@ -7097,7 +7144,7 @@ function pipeline(s,mbps,queued,done,failed){
         ? t('prov.stat.rejected','sign-in rejected')
         : t('prov.stat.capped','at its connection limit')}</span>${
         r.at?` <span class="dim">· ${esc(shortWhen(r.at))}</span>`:''}</span>
-      <span></span><span></span>${refusalDetailHtml(r.host, r.line, r.permanent)}</div>`).join(''));
+      <span></span><span></span>${refusalDetailHtml(r.host, r.line, r.permanent, !!r.source_ips)}</div>`).join(''));
   } else provc.style.display='none';
 }
 
@@ -7107,9 +7154,15 @@ function pipeline(s,mbps,queued,done,failed){
 // The provider's wording is quoted verbatim: "max simultaneous IP
 // addresses reached" tells the user what to do, and a paraphrase of it
 // would not.
-function refusalDetailHtml(host, line, permanent){
+// `sourceIps` is a capacity refusal about WHERE the account is used
+// from, not how many sockets it grants. Same back-off behaviour, and a
+// completely different remedy: lowering the connection count need not
+// help at all, so saying so would send the user at the wrong fix.
+function refusalDetailHtml(host, line, permanent, sourceIps){
   const fix=permanent
     ? t('prov.refused.fix.perm','Check the username and password for this server.')
+    : sourceIps
+    ? t('prov.refused.fix.ips','This account is in use from more addresses than your plan allows. That is about WHERE it is used, not how many connections - check for another device using it, or a router sending your traffic out by more than one route.')
     : t('prov.refused.fix.cap','Your plan will not give this many connections at once. Lower the connection count.');
   return `<div class="srvwhy ${permanent?'bad':'warn'}">${esc(line||'')}
     <span class="dim">${esc(fix)}</span>
@@ -10004,7 +10057,7 @@ function cardMenu(e, id, anchor){
   dismissLayoutTip();          // they found the controls; stop explaining them
   // Same sequence moveCard steps through, so first/last here means what
   // the arrow keys will actually refuse to do.
-  const seq=movableCards().filter(x=>!x.classList.contains('userhidden'));
+  const seq=orderedVisibleCards();
   const i=seq.indexOf(c);
   const noUp=i<=0, noDown=i<0||i>=seq.length-1;
   // A card is resizable exactly when it has an OPERABLE grip - see
@@ -12328,7 +12381,10 @@ async function loadSettings(){
   const acn=document.getElementById('s_auto_conn');
   if(document.activeElement!==acn) acn.checked=!!c.auto_connections;
   const tst=document.getElementById('tuneState');
-  if(tst){const m=c.conntune||{};const hs=Object.keys(m).sort();
+  // Only hosts a ladder actually measured. `note_capped` creates an
+  // entry for a provider that has never been probed, carrying
+  // connections 0, and listing it here read as "Auto-tuned: host -> 0".
+  if(tst){const m=c.conntune||{};const hs=Object.keys(m).filter(h=>m[h].connections>0).sort();
     tst.textContent=hs.length?t('ladder.tuned','Auto-tuned:')+' '+hs.map(h=>`${h} → ${m[h].connections}`).join(' · '):'';}
   const aup=document.getElementById('s_update_checks');
   if(document.activeElement!==aup) aup.checked=!!c.update_checks;
@@ -13352,10 +13408,36 @@ function renderServers(){
     }else if(asked0&&asked0<s.connections){
       tuneNote=` · <span class="dim" title="${escA(t('set.srv.capset.title','downloads use at most {n} connections per server, from the Connections setting in Settings; this account allows {m}. Raise Connections to use more of its allowance.',{n:asked0,m:s.connections}))}">${t('set.srv.capset','capped at {n} by the Connections setting',{n:asked0})}</span>`;
     }
+    // The LIFETIME cap ledger, which is a different job from the
+    // Providers row's: that one answers "what is happening now" and
+    // takes a session window, so a cap the provider lifts next week
+    // stops haunting it. This one is evidence for a support ticket -
+    // "capped on 14 of the last 20 days" is the sentence that gets a
+    // provider to look - and it belongs where somebody has come looking
+    // for it, not on the card everybody sees. Written only off
+    // capacity-classified refusals (conntune::note_capped).
+    let capNote='';
+    const cl=kn0&&kn0.capped, allDays=(cl&&cl.days)||[];
+    // The ledger retains the last 30 EVENTS, not 30 days, so a refusal
+    // 100 days ago plus one today rendered as "2 of the last 30 days".
+    // Drop what the sentence is not about before counting it.
+    const today=Math.floor(Date.now()/864e5);
+    const cdays=allDays.filter(d=>d>today-30);
+    if(cdays.length){
+      // The window is however long we have been watching, up to the 30
+      // days the ledger keeps - "14 of the last 20 days" must not read
+      // as 14 of 30 when the record is 20 days old.
+      const span=Math.max(cdays.length,Math.min(30,today-cdays[0]+1));
+      // A record one day old has no window to be a fraction of: "1 of
+      // the last 1 days" is arithmetically true and reads like a bug.
+      capNote=` · <span class="warn" title="${escA(t('set.srv.capped.title','on these days this provider refused another connection while it was already serving {g}, out of the {m} set here. Nothing is wrong with the account. If it does not match what you pay for, this is the record to send them.',{g:cl.granted_lo,m:s.connections}))}">${span>1
+        ? t('set.srv.capped','capped at {g} on {n} of the last {d} days',{g:cl.granted_lo,n:cdays.length,d:span})
+        : t('set.srv.capped.today','capped at {g} today',{g:cl.granted_lo})}</span>`;
+    }
     return `
     <div class="srvrow" id="srvrow${i}"${en?'':' style="opacity:.45"'}>
       <span>${esc(s.host)}:${s.port}${s.tls?` <span class="dim" title="${escA(t('set.srv.tls.title','Encrypted connection to this server'))}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lock"/></svg></span>`:''}${en?'':` <span class="warn">· ${t('set.srv.disabled','disabled')}</span>`}${s.level>0?` <span class="dim">· ${t('set.srv.fill','fill level {n}',{n:s.level})}</span>`:''}${s.block_account?` <span class="dim" title="${escA(t('set.srv.paid.chip.title','every byte from this server is billed, so nzbfast never sends it traffic of its own: no automatic connection tests, no benchmark traffic, no header scans'))}">· ${t('set.srv.paid.chip','billed per byte')}</span>`:''}${s.group?` <span class="dim">· ${esc(s.group)}</span>`:''}${block}${comp}
-        <span class="hint">${tn('set.srv.connsN',s.connections,'{n} connection','{n} connections')}${tuneNote}${s.username?' · '+esc(s.username):''}${s.retention_days>0?' · '+t('set.srv.retention','{n}d retention',{n:s.retention_days}):''}</span><span class="hint" id="srvtest${i}"></span></span>
+        <span class="hint">${tn('set.srv.connsN',s.connections,'{n} connection','{n} connections')}${tuneNote}${capNote}${s.username?' · '+esc(s.username):''}${s.retention_days>0?' · '+t('set.srv.retention','{n}d retention',{n:s.retention_days}):''}</span><span class="hint" id="srvtest${i}"></span></span>
       <label class="srvon" title="${escA(en?t('set.srv.disable.title','Take this server out of the pool without removing it'):t('set.srv.enable.title','Put this server back in the pool'))}"><input type="checkbox"${en?' checked':''} aria-label="${escA(t('set.srv.enable','Enable'))}" onchange="toggleServer(${i},this.checked?1:0,this)"></label>
       <button class="ghost" title="${escA(t('set.srv.test.title','Connect and authenticate to check this server is reachable'))}" onclick="testServerRow(${i},this)">${t('set.srv.test','Test')}</button>
       <button class="ghost" onclick="editServer(${i})">${t('set.srv.edit','Edit')}</button>
@@ -14948,6 +15030,33 @@ function setLayoutEdit(on, fromSettings){
   LAYOUT_MODE=!!on;
   layoutModeSync();
   if(LAYOUT_MODE){
+    // body.firstrun hides every movable card, so without this the mode
+    // arrives with its outlines, its labelled controls and its Done
+    // button over an empty dashboard - on a NEW INSTALL, which is
+    // exactly the user this mode exists for. Reveal them the way the
+    // "Show the full dashboard anyway" button does: session only, so
+    // nothing is written into the saved layout.
+    // Intended side effect, and it is the same one #showAll has: the
+    // dashboard stays revealed after Done for the rest of the session,
+    // because showAllCards() marks itself used and checkWelcome only
+    // re-adds .firstrun while that mark is absent.
+    // BEFORE setView below, not after: setView('dash') calls
+    // checkWelcome(), and until showAllCards.used is set that call would
+    // put .firstrun straight back when its fetch lands.
+    if(document.body.classList.contains('firstrun')){
+      showAllCards();
+      // Dropping .firstrun clears BOTH of renderLayoutTip's onboarding
+      // gates at once: .nojobs is not set during a first run either (no
+      // server means checkWelcome's `ready` is false, and that branch
+      // REMOVES nojobs). So the next checkWelcome - setView back to the
+      // dashboard, say - would coach someone who has not added a server
+      // yet, which is the noise those gates exist to suppress. Retire
+      // the coach here instead: it only ever existed to point at this
+      // door, the user has just walked through it, and every other route
+      // into the mode already dismisses it (the #layoutOpen and
+      // #setLayoutMode listeners, and the card context menu).
+      dismissLayoutTip();
+    }
     // Switching the mode on from Settings has to show the thing being
     // customised, or the click looks like it did nothing.
     if(fromSettings && inSettings) setView('dash');
@@ -15059,6 +15168,55 @@ function movableCards(){
   // the drop overlay and stays the headline).
   return [...document.querySelectorAll('#dashview>.card')]
     .filter(c=>c.id && c.id!=='welcomeCard' && c.id!=='heroCard');
+}
+// A card can be off the dashboard for reasons that are nothing to do
+// with the user's own layout: a body class the app sets, or an inline
+// display the stats tick owns. That is a different question from "may
+// the user hide this?" (see manageableCards), and every consumer of card
+// ORDER has to ask this one - the arrows, the context menu and the
+// position announcement must all walk the same sequence, or Up/Down
+// steps past something nobody can see and reads as a dead key while the
+// announcement counts cards that are not on screen.
+//
+// Derived from classes and state, NEVER measured. setView() sets
+// `#dashview{display:none}` while Settings is open, so from the card
+// manager - which lives in Settings - every dashboard card measures as
+// invisible, and an offsetParent/getClientRects test would refuse every
+// press. That is the whole touch-primary route, gone.
+//
+// Deliberately NOT listed below: .firstrun, which hides every movable
+// card at once. There is nothing to step past then, so the answer would
+// be the same for all of them and the manager's arrows would go
+// uniformly dead during setup - and the layout mode now clears .firstrun
+// on the way in anyway (see setLayoutEdit).
+function systemHidden(c){
+  if(!c) return true;
+  const b=document.body.classList;
+  // Indexer off: Browse is a view onto an index this install does not have.
+  if(c.id==='browseCard' && b.contains('noidx')) return true;
+  // No indexer of either kind - EXCEPT while the card carries the give-up
+  // list. That list is the one route back out of give-up state, so the
+  // stylesheet deliberately shows the card through .nowatch for it (the
+  // `#watchCard.hasgu` rule), and treating it as hidden here would drop
+  // an on-screen card out of the arrows: the inverse bug.
+  if(c.id==='watchCard' && b.contains('nowatch') && !c.classList.contains('hasgu')) return true;
+  // §129 4c: the cards that can only read zero until a job has run.
+  // (#tiles is on that CSS rule too but is not a .card, so it never
+  // reaches any of this.)
+  if(b.contains('nojobs') && (c.id==='usageCard' || c.id==='pipecard')) return true;
+  // And the cards that ship display:none and are turned on by a tick
+  // with something to put in them - #rescard, #pipecard, #provcard. The
+  // inline style IS the state here (the tick writes it), so reading it
+  // back is not a layout probe.
+  return c.style.display==='none';
+}
+// The sequence a card actually moves through, in screen order: what the
+// user can see, minus what they have hidden themselves. One definition,
+// shared by moveCard, the context menu's first/last state and the card
+// manager's arrows, so a press moves a card exactly as far as the
+// announcement says it did.
+function orderedVisibleCards(){
+  return movableCards().filter(c=>!c.classList.contains('userhidden') && !systemHidden(c));
 }
 // Why a card has no bottom-edge grip, in words, translated. A string
 // rather than a data- attribute so it does not sit in the markup in
@@ -15218,7 +15376,15 @@ function renderCardMgr(){
   // moveCard walks the VISIBLE cards only (stepping past something
   // invisible reads as a dead key), so a hidden card cannot be moved -
   // its arrows say so rather than doing nothing.
-  const seq=cards.filter(c=>!p.hidden.includes(c.id));
+  // The ROWS and the SEQUENCE are two different sets on purpose:
+  // hideability is what a row offers, rendered-ness is what an arrow
+  // steps through. Rows come from manageableCards(); positions come from
+  // the same orderedVisibleCards() moveCard walks, so the arrows here
+  // enable and disable exactly as the presses will behave. A card that
+  // is on screen but has no row (the give-up watchlist under .nowatch)
+  // still occupies its place in the sequence, and a row whose card the
+  // app has hidden gets i===-1 and both arrows disabled.
+  const seq=orderedVisibleCards();
   host.replaceChildren(...cards.map(c=>{
     const hidden=p.hidden.includes(c.id), i=seq.indexOf(c);
     const row=document.createElement('div');
@@ -15450,9 +15616,12 @@ function addCardGrips(){
 
 // Keyboard equivalent of dragging a card past its neighbour. Hidden cards
 // are skipped: stepping "past" something invisible looks like the key did
-// nothing, and then the next press moves two places at once.
+// nothing, and then the next press moves two places at once. That is true
+// of a card the APP has hidden as well as one the user has, which is why
+// the sequence comes from orderedVisibleCards() and not from the user's
+// hide class alone - see systemHidden().
 function moveCard(c, dir){
-  const seq=movableCards().filter(x=>!x.classList.contains('userhidden'));
+  const seq=orderedVisibleCards();
   const i=seq.indexOf(c), j=i+dir;
   if(i<0 || j<0 || j>=seq.length) return false;
   const dash=c.parentNode;

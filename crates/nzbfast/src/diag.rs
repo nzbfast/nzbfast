@@ -145,6 +145,11 @@ pub(crate) struct LossCauses<'a> {
     pub(crate) transport_sample: Option<String>,
     /// First decode/write error, verbatim.
     pub(crate) decode_sample: Option<String>,
+    /// Decode/write errors charged to RECOVERY slots. Excluded from
+    /// `derrs` on purpose - they are not payload damage - but they are
+    /// still damage, and a journal-resume retry can fetch clean parity
+    /// from another provider (Codex sweep 5, M6).
+    pub(crate) recovery_errs: u64,
     /// Servers with no usable connection at any point in the run.
     pub(crate) dead_servers: &'a [String],
     /// PAR2 recovery slots the NZB carries. Zero means the post has no
@@ -317,6 +322,37 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                  {derrs} decode/write errors"
             )
         };
+        // Damage is not absence, and the automatic-retry gate has to be
+        // able to tell them apart. `missing_articles_proven_stale` reads
+        // this message back and suppresses the single automatic retry on
+        // an aged post - but "aged" answers only whether PROPAGATION can
+        // still help. A corrupt article is bytes that were posted and
+        // arrived damaged, and a journal-resume retry re-fetches exactly
+        // those, which is the case the opening above was deliberately
+        // chosen for ("A corrupt article is exactly the case a
+        // journal-resume retry can heal"). Without this clause the gate
+        // silently overrode that decision: an aged post whose ONLY fault
+        // was damaged payload still opened "download incomplete", still
+        // collected the age clause, and lost its retry - and a
+        // suppressed retry is also FINAL, so the release was reported
+        // dead to the indexer, the FailureLink re-grab ran and a held
+        // duplicate was promoted. A phrase rather than a count, matching
+        // the two exclusions that already work this way; the count in
+        // the opening cannot serve, because it reads "0 decode/write
+        // errors" when there are none (Codex sweep 4, M3).
+        // Recovery damage counts here as much as payload damage. The
+        // census excludes it from `derrs` correctly - it is not a payload
+        // failure - but the RETRY question is different: corrupt parity
+        // beside a missing payload article is exactly the shape where a
+        // fresh copy of that parity repairs the gap, and without this the
+        // failure read as pure settled absence and lost its one automatic
+        // retry (Codex sweep 5, M6).
+        if derrs > 0 || causes.recovery_errs > 0 {
+            msg.push_str(
+                "; some of that loss is damaged articles rather than absent ones, \
+                 which a retry can fetch again",
+            );
+        }
         // The segment census, right behind the classifying clause. "94
         // file(s) with missing segments" was the whole story a user got,
         // and it is the same sentence whether one segment or twelve
@@ -505,6 +541,11 @@ pub(crate) fn missing_articles_proven_stale(msg: &str) -> bool {
     post_age_from_message(msg).is_some_and(|days| days >= GONE_MIN_AGE_DAYS)
         && !msg.contains("lost to transport/connection errors, not takedowns")
         && !msg.contains("no usable connection")
+        // Third exclusion, same shape and the same reason: age settles
+        // whether PROPAGATION can still help, and nothing else. Damaged
+        // articles are bytes that were posted, so a journal-resume retry
+        // can still heal them however old the post is.
+        && !msg.contains("damaged articles rather than absent ones")
 }
 
 /// A zip an extraction pass reported and could not produce, with the
@@ -951,6 +992,7 @@ mod main_tests {
             transport_failed: 0,
             transport_sample: None,
             decode_sample: None,
+            recovery_errs: 0,
             dead_servers: &[],
             par2_slots: 1,
             stalled: false,
@@ -1297,6 +1339,58 @@ mod main_tests {
             },
         );
         assert!(!super::missing_articles_proven_stale(&fresh), "{fresh}");
+
+        // M3: DAMAGE is not absence. Same aged, every-server-answering
+        // post as `stale` above, but with decode/write errors in the
+        // mix - the bytes were posted and arrived corrupt, and a
+        // journal-resume retry re-fetches exactly those. The gate used
+        // to read this as a dead post and suppress the one automatic
+        // retry, which also made the failure final.
+        let damaged = super::incomplete_reason(1, 3, &causes(0, &[]));
+        assert!(
+            damaged.contains("well past the minutes-to-hours"),
+            "the age is still stated, because it is still true: {damaged}"
+        );
+        assert!(
+            !super::missing_articles_proven_stale(&damaged),
+            "damaged articles are re-fetchable at any age: {damaged}"
+        );
+
+        // Codex sweep 5, M6: corrupt PARITY is damage too. The census
+        // subtracts recovery errors from `derrs` - right for payload
+        // completeness, wrong for the retry question - so an aged post
+        // with one missing payload article and one corrupt parity
+        // article read as settled absence and lost its retry, even
+        // though fresh parity from another provider repairs the gap.
+        let parity = super::incomplete_reason(
+            1,
+            0,
+            &LossCauses {
+                recovery_errs: 2,
+                ..causes(0, &[])
+            },
+        );
+        assert!(
+            !super::missing_articles_proven_stale(&parity),
+            "corrupt parity is re-fetchable at any age: {parity}"
+        );
+        // The narrower shape the challenger established, and it needs no
+        // 430 at all: a decode error makes `incomplete` non-zero on its
+        // own, so an aged post whose ONLY fault is corrupt payload took
+        // the same opening, the same age clause and the same suppression.
+        let corrupt_only = super::incomplete_reason(
+            1,
+            2,
+            &LossCauses {
+                missing_430: 0,
+                missing_segments: 0,
+                ..causes(0, &[])
+            },
+        );
+        assert!(
+            !super::missing_articles_proven_stale(&corrupt_only),
+            "corruption alone must never read as a dead post: {corrupt_only}"
+        );
     }
 
     /// Field report, 31 Jul: "94 file(s) with missing segments" for a post that

@@ -151,6 +151,21 @@ pub fn mkv_full() -> Vec<u8> {
     out
 }
 
+/// Matroska carrying ONLY audio - what a `.mka` external track is.
+///
+/// Its DocType is "matroska" and its magic is the same four bytes as any
+/// `.mkv`, which is the whole point: no amount of head-sniffing can tell
+/// this from a feature, so anything deciding "is this a video" has to
+/// read the track types. Used by nzbfast's `video_ext` to prove a
+/// nameless audio payload is not offered as a rename candidate.
+pub fn mka() -> Vec<u8> {
+    let mut seg = info(60_000.0, None);
+    seg.extend(tracks(&[audio_track(1, "A_AAC", "eng", 2, 48_000.0, true)]));
+    let mut out = ebml_head("matroska");
+    out.extend(el(SEGMENT, &seg));
+    out
+}
+
 pub fn mkv_hdr() -> Vec<u8> {
     let mut colour = uint(&[0x55, 0xB1], 9); // bt2020nc
     colour.extend(uint(&[0x55, 0xB2], 10)); // BitsPerChannel

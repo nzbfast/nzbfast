@@ -101,8 +101,12 @@ BASELINE_FILES = {
     # `fetch_all_sharded` - the worker task, the spare filler, the
     # read-stall note, and every way a run is sealed or a work item
     # requeued/failed - is one subject (sealing) and moved whole to
-    # pool/runlife.rs: 3,677.
-    "crates/nzbkit/src/pool.rs": 3677,
+    # pool/runlife.rs: 3,677. Regrown to 3,745 - five lines of margin -
+    # so the Providers-card cap gauge could not land without a split:
+    # everything the pool REPORTS rather than does (the per-server
+    # gauges, the event ring, the two refusal records) is one subject
+    # and moved whole to pool/livestats.rs: 3,365.
+    "crates/nzbkit/src/pool.rs": 3365,
     # rig_tests.rs was here at 2,988 (born in the TODO 113 split of the
     # pool's payout/safety rigs), then 3,125 when the §114 consumer-steer
     # rigs replaced the pool-gate ones, then 3,372 through the §129

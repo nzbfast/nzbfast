@@ -300,8 +300,8 @@ fn eat_budget_to(ex: &Extractor, first_slot: usize, headroom: usize, seed: u8) {
 ///
 /// The member has to clear 4 MiB - `should_stream_decode`'s bar, and
 /// therefore the incremental split path's - and encoding it is slow
-/// enough (tens of seconds in a debug build) that the three tests
-/// build it once between them.
+/// enough (tens of seconds in a debug build) that the seven cases
+/// build it once between them, through `chase_volume_set_cases`.
 fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
     static SET: std::sync::OnceLock<(Vec<u8>, Vec<Vec<u8>>, Vec<String>)> =
         std::sync::OnceLock::new();
@@ -319,6 +319,31 @@ fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
     })
 }
 
+/// The seven cases that share `chase_volume_set`, run as ONE test.
+///
+/// nextest gives every `#[test]` its own process, which puts the
+/// `OnceLock` above out of reach: each case built the 5 MiB compressed
+/// set again. Measured here, 19 CPU-seconds apiece - 132 of the chase
+/// module's 186 - and about 52 s apiece on a CI Windows runner. Built
+/// once, the same seven cost about 20.
+///
+/// They are independent: each makes its own tmpdir and its own
+/// `Extractor`, and none reads state the others wrote. The price of
+/// the merge is that the first failure hides the cases after it, and
+/// the panic message is the case that failed rather than the test
+/// name - so each keeps its own doc comment and its own name in the
+/// backtrace.
+#[test]
+fn chase_volume_set_cases() {
+    chase_over_cap_multi_volume_set_trims_and_streams();
+    chase_over_cap_multi_volume_set_demotes_with_the_trim_off();
+    chase_patch_below_the_trim_point_forfeits_and_materializes_repaired();
+    stalled_chase_pages_cold_frontier_then_demotes_byte_exact();
+    chase_read_defers_its_paged_preads_off_the_extractor_lock();
+    healthy_chase_never_pages_on_a_loss_it_does_not_own();
+    a_hole_ahead_of_the_engine_pages_beyond_it_and_still_resumes();
+}
+
 /// THE test that defines the drop-behind: a posted compressed set
 /// whose retained bytes are several times the budget headroom chases
 /// all the way to completion, byte-exact, with nothing left on disk -
@@ -328,7 +353,6 @@ fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
 /// Before the incremental split decode this shape could only demote:
 /// the split member decoded at its FINISH fragment, so every volume
 /// had to be retained until the last one landed.
-#[test]
 fn chase_over_cap_multi_volume_set_trims_and_streams() {
     let dir = tmpdir("chase-trim-stream");
     let (f, vols, names) = chase_volume_set();
@@ -370,7 +394,6 @@ fn chase_over_cap_multi_volume_set_trims_and_streams() {
 /// before drop-behind existed. Two things at once: the escape hatch
 /// works, and the test above is measuring the trim rather than a
 /// budget that was never tight.
-#[test]
 fn chase_over_cap_multi_volume_set_demotes_with_the_trim_off() {
     assert!(rar_trim_env_off_value(Some("1")));
     assert!(!rar_trim_env_off_value(Some("0")));
@@ -421,7 +444,6 @@ fn chase_over_cap_multi_volume_set_demotes_with_the_trim_off() {
 /// the volume's OWN file: what a demotion would have written, written
 /// early. So the materialized volume is byte-identical to what was
 /// posted, trimmed prefix and all.
-#[test]
 fn chase_patch_below_the_trim_point_forfeits_and_materializes_repaired() {
     let dir = tmpdir("chase-trim-patch");
     let (_, vols, names) = chase_volume_set();
@@ -611,7 +633,6 @@ fn chase_abort_on_finish_with_missing_bytes() {
 /// the pile has built, as retries do) must page the cold frontier
 /// to scratch immediately - and the demote at finish must still
 /// materialize every volume byte-exact from the paged spans.
-#[test]
 fn stalled_chase_pages_cold_frontier_then_demotes_byte_exact() {
     let dir = tmpdir("chase-stall-page");
     let (_, vols, names) = chase_volume_set();
@@ -692,7 +713,6 @@ fn stalled_chase_pages_cold_frontier_then_demotes_byte_exact() {
 /// not. The range read back is lifted out of the buffer's own
 /// `paged` map, so a request that never touched scratch cannot pass
 /// this vacuously.
-#[test]
 fn chase_read_defers_its_paged_preads_off_the_extractor_lock() {
     let dir = tmpdir("chase-read-defer");
     let (_, vols, names) = chase_volume_set();
@@ -843,7 +863,6 @@ fn stalled_chase_resumes_from_paged_spans_when_the_gap_fills() {
 /// trigger skimmed the healthy chase's entire pile through scratch
 /// and pread it straight back, 527 MB of doubled I/O on the A/B's
 /// 614 MB set.
-#[test]
 fn healthy_chase_never_pages_on_a_loss_it_does_not_own() {
     let dir = tmpdir("chase-healthy-no-page");
     let (f, vols, names) = chase_volume_set();
@@ -878,7 +897,6 @@ fn healthy_chase_never_pages_on_a_loss_it_does_not_own() {
 /// in - which lost nothing - stays warm; when the hole then fills,
 /// the decode resumes straight through the paged spans and
 /// completes one-pass, byte-exact.
-#[test]
 fn a_hole_ahead_of_the_engine_pages_beyond_it_and_still_resumes() {
     let dir = tmpdir("chase-ahead-hole-page");
     let (f, vols, names) = chase_volume_set();

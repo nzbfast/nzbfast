@@ -159,3 +159,33 @@ fn the_case_folded_arms_cover_every_row_between_them() {
     assert_eq!(ix.release_ids_by_stem("named.release").unwrap().len(), 1);
     crate::index::testutil::teardown(&d, ix);
 }
+
+/// L3b: "not a full scan" is too weak a bar for the oracle sampler.
+///
+/// Its seeks order by `first_posted` and filter `junk < 50`. No index
+/// carried `junk` - it arrives by ALTER TABLE - so they planned as a
+/// SEARCH on `idx_rel_posted` with a POST-FILTER, doing a rowid table
+/// fetch per index entry to test junk, unbounded forwards and with no
+/// wall-clock budget in the draw loop. That passes the gate above,
+/// which is why it survived: `SCAN releases` never appears.
+///
+/// The bar that catches it is naming the partial index. If a future
+/// edit widens the sampler's WHERE away from `junk < 50`, or drops
+/// `idx_rel_visible_posted`, the index silently stops being used and
+/// the per-row fetches come back - so assert the pairing directly.
+#[test]
+fn the_oracle_sampler_uses_the_partial_visible_index() {
+    let d = dir("oracle-partial");
+    let ix = Index::open(&d.join("index.db")).unwrap();
+    for (what, sql) in INDEXED {
+        if !what.starts_with("oracle_pick") || !what.contains("seek") {
+            continue;
+        }
+        let p = plan(&ix, sql);
+        assert!(
+            p.contains("idx_rel_visible_posted"),
+            "{what} no longer uses the partial visible index, so it is back to a \
+             table fetch per row to test junk: {p}"
+        );
+    }
+}

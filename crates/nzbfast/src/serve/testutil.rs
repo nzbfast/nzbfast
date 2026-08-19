@@ -88,6 +88,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         auto_connections: std::sync::atomic::AtomicBool::new(true),
         live_tune: std::sync::atomic::AtomicBool::new(false),
         shaped_hosts: Mutex::new(Default::default()),
+        capped_hosts: Mutex::new(Default::default()),
         wall_hide_adult: std::sync::atomic::AtomicBool::new(true),
         auto_defer: std::sync::atomic::AtomicBool::new(true),
         post_health: std::sync::atomic::AtomicBool::new(true),

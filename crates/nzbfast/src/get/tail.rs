@@ -559,6 +559,7 @@ pub(super) fn finish_job(
     reextract_failed: Option<String>,
     incomplete: usize,
     derrs: u64,
+    recovery_errs: u64,
     missing_430: &Arc<AtomicU64>,
     retention_skipped: u64,
     transport_failed: &Arc<AtomicU64>,
@@ -624,13 +625,14 @@ pub(super) fn finish_job(
     // and not a delete. Deliberately AFTER the reextract_failed arm,
     // whose files really were verified and whose message says so.
     quarantine_failed_payload(out_dir, extracted, unhealed_slots, slots, extractor);
-    if incomplete > 0 || derrs > 0 {
+    if incomplete > 0 || derrs > 0 || recovery_errs > 0 {
         let causes = LossCauses {
             missing_430: missing_430.load(Ordering::Relaxed),
             retention_excluded: retention_skipped,
             transport_failed: transport_failed.load(Ordering::Relaxed),
             transport_sample: transport_sample.lock_ok().clone(),
             decode_sample: decode_error_sample.lock_ok().clone(),
+            recovery_errs,
             dead_servers,
             // Sniffed slots count: "this post carries no PAR2 recovery
             // data" must not be claimed about a post whose recovery set
@@ -1100,6 +1102,7 @@ pub(super) async fn finish_run(
         reextract_failed,
         incomplete,
         derrs,
+        recovery_errs,
         missing_430,
         retention_skipped,
         transport_failed,
@@ -1262,6 +1265,7 @@ mod tests {
             reextract_failed,
             incomplete,
             derrs,
+            0,
             &Arc::new(AtomicU64::new(0)),
             0,
             &Arc::new(AtomicU64::new(0)),

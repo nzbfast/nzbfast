@@ -2033,3 +2033,193 @@ fn only_usenet_furniture_is_droppable() {
         assert!(!is_droppable_metadata(n), "{n} should NOT be furniture");
     }
 }
+
+/// M2: a two-set NZB must not let one set's block size cap the OTHER
+/// set's volumes by their declared counts.
+///
+/// The cap (`min(by_bytes, declared)`) is right on a single-set NZB and
+/// unsound across two, because `block_size_probe` picks the cheapest
+/// par2 anywhere in the NZB and hands back a block size with no set
+/// identity, while `live_volumes` takes every volume there is. A
+/// previous review refuted this exact case on the grounds that the
+/// verdict is scale-invariant in `block_size` - and it WAS, before the
+/// cap: `floor(margined/bs) > sum(floor(V_i/bs))` cancels. `declared`
+/// comes off a filename and does not scale, so the cap broke the
+/// cancellation. Pinned at the seam that decides it.
+#[test]
+fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
+    let seg =
+        |id: &str, bytes: u64| format!("<segment bytes=\"{bytes}\" number=\"1\">{id}</segment>");
+    let file = |name: &str, bytes: u64, id: &str| {
+        format!(
+            "<file subject=\"Rel - &quot;{name}&quot; yEnc (1/1)\"><groups><group>a.b.test\
+             </group></groups><segments>{}</segments></file>",
+            seg(id, bytes)
+        )
+    };
+    let parse = |xml: String| {
+        nzbkit::nzb::Nzb::parse(
+            format!(
+                "<?xml version=\"1.0\"?><nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">{xml}</nzb>"
+            )
+            .as_bytes(),
+        )
+        .expect("nzb parses")
+    };
+
+    // One set: the cap is live and load-bearing, exactly as before.
+    let one = parse(format!(
+        "{}{}",
+        file("seta.mkv", 5_000_000, "p1@x"),
+        file("seta.vol000+02.par2", 50_000_000, "v1@x"),
+    ));
+    assert!(!multiple_par2_sets(&one), "one stem is one set");
+    assert_eq!(
+        live_volumes(&one, &[]),
+        vec![(50_000_000u64, Some(2usize))],
+        "a single-set NZB keeps the declared cap"
+    );
+
+    // Two sets: same volume, cap withdrawn.
+    let two = parse(format!(
+        "{}{}{}{}",
+        file("seta.mkv", 5_000_000, "p1@x"),
+        file("seta.par2", 100_000, "m1@x"),
+        file("setb.mkv", 5_000_000, "p2@x"),
+        file("setb.vol000+02.par2", 50_000_000, "v2@x"),
+    ));
+    assert!(multiple_par2_sets(&two), "two stems are two sets");
+    assert_eq!(
+        live_volumes(&two, &[]),
+        vec![(50_000_000u64, None)],
+        "across sets the name cannot cap a volume the probe did not size"
+    );
+
+    // A Main and its own volumes are ONE set, not two - the Main has no
+    // `.vol` suffix, so the stem has to come off the bare `.par2`.
+    let main_plus_vols = parse(format!(
+        "{}{}{}",
+        file("rel.par2", 100_000, "m@x"),
+        file("rel.vol000+01.par2", 10_000_000, "v0@x"),
+        file("rel.vol001+02.par2", 20_000_000, "v1@x"),
+    ));
+    assert!(
+        !multiple_par2_sets(&main_plus_vols),
+        "a Main and its volumes share a stem"
+    );
+
+    // A second set represented ONLY by a Main with an UNQUOTED subject.
+    // kind() calls that a Par2Main - `.par2` followed by whitespace -
+    // but this function used `strip_suffix(".par2")`, which the " yEnc
+    // (1/1)" tail defeats, so the set was invisible here and the cap
+    // stayed alive on set A's volume. That cap can refuse a genuinely
+    // repairable post, which is the whole thing M2 exists to stop
+    // (18 Aug sweep).
+    let raw_main = format!(
+        "<file subject=\"setb.par2 yEnc (1/1)\"><groups><group>a.b.test</group></groups>\
+         <segments>{}</segments></file>",
+        seg("m2@x", 100_000)
+    );
+    let unquoted_second_set = parse(format!(
+        "{}{}{}",
+        file("seta.mkv", 5_000_000, "p1@x"),
+        file("seta.vol000+02.par2", 50_000_000, "v1@x"),
+        raw_main,
+    ));
+    assert_eq!(
+        unquoted_second_set.files[2].kind(),
+        nzbkit::nzb::FileKind::Par2Main,
+        "precondition: kind() reads the unquoted subject as a Main"
+    );
+    assert!(
+        multiple_par2_sets(&unquoted_second_set),
+        "an unquoted Main is still a second set"
+    );
+    assert_eq!(
+        live_volumes(&unquoted_second_set, &[]),
+        vec![(50_000_000u64, None)],
+        "with the second set seen, the declared cap is withdrawn"
+    );
+
+    // ONE set whose raw subjects carry a per-file counter. The stems
+    // differ only by that counter, and comparing the whole prefix
+    // declared two sets and threw away a trustworthy 51-slice cap -
+    // preflight then credits the looser byte-derived number, and damage
+    // between the two downloads the whole release before failing
+    // (Codex sweep 5, L8).
+    let raw = |subject: &str, bytes: u64, id: &str| {
+        format!(
+            "<file subject=\"{subject}\"><groups><group>a.b.test</group></groups>\
+             <segments>{}</segments></file>",
+            seg(id, bytes)
+        )
+    };
+    let one_set_raw_counters = parse(format!(
+        "{}{}",
+        raw("[01/02] - set.par2 yEnc (1/1)", 100_000, "rm@x"),
+        raw(
+            "[02/02] - set.vol000+51.par2 yEnc (1/1)",
+            50_000_000,
+            "rv@x"
+        ),
+    ));
+    assert!(
+        !multiple_par2_sets(&one_set_raw_counters),
+        "a counter prefix is not a second recovery set"
+    );
+    assert_eq!(
+        live_volumes(&one_set_raw_counters, &[]),
+        vec![(50_000_000u64, Some(51usize))],
+        "one set keeps its declared cap"
+    );
+
+    // An ANONYMOUS set - ".vol-01.par2", no prefix at all - reduces to
+    // an empty stem, so it was skipped entirely. It cannot be
+    // name-capped itself, but it can still supply the global block-size
+    // probe and cap a DIFFERENT set with a foreign block size, which is
+    // the false-Impossible the cross-set rule exists to prevent
+    // (Codex sweep 5, L2).
+    let anon_plus_named = parse(format!(
+        "{}{}",
+        file(".vol-01.par2", 100_000, "a1@x"),
+        file("setb.vol000+02.par2", 50_000_000, "b1@x"),
+    ));
+    assert!(
+        multiple_par2_sets(&anon_plus_named),
+        "an anonymous set beside a named one is still two sets"
+    );
+    assert_eq!(
+        live_volumes(&anon_plus_named, &[]),
+        vec![(100_000u64, None), (50_000_000u64, None)],
+        "so neither volume is capped by the other's declared count"
+    );
+}
+
+/// M2 again, one layer down: the cap is withdrawn at BOTH ceilings or
+/// the abort can stand down on a budget the verdict then reads larger.
+/// `measured_verdict` is deliberately untouched by the fix - it takes
+/// the `(bytes, declared)` pairs it is given - so this pins that an
+/// uncapped pair is what reaches it, and that the verdict it then
+/// reaches is the scale-invariant one.
+#[test]
+fn withdrawing_the_cap_restores_the_pre_cap_verdict() {
+    const BLOCK: u64 = 1_000_000;
+    // Set B's volume: 50 MB encoded, name declares 2 slices. Sized with
+    // set A's 1 MB block it credits 50 blocks by bytes.
+    const ENCODED: u64 = 50_000_000;
+    // ~9 blocks of provable damage after margin and conversion.
+    const MISSING: u64 = 20_000_000;
+
+    // Capped by the foreign name: 2 blocks of budget, 9 of damage.
+    let capped = measured_verdict(MISSING, 10, BLOCK, &[(ENCODED, Some(2))], 0, &[], vec![]);
+    assert!(
+        matches!(capped, Some(Verdict::Impossible { .. })),
+        "this is the false condemnation the cap made possible: {capped:?}"
+    );
+    // Uncapped, which is what a two-set NZB now hands it.
+    assert_eq!(
+        measured_verdict(MISSING, 10, BLOCK, &[(ENCODED, None)], 0, &[], vec![]),
+        None,
+        "with the cap withdrawn the bytes credit 50 blocks and 9 fits"
+    );
+}

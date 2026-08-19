@@ -99,6 +99,21 @@ pub struct MediaInfo {
 }
 
 impl MediaInfo {
+    /// Does this file actually carry picture?
+    ///
+    /// Counts ENABLED video tracks only, the same rule [`classify`] uses
+    /// - a container may list a track it has marked off, and a track the
+    /// muxer disabled does not make the file a video.
+    ///
+    /// Exists because `enabled` is crate-private while the question is
+    /// not: nzbfast asks it when a payload arrived with no extension at
+    /// all, where the container magic cannot answer. `.mka` is Matroska
+    /// and `.m4a` is MP4, so magic alone calls audio-only files video;
+    /// track types are the only honest discriminator.
+    pub fn has_video(&self) -> bool {
+        self.video.iter().any(|v| v.enabled)
+    }
+
     fn new(container: Container) -> Self {
         MediaInfo {
             container,
@@ -516,6 +531,26 @@ fn sniff(b: &[u8]) -> Option<Container> {
         }
     }
     None
+}
+
+/// The extension a container's own bytes call for, for a payload that
+/// arrived with NO extension at all - which is what an indexer that
+/// obfuscates the filenames inside an NZB produces.
+///
+/// Head-only and allocation-free on purpose: the callers are rename
+/// passes that run over every file in a finished job's directory, and
+/// they must not pay a container parse just to ask what a file should
+/// be called. The bytes decide, exactly as in [`sniff`] - but this is
+/// only ever asked about a file that named nothing, so there is no
+/// claim here for the bytes to override.
+pub fn container_ext(head: &[u8]) -> Option<&'static str> {
+    match sniff(head)? {
+        Container::Mkv => Some("mkv"),
+        Container::Webm => Some("webm"),
+        Container::Mp4 => Some("mp4"),
+        Container::Avi => Some("avi"),
+        Container::Unknown => None,
+    }
 }
 
 fn ext_agrees(c: Container, ext: &str) -> bool {

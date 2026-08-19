@@ -1044,51 +1044,6 @@ fn par2_magic(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn stem_lower(p: &Path) -> String {
-    p.file_stem()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default()
-}
-
-/// A "sample"/"proof"-named video. Name only - NOT sufficient on its own to
-/// delete a file (see `is_deletable_sample`); used by the non-destructive
-/// rename paths to leave a likely teaser un-renamed.
-fn is_sample_clip(p: &Path) -> bool {
-    let s = stem_lower(p);
-    (s.contains("sample") || s.contains("proof")) && VIDEO_EXTS.contains(&ext_of(p).as_str())
-}
-
-/// Fraction of the feature's size below which a "sample"/"proof"-named video
-/// is treated as a throwaway teaser. A real teaser is a tiny slice of the
-/// feature; a same-size file that merely has "proof"/"sample" in its title
-/// (the 2005 film "Proof", a "Proof" season pack, or a job that is itself
-/// only a sample) is NOT a teaser. Name alone silently deleted real content.
-const SAMPLE_MAX_FRACTION: f64 = 0.15;
-
-/// A deletable teaser: sample/proof-named AND much smaller than the feature.
-/// With `feature_len == 0` (no feature to compare against) nothing qualifies,
-/// so a lone sample-named download is never destroyed.
-fn is_deletable_sample(p: &Path, feature_len: u64) -> bool {
-    if feature_len == 0 || !is_sample_clip(p) {
-        return false;
-    }
-    let len = p.metadata().map(|m| m.len()).unwrap_or(0);
-    if (len as f64) >= (feature_len as f64) * SAMPLE_MAX_FRACTION {
-        return false;
-    }
-    // Name and size both say sample; the container gets a veto. A real
-    // episode with "sample" in its title sits small beside a
-    // double-length special, but its own header says it runs like an
-    // episode - nothing that long is deleted on a name.
-    if matches!(ext_of(p).as_str(), "mkv" | "webm")
-        && let Some(i) = nzbkit::mkv::probe(p)
-        && i.duration_secs.is_some_and(|d| d >= 15.0 * 60.0)
-    {
-        return false;
-    }
-    true
-}
-
 /// A real directory - NOT a symlink pointing at one.
 ///
 /// `Path::is_dir` follows symlinks, and every walker below pairs it with
@@ -3289,7 +3244,16 @@ pub fn tv_organize(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let is_sample = file_stem.to_ascii_lowercase().contains("sample");
+            let is_sample = is_sample_named(&path);
+            // The extension the filed episode must CARRY, which since #43
+            // need not be the one it arrived with: an extensionless
+            // payload takes the one its bytes sniff as. Filing it under
+            // its hash instead put an unowned file in a SHARED season
+            // folder - Play could not find it and delete-with-files
+            // dropped the history row and left it there (Codex sweep 5,
+            // M1). `ext` above is still the on-disk name, which is what
+            // the non-video branches below key off.
+            let ext = video_ext(&path).unwrap_or(ext);
             if VIDEO_EXTS.contains(&ext.as_str()) && !is_sample {
                 // The file's own name wins (season packs), else the job's
                 // - spelled the way the folder we are filing into is.
@@ -3468,13 +3432,25 @@ pub fn tv_rename(dir: &Path, stem: &str, suffix: &str, titles: &EpisodeTitles) -
     let Ok(rd) = std::fs::read_dir(dir) else {
         return 0;
     };
-    let mut renamed = 0;
+    // PLAN, then rename. Every file that cannot name its own episode
+    // falls back to the job's base, so they all compute the SAME target
+    // and `read_dir` order decided which one got it - a sniffable sample
+    // beside a hash-named feature could take the episode name and become
+    // what Play offers, leaving the real feature under its hash. Sample
+    // names are excluded here by NAME alone, because since #43 they need
+    // not carry an extension (Codex sweep 5, M4).
+    let mut plan: Vec<(PathBuf, String, String, String)> = Vec::new();
     for entry in rd.flatten() {
         let path = entry.path();
-        if !path.is_file() || !VIDEO_EXTS.contains(&ext_of(&path).as_str()) || is_sample_clip(&path)
-        {
+        if !path.is_file() || is_sample_named(&path) {
             continue;
         }
+        // The extension the renamed file must carry. An extensionless
+        // obfuscated payload takes the one its bytes sniff as, so this
+        // pass stops skipping the very file the job is about (#43).
+        let Some(ext) = video_ext(&path) else {
+            continue;
+        };
         let file_stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -3482,16 +3458,28 @@ pub fn tv_rename(dir: &Path, stem: &str, suffix: &str, titles: &EpisodeTitles) -
         // As in `tv_organize`: the stem that named the episode is the
         // stem whose title belongs on it.
         let (base, titled_by) = match tv_path(&file_stem).and_then(|(_, b)| b) {
-            Some(b) => (Some(b), file_stem.as_str()),
-            None => (job_base.clone(), stem),
+            Some(b) => (Some(b), file_stem.clone()),
+            None => (job_base.clone(), stem.to_string()),
         };
         let Some(b) = base else { continue };
-        let title = titles.segment(titled_by, &b, suffix);
-        let ext = ext_of(&path);
-        let target = dir.join(format!("{b}{title}{suffix}.{ext}"));
-        if target == path || target.exists() {
+        plan.push((path, ext, b, titled_by));
+    }
+    // One winner per target: the largest candidate. A teaser that slipped
+    // past the name check is smaller than the feature, so size is the
+    // tie-break that keeps the feature.
+    plan.sort_by_key(|(p, ..)| {
+        std::cmp::Reverse(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+    });
+    let mut claimed: Vec<String> = Vec::new();
+    let mut renamed = 0;
+    for (path, ext, b, titled_by) in plan {
+        let title = titles.segment(&titled_by, &b, suffix);
+        let name = format!("{b}{title}{suffix}.{ext}");
+        let target = dir.join(&name);
+        if target == path || target.exists() || claimed.iter().any(|c| c == &name) {
             continue;
         }
+        claimed.push(name);
         match std::fs::rename(&path, &target) {
             Ok(()) => renamed += 1,
             Err(e) => warn!(
@@ -3603,7 +3591,7 @@ pub fn nameless_video(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && VIDEO_EXTS.contains(&ext_of(p).as_str()) && !is_sample_clip(p))
+        .filter(|p| p.is_file() && !is_sample_clip(p) && video_ext(p).is_some())
         .collect();
     // More than one and we cannot tell which is the feature; renaming
     // either would be a guess, and CD1/CD2 sets collide.
@@ -3644,14 +3632,26 @@ pub fn rename_nameless_video(out_dir: &Path, base: &str) -> bool {
         return false;
     };
     let video = &video;
-    let ext = ext_of(video);
+    // Two different extensions, and conflating them is what produced a
+    // trailing-dot name: `ext` is what the TARGET must carry (sniffed
+    // from the bytes when the payload arrived with none), while the stem
+    // strip has to use what is actually ON DISK - for an extensionless
+    // file that is nothing, so the whole filename is the stem.
+    let Some(ext) = video_ext(video) else {
+        return false;
+    };
+    let on_disk = ext_of(video);
     let Some(old_name) = video.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return false;
     };
-    let old_stem = old_name
-        .strip_suffix(&format!(".{ext}"))
-        .unwrap_or(&old_name)
-        .to_string();
+    let old_stem = if on_disk.is_empty() {
+        old_name.clone()
+    } else {
+        old_name
+            .strip_suffix(&format!(".{on_disk}"))
+            .unwrap_or(&old_name)
+            .to_string()
+    };
     let clean = nzbkit::release::sanitize_name(base);
     if clean.is_empty() {
         return false; // nothing nameable survived sanitisation
@@ -3713,13 +3713,21 @@ pub fn rename_movie(parent: &Path, out_dir: &Path, base: &str) -> Option<PathBuf
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .collect();
+    // `video_ext`, not VIDEO_EXTS: an extensionless payload is a video
+    // since #43, and selecting on the NAME alone meant the ordinary movie
+    // arm saw zero features, renamed the job folder, and left the feature
+    // inside it under its hash - while the fallback that would have
+    // handled it runs only when `movie_name` returned None (Codex sweep
+    // 5, M2). Sample exclusion is by name, for the same reason.
     let videos: Vec<&PathBuf> = files
         .iter()
-        .filter(|p| VIDEO_EXTS.contains(&ext_of(p).as_str()) && !is_sample_clip(p))
+        .filter(|p| video_ext(p).is_some() && !is_sample_named(p))
         .collect();
     if videos.len() == 1 {
         let video = videos[0];
-        let ext = ext_of(video);
+        // The extension it must CARRY, which for a nameless payload is
+        // the sniffed one - the rename below is what gives it that.
+        let ext = video_ext(video).unwrap_or_else(|| ext_of(video));
         let old_name = video
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())?;
@@ -3900,6 +3908,11 @@ pub fn unlock(dir: &Path, password: &str) -> bool {
 // was 3,264 lines - over the gate's own ceiling - so the split is by
 // topic: filing and the mover in `tests`, sweeping and renaming in
 // `sweep_rename_tests`, with what both need in `testkit`.
+mod sample;
+use sample::{is_deletable_sample, is_sample_clip, is_sample_named};
+mod videoext;
+use videoext::video_ext;
+
 #[cfg(test)]
 mod sweep_rename_tests;
 #[cfg(test)]

@@ -156,7 +156,19 @@ impl AbortRule {
                 // reason the block rule does it in that order: the gate
                 // this mirrors computes it that way, and the two must
                 // not disagree about a boundary case.
-                (total.max(0.0) as u64 as f64 * margin) as u64 > ceiling_bytes
+                //
+                // ...and converted encoded -> raw after it, for the same
+                // reason again. `check::block_size_could_condemn` takes
+                // its deficit from `margined_deficit_raw_bytes`, which
+                // applies `min_raw_bytes`, while leaving the volumes at
+                // their full encoded size. Skipping the conversion here
+                // made this rule's deficit the yEnc overhead LARGER than
+                // the gate's, so the sweep could stand down at a point
+                // the gate would not have condemned from - which is
+                // exactly what the doc above promises cannot happen.
+                let bytes =
+                    crate::par2::min_raw_bytes((total.max(0.0) as u64 as f64 * margin) as u64);
+                bytes > ceiling_bytes
             }
             AbortRule::Blocks {
                 block_size,
@@ -638,6 +650,38 @@ fn charge_deficit(
 /// (`Connection::body_capped`), not just the loop around it.
 const MAX_PROBE_BYTES: usize = 8 << 20;
 
+/// How many servers may DELIVER probe bytes before the probe gives up.
+///
+/// [`MAX_PROBE_BYTES`] is per-server, and it is initialised inside the
+/// server loop, so a fleet at the supported ceiling of 32 could spend it
+/// 32 times over - and the caller probes two candidates, so ~512 MiB of
+/// accepted body in the worst case. The bytes only ever materialise if
+/// the servers actually serve them, i.e. against a hostile or badly
+/// corrupt post, but nothing bounded the aggregate.
+///
+/// Counted in SERVERS THAT DELIVERED, deliberately, rather than as a
+/// shared byte allowance. A shared allowance with a per-server floor was
+/// the obvious shape and it is the wrong one twice over: article size is
+/// poster-chosen, so a floor large enough to be useful refuses honest
+/// posts with big articles, and a floor small enough to be safe lets
+/// four servers serving decodable-but-Main-less bodies starve the fifth
+/// that holds the real index. Either way `probe_recovery_set` answers
+/// `None` and the caller's fallback is a FULL DOWNLOAD - the exact cost
+/// the probe exists to avoid. Counting deliverers bounds the aggregate
+/// at 3 x 8 MiB while leaving every single-server path byte-for-byte as
+/// it was.
+///
+/// A `430` costs nothing and must not count: a post whose par2 lives
+/// only on the fifth provider has to stay reachable.
+///
+/// Residue worth stating: this bounds BYTES, not wall clock. A fleet of
+/// servers that connect and then stall still pays up to
+/// [`PROBE_TIMEOUT`] each. Bounding that too would need a budget across
+/// the whole list, and a budget that expires before reaching the one
+/// provider holding the set turns a cheap probe into a full download -
+/// so it is left alone until something measures it.
+const MAX_PROBE_SERVERS: usize = 3;
+
 /// Wall-clock ceiling on one server's whole probe. `Connection::connect`
 /// bounds its own dial, but `BODY` does not bound the read - and a
 /// pre-flight that hangs is worse than one that shrugs, because every
@@ -722,7 +766,15 @@ impl ProbedSet {
 /// digests EVERY packet it keeps - which is what lets a caller place a
 /// member file's block grid on a number it did not have to estimate.
 pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Option<ProbedSet> {
+    let mut delivering = 0usize;
     for server in servers {
+        if delivering >= MAX_PROBE_SERVERS {
+            break;
+        }
+        // Set from inside the body loop, read after the future is done.
+        // Atomic rather than `Cell` only because this future has to stay
+        // `Send` for the timeout wrapper; there is no contention.
+        let served = std::sync::atomic::AtomicBool::new(false);
         let one = async {
             let (mut conn, _) = Connection::connect(server).await.ok()?;
             let mut parts: Vec<Vec<u8>> = Vec::new();
@@ -742,6 +794,7 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
                 }
                 match conn.body_capped(id, left).await {
                     Ok(Some(raw)) => {
+                        served.store(true, std::sync::atomic::Ordering::Relaxed);
                         spent += raw.len();
                         if let Ok(dec) = crate::yenc::decode(&raw) {
                             parts.push(dec.data);
@@ -751,6 +804,19 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
                     // set's: keep asking for the rest, then let the next
                     // server try what this one could not produce.
                     Ok(None) => {}
+                    // TooLarge means the read ran all the way to what
+                    // was left of MAX_PROBE_BYTES and stopped there.
+                    // Those bytes came off the wire, so this server DID
+                    // deliver its allowance and must count against the
+                    // three-server aggregate - leaving `served` false
+                    // let a fleet of 32 hostile providers spend the
+                    // per-server cap 32 times over, twice, which is the
+                    // ~512 MiB the aggregate exists to prevent (Codex
+                    // sweep 5, L1).
+                    Err(crate::nntp::NntpError::TooLarge(_)) => {
+                        served.store(true, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
@@ -787,6 +853,12 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
         };
         if let Ok(Some(probed)) = tokio::time::timeout(PROBE_TIMEOUT, one).await {
             return Some(probed);
+        }
+        // Only a server that actually handed over bytes and still failed
+        // to yield a set spends one of the allowance - see
+        // `MAX_PROBE_SERVERS`.
+        if served.load(std::sync::atomic::Ordering::Relaxed) {
+            delivering += 1;
         }
     }
     None
@@ -827,6 +899,44 @@ pub fn stratified_sample(total: usize, n: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M1: the byte abort rule must convert encoded -> raw exactly as
+    /// the gate it stands in for does.
+    ///
+    /// `check::block_size_could_condemn` takes its deficit from
+    /// `margined_deficit_raw_bytes` (which applies `min_raw_bytes`) and
+    /// leaves the volumes at their full ENCODED size. This rule skipped
+    /// the conversion, so its deficit ran the yEnc overhead larger than
+    /// the gate's and the sweep could stand down at a point the gate
+    /// would not have condemned from - the one thing `AbortRule::Bytes`
+    /// documents as impossible. The band between the two conversions is
+    /// where the two disagreed.
+    #[test]
+    fn the_byte_abort_rule_converts_encoded_to_raw_like_its_gate() {
+        // Sits ABOVE the ceiling encoded, BELOW it once converted: the
+        // exact band the missing conversion got wrong.
+        const CEILING: u64 = 1_000_000;
+        let encoded = 1_020_000f64;
+        assert!(
+            crate::par2::min_raw_bytes(encoded as u64) < CEILING,
+            "fixture is not in the disagreement band"
+        );
+        let rule = AbortRule::Bytes {
+            margin: 1.0,
+            ceiling_bytes: CEILING,
+        };
+        assert!(
+            !rule.decided(encoded),
+            "raw deficit is under the ceiling, so the sweep must keep going"
+        );
+        // And it still fires once the RAW figure clears the ceiling, so
+        // the fix delays the abort rather than disabling it.
+        assert!(
+            rule.decided(2_000_000.0),
+            "a deficit twice the ceiling is decided at any conversion"
+        );
+    }
+
     use crate::mock::{Chaos, MockServer, make_file_articles};
 
     /// Three present ids and two the server has never heard of, swept
@@ -1161,14 +1271,37 @@ mod tests {
     /// arithmetic any more, and strict because the gate it mirrors
     /// (`check::block_size_could_condemn`) is strict too. At the budget
     /// the sweep runs on; past it the sweep stands down.
+    ///
+    /// The fixtures are stated in ENCODED bytes - which is what the
+    /// weights are - and the boundary sits where they land after
+    /// `min_raw_bytes`. They used to sit either side of the ceiling
+    /// unconverted, which pinned the rule comparing encoded deficit to
+    /// encoded ceiling while the gate compared RAW deficit to encoded
+    /// ceiling; the rule therefore stood the sweep down inside a band
+    /// the gate would not have condemned from, which is the one thing
+    /// `AbortRule::Bytes`'s own doc promises cannot happen. Converting
+    /// here moved the boundary up by the yEnc overhead; it did not
+    /// loosen the strictness this test exists for, which is still
+    /// asserted on both sides.
     #[test]
     fn the_abort_fires_past_the_byte_budget_and_not_before() {
+        const CEILING: u64 = 2_000_000;
+        // 2_100_000 encoded -> 1_995_000 raw: under.
+        const UNDER: f64 = 2_100_000.0;
+        // 2_120_000 encoded -> 2_014_000 raw: over.
+        const OVER: f64 = 2_120_000.0;
+        assert!(
+            crate::par2::min_raw_bytes(UNDER as u64) <= CEILING
+                && crate::par2::min_raw_bytes(OVER as u64) > CEILING,
+            "fixtures must straddle the ceiling AFTER conversion, or this proves nothing"
+        );
+
         let cells: Vec<Arc<Vec<AtomicU8>>> = vec![Arc::new(vec![AtomicU8::new(MISSING)])];
         let budget = AbortBudget {
-            weights: vec![1_999_999.0],
+            weights: vec![UNDER],
             rule: AbortRule::Bytes {
                 margin: 1.0,
-                ceiling_bytes: 2_000_000,
+                ceiling_bytes: CEILING,
             },
         };
         let charged = vec![AtomicBool::new(false)];
@@ -1182,10 +1315,10 @@ mod tests {
 
         let cells: Vec<Arc<Vec<AtomicU8>>> = vec![Arc::new(vec![AtomicU8::new(MISSING)])];
         let budget = AbortBudget {
-            weights: vec![2_000_001.0],
+            weights: vec![OVER],
             rule: AbortRule::Bytes {
                 margin: 1.0,
-                ceiling_bytes: 2_000_000,
+                ceiling_bytes: CEILING,
             },
         };
         let charged = vec![AtomicBool::new(false)];

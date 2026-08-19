@@ -24,11 +24,25 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
             backing: .buffered, defer: false)
         window.title = "nzbfast"
         window.minSize = NSSize(width: 720, height: 480)
-        window.center()
+        // Naming the frame only makes AppKit WRITE it: every resize was
+        // saved to "NSWindow Frame nzbfast.main" and nothing ever read it
+        // back, so each launch reopened at the hardcoded size above no
+        // matter what the user had set. setFrameUsingName is the read
+        // half, and it must come after the name is set. It answers false
+        // on a first run (nothing saved yet) - only then do we place the
+        // window ourselves, because center() would otherwise overwrite a
+        // restored position with the default one.
         window.setFrameAutosaveName("nzbfast.main")
+        if !window.setFrameUsingName("nzbfast.main") {
+            window.center()
+        }
         // Closing hides the window; the daemon (and the app) keep running.
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        // NSWindowController offsets each window it shows from the last
+        // one; with a single restored window that just walks it down the
+        // screen a little further on every launch.
+        shouldCascadeWindows = false
         window.delegate = self
 
         webView.navigationDelegate = self

@@ -72,6 +72,36 @@ pub enum AuthRefusal {
     Capacity,
 }
 
+/// WHICH capacity limit a [`AuthRefusal::Capacity`] refusal names.
+///
+/// The control-flow answer is deliberately the same for both - back off,
+/// ask for fewer - which is why they share one `AuthRefusal` arm. But
+/// they are not the same FACT, and telemetry that conflates them lies:
+/// the sessions held at a simultaneous-IP refusal are an incidental
+/// count, not the account's connection ceiling, and "lower your
+/// connection count" is not the remedy. Reducing local sockets need not
+/// help at all when the problem is that the account is reachable from
+/// more than one public address (Codex sweep 5, M9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityLimit {
+    /// "too many connections", "connections per user" - the sessions we
+    /// hold ARE the ceiling, and asking for fewer is the fix.
+    Connections,
+    /// "max simultaneous IP addresses reached" - about WHERE the account
+    /// is being used from. Says nothing about how many sockets it grants.
+    SourceIps,
+}
+
+/// Which limit a capacity refusal is about. Only meaningful for a line
+/// already classified [`AuthRefusal::Capacity`].
+pub fn capacity_limit(line: &str) -> CapacityLimit {
+    let l = line.to_ascii_lowercase();
+    match l.contains("ip address") || l.contains("simultaneous ip") || l.contains("addresses") {
+        true => CapacityLimit::SourceIps,
+        false => CapacityLimit::Connections,
+    }
+}
+
 /// Classify an AUTHINFO refusal from the server's own reply line.
 ///
 /// Matched on the text because the codes are not diagnostic (see
@@ -91,6 +121,20 @@ pub fn classify_auth_refusal(line: &str) -> AuthRefusal {
         "concurrent connection",
         "maximum connections",
         "max connections",
+        // Giganews says "exceeded maximum number of connections per
+        // user", and the two words "number of" walked straight past
+        // both "maximum connections" and "max connections" above. A
+        // capacity refusal was therefore classified Permanent, so the
+        // pool wrote a working provider off mid-download ("not
+        // retrying") and the account holder was sent to check a
+        // password that was never wrong - the one outcome this
+        // classification exists to prevent. Matching the quantity
+        // phrasing rather than the exact noun pair keeps that from
+        // turning on a provider's choice of words. Measured against
+        // the live account 18 Aug 2026.
+        "number of connections",
+        "connections per user",
+        "sessions per user",
         "connection count",
         "no more connections",
         "try again later",

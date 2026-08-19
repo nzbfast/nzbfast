@@ -564,6 +564,28 @@ impl Daemon {
         gen0.is_none_or(|g0| Self::record_generation(g) == g0)
     }
 
+    /// Drop the per-job custody maps, but only for an id nobody is
+    /// still using.
+    ///
+    /// `activity` and `tail_cancel` are keyed by id ALONE. `park_gen`'s
+    /// stale-at-entry branch used to clear them unconditionally, on the
+    /// assumption that a retry seen there has only just landed and will
+    /// re-register afterwards. A tail delayed in a long post-processing
+    /// script gives no such ordering: the retry had already registered,
+    /// and clearing took its activity token and its recovery-tail cancel
+    /// handle - after which a delete could no longer stop that work. The
+    /// non-stale path avoids this by re-reading the generation and
+    /// returning before it removes (sweep 4, M4c); the stale branch is
+    /// where that condition is true by definition, so it asks a
+    /// different question instead (Codex sweep 5, M5).
+    fn release_custody_if_unclaimed(&self, id: &str) {
+        if find_job(self.queue.lock_ok().iter(), id).is_some() {
+            return;
+        }
+        self.hub.activity.lock_ok().remove(id);
+        self.hub.tail_cancel.lock_ok().remove(id);
+    }
+
     /// Park a finished job in history (NZBGet-style: failures are parked,
     /// not lost - mode=retry sends them back through the queue and the
     /// journal resumes from what already landed), on the generation the
@@ -621,11 +643,8 @@ impl Daemon {
         if stale {
             // Not ours any more. Do NOT retain the queue, prewrite,
             // file history or stamp a move - the record belongs to
-            // whoever re-queued it. The two custody maps are keyed by id
-            // and the new run re-registers them, so hand those back and
-            // leave.
-            self.hub.activity.lock_ok().remove(&id);
-            self.hub.tail_cancel.lock_ok().remove(&id);
+            // whoever re-queued it.
+            self.release_custody_if_unclaimed(&id);
             return;
         }
         // The active-download delete deferred its file removal to here: by
@@ -704,12 +723,6 @@ impl Daemon {
                 let _ = std::fs::remove_file(&nzb);
             }
         }
-        // The job's queue-row activity dies with the row.
-        self.hub.activity.lock_ok().remove(&id);
-        // §129: so does its recovery-fetch cancel handle. Same key, same
-        // place, same reason - the tail is over, and neither map may
-        // outgrow the queue.
-        self.hub.tail_cancel.lock_ok().remove(&id);
         // Read LIVE, not from the snapshot above: everything between the two
         // is unlocked, and file removal is slow. A queue or JSON-RPC delete
         // landing in that window used to be decided against a stale
@@ -755,6 +768,11 @@ impl Daemon {
         if gen0.is_some_and(|g0| Self::record_generation(&job.lock_ok()) != g0) {
             return;
         }
+        // Activity and §129's tail-cancel die with the row - BELOW the
+        // re-read, not above it, or the guard cannot guard the one thing
+        // the comment above says it exists for (sweep 4, M4c).
+        self.hub.activity.lock_ok().remove(&id);
+        self.hub.tail_cancel.lock_ok().remove(&id);
         let tombstone = job.lock_ok().tombstone;
         // Watchdog demotion: back into the queue (deferred, at the end)
         // instead of history - the abort was ours, not a failure. The
