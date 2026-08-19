@@ -79,8 +79,8 @@ Manager step by step, no SSH. Both run the same image as the compose file.
 - Built-in indexer, with a newznab endpoint, so nzbfast can be your indexer
 - Watchlist auto-grab with quality upgrades, RSS automation, Smart Folders,
   weekly scheduler, SABnzbd-compatible post-processing scripts
-- SABnzbd-compatible API and NZBGet JSON-RPC: Sonarr/Radarr, nzb360,
-  LunaSea etc. work out of the box
+- SABnzbd-compatible API and NZBGet JSON-RPC: Sonarr/Radarr, LunaSea, and
+  nzb360 (as a SABnzbd server) work out of the box
 - Crash-safe resume from an article journal; automatic PAR2 repair;
   encrypted-archive handling, including password chains
 - Dashboard and poster wall in 28 languages; the user manual in 16
