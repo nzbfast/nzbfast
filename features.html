@@ -145,7 +145,7 @@
     <div class="grid2">
       <ul class="plain">
         <li><b>SABnzbd-compatible API:</b> the whole surface the *arrs actually use: addfile/addurl, categories, priorities, per-job pause/resume, retry, pagination, two-tier API keys. Sonarr and Radarr talk to it as if it were SABnzbd.</li>
-        <li><b>NZBGet JSON-RPC facade.</b> nzb360, LunaSea and other NZBGet remotes connect unmodified.</li>
+        <li><b>NZBGet JSON-RPC facade.</b> LunaSea and other NZBGet remotes connect unmodified; nzb360 connects through the SABnzbd-compatible API.</li>
         <li><b>Newznab server.</b> With the built-in indexer switched on, your local index answers t=search/tvsearch/movie, so the *arrs can treat your own scans as one more indexer alongside the ones you pay for. It is off unless you turn it on, and the facade is closed while it is.</li>
         <li><b>RSS auto-grab:</b> an indexer's feed is the same thing a news reader subscribes to, except it lists what has just been posted to Usenet. Anything matching the filters downloads itself. Feeds are filtered with an NZBGet-style language, added and edited live from the dashboard.</li>
         <li><b>Watchlist.</b> Name the shows and films you want, even ones that haven't aired yet. Each episode is grabbed on its first appearance and upgraded until it reaches your target quality (say, 720p → 1080p REMUX), with the superseded copy deleted only after the upgrade has verified. An airdate calendar shows what's coming. It can also follow your Plex watchlist: link your account, or paste the list's address, and everything you add there is watched here too.</li>

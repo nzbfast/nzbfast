@@ -251,7 +251,8 @@
     <h2>Connecting Sonarr / Radarr</h2>
     <p class="lead-guide">nzbfast speaks the SABnzbd API. In your *arr app, add a <b>SABnzbd</b> download client:
     <b>Host</b> = your NAS IP, <b>Port</b> = <code>6789</code>, <b>API Key</b> = the value you set in
-    <code>NZBFAST_APIKEY</code>. It also exposes the NZBGet JSON-RPC API, so nzb360 / LunaSea connect the same way.</p>
+    <code>NZBFAST_APIKEY</code>. It also exposes the NZBGet JSON-RPC API for NZBGet remotes such as
+    LunaSea; nzb360 connects with the same SABnzbd settings as the *arrs.</p>
     <h2 id="updating" style="margin-top:34px">Updating</h2>
     <p class="lead-guide">The image is the update channel: nzbfast in a container never swaps its own binary,
     you move it forward by pulling a newer image. Your <code>config</code> and <code>downloads</code> survive,
