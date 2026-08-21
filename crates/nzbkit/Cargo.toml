@@ -52,7 +52,7 @@ bzip2 = "0.6"
 # dependency. `encoder` is for `zip::fixtures` (lib-visible for the
 # fuzz corpus, like bzip2's and flate2's always-present encoder
 # halves); nothing in the shipping call graph reaches it.
-lzma-rust2 = { version = "0.18", default-features = false, features = ["std", "encoder"] }
+lzma-rust2 = { version = "0.19", default-features = false, features = ["std", "encoder"] }
 # RAR5 encrypted store-mode sets: AES-256-CBC + PBKDF2-HMAC-SHA256
 # (RustCrypto - pure Rust, no new C in the tree).
 aes = "0.8"
