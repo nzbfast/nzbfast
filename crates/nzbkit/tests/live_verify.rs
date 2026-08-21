@@ -367,6 +367,40 @@ fn check_block_variants_semantics() {
 }
 
 #[test]
+fn crc_only_zero_extension_matches_hashing_the_padding() {
+    // The CRC-only check extends over the block's zero padding in
+    // O(log n) instead of hashing it. That must be bit-identical to the
+    // literal padded hash at every shape: a full block (no padding at
+    // all), a file's short final block, and a one-byte block whose
+    // padding is nearly the whole 1 MiB.
+    use nzbkit::live::check_block_crc;
+    use nzbkit::par2::BlockCheck;
+
+    let bs = 1 << 20; // 1 MiB, a real PAR2 block size
+    let mut rng = Rng(0x21D_0BEEF);
+    let full: Vec<u8> = (0..bs).map(|_| (rng.next() >> 24) as u8).collect();
+    for len in [bs, bs - 1, 700_003, 4096, 1, 0] {
+        let bytes = &full[..len];
+        let mut padded = bytes.to_vec();
+        padded.resize(bs, 0);
+        let check = BlockCheck {
+            md5: [0; 16], // unused by the CRC-only path
+            crc32: crc32fast::hash(&padded),
+        };
+        assert!(
+            check_block_crc(&check, bs, bytes),
+            "zero-extension disagreed with the padded hash at len {len}"
+        );
+        let mut wrong = check;
+        wrong.crc32 ^= 1;
+        assert!(
+            !check_block_crc(&wrong, bs, bytes),
+            "a wrong CRC was accepted at len {len}"
+        );
+    }
+}
+
+#[test]
 fn fast_mode_disk_fed_spans_still_flag_damage() {
     // Disk-fed spans (backfill/crash-resume) route through
     // on_data_from_disk, which must verify (full MD5+CRC) even in fast

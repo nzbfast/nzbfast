@@ -173,7 +173,7 @@ pub(super) fn apply_setting_tail(
         //
         // The two that ARM the cap - the switch, and a cap set while the
         // switch is already on - wake the scan loop, because that loop
-        // is what enforces it (`evict_pass_and_republish`, once per
+        // is what enforces it (`evict_between_passes`, once per
         // pass) and its idle sleep is 15 s only when there is nothing
         // whatsoever to scan. Spotnet went default-on in 129f293e, so a
         // groupless install now has a spot pass to do and sleeps the

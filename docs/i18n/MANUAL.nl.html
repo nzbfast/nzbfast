@@ -390,6 +390,16 @@ De lade van elke regel zegt wie de taak toevoegde en heeft dezelfde knop
 <b>Download de .nzb</b> als de wachtrij - handig om een release ergens anders opnieuw
 te downloaden, of om de <code>.nzb</code> bij een probleemmelding te voegen.</p>
 <p>De kaart toont standaard tien downloads en de rest is één klik weg, via de knop ▤. Status, locatie en de reden van een mislukking zitten achter een klik op de regel zelf, zodat het gewone geval - wat klaar is, hoe groot, wanneer - leesbaar blijft zonder scrollen. Sleep in plaats daarvan de onderrand van de kaart om de lijst op een door jou gekozen hoogte te laten scrollen. <b>History rows</b> in Instellingen → Interface verandert die tien; omdat het een eigenschap van de daemon is en niet van je browser, geldt het voor elk apparaat dat naar deze installatie kijkt. <b>Colour History names</b> daarnaast kleurt voltooide namen groen en mislukte rood; uitgezet blijven de namen neutraal, en de gekleurde stip en de details van de regel zeggen nog steeds welke welke is.</p>
+<p>nzbfast bewaart de geschiedenis voor altijd, tenzij je iets anders zegt.
+<b>Geschiedenis opruimen</b> bij Instellingen → Systeem verwijdert oude items via
+twee onafhankelijke regels: een leeftijd (<b>Items verwijderen die ouder zijn
+dan</b>, geteld vanaf het moment dat de download klaar was, in minuten, uren of
+dagen) en een lengte (<b>Hoogstens dit aantal items bewaren</b>). Staan ze allebei
+aan, dan gelden ze allebei, en 0 zet elk van beide afzonderlijk uit. Alleen het item
+in de geschiedenis wordt verwijderd: de gedownloade bestanden blijven precies waar
+ze zijn. De leeftijdsregel pakt alleen voltooide downloads, dus een mislukte wacht
+tot je hem opnieuw probeert of zelf verwijdert; de lengtelimiet telt elk item mee,
+wat de afloop ook was.</p>
 <h3 id="dash-usage">Dataverbruik</h3>
 <p>Dagelijkse balken per provider en totalen voor Vandaag / 7 dagen / 30 dagen -
 onmisbaar voor accounts met een datalimiet en blokaccounts. Blokaccounts tonen het
@@ -514,8 +524,7 @@ gewone webadres volstaat; een Prowlarr-regel ziet eruit als
 er terugkwam, waarmee adres en sleutel in één klik bewezen zijn. Een opgeslagen sleutel
 wordt nooit meer getoond: het vak zegt dat, en leeg laten houdt de sleutel die er al
 staat.</p>
-<p><b>Zoeken.</b> Open <b>🎬 wall</b> in de kopbalk en schakel over naar de
-releaselijst. Het uitklapmenu naast het zoekvak bepaalt waar een zoekopdracht kijkt:
+<p><b>Zoeken.</b> Open <b>🎬 wall</b> in de kopbalk en kies <b>Releases</b>. Het uitklapmenu naast het zoekvak bepaalt waar een zoekopdracht kijkt:
 <b>Deze index</b>, dus wat deze machine zelf gescand heeft, <b>Indexers</b>, of
 <b>Beide</b>. Je keuze wordt onthouden. Je accounts bevragen vraagt om iets in het vak,
 want ze met een lege opdracht doorbladeren zou het dagbudget uitgeven aan een lijst
@@ -582,6 +591,16 @@ wordt er alleen uit de lokale index geantwoord.</li>
 elke herkende film- en tv-release als postertegel met beoordeling, jaar, genres, cast
 en synopsis - je nieuwsgroepen, doorbladerbaar als catalogus.</p>
 <ul>
+<li><b>Muur</b> en <b>Releases</b> zijn twee manieren om naar dezelfde index te
+kijken; het paar onder <b>Weergave</b> wisselt ertussen. Je keuze wordt onthouden.</li>
+<li><b>Posterdichtheid</b> is <b>S</b> / <b>M</b> / <b>L</b> naast dat paar: klein zet
+er meer op het scherm, groot minder.</li>
+<li><b>Hover-voorvertoning</b>, boven de Releases-tabel: houd de muis op een rij voor
+poster en samenvatting, allemaal uit je eigen index.</li>
+<li><b>Groeperen per titel</b>, de schakelaar ernaast: één rij per titel met de releases
+eronder. Open hem met <b>&#9656;</b> of door op de rij te klikken; het vinkje bij de
+titel selecteert de getoonde releases. Groeperen geldt alleen voor <b>Deze
+index</b>.</li>
 <li><b>Tabbladen</b> voor Films / Series / Overig, direct zoeken en zeven
 sorteringen: <b>Voor jou</b>, Nieuwste posts, Releasejaar, Best beoordeeld,
 Titel A–Z, Grootste en Meest gepost.</li>
@@ -1192,7 +1211,11 @@ download.</li>
 </ul>
 <p class="dim">Het oordeel is een voorspelling op basis van aanwijzingen, geen garantie.
 Voor een hard antwoord over één NZB telt <code>nzbfast check</code>
-(<a href="#cli">§15</a>) de werkelijke artikelen.</p>
+(<a href="#cli">§15</a>) de werkelijke artikelen. Beide tellen antwoorden, geen inhoud. Een schone controle betekent dat de artikelen
+er waren toen ernaar gevraagd werd, niet dat wat erin zit onbeschadigd is: een klein
+aantal providers antwoordt voor verwijderde artikelen met dummygegevens in plaats van ze
+te weigeren, en dat blijkt pas tijdens de download zelf, waar het artikel op zijn eigen
+controlegetal vastloopt en opnieuw bij een andere server wordt opgehaald of gerepareerd.</p>
 <h3 id="memory">Geheugenbudget - en wat weinig geheugen kost</h3>
 <p>Alle engine-caches delen één budget (standaard ¼ van het fysieke RAM, begrensd op
 256 MB–16 GB). Stel het expliciet in met <i>Geheugenbudget</i> in Instellingen, of

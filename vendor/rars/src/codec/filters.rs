@@ -133,18 +133,40 @@ pub(crate) fn e8e9_encode(data: &mut [u8], file_offset: u32, include_e9: bool) {
     }
 }
 
+/// The allocating shape, for the RAR 2.9 filter path and the tests: one
+/// fresh buffer per call. The RAR 5 decoders take [`delta_decode_into`].
 pub(crate) fn delta_decode(
     data: &[u8],
     channels: usize,
     messages: DeltaErrorMessages,
 ) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    delta_decode_into(data, channels, messages, &mut out)?;
+    Ok(out)
+}
+
+/// Delta-decode `data` into `out`, which is resized to `data.len()` and
+/// fully rewritten. The decode cannot run in place - it walks the source
+/// serially and the destination by a stride of `channels`, so a byte it
+/// has yet to read may already have been overwritten - but the buffer it
+/// needs does not have to be a fresh one. Every RAR 5 filter block used
+/// to allocate and zero its own; the decoders now carry one across the
+/// whole member. (nzbfast-local change, 20 Aug 2026 - re-apply on the
+/// next rars re-sync, see vendor/rars/VENDORING.md.)
+pub(crate) fn delta_decode_into(
+    data: &[u8],
+    channels: usize,
+    messages: DeltaErrorMessages,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if channels == 0 {
         return Err(Error::InvalidData(messages.zero_channels));
     }
     if channels > 32 {
         return Err(Error::InvalidData(messages.invalid_channels));
     }
-    let mut out = vec![0u8; data.len()];
+    out.clear();
+    out.resize(data.len(), 0);
     let mut src = 0usize;
     for channel in 0..channels {
         let mut prev = 0u8;
@@ -159,7 +181,7 @@ pub(crate) fn delta_decode(
             dest += channels;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 pub(crate) fn delta_encode(
@@ -364,6 +386,34 @@ mod tests {
             ),
             Err(Error::InvalidData("DELTA filter channel count is invalid"))
         );
+    }
+
+    /// The scratch-reusing decode must be byte-identical to the
+    /// allocating one, INCLUDING when the buffer it is handed is longer
+    /// than the block and full of somebody else's bytes - which is
+    /// exactly what the second and every later block of a member sees.
+    #[test]
+    fn delta_decode_into_matches_the_allocating_decode_on_a_dirty_buffer() {
+        let mut scratch = Vec::new();
+        for channels in 1..=8usize {
+            for len in [0usize, 1, 5, 31, 64, 257, 4096] {
+                // Deterministic pseudo-random bytes: a filter block is
+                // arbitrary compressed output, not a pattern.
+                let data: Vec<u8> = (0..len)
+                    .map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 13) as u8)
+                    .collect();
+                let expected = delta_decode(&data, channels, DeltaErrorMessages::generic());
+                // Leave the previous block's answer (and then some) in
+                // the buffer, so a decode that failed to rewrite every
+                // byte would read back the stale one.
+                scratch.clear();
+                scratch.resize(len + 997, 0xa5);
+                let actual =
+                    delta_decode_into(&data, channels, DeltaErrorMessages::generic(), &mut scratch)
+                        .map(|()| scratch.clone());
+                assert_eq!(actual, expected, "channels={channels} len={len}");
+            }
+        }
     }
 
     #[test]

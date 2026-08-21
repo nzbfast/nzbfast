@@ -1100,6 +1100,10 @@ fn slot_json(
 mod prelock;
 use prelock::{PreLock, prelock_reads};
 
+// The queue walk itself, a child module: see sabcompat/walk.rs.
+mod walk;
+use walk::{QueueView, QueueWalk, queue_walk};
+
 pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>) -> Value {
     // Everything read BEFORE the queue lock: see prelock_reads. The
     // destructure keeps every downstream read on the inline names. This
@@ -1122,53 +1126,6 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         outages,
     } = prelock_reads(d);
     let q = d.queue.lock_ok();
-    // §91: the active job's progress is read fresh at every pairing with
-    // a slot's state (see `active_left` below), never snapshotted up
-    // here. A snapshot taken before the queue walk could pair the
-    // PREVIOUS job's near-100% progress with a slot that flipped to
-    // Downloading mid-walk - a state the queue was never in.
-    // ...and only for the slot that OWNS them. Two jobs are `Downloading`
-    // whenever one is finishing (job N stays in that state through its
-    // whole disk tail while job N+1 is already on the wire), and this
-    // used to answer for both - so the finishing row, the hero card and
-    // the drawer all drew the NEW download's bar: ~98%, then 0%, then
-    // climbing again. `None` means "not yours": the caller falls through
-    // to the tail arm, which has fixed numbers and needs no counters.
-    //
-    // The owner is re-read here with the counters, under the one lock
-    // the writer sets both in, so no reader can pair a stale owner with
-    // the next job's zeroes.
-    let active_left = |nzo_id: &str| {
-        let owner = d.active_dl.lock_ok();
-        if owner.as_deref() != Some(nzo_id) {
-            return None;
-        }
-        // UX §15, preferred whenever the pipeline has published one: both
-        // halves are declared NZB bytes of this run's article set, so the
-        // fraction reaches exactly 100% at net-drain and cannot pass it,
-        // and the seed already includes everything a resume had in hand.
-        //
-        // The arithmetic below is the fallback, and it is why the plan
-        // exists: decoded payload (every slot, PAR2 included) over the
-        // NZB's encoded bytes minus recovery volumes stalls near 97% on a
-        // clean set - the "1.5 GB left" that is not really left - and
-        // tops out early on a damaged one, where the extra recovery bytes
-        // land on its numerator alone.
-        if let Some(honest) = d.hub.fetch_left() {
-            return Some(honest);
-        }
-        let done = d
-            .progress
-            .load(Ordering::Relaxed)
-            // Bytes a resume never had to fetch. Counted here rather
-            // than in the shared counter so that everything measuring
-            // the WIRE (quota, average speed, best_rate_bps, the CLI
-            // ticker, the rolling speed window) goes on seeing only what
-            // this run actually moved. See StreamHub::resume_seeded.
-            .saturating_add(d.hub.resume_seeded.load(Ordering::Relaxed));
-        let total = d.active_total.load(Ordering::Relaxed).max(1);
-        Some((done.min(total), total, total.saturating_sub(done)))
-    };
     // Live speed over a ~5 s rolling window (see current_speed_bps): a
     // whole-job average hid stalls; idle or a fresh window reports 0,
     // never `bytes / ~zero elapsed`.
@@ -1193,7 +1150,28 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
     // different rule: the header called a SUSPENDED job in its tail
     // finished (0 left) while its row, which excludes suspended jobs
     // from the tail, reported the whole set still to fetch. One walk
-    // ends both.
+    // ends both. That walk is `queue_walk` below, a child module since
+    // since the B5 queue-window work - it returns the page and every
+    // total in one `QueueWalk`.
+    //
+    // B5 (20 Aug perf audit): the window the caller asked for, taken
+    // here and PASSED
+    // INTO the walk. It used to be applied after the fact, by trimming a
+    // vector every row of which had already been built - so a dashboard
+    // poll on a 15k queue rendered 15k slot bodies to throw all but its
+    // page away, with the queue lock held for the whole of it, once a
+    // second. Echoed back in the header below the way SAB does.
+    let window = window_of(params);
+    let (win_start, win_limit) = window;
+    // Ours, not SAB's, and off unless a client asks for it by name: a
+    // row whose job is in a live pipeline state rides the page wherever
+    // it sits in the queue. `pick_job` runs Force and High ahead of
+    // queue order and never MOVES the job (see `apply_priority`), so
+    // what is on the wire can be row 9000 of 15000 - and a client that
+    // pages from the top would then draw "what is running" off a page
+    // with nothing running in it. The dashboard sends this; no SAB
+    // client does, so no SAB client's paging changes shape.
+    let pin_live = params.get("pin_live").is_some_and(|v| v == "1");
     // The snapshot every row below is built against - see `SlotCtx`. Each
     // field is moved from the read above it, in the order it was taken, so
     // building it changes nothing about WHEN anything was sampled;
@@ -1220,66 +1198,28 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
             .collect(),
         global_script: d.scripts.lock_ok().clone(),
     };
-    let mut remaining_bytes: u64 = 0;
-    // ...and the whole queue's declared bytes, on the same walk and for
-    // the same reason - SAB's `mb` / `size` header pair is this total
-    // against the `mbleft` / `sizeleft` beside it, and two walks could
-    // report a total that its own remainder exceeds.
-    let mut total_bytes_all: u64 = 0;
-    let slots: Vec<Value> = q
-        .iter()
-        .enumerate()
-        .filter_map(|(i, j)| {
-            let j = j.lock_ok();
-            // §91: both sampled under this slot's lock, after its state
-            // was read, so (status, percentage) is one instant.
-            //
-            // The pipeline's own phase word once past the network; a
-            // suspended job answers "Paused" below and its phase would
-            // only contradict that.
-            let phase = (matches!(j.state, JobState::Downloading | JobState::Finishing)
-                && !j.suspended)
-                .then(|| d.tail_phase(&j.nzo_id))
-                .flatten();
-            let live = (j.state == JobState::Downloading)
-                .then(|| active_left(&j.nzo_id))
-                .flatten();
-            let (pct, left) = slot_progress(
-                j.state,
-                live.map(|(done, total, _)| (done, total)),
-                phase.is_some(),
-                j.total_bytes,
-                j.downloaded_bytes,
-            );
-            // The queue's own sizeleft, summed here from the row's own
-            // remainder - see `remaining_bytes` above. Counted for EVERY
-            // job, before the caller's view filter: the header describes
-            // the whole queue, the rows describe the slice asked for.
-            remaining_bytes = remaining_bytes.saturating_add(left);
-            total_bytes_all = total_bytes_all.saturating_add(j.total_bytes);
-            if !cat_filter.is_none_or(|c| j.category == *c)
-                || !ids.as_ref().is_none_or(|s| s.contains(j.nzo_id.as_str()))
-            {
-                return None;
-            }
-            Some(slot_json(&ctx, i, &j, phase, live.is_some(), pct, left))
-        })
-        .collect();
-    let n = slots.len();
+    let walk = queue_walk(
+        d,
+        &q,
+        &ctx,
+        &QueueView {
+            cat_filter,
+            ids: ids.as_ref(),
+            window,
+            pin_live,
+        },
+    );
+    let QueueWalk {
+        slots,
+        matched: n,
+        remaining_bytes,
+        total_bytes_all,
+        runnable_bytes,
+        need_bytes,
+    } = walk;
     // Everything in the queue, before the caller's category / nzo_ids
     // filter - SAB's `noofslots_total` beside the filtered `noofslots`.
     let total_slots = q.len();
-    // The window the caller asked for, echoed back in the header the
-    // way SAB does. Same parse as `paginate` above, which is what
-    // actually applied it.
-    let win_start: usize = params
-        .get("start")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let win_limit: usize = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     // SAB's percentage-of-line-speed cap, as a string beside the
     // absolute one. "0" when nothing is capped, or when the line speed
     // is unknown and a percentage of it would mean nothing.
@@ -1456,15 +1396,23 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         "watch_upgraded": notices.watch_upgraded,
         "delete_kept": notices.delete_kept,
         "hist_upgraded": notices.hist_upgraded,
-        // Direct id selection bypasses the start/limit window (SAB
-        // semantics; see nzo_ids_param).
-        "slots": if ids.is_some() { slots } else { paginate(slots, params) },
+        // Already exactly the window the caller asked for - applied
+        // inside the walk above, where the rows outside it are never
+        // built. Direct id selection bypasses the window entirely (SAB
+        // semantics; see nzo_ids_param), which the walk honours too.
+        "slots": slots,
         "speed": sab_units(speed_bps),
         "kbpersec": format!("{:.0}", speed_bps / 1e3),
         // SAB's own suffix convention: to_units(bytes) + "B".
         "sizeleft": format!("{}B", sab_units(remaining_bytes as f64)),
-        "timeleft": if speed_bps > 1.0 && remaining_bytes > 0 {
-            sab_timeleft(remaining_bytes as f64 / speed_bps)
+        // ETA from the RUNNABLE remainder, not the total: `sizeleft`
+        // keeps promising the whole backlog, but a paused or
+        // duplicate-held job contributes size and no time (walk.rs
+        // computes `runnable_bytes` for exactly this), and dividing
+        // the total by the line speed put a header ETA on the queue
+        // that never converged while the active job downloaded.
+        "timeleft": if speed_bps > 1.0 && runnable_bytes > 0 {
+            sab_timeleft(runnable_bytes as f64 / speed_bps)
         } else {
             "0:00:00".to_string()
         },
@@ -1531,6 +1479,15 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // from the one walk above.
         "mb": format!("{:.2}", total_bytes_all as f64 / API_MB),
         "mbleft": format!("{:.2}", remaining_bytes as f64 / API_MB),
+        // Ours, not SAB's (additive, B5). Both are whole-queue facts
+        // that a paged client cannot recover from the rows it was sent:
+        // `mbleft_runnable` is the part of `mbleft` the line will
+        // actually work through (Downloading + Queued rows only), which
+        // is the header ETA's numerator, and `space_need_bytes` is what
+        // the whole queue will ask of the download disk before it is
+        // done, summed from each row's own unpack forecast.
+        "mbleft_runnable": format!("{:.2}", runnable_bytes as f64 / API_MB),
+        "space_need_bytes": need_bytes,
         "size": format!("{}B", sab_units(total_bytes_all as f64)),
         "noofslots_total": total_slots,
         // The window this body answered for, echoed back as SAB does.
@@ -2021,13 +1978,28 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                     ) {
                         Ok(nzo) => json!(nzo_int(&nzo)),
                         Err(e) => {
-                            warn!(target: "jsonrpc", "append url: {e}");
+                            // `fetch_url`'s errors are formatted "{url}:
+                            // ..." and an NZB link routinely carries the
+                            // indexer's apikey in its query string. The
+                            // log ring is not private - logtee mirrors it
+                            // into mode=log, the JSON-RPC log methods and
+                            // `docker logs` - so it goes through the same
+                            // redaction every sibling path uses.
+                            warn!(
+                                target: "jsonrpc",
+                                "append url: {}",
+                                super::indexers::redact_url_creds(&e.to_string())
+                            );
                             json!(0)
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(target: "jsonrpc", "append url: {e}");
+                    warn!(
+                        target: "jsonrpc",
+                        "append url: {}",
+                        super::indexers::redact_url_creds(&e.to_string())
+                    );
                     json!(0)
                 }
             };
@@ -2563,6 +2535,15 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 *rpc_error = Some(format!("unsupported editqueue command {other:?}"));
             }
         }
+        // Load-bearing, and for more than the queue order: this is the
+        // ONLY store behind `GroupSetName` and `GroupApplyCategory`,
+        // whose shared `requeue_category` re-points `out_dir` and can
+        // already have MOVED the partial download to the new folder. A
+        // restructure that gives an arm its own early return takes the
+        // rename with it, and the record comes back after a restart
+        // naming a directory the bytes have left. One save, not one per
+        // arm, so renaming N jobs is one rewrite of a queue.json that
+        // reaches 14,500 rows. Pinned by `remote_compat.rs`.
         if rpc_error.is_none() {
             d.save_queue();
         }

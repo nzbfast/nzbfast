@@ -403,6 +403,16 @@ Schaltfläche <b>.nzb herunterladen</b> wie die Warteschlange - praktisch, um ei
 Release woanders noch einmal herunterzuladen oder die <code>.nzb</code> an eine
 Problemmeldung anzuhängen.</p>
 <p>Die Karte listet standardmäßig zehn Downloads, der Rest ist einen Klick entfernt, über die Schaltfläche ▤. Status, Ort und der Grund eines Fehlschlags liegen hinter einem Klick auf die Zeile selbst, damit der häufige Fall - was fertig wurde, wie groß, wann - ohne Scrollen lesbar bleibt. Zieh stattdessen die Unterkante der Karte, damit die Liste auf einer von dir gewählten Höhe scrollt. <b>History rows</b> unter Einstellungen → Oberfläche ändert die Zehn; da es eine Eigenschaft des Daemons ist und nicht deines Browsers, gilt es für jedes Gerät, das auf diese Installation schaut. <b>Colour History names</b> daneben färbt fertige Namen grün und fehlgeschlagene rot; ausgeschaltet bleiben die Namen schlicht, und der farbige Punkt wie auch die Details der Zeile sagen weiterhin, was was ist.</p>
+<p>nzbfast behält den Verlauf für immer, sofern Sie nichts anderes sagen. <b>Verlauf
+aufräumen</b> unter Einstellungen → System entfernt alte Einträge nach zwei
+unabhängigen Regeln: einem Alter (<b>Einträge entfernen, die älter sind als</b>,
+gezählt ab dem Moment, in dem der Download fertig war, in Minuten, Stunden oder
+Tagen) und einer Länge (<b>Höchstens so viele Einträge behalten</b>). Sind beide
+gesetzt, gelten beide, und 0 schaltet jede für sich ab. Entfernt wird nur der
+Verlaufseintrag - die heruntergeladenen Dateien bleiben genau dort, wo sie sind. Die
+Altersregel nimmt nur abgeschlossene Downloads, ein fehlgeschlagener wartet also,
+bis Sie ihn erneut versuchen oder selbst löschen; die Längenbegrenzung zählt jeden
+Eintrag, egal wie er ausgegangen ist.</p>
 <h3 id="dash-usage">Datenverbrauch</h3>
 <p>Tagesbalken pro Provider und Summen für Heute / 7 Tage / 30 Tage - unverzichtbar
 bei Volumen- und Block-Tarifen. Block-Konten zeigen die Lebenszeitnutzung gegen ihre
@@ -536,7 +546,7 @@ dann <b>Indexer übernehmen</b>. <b>Testen</b> fragt die Seite, was sie unterst�
 zeigt die Antwort, was Adresse und Schlüssel mit einem Klick belegt. Ein gespeicherter
 Schlüssel wird nie wieder angezeigt: das Feld sagt es, und leer lassen behält den
 Schlüssel, der schon da ist.</p>
-<p><b>Suchen.</b> Öffne <b>🎬 Wand</b> in der Kopfzeile und wechsle zur Release-Liste.
+<p><b>Suchen.</b> Öffne <b>🎬 Wand</b> in der Kopfzeile und wähle <b>Releases</b>.
 Das Auswahlfeld neben dem Suchfeld entscheidet, wo eine Suche nachsieht: <b>Dieser
 Index</b>, also das, was diese Maschine selbst gescannt hat, <b>Indexer</b> oder
 <b>Beides</b>. Deine Wahl wird gemerkt. Für eine Frage an deine Konten muss etwas im
@@ -607,6 +617,16 @@ Medienbrowser: jedes erkannte Film- und Serien-Release als Poster-Kachel mit
 Bewertung, Jahr, Genres, Besetzung und Handlung - deine Newsgroups, durchstöberbar
 als Katalog.</p>
 <ul>
+<li><b>Wand</b> und <b>Releases</b> sind zwei Sichten auf denselben Index; das
+Paar unter <b>Ansicht</b> wechselt zwischen ihnen. Deine Wahl wird gemerkt.</li>
+<li><b>Posterdichte</b> ist <b>S</b> / <b>M</b> / <b>L</b> neben diesem Paar: klein
+bringt mehr Poster auf den Schirm, groß weniger.</li>
+<li><b>Hover-Vorschau</b>, ein Schalter über der Releases-Tabelle: Zeiger auf eine
+Zeile legen für Poster und Handlung, alles aus deinem eigenen Index.</li>
+<li><b>Nach Titel gruppieren</b>, der Schalter daneben: eine Zeile je Titel, die
+Releases darunter. Öffne sie mit <b>&#9656;</b> oder per Klick auf die Zeile; das
+Kästchen am Titel wählt die gezeigten Releases aus. Gruppieren gilt nur für
+<b>Diesen Index</b>.</li>
 <li><b>Reiter</b> für Filme / Serien / Sonstiges, Sofortsuche und sieben
 Sortierungen: <b>Für dich</b>, Neueste Posts, Erscheinungsjahr, Top bewertet,
 Titel A–Z, Größte und Am meisten gepostet.</li>
@@ -1235,7 +1255,11 @@ kostet also etwas Zeit statt des Downloads.</li>
 </ul>
 <p class="dim">Das Urteil ist eine Vorhersage aus Indizien, keine Garantie. Für eine
 harte Antwort zu einer NZB zählt <code>nzbfast check</code>
-(<a href="#cli">§15</a>) die tatsächlichen Artikel.</p>
+(<a href="#cli">§15</a>) die tatsächlichen Artikel. Beide zählen Antworten, nicht Inhalte. Ein sauberer Check heißt, dass die Artikel
+da waren, als gefragt wurde, nicht dass ihr Inhalt unbeschädigt ist: eine kleine Zahl
+von Providern antwortet für entfernte Artikel mit Dummy-Daten, statt sie zu verweigern,
+und das zeigt sich erst beim Download selbst, wo der Artikel an seiner eigenen
+Prüfsumme scheitert und von einem anderen Server neu geholt oder repariert wird.</p>
 <h3 id="memory">Speicher-Budget - und was wenig Speicher kostet</h3>
 <p>Alle Engine-Caches teilen sich ein Budget (Standard ¼ des physischen RAM,
 gedeckelt auf 256 MB–16 GB). Setz es explizit mit dem <i>Speicher-Budget</i> in den

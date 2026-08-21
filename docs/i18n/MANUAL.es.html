@@ -379,6 +379,16 @@ El panel de cada fila dice quién añadió el trabajo y tiene el mismo botón <b
 que la cola - útil para volver a descargar un lanzamiento en otro sitio, o para adjuntar
 el <code>.nzb</code> a un informe de problema.</p>
 <p>La tarjeta lista diez descargas por defecto y el resto queda a un clic, en el botón ▤. El estado, la ubicación y el motivo de un fallo viven detrás de un clic en la propia fila, de modo que el caso habitual - qué terminó, de qué tamaño, cuándo - sigue siendo legible sin desplazarse. Arrastra el borde inferior de la tarjeta para que la lista se desplace a la altura que elijas. <b>History rows</b> en Ajustes → Interfaz cambia ese diez; como es una propiedad del daemon y no de tu navegador, se aplica a todos los dispositivos que miran esta instalación. <b>Colour History names</b>, al lado, tiñe de verde los nombres completados y de rojo los fallidos; al desactivarlo los nombres quedan neutros, y el punto de color y los detalles de la fila siguen diciendo cuál es cuál.</p>
+<p>nzbfast conserva el historial para siempre, salvo que digas lo contrario.
+<b>Limpieza del historial</b> en Ajustes → Sistema elimina las entradas antiguas
+según dos reglas independientes: una antigüedad (<b>Eliminar entradas con más
+antigüedad de</b>, contada desde el momento en que terminó la descarga, en minutos,
+horas o días) y una longitud (<b>Conservar como máximo estas entradas</b>). Si están
+puestas las dos, se aplican las dos, y 0 desactiva cada una por su cuenta. Solo se
+elimina la entrada del historial: los archivos descargados se quedan exactamente
+donde están. La regla de antigüedad solo toma descargas completadas, así que una
+fallida espera a que la reintentes o la borres tú; el límite de longitud cuenta
+todas las entradas, sea cual sea su resultado.</p>
 <h3 id="dash-usage">Uso de datos</h3>
 <p>Barras diarias por proveedor y totales de Hoy / 7 días / 30 días - esencial para cuentas medidas
 y de bloque. Las cuentas de bloque muestran el uso acumulado contra su tamaño.</p>
@@ -501,7 +511,7 @@ entrada, y trae consigo todos los indexadores que hay detrás.</p>
 que respondió, lo que valida la dirección y la clave en un clic. Una clave guardada no
 se vuelve a mostrar: la casilla lo dice, y dejarla en blanco conserva la que ya
 tiene.</p>
-<p><b>Buscar.</b> Abre <b>🎬 el muro</b> en la cabecera y cambia a la lista de releases.
+<p><b>Buscar.</b> Abre <b>🎬 el muro</b> en la cabecera y elige <b>Lanzamientos</b>.
 El desplegable junto al cuadro de búsqueda decide dónde mira una búsqueda: <b>Este
 índice</b>, es decir lo que esta máquina ha escaneado por su cuenta, <b>Indexadores</b> o
 <b>Ambos</b>. Tu elección se recuerda. Preguntar a tus cuentas exige algo escrito en el
@@ -569,6 +579,16 @@ de ahí se responde solo con el índice local.</li>
 multimedia: cada película y lanzamiento de TV reconocido como un mosaico de póster con valoración, año,
 géneros, reparto y sinopsis - tus newsgroups, navegables como un catálogo.</p>
 <ul>
+<li><b>Muro</b> y <b>Lanzamientos</b> son dos maneras de ver el mismo índice, y el
+par bajo <b>Vista</b> cambia entre ellas. Tu elección se recuerda.</li>
+<li><b>Densidad de pósteres</b> es <b>S</b> / <b>M</b> / <b>L</b> junto a ese par:
+pequeño pone más en pantalla, grande menos.</li>
+<li><b>Vista previa al pasar el cursor</b>, encima de la tabla de Lanzamientos: deja el
+puntero sobre una fila para ver póster y sinopsis, de tu propio índice.</li>
+<li><b>Agrupar por título</b>, el interruptor de al lado: una fila por título con sus
+lanzamientos debajo. Ábrela con <b>&#9656;</b> o pulsando la fila; la casilla del título
+selecciona los lanzamientos mostrados. La agrupación solo vale para <b>Este
+índice</b>.</li>
 <li><b>Pestañas</b> de Películas / Series / Otros, búsqueda instantánea y siete
 ordenaciones: <b>Para ti</b>, Más recientes, Año de estreno, Mejor valorados,
 Título A–Z, Más grandes y Más publicados.</li>
@@ -1168,7 +1188,11 @@ descarga.</li>
 </ul>
 <p class="dim">El veredicto es una predicción a partir de indicios, no una garantía.
 Para una respuesta firme sobre un NZB, <code>nzbfast check</code>
-(<a href="#cli">§15</a>) cuenta los artículos reales.</p>
+(<a href="#cli">§15</a>) cuenta los artículos reales. Ambos cuentan respuestas, no contenidos. Una comprobación limpia significa que los
+artículos estaban ahí cuando se preguntó, no que lo que contienen esté intacto: un
+número reducido de proveedores responde por los artículos retirados con datos falsos en
+lugar de rechazarlos, y eso solo aparece durante la descarga misma, donde el artículo
+falla su propia suma de comprobación y se vuelve a pedir a otro servidor o se repara.</p>
 <h3 id="memory">Presupuesto de memoria - y lo que cuesta la memoria escasa</h3>
 <p>Todas las cachés del motor comparten un presupuesto (por defecto ¼ de la RAM física, acotado a
 256 MB–16 GB). Fíjalo explícitamente con <i>Presupuesto de memoria</i> en Ajustes, o con

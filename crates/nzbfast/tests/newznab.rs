@@ -1435,8 +1435,12 @@ async fn newznab_tv_id_params_are_honoured_or_refused() {
             &nzbkit::index::TitleFill {
                 // `tmdb_id` carries the TVmaze SHOW id on a TV row - the
                 // same column, a different numbering scheme, which is
-                // why the tvmaze resolver has to filter on kind.
+                // why the tvmaze resolver has to filter on kind. And it
+                // must be LABELLED: an unlabelled '' id resolves nothing
+                // since the 20 Aug sweep (it may be an AniList media id
+                // written before the id_src column existed).
                 tmdb_id: 4242,
+                id_src: "tvmaze",
                 imdb: "tt0090001",
                 ..Default::default()
             },

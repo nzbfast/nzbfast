@@ -54,9 +54,21 @@ use super::*;
 /// bytes are in use or are the dead space this constant exists to stop.
 pub const WAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
+/// Page cache for the shared writer, in MiB. It is one connection, it
+/// holds the compaction and migration transactions, and every chunk
+/// commit used to pay a full fsync against SQLite's 2 MB default on a
+/// multi-gigabyte index.
+const WRITER_CACHE_MIB: i64 = 256;
+
+/// Page cache for a scratch scan connection, in MiB - see
+/// [`Index::open_scratch`]. A quarter of the writer's, matching the
+/// read-only handle's figure for the same reason: several of these are
+/// open at once and none of them needs the writer's working set.
+const SCRATCH_CACHE_MIB: i64 = 64;
+
 /// The base tables, pragmas aside: everything `CREATE TABLE IF NOT
 /// EXISTS` so it is a no-op on an existing database.
-fn create_base_schema(db: &Connection) -> rusqlite::Result<()> {
+fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
     // Only journal_mode was ever set, so every chunk commit paid a
     // full fsync and the page cache stayed at SQLite's 2 MB default
     // against a multi-gigabyte index.
@@ -87,8 +99,9 @@ fn create_base_schema(db: &Connection) -> rusqlite::Result<()> {
              PRAGMA journal_size_limit={WAL_SIZE_LIMIT};
              PRAGMA synchronous=NORMAL;
              PRAGMA temp_store=MEMORY;
-             PRAGMA cache_size=-262144;
-             PRAGMA mmap_size=1073741824;"
+             PRAGMA cache_size=-{};
+             PRAGMA mmap_size=1073741824;",
+            cache_mib * 1024
         ),
     )?;
     db.execute_batch(
@@ -299,7 +312,7 @@ fn create_base_schema(db: &Connection) -> rusqlite::Result<()> {
          -- prune, size-cap evict, twin dedupe, wall fix-up) including
          -- ones added later; both deletes are indexed. The trigger
          -- ITSELF is created by `additive_migrations` (as
-         -- `rel_identity_ad_v2`, which also unbinds `spots`) and
+         -- `rel_identity_ad_v3`, which also unbinds `spots`) and
          -- deliberately NOT here: this batch used to re-create the v1
          -- name that the migration then drops, so every single
          -- `Index::open` wrote sqlite_master twice on an
@@ -463,6 +476,45 @@ fn additive_migrations(db: &Connection) {
         // holds a TVmaze show id on TV rows, which is why every reader
         // of it also filters `kind` (see `title_key_for_tmdb`).
         "CREATE INDEX IF NOT EXISTS idx_titles_tmdb ON titles(tmdb_id) WHERE tmdb_id > 0",
+        // The "hide adult" exclusion list, which the FLAT release list
+        // builds as `title_key NOT IN (SELECT t.key FROM titles t WHERE
+        // <the genre test>)`. That subquery planned as `SCAN t` - a full
+        // pass over `titles`, ALIASED, so the string "SCAN titles" never
+        // appeared anywhere to give it away. And it ran FOUR times per
+        // request: browse renders its whole predicate list twice (once
+        // unqualified, once against the `d.` alias of the
+        // best-copy-per-stem subquery) and runs two statements, the
+        // exact COUNT and the page.
+        //
+        // So a fixed O(titles) term on every release-list request,
+        // entirely independent of how selective the rest of the filter
+        // is. Measured on a synthetic 1M-title corpus (browse.rs's
+        // `adult_cost`): 3.4 ms with the filter off, 1,235 ms with it
+        // on, for the same ~2,500 rows.
+        //
+        // Partial, and COVERING (`key` is the only column the subquery
+        // selects), so the list is built by walking the few adult
+        // entries instead of every title. On that corpus: 283 ms ->
+        // 0.59 ms for the key set, 1,235 ms -> 25.7 ms end to end at 4%
+        // adult titles, 1,179 -> 9.4 ms at 1%, 1,157 -> 4.7 ms at 0.1%
+        // (what is left scales with the ADULT population, not with
+        // `titles`, which is why hoisting the four evaluations down to
+        // one was priced and dropped). A long-running real index of
+        // 5,863 titles carries 14 adult ones, and paid ~3 ms per scan
+        // warm and 143 ms cold - x4 - with nobody noticing. See
+        // research/BROWSE-adult-exclusion-2026-08-20.md.
+        //
+        // The predicate is generated from the SAME macro the query uses
+        // (`adult_genre_match_sql!`), with the alias prefix as its one
+        // argument, because a partial index answers NOTHING unless the
+        // statement repeats its predicate verbatim - the trap three
+        // *arr id lookups sat in for weeks. `plan_tests.rs::
+        // the_adult_exclusion_list_reaches_its_partial_index` names this
+        // index, so a drift fails there rather than on someone's daemon.
+        concat!(
+            "CREATE INDEX IF NOT EXISTS idx_titles_adult ON titles(key) WHERE ",
+            crate::index::browse::adult_genre_match_sql!(""),
+        ),
         // Which provider's numbering `tmdb_id` is in, as that provider's
         // own name ('tvmaze' | 'tmdb' | 'anilist' | 'omdb' | 'wikidata' |
         // 'musicbrainz' | 'openlibrary'). One column carries at least
@@ -636,9 +688,61 @@ fn additive_migrations(db: &Connection) {
         // survivable at the tip, badly wrong at depth, where the
         // catalogue now reaches back to 2011.
         "ALTER TABLE spots ADD COLUMN stat_ok INTEGER NOT NULL DEFAULT 0",
+        // N8 incremental ingest aggregates: the two release-level counts
+        // that `files`, `total_bytes`, `have_parts`, `need_parts` and
+        // `has_par2` did not already carry - how many of the release's
+        // files are complete, and how many look like Windows
+        // executables. -1 means "unknown": rows from before this column
+        // (and rows whose files table a maintenance path rewrote without
+        // recomputing) take one full-scan recompute on their next ingest
+        // touch, which stamps the real counts and switches the row to
+        // the incremental path for good.
+        "ALTER TABLE releases ADD COLUMN nfiles_complete INTEGER NOT NULL DEFAULT -1",
+        "ALTER TABLE releases ADD COLUMN nfiles_exe INTEGER NOT NULL DEFAULT -1",
     ] {
         let _ = db.execute(ddl, []);
     }
+    // The three enricher lane queues (N1). Each lane thread asks its
+    // own question every 15 s for the life of the daemon, through
+    // `with_index` - the write connection and the index write mutex
+    // with the recorded wedge history - and NOTHING indexed `checked`,
+    // `air_tried` or `tvdb_tried`, so every one of those ticks was a
+    // full pass over `titles` plus a correlated `MAX(first_posted)` per
+    // candidate row plus a temp B-tree sort, to return six to twelve
+    // rows (or, on a settled install, none at all).
+    //
+    // PARTIAL on the queue's own "not done yet" flag, which is what
+    // makes them nearly free: the two backfill lanes exist to be
+    // FINISHED, so on a mature index these indexes hold approximately
+    // nothing, and the first lane's index holds only what enrichment
+    // has not reached yet. A partial index is also reachable only when
+    // the statement's own WHERE implies its predicate - SQLite proves
+    // that from a literal term, never from a bound parameter - so each
+    // predicate below is written out verbatim in the matching
+    // where-builder in titles.rs (`pending_lane_where`,
+    // `missing_date_where`, `tvdb_queue_where`). Do not "tidy" either
+    // copy: `idx_titles_tvdb` shipped without its term and answered
+    // nothing for weeks, and plan_tests.rs now names the index each
+    // statement must use so that cannot happen quietly again.
+    //
+    // `kind` is the indexed column because every one of the three
+    // queries also filters on it (the lane split), which turns the
+    // movie, music/book and tv arms into a seek rather than a walk of
+    // the whole partial. They live after the ALTERs above, which are
+    // what guarantee `air_tried` and `tvdb_tried` exist at all.
+    let _ = db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_titles_unchecked ON titles(kind) WHERE checked = 0",
+        [],
+    );
+    let _ = db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_titles_air_backfill ON titles(kind) WHERE air_tried = 0",
+        [],
+    );
+    let _ = db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_titles_tvdb_backfill
+           ON titles(kind) WHERE tvdb_tried = 0",
+        [],
+    );
     // The pesto backward-link's candidate query is a (grp, counter)
     // range probe; partial so the millions of non-pesto rows cost
     // nothing. Lives after the ALTERs that guarantee the column.
@@ -680,7 +784,10 @@ fn additive_migrations(db: &Connection) {
     // "resolved, release gone", never re-offered (offers match =0) and
     // never joined (repair passes match >0). Lives after the ALTER that
     // guarantees the column; the partial index keeps the trigger's
-    // UPDATE off the unresolved millions.
+    // UPDATE off the unresolved millions - but ONLY because the trigger
+    // repeats `release_id>0`. It did not until v3, so from c03a48a7
+    // (14 Aug 2026) to 20 Aug this index answered nothing and the UPDATE
+    // scanned every spot per deleted release. See the trigger below.
     let _ = db.execute(
         "CREATE INDEX IF NOT EXISTS idx_spots_rel ON spots(release_id) WHERE release_id>0",
         [],
@@ -712,12 +819,39 @@ fn additive_migrations(db: &Connection) {
     // i.e. a Sonarr search that silently finds nothing. Measured 9 times
     // in 160 runs of `newznab_honours_the_arr_search_parameters`, which
     // is the flake nextest's retry was hiding.
+    //
+    // v3 repeats `release_id>0` in the spots UPDATE, and that term is
+    // the whole point of the version bump. `idx_spots_rel` is PARTIAL
+    // on `release_id>0`, and SQLite reaches a partial index only when
+    // the statement's own WHERE implies its predicate - it does not
+    // derive `release_id>0` from `release_id=old.id`, because it cannot
+    // know what `old.id` holds. So v2's UPDATE planned as `SCAN spots`:
+    // a full pass over every spot ever seen, ONCE PER DELETED RELEASE,
+    // inside the trigger, inside the caller's transaction, on the
+    // shared index write mutex, with no await point anywhere in it.
+    //
+    // Measured 20 Aug 2026, end to end on this schema with 2.0 M spots,
+    // three runs: 83-98 ms per deleted release against 0.26-0.42 ms with
+    // the term. So one 8000-id `prune_batch` held the write mutex for
+    // eleven MINUTES where it should hold it for about three seconds.
+    // That is Gary's report: a finished job sitting in the queue while
+    // the hourly retention reap ran, the tail resuming in the same second
+    // the reap's line printed. His log reaped 4585 rows across an 8m46s
+    // silence, which is 115 ms a row - one spots scan each.
+    //
+    // The term is exactly equivalent - `releases.id` is a rowid, always
+    // >= 1, so no row can match `release_id=old.id` and fail
+    // `release_id>0` - and it turns the scan into `SEARCH spots USING
+    // INDEX idx_spots_rel`. It looks redundant. It is load-bearing, and
+    // `plan_tests.rs` now asserts every trigger statement plans without
+    // a scan so the next one cannot ship silently.
     let _ = db.execute_batch(
         "DROP TRIGGER IF EXISTS rel_identity_ad;
-         CREATE TRIGGER IF NOT EXISTS rel_identity_ad_v2 AFTER DELETE ON releases BEGIN
+         DROP TRIGGER IF EXISTS rel_identity_ad_v2;
+         CREATE TRIGGER IF NOT EXISTS rel_identity_ad_v3 AFTER DELETE ON releases BEGIN
            DELETE FROM name_claims WHERE release_id=old.id;
            DELETE FROM msgid_map WHERE release_id=old.id;
-           UPDATE spots SET release_id=-1 WHERE release_id=old.id;
+           UPDATE spots SET release_id=-1 WHERE release_id=old.id AND release_id>0;
          END;",
     );
     // The header-encryption stats group by kind over a band that is a
@@ -869,6 +1003,128 @@ fn arrival_counter_and_indexes(db: &Connection) {
          CREATE INDEX IF NOT EXISTS idx_rel_seen ON releases(first_seen);
          CREATE INDEX IF NOT EXISTS idx_rel_arrival ON releases(arrival_seq);",
     );
+}
+
+/// Largest `releases` rowid an ordinary `Index::open` may pay a picker
+/// index build for. CREATE INDEX on `releases` reads the whole table
+/// once, holding the write lock for the duration - measured 20 Aug
+/// 2026 on the production-shaped 10 M row / 3.6 GB prototype at 2.7 s
+/// per index, so ~0.3 s at this bound and minutes at the live 38 M/
+/// 55.9 GB shape. Under the bound (fresh installs, tests, small
+/// indexes) the build is noise and runs inline; over it, `open` leaves
+/// the indexes absent and the daemon's maintenance pass builds them
+/// one per pass with visible state (`build_picker_index`), abortable
+/// the moment a download starts. A CLI-only install over the bound
+/// simply keeps today's plans - the picks are correct without the
+/// indexes, just unbounded.
+pub(crate) const PICKER_INDEX_INLINE_MAX: i64 = 1_000_000;
+
+/// The partial indexes on `releases` that `Index::open` will not pay
+/// for inline above `PICKER_INDEX_INLINE_MAX`, `(name, ddl)`. The
+/// `picker_*` names date from B1, when the three background pickers
+/// were the only members; §198 added the two `complete` browse indexes
+/// to the same deferred build because they have the same shape of cost.
+///
+/// Predicates come verbatim from the builders the statements
+/// themselves use (`probe7z_band_sql`, `pesto_band_sql`,
+/// `GAPFILL_BAND_SQL`, and browse's own `{}complete` term), because
+/// SQLite reaches a partial index only when the statement's own WHERE
+/// implies the predicate, proven from literal terms - one source for
+/// both sides is what keeps them provable. The two probe lanes'
+/// indexes carry `first_posted` so the newest-first pick walks them in
+/// order; the gapfill one carries the pick's ORDER BY expressions byte
+/// for byte, which is what retires its per-pick temp B-tree over the
+/// whole incomplete band.
+///
+/// **The two browse indexes are a pair and neither is redundant** -
+/// measured 20 Aug 2026 on the 13.2M-release live index
+/// (`research/BROWSE-complete-index-2026-08-20.md`). `complete` is 1.5%
+/// of the table and nothing indexed it, so every uncurated browse -
+/// which is to say every *arr RSS sync - counted its `total` through a
+/// full 13.2M-row table scan.
+///
+/// * `idx_rel_complete_kind` leads with `kind` because every *arr query
+///   carries one (`t=movie` and `t=tvsearch` each set it even with no
+///   `cat`), and that is the shape the RSS syncs issue: Radarr's
+///   `kind='movie' AND complete` count went 1.05 s -> 0.11 s.
+/// * `idx_rel_complete_posted` leads with `first_posted` because the
+///   PAGE's `ORDER BY first_posted DESC LIMIT n` needs the index to
+///   supply the order, not just the rows. Ship the kind-leading one
+///   ALONE and the no-cat page regresses 16x (0.056 s -> 0.88 s): the
+///   planner takes it for the rows and then sorts all 204k of them.
+///   With both present the page walks this one in order and stops at
+///   the page: 0.056 s -> 0.0017 s.
+///
+/// Both carry `stem` because that is what browse's `total` counts
+/// (`browse_total_sql`), so the count never leaves the index. 11.1 MB
+/// and 11.7 MB on that 26 GB database, and ~3 us per row that is
+/// actually `complete` at ingest.
+pub(crate) fn picker_index_ddl() -> [(&'static str, String); 5] {
+    [
+        (
+            "idx_rel_probe7z",
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_rel_probe7z
+                   ON releases(first_posted) WHERE {}",
+                probe::probe7z_band_sql()
+            ),
+        ),
+        (
+            "idx_rel_pesto_tiny",
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_rel_pesto_tiny
+                   ON releases(first_posted) WHERE {}",
+                pesto::pesto_band_sql()
+            ),
+        ),
+        (
+            "idx_rel_gapfill",
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_rel_gapfill
+                   ON releases({GAPFILL_ORDER_SQL}) WHERE {GAPFILL_BAND_SQL}"
+            ),
+        ),
+        // Deployment order within the pair matters: the deferred
+        // builder installs ONE list entry per idle pass, a scan interval
+        // (or more) apart, so whichever member is listed first stands
+        // alone for at least one interval on a migrating database. The
+        // posted-leading member alone is only an improvement (the
+        // no-cat page and every count get the partial index); the
+        // kind-leading member alone is the measured 16x page regression
+        // described above. Posted first, always.
+        (
+            "idx_rel_complete_posted",
+            "CREATE INDEX IF NOT EXISTS idx_rel_complete_posted
+               ON releases(first_posted, stem, kind) WHERE complete"
+                .to_string(),
+        ),
+        (
+            "idx_rel_complete_kind",
+            "CREATE INDEX IF NOT EXISTS idx_rel_complete_kind
+               ON releases(kind, first_posted, stem) WHERE complete"
+                .to_string(),
+        ),
+    ]
+}
+
+/// The inline arm: create the picker indexes at open, but ONLY under
+/// the size bound - the B1 deployment rule is that ordinary
+/// `Index::open` must never block on an index build across the
+/// production shape. `MAX(id)` is the O(1) proxy for table size (a
+/// COUNT is itself a full scan); pruning gaps make it an
+/// overestimate, which errs toward deferring.
+fn picker_indexes(db: &Connection) {
+    let top: i64 = db
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM releases", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(i64::MAX);
+    if top > PICKER_INDEX_INLINE_MAX {
+        return;
+    }
+    for (_, ddl) in picker_index_ddl() {
+        let _ = db.execute(&ddl, []);
+    }
 }
 
 /// The two release FTS tables; (fts, pre_fts) availability flags.
@@ -1363,8 +1619,61 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
     }
 }
 
+std::thread_local! {
+    /// How many read-write [`Index::open`] calls THIS THREAD has made -
+    /// each one is a full migration-ladder run over the schema. B4
+    /// instrumentation: a scan pass used to pay one of these per group
+    /// just to republish the shared connection, and the tests that pin
+    /// the hand-back path assert this does not creep back in.
+    /// Per-thread, not process-global: the hand-back is synchronous on
+    /// the publishing thread, so its own count is the whole claim,
+    /// while a process-global counter is bumped by whatever else the
+    /// process is opening - under an in-process parallel test runner
+    /// (plain `cargo test`, where every test shares one process) that
+    /// made the hand-back assertion flake.
+    static OPEN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl Index {
+    /// See [`OPEN_COUNT`]; counts the calling thread's opens only.
+    pub fn open_count() -> u64 {
+        OPEN_COUNT.with(|c| c.get())
+    }
+
+    /// A scan's own connection: [`Self::open`], with a page cache sized
+    /// for a scratch pass instead of for the shared writer.
+    ///
+    /// `open`'s `cache_size` is the writer's 256 MiB, and the daemon
+    /// opens one of these PER GROUP - up to eight at once on a busy pass,
+    /// plus the two spot passes - so the writer's figure let a pass
+    /// address ~2.5 GiB of page cache on a machine that may have 2 GB
+    /// total. A scan is streaming upserts and point lookups: it reads
+    /// each btree page it touches once and dirties it once, which is the
+    /// access pattern a large cache does least for, and reads ride the
+    /// 1 GB mmap window rather than the cache anyway.
+    ///
+    /// A/B'd against a 47 GB live index (20 Aug 2026), three alternating
+    /// pairs, each ingesting 4,000 clusters under stems sampled at random
+    /// across all 41 M releases - a scan re-seeing articles for releases
+    /// it already holds, which is the shape that actually fills a cache.
+    /// Ingest time was a wash (6.65/8.47/7.94 s scratch against
+    /// 6.64/8.49/7.68 s writer, the arms trading the win); SQLite's own
+    /// heap settled at 78 MiB against 237-250 MiB, and its high-water
+    /// went from ~314 MiB per connection to ~86 MiB. The daemon opens one
+    /// of these per group, so that is the figure multiplied by eight.
+    ///
+    /// The shared writer keeps 256 MiB - it is one connection and it
+    /// holds the compaction and migration transactions.
+    pub fn open_scratch(path: &Path) -> rusqlite::Result<Index> {
+        Self::open_with_cache(path, SCRATCH_CACHE_MIB)
+    }
+
     pub fn open(path: &Path) -> rusqlite::Result<Index> {
+        Self::open_with_cache(path, WRITER_CACHE_MIB)
+    }
+
+    fn open_with_cache(path: &Path, cache_mib: i64) -> rusqlite::Result<Index> {
+        OPEN_COUNT.with(|c| c.set(c.get() + 1));
         let mut db = Connection::open(path)?;
         // Several connections share this db (scan scratch, API queries,
         // wall enricher, IMDb refresher). Without a busy timeout a
@@ -1373,10 +1682,11 @@ impl Index {
         // silently skip a whole interval (the long-standing
         // scan_loop_populates_index_live "flake").
         db.busy_timeout(std::time::Duration::from_secs(10))?;
-        create_base_schema(&db)?;
+        create_base_schema(&db, cache_mib)?;
         additive_migrations(&db);
         rebuild_marks_if_needed(&db);
         arrival_counter_and_indexes(&db);
+        picker_indexes(&db);
         let (fts, pre_fts) = ensure_fts(&db);
         let people_fts_ok = ensure_people(&db)?;
         let people_fts = fts && people_fts_ok;
@@ -1407,8 +1717,25 @@ impl Index {
             })
             .unwrap_or(false);
         if feed_ever {
-            Self::ensure_named_index(&db);
+            // Part of the open-time ladder, so no `ddl` stamp: nothing
+            // pooled can predate a connection's own open.
+            let _ = Self::ensure_named_index(&db);
         }
+        // C3 prototype. The env flag INSTALLS the schema; the schema is
+        // what makes it on from then on, so a daemon that started with
+        // the flag keeps its summaries maintained across the scan
+        // loop's re-opens even where the variable is not inherited.
+        // Turning the flag to 0 explicitly uninstalls, so the triggers
+        // stop costing writes the moment the experiment ends.
+        let want = std::env::var("NZBFAST_TITLE_SUMMARIES").ok();
+        let summaries = match want.as_deref() {
+            Some("0") => {
+                let _ = summaries::drop_schema(&db);
+                false
+            }
+            Some("1") => summaries::ensure_schema(&db).is_ok(),
+            _ => table_exists(&db, "title_summaries"),
+        };
         Ok(Index {
             db,
             gate: None,
@@ -1420,6 +1747,9 @@ impl Index {
             watch: None,
             hits: Default::default(),
             retry: Default::default(),
+            ddl: std::cell::Cell::new(false),
+            summaries,
+            stats_cache: Default::default(),
         })
     }
 
@@ -1480,6 +1810,10 @@ impl Index {
         // so if it read `false` here a release the pre feed rescued would
         // be findable by its obfuscated stem and by nothing else.
         let pre_fts = has("pre_fts");
+        // C3 prototype, detected exactly like FTS: the read-only handle
+        // never installs anything, it only reads what the read-write
+        // open put there.
+        let summaries = has("title_summaries") && has("title_dirty");
         // `predb` gates the ingest-time naming lookup only, and ingest
         // never happens on a query_only connection.
         let predb = false;
@@ -1497,8 +1831,22 @@ impl Index {
             watch: None,
             hits: Default::default(),
             retry: Default::default(),
+            ddl: std::cell::Cell::new(false),
+            summaries,
+            stats_cache: Default::default(),
         })
     }
+}
+
+/// Does this database hold a table by that name? The read-write open's
+/// twin of `open_read_only`'s local `has`.
+fn table_exists(db: &Connection, name: &str) -> bool {
+    db.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 #[cfg(test)]
@@ -1552,6 +1900,38 @@ mod tests {
         assert!(ro.kv_set("k", "v").is_err());
         // And it must never be the open that CREATES a database.
         assert!(Index::open_read_only(&dir.join("absent.db")).is_err());
+    }
+
+    /// A scan's scratch connection carries the scratch page cache and
+    /// the shared writer carries the writer's - and the scratch figure
+    /// must be in place for the OPEN, not applied after it, or a pass
+    /// still touches the writer's ceiling on the way in (measured: the
+    /// per-connection high-water was ~314 MiB when the pragma landed
+    /// last, ~86 MiB when it leads).
+    #[test]
+    fn a_scratch_open_carries_the_smaller_page_cache() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-cachesz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        // Negative cache_size is KiB of memory rather than a page count,
+        // which is the whole point of the sign - a page-count cache is
+        // sized in pages whose bytes depend on page_size.
+        let of = |ix: &Index| -> i64 {
+            ix.db
+                .query_row("PRAGMA cache_size", [], |r| r.get(0))
+                .unwrap()
+        };
+        let writer = Index::open(&db).unwrap();
+        assert_eq!(of(&writer), -(WRITER_CACHE_MIB * 1024));
+        let scratch = Index::open_scratch(&db).unwrap();
+        assert_eq!(of(&scratch), -(SCRATCH_CACHE_MIB * 1024));
+        assert!(SCRATCH_CACHE_MIB < WRITER_CACHE_MIB);
+        // The scratch connection is a full read-write Index, migrations
+        // and all - it is a scan's own handle, not a reader.
+        assert!(scratch.kv_set("k", "v").is_ok());
+        drop(scratch);
+        teardown(&dir, writer);
     }
 
     /// `Index::open` must leave the schema cookie ALONE on a database it
@@ -1623,19 +2003,32 @@ mod tests {
                 )
                 .unwrap()
         };
-        assert_eq!(named(&first, "rel_identity_ad_v2"), 1);
+        assert_eq!(named(&first, "rel_identity_ad_v3"), 1);
+        assert_eq!(named(&first, "rel_identity_ad_v2"), 0);
         assert_eq!(named(&first, "rel_identity_ad"), 0);
+        // Both retirements, from the two shapes a real install can be
+        // carrying: the v1 name, and the v2 whose spots UPDATE
+        // full-scanned because it did not repeat `release_id>0`.
         first
             .db
             .execute_batch(
                 "CREATE TRIGGER rel_identity_ad AFTER DELETE ON releases BEGIN
                    DELETE FROM name_claims WHERE release_id=old.id;
+                 END;
+                 DROP TRIGGER rel_identity_ad_v3;
+                 CREATE TRIGGER rel_identity_ad_v2 AFTER DELETE ON releases BEGIN
+                   UPDATE spots SET release_id=-1 WHERE release_id=old.id;
                  END;",
             )
             .unwrap();
         let migrated = Index::open(&db).unwrap();
         assert_eq!(named(&migrated, "rel_identity_ad"), 0, "v1 was not retired");
-        assert_eq!(named(&migrated, "rel_identity_ad_v2"), 1);
+        assert_eq!(
+            named(&migrated, "rel_identity_ad_v2"),
+            0,
+            "v2 was not retired"
+        );
+        assert_eq!(named(&migrated, "rel_identity_ad_v3"), 1);
         let after_retire = cookie(&migrated);
         let settled = Index::open(&db).unwrap();
         assert_eq!(
@@ -1647,6 +2040,67 @@ mod tests {
         drop(migrated);
         drop(settled);
         teardown(&dir, first);
+    }
+
+    /// The `release_id>0` term in `rel_identity_ad_v3` is what lets the
+    /// trigger reach `idx_spots_rel`, and `plan_tests.rs` asserts that.
+    /// This asserts the other half: adding it did not change what the
+    /// trigger DOES, which is the risk with any predicate bolted on for
+    /// the planner's benefit.
+    ///
+    /// The recycled-rowid hazard is the whole reason the trigger exists.
+    /// `releases.id` has no AUTOINCREMENT, so the id of a reaped release
+    /// is handed straight to the next insert - and a spot still pointing
+    /// at it would rebind to a stranger, giving a brand-new post another
+    /// release's card link and repair history.
+    #[test]
+    fn deleting_a_release_unbinds_its_spot_and_leaves_the_others_alone() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-spot-unbind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.db
+            .execute(
+                "INSERT INTO releases(id, stem, poster, grp, first_posted)
+                 VALUES(7,'Doomed.Release','p','g',1), (9,'Kept.Release','p','g',1)",
+                [],
+            )
+            .unwrap();
+        ix.db
+            .execute(
+                "INSERT INTO spots(msgid, title, release_id) VALUES
+                   ('bound@x','bound',7),
+                   ('other@x','other',9),
+                   ('unresolved@x','unresolved',0),
+                   ('gone@x','gone',-1)",
+                [],
+            )
+            .unwrap();
+        ix.db
+            .execute("DELETE FROM releases WHERE id=7", [])
+            .unwrap();
+        let rel = |msgid: &str| -> i64 {
+            ix.db
+                .query_row(
+                    "SELECT release_id FROM spots WHERE msgid=?1",
+                    [msgid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            rel("bound@x"),
+            -1,
+            "the spot kept pointing at a freed rowid"
+        );
+        assert_eq!(rel("other@x"), 9, "an unrelated binding was collateral");
+        assert_eq!(
+            rel("unresolved@x"),
+            0,
+            "an unresolved spot must stay offerable"
+        );
+        assert_eq!(rel("gone@x"), -1);
+        teardown(&dir, ix);
     }
 
     fn wal_len(db: &Path) -> u64 {

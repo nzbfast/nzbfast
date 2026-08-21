@@ -114,8 +114,11 @@ impl SeedSink for DaemonSink {
         self.0.with_index_mut(|ix| ix.kv_set(k, v).ok());
     }
     fn store(&self, lines: &[nzbkit::predb::PreLine], now: i64) -> Option<usize> {
-        self.0
-            .with_index_mut(|ix| ix.predb_seed_store(lines, "seed:predb.net", now).ok())
+        // retiring_ddl: a first seed import builds the named-count
+        // index - same schema event as the live feed's first batch.
+        self.0.with_index_mut_retiring_ddl(|ix| {
+            ix.predb_seed_store(lines, "seed:predb.net", now).ok()
+        })
     }
     fn rows(&self) -> u64 {
         self.0

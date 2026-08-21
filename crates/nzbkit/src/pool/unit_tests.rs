@@ -39,13 +39,14 @@ fn server(host: &str) -> ServerConfig {
 }
 
 fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
-    ids.iter()
-        .map(|id| ArticleReq::fresh((*id).into()))
-        .collect()
+    ids.iter().map(|id| ArticleReq::fresh(*id)).collect()
 }
 
 fn work(id: &str) -> Work {
     Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: id.into(),
         attempts: 0,
         promoted: false,
@@ -163,28 +164,27 @@ fn ctx_for_unions_mirror_group_bits() {
 }
 
 #[test]
-fn shared_new_seeds_age_and_part_maps_for_the_pool_paths_that_read_them() {
+fn shared_new_seeds_age_and_part_onto_work_for_the_pool_paths_that_read_them() {
     let reqs = vec![
         ArticleReq {
             id: "<aged@x>".into(),
             age_days: 30,
             part: 2,
         },
-        ArticleReq::fresh("<plain@x>".into()),
+        ArticleReq::fresh("<plain@x>"),
     ];
     let (sh, unservable) = Shared::new(reqs, &[(server("s"), PoolConfig::default())]);
     assert!(unservable.is_empty(), "an unlimited server serves any age");
+    let q = sh.queue.try_lock().unwrap();
+    let aged = q.iter().find(|w| &*w.id == "<aged@x>").unwrap();
     assert_eq!(
-        sh.parts.get("<aged@x>").copied(),
-        Some(2),
+        aged.part, 2,
         "the CRC gate needs the requested part to catch split-brain swaps"
     );
-    assert_eq!(
-        sh.parts.get("<plain@x>"),
-        None,
-        "part 0 means no declared part"
-    );
-    assert_eq!(sh.ages.get("<aged@x>").copied(), Some(30));
+    assert_eq!(aged.age_days, 30);
+    let plain = q.iter().find(|w| &*w.id == "<plain@x>").unwrap();
+    assert_eq!(plain.part, 0, "part 0 means no declared part");
+    assert_eq!(plain.age_days, 0);
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn pick_suspect_dup_walks_its_gate_ladder() {
     let dup = sh
         .pick_suspect_dup(0b10, 0b10, 0, 0)
         .expect("an idle primary races the suspect");
-    assert_eq!(dup.id, "<a@x>");
+    assert_eq!(&*dup.id, "<a@x>");
     assert!(dup.dup, "raced copy is a duplicate, never an owner");
     assert_eq!(sh.hedges_issued.load(Ordering::Relaxed), 1);
     {
@@ -429,7 +429,7 @@ fn a_spent_budget_opens_the_fill_gate_without_forging_a_refusal() {
         "one re-arm per server is what bounds the ladder"
     );
     // A terminal article takes its routing state with it.
-    assert!(sh.claim_done("<a@x>"));
+    assert!(sh.claim_done("<a@x>", w.ord));
     assert_eq!(sh.spent_mask("<a@x>"), 0);
 }
 
@@ -500,7 +500,7 @@ fn race_burst_note_opens_its_window_before_ever_marking() {
 fn any_live_answers_from_inflight_then_queue_then_absence() {
     let ctl = QueueControl::default();
     assert_eq!(
-        ctl.any_live(&["<a@x>".to_string()]),
+        ctl.any_live(&["<a@x>".into()]),
         None,
         "before attach there is no pool to ask"
     );
@@ -511,18 +511,18 @@ fn any_live_answers_from_inflight_then_queue_then_absence() {
     ctl.attach(&sh);
     assert_eq!(ctl.any_live(&[]), Some(true), "no ids is vacuously live");
     assert_eq!(
-        ctl.any_live(&["<q1@x>".to_string()]),
+        ctl.any_live(&["<q1@x>".into()]),
         Some(true),
         "still queued means still live"
     );
     assert_eq!(
-        ctl.any_live(&["<nope@x>".to_string()]),
+        ctl.any_live(&["<nope@x>".into()]),
         Some(false),
         "unknown everywhere is the negative verdict"
     );
     sh.register_inflight(&work("<w@x>"), 0);
     assert_eq!(
-        ctl.any_live(&["<w@x>".to_string()]),
+        ctl.any_live(&["<w@x>".into()]),
         Some(true),
         "in flight answers without touching the queue lock"
     );
@@ -531,7 +531,7 @@ fn any_live_answers_from_inflight_then_queue_then_absence() {
 #[test]
 fn requeue_rolls_back_when_the_run_is_over_or_aborted() {
     assert_eq!(
-        QueueControl::default().requeue(&["<a@x>".to_string()]),
+        QueueControl::default().requeue(&["<a@x>".into()]),
         0,
         "no pool attached, nothing to resurrect"
     );
@@ -549,15 +549,15 @@ fn requeue_rolls_back_when_the_run_is_over_or_aborted() {
     // hold one in production, so the test must too.
     let finished = sh.finished.subscribe();
     let mut cancel_ids = HashSet::new();
-    cancel_ids.insert("<a@x>".to_string());
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".to_string()]);
-    assert!(sh.claim_done("<b@x>"));
+    cancel_ids.insert("<a@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
+    assert!(sh.claim_done("<b@x>", 1));
     sh.complete_one();
     assert!(
         *finished.borrow(),
         "the cancelled+completed pair drained the run"
     );
-    assert_eq!(ctl.requeue(&["<a@x>".to_string()]), 0);
+    assert_eq!(ctl.requeue(&["<a@x>".into()]), 0);
     assert!(
         sh.cancelled.lock_ok().contains_key("<a@x>"),
         "rollback re-stashes, so a later retry is still possible"
@@ -568,7 +568,7 @@ fn requeue_rolls_back_when_the_run_is_over_or_aborted() {
         "the probe count was undone"
     );
     // Unknown ids never count toward the return value.
-    assert_eq!(ctl.requeue(&["<never@x>".to_string()]), 0);
+    assert_eq!(ctl.requeue(&["<never@x>".into()]), 0);
     // Aborted-run refusal, before any stash lookup.
     let ctl2 = QueueControl::default();
     let (sh2, _) = Shared::new(
@@ -577,10 +577,10 @@ fn requeue_rolls_back_when_the_run_is_over_or_aborted() {
     );
     ctl2.attach(&sh2);
     let mut ids2 = HashSet::new();
-    ids2.insert("<c@x>".to_string());
-    assert_eq!(ctl2.cancel(&ids2), vec!["<c@x>".to_string()]);
+    ids2.insert("<c@x>".into());
+    assert_eq!(ctl2.cancel(&ids2), vec!["<c@x>".into()]);
     assert!(ctl2.abort());
-    assert_eq!(ctl2.requeue(&["<c@x>".to_string()]), 0);
+    assert_eq!(ctl2.requeue(&["<c@x>".into()]), 0);
 }
 
 /// The drained verdict vs a concurrent requeue, interleaved at the exact
@@ -603,8 +603,8 @@ fn requeue_inside_the_drain_gap_keeps_the_run_alive() {
     ctl.attach(&sh);
     let finished = sh.finished.subscribe();
     let mut cancel_ids = HashSet::new();
-    cancel_ids.insert("<a@x>".to_string());
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".to_string()]);
+    cancel_ids.insert("<a@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
     // Arm the seam, then complete the last real article on a second
     // thread: it parks between the zero-crossing and the verdict.
     let entered = Arc::new(std::sync::Barrier::new(2));
@@ -612,13 +612,13 @@ fn requeue_inside_the_drain_gap_keeps_the_run_alive() {
     *sh.drain_send_barrier.lock_ok() = Some((entered.clone(), released.clone()));
     let sh2 = sh.clone();
     let completer = std::thread::spawn(move || {
-        assert!(sh2.claim_done("<b@x>"));
+        assert!(sh2.claim_done("<b@x>", 1));
         sh2.complete_one();
     });
     entered.wait(); // the crossing has happened, the verdict has not
     *sh.drain_send_barrier.lock_ok() = None; // one trip only
     assert_eq!(
-        ctl.requeue(&["<a@x>".to_string()]),
+        ctl.requeue(&["<a@x>".into()]),
         1,
         "a requeue landing inside the gap is honoured, not lost"
     );
@@ -630,11 +630,15 @@ fn requeue_inside_the_drain_gap_keeps_the_run_alive() {
     );
     assert_eq!(sh.pending.load(Ordering::Acquire), 1);
     assert!(
-        sh.queue.try_lock().unwrap().iter().any(|w| w.id == "<a@x>"),
+        sh.queue
+            .try_lock()
+            .unwrap()
+            .iter()
+            .any(|w| &*w.id == "<a@x>"),
         "the requeued article is queued for a fleet that is still running"
     );
     // The requeued article's own completion now ends the run.
-    assert!(sh.claim_done("<a@x>"));
+    assert!(sh.claim_done("<a@x>", 0));
     sh.complete_one();
     assert!(
         *finished.borrow(),
@@ -687,23 +691,23 @@ fn requeue_into_an_exhausted_fleet_is_refused_but_a_newborn_one_is_not() {
     );
     ctl.attach(&sh);
     let mut cancel_ids = HashSet::new();
-    cancel_ids.insert("<a@x>".to_string());
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".to_string()]);
+    cancel_ids.insert("<a@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
 
     // Before any worker exists - the fleet is still arriving, and this
     // is the interleaving the naive guard broke.
     assert_eq!(
-        ctl.requeue(&["<a@x>".to_string()]),
+        ctl.requeue(&["<a@x>".into()]),
         1,
         "a requeue racing fleet birth must be honoured, not dropped"
     );
 
     // Now the fleet lives and then dies out entirely.
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".to_string()]);
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
     sh.workers_born.store(4, Ordering::Release);
     sh.workers_live.store(0, Ordering::Release);
     assert_eq!(
-        ctl.requeue(&["<a@x>".to_string()]),
+        ctl.requeue(&["<a@x>".into()]),
         0,
         "reviving into a fleet that has no workers left queues work nobody can pop"
     );
@@ -734,14 +738,14 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     sh.workers_born.store(1, Ordering::Release);
     sh.workers_live.store(1, Ordering::Release);
     let mut cancel_ids = HashSet::new();
-    cancel_ids.insert("<a@x>".to_string());
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".to_string()]);
+    cancel_ids.insert("<a@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
 
     let entered = Arc::new(std::sync::Barrier::new(2));
     let released = Arc::new(std::sync::Barrier::new(2));
     *sh.requeue_gate_barrier.lock_ok() = Some((entered.clone(), released.clone()));
     let ctl2 = ctl.clone();
-    let requeuer = std::thread::spawn(move || ctl2.requeue(&["<a@x>".to_string()]));
+    let requeuer = std::thread::spawn(move || ctl2.requeue(&["<a@x>".into()]));
     entered.wait(); // past the gate check, queue lock not taken yet
     *sh.requeue_gate_barrier.lock_ok() = None; // one trip only
     // The last worker leaves and seals what it can see - which does not
@@ -763,11 +767,15 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
         "the refusal re-stashes, so the caller keeps its deferred accounting"
     );
     assert!(
-        !sh.queue.try_lock().unwrap().iter().any(|w| w.id == "<a@x>"),
+        !sh.queue
+            .try_lock()
+            .unwrap()
+            .iter()
+            .any(|w| &*w.id == "<a@x>"),
         "nothing was published behind the departed fleet"
     );
     assert!(
-        sh.done.lock_ok().contains("<a@x>"),
+        sh.done.lock_ok().contains(0), // <a@x>'s ordinal
         "the article is terminal again, exactly as `cancel` left it"
     );
     assert_eq!(
@@ -779,7 +787,7 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     while let Ok(FetchOutcome::Failed { id, .. }) = rx.try_recv() {
         failed.push(id);
     }
-    assert_eq!(failed, vec!["<b@x>".to_string()]);
+    assert_eq!(failed, vec!["<b@x>".into()]);
 
     // Same seam, fleet still alive: the requeue must go through.
     let ctl = Arc::new(QueueControl::default());
@@ -791,13 +799,13 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     sh.workers_born.store(1, Ordering::Release);
     sh.workers_live.store(1, Ordering::Release);
     let mut cancel_ids = HashSet::new();
-    cancel_ids.insert("<c@x>".to_string());
-    assert_eq!(ctl.cancel(&cancel_ids), vec!["<c@x>".to_string()]);
+    cancel_ids.insert("<c@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<c@x>".into()]);
     let entered = Arc::new(std::sync::Barrier::new(2));
     let released = Arc::new(std::sync::Barrier::new(2));
     *sh.requeue_gate_barrier.lock_ok() = Some((entered.clone(), released.clone()));
     let ctl2 = ctl.clone();
-    let requeuer = std::thread::spawn(move || ctl2.requeue(&["<c@x>".to_string()]));
+    let requeuer = std::thread::spawn(move || ctl2.requeue(&["<c@x>".into()]));
     entered.wait();
     *sh.requeue_gate_barrier.lock_ok() = None;
     released.wait();
@@ -807,12 +815,16 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
         "a live fleet still gets its work back - the recheck is not a teardown"
     );
     assert!(
-        sh.queue.try_lock().unwrap().iter().any(|w| w.id == "<c@x>"),
+        sh.queue
+            .try_lock()
+            .unwrap()
+            .iter()
+            .any(|w| &*w.id == "<c@x>"),
         "and the article really is queued for it"
     );
     assert_eq!(sh.pending.load(Ordering::Acquire), 2);
     assert!(
-        !sh.done.lock_ok().contains("<c@x>"),
+        !sh.done.lock_ok().contains(0), // <c@x>'s ordinal
         "un-terminal again, so its own outcome can still land"
     );
 }
@@ -852,7 +864,7 @@ fn seal_run_blocking_fails_orphans_exactly_once() {
         }
     }
     failed.sort();
-    assert_eq!(failed, vec!["<a@x>".to_string(), "<b@x>".to_string()]);
+    assert_eq!(failed, vec!["<a@x>".into(), "<b@x>".into()]);
     assert_eq!(sh.pending.load(Ordering::Acquire), 0);
     // Nothing left: the pending==0 early return, and no double report.
     assert_eq!(seal_run_blocking(&sh, &tx, "again"), 0);
@@ -1160,24 +1172,24 @@ fn arrival_ack_holds_done_ok_until_the_consumer_settles() {
     // its own (correct) reason.
     sh.queue.try_lock().expect("no workers hold it").clear();
     // Ack-less pool: the handoff settles immediately.
-    sh.done_ok.lock_ok().insert("<a@x>".to_string());
+    sh.done_ok.lock_ok().insert("<a@x>".into());
     sh.settle_handoff(false, false, true, "<a@x>");
     assert!(!sh.done_ok.lock_ok().contains("<a@x>"));
     // Acking pool: the entry survives the handoff, keeps the span
     // live, and leaves only on the consumer's ack.
-    sh.done_ok.lock_ok().insert("<b@x>".to_string());
+    sh.done_ok.lock_ok().insert("<b@x>".into());
     sh.settle_handoff(false, true, true, "<b@x>");
     assert!(
         sh.done_ok.lock_ok().contains("<b@x>"),
         "held through the channel buffer and decode batch"
     );
-    assert_eq!(ctl.any_live(&["<b@x>".to_string()]), Some(true));
+    assert_eq!(ctl.any_live(&["<b@x>".into()]), Some(true));
     ctl.note_settled("<b@x>");
     assert!(!sh.done_ok.lock_ok().contains("<b@x>"));
-    assert_eq!(ctl.any_live(&["<b@x>".to_string()]), Some(false));
+    assert_eq!(ctl.any_live(&["<b@x>".into()]), Some(false));
     // An undelivered body (channel closed) has no consumer left to
     // ack it - settles at the handoff.
-    sh.done_ok.lock_ok().insert("<c@x>".to_string());
+    sh.done_ok.lock_ok().insert("<c@x>".into());
     sh.settle_handoff(false, true, false, "<c@x>");
     assert!(!sh.done_ok.lock_ok().contains("<c@x>"));
 }
@@ -1245,11 +1257,21 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     let ctx = ctx_for(&servers, 0);
     let (tx, mut rx) = mpsc::channel(8);
     // A duplicate dispatch won both of the first two articles already.
-    assert!(sh.claim_done("<l0@x>"));
-    assert!(sh.claim_done("<l1@x>"));
-    let mut inflight: VecDeque<Work> = [work("<l0@x>"), work("<l1@x>"), work("<l2@x>")]
-        .into_iter()
-        .collect();
+    assert!(sh.claim_done("<l0@x>", 0));
+    assert!(sh.claim_done("<l1@x>", 1));
+    let mut inflight: VecDeque<Work> = [
+        work("<l0@x>"),
+        Work {
+            ord: 1,
+            ..work("<l1@x>")
+        },
+        Work {
+            ord: 2,
+            ..work("<l2@x>")
+        },
+    ]
+    .into_iter()
+    .collect();
     for _ in 0..inflight.len() {
         sh.charge_wire();
     }
@@ -1289,7 +1311,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     assert_eq!(losses, 0, "a recycle spends the evidence");
     assert!(inflight.is_empty(), "the shed empties the pipeline");
     assert_eq!(
-        sh.queue.lock().await.front().map(|w| w.id.as_str()),
+        sh.queue.lock().await.front().map(|w| &*w.id),
         Some("<l2@x>"),
         "the shed article requeues at the front, uncharged"
     );
@@ -1297,7 +1319,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
     // Endgame: same two losses, but with the queue nearly drained the
     // fan-out makes losing normal - no evidence is charged.
     let (sh2, _) = Shared::new(fresh(&["<e0@x>", "<e1@x>"]), &servers);
-    assert!(sh2.claim_done("<e0@x>"));
+    assert!(sh2.claim_done("<e0@x>", 0));
     let mut inflight2: VecDeque<Work> = [work("<e0@x>")].into_iter().collect();
     sh2.charge_wire();
     let mut losses2 = 0u32;
@@ -1336,7 +1358,15 @@ async fn recycle_slope_redials_a_collapsed_session() {
     // age (clamped to 0.5 s), one live worker shares them.
     sh.bytes[0].store(64_000_000, Ordering::Release);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut inflight: VecDeque<Work> = [work("<s0@x>"), work("<s1@x>")].into_iter().collect();
+    let mut inflight: VecDeque<Work> = [
+        work("<s0@x>"),
+        Work {
+            ord: 1,
+            ..work("<s1@x>")
+        },
+    ]
+    .into_iter()
+    .collect();
     for _ in 0..inflight.len() {
         sh.charge_wire();
     }
@@ -1361,13 +1391,13 @@ async fn recycle_slope_redials_a_collapsed_session() {
     // The article itself was WON and delivered - the slope verdict is
     // about the session, never the outcome.
     match rx.try_recv() {
-        Ok(FetchOutcome::Done { id, .. }) => assert_eq!(id, "<s0@x>"),
+        Ok(FetchOutcome::Done { id, .. }) => assert_eq!(&*id, "<s0@x>"),
         other => panic!("expected the won article delivered, got {other:?}"),
     }
     assert!(matches!(step, BodyStep::Recycle));
     assert!(inflight.is_empty());
     assert_eq!(
-        sh.queue.lock().await.front().map(|w| w.id.as_str()),
+        sh.queue.lock().await.front().map(|w| &*w.id),
         Some("<s1@x>"),
         "the shed sibling requeues"
     );
@@ -1453,9 +1483,9 @@ async fn a_promote_mid_pipeline_sheds_to_a_fresh_session() {
         .collect();
     // Promote the tail of the file - guaranteed still queued at 100 ms
     // with only the first window's worth in flight.
-    let seek: Vec<String> = segs[n - 3..]
+    let seek: Vec<Arc<str>> = segs[n - 3..]
         .iter()
-        .map(|(id, _, _)| format!("<{id}>"))
+        .map(|(id, _, _)| Arc::from(format!("<{id}>")))
         .collect();
     let ctl = std::sync::Arc::new(QueueControl::default());
     let promoter = {
@@ -2016,7 +2046,7 @@ async fn desync_echoed_id_cuts_the_session_and_completes_byte_perfect() {
                     let (meta, _) =
                         crate::yenc_simd::decode_into_integrity(&raw, &mut scratch, true)
                             .expect("desync leg delivered an undecodable body");
-                    if meta.part != parts.get(&id).copied() {
+                    if meta.part != parts.get(&*id).copied() {
                         wrong_part += 1;
                         continue;
                     }
@@ -2076,11 +2106,11 @@ async fn next_work_reports_a_dead_article_and_latches_the_tail() {
     let w = next_work(&sh, ctx, &tx, Pipeline::payload(0))
         .await
         .expect("the healthy article is picked");
-    assert_eq!(w.id, "<ok@x>");
+    assert_eq!(&*w.id, "<ok@x>");
     match rx.try_recv() {
         Ok(FetchOutcome::Missing { id, cause }) => {
-            assert_eq!(id, "<dead@x>");
-            assert!(matches!(cause, MissingCause::Gone), "{cause:?}");
+            assert_eq!(&*id, "<dead@x>");
+            assert!(matches!(cause, MissingCause::Gone { .. }), "{cause:?}");
         }
         other => panic!("expected the dead article's Missing report, got {other:?}"),
     }
@@ -2122,14 +2152,14 @@ async fn steer_inbox_requeues_are_adopted_in_promoted_first_order() {
     let w = next_work(&sh, ctx, &tx, Pipeline::payload(0))
         .await
         .expect("work is available");
-    assert_eq!(w.id, "<p@x>", "the promoted steer lands at the front");
+    assert_eq!(&*w.id, "<p@x>", "the promoted steer lands at the front");
     assert_eq!(
         sh.promoted_pending.load(Ordering::Acquire),
         0,
         "the adopt charged promoted_pending and the pick spent it"
     );
     let q = sh.queue.lock().await;
-    let ids: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
+    let ids: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         ids,
         ["<q@x>", "<n@x>"],
@@ -2162,7 +2192,7 @@ async fn a_fill_server_waits_for_every_live_primary_miss() {
     let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
         .await
         .expect("gate satisfied");
-    assert_eq!(w.id, "<a@x>");
+    assert_eq!(&*w.id, "<a@x>");
 }
 
 /// M5: the primary resets on one article every time it is dispatched.
@@ -2192,7 +2222,7 @@ async fn a_primary_that_spends_its_budget_hands_the_article_down() {
         let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
             .await
             .unwrap_or_else(|| panic!("the primary picks it on attempt {attempt}"));
-        assert_eq!(w.id, "<a@x>");
+        assert_eq!(&*w.id, "<a@x>");
         sh.charge_wire();
         sh.register_inflight(&w, 0);
         let mut inflight: VecDeque<Work> = VecDeque::new();
@@ -2226,7 +2256,7 @@ async fn a_primary_that_spends_its_budget_hands_the_article_down() {
     let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
         .await
         .expect("the fill server takes the article the primary could not fetch");
-    assert_eq!(w.id, "<a@x>");
+    assert_eq!(&*w.id, "<a@x>");
 }
 
 #[tokio::test]
@@ -2254,7 +2284,7 @@ async fn endgame_ladder_articles_ride_empty_pipelines_only() {
     let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
         .await
         .expect("idle takes the probe");
-    assert_eq!(w.id, "<l@x>");
+    assert_eq!(&*w.id, "<l@x>");
 }
 
 #[tokio::test]
@@ -2284,7 +2314,7 @@ async fn untried_promoted_work_is_left_for_a_faster_server() {
     );
     {
         let q = sh.queue.lock().await;
-        assert_eq!(q.front().map(|w| w.id.as_str()), Some("<s@x>"));
+        assert_eq!(q.front().map(|w| &*w.id), Some("<s@x>"));
         assert!(q.front().unwrap().promoted);
     }
     assert_eq!(
@@ -2299,7 +2329,7 @@ async fn untried_promoted_work_is_left_for_a_faster_server() {
     let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
         .await
         .expect("a missed promote goes to whoever is standing");
-    assert_eq!(w.id, "<s@x>");
+    assert_eq!(&*w.id, "<s@x>");
     assert_eq!(sh.promoted_pending.load(Ordering::Acquire), 0);
 }
 
@@ -2335,6 +2365,7 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         &mut inflight,
         Vec::new(),
         false,
+        false,
         &mut Default::default(),
     )
     .await;
@@ -2368,11 +2399,12 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         &mut inflight,
         Vec::new(),
         false,
+        false,
         &mut Default::default(),
     )
     .await;
     assert!(
-        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if id == "<a@x>"),
+        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<a@x>"),
         "the second bare 430 confirms the first and declares the article"
     );
     assert_eq!(
@@ -2398,7 +2430,7 @@ async fn the_bare_430_recheck_jumps_the_queue() {
     let ctx = ctx_for(&servers, 0);
     let (tx, _rx) = mpsc::channel(8);
     let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
-    assert_eq!(dispatched.id, "<a@x>");
+    assert_eq!(&*dispatched.id, "<a@x>");
     let mut inflight: VecDeque<Work> = [dispatched].into_iter().collect();
     sh.charge_wire();
 
@@ -2410,13 +2442,14 @@ async fn the_bare_430_recheck_jumps_the_queue() {
         &mut inflight,
         Vec::new(),
         false,
+        false,
         &mut Default::default(),
     )
     .await;
     let q = sh.queue.lock().await;
     assert_eq!(q.len(), 2, "requeued for the recheck");
     assert_eq!(
-        q.front().map(|w| w.id.as_str()),
+        q.front().map(|w| &*w.id),
         Some("<a@x>"),
         "the recheck must dispatch ahead of untouched work, not at drain-end"
     );
@@ -2443,7 +2476,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
     let cfg = PoolConfig::default();
     let ctx = ctx_for(&servers, 0);
     let (tx, mut rx) = mpsc::channel(8);
-    let mut ledger: VecDeque<String> = VecDeque::new();
+    let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
 
     // A desynced session's refusal: bare, and about the article behind.
     let w = sh.queue.lock().await.pop_front().expect("the seeded work");
@@ -2456,6 +2489,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &tx,
         &mut inflight,
         Vec::new(),
+        false,
         false,
         &mut ledger,
     )
@@ -2489,6 +2523,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &mut inflight,
         Vec::new(),
         false,
+        false,
         &mut Default::default(),
     )
     .await;
@@ -2517,11 +2552,12 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &mut inflight,
         Vec::new(),
         false,
+        false,
         &mut Default::default(),
     )
     .await;
     assert!(
-        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if id == "<a@x>"),
+        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<a@x>"),
         "two refusals off aligned sockets are still a confirmation"
     );
 }
@@ -2546,7 +2582,7 @@ async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
         let Some(w) = sh.queue.lock().await.pop_front() else {
             break; // resolved: the article left the queue for good
         };
-        let mut ledger: VecDeque<String> = VecDeque::new();
+        let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
         let mut inflight: VecDeque<Work> = [w].into_iter().collect();
         sh.charge_wire();
         handle_missing(
@@ -2557,12 +2593,13 @@ async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
             &mut inflight,
             Vec::new(),
             false,
+            false,
             &mut ledger,
         )
         .await;
         sh.void_soft_430(&ledger, ctx.group_bits);
         if let Ok(FetchOutcome::Missing { id, .. }) = rx.try_recv() {
-            assert_eq!(id, "<a@x>");
+            assert_eq!(&*id, "<a@x>");
             assert!(
                 round <= SOFT_REARM_CAP as usize + 1,
                 "resolved after {round} rounds"
@@ -2783,152 +2820,6 @@ async fn auth_blip_fails_fast_and_honest_by_design() {
         wall < Duration::from_secs(5),
         "an auth refusal must fail the job fast, not grind ({wall:?})"
     );
-}
-
-/// §146 tail give-up census: `verdict_walkers` answers Some only in the
-/// exact state the give-up is licensed to spend recovery blocks on -
-/// every pending article refusal-tainted - and None the moment any
-/// article is still plain payload, including the CORRUPT damage class's
-/// refetches, whose evidence is `tried_fail` and must never open this
-/// gate.
-#[test]
-fn verdict_walkers_census_opens_only_on_a_pure_refusal_tail() {
-    let ctl = QueueControl::default();
-    assert_eq!(
-        ctl.verdict_walkers(),
-        None,
-        "before attach there is no pool to ask"
-    );
-    let (sh, _) = Shared::new(
-        fresh(&["<a@x>", "<b@x>", "<c@x>"]),
-        &[(server("s"), PoolConfig::default())],
-    );
-    ctl.attach(&sh);
-    assert_eq!(
-        ctl.verdict_walkers(),
-        None,
-        "a queue of untried payload is a download, not a tail"
-    );
-    // Two walkers, one article whose only evidence is a transport
-    // failure - that is a refetch (the corrupt-body path), not a
-    // refusal, and it must keep the census closed.
-    {
-        let mut q = sh.queue.try_lock().expect("test owns the queue");
-        q[0].tried_430 = 0b01;
-        q[1].soft_430 = 0b01;
-        q[2].tried_fail = 0b01;
-    }
-    assert_eq!(
-        ctl.verdict_walkers(),
-        None,
-        "tried_fail is corrupt-class evidence, never a walker"
-    );
-    // The third article joins the ladder: census opens with all three.
-    {
-        let mut q = sh.queue.try_lock().expect("test owns the queue");
-        q[2].tried_430 = 0b01;
-    }
-    let walkers = ctl.verdict_walkers().expect("a pure refusal tail");
-    assert_eq!(walkers.len(), 3);
-    // An in-flight article with no refusal yet is payload on the wire.
-    {
-        let mut q = sh.queue.try_lock().expect("test owns the queue");
-        let w = q.pop_front().expect("three queued");
-        sh.register_inflight(&w, 0);
-    }
-    // NOTE: q[0] carried tried_430, so the entry is seeded refused and
-    // the census stays open - now split across queue and inflight.
-    let walkers = ctl
-        .verdict_walkers()
-        .expect("walker in flight still counts");
-    assert_eq!(walkers.len(), 3);
-    // A clean in-flight article closes it.
-    sh.pending.fetch_add(1, Ordering::AcqRel);
-    sh.register_inflight(&work("<clean@x>"), 0);
-    assert_eq!(
-        ctl.verdict_walkers(),
-        None,
-        "a clean article on the wire may still arrive - no trade"
-    );
-    sh.inflight.lock_ok().remove("<clean@x>");
-    // ...and so does an unaccounted article (pending without a home):
-    // the books must balance in one snapshot.
-    assert_eq!(
-        ctl.verdict_walkers(),
-        None,
-        "an article invisible between two locks vetoes the snapshot"
-    );
-    sh.pending.fetch_sub(1, Ordering::AcqRel);
-    assert!(ctl.verdict_walkers().is_some());
-    // A dup-union verdict claims an article terminal while its ORIGINAL
-    // is still mid-read - the inflight entry lingers until that answer
-    // lands, seconds on a slow refusal. The census must look straight
-    // through it: it is not pending, and counting it failed the books
-    // for every tick of the loopback gone rig's tail.
-    let mut lingering = work("<claimed@x>");
-    lingering.tried_430 = 0b01;
-    sh.register_inflight(&lingering, 0);
-    assert!(sh.claim_done("<claimed@x>"));
-    let walkers = ctl
-        .verdict_walkers()
-        .expect("a lingering terminal original must not close the census");
-    assert!(
-        !walkers.contains(&"<claimed@x>".to_string()),
-        "a terminal article is never handed back as a walker"
-    );
-    sh.inflight.lock_ok().remove("<claimed@x>");
-    // A drain keeps its queue: no give-up during a graceful pause.
-    sh.draining.store(true, Ordering::Release);
-    assert_eq!(ctl.verdict_walkers(), None, "a pause must resume intact");
-    sh.draining.store(false, Ordering::Release);
-}
-
-/// §146 tail give-up commit: queued walkers cancel, in-flight walkers
-/// are claimed where they stand, the run seals when the last one goes,
-/// and nothing is ever returned twice.
-#[test]
-fn give_up_covered_claims_queue_and_flight_and_seals_the_run() {
-    let ctl = QueueControl::default();
-    let (sh, _) = Shared::new(
-        fresh(&["<a@x>", "<b@x>", "<c@x>"]),
-        &[(server("s"), PoolConfig::default())],
-    );
-    ctl.attach(&sh);
-    let finished = sh.finished.subscribe();
-    // a stays queued; b goes in flight; c already reached a terminal
-    // outcome on its own.
-    {
-        let mut q = sh.queue.try_lock().expect("test owns the queue");
-        q[0].tried_430 = 0b01;
-        let mut b = q.remove(1).expect("b queued");
-        b.tried_430 = 0b01;
-        sh.register_inflight(&b, 0);
-        q.pop_back(); // c leaves the queue...
-    }
-    assert!(sh.claim_done("<c@x>")); // ...and completes on its own
-    sh.complete_one();
-    let ids: HashSet<String> = ["<a@x>", "<b@x>", "<c@x>"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let mut claimed = ctl.give_up_covered(&ids);
-    claimed.sort();
-    assert_eq!(
-        claimed,
-        vec!["<a@x>".to_string(), "<b@x>".to_string()],
-        "c's own outcome stands - the give-up never claims it"
-    );
-    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
-    assert!(
-        *finished.borrow(),
-        "the last claimed walker seals the run and the fleet winds down"
-    );
-    assert!(
-        ctl.give_up_covered(&ids).is_empty(),
-        "a second commit finds everything already terminal"
-    );
-    // The in-flight walker's eventual verdict lands as a no-op.
-    assert!(!sh.claim_done("<b@x>"));
 }
 
 /// Codex sweep 5, L6: a recorded ceiling must not outlive proof that it

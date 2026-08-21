@@ -73,6 +73,174 @@ fn one_shot_and_countdown_cover_exactly_sleep_and_shutdown() {
     }
 }
 
+/// A payload the mover is still relocating must block the machine going
+/// to sleep, even though its record has LEFT the queue.
+///
+/// `park` files the record into history and hands the move over on the
+/// mover's own worker, precisely so the runner never waits on a NAS
+/// copy - so by the time the queue looks empty, the slowest thing this
+/// download will do has not started. Walking `d.queue` alone cannot see
+/// it, and shutting down mid-copy is the one outcome a queue-finished
+/// action must never produce.
+#[test]
+fn an_owed_relocation_blocks_the_drain_though_it_left_the_queue() {
+    with_daemon("moving", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        assert_eq!(drain_blocker(d), None, "empty queue, nothing moving");
+
+        // Queued for the mover but not yet picked up.
+        d.mover_q.lock_ok().push_back(queued("owes-move", false, 0));
+        assert_eq!(
+            drain_blocker(d),
+            Some("a finished download is still being moved"),
+            "a job waiting on the mover must hold the drain"
+        );
+        d.mover_q.lock_ok().clear();
+
+        // ...and the copy actually in flight.
+        d.moving.lock_ok().insert("owes-move".to_string());
+        assert_eq!(
+            drain_blocker(d),
+            Some("a finished download is still being moved"),
+            "a copy in flight must hold the drain"
+        );
+        d.moving.lock_ok().clear();
+        assert_eq!(
+            drain_blocker(d),
+            None,
+            "and it clears when the move is done"
+        );
+    });
+}
+
+/// A refusal must not SPEND the drain edge.
+///
+/// `note_queue_idle` short-circuits on the set latch, so it can never
+/// issue a second edge for an idle period already announced. An edge
+/// consumed by a refusal therefore disarmed the action permanently:
+/// the user deletes the paused job that was blocking it, the queue is
+/// now genuinely empty and idle, and nothing ever fires.
+#[test]
+fn a_refused_drain_keeps_its_edge_for_the_next_tick() {
+    with_daemon("edge", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        *d.finish.action.lock_ok() = FinishAction::Sleep;
+        d.queue.lock_ok().push_back(queued("paused", true, 0));
+
+        d.finish.note_drained();
+        tick(d);
+        assert!(
+            drain_blocker(d).is_some(),
+            "the paused job is still the blocker"
+        );
+        assert!(
+            d.finish.drained.load(Ordering::Relaxed),
+            "the refused edge must still be armed"
+        );
+
+        // The user deletes the blocker. Nothing re-arms the edge - the
+        // latch is still set, so `note_queue_idle` returns early - so
+        // the HELD edge is the only thing that can still fire this.
+        d.queue.lock_ok().clear();
+        assert_eq!(drain_blocker(d), None);
+        tick(d);
+        assert!(
+            d.finish.pending().is_some(),
+            "with the blocker gone the held edge must arm the countdown"
+        );
+    });
+}
+
+/// A Completed row whose post-processing tail is still running matches
+/// neither state arm - `finalizing` is the marker that says the unpack,
+/// rename or pp-script is in flight while the row waits for park. The
+/// mover checks cannot cover it either: the mover only receives the job
+/// AT park. Without this, a two-wide postproc lane let job A's park
+/// drain the queue and power the machine off mid-way through job B's
+/// unpack (bug sweep 20 Aug).
+#[test]
+fn a_finalizing_completed_row_still_blocks_the_drain() {
+    with_daemon("finalizing", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        let j = queued("tail", false, 0);
+        {
+            let mut g = j.lock_ok();
+            g.state = JobState::Completed;
+            g.finalizing = true;
+        }
+        d.queue.lock_ok().push_back(j.clone());
+        assert_eq!(
+            drain_blocker(d),
+            Some("a download is still finishing"),
+            "a finalizing tail is a job in flight"
+        );
+        j.lock_ok().finalizing = false;
+        assert_eq!(drain_blocker(d), None, "and parking it releases the drain");
+    });
+}
+
+/// A countdown cancelled by a transient blocker must give the edge back,
+/// exactly as a refusal before the countdown does. The latch is still
+/// set, so `note_queue_idle` will never issue another edge for this idle
+/// period - a cancellation that merely SPENDS it silently disarms the
+/// action until unrelated new work drains again (bug sweep 20 Aug: a
+/// move auto-retry firing mid-countdown was enough).
+#[test]
+fn a_cancelled_countdown_gives_the_edge_back() {
+    with_daemon("cancelledge", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        d.finish.set_action(FinishAction::Shutdown);
+        d.finish.set_delay_secs(30);
+        d.finish.note_drained();
+        tick(d);
+        assert!(
+            d.finish.pending().is_some(),
+            "the drain armed the countdown"
+        );
+        assert!(
+            !d.finish.drained.load(Ordering::Relaxed),
+            "arming spent the edge"
+        );
+        // A mover blocker appears mid-countdown (the M32 auto-retry
+        // redriving a failed NAS move).
+        d.moving.lock_ok().insert("retry".to_string());
+        assert_eq!(tick(d), IDLE_TICK);
+        assert!(d.finish.pending().is_none(), "the countdown is cancelled");
+        assert!(
+            d.finish.drained.load(Ordering::Relaxed),
+            "and the edge is held for when the blocker clears"
+        );
+        // The retried move completes to a still-idle queue: the held
+        // edge is the only thing that can still fire this, and it must.
+        d.moving.lock_ok().clear();
+        tick(d);
+        assert!(
+            d.finish.pending().is_some(),
+            "the held edge re-arms the countdown"
+        );
+    });
+}
+
+/// The in-transit windows: a job popped off `mover_q` but not yet in
+/// `moving` (the dispatcher's lane-key resolution, a lane's 2 s busy
+/// requeue sleep) is invisible to both structure checks. The custody
+/// counter is what covers the gap.
+#[test]
+fn a_move_in_lane_custody_blocks_the_drain_between_the_structures() {
+    with_daemon("inflight", |d| {
+        d.queue_idle_latch.store(true, Ordering::Relaxed);
+        assert_eq!(drain_blocker(d), None);
+        d.mover_inflight.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(
+            drain_blocker(d),
+            Some("a finished download is still being moved"),
+            "custody without either structure must still hold the drain"
+        );
+        d.mover_inflight.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(drain_blocker(d), None);
+    });
+}
+
 /// The whole safety case in one test: every queue state that must refuse
 /// to power the machine off, and the one that must not.
 #[test]

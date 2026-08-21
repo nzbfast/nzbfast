@@ -421,12 +421,26 @@ pub(super) async fn dial_session(
             // a dial that fails is the ONE flavour of dead server that
             // used to leave nothing behind anywhere but a single `warn!`
             // at t=0 - no refusal line, no event, no per-server state.
+            let held = shared.sessions[ctx.idx].load(Ordering::Acquire);
             if let Some(live) = &cfg.live
                 && let Some(sl) = live.servers.get(ctx.idx)
+                // Guarded by `held` exactly as the capacity arm above is,
+                // and for the same reason (Codex sweep 12 Aug F11): we
+                // deliberately ask for more connections than the plan
+                // grants, so surplus workers failing to dial is the
+                // NORMAL case. Unguarded, one surplus dial failure
+                // stamped `down_since` on a server currently serving N
+                // sessions - and only a later SUCCESSFUL dial clears it,
+                // which a server already at its granted ceiling will
+                // never produce. `server_outages` trusts that stamp, so
+                // the queue row said "no usable connection" about a
+                // provider that never stopped serving. The F11 fix
+                // reached the refusal arm and not this one.
+                && held == 0
             {
                 sl.note_down("unreachable", e.to_string());
             }
-            shared.auth[ctx.idx].mark_down(shared.sessions[ctx.idx].load(Ordering::Acquire));
+            shared.auth[ctx.idx].mark_down(held);
             // Say WHY, once per worker per run. This was a bare
             // `Err(_)` and the silence was expensive: a server that
             // cannot authenticate, cannot resolve, or is refusing
@@ -636,6 +650,10 @@ pub(super) struct ReadStep {
     /// is proof that the socket was still aligned here, which is what
     /// closes §129 3g's suspect window.
     id_echoed: bool,
+    /// On a miss: the refusal SAID the article was removed rather than
+    /// not found ([`crate::nntp::takedown_flavoured`]). A hint riding
+    /// beside the verdict, never part of it.
+    takedown: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -676,8 +694,15 @@ pub(super) async fn read_one(
         cfg.ttfb_hedge && cfg.adaptive_timeout && !inflight.front().is_some_and(|w| w.probe);
     let status_seen = AtomicBool::new(false);
     let id_echoed = AtomicBool::new(false);
-    let suspect_front: Option<String> = if ttfb_hedge_armed {
-        inflight.front().map(|w| w.id.clone())
+    let takedown = AtomicBool::new(false);
+    // Borrowed, not cloned: `inflight` is a shared reference that
+    // outlives this read, and the only consumer is `mark_suspect`
+    // below, which takes a `&str`. Cloning it bought an owned id per
+    // read on a reactor thread for nothing. (R4 item 4 - which R9's
+    // interning would have made a refcount bump rather than an
+    // allocation, but a borrow beats a bump, so the borrow stands.)
+    let suspect_front: Option<&str> = if ttfb_hedge_armed {
+        inflight.front().map(|w| &*w.id)
     } else {
         None
     };
@@ -699,7 +724,7 @@ pub(super) async fn read_one(
             // be filed under the wrong article. The mismatch surfaces
             // as an NntpError and takes the existing protocol-error
             // exit (drop the session, requeue the pipeline).
-            let expected = inflight.front().map(|w| w.id.as_str());
+            let expected = inflight.front().map(|w| &*w.id);
             // TODO 96.4: a verdict probe answers with one status line
             // and nothing else, so there is no post-byte phase to bound
             // - the pre-byte budget is the whole read. Attribution,
@@ -715,7 +740,7 @@ pub(super) async fn read_one(
                     cfg.read_timeout
                 };
                 return match conn
-                    .read_stat_noting(expected, budget, &status_seen, &id_echoed)
+                    .read_stat_noting(expected, budget, &status_seen, &id_echoed, &takedown)
                     .await
                 {
                     Ok((hit, ttfb)) => {
@@ -753,6 +778,7 @@ pub(super) async fn read_one(
                         ADAPTIVE_STALL,
                         &status_seen,
                         &id_echoed,
+                        &takedown,
                     )
                     .await
                 {
@@ -800,7 +826,7 @@ pub(super) async fn read_one(
             } else {
                 tokio::time::timeout(
                     cfg.read_timeout,
-                    conn.read_body_into(buf, expected, &id_echoed),
+                    conn.read_body_into(buf, expected, &id_echoed, &takedown),
                 )
                 .await
                 .map_err(|_| ())
@@ -818,7 +844,7 @@ pub(super) async fn read_one(
                     suspect_armed = false;
                     suspect_fired = true;
                     if !status_seen.load(Ordering::Acquire)
-                        && let Some(id) = &suspect_front
+                        && let Some(id) = suspect_front
                     {
                         shared.mark_suspect(id);
                     }
@@ -917,6 +943,7 @@ pub(super) async fn read_one(
         shed_for_promote,
         mute_suspect: suspect_fired && no_status,
         id_echoed: id_echoed.load(Ordering::Acquire),
+        takedown: takedown.load(Ordering::Acquire),
     }
 }
 
@@ -964,10 +991,10 @@ pub(super) async fn handle_body(
     // per 222 regardless of who owns the outcome (dups
     // included; the response is real evidence either way).
     if let Some(o) = &cfg.oracle {
-        o.hit(ctx.idx, shared.ages.get(&w.id).copied().unwrap_or(0));
+        o.hit(ctx.idx, w.age_days);
     }
     shared.deregister_inflight_done(&w);
-    if shared.claim_done(&w.id) {
+    if shared.claim_done(&w.id, w.ord) {
         *race_losses = 0;
         if w.dup {
             shared.dup_wins.fetch_add(1, Ordering::Relaxed);
@@ -1155,7 +1182,8 @@ pub(super) async fn handle_missing(
     inflight: &mut VecDeque<Work>,
     buf: Vec<u8>,
     echoed: bool,
-    bare_refused: &mut VecDeque<String>,
+    takedown: bool,
+    bare_refused: &mut VecDeque<Arc<str>>,
 ) {
     let mut w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
@@ -1176,9 +1204,16 @@ pub(super) async fn handle_missing(
     // M29 oracle: the mirror of the hit above - one miss
     // per actual 430/423 wire response. Derived Missing
     // verdicts (retention seeding, unanimity) are NOT
-    // recorded; only real answers train the ledger.
+    // recorded; only real answers train the ledger. A
+    // takedown-flavoured refusal trains it harder: the
+    // server said REMOVED, which a bare 430 never does.
     if let Some(o) = &cfg.oracle {
-        o.miss(ctx.idx, shared.ages.get(&w.id).copied().unwrap_or(0));
+        let age = w.age_days;
+        if takedown {
+            o.miss_takedown(ctx.idx, age);
+        } else {
+            o.miss(ctx.idx, age);
+        }
     }
     if w.dup {
         // An un-echoed dup miss is positional-only evidence on a
@@ -1196,6 +1231,12 @@ pub(super) async fn handle_missing(
         if !echoed && !w.fenced {
             return;
         }
+        // A charged refusal that named the removal leaves its hint
+        // beside the mask it is about to join. Unproven refusals
+        // (dropped above) leave none, same as their tried_430 bit.
+        if takedown {
+            shared.note_takedown(&w.id, ctx.group_bits);
+        }
         // M2c.4: a duplicate's 430 is real evidence, not a
         // discard - merge it into the article's
         // authoritative mask (the inflight entry while the
@@ -1212,6 +1253,9 @@ pub(super) async fn handle_missing(
                 unanimous = inf.tried_430 & live == live;
             }
         }
+        // The fold can open a ladder pick for other servers - wake
+        // gated idle scanners (N6).
+        shared.bump_inflight_gen();
         if !unanimous {
             // Tail queues are tiny (endgame ≤64) - a linear
             // stamp is cheap, and a miss (article mid-hand-
@@ -1222,11 +1266,12 @@ pub(super) async fn handle_missing(
                 unanimous = qi.tried_430 & live == live;
             }
         }
-        if unanimous && shared.claim_done(&w.id) {
+        if unanimous && shared.claim_done(&w.id, w.ord) {
+            let td = shared.take_takedown(&w.id) != 0;
             let _ = out
                 .send(FetchOutcome::Missing {
                     id: w.id,
-                    cause: MissingCause::Gone,
+                    cause: MissingCause::Gone { takedown: td },
                 })
                 .await;
             shared.complete_one();
@@ -1238,6 +1283,7 @@ pub(super) async fn handle_missing(
     if let Some(inf) = shared.inflight.lock_ok().remove(&w.id) {
         w.tried_430 |= inf.tried_430;
     }
+    shared.bump_inflight_gen();
     // A miss whose refusal line carried no echoed id is positional
     // attribution only: if an upstream frontend dropped the previous
     // pipelined response, this bare "430 no such article" belongs to
@@ -1298,7 +1344,7 @@ pub(super) async fn handle_missing(
     // repeated-race redial. Both siblings in `runlife` ask exactly this
     // before reinserting; the inflight entry is already deregistered
     // above, so returning here strands nothing.
-    if shared.done.lock_ok().contains(&w.id) {
+    if shared.done.lock_ok().contains(w.ord) {
         return;
     }
     if !echoed && !w.fenced && w.soft_430 & ctx.group_bits != ctx.group_bits {
@@ -1332,13 +1378,17 @@ pub(super) async fn handle_missing(
     // the article missing (dead servers can never answer -
     // counting them here deadlocked the run pre-fix).
     w.tried_430 |= ctx.group_bits;
+    if takedown {
+        shared.note_takedown(&w.id, ctx.group_bits);
+    }
     let live = shared.live_mask();
     if w.tried_430 & live == live {
-        if shared.claim_done(&w.id) {
+        if shared.claim_done(&w.id, w.ord) {
+            let td = shared.take_takedown(&w.id) != 0;
             let _ = out
                 .send(FetchOutcome::Missing {
                     id: w.id,
-                    cause: MissingCause::Gone,
+                    cause: MissingCause::Gone { takedown: td },
                 })
                 .await;
             shared.complete_one();
@@ -1481,10 +1531,11 @@ pub(super) async fn pre_dial_gates(
     // worker's `alive` count comes down with it, so a multi-server job
     // steers to the healthy backbone and a single-server one seals a
     // truthful Failed. Checked before the backoff: a worker that is
-    // leaving anyway must not sit out a 30 s sleep on the way out. Only
-    // the fast-failure paths touch the counter, and any well-formed BODY
-    // response clears it, so a connection that has been serving is never
-    // walked toward this by a rough patch.
+    // leaving anyway must not sit out a 30 s sleep on the way out. The
+    // fast-failure paths and (since A8) the read-stall arm touch the
+    // counter, and any well-formed BODY response clears it, so a
+    // connection that has been serving is never walked toward this by a
+    // rough patch - only consecutive zero-work failures count.
     if session_failures >= MAX_SESSION_ATTEMPTS {
         return false;
     }
@@ -1498,11 +1549,14 @@ pub(super) async fn pre_dial_gates(
     {
         return false;
     }
-    // Session-level pacing (see `session_backoff_delay`). Armed only by
-    // the fast failure paths - protocol error, failed send, failed flush
-    // - which otherwise reconnect with zero delay. Deliberate reconnects
-    // (pipeline shed, promote shed) never arm it, and the read-stall
-    // path is already paced by `read_timeout`. The session guard has
+    // Session-level pacing (see `session_backoff_delay`). Armed by the
+    // fast failure paths - protocol error, failed send, failed flush -
+    // which otherwise reconnect with zero delay, and (A8) by the
+    // read-stall arm: an expiry paces one attempt at the budget it
+    // burned, but without the ladder a mute-after-AUTH server held its
+    // whole fleet in a dial-and-expire loop at the TTFB floor for the
+    // run. Deliberate reconnects (pipeline shed, promote shed) never
+    // arm it. The session guard has
     // been dropped by the `continue` that got us here, so a worker
     // sleeping this off is not counted as connected. Abort sets
     // `finished`, so that arm covers it; a graceful pause does not, hence
@@ -1556,7 +1610,7 @@ async fn session_died_mid_read(
     inflight: &mut VecDeque<Work>,
     buf: Vec<u8>,
     e: &crate::nntp::NntpError,
-    bare_refused: &VecDeque<String>,
+    bare_refused: &VecDeque<Arc<str>>,
     session_bytes: u64,
     session_responses: u32,
 ) -> usize {
@@ -1632,7 +1686,7 @@ async fn session_stalled_mid_read(
     inflight: &mut VecDeque<Work>,
     buf: Vec<u8>,
     prebyte_expired: bool,
-    bare_refused: &VecDeque<String>,
+    bare_refused: &VecDeque<Arc<str>>,
     session_bytes: u64,
 ) -> usize {
     // Stalled mid-response; connection state unusable.
@@ -1926,7 +1980,7 @@ pub(super) async fn session_loop(
         // refusals are bare, but the session PROVES the misalignment when
         // it finally reads an id it can check - and at that moment every
         // refusal in here is evidence collected from a misaligned socket.
-        let mut bare_refused: VecDeque<String> = VecDeque::new();
+        let mut bare_refused: VecDeque<Arc<str>> = VecDeque::new();
         // §129 3g: whether this session has already read a fence answer.
         // Only the first one can tell DATE-silence apart from a real
         // desync, because before it the socket is aligned by
@@ -1954,6 +2008,19 @@ pub(super) async fn session_loop(
         };
         let mut conn = match warm {
             Some(c) => {
+                // "The outage is over the moment a session is GRANTED,
+                // whatever the reason it started" - and one taken from
+                // the warm pool is granted. Without these two the only
+                // calls that stop the dashboard stamp and bank the
+                // outage budget live on the DIAL path, so a server that
+                // recovers purely through parked connections goes on
+                // accruing downtime for as long as it serves.
+                if let Some(live) = &cfg.live
+                    && let Some(sl) = live.servers.get(ctx.idx)
+                {
+                    sl.note_up();
+                }
+                shared.auth[ctx.idx].mark_up();
                 connect_failures = 0;
                 ever_connected = true;
                 shared.connected[ctx.idx].store(true, Ordering::Relaxed);
@@ -2236,6 +2303,7 @@ pub(super) async fn session_loop(
                         &mut inflight,
                         buf,
                         step.id_echoed,
+                        step.takedown,
                         &mut bare_refused,
                     )
                     .await;
@@ -2276,6 +2344,21 @@ pub(super) async fn session_loop(
                         )
                         .await,
                     );
+                    // A8: the stall arm arms the same backoff as the
+                    // protocol-death arm above. The expiry itself paces
+                    // one attempt (the budget had to run out first),
+                    // but it never grew: a server that accepts
+                    // TCP+TLS+AUTH and then goes mute produced an
+                    // unbounded dial-and-expire loop at the TTFB floor
+                    // for the whole run - exactly the traffic shape
+                    // `session_backoff_delay` documents providers
+                    // banning for. The useful-work reset plus the
+                    // immediate first retry keep a transient stall on
+                    // a serving session at zero extra delay, and a
+                    // can-only-stall server now also bows out at
+                    // MAX_SESSION_ATTEMPTS like any other broken one.
+                    session_failures += 1;
+                    pending_backoff = Some(session_backoff_delay(cfg, session_failures));
                     continue 'session;
                 }
             }

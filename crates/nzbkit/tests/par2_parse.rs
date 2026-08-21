@@ -2,7 +2,7 @@
 //! Fixture provenance: tests/fixtures/par2/README.txt
 //! (`par2 create -s4096 -r34 -n1 -a testset alpha.bin beta.bin`)
 
-use nzbkit::par2::{Par2Set, verify_file, verify_file_blocks};
+use nzbkit::par2::{Par2Set, verify_file, verify_file_blocks, verify_file_streaming};
 
 const MAIN: &[u8] = include_bytes!("fixtures/par2/testset.par2");
 const VOL: &[u8] = include_bytes!("fixtures/par2/testset.vol0+4.par2");
@@ -217,4 +217,117 @@ fn member_hash16k_fingerprints_the_long_members_only() {
     // the first 16 KiB has to agree with what the sidecar declared.
     let want: [u8; 16] = <md5::Md5 as md5::Digest>::digest(&BETA[..16384]).into();
     assert_eq!(hashes[0].0, nzbkit::par2::hex16(&want));
+}
+
+// --- streaming verification: differential against the buffered reference ---
+//
+// `verify_file` is the reference implementation (its own docs, and
+// `verify_file_blocks`', say so). `verify_file_streaming` is what the settle
+// path and `nzbfast verify` now run, because the buffered form needed a 30 GB
+// set member resident to check it. A verification verdict is a safety
+// contract, so the only acceptable difference between the two is memory: for
+// every input below they must agree on all three fields.
+
+/// A reader that hands back at most `max` bytes per call, and - when
+/// `interrupt` is set - fails every other call with `Interrupted` first.
+/// `Read` is allowed both behaviours and a file over a slow or signalled
+/// mount does both; the buffered form never had to survive either.
+struct Choked<'a> {
+    data: &'a [u8],
+    max: usize,
+    interrupt: bool,
+    calls: usize,
+}
+
+impl std::io::Read for Choked<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.calls += 1;
+        if self.interrupt && self.calls % 2 == 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "eintr",
+            ));
+        }
+        let n = buf.len().min(self.max).min(self.data.len());
+        buf[..n].copy_from_slice(&self.data[..n]);
+        self.data = &self.data[n..];
+        Ok(n)
+    }
+}
+
+/// Every read granularity, with and without spurious `Interrupted`s.
+/// 4096 is the fixture's block size, so its neighbours put a block
+/// boundary exactly on, just before and just after a read boundary.
+fn assert_streaming_agrees(f: &nzbkit::par2::Par2File, block_size: u64, data: &[u8], case: &str) {
+    let want = verify_file(f, block_size, data);
+    for max in [1usize, 3, 4095, 4096, 4097, 16384, usize::MAX] {
+        for interrupt in [false, true] {
+            let got = verify_file_streaming(
+                f,
+                block_size,
+                Choked {
+                    data,
+                    max,
+                    interrupt,
+                    calls: 0,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{case} (max {max}): {e}"));
+            let where_ = format!("{case} (reads of {max}, eintr {interrupt})");
+            assert_eq!(want.blocks, got.blocks, "{where_}: per-block flags");
+            assert_eq!(want.md5_ok, got.md5_ok, "{where_}: whole-file MD5");
+            assert_eq!(want.md5_16k_ok, got.md5_16k_ok, "{where_}: MD5-16k");
+        }
+    }
+}
+
+#[test]
+fn streaming_verify_matches_reference_on_the_fixtures() {
+    let set = parse_set();
+    let alpha = file(&set, "alpha.bin"); // 10 KiB: under 16k, short last block
+    let beta = file(&set, "beta.bin"); // 33 KiB: 8 whole blocks plus 1024
+
+    // Clean, and the short-file case where md5_16k is the whole-file MD5.
+    assert_streaming_agrees(alpha, set.block_size, ALPHA, "alpha pristine");
+    assert_streaming_agrees(beta, set.block_size, BETA, "beta pristine");
+    // Vacuous agreement would be all-false on both sides; these are not.
+    assert!(verify_file(beta, set.block_size, BETA).md5_ok);
+
+    // Corruption: inside a whole block, inside the zero-padded final block,
+    // and inside the first 16 KiB (which fails md5_16k as well).
+    for (off, case) in [
+        (5 * 4096 + 123, "beta mid-block flip"),
+        (BETA.len() - 1, "beta padded-tail flip"),
+        (7usize, "beta head flip"),
+    ] {
+        let mut hurt = BETA.to_vec();
+        hurt[off] ^= 0xff;
+        assert_streaming_agrees(beta, set.block_size, &hurt, case);
+    }
+
+    // Short input: mid-block, on a block boundary, and nothing at all.
+    assert_streaming_agrees(
+        beta,
+        set.block_size,
+        &BETA[..2 * 4096 + 100],
+        "beta truncated",
+    );
+    assert_streaming_agrees(
+        beta,
+        set.block_size,
+        &BETA[..4 * 4096],
+        "beta cut on a boundary",
+    );
+    assert_streaming_agrees(beta, set.block_size, &[], "beta empty");
+    assert_streaming_agrees(alpha, set.block_size, &[], "alpha empty");
+
+    // Trailing bytes past the last expected block create no extra flags.
+    let mut longer = BETA.to_vec();
+    longer.extend_from_slice(&[0xa5; 9000]);
+    assert_streaming_agrees(beta, set.block_size, &longer, "beta with trailing bytes");
+
+    // A block size that is not the set's, and the degenerate zero - both
+    // reference behaviours, neither of them a panic.
+    assert_streaming_agrees(beta, 4092, BETA, "beta at the wrong block size");
+    assert_streaming_agrees(beta, 0, BETA, "beta at block size zero");
 }

@@ -11,6 +11,80 @@
 use super::*;
 
 impl Shared {
+    /// N6: the inflight map (or a gate a completion moves - `pending`,
+    /// `done`) changed in a way that may create a `pick_dup` candidate.
+    /// Called AFTER the mutation is visible: the Release here pairs with
+    /// `pick_dup`'s Acquire snapshot, taken before it locks the map, so
+    /// a snapshot that includes this bump always observes the mutation.
+    pub(super) fn bump_inflight_gen(&self) {
+        self.inflight_gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// Register a dispatched original in the inflight map the dup race
+    /// walks. Moved here from pool.rs with its lifecycle siblings under
+    /// the size gate - the map's readers and writers are one subject.
+    pub(super) fn register_inflight(&self, w: &Work, server: usize) {
+        if w.dup {
+            return; // dups are tracked via the original's entry
+        }
+        self.inflight.lock_ok().insert(
+            w.id.clone(),
+            Inflight {
+                server,
+                dispatched: Instant::now(),
+                dups: 0,
+                tried_430: w.tried_430,
+                dup_servers: 0,
+                tried_fail: w.tried_fail,
+                suspect: false,
+                found: 0,
+                age_days: w.age_days,
+                part: w.part,
+                ord: w.ord,
+            },
+        );
+        self.bump_inflight_gen();
+    }
+
+    /// TODO 96.4: a STAT probe came back 223 - this backbone holds the
+    /// article. Recorded on the in-flight entry the probe was racing,
+    /// which is what stops the rest of the fan-out (see `Inflight::found`).
+    /// The entry can already be gone (the original landed while the probe
+    /// was reading); that is a no-op.
+    pub(super) fn note_found(&self, id: &str, group_bits: u32) {
+        if let Some(inf) = self.inflight.lock_ok().get_mut(id) {
+            inf.found |= group_bits;
+        }
+    }
+
+    pub(super) fn deregister_inflight(&self, w: &Work) {
+        if !w.dup {
+            self.inflight.lock_ok().remove(&w.id);
+            self.bump_inflight_gen();
+        }
+    }
+
+    /// Done-path deregistration: also feeds the article-time EWMA the
+    /// hedge bound trains on. Failure, requeue and shed paths use plain
+    /// [`Self::deregister_inflight`] - a requeue's age is not a
+    /// completion time.
+    pub(super) fn deregister_inflight_done(&self, w: &Work) {
+        if w.dup {
+            return; // dups are tracked via the original's entry
+        }
+        if let Some(inf) = self.inflight.lock_ok().remove(&w.id) {
+            let ms = (inf.dispatched.elapsed().as_millis() as u64).max(1);
+            let old = self.art_ms.load(Ordering::Relaxed);
+            let new = if old == 0 { ms } else { old - old / 8 + ms / 8 };
+            self.art_ms.store(new.max(1), Ordering::Relaxed);
+            // M7b.2: the by-owner twin. Charged to the entry's OWNER,
+            // not the completing worker - when a dup wins, the elapsed
+            // time still describes how long the owner held the article.
+            self.note_srv_art(inf.server, ms);
+        }
+        self.bump_inflight_gen();
+    }
+
     /// Hedge experiment: the staleness bound for the dup race. 3x the
     /// trained article-time EWMA, clamped between the fan-out age floor
     /// and the old flat 8 s - hedging can only be MORE responsive than
@@ -131,6 +205,25 @@ impl Shared {
         pipe: Pipeline,
         level: u32,
     ) -> Option<Work> {
+        // N6 idle-spin gate: this server's last idle walk of the whole
+        // map picked nothing and the map has not changed since - skip
+        // the walk instead of re-taking the `done` + `inflight` mutexes
+        // every 25 ms x idle-workers (at queue-dry that was ~4000 full
+        // walks/s on a 100-conn fleet, squarely against the completion
+        // paths). Time-capped at [`SCAN_RETRY_MS`] because staleness and
+        // fan-out age arm by CLOCK, not by map change; the gen snapshot
+        // is taken before the walk so any concurrent mutation
+        // invalidates the record it leaves behind. Worst case a
+        // speculative dup is delayed one retry window, never lost.
+        let now_ms = self.start.elapsed().as_millis() as u64;
+        let map_gen = self.inflight_gen.load(Ordering::Acquire);
+        let futile_at = self.dup_futile[me].load(Ordering::Relaxed);
+        if futile_at != u64::MAX
+            && now_ms.saturating_sub(futile_at) < SCAN_RETRY_MS
+            && self.dup_futile_gen[me].load(Ordering::Relaxed) == map_gen
+        {
+            return None;
+        }
         // Early fan-out experiment: the tail latch flips at the exact
         // moment idle capacity first exists (a primary found the queue
         // dry with work still in flight), which with a big fleet is
@@ -162,22 +255,22 @@ impl Shared {
         // picker stops arming; ladder dups stay exempt (verdicts, not speed).
         let capped = self.dup_spend_capped();
         let done = self.done.lock_ok();
-        let hedges_ok =
-            !self.hedge || self.hedges_issued.load(Ordering::Relaxed) < 4 + done.len() as u64 / 20;
+        let hedges_ok = !self.hedge
+            || self.hedges_issued.load(Ordering::Relaxed) < 4 + done.count() as u64 / 20;
         let mut inflight = self.inflight.lock_ok();
         // (id, owner_rate, ladder-progress, stale-only) - endgame prefers
         // the article CLOSEST to its verdict, normal phase the slowest
         // owner; stale-only marks a hedge for the issue-rate cap.
-        let mut best: Option<(&String, f64, u32, bool)> = None;
+        let mut best: Option<(&Arc<str>, f64, u32, bool)> = None;
         // Tail fan-out candidates: fewest racers first, then longest on
         // the wire - so the second idle worker picks the second
         // straggler, not the same one.
-        let mut fan: Option<(&String, u8, Instant)> = None;
+        let mut fan: Option<(&Arc<str>, u8, Instant)> = None;
         for (id, inf) in inflight.iter() {
             if inf.tried_430 & my_bit != 0
                 || inf.dup_servers & my_bit != 0
                 || inf.tried_fail & my_bit != 0
-                || done.contains(id)
+                || done.contains(inf.ord)
             {
                 continue;
             }
@@ -281,9 +374,23 @@ impl Shared {
             Some(_) => "slow-owner",
             None => "fanout",
         };
-        let id = best
+        let Some(id) = best
             .map(|(id, _, _, _)| id.clone())
-            .or_else(|| fan.map(|(id, _, _)| id.clone()))?;
+            .or_else(|| fan.map(|(id, _, _)| id.clone()))
+        else {
+            // Record the futile walk - but only from a MAXIMALLY
+            // permissive one, so its empty answer covers every other
+            // shape of call this server can make: a fully idle picker
+            // (the fan-out and envelope arms are idle-only) with no
+            // fill gate (`required` bits only ever EXCLUDE ladder
+            // candidates). Gen first, then the timestamp that arms the
+            // record.
+            if pipe.used == 0 && required == 0 {
+                self.dup_futile_gen[me].store(map_gen, Ordering::Relaxed);
+                self.dup_futile[me].store(now_ms, Ordering::Relaxed);
+            }
+            return None;
+        };
         let inf = inflight.get_mut(&id).unwrap();
         if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
             eprintln!(
@@ -319,6 +426,9 @@ impl Shared {
             rearms: 0,
             ladder: is_ladder,
             probe,
+            age_days: inf.age_days,
+            part: inf.part,
+            ord: inf.ord,
         })
     }
 
@@ -372,20 +482,20 @@ impl Shared {
             return None;
         }
         let done = self.done.lock_ok();
-        if self.hedges_issued.load(Ordering::Relaxed) >= 4 + done.len() as u64 / 20 {
+        if self.hedges_issued.load(Ordering::Relaxed) >= 4 + done.count() as u64 / 20 {
             return None; // capped; the budget path still rescues
         }
         let mut inflight = self.inflight.lock_ok();
         // Oldest suspicion first: it has the least budget left.
-        let picked: Option<String> = inflight
+        let picked: Option<Arc<str>> = inflight
             .iter()
-            .filter(|(id, inf)| {
+            .filter(|(_, inf)| {
                 inf.suspect
                     && inf.dups == 0
                     && inf.tried_430 & my_bit == 0
                     && inf.dup_servers & my_bit == 0
                     && inf.tried_fail & my_bit == 0
-                    && !done.contains(*id)
+                    && !done.contains(inf.ord)
             })
             .min_by_key(|(_, inf)| inf.dispatched)
             .map(|(id, _)| id.clone());
@@ -418,6 +528,9 @@ impl Shared {
             rearms: 0,
             ladder: false,
             probe: false,
+            age_days: inf.age_days,
+            part: inf.part,
+            ord: inf.ord,
         })
     }
 }

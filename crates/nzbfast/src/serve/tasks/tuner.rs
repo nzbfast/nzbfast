@@ -272,10 +272,10 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 .map(|e| e.host)
                 .collect();
             // Whether the config could be READ this epoch, kept apart
-            // from its contents: on a failed load every server falls
-            // back to the current target as its ceiling, which is a
-            // guess, and a guess must never be mistaken for the user
-            // having changed the number (see the rebuild below).
+            // from its contents: on a failed load a server has no
+            // configured ceiling, and that must never be mistaken for
+            // the user having changed the number (see the rebuild
+            // below).
             let cfg_loaded = nzbkit::config::Config::load(&config);
             let cfg_read = cfg_loaded.is_ok();
             let cfg_servers = cfg_loaded.map(|c| c.servers).unwrap_or_default();
@@ -300,9 +300,23 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 // No handle = pinned server, sidecar hub, or the
                 // feature raced a config change: nothing to move.
                 let Some(target) = target else { continue };
+                // No server config this epoch (a failed load, or a host
+                // the user removed while it is still live): fall back to
+                // the GLOBAL limit, which is a bound we actually know -
+                // `effective_limit` never returns more than it either.
+                //
+                // It used to fall back to `target.get()`, the value the
+                // just-finished epoch ran at, and that is read BEFORE
+                // `on_epoch` below and then used to clamp `desired`. A
+                // ceiling equal to the current target is a one-way
+                // ratchet: the controller can still walk down and can
+                // never walk back up, so an up-probe leaves the live
+                // target untouched, measures no gain, and confirms
+                // itself. Down-only was invisible because each single
+                // epoch looked like an ordinary decision.
                 let ceiling = srv_cfg
                     .map(|s| crate::conntune::effective_limit(global, s.connections))
-                    .unwrap_or_else(|| target.get());
+                    .unwrap_or(global);
                 // The ceiling a `ServerTuner` is built with is immutable
                 // and the per-epoch re-read only ever NARROWS (`.min`),
                 // so a raised connections setting could not reach the

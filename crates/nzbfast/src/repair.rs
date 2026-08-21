@@ -32,6 +32,14 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
                 && t[1..].bytes().all(|c| c.is_ascii_digit()))
                 || ((2..=4).contains(&t.len()) && t.bytes().all(|c| c.is_ascii_digit()))
         });
+        // The one exception to `by_name`: a `.rar` whose name carries
+        // no set (hash stem, no ordinal, no `.rNN` sibling) belongs to
+        // the obfuscated branch below - by name it is its own
+        // single-volume stem group, which fails on the split entry
+        // (issue #47's shape, same rule as `try_unrar_spent`).
+        if name.ends_with(".rar") && unpack::rar_name_carries_no_set(&path) && rar_magic(&path) {
+            continue;
+        }
         if by_name || (rollover_or_numeric && rar_magic(&path)) {
             rars.push(path);
         }
@@ -234,7 +242,7 @@ mod sidefetch;
 // interesting to a caller, and `use super::*` importers stay valid.
 pub(crate) use sidefetch::{
     SideCancel, fetch_volume_articles, fetch_volumes, side_pool_servers, vol_count_from_name,
-    volume_prealloc_cap,
+    volume_prealloc_cap, volume_reqs,
 };
 
 /// Candidate recovery volumes of the NZB: (file idx, declared slices,
@@ -346,9 +354,7 @@ pub(crate) async fn try_mapped_repair(
     // recovery fetch below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
 ) -> Result<bool> {
-    use nzbkit::par2repair::{
-        MAX_INPUT_SLICES, MAX_REPAIR_DIM, VolumeIo, recovery_slice_locators, repair_mapped,
-    };
+    use nzbkit::par2repair::{MAX_INPUT_SLICES, MAX_REPAIR_DIM, VolumeIo, repair_mapped_catalog};
     // Gate: every set file must be one of
     //  - verified/damaged with a sane ledger, DAMAGED only if mapped or
     //    plain-patchable (a clean plain file was always fine - read_at
@@ -494,52 +500,35 @@ pub(crate) async fn try_mapped_repair(
             dl_bytes as f64 / 1e6
         );
         fetched_files = chosen.iter().map(|&vi| vols[vi].0).collect();
-        cpu.without_permit(fetch_volumes(
-            servers,
-            nzb,
-            out_dir,
-            &buf_pool,
-            &fetched_files,
-            cancel,
-        ))
-        .await?;
+        // The failure count is deliberately unused here: this path's
+        // `fetched_files` never feeds an exclusion list (a decline
+        // falls through to `fetch_and_repair`, which recomputes its
+        // candidates), and the mapped catalog below re-proves every
+        // slice it selects against its packet MD5.
+        let _partial_failures = cpu
+            .without_permit(fetch_volumes(
+                servers,
+                nzb,
+                out_dir,
+                &buf_pool,
+                &fetched_files,
+                cancel,
+            ))
+            .await?;
     }
 
-    // Harvest every recovery slice on disk (bootstrap + fetched volumes).
-    // By extension AND by packet magic: an obfuscated post's volumes land
-    // under hash names no extension rule can match (issue #14).
+    // Catalog every recovery slice on disk (bootstrap + fetched volumes)
+    // as validated LOCATORS - by extension AND by packet magic, exactly
+    // the file set the old whole-file harvest read (an obfuscated post's
+    // volumes land under hash names no extension rule can match, issue
+    // #14; the packet-file ceiling binds both kinds alike, Codex sweep
+    // 10 Aug M4). The payload bytes stay on disk: `repair_mapped_catalog`
+    // preads only the exponents the repair actually selects, re-proving
+    // each against its packet MD5, so peak recovery memory is missing x
+    // block_size instead of every slice in the directory (B3 stage 2 on
+    // the B2 catalog).
     let t0 = Instant::now();
-    let mut recovery: Vec<(u32, Vec<u8>)> = Vec::new();
-    let mut sources: Vec<PathBuf> = Vec::new();
-    for e in std::fs::read_dir(out_dir)? {
-        let e = e?;
-        let p = e.path();
-        if p.is_file()
-            && p.extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case("par2"))
-            // Same ceiling the sniffed volumes clear, for the same
-            // reason: each of these is read WHOLE below and its slices
-            // copied into `recovery`, and the poster picks the name, so
-            // a bound only the extensionless files honour is no bound
-            // (Codex sweep 10 Aug, M4).
-            && e.metadata().is_ok_and(|m| m.len() <= nzbkit::par2repair::MAX_PACKET_FILE_BYTES)
-        {
-            sources.push(p);
-        }
-    }
-    for p in nzbkit::par2repair::sniffed_packet_files(out_dir).unwrap_or_default() {
-        if !sources.contains(&p) {
-            sources.push(p);
-        }
-    }
-    for p in sources {
-        let bytes = std::fs::read(&p)?;
-        for (exp, off, len) in recovery_slice_locators(&bytes, &set.recovery_set_id) {
-            if len == bs {
-                recovery.push((exp, bytes[off..off + len].to_vec()));
-            }
-        }
-    }
+    let mut cat = nzbkit::par2repair::PacketCatalog::build(out_dir)?;
 
     // Allocate the fresh slots only now, past every cheap decline. A
     // late decline (verify failure, I/O error) can still leave fed
@@ -576,7 +565,7 @@ pub(crate) async fn try_mapped_repair(
         slot_of: &slot_of,
         feed: &feed,
     };
-    match repair_mapped(&files, bs, &recovery, &io, full_verify) {
+    match repair_mapped_catalog(&files, bs, &mut cat, &set.recovery_set_id, &io, full_verify) {
         Ok(n) => {
             recreated_names.extend(feed.iter().flatten().map(|(name, _)| name.clone()));
             let parity = if recreated > 0 {
@@ -712,15 +701,28 @@ pub(crate) async fn fetch_and_repair(
         );
 
         fetched_files = chosen.iter().map(|&vi| vols[vi].0).collect();
-        cpu.without_permit(fetch_volumes(
-            servers,
-            nzb,
-            out_dir,
-            &buf_pool,
-            &fetched_files,
-            cancel,
-        ))
-        .await?;
+        let failures = cpu
+            .without_permit(fetch_volumes(
+                servers,
+                nzb,
+                out_dir,
+                &buf_pool,
+                &fetched_files,
+                cancel,
+            ))
+            .await?;
+        if failures > 0 {
+            // At least one chosen volume landed PARTIAL, and the batch
+            // count cannot say which - so none of the batch may enter
+            // the escalation's exclusion list below (only a complete
+            // volume may ever be excluded: sidefetch contract). The
+            // escalation then refetches them in full, rewriting the
+            // files in place - the behavior the resume path documents -
+            // instead of permanently stranding the partial volume's
+            // missing slices and declaring a recoverable job
+            // unrepairable.
+            fetched_files.clear();
+        }
     }
 
     // Reed-Solomon repair: native in-process GF(2^16) first - verifies the

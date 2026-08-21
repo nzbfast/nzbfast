@@ -44,10 +44,11 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         saver_armed: AtomicBool::new(false),
         hooks_tx: Mutex::new(None),
         history_keep_count: AtomicU64::new(0),
-        history_keep_days: AtomicU64::new(0),
+        history_keep_secs: AtomicU64::new(0),
         add_lock: Mutex::new(()),
         moving: Mutex::new(std::collections::HashSet::new()),
         mover_q: Mutex::new(VecDeque::new()),
+        mover_inflight: std::sync::atomic::AtomicUsize::new(0),
         mover_wake: tokio::sync::Notify::new(),
         mover_bucket: Mutex::new(mover::PaceState::default()),
         move_pace: Mutex::new("yield".to_string()),
@@ -84,7 +85,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         #[cfg(feature = "indexer")]
         index_migrated: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
-        index_stats_cache: Mutex::new(None),
+        index_stats_cache: Mutex::new(Default::default()),
         auto_speed: std::sync::atomic::AtomicBool::new(false),
         preflight: std::sync::atomic::AtomicBool::new(false),
         auto_connections: std::sync::atomic::AtomicBool::new(true),
@@ -124,7 +125,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         cors_origin: Mutex::new(CORS_DEFAULT.to_string()),
         sidecar: Mutex::new(None),
         sidecar_tails: Mutex::new(Vec::new()),
-        media_rejudge: Mutex::new(Vec::new()),
+        media_final_owed: Mutex::new(Vec::new()),
         best_rate_bps: AtomicU64::new(0),
         speed_ceiling: AtomicU64::new(0),
         mem_budget_total: 1 << 30,
@@ -339,5 +340,9 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         settings_path,
         #[cfg(feature = "indexer")]
         taste_cache: Mutex::new(None),
+        #[cfg(feature = "indexer")]
+        owned_keys_cache: Mutex::new(None),
+        #[cfg(feature = "indexer")]
+        oracle_bb_cache: Mutex::new(None),
     })
 }

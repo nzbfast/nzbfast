@@ -579,7 +579,7 @@ fn scoreboard_cats_can_only_reduce_the_daily_requests() {
 }
 
 /// Arming the size cap wakes the scan loop, because that loop is what
-/// enforces it (`evict_pass_and_republish`, once per pass) and its sleep
+/// enforces it (`evict_between_passes`, once per pass) and its sleep
 /// is the full `index_interval_secs` on any install with something to
 /// scan. Spotnet going default-on (129f293e) gave every groupless
 /// install something to scan, which turned "switch on the cap" into a

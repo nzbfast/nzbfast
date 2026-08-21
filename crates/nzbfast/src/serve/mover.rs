@@ -185,6 +185,13 @@ fn spawn_lane(
             .await
             .unwrap_or(false);
             drop(permit);
+            if !requeue {
+                // Custody ends here and nowhere else: across a requeue
+                // (below) the job stays in this lane's channel, still
+                // invisible to `mover_q` and `moving`, so the count
+                // must ride with it.
+                d.mover_inflight.fetch_sub(1, Ordering::Relaxed);
+            }
             if requeue {
                 // Another actor holds this job's files (a recategorize
                 // mid-flight). Pause, then the BACK of this lane's own
@@ -398,6 +405,12 @@ impl Daemon {
     /// processed twice, and the second pass finds `move_pending` false
     /// and does nothing.
     pub(super) fn mover_enqueue(&self, job: &Arc<Mutex<Job>>) {
+        // Counted BEFORE the push, so no observer can see the queue
+        // gain work the inflight count does not yet admit to. The
+        // matching decrement is the lane's, when `mover_process`
+        // returns without a requeue - a second enqueue of the same job
+        // is balanced by its own pop reaching the "nothing owed" arm.
+        self.mover_inflight.fetch_add(1, Ordering::Relaxed);
         self.mover_q.lock_ok().push_back(job.clone());
         self.mover_wake.notify_one();
     }

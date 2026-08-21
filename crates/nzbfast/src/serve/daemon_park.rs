@@ -1027,6 +1027,19 @@ impl Daemon {
             // dashboard's snapshot-diff toast inference. Then retention,
             // which is a no-op unless the optional knobs are set.
             let _ = self.history_upsert(std::slice::from_ref(&job));
+            // §76: the record is in history, so the media prober's final
+            // on-disk pass has something to read. Owed HERE, as an event,
+            // rather than inferred by that task noticing the job stop
+            // downloading between two of its ticks: a job whose whole
+            // download fits inside one tick is never seen running at all,
+            // and used to reach history with no chip and no log line to
+            // say why. A small post on a fast line is exactly that job.
+            // Bound before the mailbox lock is taken, never inline: the
+            // other producer (post-processing's re-judge) pushes while
+            // holding the job guard, so a `mailbox.lock().push(job.lock())`
+            // here would be that pair in the opposite order.
+            let owed = job.lock_ok().nzo_id.clone();
+            self.media_final_owed.lock_ok().push(owed);
             self.life_emit_parked(&job);
             self.history_enforce_retention();
             if owes_move {

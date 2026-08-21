@@ -9,9 +9,11 @@
 //! - an idle STAT sampler in the daemon probing indexed releases on
 //!   spare connections (throttled; the daemon owns the schedule).
 //!
-//! Availability clusters by backbone, not provider brand, so even a
-//! single user's traffic learns fast: one Omicron reseller's 430 pattern
-//! predicts every Omicron reseller.
+//! Availability clusters by backbone SPOOL, not provider brand and not
+//! owner, so even a single user's traffic learns fast: one Highwinds
+//! reseller's 430 pattern predicts every Highwinds reseller. It does
+//! NOT predict Eweka, which the same company owns on a separate spool
+//! under a different takedown regime - see [`BACKBONE_ALIASES`].
 
 use crate::sync::MutexExt;
 use std::collections::HashMap;
@@ -58,41 +60,120 @@ pub fn bucket_label(b: u8) -> &'static str {
 /// second-level host label (after digit/subdomain stripping); values the
 /// backbone the ledger clusters them under. Unlisted hosts key under
 /// their own normalized label - still correct, just unclustered.
+///
+/// A value is a SPOOL, not a company. Takedowns propagate within one
+/// spool and stop at its edge, so two brands belong to the same key only
+/// if an article removed from one is thereby removed from the other.
+/// Common ownership is not that: Omicron Media owns three separate
+/// spools and this table used to fold all three into one `omicron` key,
+/// which cost real accuracy three ways. The ledger read Highwinds misses
+/// as evidence about Eweka and could mark content "gone" on a spool that
+/// still carried it (Highwinds answers DMCA takedowns, Eweka and Base-IP
+/// answer Dutch NTD notices, so they genuinely diverge). `whyslow`'s
+/// "unrelated providers report the same gaps" receipt and `census`'s
+/// failure summary both count DISTINCT keys as independent opinions, so
+/// a user on Newshosting + Eweka + TweakNews had three opinions counted
+/// as one.
+///
+/// The bias runs one way on purpose: a MISSING cluster only slows
+/// learning and under-states independence, while a WRONG cluster
+/// fabricates agreement between spools that do not share takedowns. So
+/// a brand whose spool the public maps disagree about keeps its own key
+/// rather than being guessed into a cluster (see `fastusenet` below).
+///
+/// Verified 20 Aug 2026 against cogipas.com/usenet-backbones (updated
+/// 2026-01-03), datahoarder.io/usenet-backbone-map (2026-05-20) and
+/// usenet.org/providers. Community maps shift; re-check before trusting
+/// an entry for anything expensive.
+///
+/// UNRESOLVED, and the one thing that could overturn the Omicron split:
+/// this repo's own `diversity` check (`sysbench.rs`, which clusters
+/// servers by MEASURED missing-article overlap and consults nothing in
+/// this table) once reported Newshosting = Eweka = TweakNews at 100%
+/// shared gaps on a six-provider live config - one spool by measurement,
+/// three by every published map. Either reading can be true of a real
+/// sample: retention-purged articles go missing on all three at the
+/// same age whatever the takedown regime, and the run's own note warns
+/// that a double-bracketed STAT id once faked a 100% overlap. Re-run
+/// `nzbfast diversity` on an age-controlled sample before treating
+/// either answer as settled - and note which way the risk runs if the
+/// spools really are one: `whyslow` and `census` would then read three
+/// keys as three independent opinions when there is one, over-stating
+/// a "nobody has this" claim.
 const BACKBONE_ALIASES: &[(&str, &str)] = &[
-    // Omicron Media.
-    ("usenetserver", "omicron"),
-    ("newshosting", "omicron"),
-    ("eweka", "omicron"),
-    ("easynews", "omicron"),
-    ("tweaknews", "omicron"),
-    ("pureusenet", "omicron"),
-    ("sunnyusenet", "omicron"),
-    ("hitnews", "omicron"),
-    // UsenetExpress.
+    // Omicron Media spool 1 of 3: Highwinds ("HW Media"), US + NL,
+    // DMCA takedowns. Astraweb retired its own spool onto this one, and
+    // is no longer an independent backbone.
+    ("newshosting", "highwinds"),
+    ("usenetserver", "highwinds"),
+    ("easynews", "highwinds"),
+    ("newsgroupninja", "highwinds"),
+    ("astraweb", "highwinds"),
+    // Omicron Media spool 2 of 3: Eweka, NL, NTD. One brand, its own
+    // spool - which is exactly why folding it into `omicron` was wrong.
+    ("eweka", "eweka"),
+    // Omicron Media spool 3 of 3: Base-IP, NL, NTD. Keyed `baseip`
+    // rather than `base-ip` so a Base-IP host that is NOT in this table
+    // still folds here: `backbone_of` strips non-alphabetics, so
+    // news.base-ip.net normalizes to `baseip` on its own.
+    ("baseip", "baseip"),
+    ("tweaknews", "baseip"),
+    ("xlned", "baseip"),
+    ("sunnyusenet", "baseip"),
+    ("pureusenet", "baseip"),
+    ("usenetbucket", "baseip"),
+    // UsenetExpress, US, DMCA.
     ("usenetexpress", "usenetexpress"),
-    ("viper", "usenetexpress"),
-    ("vipernews", "usenetexpress"),
-    ("fastusenet", "usenetexpress"),
+    ("newsdemon", "usenetexpress"),
+    ("newsgroupdirect", "usenetexpress"),
+    ("maximumusenet", "usenetexpress"),
+    ("thecubenet", "usenetexpress"),
+    ("thundernews", "usenetexpress"),
     ("usenetprime", "usenetexpress"),
-    // Abavia.
+    // ViperNews (operator Uzo Reto), NL, NTD - its OWN backbone. This
+    // table had it under UsenetExpress; every 2026 map consulted lists
+    // it as an independent spool.
+    ("vipernews", "vipernews"),
+    ("viper", "vipernews"),
+    // Abavia, NL. XS News is Abavia's own consumer brand, not a
+    // separate backbone; HitNews rides it too (its ~2,100-day retention
+    // is Abavia's, nothing like Omicron's).
     ("abavia", "abavia"),
+    ("xsnews", "abavia"),
+    ("xsusenet", "abavia"),
     ("bulknews", "abavia"),
-    ("usenetbucket", "abavia"),
     ("cheapnews", "abavia"),
-    // Giganews (also powers Supernews).
+    ("stingyusenet", "abavia"),
+    ("hitnews", "abavia"),
+    // Netnews, US. BlockNews is a reseller of it, not a backbone.
+    ("netnews", "netnews"),
+    ("blocknews", "netnews"),
+    ("usenetnow", "netnews"),
+    // Giganews (UNS Holdings), also powers Supernews. Sibling to
+    // Netnews under the same owner, separate spool.
     ("giganews", "giganews"),
     ("supernews", "giganews"),
-    // Independents that are their own backbone (identity entries so a
-    // rename here never orphans history).
-    ("xsnews", "xsnews"),
-    ("blocknews", "blocknews"),
-    ("astraweb", "astraweb"),
+    // Usenet.farm, NL, NTD. Aliased from the bare label because
+    // `backbone_of` reduces news.usenet.farm to `farm` - ".farm" is a
+    // real TLD but too long for the TLD-ish tail rule, so the brand
+    // label it lands on is the TLD itself.
+    ("usenetfarm", "usenetfarm"),
+    ("farm", "usenetfarm"),
+    // Deliberately NOT clustered, because the public maps disagree and
+    // a wrong cluster is worse than none (see the note above):
+    // - fastusenet: usenet.org puts Fast Usenet on Omicron without
+    //   naming WHICH of the three spools, and no map consulted places
+    //   it. It keys as `fastusenet`. It was under `usenetexpress` here,
+    //   which no source supports.
+    // - frugalusenet: cogipas lists Frugal Usenet under Netnews AND
+    //   under Usenet.farm. It keys as `frugalusenet`.
 ];
 
 /// Normalize a server host to its backbone key: take the registrable
 /// label (skipping TLD-ish tails like "co.uk"), strip digits/dashes
 /// (news2, ssl-eu), then apply the reseller alias map.
-/// news.eweka.nl → eweka → omicron; news2.blocknews.net → blocknews.
+/// news.newshosting.com → newshosting → highwinds; news.eweka.nl →
+/// eweka (its own spool); news2.blocknews.net → blocknews → netnews.
 pub fn backbone_of(host: &str) -> String {
     let host = host.to_ascii_lowercase();
     let host = host.split(':').next().unwrap_or(&host); // strip :port
@@ -125,6 +206,25 @@ pub fn backbone_of(host: &str) -> String {
         }
     }
     key
+}
+
+/// The backbone `host` belongs to, but ONLY when that name came from
+/// the alias table - an unlisted host keys under its own label, which
+/// is a perfectly good ledger key and a useless thing to show a user.
+///
+/// The caller is the dashboard's mirror-group suggestion: it offers a
+/// `group` string for the server being edited, so it has to tell "this
+/// brand is one of the shared networks we know about" from "this is
+/// some hostname". Recognition tests the table's VALUES, not its keys,
+/// so if the aliases are ever split into finer spools the suggestion
+/// follows whatever [`backbone_of`] starts returning, with no second
+/// list to keep in step.
+pub fn known_backbone_of(host: &str) -> Option<String> {
+    let key = backbone_of(host);
+    BACKBONE_ALIASES
+        .iter()
+        .any(|(_, backbone)| *backbone == key)
+        .then_some(key)
 }
 
 /// Collapse a newsgroup to its family: strip the "alt.binaries." (or
@@ -168,8 +268,11 @@ pub struct OracleSink {
     servers: Mutex<Vec<String>>,
     /// Group family of the job's release (one NZB ≈ one family).
     family: Mutex<String>,
-    /// (server index, age bucket) → (hits, misses).
-    counts: Mutex<HashMap<(usize, u8), (u64, u64)>>,
+    /// (server index, age bucket) → (hits, misses, takedown misses).
+    /// The third count is the subset of `misses` whose refusal SAID the
+    /// article was removed (`crate::nntp::takedown_flavoured`); `drain`
+    /// spends it as extra miss weight.
+    counts: Mutex<HashMap<(usize, u8), (u64, u64, u64)>>,
 }
 
 impl OracleSink {
@@ -185,13 +288,29 @@ impl OracleSink {
     /// without dates are rare enough not to matter).
     pub fn hit(&self, si: usize, age_days: u32) {
         let mut c = self.counts.lock_ok();
-        c.entry((si, age_bucket(age_days))).or_insert((0, 0)).0 += 1;
+        c.entry((si, age_bucket(age_days))).or_insert((0, 0, 0)).0 += 1;
     }
 
     /// Record one 430/423 from server `si`.
     pub fn miss(&self, si: usize, age_days: u32) {
         let mut c = self.counts.lock_ok();
-        c.entry((si, age_bucket(age_days))).or_insert((0, 0)).1 += 1;
+        c.entry((si, age_bucket(age_days))).or_insert((0, 0, 0)).1 += 1;
+    }
+
+    /// Record one TAKEDOWN-FLAVOURED refusal from server `si` - the
+    /// server said the article was removed, not merely that it could
+    /// not find it. Counted as a miss like any other, plus a tally that
+    /// `drain` turns into extra miss weight: an explicit removal notice
+    /// is a statement about gone-ness that a bare 430 (which may be
+    /// propagation, a backfill hole, or a frontend wobble) is not.
+    /// Absence of the flavour is NO evidence the other way - most
+    /// backbones never name the reason - so plain misses keep exactly
+    /// the weight they had.
+    pub fn miss_takedown(&self, si: usize, age_days: u32) {
+        let mut c = self.counts.lock_ok();
+        let e = c.entry((si, age_bucket(age_days))).or_insert((0, 0, 0));
+        e.1 += 1;
+        e.2 += 1;
     }
 
     /// Empty the accumulator into ingest-ready samples, one per LEDGER
@@ -204,14 +323,22 @@ impl OracleSink {
         let counts = std::mem::take(&mut *self.counts.lock_ok());
         let raw: Vec<Sample> = counts
             .into_iter()
-            .filter_map(|((si, bucket), (hits, misses))| {
+            .filter_map(|((si, bucket), (hits, misses, takedowns))| {
                 let host = servers.get(si)?.clone();
                 Some(Sample {
                     host,
                     family: family.clone(),
                     bucket,
                     hits,
-                    misses,
+                    // A takedown-flavoured miss counts twice: the server
+                    // put "removed" on the record, which a bare 430
+                    // never does. Conservative on purpose - the doubled
+                    // weight only shifts the hit/miss RATIO where hits
+                    // exist beside it (clamp_weight preserves ratios,
+                    // and an all-miss cell is all-miss either way), and
+                    // the per-job clamp below still bounds the whole
+                    // release to one JOB_SAMPLE_WEIGHT observation.
+                    misses: misses.saturating_add(takedowns),
                 })
             })
             .collect();
@@ -220,11 +347,11 @@ impl OracleSink {
         // release's articles are not independent trials - they live or
         // die together - so feeding 15,000 raw 430s into a Wilson
         // interval that assumes independence is a category error, and it
-        // is what let two doomed postings drive (omicron, hdtv, 7-30d)
+        // is what let two doomed postings drive (highwinds, hdtv, 7-30d)
         // to a 0.05 upper bound while 12 other releases in that same
         // cell were 36/36 available. The fold by backbone is the same
-        // argument one level up: three Omicron resellers refusing the
-        // same article is one refusal, not three.
+        // argument one level up: three Highwinds resellers refusing
+        // the same article is one refusal, not three.
         fold_by_backbone(&raw, JOB_SAMPLE_WEIGHT)
     }
 }
@@ -263,8 +390,8 @@ fn clamp_weight(hits: u64, misses: u64, weight: u64) -> (u64, u64) {
 ///
 /// Evidence is produced per configured SERVER, but the ledger is keyed
 /// by backbone, and a user can have three configured servers that are
-/// all the same backbone (Eweka, UsenetServer and Newshosting are all
-/// Omicron). The idle sampler STATs the same article ids against every
+/// all the same backbone (Easynews, UsenetServer and Newshosting are
+/// all Highwinds). The idle sampler STATs the same article ids against every
 /// enabled server in one tick, and a doomed download takes a real 430
 /// from each of them - so one release used to arrive as three
 /// independent `(0, 5)` samples that ingest summed into `(0, 15)`,
@@ -341,7 +468,116 @@ pub fn ensure_schema(db: &Connection) -> rusqlite::Result<()> {
         [],
     );
     rescale_article_counts(db);
+    remap_retired_backbones(db);
     Ok(())
+}
+
+/// Cells whose key was retired when [`BACKBONE_ALIASES`] moved to
+/// per-SPOOL granularity (20 Aug 2026). Two shapes, handled differently
+/// because they are different claims about the old evidence.
+///
+/// `RENAMED` is the same spool under a new key: BlockNews turned out to
+/// be a reseller of Netnews rather than a backbone, XS News to be
+/// Abavia's own brand, and Astraweb to have retired its spool onto
+/// Highwinds. Every sample under the old key was a sample of the new
+/// key's spool all along, so those rows are re-keyed and merged
+/// ADDITIVELY - exactly what `ingest` would have done had the table been
+/// right at the time.
+///
+/// `SPLIT` is a key that no longer names one spool: `omicron` folded
+/// Highwinds, Eweka and Base-IP together, so a row under it is some
+/// unknown mixture of three spools' evidence. Nothing recovers which,
+/// because the ledger stores counts and never the server that produced
+/// them. Those rows are DELETED.
+///
+/// Deleting is the deliberate choice over the two alternatives.
+/// Copying an `omicron` row to all three spools would take Highwinds'
+/// DMCA misses and assert them of Eweka, which is the precise error
+/// this whole change exists to remove. Re-keying it to `highwinds`
+/// alone (the busiest of the three, so statistically the likeliest
+/// source) would still be a guess presented as measurement, and one
+/// that can only push a real cell toward a false `Gone`. The ledger is
+/// cheap to rebuild - [`MIN_SAMPLES`] is about a dozen postings, days
+/// at the idle sampler's one release a minute - and the cost of the
+/// wrong answer is a user told content is gone when a spool still has
+/// it.
+///
+/// What this CANNOT undo: evidence that was mis-folded at ingest into a
+/// key that survives. HitNews and Fast Usenet samples were written into
+/// `omicron` (deleted here, so moot) and `usenetexpress`; ViperNews
+/// samples went to `usenetexpress`; UsenetBucket samples went to
+/// `abavia`. Those counts are summed into rows that also hold correct
+/// evidence and cannot be separated. They are bounded (one reseller's
+/// share of one user's traffic) and decay as fresh correctly-keyed
+/// samples accumulate.
+///
+/// Non-fatal and flag-guarded like the module's other migrations; if
+/// the flag write is lost the whole thing re-runs, and re-running is a
+/// no-op once no retired key is left in the table.
+#[cfg(feature = "indexer")]
+fn remap_retired_backbones(db: &Connection) {
+    const FLAG: &str = "oracle_spool_split_v1";
+    /// (retired key, spool it was always a sample of).
+    const RENAMED: &[(&str, &str)] = &[
+        ("astraweb", "highwinds"),
+        ("blocknews", "netnews"),
+        ("xsnews", "abavia"),
+    ];
+    /// Keys that named more than one spool - unattributable.
+    const SPLIT: &[&str] = &["omicron"];
+    if db
+        .query_row("SELECT 1 FROM kv WHERE k=?1", [FLAG], |_| Ok(()))
+        .is_ok()
+    {
+        return;
+    }
+    let Ok(tx) = db.unchecked_transaction() else {
+        return;
+    };
+    let mut ok = true;
+    for (old, new) in RENAMED {
+        // Read the old rows out before writing: an upsert whose SELECT
+        // source is the table it conflicts on is not worth reasoning
+        // about, and the ledger is small by construction.
+        let rows: Vec<(String, i64, i64, i64, i64, i64)> = match tx
+            .prepare("SELECT family, bucket, hits, misses, updated_at, legacy                       FROM oracle WHERE backbone = ?1")
+            .and_then(|mut st| {
+                st.query_map([old], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .and_then(|it| it.collect())
+            }) {
+            Ok(rows) => rows,
+            Err(_) => {
+                ok = false;
+                continue;
+            }
+        };
+        for (family, bucket, hits, misses, updated_at, legacy) in rows {
+            let r = tx.execute(
+                "INSERT INTO oracle(backbone, family, bucket, hits, misses, updated_at, legacy)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(backbone, family, bucket) DO UPDATE SET
+                   hits = hits + excluded.hits,
+                   misses = misses + excluded.misses,
+                   legacy = legacy + excluded.legacy,
+                   updated_at = MAX(updated_at, excluded.updated_at)",
+                rusqlite::params![new, family, bucket, hits, misses, updated_at, legacy],
+            );
+            ok &= r.is_ok();
+        }
+        ok &= tx
+            .execute("DELETE FROM oracle WHERE backbone = ?1", [old])
+            .is_ok();
+    }
+    for old in SPLIT {
+        ok &= tx
+            .execute("DELETE FROM oracle WHERE backbone = ?1", [old])
+            .is_ok();
+    }
+    if ok && tx.commit().is_ok() {
+        let _ = db.execute("INSERT OR REPLACE INTO kv(k, v) VALUES(?1, '1')", [FLAG]);
+    }
 }
 
 /// One-shot migration off article-counted evidence.
@@ -848,30 +1084,196 @@ impl Verdict {
 mod tests {
     use super::*;
 
+    /// A takedown-flavoured miss (the server said REMOVED) counts as
+    /// two misses in the drained ratio, a bare 430 as one - so the same
+    /// mixed cell drains with more miss weight when the removals were
+    /// explicit. Conservative by construction: the per-job clamp still
+    /// bounds the cell at JOB_SAMPLE_WEIGHT, an all-miss cell is
+    /// all-miss either way, and a plain miss keeps exactly the weight
+    /// it always had (no flavour = no evidence, most backbones never
+    /// name the reason).
+    #[test]
+    fn a_takedown_miss_outweighs_a_bare_one_in_the_drained_ratio() {
+        let drain_mixed = |takedown: bool| {
+            let sink = OracleSink::default();
+            sink.set_context(vec!["news.a.example".into()], "alt".into());
+            for _ in 0..6 {
+                sink.hit(0, 10);
+            }
+            for _ in 0..2 {
+                if takedown {
+                    sink.miss_takedown(0, 10);
+                } else {
+                    sink.miss(0, 10);
+                }
+            }
+            let s = sink.drain();
+            assert_eq!(s.len(), 1);
+            s.into_iter().next().unwrap()
+        };
+        let plain = drain_mixed(false);
+        let flagged = drain_mixed(true);
+        assert!(
+            flagged.misses > plain.misses,
+            "explicit removals must weigh heavier: plain {plain:?} vs flagged {flagged:?}"
+        );
+        assert_eq!(
+            flagged.hits + flagged.misses,
+            JOB_SAMPLE_WEIGHT,
+            "the per-job clamp still bounds the flavoured cell"
+        );
+        // An all-miss cell is all-miss whatever the flavour.
+        let sink = OracleSink::default();
+        sink.set_context(vec!["news.a.example".into()], "alt".into());
+        for _ in 0..4 {
+            sink.miss_takedown(0, 10);
+        }
+        let s = sink.drain();
+        assert_eq!(s[0].hits, 0);
+        assert_eq!(s[0].misses, JOB_SAMPLE_WEIGHT.min(8));
+    }
+
     #[test]
     fn backbone_normalization() {
-        // Reseller aliases cluster under the backbone.
-        assert_eq!(backbone_of("news.eweka.nl"), "omicron");
-        assert_eq!(backbone_of("news.usenetserver.com"), "omicron");
-        assert_eq!(backbone_of("news2.newshosting.com"), "omicron");
-        assert_eq!(backbone_of("secure.easynews.com"), "omicron");
+        // Reseller aliases cluster under the backbone SPOOL.
+        assert_eq!(backbone_of("news.usenetserver.com"), "highwinds");
+        assert_eq!(backbone_of("news2.newshosting.com"), "highwinds");
+        assert_eq!(backbone_of("secure.easynews.com"), "highwinds");
         assert_eq!(backbone_of("usenetexpress.com"), "usenetexpress");
-        assert_eq!(backbone_of("news.fastusenet.org"), "usenetexpress");
+        assert_eq!(backbone_of("news.newsdemon.com"), "usenetexpress");
         assert_eq!(backbone_of("reader.abavia.com"), "abavia");
         assert_eq!(backbone_of("news.giganews.com"), "giganews");
         assert_eq!(backbone_of("news.supernews.com"), "giganews");
         // Digit/dash stripping on the brand label.
-        assert_eq!(backbone_of("news2.blocknews.net"), "blocknews");
-        assert_eq!(backbone_of("ssl-eu.astraweb.com"), "astraweb");
+        assert_eq!(backbone_of("news2.blocknews.net"), "netnews");
+        assert_eq!(backbone_of("ssl-eu.astraweb.com"), "highwinds");
         // Unknown host keys under its own normalized label.
         assert_eq!(backbone_of("nntp.futureprovider.io"), "futureprovider");
         // Port and case are irrelevant; two-part TLDs resolve the brand.
-        assert_eq!(backbone_of("News.Eweka.NL:563"), "omicron");
+        assert_eq!(backbone_of("News.Eweka.NL:563"), "eweka");
         assert_eq!(backbone_of("news.provider.co.uk"), "provider");
         // Bare hostname (mock servers, LAN) is its own key.
         assert_eq!(backbone_of("localhost"), "localhost");
         // IPs degrade to a stable (if opaque) key - mock/LAN only.
         assert_eq!(backbone_of("127.0.0.1"), "0");
+    }
+
+    /// The point of the 20 Aug 2026 split: takedowns propagate within a
+    /// SPOOL, so Omicron Media's three spools must never share a key.
+    /// Highwinds answers DMCA notices while Eweka and Base-IP answer
+    /// Dutch NTD ones, so "gone on Highwinds" is not evidence about the
+    /// other two - and a user holding one of each has THREE independent
+    /// opinions, which is what `whyslow` and `census` count.
+    #[test]
+    fn omicron_owns_three_distinct_spools() {
+        let highwinds = backbone_of("news.newshosting.com");
+        let eweka = backbone_of("news.eweka.nl");
+        let baseip = backbone_of("news.tweaknews.eu");
+        assert_eq!(highwinds, "highwinds");
+        assert_eq!(eweka, "eweka");
+        assert_eq!(baseip, "baseip");
+        let distinct: std::collections::HashSet<&String> =
+            [&highwinds, &eweka, &baseip].into_iter().collect();
+        assert_eq!(distinct.len(), 3, "one owner, three spools, three keys");
+        // Every brand on a spool lands on that spool's key, and the old
+        // `omicron` key is gone from the table entirely.
+        for h in [
+            "news.usenetserver.com",
+            "secure.easynews.com",
+            "news.newsgroupninja.com",
+            "ssl.astraweb.com",
+        ] {
+            assert_eq!(backbone_of(h), "highwinds", "{h}");
+        }
+        for h in [
+            "news.xlned.com",
+            "news.sunnyusenet.com",
+            "news.pureusenet.nl",
+            "news.usenetbucket.com",
+            "news.base-ip.net",
+        ] {
+            assert_eq!(backbone_of(h), "baseip", "{h}");
+        }
+        assert!(
+            !BACKBONE_ALIASES.iter().any(|(_, bb)| *bb == "omicron"),
+            "`omicron` is an owner, not a spool - it must not be a key"
+        );
+    }
+
+    /// Brands this table used to put on the wrong spool. Each was
+    /// re-checked against the 2026 public backbone maps; see
+    /// [`BACKBONE_ALIASES`] for the sources.
+    #[test]
+    fn corrected_brand_assignments() {
+        // ViperNews (operator Uzo Reto) is its own NTD backbone, not a
+        // UsenetExpress reseller.
+        assert_eq!(backbone_of("news.vipernews.com"), "vipernews");
+        assert_eq!(backbone_of("news.viper.com"), "vipernews");
+        assert_ne!(backbone_of("news.vipernews.com"), "usenetexpress");
+        // XS News is Abavia's own brand; HitNews rides Abavia too.
+        assert_eq!(backbone_of("news.xsnews.nl"), "abavia");
+        assert_eq!(backbone_of("news.hitnews.com"), "abavia");
+        // UsenetBucket is Base-IP, not Abavia.
+        assert_eq!(backbone_of("news.usenetbucket.com"), "baseip");
+        // BlockNews resells Netnews; it is not a backbone.
+        assert_eq!(backbone_of("news.blocknews.net"), "netnews");
+        // usenet.farm reduces to the TLD-ish label `farm` without its
+        // alias, because ".farm" is too long for the TLD tail rule.
+        assert_eq!(backbone_of("news.usenet.farm"), "usenetfarm");
+        assert_eq!(backbone_of("usenet.farm"), "usenetfarm");
+        // Sources disagree on these two, so they stay UNCLUSTERED - a
+        // missing cluster only slows learning, a wrong one fabricates
+        // agreement between spools that do not share takedowns.
+        assert_eq!(backbone_of("news.fastusenet.org"), "fastusenet");
+        assert_eq!(backbone_of("news.frugalusenet.com"), "frugalusenet");
+    }
+
+    /// Every alias VALUE must be a fixed point: `backbone_of` is applied
+    /// to raw hosts at ingest and to the folded sample's host again, so
+    /// a value that itself aliased elsewhere would key a cell nothing
+    /// ever reads. (It also catches a typo'd value silently becoming a
+    /// backbone of its own.)
+    #[test]
+    fn alias_values_are_fixed_points() {
+        for (alias, bb) in BACKBONE_ALIASES {
+            assert_eq!(
+                backbone_of(&format!("news.{bb}.com")),
+                *bb,
+                "alias {alias} points at {bb}, which is not a fixed point"
+            );
+        }
+    }
+
+    /// The suggestion door: a listed brand is a name worth offering the
+    /// user, and everything else is not. The ledger is happy to key a
+    /// LAN box under "localhost"; the server editor must never propose
+    /// that as a provider network.
+    #[test]
+    fn only_a_listed_backbone_is_worth_suggesting() {
+        assert_eq!(known_backbone_of("news.eweka.nl").as_deref(), Some("eweka"));
+        assert_eq!(
+            known_backbone_of("News.Newshosting.com:563").as_deref(),
+            Some("highwinds")
+        );
+        // Resellers suggest their SPOOL, which is the name that means
+        // "these two share takedowns" - Astraweb retired its own spool
+        // onto Highwinds, so that is the network worth offering.
+        assert_eq!(
+            known_backbone_of("ssl-eu.astraweb.com").as_deref(),
+            Some("highwinds")
+        );
+        // Identity entries in the table count: an independent that is
+        // its own backbone is still a name two of its hostnames share.
+        assert_eq!(
+            known_backbone_of("reader.abavia.com").as_deref(),
+            Some("abavia")
+        );
+        // Unlisted, LAN and IP hosts key under their own label, which is
+        // a ledger key and not a network name.
+        assert_eq!(known_backbone_of("nntp.futureprovider.io"), None);
+        assert_eq!(known_backbone_of("localhost"), None);
+        assert_eq!(known_backbone_of("127.0.0.1"), None);
+        assert_eq!(known_backbone_of(""), None);
     }
 
     #[test]
@@ -951,7 +1353,7 @@ mod tests {
     fn drain_bounds_one_job_to_a_release_sized_sample() {
         let sink = OracleSink::default();
         sink.set_context(vec!["news.eweka.nl".into()], "hdtv".into());
-        // The shape that poisoned (omicron, hdtv, 7-30d): a 15,000
+        // The shape that poisoned the live (hdtv, 7-30d) cell: a 15,000
         // segment posting that is simply gone from this backbone.
         for _ in 0..15_000 {
             sink.miss(0, 20);
@@ -1048,11 +1450,14 @@ mod tests {
             .unwrap();
         };
         // The measured live cell that started this: 2871/57071 on
-        // (omicron, hdtv, 7-30d), Wilson upper 0.0496 - two releases.
-        seed("omicron", "hdtv", 2, 2871, 57071);
+        // (eweka, hdtv, 7-30d), Wilson upper 0.0496 - two releases.
+        // (Recorded against `omicron` at the time; that key was retired
+        // when the table split into per-spool keys, and the Eweka half
+        // of it is the part `news.eweka.nl` below keeps feeding.)
+        seed("eweka", "hdtv", 2, 2871, 57071);
         // A wholly-missing cell, a healthy cell, and one already thin.
         seed("giganews", "hdtv", 2, 0, 15_263);
-        seed("xsnews", "moovee", 0, 3205, 0);
+        seed("baseip", "moovee", 0, 3205, 0);
         seed("abavia", "teevee", 1, 2, 1);
 
         ensure_schema(&db).unwrap();
@@ -1072,16 +1477,16 @@ mod tests {
                 "({bb},{fam},{b}) = {h}/{m} still counts as evidence"
             );
         }
-        assert!(!snap.backbone_gone("omicron", "hdtv", 20));
+        assert!(!snap.backbone_gone("eweka", "hdtv", 20));
         assert!(!snap.backbone_gone("giganews", "hdtv", 20));
-        assert_eq!(snap.carry_rate("omicron", "hdtv", 2), None);
+        assert_eq!(snap.carry_rate("eweka", "hdtv", 2), None);
 
         // The lean survives: a miss-dominated cell stays miss-leaning,
         // a 100%-miss cell stays 100% miss, a clean cell stays clean.
-        let (h, m) = cell("omicron", "hdtv", 2);
+        let (h, m) = cell("eweka", "hdtv", 2);
         assert!(m > h, "{h}/{m} lost the miss lean it was measured with");
         assert_eq!(cell("giganews", "hdtv", 2), (0, 11));
-        assert_eq!(cell("xsnews", "moovee", 0), (11, 0));
+        assert_eq!(cell("baseip", "moovee", 0), (11, 0));
         // Already under the target - untouched, not inflated to 11.
         assert_eq!(cell("abavia", "teevee", 1), (2, 1));
 
@@ -1099,10 +1504,7 @@ mod tests {
         }
         ensure_schema(&db).unwrap();
         let snap = Snapshot::load(&db).unwrap();
-        let (h, m) = *snap
-            .cells
-            .get(&("omicron".into(), "hdtv".into(), 2))
-            .unwrap();
+        let (h, m) = *snap.cells.get(&("eweka".into(), "hdtv".into(), 2)).unwrap();
         assert_eq!(
             h + m,
             11 + 20,
@@ -1255,7 +1657,7 @@ mod tests {
         // two correlated releases, 57k article misses.
         db.execute(
             "INSERT INTO oracle(backbone, family, bucket, hits, misses, updated_at)
-             VALUES('omicron', 'hdtv', 2, 2871, 57071, 1)",
+             VALUES('highwinds', 'hdtv', 2, 2871, 57071, 1)",
             [],
         )
         .unwrap();
@@ -1268,15 +1670,15 @@ mod tests {
 
         let snap = Snapshot::load(&db).unwrap();
         // The lean is still there for the wall's amber...
-        assert_eq!(snap.cell("omicron", "hdtv", 2), Some((2871, 57071)));
+        assert_eq!(snap.cell("highwinds", "hdtv", 2), Some((2871, 57071)));
         // ...but none of it is evidence a verdict may rest on.
         assert!(
-            !snap.backbone_gone("omicron", "hdtv", 20),
+            !snap.backbone_gone("highwinds", "hdtv", 20),
             "57k unmigrated article misses are not a dozen releases"
         );
-        assert_eq!(snap.carry_rate("omicron", "hdtv", 2), None);
+        assert_eq!(snap.carry_rate("highwinds", "hdtv", 2), None);
         assert!(
-            snap.reaped_families(&["omicron".to_string(), "giganews".to_string()])
+            snap.reaped_families(&["highwinds".to_string(), "giganews".to_string()])
                 .is_empty(),
             "an unmigrated ledger must not name a reaped family"
         );
@@ -1296,7 +1698,7 @@ mod tests {
             [],
         )
         .unwrap();
-        for bb in ["giganews", "omicron"] {
+        for bb in ["giganews", "highwinds"] {
             db.execute(
                 "INSERT INTO oracle(backbone, family, bucket, hits, misses, updated_at)
                  VALUES(?1, 'warez', 1, 0, 9000, 1)",
@@ -1306,14 +1708,14 @@ mod tests {
         }
         ensure_schema(&db).unwrap();
         let snap = Snapshot::load(&db).unwrap();
-        let bbs = vec!["giganews".to_string(), "omicron".to_string()];
+        let bbs = vec!["giganews".to_string(), "highwinds".to_string()];
         assert!(
             snap.reaped_families(&bbs).is_empty(),
             "22 migrated article misses are not two dozen releases"
         );
 
         // Fresh evidence agreeing with the lean does license the call.
-        for bb in ["news.giganews.com", "news.eweka.nl"] {
+        for bb in ["news.giganews.com", "news.newshosting.com"] {
             for _ in 0..2 {
                 ingest(
                     &db,
@@ -1354,30 +1756,42 @@ mod tests {
             hits: 0,
             misses: JOB_SAMPLE_WEIGHT,
         };
-        // ONE sampler tick: the same article ids against three Omicron
-        // resellers plus an unrelated backbone.
+        // ONE sampler tick: the same article ids against three
+        // Highwinds resellers plus an unrelated backbone. Eweka would
+        // NOT belong in this list - same owner, different spool.
         let tick = fold_by_backbone(
             &[
                 s("news.usenetserver.com"),
-                s("news.eweka.nl"),
+                s("secure.easynews.com"),
                 s("news.newshosting.com"),
                 s("news.blocknews.net"),
             ],
             JOB_SAMPLE_WEIGHT,
         );
-        assert_eq!(tick.len(), 2, "omicron collapses, blocknews stands alone");
+        assert_eq!(tick.len(), 2, "highwinds collapses, netnews stands alone");
         ingest(&db, &tick, 100).unwrap();
         let snap = Snapshot::load(&db).unwrap();
-        assert_eq!(snap.cell("omicron", "teevee", 1), Some((0, 5)));
-        assert_eq!(snap.cell("blocknews", "teevee", 1), Some((0, 5)));
-        assert!(!snap.backbone_gone("omicron", "teevee", 3));
+        assert_eq!(snap.cell("highwinds", "teevee", 1), Some((0, 5)));
+        assert_eq!(snap.cell("netnews", "teevee", 1), Some((0, 5)));
+        assert!(!snap.backbone_gone("highwinds", "teevee", 3));
+
+        // Same owner, different spools: Omicron's three never fold.
+        let three_spools = fold_by_backbone(
+            &[
+                s("news.newshosting.com"),
+                s("news.eweka.nl"),
+                s("news.tweaknews.eu"),
+            ],
+            JOB_SAMPLE_WEIGHT,
+        );
+        assert_eq!(three_spools.len(), 3, "one owner is not one spool");
 
         // Different buckets are different cells and never fold together.
         let two_buckets = fold_by_backbone(
             &[
                 Sample {
                     bucket: 1,
-                    ..s("news.eweka.nl")
+                    ..s("secure.easynews.com")
                 },
                 Sample {
                     bucket: 5,
@@ -1397,7 +1811,7 @@ mod tests {
         let sink = OracleSink::default();
         sink.set_context(
             vec![
-                "news.eweka.nl".into(),
+                "secure.easynews.com".into(),
                 "news.newshosting.com".into(),
                 "news.usenetserver.com".into(),
                 "news.blocknews.net".into(),
@@ -1410,16 +1824,91 @@ mod tests {
             }
         }
         let s = sink.drain();
-        assert_eq!(s.len(), 2, "three Omicron resellers are one cell: {s:?}");
+        assert_eq!(s.len(), 2, "three Highwinds resellers are one cell: {s:?}");
         // Sorted by (host, bucket); the folded sample keeps the
         // alphabetically first raw host of its group.
         assert_eq!(s[0].host, "news.blocknews.net");
-        assert_eq!(s[1].host, "news.eweka.nl");
+        assert_eq!(s[1].host, "news.newshosting.com");
         assert!(
             s.iter()
                 .all(|x| (x.hits, x.misses) == (0, JOB_SAMPLE_WEIGHT)),
             "one job is one release-weighted sample per cell: {s:?}"
         );
+    }
+
+    /// The 20 Aug 2026 per-spool split, on a ledger written under the
+    /// old keys: same-spool renames merge additively, and the one key
+    /// that named THREE spools is dropped rather than guessed onto one.
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn retired_backbone_keys_are_remapped_or_dropped() {
+        let db = Connection::open_in_memory().unwrap();
+        ensure_schema(&db).unwrap();
+        // Pretend this ledger predates the split.
+        db.execute("DELETE FROM kv WHERE k = 'oracle_spool_split_v1'", [])
+            .unwrap();
+        let seed = |bb: &str, fam: &str, b: u8, h: i64, m: i64, leg: i64| {
+            db.execute(
+                "INSERT INTO oracle(backbone, family, bucket, hits, misses, updated_at, legacy)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![bb, fam, b, h, m, 7, leg],
+            )
+            .unwrap();
+        };
+        // A rename with a collision: `blocknews` was always Netnews, so
+        // the two rows are two batches of the same spool's evidence.
+        seed("blocknews", "teevee", 1, 4, 1, 2);
+        seed("netnews", "teevee", 1, 6, 3, 1);
+        // A rename with no collision, and one on a different cell.
+        seed("xsnews", "moovee", 0, 8, 2, 0);
+        seed("astraweb", "hdtv", 3, 5, 5, 5);
+        // The split key, and an innocent bystander.
+        seed("omicron", "hdtv", 2, 30, 70, 11);
+        seed("giganews", "hdtv", 2, 9, 1, 0);
+
+        ensure_schema(&db).unwrap();
+        let snap = Snapshot::load(&db).unwrap();
+
+        // Merged additively - counts AND the legacy share.
+        assert_eq!(snap.cell("netnews", "teevee", 1), Some((10, 4)));
+        assert_eq!(
+            snap.legacy
+                .get(&("netnews".into(), "teevee".into(), 1))
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(snap.cell("blocknews", "teevee", 1), None);
+        // Re-keyed onto the spool they were always samples of.
+        assert_eq!(snap.cell("abavia", "moovee", 0), Some((8, 2)));
+        assert_eq!(snap.cell("highwinds", "hdtv", 3), Some((5, 5)));
+        assert_eq!(snap.cell("xsnews", "moovee", 0), None);
+        assert_eq!(snap.cell("astraweb", "hdtv", 3), None);
+        // Unattributable: dropped, not spread across the three spools
+        // and not guessed onto the busiest one.
+        assert_eq!(snap.cell("omicron", "hdtv", 2), None);
+        for bb in ["highwinds", "eweka", "baseip"] {
+            assert_eq!(snap.cell(bb, "hdtv", 2), None, "{bb} inherited a guess");
+        }
+        // Everything else is untouched.
+        assert_eq!(snap.cell("giganews", "hdtv", 2), Some((9, 1)));
+
+        // One-shot, and re-running is a no-op: fresh Netnews evidence
+        // is not re-merged or re-counted by a later open.
+        ingest(
+            &db,
+            &[Sample {
+                host: "news.blocknews.net".into(),
+                family: "teevee".into(),
+                bucket: 1,
+                hits: 5,
+                misses: 0,
+            }],
+            300,
+        )
+        .unwrap();
+        ensure_schema(&db).unwrap();
+        let snap = Snapshot::load(&db).unwrap();
+        assert_eq!(snap.cell("netnews", "teevee", 1), Some((15, 4)));
     }
 
     #[cfg(feature = "indexer")]
@@ -1434,12 +1923,12 @@ mod tests {
             hits,
             misses,
         };
-        ingest(&db, &[s("news.eweka.nl", 10, 2)], 100).unwrap();
-        // A different Omicron reseller lands in the SAME cell.
+        ingest(&db, &[s("news.newshosting.com", 10, 2)], 100).unwrap();
+        // A different Highwinds reseller lands in the SAME cell.
         ingest(&db, &[s("news.usenetserver.com", 5, 1)], 200).unwrap();
         let snap = Snapshot::load(&db).unwrap();
         assert_eq!(
-            snap.cells.get(&("omicron".into(), "teevee".into(), 1)),
+            snap.cells.get(&("highwinds".into(), "teevee".into(), 1)),
             Some(&(15, 3))
         );
         let at: i64 = db
@@ -1453,35 +1942,35 @@ mod tests {
         let bbs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut snap = Snapshot::default();
         // Thin ledger → no verdict.
-        assert_eq!(snap.verdict(&bbs(&["omicron"]), "teevee", 3), None);
-        snap.insert("omicron", "teevee", 1, 5, 0); // < MIN_SAMPLES
-        assert_eq!(snap.verdict(&bbs(&["omicron"]), "teevee", 3), None);
+        assert_eq!(snap.verdict(&bbs(&["highwinds"]), "teevee", 3), None);
+        snap.insert("highwinds", "teevee", 1, 5, 0); // < MIN_SAMPLES
+        assert_eq!(snap.verdict(&bbs(&["highwinds"]), "teevee", 3), None);
         // Confident green: 200/200 → Wilson low ≈ 0.981.
-        snap.insert("omicron", "teevee", 1, 200, 0);
+        snap.insert("highwinds", "teevee", 1, 200, 0);
         assert_eq!(
-            snap.verdict(&bbs(&["omicron"]), "teevee", 3),
+            snap.verdict(&bbs(&["highwinds"]), "teevee", 3),
             Some(Verdict::Ok)
         );
         // Mixed → amber.
-        snap.insert("omicron", "teevee", 2, 60, 40);
+        snap.insert("highwinds", "teevee", 2, 60, 40);
         assert_eq!(
-            snap.verdict(&bbs(&["omicron"]), "teevee", 20),
+            snap.verdict(&bbs(&["highwinds"]), "teevee", 20),
             Some(Verdict::Maybe)
         );
         // Confident red on ALL enabled backbones.
-        snap.insert("omicron", "teevee", 6, 2, 98);
+        snap.insert("highwinds", "teevee", 6, 2, 98);
         assert_eq!(
-            snap.verdict(&bbs(&["omicron"]), "teevee", 2000),
+            snap.verdict(&bbs(&["highwinds"]), "teevee", 2000),
             Some(Verdict::Gone)
         );
         // A blind-spot backbone demotes red to amber (never red).
         assert_eq!(
-            snap.verdict(&bbs(&["omicron", "abavia"]), "teevee", 2000),
+            snap.verdict(&bbs(&["highwinds", "abavia"]), "teevee", 2000),
             Some(Verdict::Maybe)
         );
         // But a blind spot does NOT demote green.
         assert_eq!(
-            snap.verdict(&bbs(&["omicron", "abavia"]), "teevee", 3),
+            snap.verdict(&bbs(&["highwinds", "abavia"]), "teevee", 3),
             Some(Verdict::Ok)
         );
         // No backbones configured → no verdict.
@@ -1493,15 +1982,15 @@ mod tests {
         let mut snap = Snapshot::default();
         // Nothing for "moovee" specifically, but the backbone's bucket
         // aggregate (via another family) is rich - fallback applies.
-        snap.insert("omicron", "teevee", 1, 300, 0);
+        snap.insert("highwinds", "teevee", 1, 300, 0);
         assert_eq!(
-            snap.verdict(&["omicron".to_string()], "moovee", 3),
+            snap.verdict(&["highwinds".to_string()], "moovee", 3),
             Some(Verdict::Ok)
         );
         // An exact family cell with enough samples wins over aggregate.
-        snap.insert("omicron", "warez", 1, 3, 30);
+        snap.insert("highwinds", "warez", 1, 3, 30);
         assert_eq!(
-            snap.verdict(&["omicron".to_string()], "warez", 3),
+            snap.verdict(&["highwinds".to_string()], "warez", 3),
             Some(Verdict::Gone)
         );
     }
@@ -1511,16 +2000,16 @@ mod tests {
         let bbs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut snap = Snapshot::default();
         // "teevee" fresh posts (bucket 1) confidently gone → a reap.
-        snap.insert("omicron", "teevee", 1, 3, 97);
+        snap.insert("highwinds", "teevee", 1, 3, 97);
         // "moovee" fresh posts healthy → not reaped.
-        snap.insert("omicron", "moovee", 1, 200, 0);
+        snap.insert("highwinds", "moovee", 1, 200, 0);
         // "warez" is only gone in an OLD bucket (5 = 1-3y) → that's
         // retention expiry, NOT a takedown; must not be flagged.
-        snap.insert("omicron", "warez", 5, 2, 98);
+        snap.insert("highwinds", "warez", 5, 2, 98);
         // "xxx" fresh misses but too few samples → not enough to call.
-        snap.insert("omicron", "xxx", 0, 1, 5);
+        snap.insert("highwinds", "xxx", 0, 1, 5);
 
-        let reaped = snap.reaped_families(&bbs(&["omicron"]));
+        let reaped = snap.reaped_families(&bbs(&["highwinds"]));
         let fams: Vec<&str> = reaped.iter().map(|r| r.family.as_str()).collect();
         assert_eq!(fams, vec!["teevee"], "{reaped:?}");
         assert_eq!(reaped[0].bucket, 1);
@@ -1534,8 +2023,8 @@ mod tests {
 
         // Cross-family fallback must NOT leak: a thin fresh family in a
         // bucket dominated by another family's reap stays unflagged.
-        snap.insert("omicron", "thinfam", 1, 0, 2); // < MIN_SAMPLES
-        let reaped = snap.reaped_families(&bbs(&["omicron"]));
+        snap.insert("highwinds", "thinfam", 1, 0, 2); // < MIN_SAMPLES
+        let reaped = snap.reaped_families(&bbs(&["highwinds"]));
         assert!(
             reaped.iter().all(|r| r.family != "thinfam"),
             "aggregate fallback must not flag a thin family: {reaped:?}"
@@ -1545,22 +2034,22 @@ mod tests {
     #[test]
     fn backbone_gone_is_exact_and_conservative() {
         let mut snap = Snapshot::default();
-        // omicron/teevee/bucket1 confidently gone.
-        snap.insert("omicron", "teevee", 1, 3, 97);
-        assert!(snap.backbone_gone("omicron", "teevee", 3));
+        // highwinds/teevee/bucket1 confidently gone.
+        snap.insert("highwinds", "teevee", 1, 3, 97);
+        assert!(snap.backbone_gone("highwinds", "teevee", 3));
         // A different backbone with no data for this family: NOT gone.
         assert!(!snap.backbone_gone("abavia", "teevee", 3));
         // A different family on the same backbone/bucket: NOT gone (no
         // aggregate-fallback leak - routing must not skip on it).
-        assert!(!snap.backbone_gone("omicron", "moovee", 3));
+        assert!(!snap.backbone_gone("highwinds", "moovee", 3));
         // A different age bucket: NOT gone.
-        assert!(!snap.backbone_gone("omicron", "teevee", 2000));
+        assert!(!snap.backbone_gone("highwinds", "teevee", 2000));
         // Thin evidence never counts as gone.
-        snap.insert("omicron", "warez", 0, 1, 5);
-        assert!(!snap.backbone_gone("omicron", "warez", 0));
+        snap.insert("highwinds", "warez", 0, 1, 5);
+        assert!(!snap.backbone_gone("highwinds", "warez", 0));
         // A healthy cell is not gone.
-        snap.insert("omicron", "moovee", 1, 200, 0);
-        assert!(!snap.backbone_gone("omicron", "moovee", 3));
+        snap.insert("highwinds", "moovee", 1, 200, 0);
+        assert!(!snap.backbone_gone("highwinds", "moovee", 3));
     }
 
     /// carry_rate is the A8 ranking signal: exact-cell only, None on a
@@ -1570,15 +2059,15 @@ mod tests {
     fn carry_rate_is_exact_cell_only() {
         let mut snap = Snapshot::default();
         assert!(snap.is_empty());
-        assert_eq!(snap.carry_rate("omicron", "teevee", 1), None);
-        snap.insert("omicron", "teevee", 1, 3, 1); // < MIN_SAMPLES
+        assert_eq!(snap.carry_rate("highwinds", "teevee", 1), None);
+        snap.insert("highwinds", "teevee", 1, 3, 1); // < MIN_SAMPLES
         assert!(!snap.is_empty());
-        assert_eq!(snap.carry_rate("omicron", "teevee", 1), None);
-        snap.insert("omicron", "teevee", 1, 75, 25);
-        assert_eq!(snap.carry_rate("omicron", "teevee", 1), Some(0.75));
+        assert_eq!(snap.carry_rate("highwinds", "teevee", 1), None);
+        snap.insert("highwinds", "teevee", 1, 75, 25);
+        assert_eq!(snap.carry_rate("highwinds", "teevee", 1), Some(0.75));
         // No cross-family or cross-bucket leakage.
-        assert_eq!(snap.carry_rate("omicron", "moovee", 1), None);
-        assert_eq!(snap.carry_rate("omicron", "teevee", 2), None);
+        assert_eq!(snap.carry_rate("highwinds", "moovee", 1), None);
+        assert_eq!(snap.carry_rate("highwinds", "teevee", 2), None);
         assert_eq!(snap.carry_rate("abavia", "teevee", 1), None);
     }
 
@@ -1595,13 +2084,13 @@ mod tests {
     #[test]
     fn blank_family_reads_as_misc() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "misc", 1, 200, 0);
+        snap.insert("highwinds", "misc", 1, 200, 0);
         assert_eq!(
-            snap.verdict(&["omicron".to_string()], "  ", 3),
+            snap.verdict(&["highwinds".to_string()], "  ", 3),
             Some(Verdict::Ok)
         );
-        snap.insert("omicron", "misc", 0, 2, 98);
-        assert!(snap.backbone_gone("omicron", "", 0));
+        snap.insert("highwinds", "misc", 0, 2, 98);
+        assert!(snap.backbone_gone("highwinds", "", 0));
     }
 
     #[test]

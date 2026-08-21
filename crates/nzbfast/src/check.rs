@@ -12,6 +12,13 @@ use std::path::Path;
 
 /// What pre-flight expects the download to do.
 ///
+/// Every variant is a claim about ANSWERS, not about contents: the
+/// sweep underneath asks STAT, and a provider that serves a dummy body
+/// for a removed article answers 223 like any other. `Complete` can
+/// therefore be green on a post that is gone - see the false-green
+/// note in `nzbkit::preflight`. Nothing here can close that; the
+/// download's own CRC does.
+///
 /// `dropped` names the files whose loss does NOT decide the verdict:
 /// Usenet furniture (`.nfo`, `.sfv`, `.txt`, …) that no server has in
 /// full. It rides on every variant because a job can lose furniture in

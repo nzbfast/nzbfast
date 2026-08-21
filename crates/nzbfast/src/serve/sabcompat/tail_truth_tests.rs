@@ -6,6 +6,7 @@
 //! crossed its 3,000-line ceiling. Same module, its own file.
 
 use super::{JobState, hold_json, sab_script_name, slot_progress};
+use nzbkit::sync::MutexExt;
 
 const GB: u64 = 1_000_000_000;
 
@@ -202,4 +203,103 @@ fn the_no_servers_hold_publishes_no_quota_pair() {
     let q = hold_json("quota", 50.0, 50.0);
     assert_eq!(q["spent_gb"], 50.0);
     assert_eq!(q["cap_gb"], 50.0);
+}
+
+/// The phase word must never lapse between the last article and the
+/// history row - and specifically not in the window where the ENGINE
+/// has handed off but the lane has not yet marked the record
+/// `Finishing`.
+///
+/// The engine's last act is `note_activity("finalizing")` (get/tail.rs)
+/// and the record is still `JobState::Downloading` for the moment it
+/// takes the postproc lane to take custody and set `Finishing`. Those
+/// five daemon-owned tokens used to map to no phase at all, so a queue
+/// poll landing in that window computed `phase = None` on a
+/// `Downloading` row - and with the counters already released at
+/// net-drain there was nothing to read but `downloaded_bytes`, which is
+/// 0. The row rendered `Downloading 0%` between `Extracting 100%` and
+/// `Moving 100%`: a finished download going backwards to nothing for
+/// one poll. Observed under full-suite load, 20 Aug 2026.
+///
+/// This walks the whole ladder token by token and pins the transitions
+/// as token-TO-TOKEN rather than leaving the gap to a load-sensitive
+/// end-to-end race.
+#[test]
+fn the_phase_word_never_lapses_across_the_finalize_hand_off() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-tailladder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let d = crate::serve::testutil::test_daemon(&dir);
+
+    // Every stage a job passes through from the disk-unpack ladder to
+    // the history row, in order: the engine's own words
+    // (get/tail.rs, get/settle.rs) then the daemon's
+    // (`Daemon::note_tail_stage`). The state each is seen in is the
+    // point: `Downloading` right through the hand-off, because the
+    // lane only writes `Finishing` once it has taken custody.
+    let ladder: &[(&str, JobState)] = &[
+        ("verifying", JobState::Downloading),
+        ("repairing", JobState::Downloading),
+        ("extracting", JobState::Downloading),
+        // The hand-off. Still Downloading - this is the window.
+        ("finalizing", JobState::Downloading),
+        ("finalizing", JobState::Finishing),
+        ("unlocking", JobState::Finishing),
+        ("identifying", JobState::Finishing),
+        ("renaming", JobState::Finishing),
+        ("scripting", JobState::Finishing),
+    ];
+    for (tok, state) in ladder {
+        d.hub
+            .activity
+            .lock_ok()
+            .insert("nzo-ladder".to_string(), tok);
+        let phase = d.tail_phase("nzo-ladder");
+        assert!(
+            phase.is_some(),
+            "{tok} left the row with no phase at all - a {state:?} row with no phase \
+             reports its downloaded_bytes, which is 0 once the counters are released"
+        );
+        // Composed exactly as the queue walk composes it: no live
+        // counters (released at net-drain), the phase as the tail flag.
+        assert_eq!(
+            slot_progress(*state, None, phase.is_some(), 40 * GB, 0),
+            (100, 0),
+            "{tok}: the bytes are all in and the row must say so"
+        );
+    }
+
+    // ...and the vocabulary the *arrs read is unchanged by that: the
+    // daemon's stages are all SAB's `Moving`, which is what a
+    // `Finishing` row reported before any of them were mapped.
+    for tok in [
+        "finalizing",
+        "unlocking",
+        "identifying",
+        "renaming",
+        "scripting",
+    ] {
+        d.hub
+            .activity
+            .lock_ok()
+            .insert("nzo-ladder".to_string(), tok);
+        assert_eq!(d.tail_phase("nzo-ladder"), Some("Moving"), "{tok}");
+    }
+
+    // The other side of the same coin: a word written BEFORE the
+    // network is not a tail, and a row carrying it reports nothing
+    // fetched rather than all-in.
+    d.hub
+        .activity
+        .lock_ok()
+        .insert("nzo-pre".to_string(), "preflight");
+    let pre = d.tail_phase("nzo-pre");
+    assert_eq!(pre, None, "preflight is not a post-network stage");
+    assert_eq!(
+        slot_progress(JobState::Downloading, None, pre.is_some(), 40 * GB, 0),
+        (0, 40 * GB)
+    );
+
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -378,6 +378,15 @@ Her satırın çekmecesi işi kimin eklediğini söyler ve kuyruktakiyle aynı
 <b>.nzb dosyasını indir</b> düğmesini taşır - bir sürümü başka bir yerde yeniden indirmek
 ya da <code>.nzb</code> dosyasını bir sorun bildirimine eklemek için kullanışlı.</p>
 <p>Kart varsayılan olarak on indirme listeler, gerisi ▤ düğmesiyle bir tık uzaktadır. Durum, konum ve bir işin neden başarısız olduğu satırın kendisine tıklamanın arkasındadır; böylece yaygın durum - ne bitti, ne kadar büyük, ne zaman - kaydırmadan okunabilir kalır. Bunun yerine kartın alt kenarını sürükleyerek listeyi seçtiğiniz bir yükseklikte kaydırabilirsiniz. Ayarlar → Arayüz altındaki <b>History rows</b> bu onu değiştirir; tarayıcınızın değil daemon'un bir özelliği olduğundan, bu kuruluma bakan her cihaz için geçerlidir. Yanındaki <b>Colour History names</b> biten adları yeşile, başarısız olanları kırmızıya boyar; kapatıldığında adlar sade kalır ve renkli nokta ile satırın kendi ayrıntıları hangisinin hangisi olduğunu yine söyler.</p>
+<p>nzbfast, aksini söylemediğiniz sürece geçmişi sonsuza dek saklar. Ayarlar → Sistem
+altındaki <b>Geçmiş temizliği</b>, eski kayıtları birbirinden bağımsız iki kurala
+göre siler: bir yaş (<b>Şundan eski kayıtları kaldır</b>; indirmenin bittiği andan
+itibaren dakika, saat veya gün olarak sayılır) ve bir uzunluk (<b>En fazla bu kadar
+kayıt tut</b>). İkisi de ayarlıysa ikisi de geçerlidir ve 0, her birini tek başına
+kapatır. Yalnızca geçmiş kaydı silinir - indirilen dosyalar tam olarak oldukları
+yerde kalır. Yaş kuralı yalnızca tamamlanmış indirmeleri alır, dolayısıyla başarısız
+olan, siz yeniden deneyene ya da kendiniz silene kadar bekler; uzunluk sınırı ise
+sonucu ne olursa olsun her kaydı sayar.</p>
 <h3 id="dash-usage">Veri kullanımı</h3>
 <p>Sağlayıcı başına günlük çubuklar ve Bugün / 7 günlük / 30 günlük toplamlar - sayaçlı ve
 blok hesaplar için elzem. Blok hesaplar ömür boyu kullanımı boyutlarına karşı gösterir.</p>
@@ -497,7 +506,7 @@ hesap sayfandan aldığın API anahtarını gir, sonra <b>Indexer'ları uygula</
 <b>Sına</b> siteye neyi desteklediğini sorar ve dönen yanıtı gösterir; adresi ve anahtarı
 tek tıkla kanıtlar. Kaydedilmiş bir anahtar bir daha gösterilmez: kutu bunu söyler ve boş
 bırakmak hâlihazırdaki anahtarı korur.</p>
-<p><b>Arama.</b> Üst çubuktan <b>🎬 duvar</b>'ı aç ve release listesine geç. Arama
+<p><b>Arama.</b> Üst çubuktan <b>🎬 duvar</b>'ı aç ve <b>Sürümler</b>'i seç. Arama
 kutusunun yanındaki açılır menü aramanın nereye bakacağını belirler: <b>Bu dizin</b>,
 yani bu makinenin kendi taradığı şey, <b>Indexer'lar</b> ya da <b>İkisi de</b>. Seçimin
 hatırlanır. Hesaplarına sormak kutuda bir şey yazmayı gerektirir, çünkü boş bir sorguyla
@@ -561,6 +570,15 @@ ondan sonrası yalnızca yerel dizinden yanıtlanır.</li>
 tanınan her film ve TV sürümü, puan, yıl, türler, oyuncular ve özetle bir poster kutucuğu
 olarak - haber grupların, bir katalog gibi gezilebilir halde.</p>
 <ul>
+<li><b>Duvar</b> ve <b>Sürümler</b> aynı dizine bakmanın iki yoludur; <b>Görünüm</b>
+altındaki çift bunlar arasında geçiş yapar. Seçimin hatırlanır.</li>
+<li><b>Afiş yoğunluğu</b> o çiftin yanındaki <b>S</b> / <b>M</b> / <b>L</b>'dir: küçük
+ekrana daha çok afiş sığdırır, büyük daha az.</li>
+<li><b>Üzerine gelince önizleme</b>, Sürümler tablosunun üstünde: imleci bir satırın
+üzerinde tut, afiş ve özet gelsin - hepsi kendi dizininden.</li>
+<li><b>Başlığa göre grupla</b>, yanındaki anahtar: başlık başına bir satır, sürümleri
+altında. <b>&#9656;</b> ile veya satıra tıklayarak aç; başlıktaki kutu gösterilen
+sürümleri seçer. Gruplama yalnızca <b>Bu dizin</b> için geçerlidir.</li>
 <li>Filmler / Diziler / Diğer için <b>sekmeler</b>, anında arama ve yedi sıralama:
 <b>Sana özel</b>, En yeni gönderiler, Çıkış yılı, En yüksek puanlı, Başlık A–Z,
 En büyük ve En çok gönderilen.</li>
@@ -1149,7 +1167,11 @@ karar indirme yerine biraz zamana mal olur.</li>
 </ul>
 <p class="dim">Karar, kanıttan çıkarılmış bir tahmindir, garanti değil. Tek bir NZB için
 kesin yanıtı <code>nzbfast check</code> (<a href="#cli">§15</a>) gerçek makaleleri
-sayarak verir.</p>
+sayarak verir. Her ikisi de yanıtları sayar, içerikleri değil. Temiz bir kontrol, sorulduğunda
+makalelerin orada olduğu anlamına gelir; içeriklerinin sağlam olduğu anlamına gelmez: az
+sayıda sağlayıcı, kaldırılmış makaleler için onları reddetmek yerine sahte veriyle yanıt
+verir ve bu ancak indirmenin kendisi sırasında ortaya çıkar; orada makale kendi sağlama
+toplamında düşer ve başka bir sunucudan yeniden alınır ya da onarılır.</p>
 <h3 id="memory">Bellek bütçesi - ve az belleğin maliyeti</h3>
 <p>Tüm motor önbellekleri tek bir bütçeyi paylaşır (varsayılan fiziksel RAM'in ¼'ü,
 256 MB–16 GB'a kelepçeli). Ayarlar'da <i>Bellek sınırı</i> ile ya da komut satırında

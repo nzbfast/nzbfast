@@ -31,6 +31,7 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "elapsed_secs": j.elapsed_secs,
         // Wall clock, so history ages survive a restart.
         "finished_unix": j.finished_unix,
+        "postproc_secs": j.postproc_secs,
         // The other wall clock, for the same reason: `queued_at` is a
         // monotonic Instant that cannot cross a process (and is taken at
         // pick), so every restored queue row answered SAB's numeric
@@ -157,6 +158,17 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // `finished_unix` is the one that carries the age across.
         finished_at: None,
         finished_unix: v.get("finished_unix").and_then(Value::as_i64),
+        // Absent on every record written before the tail was timed;
+        // 0.0 is exactly what those rows can truthfully say, and the
+        // drawer renders no line for it.
+        postproc_secs: v
+            .get("postproc_secs")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        // Never written, so never read: these index a log ring this
+        // process has not filled. See `Job::log_mark`.
+        log_mark: 0,
+        log_end: 0,
         nzb_sha: s("nzb_sha").unwrap_or_default(),
         finalizing: v
             .get("finalizing")

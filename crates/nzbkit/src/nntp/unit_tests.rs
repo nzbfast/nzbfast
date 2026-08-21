@@ -207,30 +207,29 @@ mod echoed_id_tests {
 
     #[test]
     fn plausible_ids_only() {
+        fn id(line: &str) -> Option<&[u8]> {
+            echoed_message_id(line.as_bytes())
+        }
+        fn want(s: &str) -> Option<&[u8]> {
+            Some(s.as_bytes())
+        }
         // RFC shape: code, number, id, prose - for BODY (222), ARTICLE
         // (220) and an id-echoing refusal alike.
-        assert_eq!(echoed_message_id("222 0 <a@b> body follows"), Some("<a@b>"));
-        assert_eq!(
-            echoed_message_id("220 0 <a@b> article follows"),
-            Some("<a@b>")
-        );
-        assert_eq!(
-            echoed_message_id("430 <a@b> no such article"),
-            Some("<a@b>")
-        );
+        assert_eq!(id("222 0 <a@b> body follows"), want("<a@b>"));
+        assert_eq!(id("220 0 <a@b> article follows"), want("<a@b>"));
+        assert_eq!(id("430 <a@b> no such article"), want("<a@b>"));
         // Providers that echo 0 or nothing: no evidence, no id.
-        assert_eq!(echoed_message_id("222 0 0 body follows"), None);
-        assert_eq!(echoed_message_id("430 no such article"), None);
+        assert_eq!(id("222 0 0 body follows"), None);
+        assert_eq!(id("430 no such article"), None);
         // A bare "<>" is not a plausible id.
-        assert_eq!(echoed_message_id("222 0 <> body"), None);
+        assert_eq!(id("222 0 <> body"), None);
+        // Runs of whitespace (some servers pad) do not become tokens.
+        assert_eq!(id("222  0   <a@b>  body"), want("<a@b>"));
     }
 
     #[test]
     fn mismatch_is_a_session_error_and_absence_is_not() {
-        let st = |line: &str| Status {
-            code: 222,
-            line: line.to_string(),
-        };
+        let st = |line: &str| Status::new(222, line);
         // Match (and case-insensitive match) pass.
         assert!(check_echoed_id(&st("222 0 <a@b> ok"), Some("<a@b>")).is_ok());
         assert!(check_echoed_id(&st("222 0 <A@B> ok"), Some("<a@b>")).is_ok());
@@ -241,6 +240,64 @@ mod echoed_id_tests {
         let err = check_echoed_id(&st("222 0 <other@b> ok"), Some("<a@b>"))
             .expect_err("a different echoed id must error");
         assert!(matches!(err, NntpError::IdMismatch { .. }), "{err:?}");
+    }
+}
+
+/// The status line stops allocating on the per-article path (R4): the
+/// text rides inline when it fits and only spills to a `String` on the
+/// long lines, and `from_wire` still trims and classifies exactly what
+/// the old `from_utf8_lossy().trim_end().to_string()` did.
+mod status_line_tests {
+    use crate::nntp::{STATUS_INLINE, Status};
+
+    /// The inline buffer is a deliberate size trade (see
+    /// `STATUS_INLINE`), so pin it: a `Status` that quietly grew past
+    /// this would be moving more bytes per article than the allocation
+    /// it replaced.
+    #[test]
+    fn status_stays_small_enough_to_move() {
+        assert_eq!(std::mem::size_of::<Status>(), STATUS_INLINE + 16);
+        assert!(std::mem::size_of::<Status>() <= 128);
+    }
+
+    #[test]
+    fn from_wire_trims_and_reads_the_code() {
+        let st = Status::from_wire(b"222 0 <a@b> body follows\r\n");
+        assert_eq!(st.code, 222);
+        assert_eq!(st.line(), "222 0 <a@b> body follows");
+        assert_eq!(st.line_bytes(), b"222 0 <a@b> body follows");
+        // Bare LF, and trailing spaces, trim the same way.
+        assert_eq!(Status::from_wire(b"223 0 <a@b>  \n").line(), "223 0 <a@b>");
+        // A line with no leading three-digit number is code 0, not a
+        // panic - same as the old `get(..3).parse().unwrap_or(0)`.
+        assert_eq!(Status::from_wire(b"hi\r\n").code, 0);
+        assert_eq!(Status::from_wire(b"\r\n").line(), "");
+    }
+
+    #[test]
+    fn long_lines_spill_to_the_heap_intact() {
+        let long = format!("500 {}", "x".repeat(STATUS_INLINE * 2));
+        let st = Status::from_wire(format!("{long}\r\n").as_bytes());
+        assert_eq!(st.code, 500);
+        assert_eq!(st.line(), long);
+        assert_eq!(st.clone().into_line(), long);
+        // And the boundary either side of the inline capacity.
+        for len in [STATUS_INLINE - 1, STATUS_INLINE, STATUS_INLINE + 1] {
+            let text = "y".repeat(len);
+            let st = Status::new(0, &text);
+            assert_eq!(st.line(), text, "len {len}");
+            assert_eq!(st.into_line(), text, "len {len}");
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_is_repaired_once_like_the_old_lossy_path() {
+        let st = Status::from_wire(b"430 caf\xe9 gone\r\n");
+        assert_eq!(st.code, 430);
+        assert_eq!(st.line(), "430 caf\u{fffd} gone");
+        // The stored bytes are the repaired text, so the byte readers
+        // never see a broken sequence.
+        assert_eq!(st.line_bytes(), "430 caf\u{fffd} gone".as_bytes());
     }
 }
 
@@ -586,19 +643,24 @@ mod quit_tests {
         );
     }
 
-    /// The tight stall bound is still an IDLE deadline: a body that
-    /// dribbles a chunk every 4 s under an 8 s stall bound completes no
-    /// matter how long it takes end to end. This is the property that
-    /// lets the adaptive path drop the flat whole-response cap without
-    /// killing slow-but-healthy transfers.
+    /// The A6 contract, half one: a transfer that stays ABOVE the rate
+    /// floor survives, however long it takes end to end. The stall bound
+    /// alone would let it live anyway (each gap is under 8 s); the point
+    /// pinned here is that the FLOOR does not kill it either - 256 B/s
+    /// against a 64 B/s floor, across several full windows.
     #[tokio::test(start_paused = true)]
-    async fn paced_slow_but_alive_survives_a_tight_stall_bound() {
+    async fn paced_slow_but_above_the_floor_survives() {
         let stall = std::time::Duration::from_secs(8);
         let gap = std::time::Duration::from_secs(4);
-        let mut chunks: std::collections::VecDeque<Vec<u8>> = (0..20)
-            .map(|i| format!("{i}\tsubject {i}\tposter\r\n").into_bytes())
-            .collect();
-        chunks.push_back(b".\r\n".to_vec());
+        let floor = super::RateFloor {
+            window: std::time::Duration::from_secs(30),
+            min_bytes: 64 * 30,
+        };
+        // 1 KiB every 4 s = 256 B/s, four times the floor, for over
+        // three minutes - long enough to cross the window repeatedly.
+        let mut chunks: std::collections::VecDeque<Vec<u8>> =
+            (0..50).map(|_| vec![b'x'; 1024]).collect();
+        chunks.push_back(b"\r\n.\r\n".to_vec());
         let mut reader = Dribble {
             chunks,
             cur: Vec::new(),
@@ -608,15 +670,136 @@ mod quit_tests {
         };
         let mut out = Vec::new();
         let t0 = tokio::time::Instant::now();
-        super::read_multiline_paced(&mut reader, &mut out, stall)
-            .await
-            .expect("a slow but live stream must complete");
-        assert!(out.ends_with(b"19\tsubject 19\tposter\r\n"));
+        super::read_multiline_paced_max(
+            &mut reader,
+            &mut out,
+            stall,
+            super::MAX_MULTILINE_BYTES,
+            Some(floor),
+        )
+        .await
+        .expect("a slow but above-floor stream must complete");
+        assert_eq!(out.len(), 50 * 1024 + 2);
         assert!(
-            t0.elapsed() > stall * 5,
-            "test did not outlast the stall bound: {:?}",
+            t0.elapsed() > floor.window * 5,
+            "test did not outlast the floor window: {:?}",
             t0.elapsed()
         );
+    }
+
+    /// The A6 contract, half two: a dribble UNDER the floor is torn
+    /// down even though every gap resets the idle deadline. This is the
+    /// shape the floor exists for - one small chunk every 7 s survives
+    /// an 8 s stall bound forever, and before the floor a unit test
+    /// here pinned exactly that survival as the contract.
+    #[tokio::test(start_paused = true)]
+    async fn paced_dribble_under_the_floor_is_torn_down() {
+        let stall = std::time::Duration::from_secs(8);
+        let gap = std::time::Duration::from_secs(7);
+        let floor = super::RateFloor {
+            window: std::time::Duration::from_secs(30),
+            min_bytes: 64 * 30,
+        };
+        // 8 bytes every 7 s ≈ 1 B/s, two orders under the floor, and an
+        // endless supply - without the floor this read never returns.
+        let mut chunks: std::collections::VecDeque<Vec<u8>> =
+            (0..10_000).map(|_| vec![b'x'; 8]).collect();
+        chunks.push_back(b"\r\n.\r\n".to_vec());
+        let mut reader = Dribble {
+            chunks,
+            cur: Vec::new(),
+            pos: 0,
+            gap,
+            sleep: None,
+        };
+        let mut out = Vec::new();
+        let t0 = tokio::time::Instant::now();
+        let err = super::read_multiline_paced_max(
+            &mut reader,
+            &mut out,
+            stall,
+            super::MAX_MULTILINE_BYTES,
+            Some(floor),
+        )
+        .await
+        .expect_err("a dribble under the floor must be torn down");
+        assert!(matches!(err, super::NntpError::Timeout), "got {err:?}");
+        // Torn down at the first window boundary reached by an arrival,
+        // not hours later and not before the window had a fair chance.
+        assert!(
+            t0.elapsed() >= floor.window,
+            "fired before the window elapsed: {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            t0.elapsed() < floor.window * 2,
+            "fired far too late: {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// Drive the capped reader over explicit chunk boundaries.
+    async fn read_capped_split(
+        chunks: Vec<Vec<u8>>,
+        max: usize,
+    ) -> Result<Vec<u8>, super::NntpError> {
+        let mut reader = Dribble {
+            chunks: chunks.into(),
+            cur: Vec::new(),
+            pos: 0,
+            gap: std::time::Duration::from_millis(1),
+            sleep: None,
+        };
+        let mut out = Vec::new();
+        super::read_multiline_paced_max(
+            &mut reader,
+            &mut out,
+            std::time::Duration::from_secs(8),
+            max,
+            None,
+        )
+        .await
+        .map(|()| out)
+    }
+
+    /// An exact-cap body must not pass or fail by where TCP split its
+    /// terminator. The provisional `.` / `.\r` at a chunk edge used to
+    /// be counted as payload before the next iteration's straddle
+    /// logic removed it, so a payload of exactly `max` returned
+    /// TooLarge under one split and Ok under every other - the same
+    /// chunking-dependence the wholly-present-terminator arm was cured
+    /// of on 10 Aug.
+    #[tokio::test(start_paused = true)]
+    async fn an_exact_cap_body_is_immune_to_terminator_splits() {
+        let max = 1024usize;
+        // Payload of exactly `max` bytes, its own trailing CRLF included.
+        let mut payload = vec![b'x'; max - 2];
+        payload.extend_from_slice(b"\r\n");
+
+        // Split A: [payload + "."]["\r\n"] - the bare provisional dot.
+        let mut a1 = payload.clone();
+        a1.push(b'.');
+        let out = read_capped_split(vec![a1, b"\r\n".to_vec()], max)
+            .await
+            .expect("payload == max with a split `.` must succeed");
+        assert_eq!(out.len(), max);
+
+        // Split B: [payload + ".\r"]["\n"] - the two-byte provisional.
+        let mut b1 = payload.clone();
+        b1.extend_from_slice(b".\r");
+        let out = read_capped_split(vec![b1, b"\n".to_vec()], max)
+            .await
+            .expect("payload == max with a split `.\\r` must succeed");
+        assert_eq!(out.len(), max);
+
+        // Control: one byte OVER the cap still fails, terminator split
+        // identically - the exclusion is the provisional bytes only.
+        let mut over = vec![b'x'; max - 1];
+        over.extend_from_slice(b"\r\n.");
+        let err = read_capped_split(vec![over, b"\r\n".to_vec()], max)
+            .await
+            .expect_err("payload == max + 1 must still be refused");
+        assert!(matches!(err, super::NntpError::TooLarge(_)), "got {err:?}");
     }
 
     /// Two-phase body read, pre-byte half: a connection whose status
@@ -1162,6 +1345,58 @@ async fn the_list_and_capabilities_ladders_answer_hit_and_miss() {
     assert!(
         !conn.enable_header_gzip().await,
         "a rejected XFEATURE leaves the connection in plain mode"
+    );
+    conn.quit().await;
+}
+
+/// R4: `send_body`/`send_stat` stopped `format!`ing a command String per
+/// article and write the verb, the id and the CRLF as three pieces into
+/// the buffered writer. The bytes on the wire must not have moved by a
+/// byte - a pipelined peer attributes responses positionally, so a
+/// mangled command is a desync, not a parse error - and the CR/LF
+/// backstop must still cover the untrusted half.
+#[tokio::test]
+async fn the_per_article_commands_put_the_same_bytes_on_the_wire() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let (s, _) = listener.accept().expect("accept");
+        let mut w = s.try_clone().expect("clone");
+        w.write_all(b"200 recorder ready\r\n").expect("greet");
+        let mut r = BufReader::new(s);
+        let mut line = String::new();
+        while r.read_line(&mut line).unwrap_or(0) > 0 {
+            if tx.send(line.clone()).is_err() {
+                break;
+            }
+            line.clear();
+            if w.write_all(b"430 no such article\r\n").is_err() {
+                break;
+            }
+        }
+    });
+    let (mut conn, _) = Connection::connect(&at(port)).await.expect("connect");
+    conn.send_body("<a@b>").await.expect("BODY");
+    conn.send_stat("<c@d>").await.expect("STAT");
+    conn.flush().await.expect("flush");
+    assert_eq!(rx.recv().expect("BODY line"), "BODY <a@b>\r\n");
+    assert_eq!(rx.recv().expect("STAT line"), "STAT <c@d>\r\n");
+
+    // The untrusted half still cannot smuggle a second command in, and
+    // the refusal happens BEFORE anything reaches the writer.
+    let err = conn
+        .send_body("<a@b>\r\nQUIT")
+        .await
+        .expect_err("an embedded CRLF must be refused");
+    assert!(matches!(err, NntpError::Unexpected { .. }), "{err:?}");
+    conn.send_body("<e@f>").await.expect("BODY");
+    conn.flush().await.expect("flush");
+    assert_eq!(
+        rx.recv().expect("third line"),
+        "BODY <e@f>\r\n",
+        "the refused command must not have left a partial write behind"
     );
     conn.quit().await;
 }

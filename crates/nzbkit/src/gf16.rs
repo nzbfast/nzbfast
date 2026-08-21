@@ -106,6 +106,21 @@ fn affine_matrix(products: &[u16; 8], take: fn(u16) -> u8) -> u64 {
     m
 }
 
+/// The SIMD nibble tables for multiply-by-`c` (see [`MulTable::nl`]).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn nibble_tables(c: u16) -> ([[u8; 16]; 4], [[u8; 16]; 4]) {
+    let mut nl = [[0u8; 16]; 4];
+    let mut nh = [[0u8; 16]; 4];
+    for (j, (nlj, nhj)) in nl.iter_mut().zip(nh.iter_mut()).enumerate() {
+        for n in 0..16u16 {
+            let p = mul(c, n << (4 * j));
+            nlj[n as usize] = p as u8;
+            nhj[n as usize] = (p >> 8) as u8;
+        }
+    }
+    (nl, nh)
+}
+
 impl MulTable {
     pub fn new(c: u16) -> MulTable {
         let mut lo = [0u16; 256];
@@ -115,18 +130,7 @@ impl MulTable {
             hi[b as usize] = mul(c, b << 8);
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        let (nl, nh) = {
-            let mut nl = [[0u8; 16]; 4];
-            let mut nh = [[0u8; 16]; 4];
-            for (j, (nlj, nhj)) in nl.iter_mut().zip(nh.iter_mut()).enumerate() {
-                for n in 0..16u16 {
-                    let p = mul(c, n << (4 * j));
-                    nlj[n as usize] = p as u8;
-                    nhj[n as usize] = (p >> 8) as u8;
-                }
-            }
-            (nl, nh)
-        };
+        let (nl, nh) = nibble_tables(c);
         #[cfg(target_arch = "x86_64")]
         let affine = affine_matrices(c);
         MulTable {
@@ -159,27 +163,9 @@ impl MulTable {
     pub fn xor_mul_into(&self, dst: &mut [u16], src: &[u8]) {
         assert!(src.len().div_ceil(2) <= dst.len(), "src longer than dst");
         #[cfg(target_arch = "aarch64")]
-        // SAFETY: NEON is baseline on aarch64, so no runtime feature check
-        // is needed (see xor_mul_into_neon's docs); the assert above
-        // guarantees dst has a word for every byte pair of src.
-        let done = unsafe { self.xor_mul_into_neon(dst, src) };
+        let done = fold_simd(&self.nl, &self.nh, dst, src);
         #[cfg(target_arch = "x86_64")]
-        let done = if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
-            // SAFETY: GFNI and AVX2 verified by the detects on this branch;
-            // the assert above guarantees dst has a word for every byte
-            // pair of src.
-            unsafe { self.xor_mul_into_gfni(dst, src) }
-        } else if is_x86_feature_detected!("avx2") {
-            // SAFETY: AVX2 verified by the detect on this branch; dst
-            // covers src per the assert above.
-            unsafe { self.xor_mul_into_avx2(dst, src) }
-        } else if is_x86_feature_detected!("ssse3") {
-            // SAFETY: SSSE3 verified by the detect on this branch; dst
-            // covers src per the assert above.
-            unsafe { self.xor_mul_into_ssse3(dst, src) }
-        } else {
-            0usize
-        };
+        let done = fold_simd(&self.nl, &self.nh, &self.affine, dst, src);
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         let done = 0usize;
         Self::xor_mul_scalar(&self.lo, &self.hi, &mut dst[done..], &src[done * 2..]);
@@ -196,252 +182,285 @@ impl MulTable {
             dst[words] ^= lo[src[src.len() - 1] as usize];
         }
     }
+}
 
-    /// NEON fold: `dst[i] ^= c · src_word[i]` for whole 32-byte (16-word)
-    /// chunks. Returns the number of u16 WORDS processed; the caller runs
-    /// the remainder scalar. NEON is baseline on aarch64, so no runtime
-    /// feature check is needed.
-    #[cfg(target_arch = "aarch64")]
-    unsafe fn xor_mul_into_neon(&self, dst: &mut [u16], src: &[u8]) -> usize {
-        use std::arch::aarch64::*;
-        let chunks = src.len() / 32;
-        if chunks == 0 {
-            return 0;
-        }
-        // SAFETY: NEON intrinsics are baseline on aarch64 (no feature
-        // precondition). All pointer accesses stay within the first
-        // chunks * 32 bytes: in bounds for src by chunks = src.len() / 32,
-        // and for dst by the caller's guarantee that dst has a word for
-        // every byte pair of src (the assert in xor_mul_into).
-        unsafe {
-            let (t0l, t1l, t2l, t3l) = (
-                vld1q_u8(self.nl[0].as_ptr()),
-                vld1q_u8(self.nl[1].as_ptr()),
-                vld1q_u8(self.nl[2].as_ptr()),
-                vld1q_u8(self.nl[3].as_ptr()),
-            );
-            let (t0h, t1h, t2h, t3h) = (
-                vld1q_u8(self.nh[0].as_ptr()),
-                vld1q_u8(self.nh[1].as_ptr()),
-                vld1q_u8(self.nh[2].as_ptr()),
-                vld1q_u8(self.nh[3].as_ptr()),
-            );
-            let mask = vdupq_n_u8(0x0f);
-            let dst_bytes = dst.as_mut_ptr() as *mut u8;
-            for c in 0..chunks {
-                // src bytes deinterleave to low/high bytes of the 16 words.
-                let s = vld2q_u8(src.as_ptr().add(c * 32));
-                let n0 = vandq_u8(s.0, mask);
-                let n1 = vshrq_n_u8::<4>(s.0);
-                let n2 = vandq_u8(s.1, mask);
-                let n3 = vshrq_n_u8::<4>(s.1);
-                let plo = veorq_u8(
-                    veorq_u8(vqtbl1q_u8(t0l, n0), vqtbl1q_u8(t1l, n1)),
-                    veorq_u8(vqtbl1q_u8(t2l, n2), vqtbl1q_u8(t3l, n3)),
-                );
-                let phi = veorq_u8(
-                    veorq_u8(vqtbl1q_u8(t0h, n0), vqtbl1q_u8(t1h, n1)),
-                    veorq_u8(vqtbl1q_u8(t2h, n2), vqtbl1q_u8(t3h, n3)),
-                );
-                let dp = dst_bytes.add(c * 32);
-                let d = vld2q_u8(dp);
-                vst2q_u8(dp, uint8x16x2_t(veorq_u8(d.0, plo), veorq_u8(d.1, phi)));
-            }
-        }
-        chunks * 16
+/// The runtime-dispatched SIMD fold over explicit tables, shared by
+/// [`MulTable`] and [`FoldTable`]: bulk-folds whole chunks and returns
+/// the number of u16 WORDS processed; the caller finishes the tail from
+/// whatever scalar tables it carries.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn fold_simd(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u16], src: &[u8]) -> usize {
+    // SAFETY: NEON is baseline on aarch64, so no runtime feature check
+    // is needed (see fold_neon's docs); every caller asserts dst has a
+    // word for every byte pair of src.
+    unsafe { fold_neon(nl, nh, dst, src) }
+}
+
+/// See the aarch64 twin above. Pre-SSSE3 parts fold nothing here and
+/// run entirely on the caller's scalar tail.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn fold_simd(
+    nl: &[[u8; 16]; 4],
+    nh: &[[u8; 16]; 4],
+    affine: &[u64; 4],
+    dst: &mut [u16],
+    src: &[u8],
+) -> usize {
+    if is_x86_feature_detected!("gfni") && is_x86_feature_detected!("avx2") {
+        // SAFETY: GFNI and AVX2 verified by the detects on this branch;
+        // every caller asserts dst has a word for every byte pair of src.
+        unsafe { fold_gfni(affine, dst, src) }
+    } else if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 verified by the detect on this branch; dst covers
+        // src per the caller's assert.
+        unsafe { fold_avx2(nl, nh, dst, src) }
+    } else if is_x86_feature_detected!("ssse3") {
+        // SAFETY: SSSE3 verified by the detect on this branch; dst covers
+        // src per the caller's assert.
+        unsafe { fold_ssse3(nl, nh, dst, src) }
+    } else {
+        0
     }
+}
 
-    /// SSSE3 fold: the `pshufb` twin of the NEON path - same nibble
-    /// tables, 16 words per 32-byte chunk. x86 has no deinterleaving
-    /// load, so low/high bytes are split with mask+`packus` and the
-    /// products re-interleaved with `unpack` before XORing into `dst`
-    /// in place. Returns the number of u16 WORDS processed; the caller
-    /// runs the remainder scalar. Caller must have verified SSSE3.
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn xor_mul_into_ssse3(&self, dst: &mut [u16], src: &[u8]) -> usize {
-        use std::arch::x86_64::*;
-        let chunks = src.len() / 32;
-        if chunks == 0 {
-            return 0;
-        }
-        // SAFETY: SSSE3 is enabled here per #[target_feature], and every
-        // caller has verified it at runtime (documented requirement above).
-        // All pointer accesses stay within the first chunks * 32 bytes: in
-        // bounds for src by chunks = src.len() / 32, and for dst by the
-        // caller's guarantee that dst has a word for every byte pair of
-        // src (the assert in xor_mul_into).
-        unsafe {
-            let (t0l, t1l, t2l, t3l) = (
-                _mm_loadu_si128(self.nl[0].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nl[1].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nl[2].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nl[3].as_ptr() as *const __m128i),
-            );
-            let (t0h, t1h, t2h, t3h) = (
-                _mm_loadu_si128(self.nh[0].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nh[1].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nh[2].as_ptr() as *const __m128i),
-                _mm_loadu_si128(self.nh[3].as_ptr() as *const __m128i),
-            );
-            let nib = _mm_set1_epi8(0x0f);
-            let lo8 = _mm_set1_epi16(0x00ff);
-            let dst_bytes = dst.as_mut_ptr() as *mut u8;
-            for c in 0..chunks {
-                let sp = src.as_ptr().add(c * 32) as *const __m128i;
-                let v0 = _mm_loadu_si128(sp);
-                let v1 = _mm_loadu_si128(sp.add(1));
-                // Split the 16 words into their low and high bytes.
-                let slo = _mm_packus_epi16(_mm_and_si128(v0, lo8), _mm_and_si128(v1, lo8));
-                let shi = _mm_packus_epi16(_mm_srli_epi16(v0, 8), _mm_srli_epi16(v1, 8));
-                let n0 = _mm_and_si128(slo, nib);
-                let n1 = _mm_and_si128(_mm_srli_epi16(slo, 4), nib);
-                let n2 = _mm_and_si128(shi, nib);
-                let n3 = _mm_and_si128(_mm_srli_epi16(shi, 4), nib);
-                let plo = _mm_xor_si128(
-                    _mm_xor_si128(_mm_shuffle_epi8(t0l, n0), _mm_shuffle_epi8(t1l, n1)),
-                    _mm_xor_si128(_mm_shuffle_epi8(t2l, n2), _mm_shuffle_epi8(t3l, n3)),
-                );
-                let phi = _mm_xor_si128(
-                    _mm_xor_si128(_mm_shuffle_epi8(t0h, n0), _mm_shuffle_epi8(t1h, n1)),
-                    _mm_xor_si128(_mm_shuffle_epi8(t2h, n2), _mm_shuffle_epi8(t3h, n3)),
-                );
-                // Re-interleave the product bytes into word order; the XOR
-                // into dst then needs no deinterleave at all.
-                let dp = dst_bytes.add(c * 32) as *mut __m128i;
-                let d0 = _mm_loadu_si128(dp);
-                let d1 = _mm_loadu_si128(dp.add(1));
-                _mm_storeu_si128(dp, _mm_xor_si128(d0, _mm_unpacklo_epi8(plo, phi)));
-                _mm_storeu_si128(dp.add(1), _mm_xor_si128(d1, _mm_unpackhi_epi8(plo, phi)));
-            }
-        }
-        chunks * 16
+/// NEON fold: `dst[i] ^= c · src_word[i]` for whole 32-byte (16-word)
+/// chunks. Returns the number of u16 WORDS processed; the caller runs
+/// the remainder scalar. NEON is baseline on aarch64, so no runtime
+/// feature check is needed.
+#[cfg(target_arch = "aarch64")]
+unsafe fn fold_neon(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u16], src: &[u8]) -> usize {
+    use std::arch::aarch64::*;
+    let chunks = src.len() / 32;
+    if chunks == 0 {
+        return 0;
     }
-
-    /// AVX2 fold: the SSSE3 path widened to 32 words per 64-byte chunk -
-    /// `vpshufb` shuffles each 128-bit lane against its own copy of the
-    /// broadcast nibble table, and `packus`/`unpack` are lane-local too,
-    /// so the split/lookup/re-interleave round-trips within each lane
-    /// exactly as in the 128-bit version. Returns u16 WORDS processed;
-    /// caller runs the remainder scalar. Caller must have verified AVX2.
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
-    unsafe fn xor_mul_into_avx2(&self, dst: &mut [u16], src: &[u8]) -> usize {
-        use std::arch::x86_64::*;
-        let chunks = src.len() / 64;
-        if chunks == 0 {
-            return 0;
-        }
-        // SAFETY: AVX2 is enabled here per #[target_feature], and every
-        // caller has verified it at runtime (documented requirement above).
-        // All pointer accesses stay within the first chunks * 64 bytes: in
-        // bounds for src by chunks = src.len() / 64, and for dst by the
-        // caller's guarantee that dst has a word for every byte pair of
-        // src (the assert in xor_mul_into).
-        unsafe {
-            let bc = |t: &[u8; 16]| {
-                _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr() as *const __m128i))
-            };
-            let (t0l, t1l, t2l, t3l) = (
-                bc(&self.nl[0]),
-                bc(&self.nl[1]),
-                bc(&self.nl[2]),
-                bc(&self.nl[3]),
+    // SAFETY: NEON intrinsics are baseline on aarch64 (no feature
+    // precondition). All pointer accesses stay within the first
+    // chunks * 32 bytes: in bounds for src by chunks = src.len() / 32,
+    // and for dst by the caller's guarantee that dst has a word for
+    // every byte pair of src (the assert in xor_mul_into).
+    unsafe {
+        let (t0l, t1l, t2l, t3l) = (
+            vld1q_u8(nl[0].as_ptr()),
+            vld1q_u8(nl[1].as_ptr()),
+            vld1q_u8(nl[2].as_ptr()),
+            vld1q_u8(nl[3].as_ptr()),
+        );
+        let (t0h, t1h, t2h, t3h) = (
+            vld1q_u8(nh[0].as_ptr()),
+            vld1q_u8(nh[1].as_ptr()),
+            vld1q_u8(nh[2].as_ptr()),
+            vld1q_u8(nh[3].as_ptr()),
+        );
+        let mask = vdupq_n_u8(0x0f);
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for c in 0..chunks {
+            // src bytes deinterleave to low/high bytes of the 16 words.
+            let s = vld2q_u8(src.as_ptr().add(c * 32));
+            let n0 = vandq_u8(s.0, mask);
+            let n1 = vshrq_n_u8::<4>(s.0);
+            let n2 = vandq_u8(s.1, mask);
+            let n3 = vshrq_n_u8::<4>(s.1);
+            let plo = veorq_u8(
+                veorq_u8(vqtbl1q_u8(t0l, n0), vqtbl1q_u8(t1l, n1)),
+                veorq_u8(vqtbl1q_u8(t2l, n2), vqtbl1q_u8(t3l, n3)),
             );
-            let (t0h, t1h, t2h, t3h) = (
-                bc(&self.nh[0]),
-                bc(&self.nh[1]),
-                bc(&self.nh[2]),
-                bc(&self.nh[3]),
+            let phi = veorq_u8(
+                veorq_u8(vqtbl1q_u8(t0h, n0), vqtbl1q_u8(t1h, n1)),
+                veorq_u8(vqtbl1q_u8(t2h, n2), vqtbl1q_u8(t3h, n3)),
             );
-            let nib = _mm256_set1_epi8(0x0f);
-            let lo8 = _mm256_set1_epi16(0x00ff);
-            let dst_bytes = dst.as_mut_ptr() as *mut u8;
-            for c in 0..chunks {
-                let sp = src.as_ptr().add(c * 64) as *const __m256i;
-                let v0 = _mm256_loadu_si256(sp);
-                let v1 = _mm256_loadu_si256(sp.add(1));
-                let slo = _mm256_packus_epi16(_mm256_and_si256(v0, lo8), _mm256_and_si256(v1, lo8));
-                let shi = _mm256_packus_epi16(_mm256_srli_epi16(v0, 8), _mm256_srli_epi16(v1, 8));
-                let n0 = _mm256_and_si256(slo, nib);
-                let n1 = _mm256_and_si256(_mm256_srli_epi16(slo, 4), nib);
-                let n2 = _mm256_and_si256(shi, nib);
-                let n3 = _mm256_and_si256(_mm256_srli_epi16(shi, 4), nib);
-                let plo = _mm256_xor_si256(
-                    _mm256_xor_si256(_mm256_shuffle_epi8(t0l, n0), _mm256_shuffle_epi8(t1l, n1)),
-                    _mm256_xor_si256(_mm256_shuffle_epi8(t2l, n2), _mm256_shuffle_epi8(t3l, n3)),
-                );
-                let phi = _mm256_xor_si256(
-                    _mm256_xor_si256(_mm256_shuffle_epi8(t0h, n0), _mm256_shuffle_epi8(t1h, n1)),
-                    _mm256_xor_si256(_mm256_shuffle_epi8(t2h, n2), _mm256_shuffle_epi8(t3h, n3)),
-                );
-                let dp = dst_bytes.add(c * 64) as *mut __m256i;
-                let d0 = _mm256_loadu_si256(dp);
-                let d1 = _mm256_loadu_si256(dp.add(1));
-                _mm256_storeu_si256(dp, _mm256_xor_si256(d0, _mm256_unpacklo_epi8(plo, phi)));
-                _mm256_storeu_si256(
-                    dp.add(1),
-                    _mm256_xor_si256(d1, _mm256_unpackhi_epi8(plo, phi)),
-                );
-            }
+            let dp = dst_bytes.add(c * 32);
+            let d = vld2q_u8(dp);
+            vst2q_u8(dp, uint8x16x2_t(veorq_u8(d.0, plo), veorq_u8(d.1, phi)));
         }
-        chunks * 32
     }
+    chunks * 16
+}
 
-    /// GFNI+AVX2 fold: the AVX2 nibble path with the 8 table shuffles
-    /// replaced by 4 `gf2p8affineqb`s against the four 8x8 bit-matrices
-    /// in `self.affine` (see the field docs) - same split/re-interleave
-    /// framing, half the shuffle-port traffic and no nibble extraction.
-    /// Returns u16 WORDS processed; caller runs the remainder scalar.
-    /// Caller must have verified GFNI and AVX2.
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "gfni,avx2")]
-    unsafe fn xor_mul_into_gfni(&self, dst: &mut [u16], src: &[u8]) -> usize {
-        use std::arch::x86_64::*;
-        let chunks = src.len() / 64;
-        if chunks == 0 {
-            return 0;
-        }
-        // SAFETY: GFNI and AVX2 are enabled here per #[target_feature],
-        // and every caller has verified both at runtime (documented
-        // requirement above). All pointer accesses stay within the first
-        // chunks * 64 bytes: in bounds for src by chunks = src.len() / 64,
-        // and for dst by the caller's guarantee that dst has a word for
-        // every byte pair of src (the assert in xor_mul_into).
-        unsafe {
-            let mll = _mm256_set1_epi64x(self.affine[0] as i64);
-            let mhl = _mm256_set1_epi64x(self.affine[1] as i64);
-            let mlh = _mm256_set1_epi64x(self.affine[2] as i64);
-            let mhh = _mm256_set1_epi64x(self.affine[3] as i64);
-            let lo8 = _mm256_set1_epi16(0x00ff);
-            let dst_bytes = dst.as_mut_ptr() as *mut u8;
-            for c in 0..chunks {
-                let sp = src.as_ptr().add(c * 64) as *const __m256i;
-                let v0 = _mm256_loadu_si256(sp);
-                let v1 = _mm256_loadu_si256(sp.add(1));
-                let slo = _mm256_packus_epi16(_mm256_and_si256(v0, lo8), _mm256_and_si256(v1, lo8));
-                let shi = _mm256_packus_epi16(_mm256_srli_epi16(v0, 8), _mm256_srli_epi16(v1, 8));
-                let plo = _mm256_xor_si256(
-                    _mm256_gf2p8affine_epi64_epi8::<0>(slo, mll),
-                    _mm256_gf2p8affine_epi64_epi8::<0>(shi, mhl),
-                );
-                let phi = _mm256_xor_si256(
-                    _mm256_gf2p8affine_epi64_epi8::<0>(slo, mlh),
-                    _mm256_gf2p8affine_epi64_epi8::<0>(shi, mhh),
-                );
-                let dp = dst_bytes.add(c * 64) as *mut __m256i;
-                let d0 = _mm256_loadu_si256(dp);
-                let d1 = _mm256_loadu_si256(dp.add(1));
-                _mm256_storeu_si256(dp, _mm256_xor_si256(d0, _mm256_unpacklo_epi8(plo, phi)));
-                _mm256_storeu_si256(
-                    dp.add(1),
-                    _mm256_xor_si256(d1, _mm256_unpackhi_epi8(plo, phi)),
-                );
-            }
-        }
-        chunks * 32
+/// SSSE3 fold: the `pshufb` twin of the NEON path - same nibble
+/// tables, 16 words per 32-byte chunk. x86 has no deinterleaving
+/// load, so low/high bytes are split with mask+`packus` and the
+/// products re-interleaved with `unpack` before XORing into `dst`
+/// in place. Returns the number of u16 WORDS processed; the caller
+/// runs the remainder scalar. Caller must have verified SSSE3.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn fold_ssse3(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u16], src: &[u8]) -> usize {
+    use std::arch::x86_64::*;
+    let chunks = src.len() / 32;
+    if chunks == 0 {
+        return 0;
     }
+    // SAFETY: SSSE3 is enabled here per #[target_feature], and every
+    // caller has verified it at runtime (documented requirement above).
+    // All pointer accesses stay within the first chunks * 32 bytes: in
+    // bounds for src by chunks = src.len() / 32, and for dst by the
+    // caller's guarantee that dst has a word for every byte pair of
+    // src (the assert in xor_mul_into).
+    unsafe {
+        let (t0l, t1l, t2l, t3l) = (
+            _mm_loadu_si128(nl[0].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nl[1].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nl[2].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nl[3].as_ptr() as *const __m128i),
+        );
+        let (t0h, t1h, t2h, t3h) = (
+            _mm_loadu_si128(nh[0].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nh[1].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nh[2].as_ptr() as *const __m128i),
+            _mm_loadu_si128(nh[3].as_ptr() as *const __m128i),
+        );
+        let nib = _mm_set1_epi8(0x0f);
+        let lo8 = _mm_set1_epi16(0x00ff);
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for c in 0..chunks {
+            let sp = src.as_ptr().add(c * 32) as *const __m128i;
+            let v0 = _mm_loadu_si128(sp);
+            let v1 = _mm_loadu_si128(sp.add(1));
+            // Split the 16 words into their low and high bytes.
+            let slo = _mm_packus_epi16(_mm_and_si128(v0, lo8), _mm_and_si128(v1, lo8));
+            let shi = _mm_packus_epi16(_mm_srli_epi16(v0, 8), _mm_srli_epi16(v1, 8));
+            let n0 = _mm_and_si128(slo, nib);
+            let n1 = _mm_and_si128(_mm_srli_epi16(slo, 4), nib);
+            let n2 = _mm_and_si128(shi, nib);
+            let n3 = _mm_and_si128(_mm_srli_epi16(shi, 4), nib);
+            let plo = _mm_xor_si128(
+                _mm_xor_si128(_mm_shuffle_epi8(t0l, n0), _mm_shuffle_epi8(t1l, n1)),
+                _mm_xor_si128(_mm_shuffle_epi8(t2l, n2), _mm_shuffle_epi8(t3l, n3)),
+            );
+            let phi = _mm_xor_si128(
+                _mm_xor_si128(_mm_shuffle_epi8(t0h, n0), _mm_shuffle_epi8(t1h, n1)),
+                _mm_xor_si128(_mm_shuffle_epi8(t2h, n2), _mm_shuffle_epi8(t3h, n3)),
+            );
+            // Re-interleave the product bytes into word order; the XOR
+            // into dst then needs no deinterleave at all.
+            let dp = dst_bytes.add(c * 32) as *mut __m128i;
+            let d0 = _mm_loadu_si128(dp);
+            let d1 = _mm_loadu_si128(dp.add(1));
+            _mm_storeu_si128(dp, _mm_xor_si128(d0, _mm_unpacklo_epi8(plo, phi)));
+            _mm_storeu_si128(dp.add(1), _mm_xor_si128(d1, _mm_unpackhi_epi8(plo, phi)));
+        }
+    }
+    chunks * 16
+}
 
+/// AVX2 fold: the SSSE3 path widened to 32 words per 64-byte chunk -
+/// `vpshufb` shuffles each 128-bit lane against its own copy of the
+/// broadcast nibble table, and `packus`/`unpack` are lane-local too,
+/// so the split/lookup/re-interleave round-trips within each lane
+/// exactly as in the 128-bit version. Returns u16 WORDS processed;
+/// caller runs the remainder scalar. Caller must have verified AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fold_avx2(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u16], src: &[u8]) -> usize {
+    use std::arch::x86_64::*;
+    let chunks = src.len() / 64;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: AVX2 is enabled here per #[target_feature], and every
+    // caller has verified it at runtime (documented requirement above).
+    // All pointer accesses stay within the first chunks * 64 bytes: in
+    // bounds for src by chunks = src.len() / 64, and for dst by the
+    // caller's guarantee that dst has a word for every byte pair of
+    // src (the assert in xor_mul_into).
+    unsafe {
+        let bc = |t: &[u8; 16]| {
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr() as *const __m128i))
+        };
+        let (t0l, t1l, t2l, t3l) = (bc(&nl[0]), bc(&nl[1]), bc(&nl[2]), bc(&nl[3]));
+        let (t0h, t1h, t2h, t3h) = (bc(&nh[0]), bc(&nh[1]), bc(&nh[2]), bc(&nh[3]));
+        let nib = _mm256_set1_epi8(0x0f);
+        let lo8 = _mm256_set1_epi16(0x00ff);
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for c in 0..chunks {
+            let sp = src.as_ptr().add(c * 64) as *const __m256i;
+            let v0 = _mm256_loadu_si256(sp);
+            let v1 = _mm256_loadu_si256(sp.add(1));
+            let slo = _mm256_packus_epi16(_mm256_and_si256(v0, lo8), _mm256_and_si256(v1, lo8));
+            let shi = _mm256_packus_epi16(_mm256_srli_epi16(v0, 8), _mm256_srli_epi16(v1, 8));
+            let n0 = _mm256_and_si256(slo, nib);
+            let n1 = _mm256_and_si256(_mm256_srli_epi16(slo, 4), nib);
+            let n2 = _mm256_and_si256(shi, nib);
+            let n3 = _mm256_and_si256(_mm256_srli_epi16(shi, 4), nib);
+            let plo = _mm256_xor_si256(
+                _mm256_xor_si256(_mm256_shuffle_epi8(t0l, n0), _mm256_shuffle_epi8(t1l, n1)),
+                _mm256_xor_si256(_mm256_shuffle_epi8(t2l, n2), _mm256_shuffle_epi8(t3l, n3)),
+            );
+            let phi = _mm256_xor_si256(
+                _mm256_xor_si256(_mm256_shuffle_epi8(t0h, n0), _mm256_shuffle_epi8(t1h, n1)),
+                _mm256_xor_si256(_mm256_shuffle_epi8(t2h, n2), _mm256_shuffle_epi8(t3h, n3)),
+            );
+            let dp = dst_bytes.add(c * 64) as *mut __m256i;
+            let d0 = _mm256_loadu_si256(dp);
+            let d1 = _mm256_loadu_si256(dp.add(1));
+            _mm256_storeu_si256(dp, _mm256_xor_si256(d0, _mm256_unpacklo_epi8(plo, phi)));
+            _mm256_storeu_si256(
+                dp.add(1),
+                _mm256_xor_si256(d1, _mm256_unpackhi_epi8(plo, phi)),
+            );
+        }
+    }
+    chunks * 32
+}
+
+/// GFNI+AVX2 fold: the AVX2 nibble path with the 8 table shuffles
+/// replaced by 4 `gf2p8affineqb`s against the four 8x8 bit-matrices
+/// in `affine` (see [`MulTable::affine`]) - same split/re-interleave
+/// framing, half the shuffle-port traffic and no nibble extraction.
+/// Returns u16 WORDS processed; caller runs the remainder scalar.
+/// Caller must have verified GFNI and AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "gfni,avx2")]
+unsafe fn fold_gfni(affine: &[u64; 4], dst: &mut [u16], src: &[u8]) -> usize {
+    use std::arch::x86_64::*;
+    let chunks = src.len() / 64;
+    if chunks == 0 {
+        return 0;
+    }
+    // SAFETY: GFNI and AVX2 are enabled here per #[target_feature],
+    // and every caller has verified both at runtime (documented
+    // requirement above). All pointer accesses stay within the first
+    // chunks * 64 bytes: in bounds for src by chunks = src.len() / 64,
+    // and for dst by the caller's guarantee that dst has a word for
+    // every byte pair of src (the assert in xor_mul_into).
+    unsafe {
+        let mll = _mm256_set1_epi64x(affine[0] as i64);
+        let mhl = _mm256_set1_epi64x(affine[1] as i64);
+        let mlh = _mm256_set1_epi64x(affine[2] as i64);
+        let mhh = _mm256_set1_epi64x(affine[3] as i64);
+        let lo8 = _mm256_set1_epi16(0x00ff);
+        let dst_bytes = dst.as_mut_ptr() as *mut u8;
+        for c in 0..chunks {
+            let sp = src.as_ptr().add(c * 64) as *const __m256i;
+            let v0 = _mm256_loadu_si256(sp);
+            let v1 = _mm256_loadu_si256(sp.add(1));
+            let slo = _mm256_packus_epi16(_mm256_and_si256(v0, lo8), _mm256_and_si256(v1, lo8));
+            let shi = _mm256_packus_epi16(_mm256_srli_epi16(v0, 8), _mm256_srli_epi16(v1, 8));
+            let plo = _mm256_xor_si256(
+                _mm256_gf2p8affine_epi64_epi8::<0>(slo, mll),
+                _mm256_gf2p8affine_epi64_epi8::<0>(shi, mhl),
+            );
+            let phi = _mm256_xor_si256(
+                _mm256_gf2p8affine_epi64_epi8::<0>(slo, mlh),
+                _mm256_gf2p8affine_epi64_epi8::<0>(shi, mhh),
+            );
+            let dp = dst_bytes.add(c * 64) as *mut __m256i;
+            let d0 = _mm256_loadu_si256(dp);
+            let d1 = _mm256_loadu_si256(dp.add(1));
+            _mm256_storeu_si256(dp, _mm256_xor_si256(d0, _mm256_unpacklo_epi8(plo, phi)));
+            _mm256_storeu_si256(
+                dp.add(1),
+                _mm256_xor_si256(d1, _mm256_unpackhi_epi8(plo, phi)),
+            );
+        }
+    }
+    chunks * 32
+}
+
+impl MulTable {
     /// dst ^= c · src over u16 word slices (used by matrix row ops and
     /// the repair back-substitution). On little-endian targets the word
     /// slice IS its PAR2 byte representation, so this rides the same
@@ -455,6 +474,103 @@ impl MulTable {
         #[cfg(target_endian = "big")]
         for (d, s) in dst.iter_mut().zip(src) {
             *d ^= self.mul(*s);
+        }
+    }
+}
+
+/// The fold-only slice of [`MulTable`]: exactly the fields the SIMD
+/// fold kernels read - the nibble tables (128 B) plus, on x86_64, the
+/// GFNI bit-matrices (32 B) - against 1.2 KB for the full table. The
+/// tiled repair fold builds one table per (row, source) and walks the
+/// whole set across every column tile, so the tables compete with the
+/// destination tiles for cache; shrinking them ~9x cuts that streaming
+/// footprint and lets ~9x more sources share one table-budget group
+/// (fewer passes over the destination tiles). The scalar matrix paths
+/// (inversion, Vandermonde) keep [`MulTable`]: a 256-entry split table
+/// is what makes single-word [`mul`](MulTable::mul) fast, and this
+/// type deliberately has no such method.
+///
+/// On targets with no SIMD fold the split tables ARE the whole fold,
+/// so there this type keeps them and the split is a no-op.
+pub struct FoldTable {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    nl: [[u8; 16]; 4],
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    nh: [[u8; 16]; 4],
+    #[cfg(target_arch = "x86_64")]
+    affine: [u64; 4],
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    lo: [u16; 256],
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    hi: [u16; 256],
+}
+
+impl FoldTable {
+    /// Also much cheaper to BUILD than [`MulTable::new`]: 64 field
+    /// multiplies (plus, on x86_64, the nibble-table affine lookup)
+    /// instead of 512 - the fold builds one per (row, source).
+    pub fn new(c: u16) -> FoldTable {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        {
+            let (nl, nh) = nibble_tables(c);
+            FoldTable {
+                nl,
+                nh,
+                #[cfg(target_arch = "x86_64")]
+                affine: affine_matrices_fast(c),
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            let mut lo = [0u16; 256];
+            let mut hi = [0u16; 256];
+            for b in 0..256u16 {
+                lo[b as usize] = mul(c, b);
+                hi[b as usize] = mul(c, b << 8);
+            }
+            FoldTable { lo, hi }
+        }
+    }
+
+    /// [`MulTable::xor_mul_into`] with the compact tables: the same
+    /// SIMD kernels, with the sub-chunk tail finished from the nibble
+    /// tables (at most 15 words plus an odd byte, so their 8-lookup
+    /// word cost never matters; on a pre-SSSE3 x86 the whole buffer
+    /// would run that way - keep [`MulTable`] anywhere that matters).
+    pub fn xor_mul_into(&self, dst: &mut [u16], src: &[u8]) {
+        assert!(src.len().div_ceil(2) <= dst.len(), "src longer than dst");
+        #[cfg(target_arch = "aarch64")]
+        let done = fold_simd(&self.nl, &self.nh, dst, src);
+        #[cfg(target_arch = "x86_64")]
+        let done = fold_simd(&self.nl, &self.nh, &self.affine, dst, src);
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        Self::xor_mul_scalar_nibble(&self.nl, &self.nh, &mut dst[done..], &src[done * 2..]);
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        MulTable::xor_mul_scalar(&self.lo, &self.hi, dst, src);
+    }
+
+    /// The scalar tail from the nibble tables (layout per
+    /// [`MulTable::nl`]): a word's product is the XOR of its four
+    /// nibbles' table entries, per byte half.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn xor_mul_scalar_nibble(nl: &[[u8; 16]; 4], nh: &[[u8; 16]; 4], dst: &mut [u16], src: &[u8]) {
+        let mul1 = |w: u16| -> u16 {
+            let n = [
+                (w & 0xf) as usize,
+                ((w >> 4) & 0xf) as usize,
+                ((w >> 8) & 0xf) as usize,
+                (w >> 12) as usize,
+            ];
+            let lo = nl[0][n[0]] ^ nl[1][n[1]] ^ nl[2][n[2]] ^ nl[3][n[3]];
+            let hi = nh[0][n[0]] ^ nh[1][n[1]] ^ nh[2][n[2]] ^ nh[3][n[3]];
+            lo as u16 | (hi as u16) << 8
+        };
+        let words = src.len() / 2;
+        for (d, s) in dst.iter_mut().zip(src.chunks_exact(2)) {
+            *d ^= mul1(u16::from_le_bytes([s[0], s[1]]));
+        }
+        if src.len() % 2 == 1 {
+            dst[words] ^= mul1(src[src.len() - 1] as u16);
         }
     }
 }
@@ -1201,7 +1317,7 @@ mod tests {
                         // SAFETY: SSSE3 verified by the detect above; got
                         // holds words + 3 elements, a word for every byte
                         // pair of src.
-                        let done = unsafe { t.xor_mul_into_ssse3(&mut got, &src) };
+                        let done = unsafe { fold_ssse3(&t.nl, &t.nh, &mut got, &src) };
                         MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
                         assert_eq!(got, want, "ssse3 c={c:#x} len={len}");
                     }
@@ -1209,7 +1325,7 @@ mod tests {
                         let mut got = base.clone();
                         // SAFETY: AVX2 verified by the detect above; got
                         // covers src as above.
-                        let done = unsafe { t.xor_mul_into_avx2(&mut got, &src) };
+                        let done = unsafe { fold_avx2(&t.nl, &t.nh, &mut got, &src) };
                         MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
                         assert_eq!(got, want, "avx2 c={c:#x} len={len}");
                     }
@@ -1217,11 +1333,46 @@ mod tests {
                         let mut got = base.clone();
                         // SAFETY: GFNI and AVX2 verified by the detect
                         // above; got covers src as above.
-                        let done = unsafe { t.xor_mul_into_gfni(&mut got, &src) };
+                        let done = unsafe { fold_gfni(&t.affine, &mut got, &src) };
                         MulTable::xor_mul_scalar(&t.lo, &t.hi, &mut got[done..], &src[done * 2..]);
                         assert_eq!(got, want, "gfni c={c:#x} len={len}");
                     }
                 }
+            }
+        }
+    }
+
+    /// [`FoldTable`] must match the same per-word oracle as
+    /// [`MulTable::xor_mul_into`] at every length class - in particular
+    /// the sub-chunk tails and the odd trailing byte, which exercise
+    /// the nibble-table scalar path the compact table falls back on.
+    #[test]
+    fn fold_table_matches_scalar_all_lengths() {
+        let mut state = 0xD1B54A32D192ED03u64;
+        let mut rng = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for c in [0u16, 1, 2, 0x00FF, 0x0101, 0x1234, 0xABCD, 0xFFFF] {
+            let t = FoldTable::new(c);
+            for len in [0usize, 1, 2, 3, 15, 16, 31, 32, 33, 64, 65, 127, 4096, 4097] {
+                let src: Vec<u8> = (0..len).map(|_| rng() as u8).collect();
+                let words = len.div_ceil(2);
+                let base: Vec<u16> = (0..words + 3).map(|_| rng() as u16).collect();
+                let mut want = base.clone();
+                for (i, s) in src.chunks(2).enumerate() {
+                    let w = if s.len() == 2 {
+                        u16::from_le_bytes([s[0], s[1]])
+                    } else {
+                        s[0] as u16
+                    };
+                    want[i] ^= mul(c, w);
+                }
+                let mut got = base.clone();
+                t.xor_mul_into(&mut got, &src);
+                assert_eq!(got, want, "fold-table c={c:#x} len={len}");
             }
         }
     }

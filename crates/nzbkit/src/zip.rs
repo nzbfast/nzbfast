@@ -483,7 +483,7 @@ const FINAL_CONTENT_MARKERS: &[(&str, &str)] = &[
     // append its payload as a PLAINTEXT zip rather than keeping it in a
     // private container the way NSIS and Inno do - a bundled JRE, the
     // native launchers, and the media archives, all readable. Found on
-    // mediatvpc (TODO 159 item 8) in a real vendor installer sitting in
+    // a Windows box (TODO 159 item 8) in a vendor installer sitting in
     // Downloads, which exploded to 7,411 files. Same class as the jar:
     // the zip IS the program. Two markers because both are fixed paths
     // the builder writes, and either alone would be a single-sample bet.

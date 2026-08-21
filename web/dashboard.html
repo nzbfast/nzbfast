@@ -149,6 +149,13 @@ button.dimbtn:hover,button.dimbtn:focus-visible{opacity:1}
 #histhov .foot{color:var(--dim);margin-top:7px;font-size:11.5px}
 #ctxmenu{position:fixed;background:var(--surface);border:1px solid var(--line);border-radius:10px;
   padding:5px;z-index:99;min-width:220px;box-shadow:0 10px 34px rgba(0,0,0,.5)}
+/* The clipboard-refused fallback for a generated report. Centred rather
+   than cursor-anchored: it is a block of text to read and select, not a
+   menu to click through. */
+#textbox{position:fixed;inset:5vh 5vw;z-index:100;display:flex;flex-direction:column;
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;box-shadow:0 10px 34px rgba(0,0,0,.5)}
+#textbox pre{flex:1;min-height:0;overflow:auto;white-space:pre-wrap;user-select:text;margin:8px 0}
 #ctxmenu button{display:block;width:100%;text-align:start;background:none;color:var(--fg);
   border:none;padding:7px 12px;border-radius:7px;font-size:12.5px;cursor:pointer;margin:0}
 #ctxmenu button:hover{background:var(--surface-2)}
@@ -2082,7 +2089,8 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <button class="ghost mini" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
   <button class="ghost mini" onclick="selClear('q')" data-i18n="sel.clear">Clear selection</button>
 </div>
-  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table></div>
+  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table>
+  <div id="queueMore" style="margin-top:6px"></div></div>
   <div class="cardgrip" data-card="queueCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
 
@@ -2184,6 +2192,12 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
      is nothing to fix, it just explains why a label the user may have
      complained about has changed by itself. -->
   <div id="histUpgraded" class="dim" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
+<!-- Failure-driven diversity nudge: repeated missing-article failures in
+     the rows below usually mean every configured server sits on the same
+     backbone, so it lives here next to the evidence. Dismissible, and the
+     dismissal remembers WHICH failure was newest, so it only comes back
+     for genuinely new failures - never as a nag. -->
+  <div id="divNudge" class="dim" style="display:none;font-size:12.5px;margin-bottom:8px"></div>
   <div class="filterbar" id="histFilter"></div>
 <!-- §129 2f: bulk actions for the checked history rows. Delete rides the
      API's comma-separated value= in one call (trash-aware server-side,
@@ -2398,7 +2412,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <button class="ghost" onclick="testServer(this)" data-i18n="set.srv.testconn">Test connection</button>
       <button class="ghost" onclick="document.getElementById('srvform').style.display='none'" data-i18n="btn.cancel">Cancel</button>
     </div>
-    <div class="row"><label data-i18n="set.srv.host">Server address</label><input class="txt" id="sv_host" placeholder="news.provider.com"></div>
+    <div class="row"><label data-i18n="set.srv.host">Server address</label><input class="txt" id="sv_host" placeholder="news.provider.com" onchange="groupSuggest()"></div>
     <div class="row"><label data-i18n="set.srv.port">Port<span class="hint" data-i18n="set.srv.port.hint">563 secure · 119 plain</span></label>
       <input class="txt sm" type="number" min="1" max="65535" id="sv_port" value="563"></div>
     <div class="row"><label data-i18n="set.srv.tls">TLS (encrypted)</label><input type="checkbox" id="sv_tls" checked></div>
@@ -2412,7 +2426,8 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <div class="row"><label data-i18n="set.srv.level">Tier / level<span class="hint" data-i18n="set.srv.level.hint">0 = primary; a level-N server only fetches articles every lower level missed: fill/backup economics</span></label>
       <input class="txt sm" type="number" min="0" max="99" id="sv_level" value="0" oninput="paidSuggest()"></div>
     <div class="row"><label data-i18n="set.srv.group">Provider network<span class="hint" data-i18n="set.srv.group.hint">servers you give the same name here are treated as one source: many brands resell the same network (optional)</span></label>
-      <input class="txt" id="sv_group"></div>
+      <span style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;width:100%"><input class="txt" id="sv_group" style="width:100%" oninput="groupSuggestRender()">
+      <span class="hint" id="sv_groupsug" style="text-align:end"></span></span></div>
     <div class="row"><label data-i18n="set.srv.ret">Retention (days)<span class="hint" data-i18n="set.srv.ret.hint">0 = unlimited; older articles route to deeper servers</span></label>
       <input class="txt sm" type="number" min="0" id="sv_ret" value="0"></div>
     <div class="row"><label data-i18n="set.srv.block">Block size (GB)<span class="hint" data-i18n="set.srv.block.hint">for an account where you paid up front for a fixed amount of data: nzbfast counts what it has used and stops using this server when that data is gone. 0 = an unlimited plan. Give it a tier of 1 or more so it only fills in what your main servers missed</span></label>
@@ -2470,7 +2485,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_race_stragglers" onchange="setCfg('race_stragglers',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.speed.adaptive">Adaptive connection timeouts<span class="hint" data-i18n="set.speed.adaptive.hint">a connection that goes quiet is cut in seconds instead of half a minute, judged against that server's usual response time; a slow but alive transfer is never cut. In fault tests it cleared dead-air stalls about 4x sooner, helped further when a whole server went mute, and dropped nothing on a spiky but healthy link</span></label>
     <input type="checkbox" id="s_adaptive_timeouts" onchange="setCfg('adaptive_timeouts',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.speed.posthealth">Check posts before downloading<span class="hint" data-i18n="set.speed.posthealth.hint">while nothing is downloading, ask every server about a few of each queued post's articles and mark the row with the answer: a post your providers no longer carry is worth knowing about before the bandwidth is spent, not at 97%. Costs a few dozen tiny requests per job</span></label>
+  <div class="row"><label data-i18n="set.speed.posthealth">Check posts before downloading<span class="hint" data-i18n="set.speed.posthealth.hint">while nothing is downloading, ask every server about a few of each queued post's articles and mark the row with the answer: a post your providers no longer carry is worth knowing about before the bandwidth is spent, not at 97%. Costs a few dozen tiny requests per job. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches</span></label>
     <input type="checkbox" id="s_post_health" onchange="setCfg('post_health',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.posthealthdefer">Healthy-looking posts start first<span class="hint" data-i18n="set.speed.posthealthdefer.hint">a job whose check came back bad waits behind items of the same priority that checked out better. It only changes the ORDER: nothing is removed, paused or failed, and forcing a job or raising its priority overrides it. On by default: a post uploaded moments ago can look missing everywhere too, but it only waits behind healthier items and still downloads</span></label>
     <input type="checkbox" id="s_post_health_defer" onchange="setCfg('post_health_defer',this.checked?1:0)"></div>
@@ -3237,6 +3252,26 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input class="txt" id="s_tls_cert" spellcheck="false" onchange="setCfg('tls_cert',this.value)"></div>
   <div class="row"><label data-i18n="set.sec.tlskey">HTTPS private key<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.sec.tlskey.hint">the PEM private key that belongs to the certificate above. With both rows set, the next restart answers on https instead of http</span></label>
     <input class="txt" id="s_tls_key" spellcheck="false" onchange="setCfg('tls_key',this.value)"></div>
+</div>
+
+<!-- Issue #45: History cleanup. The two daemon rules have existed
+     since §129 D5 and were settable only by hand-editing settings.json.
+     They are INDEPENDENT - both apply when both are set, and an entry
+     goes when EITHER matches - so they are two rows, not one control
+     with a mode. The checkbox exists because "off" is 0 in both rules
+     and a page that only showed two zeroes would not say so. -->
+<div class="card set" data-sg="system" data-sk="history">
+  <h3 data-i18n="set.hist.title">History cleanup</h3>
+  <div class="row"><label data-i18n="set.hist.auto">Remove old History entries<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.hist.auto.hint">off = History keeps everything, which is what nzbfast has always done. Switch it on and the two rules below decide what goes. Only the History entry is removed - the downloaded files stay exactly where they are, and a job still finishing or still being moved is never touched.</span></label>
+    <input type="checkbox" id="s_hist_clean" onchange="histCleanToggle(this.checked)"></div>
+  <div class="row" id="histAgeRow"><label data-i18n="set.hist.age">Remove entries older than<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.hist.age.hint">age counted from the moment the download finished; 0 = this rule is off. It removes completed downloads only: a failed one stays until you retry it or delete it yourself, because it is a decision you have not made yet. Checked once a minute, so a short setting takes effect within about a minute of the entry ageing past it. Works alongside the limit below, not instead of it.</span></label>
+    <div class="pathrow"><input type="number" class="txt sm" id="s_hist_age" min="0" max="100000" style="width:8ch" onchange="setHistAge()" data-i18n-title="set.hist.age.title" title="how long a finished download stays in History"><select class="sel" id="s_hist_age_unit" style="max-width:130px" onchange="setHistAge()" data-i18n-title="set.hist.age.unit.title" title="the unit the number beside this is counted in">
+      <option value="60" data-i18n="set.hist.unit.mins">minutes</option>
+      <option value="3600" data-i18n="set.hist.unit.hours">hours</option>
+      <option value="86400" selected data-i18n="set.hist.unit.days">days</option>
+    </select></div></div>
+  <div class="row" id="histCountRow"><label data-i18n="set.hist.count">Keep at most this many entries<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.hist.count.hint">once History is longer than this the oldest entries go, whatever their outcome - unlike the age rule above, this one counts failed downloads too, because a length limit that could be filled with failures would stop being a limit. 0 = this rule is off. Works alongside the age rule, not instead of it.</span></label>
+    <input type="number" class="txt sm" id="s_hist_count" min="0" max="1000000" style="width:8ch" onchange="setCfg('history_keep_count',String(Math.max(0,Math.floor(Number(this.value)||0))))"></div>
 </div>
 
 <div class="card set" data-sg="system" data-sk="log" id="logCard">
@@ -4376,9 +4411,12 @@ async function keySubmit(){
     // Prove the key against a mode that REQUIRES it before adopting it -
     // mode=version answers without auth, so it proves nothing. Passing
     // it as the explicit one-shot credential means a wrong guess can
-    // never recurse back into this modal.
+    // never recurse back into this modal. `limit=1` because only the
+    // ANSWER matters here, never the rows: the daemon builds only what
+    // the window asks for, so a wrong guess against a 15k queue
+    // no longer costs a full queue body to be refused.
     let j;
-    try { j = await api('queue', '&output=json', v); }
+    try { j = await api('queue', '&limit=1&output=json', v); }
     catch(e){ j = null; }
     if (j == null || j.error === ERR_UNREACHABLE
         || j.error === 'HTTP 502' || j.error === 'HTTP 503' || j.error === 'HTTP 504'){
@@ -4673,17 +4711,37 @@ function gbpsToMbps(g){ return (g||0)*125; }
 // ---- indexer pill (header) ----------------------------------------
 // Deliberately its own slow poll rather than riding tick(): index_stats
 // measures the database (db/live/file bytes), which is far too much work
-// to do every second for one word of text.
-let IDX_PAUSED=null;
-async function refreshIdxPill(){
-  const el=document.getElementById('idxPill'); if(!el) return;
-  // The pill reports on scanning, so with the indexer switched off it has
-  // nothing to say and the CSS has already taken it off the header. Stop
-  // the poll rather than run a 15-second database query into a hidden
-  // element.
+// to do every second for one word of text. N7: ONE fetch feeds this
+// pill AND the Browse-card status (renderIdxStatus) - they used to
+// poll the same query independently, so a single open tab paid for the
+// stats twice over. Gated on document.hidden, with a visibilitychange
+// catch-up beside the other side-pollers.
+let IDX_PAUSED=null, idxQuick=null;
+async function pollIdxStats(){
+  // With the indexer switched off both consumers have nothing to say
+  // and the CSS has already taken them off the page. Stop the poll
+  // rather than run a database query into hidden elements.
   if(!IDX_ON) return;
+  clearTimeout(idxQuick); idxQuick=null;
+  let s;
+  try{ s=await api('index_stats'); }
+  catch(e){
+    const el=document.getElementById('idxPill');
+    if(el) el.style.display='none';
+    return;
+  }
+  try{ renderIdxPill(s); }catch(e){}
+  try{ renderIdxStatus(s); }catch(e){}
+  // Poll fast while a scan runs so the header count visibly moves - and
+  // while the stats are cold, so "still reading" resolves into real
+  // figures as soon as the daemon can answer. Not while hidden: the
+  // visibilitychange catch-up restarts the chain on return.
+  if(s.scanning||s.stats_cold)
+    idxQuick=setTimeout(()=>{ if(!document.hidden) pollIdxStats(); }, 2000);
+}
+function renderIdxPill(s){
+  const el=document.getElementById('idxPill'); if(!el) return;
   try{
-    const s=await api('index_stats');
     const groups=(s.groups||[]).length;
     if(!groups){ el.style.display='none'; return; }   // indexing not set up
     IDX_PAUSED=!!s.paused;
@@ -4704,9 +4762,9 @@ async function refreshIdxPill(){
 async function toggleIdxPaused(){
   const el=document.getElementById('idxPill');
   await setIdxPaused(el, !IDX_PAUSED);
-  refreshIdxPill();
+  pollIdxStats();
 }
-refreshIdxPill(); setInterval(refreshIdxPill, 15000);
+pollIdxStats(); setInterval(()=>{ if(!document.hidden) pollIdxStats(); }, 15000);
 
 function relabelLimitOptions(){
   document.querySelectorAll('#limitSel option').forEach(o=>{
@@ -5421,6 +5479,48 @@ let histSearch='', histLimitOverride=0, histFull={};
 // poll was already in flight), the next tick sends rev 0 and refetches
 // regardless of what revision the in-flight poll adopted.
 let histAppliedWin=null;
+// The QUEUE is paged too, the same way and for a sharper reason.
+// The daemon builds only the rows inside this window - `queue_json`
+// used to render every slot in the queue and then throw all but the
+// page away, with the queue lock held for the whole of it, once a
+// second. At 15,000 jobs that was ~430 ms of held lock per poll
+// against ~4 ms paged, so this number is a real cost on the daemon,
+// not just a render budget here.
+//
+// `pin_live=1` is what makes paging safe: the picker runs Force and
+// High ahead of queue order and never MOVES the row, so the job
+// actually on the wire can sit past the end of the window - and the
+// hero card, the burn-down and the status pill all read "what is
+// running" off the rows. With the flag, live rows ride the page
+// wherever they sit.
+//
+// Everything the page says about the WHOLE queue - its count, its
+// remaining bytes, its ETA, its disk forecast - comes off the header
+// now (noofslots / mbleft / mbleft_runnable / space_need_bytes),
+// because a page cannot answer a question about the queue.
+const QUEUE_PAGE=250;
+let qLimitOverride=0;
+function queueWindowExtra(){
+  return '&limit='+(qLimitOverride||QUEUE_PAGE)+'&pin_live=1';
+}
+// Same shape as histShowMore: raise the window, zero the revision so
+// the next tick cannot be answered "unchanged", and refetch.
+function qShowMore(){
+  qLimitOverride=(qLimitOverride||QUEUE_PAGE)+QUEUE_PAGE;
+  dashQRev=0; tick();
+}
+// The whole queue's row count, which is NOT the number of rows on this
+// page. `noofslots` is the daemon's own filtered count, taken before
+// its window; the fallback keeps an older daemon (or a payload that
+// predates the header) rendering off what it did send.
+function qCount(q){
+  const n=q&&q.noofslots;
+  return typeof n==='number' ? n : (((q&&q.slots)||[]).length);
+}
+// True while the queue holds rows this page was not sent. Guards the
+// three places that treat "not in the payload" as "gone from the
+// queue" - a selection, an open drawer, and the added/removed toasts.
+function qTruncated(q){ return qCount(q) > (((q&&q.slots)||[]).length); }
 function histWindowExtra(){
   const cur=histFilter();
   const lim=histExpanded()?Math.max(200,histLimitOverride):histRows();
@@ -5533,6 +5633,7 @@ async function tick(){
     // discrete lifecycle events replace the old snapshot diffing - so
     // an idle refresh costs the same however large history grows.
     const win=histWindowExtra();
+    const qwin=queueWindowExtra();
     const hrevSent=(win===histAppliedWin)?dashHRev:0;
     // The events param is OMITTED on the very first poll: that primes
     // the cursor server-side (no replay of old toasts). From then on
@@ -5540,7 +5641,7 @@ async function tick(){
     // daemon's first-ever event still reaches a page already watching.
     const r=await api('dashboard',
       `&queue_rev=${dashQRev}&history_rev=${hrevSent}`
-      +(dashEHave?`&events=${dashESeq}`:'')+win);
+      +(dashEHave?`&events=${dashESeq}`:'')+qwin+win);
     // A declined key is not an outage. While key entry is turned down
     // the daemon answers every poll with a 403 body, but the payload
     // fields are missing, the throw below fires, and the catch painted
@@ -5756,27 +5857,47 @@ async function tick(){
     drawHistogram();
 
     // Whole-queue remaining + ETA in the tab title (useful when backgrounded).
-    const totLeft=q.slots.reduce((a,s)=>a+(parseFloat(s.mbleft)||0),0);
+    // Both come off the header, not out of the rows: the queue is paged
+    // now, and a sum over the page is not a fact about the queue. The
+    // daemon accumulates both on the walk that visits every job.
+    const totLeft=parseFloat(q.mbleft)||0;
     // Bytes the current rate will actually work through. A paused item -
     // and a duplicate held at Duplicate priority is paused - contributes
     // size but never time, so counting it inflated the header ETA past
     // the last row's own figure. renderQueue() already filters this way
-    // for the per-row ETAs; the two must not disagree.
-    const runLeft=q.slots.reduce((a,s)=>a+
-      (s.status==='Downloading'||s.status==='Queued'?(parseFloat(s.mbleft)||0):0),0);
+    // for the per-row ETAs; the two must not disagree - which is why
+    // `mbleft_runnable` is summed with exactly that filter daemon-side.
+    const runLeft=parseFloat(q.mbleft_runnable)||0;
     // Burn-down samples only while downloading; a drained queue resets it.
     burnLive = q.slots.some(s=>s.status==='Downloading');
     // MiB, as `mbleft` arrives; the caption formats them. drawArea
     // normalises to the series' own max, so the magnitude is free to be
     // the honest one.
     if(burnLive) push(burnHist, totLeft);
-    else if(!q.slots.length) burnHist.length=0;
+    else if(!qCount(q)) burnHist.length=0;
     if(REDUCED) drawBurn(0);
     document.title = (mbps>0 && !paused) ? `${fmtRate(mbps)} · nzbfast`
-      : (q.slots.length? 'nzbfast · '+(paused?t('status.paused','paused')
+      : (qCount(q)? 'nzbfast · '+(paused?t('status.paused','paused')
         : tailNow?tStatus(tailNow.status):t('status.idle','idle')) : 'nzbfast');
 
-    const act=q.slots.find(s=>s.status==='Downloading')||q.slots[0];
+    // The job this card is ABOUT: whatever is downloading, else whatever
+    // is in its post-network tail, else the next row that could actually
+    // start.
+    //
+    // It used to fall back to `q.slots[0]` - the first row, whatever it
+    // was. A queue whose head is held or paused therefore named, under a
+    // live speed trace, a job that was not running and would not start
+    // on its own; a tester watched a held duplicate sit there for days
+    // reading "0% · - left", which is what this panel prints when there
+    // is no rate to divide by. The header's own `runLeft` a few lines up
+    // already draws exactly this line ("a paused item - and a duplicate
+    // held at Duplicate priority is paused - contributes size but never
+    // time"), and the two must not disagree. The queue card still lists
+    // the row, with the ⏫ that releases it; this card is about work in
+    // progress.
+    const act=q.slots.find(s=>s.status==='Downloading')
+      ||q.slots.find(s=>isTail(s))
+      ||q.slots.find(s=>s.status==='Queued');
     if(act){
       const left=parseFloat(act.mbleft)||0, eta=mbps>0?left/mbps:Infinity;
       setHtml('active',
@@ -5815,10 +5936,19 @@ async function tick(){
              : t('shape.title','What this download turned out to be.');
            return `<div class="${why.length?'warn':'dim'}" style="margin-top:5px;font-size:12.5px" title="${escA(tip)}">${why.length?'⚠ ':''}${esc(facts)}</div>`;
          })()}`);
+    } else if(qCount(q)){
+      // Items, but not one of them can start. "idle · drop a .nzb here"
+      // over three held rows is the same untruth from the other side,
+      // and it hides the one thing worth saying: the queue is not
+      // empty, it is blocked, and the rows below say on what.
+      setHtml('active',`<span class="dim">${
+        tn('queue.nonerunning',qCount(q),
+           'nothing running · {n} item held or paused',
+           'nothing running · {n} items held or paused')}</span>`);
     } else setHtml('active',`<button type="button" class="dim idlepick" title="${escA(t('queue.idle.drop.tip','drop it anywhere on this page, or click to choose a file'))}">${t('queue.idle.drop2','idle · drop a .nzb here')}</button>`);
 
-    document.getElementById('qcount').textContent=q.slots.length
-      ?`${tn('queue.count',q.slots.length,'{n} item','{n} items')}${runLeft>0&&mbps>0?` · ${t('queue.timeleft','{t} left',{t:fmtEta(runLeft/mbps)})}`:''}`:'';
+    document.getElementById('qcount').textContent=qCount(q)
+      ?`${tn('queue.count',qCount(q),'{n} item','{n} items')}${runLeft>0&&mbps>0?` · ${t('queue.timeleft','{t} left',{t:fmtEta(runLeft/mbps)})}`:''}`:'';
     lastQ=q; lastStats=st; lastMbps=mbps;
     // Per-job server contribution baseline: snapshot the cumulative
     // per-server byte counters when a job goes active; the drawer shows
@@ -5827,7 +5957,10 @@ async function tick(){
     if(actDl && jobBase.id!==actDl.nzo_id)
       jobBase={id:actDl.nzo_id, bytes:Object.fromEntries((st.servers||[]).map(sv=>[sv.host,sv.bytes||0]))};
     if(!actDl) jobBase={id:null,bytes:{}};
-    if(openDrawer && !q.slots.some(s=>s.nzo_id===openDrawer)) openDrawer=null;
+    // A row missing from a PAGE has not left the queue - only close the
+    // drawer when the payload could have contained it.
+    if(openDrawer && !qTruncated(q) && !q.slots.some(s=>s.nzo_id===openDrawer))
+      openDrawer=null;
     renderQueue();
     // Open history drawers on disk-full failures show LIVE free space:
     // re-render just those spans from the fresh diskspace1 so the
@@ -5962,7 +6095,7 @@ async function tick(){
     const failed=c.failed||0;
     renderHistory(h.slots);
 
-    pipeline(st,mbps,q.slots.length,done,failed);
+    pipeline(st,mbps,qCount(q),done,failed);
   }catch(e){
     // An unreachable daemon's last-known chips would be a claim about
     // work nobody can verify - clear them with the pill.
@@ -6087,7 +6220,7 @@ function healthDetail(h){
     <span class="dim">${esc(healthTip(h))}</span>`+
     (per?`<div class="dsrv">${per}</div>`:'')+
     (h.sunk?`<div class="dim" style="margin-top:4px">${t('drawer.health.sunk','Waiting behind items of the same priority that checked out better. Raise its priority or drag it up to run it now.')}</div>`:'')+
-    `<div class="dim" style="margin-top:4px">${t('drawer.health.hint','Advisory only. A post that was uploaded moments ago looks exactly like one that is gone, so nzbfast never blocks, pauses or fails a job because of this check.')}</div>`+
+    `<div class="dim" style="margin-top:4px">${t('drawer.health.hint','Advisory only. A post that was uploaded moments ago looks exactly like one that is gone, so nzbfast never blocks, pauses or fails a job because of this check. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches.')}</div>`+
     `</div>`;
 }
 function healthBadge(h){
@@ -6284,8 +6417,40 @@ function histWhen(s, full){
         : {day:'numeric',month:'short',year:'numeric'});
   return d.toLocaleString(LOCALE,o);
 }
+// Failure-driven diversity nudge (see the #divNudge comment in the
+// markup). "missing" is the daemon's own fail_kind classification:
+// every server that has the post said 430, which is exactly the failure
+// a second backbone would have rescued. Judged over the last 10 failed
+// rows: 3 of them missing is a pattern, one is weather. A dismissal
+// stamps the newest such failure's time, and the threshold then only
+// counts failures NEWER than the stamp - so the note stays gone until
+// the pattern genuinely repeats. Only recomputed when the current
+// filter actually lists failed rows; a view filtered to Completed says
+// nothing either way, so the note keeps its last state there.
+function renderDivNudge(){
+  const el=document.getElementById('divNudge'); if(!el) return;
+  const f=histFilter();
+  if(f!=='all'&&f!=='failed') return;
+  const failed=(lastHistSlots||[]).filter(s=>s.status!=='Completed'&&s.fail_kind).slice(0,10);
+  const upto=+localStorage.divNudgeUpto||0;
+  const miss=failed.filter(s=>s.fail_kind==='missing'&&(s.completed||0)>upto);
+  const show=miss.length>=3;
+  el.style.display=show?'':'none';
+  if(!show){ el.innerHTML=''; return; }
+  setHtml(el,`💡 ${
+    t('hist.divnudge','{n} of your last {m} failed downloads were missing articles on every server you have. Servers on the same backbone miss the same articles: the server diversity check shows whether yours overlap, and a server on a different backbone fills the gap.',{n:miss.length,m:failed.length})
+    } <a href="#" onclick="return goSetting('diversity')">${t('hist.divnudge.check','Check server diversity')}</a> · <a href="#" onclick="return dismissDivNudge()">${t('hist.divnudge.dismiss','dismiss')}</a>`);
+}
+function dismissDivNudge(){
+  const miss=(lastHistSlots||[]).filter(s=>s.status!=='Completed'&&s.fail_kind==='missing');
+  localStorage.divNudgeUpto=String(Math.max(+localStorage.divNudgeUpto||0,
+    Math.floor(Date.now()/1000), ...miss.map(s=>s.completed||0)));
+  document.getElementById('divNudge').style.display='none';
+  return false;
+}
 function renderHistory(slots){
   if(slots) lastHistSlots=slots;
+  renderDivNudge();
   const cur=histFilter();
   // §129 1a: the daemon filters, searches and windows at the store, and
   // sends the facet counts with the page - the chips no longer need the
@@ -6369,7 +6534,7 @@ function renderHistory(slots){
         // because touch has no right-click and four of these actions
         // (play, show in folder, change category, delete files) had no
         // other route at all.
-        `<button class="ghost mini" aria-haspopup="menu" title="${escA(t('hist.more.title','More: play, show in folder, change category, remove with files'))}" aria-label="${escA(t('hist.more.title','More: play, show in folder, change category, remove with files'))}" onclick="event.stopPropagation();histMenu(event,'${s.nzo_id}',${retryable})">⋯</button>`;
+        `<button class="ghost mini" aria-haspopup="menu" title="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" aria-label="${escA(t('hist.more.title','More: play, show in folder, change category, create report, remove with files'))}" onclick="event.stopPropagation();histMenu(event,'${s.nzo_id}',${retryable})">⋯</button>`;
       if(actSamples[actSig]===undefined) actSamples[actSig]=ctl;
       // The sub-line under the size: when it finished, then how long it
       // took and how fast. The when carries its full stamp on hover -
@@ -7935,14 +8100,10 @@ function renderSearch(){
     ||`<tr><td colspan="5" class="dim">${searchResults.length?t('browse.nomatchq','no matches at that quality: clear the quality filter to see the rest'):t('browse.nomatch','no matches in the index yet: it grows as background scanning continues (status above)')}</td></tr>`;
 }
 // Browse-card status: what the index holds and whether it's growing.
-let idxQuick=null;
-async function refreshIdxStatus(){
-  // Nothing to report and nothing on screen to report it on: the Browse
-  // card is hidden. Skipping the poll is the point - a switched-off
-  // indexer should not be answering a status request every minute.
-  if(!IDX_ON) return;
-  try{
-    const s=await api('index_stats');
+// N7: a renderer now - the fetch (and the quick re-poll while a scan
+// runs) lives in pollIdxStats, shared with the header pill.
+function renderIdxStatus(s){
+  {
     const el=document.getElementById('idxStatus');
     if(!(s.groups||[]).length){
       el.innerHTML=t('idx.off','Indexing is <b>off</b>. Nothing is being scanned.')+' '+
@@ -7976,12 +8137,7 @@ async function refreshIdxStatus(){
             :`<button class="ghost mini" onclick="scanNow(this)">${t('set.idx.scannow.btn','Scan now')}</button>`
           } <button class="ghost mini" onclick="setIdxPaused(this,1)">${t('idx.pause','Pause indexing')}</button>`);
     }
-    // Poll fast while a scan runs so the header count visibly moves -
-    // and while the stats are cold, so "still reading" resolves into
-    // real figures as soon as the daemon can answer.
-    clearTimeout(idxQuick); idxQuick=null;
-    if(s.scanning||s.stats_cold) idxQuick=setTimeout(refreshIdxStatus, 2000);
-  }catch(e){}
+  }
 }
 // The master switch. Unlike every other setting on the page this one
 // changes what the page IS - which nav pills exist, which cards exist,
@@ -8028,19 +8184,18 @@ async function setIdxPaused(btn,on){
     await api('config',`&name=index_paused&value=${on?1:0}`);
     toast(on?t('toast.idxpaused','Indexing paused. It stays off until you resume it.')
             :t('toast.idxresumed','Indexing resumed.'));
-    setTimeout(refreshIdxStatus, 400);
+    setTimeout(pollIdxStats, 400);
   });
 }
 async function scanNow(btn,depth){ await busy(btn,t('busy.starting','Starting…'), async()=>{
   await api('index_scan_now', depth?`&value=${depth}`:'');
   toast(depth?t('toast.deepscan','Deep scan of the last {n} headers started.',{n:(+depth).toLocaleString(LOCALE)}):t('toast.scan','Scan started.'));
-  setTimeout(refreshIdxStatus, 700);
+  setTimeout(pollIdxStats, 700);
 }); }
 // There used to be a one-click "Start indexing TV & movies" here, which
 // subscribed two groups the user never named. Whatever gets indexed is
 // now chosen in ⚙ settings → Indexing and nowhere else, so there is no
 // path where nzbfast picks a topic on someone's behalf.
-refreshIdxStatus(); setInterval(refreshIdxStatus, 60_000);
 async function grab(id,btn){ await busy(btn,t('busy.getting','Getting…'), async()=>{ await api('index_get',`&id=${id}`); tick(); toast(t('toast.queued','Added to the queue.')); }); }
 
 // "What is happening right now" sub-line under the active row's progress
@@ -8074,6 +8229,16 @@ function actLine(s){
     // says the download itself is over. Front-loaded so the actline's
     // ellipsis keeps the part that matters.
     case 'finalizing':return t('queue.act.tailwrite','writing the last files to your folder - the download itself is done');
+    // The daemon's own tail, stage by stage (serve/daemon.rs
+    // note_tail_stage). These used to be indistinguishable from
+    // unpacking, because the pipeline's last token was "extracting" and
+    // nothing overwrote it before the row left the queue - so a tail
+    // that took minutes read as an unpack that never ended. Each
+    // sentence is front-loaded: the line ellipsizes to the column.
+    case 'unlocking':return t('queue.act.unlocking','trying saved passwords to unpack this');
+    case 'identifying':return t('queue.act.identifying','looking up what this release is');
+    case 'renaming':return t('queue.act.renaming','tidying up and naming the files');
+    case 'scripting':return t('queue.act.scripting','running your post-processing script');
   }
   return '';
 }
@@ -8112,9 +8277,40 @@ function whyPhrase(w){
     // that are not there, and a miss costs a round trip and returns no
     // bytes. Without this the same evidence read as a shaped provider,
     // and the verdict named a host that was doing nothing wrong.
-    case 'missing':return t('diag.layer.missing','much of this post is missing, so the requests come back empty');
+    // ...and WHICH of the two situations that produce this identical
+    // picture, when the evidence licenses saying. A release grabbed the
+    // hour it pre'd 430s everywhere while the backbones fill in, and a
+    // taken-down one 430s everywhere forever; the reader's move is
+    // opposite in the two cases, and one sentence covering both told
+    // Gary neither. The daemon decides (serve/whyslow.rs missing_case)
+    // and only ever sends a token, so the claim and its bar live in one
+    // place and this stays a sentence.
+    case 'missing':{
+      const age=+w.post_unix>0?Math.max(0,Date.now()/1000-w.post_unix):0;
+      // The timeline replays past verdicts and carries no date with
+      // them, so each arm has a dateless form of the same claim.
+      if(d==='young') return age
+        ?t('diag.layer.missing.young.age','much of this post has not reached your providers yet - it was posted only {a} ago, so waiting may still finish it',{a:postAge(age)})
+        :t('diag.layer.missing.young','much of this post has not reached your providers yet - it was posted very recently, so waiting may still finish it');
+      if(d==='gone') return t('diag.layer.missing.gone','much of this post is missing on more than one provider and is too old to still be arriving - waiting will not help');
+      return t('diag.layer.missing','much of this post is missing, so the requests come back empty');
+    }
   }
   return t('diag.layer.unknown','still gathering evidence');
+}
+// A post's age for the sentences above. Coarse on purpose: the claim it
+// supports is "hours, not days" or the reverse, and a figure that
+// churned every second would read as precision this does not have.
+function postAge(secs){
+  // The counts are hoisted, not inlined: extract.js scrapes tn() with a
+  // COMMA-FREE count expression, so `Math.max(1,...)` inline would have
+  // dropped diag.age.min.one/.many out of every catalogue silently.
+  const mins=Math.max(1,Math.floor(secs/60));
+  if(secs<3600) return tn('diag.age.min',mins,'{n} minute','{n} minutes');
+  const hours=Math.round(secs/3600);
+  if(secs<48*3600) return tn('diag.age.hour',hours,'{n} hour','{n} hours');
+  const days=Math.round(secs/86400);
+  return tn('diag.age.day',days,'{n} day','{n} days');
 }
 // The panel itself: the verdict WITH its receipts. The three-layer gap
 // (line ceiling / what the providers delivered / right now), the
@@ -8165,7 +8361,19 @@ function whyslowBlock(s){
       // has stopped, which is the difference between this and the pause.
       +w.storage_probe_ms>0?` · ${esc(t('diag.receipts.disk',
         'a test write to the download folder took {s} s; the queue is still running',
-        {s:num(w.storage_probe_ms/1000,1)}))}`:''}</div>
+        {s:num(w.storage_probe_ms/1000,1)}))}`:''}${
+      // Same rule for the post verdict, and it matters more here: the
+      // "gone" sentence invites the reader to abandon a job. It ships
+      // the miss rate that opened the case, the post's own date, and
+      // how many UNRELATED upstreams are seeing the same gaps - five
+      // resellers of one backbone being one opinion, never five.
+      w.layer==='missing'?` · ${esc(t('diag.receipts.missing',
+        '{p}% of the articles asked for came back empty',
+        {p:num(+w.missing_pct||0,1)}))}${
+        +w.post_unix>0?` · ${esc(t('diag.receipts.posted','posted {a} ago',
+          {a:postAge(Math.max(0,Date.now()/1000-w.post_unix))}))}`:''}${
+        +w.missing_backbones>1?` · ${esc(t('diag.receipts.backbones',
+          '{n} unrelated providers report the same gaps',{n:w.missing_backbones}))}`:''}`:''}</div>
   </div>`;
 }
 // §156 8(d): which scheduler hold is worth drawing. The banner answers
@@ -8183,7 +8391,7 @@ function whyslowBlock(s){
 // explains it.
 function visibleHold(q){
   const h=q&&q.hold;
-  if(h&&h.kind==='noservers'&&!((q.slots||[]).length)) return null;
+  if(h&&h.kind==='noservers'&&!qCount(q)) return null;
   return h||null;
 }
 // Queue table renderer (runs each tick AND on drawer toggles). The
@@ -8204,19 +8412,19 @@ function renderQueue(){
   // work to do. Above the drag guard with the numbers - a row leaving
   // mid-drag must not leave a button offering to clear nothing.
   const qc=document.getElementById('qClear');
-  if(qc) qc.style.display=slots.length?'':'none';
+  if(qc) qc.style.display=qCount(lastQ)?'':'none';
   const qf=document.getElementById('qfree');
   if(qf){
     qf.textContent=lastQ?t('queue.free','{gb} GB free',{gb:freeGB.toFixed(1)}):'';
     qf.title=t('queue.free.title','Free space on the download disk.');
   }
-  let needBytes=0;
-  for(const s of slots){
-    if(s.status==='Completed') continue;
-    const left=(parseFloat(s.mbleft)||0)*1048576;
-    const twoPass=/(^|\s)(on-disk|mixed-pass|unlock-at-end)(\s|$)/.test(s.archive_shape||'');
-    needBytes+=left+(twoPass?(parseFloat(s.mb)||0)*1048576:0);
-  }
+  // The queue-wide forecast comes off the header now. It used to be
+  // summed here over every slot, which a PAGE cannot do - and the
+  // banner below names a figure ("this queue needs about N GB"), so a
+  // sum over 250 of 15,000 rows would have been a wrong number, not a
+  // cautious one. The daemon sums it on its own walk, per row, with the
+  // same arithmetic each row's amber space chip uses.
+  const needBytes=(lastQ&&+lastQ.space_need_bytes)||0;
   const qs=document.getElementById('qspace');
   if(qs){
     const hold=visibleHold(lastQ);
@@ -8287,8 +8495,10 @@ function renderQueue(){
   if(qDragging||document.querySelector('#queue tbody select:focus, #queue tbody input:focus, #qselbar :focus')) return;
   // §129 2f: selection tracks the queue - a row that left (finished,
   // deleted elsewhere) leaves the Set too, so a later bulk op cannot
-  // act on ids the user can no longer see.
-  for(const id of [...qSel]) if(!slots.some(s=>s.nzo_id===id)) qSel.delete(id);
+  // act on ids the user can no longer see. And only when this page
+  // could have contained it - a row past the window has not left.
+  if(!qTruncated(lastQ))
+    for(const id of [...qSel]) if(!slots.some(s=>s.nzo_id===id)) qSel.delete(id);
   // Cumulative ETA: each item finishes once everything downloading BEFORE
   // it has drained the line. Download order is NOT visual row order -
   // pick_job runs Force/High first, then queue order within a priority,
@@ -8414,6 +8624,15 @@ function renderQueue(){
       escA(t('queue.empty.nzblnk','An nzblnk link works too: paste it anywhere on this page.'))}">${
       t('queue.empty.drop','Nothing downloading. Drop a .nzb anywhere, or click here to choose one.')}</button></td></tr>`);
   updateSelBar('q');
+  // Say what is being withheld rather than just stopping - a
+  // queue that ends silently at 250 of 15,000 reads as lost downloads.
+  // Same pager as history's, and for the same reason: the window is a
+  // real request to the daemon, which builds only the rows inside it.
+  const qmore=qCount(lastQ)-slots.length;
+  setHtml('queueMore', qmore>0
+    ? `<button class="ghost mini" onclick="qShowMore()">${esc(
+        t('queue.more','show {n} more of {total}',{n:Math.min(QUEUE_PAGE,qmore),total:qCount(lastQ)}))}</button>`
+    : '');
   restoreKbdFocus();
 }
 // Detail drawer body: live per-file progress + verify + per-server
@@ -9588,7 +9807,7 @@ async function saveInterests(box){
     await loadInterests();
     const c=(await api('get_config')).config.nzbfast;
     put('s_index_groups',(c.index_groups||[]).join(', '));
-    refreshIdxStatus();
+    pollIdxStats();
     toast(keys.length?t('toast.wantSaved','Saved. Indexing what you picked.')
                      :t('toast.wantNone','Saved. Nothing is being indexed.'));
   }finally{ box.disabled=false; }
@@ -9620,7 +9839,10 @@ async function watchCheckNow(btn){ await busy(btn,t('busy.checking','Checking…
   toast(t('toast.wlCheck','Watchlist check started.'));
   setTimeout(refreshWatchStatus, 2500);
 }); }
-loadWatchlist(); refreshWatchStatus(); setInterval(refreshWatchStatus, 15_000);
+// N7: hidden tabs skip the poll; the shared visibilitychange catch-up
+// (beside refreshUsage) fires the moment the tab is looked at again.
+loadWatchlist(); refreshWatchStatus();
+setInterval(()=>{ if(!document.hidden) refreshWatchStatus(); }, 15_000);
 
 // Per-download controls (SAB-compatible queue/history ops).
 async function qOp(name,id){
@@ -9657,7 +9879,9 @@ async function stopJob(id){
 // the user reading "cleared" over a queue with rows still in it.
 async function clearQueue(btn){
   const slots=(lastQ&&lastQ.slots)||[];
-  if(!slots.length) return;
+  if(!qCount(lastQ)) return;
+  // Live rows ride every page (`pin_live`), so this reads true off a
+  // paged queue exactly as it did off a whole one.
   const busyRow=slots.some(s=>s.status==='Downloading'||isTail(s));
   if(!confirm((busyRow?t('confirm.qclear.active','This stops the download in progress, and anything still repairing or unpacking.')+'\n\n':'')
       +t('confirm.qclear','Remove everything from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk, and adding the same NZB again picks up from there - but that needs your own copy of the .nzb file, because the queue\'s copy goes with the row.\n\nNothing is filed to history, and this cannot be undone.'))) return;
@@ -9918,6 +10142,49 @@ async function delWatchFailed(ref){
   if(j && j.status===false) toast(tErr(j.error)||t('toast.wfDelFail',"couldn't delete it"));
   else { toast(t('toast.wfDeleted','Deleted from the watch folder.')); tick(); }
 }
+// "Create report" (Gary, 19 Aug): everything about ONE download as
+// shareable text - its facts, its providers, the NZB's shape and its own
+// log lines, without handing over the daemon's whole log. Assembled by
+// the daemon (serve/report.rs), which is the only place that can slice a
+// job's own span out of the log ring.
+//
+// Straight to the clipboard: the point is pasting it somewhere. The
+// fallback matters more than usual here - plain-HTTP origins and
+// embedded webviews refuse clipboard writes, and this is exactly the
+// user who is already having a bad time - so a refusal opens the text
+// selected instead of failing.
+// Text the user needs and the clipboard would not take. Selectable, and
+// selected on open, so "copy it by hand" is one keystroke rather than a
+// drag across a scroller.
+function showTextBox(title, text, note){
+  document.getElementById('textbox')?.remove();
+  const box=document.createElement('div');
+  box.id='textbox'; box.setAttribute('role','dialog'); box.setAttribute('aria-label',title);
+  const pre=document.createElement('pre'); pre.textContent=text;
+  const head=document.createElement('div');
+  head.innerHTML=`<strong>${esc(title)}</strong><div class="dim">${esc(note||'')}</div>`;
+  const close=document.createElement('button');
+  close.className='ghost'; close.type='button';
+  close.textContent=t('rep.close','Close');
+  close.onclick=()=>box.remove();
+  box.append(head, pre, close);
+  document.body.appendChild(box);
+  getSelection()?.selectAllChildren(pre);
+  close.focus();
+}
+
+async function jobReport(id){
+  const j = await api('report',`&value=${encodeURIComponent(id)}`);
+  if(!j||!j.status||!j.report){ toast(t('rep.none','That download is no longer in the queue or history.'), true); return; }
+  try{
+    await navigator.clipboard.writeText(j.report);
+    toast(t('rep.copied','Report copied. Paste it into your bug report.'));
+  }catch{
+    showTextBox(t('rep.title','Download report'), j.report,
+      t('rep.manual','Could not reach the clipboard - select the text and copy it by hand.'));
+  }
+}
+
 async function delHist(id){
   await api('history',`&name=delete&value=${id}`);
   toast(t('toast.histRemoved','History entry removed.'));
@@ -10812,7 +11079,7 @@ function histMenu(e, id, failed){
   e.preventDefault(); closeMenu();
   const m=document.createElement('div'); m.id='ctxmenu';
   m.setAttribute('role','menu');
-  m.setAttribute('aria-label',t('hist.more.title','More: play, show in folder, change category, remove with files'));
+  m.setAttribute('aria-label',t('hist.more.title','More: play, show in folder, change category, create report, remove with files'));
   const it=(attrs,body)=>`<button type="button" role="menuitem" ${attrs}>${body}</button>`;
   m.innerHTML=
     // "Test" for what is plainly Play: one action had two names across
@@ -10821,6 +11088,7 @@ function histMenu(e, id, failed){
     it(`onclick="openItem('${id}','folder')"`,`📂&nbsp; ${t('menu.showfolder','Show in folder')}`)+
     it(`onclick="changeCat('${id}')"`,`🗂&nbsp; ${t('menu.changecat','Change category…')}`)+
     (failed?it(`onclick="retryJob('${id}')"`,`↻&nbsp; ${t('menu.retry','Retry download')}`):'')+
+    it(`onclick="jobReport('${id}')"`,`🧾&nbsp; ${t('menu.report','Create report')}`)+
     `<hr>`+it(`onclick="delHist('${id}')"`,`✕&nbsp; ${t('menu.remove','Remove from history')}`)+
     it(`class="danger" onclick="delHistFiles('${id}')"`,`🗑&nbsp; ${t('menu.removefiles','Remove and delete files…')}`);
   document.body.appendChild(m);
@@ -11096,7 +11364,16 @@ function drawUsageBars(days, hosts){
   });
   ctx.textAlign='left';
 }
-refreshUsage(); setInterval(refreshUsage, 60_000);
+refreshUsage(); setInterval(()=>{ if(!document.hidden) refreshUsage(); }, 60_000);
+// N7: the side-pollers above (index stats, watchlist status, usage) all
+// skip their ticks while the tab is hidden - a forgotten background tab
+// used to keep every one of them running forever. One catch-up brings
+// them all current the moment the tab is visible again (the main tick
+// has its own identical listener).
+addEventListener('visibilitychange', ()=>{
+  if(document.hidden) return;
+  pollIdxStats(); refreshWatchStatus(); refreshUsage();
+});
 
 // Score a measured peak against the configured Line speed. The ladder
 // deliberately measures PAST it (a link is often faster than the number
@@ -11968,6 +12245,16 @@ let updVersion='';
 // (duplicate)" simply stopped saying so.
 let qHeld=null;
 function sndQueueEvents(q){
+  // The arrival cue compares this poll's ids with the last poll's,
+  // and a PAGED queue makes that comparison meaningless - "show more"
+  // would announce 250 new downloads, and a row falling off the end of
+  // the window is not a row that left the queue. So while the page is
+  // short of the queue, the arrival and drained cues sit out, and
+  // `qSeen` re-primes rather than banking a set it cannot trust. The
+  // pause and update cues are header facts and keep working; the
+  // duplicate-promotion cue only ever fires on rows this page held last
+  // poll, so it is safe either way.
+  const partial=qTruncated(q);
   const ids=new Set(q.slots.map(s=>s.nzo_id));
   const held=new Set(q.slots.filter(s=>s.priority==='Duplicate').map(s=>s.nzo_id));
   if(qHeld!==null){
@@ -11979,7 +12266,7 @@ function sndQueueEvents(q){
   }
   qHeld=held;
   if(qSeen!==null){
-    const added=q.slots.filter(s=>!qSeen.has(s.nzo_id));
+    const added=partial?[]:q.slots.filter(s=>!qSeen.has(s.nzo_id));
     if(added.length){
       snd('added');
       say('added', added.length===1?t('say.added','Download added: {name}.',{name:sayShort(added[0].filename||added[0].name)})
@@ -11987,7 +12274,7 @@ function sndQueueEvents(q){
     }
     // Queue just drained, and something actually completed moments ago -
     // that's "all done", not the user deleting the last item.
-    if(qSeen.size>0 && ids.size===0 && performance.now()-lastCompleteAt<5000){
+    if(qSeen.size>0 && qCount(q)===0 && performance.now()-lastCompleteAt<5000){
       snd('alldone'); say('alldone',t('say.alldone','All downloads finished.'));
     }
     if(prevPaused2!==null && q.paused!==prevPaused2){
@@ -11999,7 +12286,7 @@ function sndQueueEvents(q){
       say('update', t('say.update','nzbfast version {v} is available.',{v:q.update_version}));
     }
   }
-  qSeen=ids; prevPaused2=q.paused;
+  qSeen=partial?null:ids; prevPaused2=q.paused;
 }
 addEventListener('pointerdown', e=>{
   const el=e.target.closest('button,select,a,[onclick],input[type=checkbox]');
@@ -12870,6 +13157,45 @@ function savePrefQuality(){
     acodec:g('s_pq_acodec'), vcodec:g('s_pq_vcodec'),
   }));
 }
+// Issue #45: the History cleanup card.
+//
+// The daemon has two independent retention rules - `history_keep_secs`
+// (age, from `finished_unix`) and `history_keep_count` - and 0 means
+// "this rule is off" in both. That makes "cleanup is off" a state with
+// no control of its own, which is why the checkbox is here: it is a
+// disclosure plus a big red OFF, not a third setting. Checking it
+// reveals the rules and writes NOTHING - a box that started deleting
+// history the moment it was ticked would be a nasty surprise on a
+// control whose effect cannot be undone. Unchecking it writes 0 to both,
+// which is the safe direction and needs no confirmation.
+//
+// Its state is remembered per browser so the rows stay open while the
+// user is still deciding what to type into them; the daemon's own values
+// re-derive it on any other device.
+function histCleanRows(on){
+  ['histAgeRow','histCountRow'].forEach(id=>{
+    const r=document.getElementById(id);
+    if(r) r.style.display=on?'':'none';
+  });
+}
+function histCleanToggle(on){
+  try{ localStorage.nzbfastHistClean=on?'1':'0'; }catch(e){}
+  histCleanRows(on);
+  if(on) return;
+  setCfg('history_keep_secs','0'); setCfg('history_keep_count','0');
+  const a=document.getElementById('s_hist_age'), c=document.getElementById('s_hist_count');
+  if(a) a.value=0;
+  if(c) c.value=0;
+}
+// Seconds is what the daemon stores (the unit `finished_unix` is in);
+// the unit select is presentation only, so the multiply happens here.
+function setHistAge(){
+  const n=document.getElementById('s_hist_age'), u=document.getElementById('s_hist_age_unit');
+  if(!n||!u) return;
+  const v=Math.max(0,Math.floor(Number(n.value)||0));
+  setCfg('history_keep_secs',String(v*(Number(u.value)||60)));
+}
+
 async function setCfg(name, value){
   // Bootstrapping the first API key while only the NZB key is set: the config
   // write is authorized by the NZB key (or loopback) via the daemon's
@@ -13415,6 +13741,35 @@ async function loadSettings(){
   const hr=document.getElementById('s_history_rows');
   if(hr && document.activeElement!==hr && c.history_rows) hr.value=c.history_rows;
   if(typeof c.history_rows==='number' && c.history_rows!==HIST_ROWS){ HIST_ROWS=c.history_rows; renderHistory(); }
+  // Issue #45 History cleanup. Every read is guarded and every value is
+  // coerced: loadSettings has no try/catch, so one throw here would
+  // leave every card BELOW this one unpopulated (which is how a blank
+  // Settings page shipped in the 1.1.5 betas). An older daemon reports
+  // neither key, and Number(undefined)||0 is the right answer for both.
+  const hSecs=Math.max(0,Number(c.history_keep_secs)||0);
+  const hCount=Math.max(0,Number(c.history_keep_count)||0);
+  const hAge=document.getElementById('s_hist_age');
+  const hUnit=document.getElementById('s_hist_age_unit');
+  if(hAge&&hUnit&&document.activeElement!==hAge&&document.activeElement!==hUnit){
+    // Show the largest unit the stored seconds divide into evenly, so
+    // 30 days reads as "30 days" and 20 minutes as "20 minutes". A
+    // stored 0 leaves the unit alone - there is no unit to infer, and
+    // snapping the select back to minutes under someone who had just
+    // picked days would look like the page fighting them.
+    if(hSecs>0){
+      const unit=hSecs%86400===0?86400:hSecs%3600===0?3600:60;
+      hUnit.value=String(unit);
+      hAge.value=Math.round(hSecs/unit);
+    } else hAge.value=0;
+  }
+  const hCnt=document.getElementById('s_hist_count');
+  if(hCnt&&document.activeElement!==hCnt) hCnt.value=hCount;
+  const hClean=document.getElementById('s_hist_clean');
+  let hStick=false;
+  try{ hStick=localStorage.nzbfastHistClean==='1'; }catch(e){}
+  const hOn=hSecs>0||hCount>0||hStick;
+  if(hClean&&document.activeElement!==hClean) hClean.checked=hOn;
+  histCleanRows(hOn);
   const hc=document.getElementById('s_history_color_names');
   if(hc) hc.checked=c.history_color_names!==false;
   applyHistColor(c.history_color_names!==false);
@@ -14337,6 +14692,31 @@ function renderServers(){
       <button class="ghost" onclick="editServer(${i})">${t('set.srv.edit','Edit')}</button>
       <button class="ghost" onclick="delServer(${i},this)">${t('set.srv.remove','Remove')}</button>
     </div>`;}).join('')||`<div class="dim">${t('set.srv.none','no servers configured: add your provider below')}</div>`;
+  document.getElementById('srvlist').insertAdjacentHTML('beforeend', backboneHints());
+}
+// Zero-network duplication advice: two enabled servers whose hosts
+// resolve to the same backbone (the daemon computes it from the oracle's
+// alias map) are one network under two brands. A 430 on one means the
+// others almost never have the article, so they do not back each other
+// up - say so at render time instead of waiting for the click-to-run
+// diversity probe to prove it with traffic. Skipped when the user has
+// already told us ("Provider network" group set the same on all of
+// them), and passive: a dim note, no badge, no toast.
+function backboneHints(){
+  const by={};
+  srvList.filter(s=>s.enabled!==false&&s.backbone).forEach(s=>{(by[s.backbone]=by[s.backbone]||[]).push(s);});
+  return Object.entries(by).filter(([,l])=>{
+    if(l.length<2) return false;
+    const g=l[0].group;
+    return !(g&&l.every(s=>s.group===g));
+  }).map(([bb,l])=>{
+    const hosts=l.map(s=>esc(s.host)).join(', ');
+    return `<div class="hint" style="margin-top:8px;display:block">💡 ${
+      t('set.srv.samebb','{hosts} look like the same network under different brands ({bb}). When one of them is missing an article, the others almost never have it, so they do not back each other up.',{hosts,bb:esc(bb)})} ${
+      t('set.srv.samebb.group','If that is what you want, give them the same Provider network name so they are treated as one source.')} ${
+      t('set.srv.samebb.cover','For real coverage, add a server on a different backbone: a subscription or a small block account both work.')} <a href="#" onclick="return goSetting('diversity')">${
+      t('set.srv.samebb.link','Check server diversity')}</a></div>`;
+  }).join('');
 }
 // Per-row connectivity test: connect + authenticate to a saved server and
 // show latency + the server's greeting. _testSrv is shared so "Test all"
@@ -14392,9 +14772,24 @@ async function toggleServer(i,on,box){
 }
 // M19: import servers from SABnzbd / NZBGet configs found on this machine.
 async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…'), async()=>{
-  const j=await api('import_probe');
-  const cands=j.candidates||[];
-  if(!cands.length){ toast(t('toast.noimport','No SABnzbd or NZBGet configuration found on this machine.'), true); return; }
+  let j=await api('import_probe');
+  let cands=j.candidates||[];
+  if(!cands.length){
+    // #46: the scan only knows the stock install locations. When it comes
+    // up empty the config may still exist somewhere else (Docker volume,
+    // portable install), so offer a typed path before giving up - the
+    // probe endpoint has taken one all along.
+    const p=prompt(t('prompt.importpath','No SABnzbd or NZBGet configuration found in the usual places.\n\nIf yours is somewhere else, paste the full path to the sabnzbd.ini or nzbget.conf file:'),'');
+    if(p===null||!p.trim()) return;
+    j=await api('import_probe',`&value=${encodeURIComponent(p.trim())}`);
+    cands=j.candidates||[];
+    if(!cands.length){
+      toast(j.miss==='no_servers'
+        ? t('toast.import.noservers','Read that file, but there are no servers in it.')
+        : t('toast.import.nofile','No readable file at that path.'), true);
+      return;
+    }
+  }
   let imported=0;
   for(const c of cands){
     const names=c.servers.map(s=>s.host).join(', ');
@@ -14451,6 +14846,14 @@ function editServer(i){
   put('sv_conns',s.connections||100); put('sv_level',s.level||0);
   document.getElementById('sv_pin').checked=!!s.pin_connections;
   put('sv_group',s.group||''); put('sv_ret',s.retention_days||0);
+  // Ask what network this hostname is on, for the ghost in the group
+  // box. Reset first: the answer depends on WHICH server is being
+  // edited (its own name is not suggested back to it), so the previous
+  // form's answer never carries over.
+  grpSug=null; grpSugHost='';
+  document.getElementById('sv_group').placeholder='';
+  document.getElementById('sv_groupsug').textContent='';
+  groupSuggest();
   put('sv_block',Math.round((s.block_bytes||0)/1e9));
   // The refill affordance only makes sense on a SAVED server with a
   // block configured and bytes already counted against it - a fresh
@@ -14499,6 +14902,57 @@ function paidSuggest(){
   el.textContent=(lvl>0&&!on)
     ? t('set.srv.paid.sug','fill tiers are usually paid blocks: turn this on if you pay for this server by the byte')
     : '';
+}
+// Same shape for the mirror-group box: say what the hostname looks
+// like, never fill it in. Servers sharing this name are treated as one
+// source, so a 430 from one is taken as a 430 from all - which is a
+// saving when they really are the same network and a lost article when
+// they are not. The table that knows who resells whom is kept by hand
+// and goes out of date on its own schedule, so the page ghosts what it
+// thinks and waits to be told it is right.
+let grpSug=null;    // the daemon's answer: {backbone, suggest, same_as}
+let grpSugHost='';  // the hostname that answer belongs to
+async function groupSuggest(){
+  const hostEl=document.getElementById('sv_host');
+  if(!hostEl) return;
+  const host=hostEl.value.trim();
+  if(host!==grpSugHost){
+    grpSug=null; grpSugHost=host;
+    if(host){
+      const j=await api('server_backbone',
+        `&value=${encodeURIComponent(host)}&value2=${srvEditIdx}`);
+      // The form may have moved on while that was in flight - another
+      // server, or another hostname typed over this one. Only an answer
+      // to what the box says NOW may be drawn.
+      if(!j||!j.status||hostEl.value.trim()!==host) return;
+      grpSug=j.suggest?j:null;
+    }
+  }
+  groupSuggestRender();
+}
+// Draw (or clear) the ghost from the last answer. Split from the fetch
+// above so typing in the group box re-renders without asking again.
+function groupSuggestRender(){
+  const box=document.getElementById('sv_group'), el=document.getElementById('sv_groupsug');
+  if(!box||!el) return;
+  const s=grpSug;
+  el.textContent='';
+  // Nothing to say, or the field is already answered: a suggestion over
+  // the top of a value the user typed is just noise.
+  if(!s||box.value.trim()){ box.placeholder=''; return; }
+  box.placeholder=s.suggest;
+  const line=document.createElement('span');
+  line.textContent=s.same_as
+    ? t('set.srv.group.sug.same','same network as {host}: brands on one network answer alike',{host:s.same_as})
+    : t('set.srv.group.sug','looks like the {name} network: brands on one network answer alike',{name:s.backbone});
+  const btn=document.createElement('button');
+  btn.className='ghost sm'; btn.type='button';
+  btn.textContent=t('set.srv.group.sug.use','Use {name}',{name:s.suggest});
+  // The one place the value is ever written, and a person pressed it.
+  btn.onclick=()=>{ box.value=s.suggest; groupSuggestRender(); };
+  el.appendChild(line);
+  el.appendChild(document.createTextNode(' '));
+  el.appendChild(btn);
 }
 // What the blank ("choose for me") fields currently resolve to. Shown
 // rather than pre-filled, so the boxes keep meaning "derive it" and a
@@ -15037,7 +15491,7 @@ async function evictNow(btn){
             +' '+shrinkShortfall(j), true);
     else toast(n>0?tn('toast.evicted',n,'{n} release deleted. The file gets smaller when the compact runs.','{n} releases deleted. The file gets smaller when the compact runs.')
              :t('toast.evictNone','Nothing to delete: the index is already under the limit.'));
-    refreshDbState(); refreshIdxStatus();
+    refreshDbState(); pollIdxStats();
   });
 }
 // Shrink to a size typed here and now. Like the limit, this PRUNES and
@@ -15058,7 +15512,7 @@ async function shrinkIndex(btn){
             +' '+shrinkShortfall(j), true);
     else toast(n>0?tn('toast.shrunk',n,'{n} release deleted. The file gives the space back when it is compacted.','{n} releases deleted. The file gives the space back when it is compacted.')
              :t('toast.shrinkNone','Already under that size: nothing was deleted.'));
-    refreshDbState(); refreshIdxStatus();
+    refreshDbState(); pollIdxStats();
   });
 }
 
@@ -17453,7 +17907,7 @@ if(LOCALE!=='en'){
     // refreshWatchStatus too, not just loadWatchlist: the "Given up on"
     // list is built inside it, so without this it sat in English until
     // the 15 s poll came round.
-    refreshIdxStatus(); loadWatchlist(); refreshWatchStatus(); loadBenchHist(); refreshUsage(); loadSetup();
+    pollIdxStats(); loadWatchlist(); refreshWatchStatus(); loadBenchHist(); refreshUsage(); loadSetup();
     if(inSettings) loadSettings();
     tick();
     // Last: if we got here from a language change, go back to the control.

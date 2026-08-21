@@ -176,7 +176,7 @@ impl Index {
         // Feed activity is what makes the named count worth indexing;
         // this is the first-session path, before the next `open` gets
         // to build it (no-op once it exists).
-        Self::ensure_named_index(&self.db);
+        self.ensure_named_index_stamped();
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -268,12 +268,38 @@ impl Index {
     /// activity, so an install that never ran the feed never pays the
     /// one-time build. On a read-only handle the CREATE fails and is
     /// ignored, the same way the open-time migrations ignore it.
-    pub(super) fn ensure_named_index(db: &Connection) {
-        let _ = db.execute(
+    ///
+    /// Returns whether this call actually BUILT the index - the one
+    /// runtime schema change in the system, which is what the daemon
+    /// retires its pooled readers on now that the per-pass flush is
+    /// gone (B4). The existence probe first keeps the steady state (it
+    /// already exists) a single sqlite_master row read.
+    pub(super) fn ensure_named_index(db: &Connection) -> bool {
+        let had = db
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_rel_pre_named'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if had {
+            return false;
+        }
+        db.execute(
             "CREATE INDEX IF NOT EXISTS idx_rel_pre_named
                ON releases(pre_title) WHERE pre_title<>''",
             [],
-        );
+        )
+        .is_ok()
+    }
+
+    /// [`Self::ensure_named_index`] for the runtime write paths: stamps
+    /// the connection's `ddl` flag when the index was built just now,
+    /// so [`Index::take_schema_ddl`] reports it.
+    fn ensure_named_index_stamped(&self) {
+        if Self::ensure_named_index(&self.db) {
+            self.ddl.set(true);
+        }
     }
 
     /// How many releases carry a name the feed gave them.
@@ -285,7 +311,7 @@ impl Index {
         // With the index present the COUNT is an index-only scan of
         // exactly the rows it counts; without it the scan below is
         // slow but correct.
-        Self::ensure_named_index(&self.db);
+        self.ensure_named_index_stamped();
         self.db
             .query_row(
                 "SELECT COUNT(*) FROM releases WHERE pre_title<>''",
@@ -1859,7 +1885,7 @@ impl Index {
         // Same reason as predb_store: seed rows are feed activity, and
         // the named count needs its index before the read-only API
         // handle starts asking.
-        Self::ensure_named_index(&self.db);
+        self.ensure_named_index_stamped();
         let tx = self.db.transaction()?;
         let mut stored = 0usize;
         for l in lines {

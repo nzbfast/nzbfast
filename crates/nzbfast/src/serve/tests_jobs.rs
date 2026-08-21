@@ -10,12 +10,15 @@ use super::*;
 pub(super) fn no_causes() -> crate::LossCauses<'static> {
     crate::LossCauses {
         missing_430: 0,
+        takedown_430: 0,
         retention_excluded: 0,
         transport_failed: 0,
         transport_sample: None,
         decode_sample: None,
         recovery_errs: 0,
+        recovery_lost: 0,
         dead_servers: &[],
+        left_servers: &[],
         par2_slots: 1,
         stalled: false,
         missing_segments: 0,

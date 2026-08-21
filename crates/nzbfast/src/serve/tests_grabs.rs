@@ -646,17 +646,14 @@ fn every_served_page_gets_the_shared_design_tokens() {
     }
     // The wall and the manual were the two pages that did NOT read the
     // user's theme; keep them wired.
-    let mut pages: Vec<(&str, &str)> = vec![
-        ("dashboard", DASHBOARD_HTML),
-        ("wall", WALL_HTML),
-        ("manual", MANUAL_HTML),
-    ];
-    for lang in UI_LOCALES {
-        if let Some(m) = manual_i18n(lang) {
-            pages.push(("manual-i18n", m));
-        }
-    }
-    for (name, page) in pages {
+    //
+    // Two halves, because the manuals are substituted at BUILD time now
+    // (R10 / C9) and only the shell pages still pass through
+    // `ui_themed` per request. The shell pages are checked as source -
+    // placeholder in, no placeholder out - and every manual is checked
+    // as the bytes that actually ship, inflated back out of its
+    // compressed member.
+    for (name, page) in [("dashboard", DASHBOARD_HTML), ("wall", WALL_HTML)] {
         assert!(page.contains(MARK), "{name} has no tokens placeholder");
         // No page may keep a private palette that would shadow the
         // shared one.
@@ -667,6 +664,24 @@ fn every_served_page_gets_the_shared_design_tokens() {
         assert!(
             !ui_themed(page).contains(MARK),
             "{name} kept a stray placeholder"
+        );
+    }
+    for lang in UI_LOCALES {
+        let Some(manual) = manual_i18n(lang) else {
+            continue;
+        };
+        let shipped = String::from_utf8(inflate(manual.gz)).expect("a manual is UTF-8");
+        assert!(
+            !shipped.contains(MARK),
+            "the {lang} manual ships with a stray placeholder"
+        );
+        assert!(
+            !shipped.contains("--bg:#0a0b10") && !shipped.contains("--bg:#0f1116"),
+            "the {lang} manual still carries its own background token"
+        );
+        assert!(
+            shipped.contains("data-theme=\"contrast\"") && shipped.contains("--surface:"),
+            "the {lang} manual did not get the shared design tokens"
         );
     }
 }
@@ -1013,6 +1028,7 @@ fn only_a_dead_post_is_reported_to_the_indexer() {
         0,
         &crate::LossCauses {
             missing_430: 4,
+            takedown_430: 0,
             retention_excluded: 900,
             dead_servers: &hosts,
             ..no_causes()
@@ -1049,6 +1065,7 @@ fn only_a_dead_post_is_reported_to_the_indexer() {
         0,
         &crate::LossCauses {
             missing_430: 12_018,
+            takedown_430: 0,
             missing_segments: 12_018,
             total_segments: 12_018,
             bytes_arrived: 0,
@@ -1172,6 +1189,7 @@ fn fail_hint_names_the_sub_cause() {
         0,
         &crate::LossCauses {
             missing_430: 1,
+            takedown_430: 0,
             retention_excluded: 900,
             ..no_causes()
         },
@@ -1184,6 +1202,7 @@ fn fail_hint_names_the_sub_cause() {
         0,
         &crate::LossCauses {
             missing_430: 3,
+            takedown_430: 0,
             par2_slots: 0,
             ..no_causes()
         },
@@ -1206,6 +1225,7 @@ fn fail_hint_names_the_sub_cause() {
         0,
         &crate::LossCauses {
             missing_430: 4,
+            takedown_430: 0,
             par2_slots: 9,
             ..no_causes()
         },
@@ -1246,6 +1266,7 @@ fn each_failure_gets_the_action_that_can_help() {
         0,
         &crate::LossCauses {
             missing_430: 1,
+            takedown_430: 0,
             retention_excluded: 900,
             ..no_causes()
         },

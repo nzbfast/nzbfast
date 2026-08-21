@@ -367,7 +367,10 @@ fn history_paging_and_search() {
     let d = serve(&dir);
     let port = d.port;
 
-    // The unpaged facade answer: everything, newest first.
+    // The unpaged facade answer: newest first, and everything here
+    // because 40 rows is inside HISTORY_DEFAULT_LIMIT. The cap
+    // itself is gated in tests/dashboard_load.rs, which has a
+    // history deep enough to reach it.
     let all = api(port, "mode=history");
     assert_eq!(slots(&all).len(), 40, "{all}");
     assert_eq!(all["history"]["noofslots"], 40, "{all}");
@@ -745,6 +748,68 @@ fn retention_knobs_off_by_default_and_enforced_when_set() {
     assert!(
         !s.iter().any(|r| r["nzo_id"] == "SABnzbd_nzo_h9"),
         "the oldest rows were not purged: {h}"
+    );
+}
+
+/// Issue #45: the age rule works below a day, and still only
+/// ever takes COMPLETED rows.
+///
+/// The knob was `history_keep_days` and is now `history_keep_secs`, for
+/// the reason the issue gave: the reporter wanted entries gone "after XY
+/// minutes", which whole days cannot say. Days-only also hid the second
+/// half of the rule, because at that scale nobody notices which rows it
+/// spares - a failed download stays until the user retries it or deletes
+/// it, since it is a decision they have not made yet, and a ten-minute
+/// rule makes that visible within the hour.
+///
+/// Seeded relative to NOW, unlike the count-cap test above: a fixed
+/// timestamp is "old" under every possible age rule, which is exactly
+/// the distinction this test exists to draw.
+#[test]
+fn the_age_rule_works_in_minutes_and_spares_failed_rows() {
+    let dir = scratch("keepage");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let row = |i: usize, name: &str, state: &str, ago: i64| {
+        let mut r = hist_record(&dir, i, name, state, "movies");
+        r["finished_unix"] = json!(now - ago);
+        r
+    };
+    let records = vec![
+        // Inside the window: stays whatever the rule is.
+        row(1, "Recent.Completed", "Completed", 60),
+        // Past a ten-minute window, and completed: goes.
+        row(2, "Stale.Completed", "Completed", 3_600),
+        // Past it too, but FAILED: the age rule never takes these.
+        row(3, "Stale.Failed", "Failed", 3_600),
+    ];
+    seed_legacy(&dir, &records);
+    std::fs::write(
+        dir.join("settings.json"),
+        "{\"index_enabled\": false, \"history_keep_secs\": 600}",
+    )
+    .unwrap();
+
+    let d = serve(&dir);
+    let h = api(d.port, "mode=history");
+    let names: Vec<String> = slots(&h)
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "Recent.Completed"),
+        "a row inside the window was purged: {h}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "Stale.Completed"),
+        "a completed row an hour past a ten-minute rule survived - the \
+         age cutoff is still being read as days: {h}"
+    );
+    assert!(
+        names.iter().any(|n| n == "Stale.Failed"),
+        "the age rule took a FAILED row; only the count cap may do that: {h}"
     );
 }
 

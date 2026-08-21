@@ -100,6 +100,57 @@ fn id_source(provider: &str) -> &'static str {
     }
 }
 
+/// The pending `titles` row a key deserves, derived from the releases it
+/// names - or `None` when it names none.
+///
+/// Endpoints that read-modify-write a title row cannot assume one
+/// exists. A wall poll seeds the cards it draws, and the scan loop's
+/// `seed_missing_titles` is a later, bounded, kind-filtered sweep, so a
+/// card reached before either has touched it has no row at all: a direct
+/// link, a `key=`-scoped fetch, the Releases surface's hover preview, or
+/// simply a page the user never scrolled to. `wall_fix` has always
+/// coped, because `title_set_identity` upserts; `wall_art` and
+/// `wall_refresh` write through a bare UPDATE and used to answer
+/// "unknown title key" for a key that is perfectly good. They seed first
+/// now, which is also what lets the wall poll stop writing on the HTTP
+/// request path.
+///
+/// Derived exactly as `mode=wall2` derives its own seeds - one card via
+/// `title_keys`, `parse_release` for the display title a row without
+/// metadata has to carry - so a key seeded here and the same key seeded
+/// by a poll produce the identical row.
+///
+/// Uncurated on purpose, and `matched_only` off. Junk gating, per-title
+/// hides and the adult filter decide what the WALL DRAWS, not whether a
+/// key EXISTS: a card reached from the Hidden panel is a real key with
+/// real releases, and "unknown title key" would be a lie about the
+/// index. `matched_only` is the sharper one - it keeps only rows the
+/// enricher already filled, which is the exact complement of the rows
+/// that need seeding. `None` is therefore the genuinely bad key, and
+/// stays worth reporting as one.
+fn seed_for_key(ix: &nzbkit::index::Index, key: &str) -> Option<nzbkit::index::TitleSeed> {
+    let bq = nzbkit::index::BrowseQuery {
+        title_keys: vec![key.to_string()],
+        limit: 1,
+        ..Default::default()
+    };
+    let (cards, _) = ix
+        .browse_cards(&bq, nzbkit::index::CardSort::Latest, false, false, None)
+        .ok()?;
+    let c = cards.into_iter().next()?;
+    let p = crate::wall::parse_release(&c.rep_stem);
+    Some(nzbkit::index::TitleSeed {
+        key: c.title_key,
+        kind: c.kind,
+        title: if c.title.is_empty() { p.title } else { c.title },
+        year: if c.year > 0 {
+            c.year
+        } else {
+            p.year.unwrap_or(0)
+        },
+    })
+}
+
 fn m_wall_fix(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -393,13 +444,42 @@ fn m_wall_art(
                 // exist because a scan batch happened to be
                 // running, and send them off to fix the wrong
                 // thing - after they already uploaded the file.
-                Some(b) => match d.index_read_checked(|ix| ix.title_get(&key).ok().flatten()) {
+                //
+                // Both halves of the seed-then-act lookup under ONE
+                // pooled read: the row if it exists, and otherwise the
+                // seed that would make it exist (see `seed_for_key` for
+                // why a missing row is not a missing title). Only a key
+                // that names no releases at all is unknown.
+                Some(b) => match d.index_read_checked(|ix| {
+                    Some(match ix.title_get(&key) {
+                        Ok(Some(t)) => (Some(t), None),
+                        Ok(None) => (None, seed_for_key(ix, &key)),
+                        // A read that FAILED is not an absent row, and
+                        // the difference is destructive here: seeding on
+                        // it would be a no-op against the row that is
+                        // really there, and the fill would then write
+                        // the blank defaults over its id, rating, imdb
+                        // and cast. Answered as before - the upload is
+                        // refused and nothing is touched.
+                        Err(_) => (None, None),
+                    })
+                }) {
                     Err(why) => json!({
                         "status": false,
                         "error": why.message(),
                     }),
-                    Ok(None) => json!({"status": false, "error": "unknown title key"}),
-                    Ok(Some(t)) => {
+                    // `Ok(None)` is the indexer switched off - no index
+                    // to hold a title, so the key resolves to nothing
+                    // exactly as an unknown one does.
+                    Ok(None) | Ok(Some((None, None))) => {
+                        json!({"status": false, "error": "unknown title key"})
+                    }
+                    Ok(Some((row, seed))) => {
+                        // A row we are about to seed carries its
+                        // identity and nothing else, which is precisely
+                        // what `TitleRow::default()` is - so the fill
+                        // below reads the same either way.
+                        let t = row.unwrap_or_default();
                         let art = d.spool.join("art");
                         let _ = std::fs::create_dir_all(&art);
                         let name = crate::wall::art_name(&key, false);
@@ -407,6 +487,22 @@ fn m_wall_art(
                             json!({"status": false, "error": "couldn't write the art cache"})
                         } else {
                             let ok = d.with_index(|ix| {
+                                // Seed first when the row is missing:
+                                // `title_fill` is a bare UPDATE, so on a
+                                // card the wall has never drawn it would
+                                // match nothing, change nothing, and
+                                // still report success - the poster on
+                                // disk, no row naming it, and the card
+                                // still wearing its placeholder.
+                                //
+                                // Two autocommits rather than one
+                                // transaction, deliberately: a seed that
+                                // lands without its fill is an ordinary
+                                // pending row, which is what the next
+                                // scan sweep would have written anyway.
+                                if let Some(s) = &seed {
+                                    ix.title_seed(&s.key, &s.kind, &s.title, s.year).ok()?;
+                                }
                                 ix.title_fill(
                                     &key,
                                     &nzbkit::index::TitleFill {
@@ -485,16 +581,67 @@ fn m_wall_refresh(
         let target = params.get("value").cloned().unwrap_or_default();
         let art = d.spool.join("art");
         if target == "all" {
-            let n = d.with_index(|ix| ix.titles_reset_all().ok()).unwrap_or(0);
+            // `.ok()` used to fold three different answers into 0 - no
+            // index, a failed UPDATE, and a genuinely empty table - and
+            // the wipe below then ran regardless. Clearing `checked` is
+            // the ONLY thing that requeues a title for enrichment, so on
+            // a refused reset that destroyed every poster with nothing
+            // left to re-fetch them, and said `"status": true`.
+            let n = d.with_index(|ix| ix.titles_reset_all().ok());
+            let Some(n) = n else {
+                warn!(target: "wall", "metadata reset refused - the art cache is untouched");
+                return Some(json!({
+                    "status": false,
+                    "error": "the index could not be reset"
+                }));
+            };
             let _ = std::fs::remove_dir_all(&art);
             let _ = std::fs::create_dir_all(&art);
             info!(target: "wall", "metadata reset for {n} titles - re-enriching");
             json!({"status": true, "reset": n})
         } else if !target.is_empty() {
-            let ok = d
+            let mut ok = d
                 .with_index(|ix| ix.title_reset(&target).ok())
                 .unwrap_or(false);
-            crate::wall::drop_art(&art, &target);
+            // A bare UPDATE matched nothing, which is the ONE case that
+            // is not a verdict about the key: a card the wall has never
+            // drawn has no row to reset, and refusing it told the user
+            // their perfectly good title did not exist. Seed the row
+            // this key deserves and the reset lands on it - a freshly
+            // seeded row IS the post-reset state (checked=0, every
+            // metadata column empty), so the seed and the reset are the
+            // same write, and `title_seed` is INSERT OR IGNORE so a row
+            // that appeared in between is reset rather than overwritten.
+            //
+            // Reset first and seed only on the miss: the row exists on
+            // every ordinary refresh, and that path must not pay for a
+            // card lookup it will throw away.
+            if !ok {
+                // index_read_checked for `wall_art`'s reason - a busy
+                // read pool is not an unknown key, and this one would
+                // otherwise report a saturated pool as a bad title.
+                match d.index_read_checked(|ix| seed_for_key(ix, &target)) {
+                    Err(why) => {
+                        return Some(json!({"status": false, "error": why.message()}));
+                    }
+                    // No row and no releases either: a genuinely bad
+                    // key, and still worth saying so.
+                    Ok(None) => {}
+                    Ok(Some(s)) => {
+                        ok = d
+                            .with_index(|ix| {
+                                ix.title_seed(&s.key, &s.kind, &s.title, s.year).ok()?;
+                                ix.title_reset(&target).ok()
+                            })
+                            .unwrap_or(false);
+                    }
+                }
+            }
+            // Same rule as the `all` arm: the art is the only copy, and
+            // nothing re-fetches it unless `checked` was cleared.
+            if ok {
+                crate::wall::drop_art(&art, &target);
+            }
             if ok {
                 json!({"status": true})
             } else {

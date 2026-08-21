@@ -410,6 +410,17 @@ Le tiroir de chaque ligne dit qui a ajouté la tâche et propose le même bouton
 nouveau ailleurs, ou pour joindre le <code>.nzb</code> à un signalement de
 problème.</p>
 <p>La carte liste dix téléchargements par défaut et le reste est à un clic, sur le bouton ▤. Le statut, l'emplacement et la raison d'un échec vivent derrière un clic sur la ligne elle-même, si bien que le cas courant - ce qui s'est terminé, quelle taille, quand - reste lisible sans défilement. Tirez le bord inférieur de la carte pour faire défiler la liste à la hauteur de votre choix à la place. <b>History rows</b> dans Paramètres → Interface change ces dix ; comme c'est une propriété du daemon et non de votre navigateur, cela s'applique à tous les appareils qui regardent cette installation. <b>Colour History names</b>, juste à côté, teinte en vert les noms terminés et en rouge ceux qui ont échoué ; en le désactivant les noms restent neutres, et la pastille colorée comme les détails de la ligne disent toujours lequel est lequel.</p>
+<p>nzbfast conserve l’historique indéfiniment, sauf indication contraire.
+<b>Nettoyage de l’historique</b> dans Réglages → Système supprime les anciennes
+entrées selon deux règles indépendantes : un âge (<b>Supprimer les entrées plus
+anciennes que</b>, compté à partir du moment où le téléchargement s’est terminé, en
+minutes, heures ou jours) et une longueur (<b>Conserver au plus ce nombre
+d’entrées</b>). Si les deux sont réglées, les deux s’appliquent, et 0 désactive
+chacune séparément. Seule l’entrée de l’historique est supprimée - les fichiers
+téléchargés restent exactement où ils sont. La règle d’âge ne prend que les
+téléchargements terminés : un téléchargement échoué attend que vous le relanciez ou
+le supprimiez vous-même ; la limite de longueur compte toutes les entrées, quel
+qu’ait été leur résultat.</p>
 <h3 id="dash-usage">Consommation</h3>
 <p>Barres quotidiennes par fournisseur et totaux Aujourd'hui / 7 jours / 30 jours -
 indispensable pour les comptes au volume et les comptes à bloc. Les comptes à bloc
@@ -542,8 +553,7 @@ regroupe.</p>
 affiche sa réponse, ce qui valide l'adresse et la clé en un clic. Une clé enregistrée
 n'est jamais réaffichée : le champ le dit, et le laisser vide conserve la clé déjà
 en place.</p>
-<p><b>Chercher.</b> Ouvrez <b>🎬 le mur</b> dans l'en-tête et passez à la liste des
-releases. Le menu déroulant à côté du champ de recherche décide où la recherche
+<p><b>Chercher.</b> Ouvrez <b>🎬 le mur</b> dans l'en-tête et choisissez <b>Releases</b>. Le menu déroulant à côté du champ de recherche décide où la recherche
 regarde : <b>Cet index</b>, c'est-à-dire ce que cette machine a scanné elle-même,
 <b>Indexeurs</b>, ou <b>Les deux</b>. Votre choix est mémorisé. Interroger vos comptes
 exige quelque chose dans le champ, car les parcourir avec une requête vide dépenserait
@@ -616,6 +626,15 @@ explorateur multimédia : chaque film et chaque série reconnus deviennent une
 tuile-affiche avec note, année, genres, casting et synopsis - vos newsgroups,
 explorables comme un catalogue.</p>
 <ul>
+<li><b>Mur</b> et <b>Releases</b> sont deux façons de voir le même index, et la
+paire sous <b>Vue</b> passe de l'une à l'autre. Votre choix est retenu.</li>
+<li><b>Densité des affiches</b> : <b>S</b> / <b>M</b> / <b>L</b> à côté de cette paire.
+Petit met plus d'affiches à l'écran, grand en met moins.</li>
+<li><b>Aperçus au survol</b>, au-dessus du tableau Releases : posez le pointeur sur une
+ligne pour une affiche et un résumé, tirés de votre propre index.</li>
+<li><b>Grouper par titre</b>, à côté : une ligne par titre, ses releases en dessous.
+Ouvrez-la avec <b>&#9656;</b> ou en cliquant la ligne ; la case à cocher du titre
+sélectionne les releases affichées. Le regroupement ne vaut que pour <b>Cet index</b>.</li>
 <li><b>Onglets</b> Films / Séries / Autre, recherche instantanée et sept tris :
 <b>Pour vous</b>, Posts récents, Année de sortie, Mieux notés, Titre A–Z, Plus gros et
 Les plus postés.</li>
@@ -1255,7 +1274,12 @@ erreur coûte donc un peu de temps plutôt que le téléchargement.</li>
 </ul>
 <p class="dim">Le verdict est une prédiction fondée sur des indices, pas une garantie.
 Pour une réponse ferme sur un NZB, <code>nzbfast check</code>
-(<a href="#cli">§15</a>) compte les articles réels.</p>
+(<a href="#cli">§15</a>) compte les articles réels. Les deux comptent des réponses, pas des contenus. Un contrôle propre veut dire que
+les articles étaient là quand on a demandé, pas que ce qu'ils contiennent est intact :
+un petit nombre de fournisseurs répondent pour des articles retirés avec des données
+factices au lieu de les refuser, et cela n'apparaît qu'au téléchargement lui-même, où
+l'article échoue à sa propre somme de contrôle et est récupéré sur un autre serveur ou
+réparé.</p>
 <h3 id="memory">Budget mémoire - et ce que coûte une mémoire réduite</h3>
 <p>Tous les caches du moteur partagent un même budget (par défaut ¼ de la RAM
 physique, borné à 256 MB–16 GB). Fixez-le explicitement avec <i>Budget mémoire</i>

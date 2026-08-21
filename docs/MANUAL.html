@@ -394,6 +394,14 @@ because it is a property of the daemon rather than of your browser, it applies t
 every device looking at this install. <b>Colour History names</b>, beside it, tints
 finished names green and failed ones red; turning it off leaves the names plain,
 and the coloured dot and the row's own details still say which is which.</p>
+<p>nzbfast keeps History for ever unless you say otherwise. <b>History cleanup</b> in
+Settings → System removes old entries by two independent rules: an age (<b>Remove
+entries older than</b>, counted from the moment the download finished, in minutes,
+hours or days) and a length (<b>Keep at most this many entries</b>). Both apply when
+both are set, and 0 turns either one off on its own. Only the History entry is
+removed - the downloaded files stay exactly where they are. The age rule takes
+completed downloads only, so a failed one waits until you retry it or delete it
+yourself; the length limit counts every entry, whatever its outcome.</p>
 <h3 id="dash-usage">Data usage</h3>
 <p>Per-provider daily bars and Today / 7-day / 30-day totals, essential for metered
 and block accounts. Block accounts show lifetime usage against their size.</p>
@@ -508,7 +516,7 @@ from your account page there, then <b>Apply indexers</b>. <b>Test</b> asks the s
 it supports and shows what came back, which proves the address and the key in one click.
 A saved key is never shown again: the box says so, and leaving it blank keeps the key it
 already has.</p>
-<p><b>Searching.</b> Open <b>🎬 wall</b> in the header and switch to the release list.
+<p><b>Searching.</b> Open <b>🎬 wall</b> in the header and choose <b>Releases</b>.
 The dropdown beside the search box decides where a search looks: <b>This index</b>, which
 is what this machine has scanned itself, <b>Indexers</b>, or <b>Both</b>. Your choice is
 remembered. Asking your accounts needs something typed in the box, because browsing them
@@ -584,9 +592,23 @@ week", which Newest posts cannot (that is upload date, and a re-post of a
 30-year-old film lands at the top of it). Titles enriched before this existed,
 or whose provider had no date, fall back to their year until you refresh their
 metadata.</li>
-<li><b>Poster size</b> is a slider (🔍) next to the layout buttons: drag it, or
-press <b>+</b> and <b>-</b>, for anything from a wall of thumbnails to a handful
-of large posters. Big posters and Compact each remember their own size.</li>
+<li><b>Wall</b> and <b>Releases</b> are the two ways to look at the same index,
+and the pair under <b>View</b> switches between them. Wall browses titles as a
+poster wall; Releases is every release in a sortable table. Your choice is
+remembered.</li>
+<li><b>Poster density</b> is <b>S</b> / <b>M</b> / <b>L</b> beside the view pair:
+small posters put more on screen, large ones fewer. It applies to the wall.</li>
+<li><b>Hover previews</b>, a toggle above the Releases table, brings back a
+poster and synopsis popup when you rest the pointer on a row. Everything in it
+comes from your own index, so it costs no request to anybody.</li>
+<li><b>Group by title</b>, the toggle beside it, collapses the table to one row
+per title with that title's releases nested underneath: it answers "what
+versions of this exist" where the flat table answers "what arrived recently".
+Open a title with the <b>&#9656;</b> or by clicking its row. The checkbox on a
+title row selects the releases it is showing, so a whole title can go to the
+queue in one go. Grouping reads your own index, so it applies to <b>This
+index</b> only; pick <b>Indexers</b> or <b>Both</b> and the table goes flat
+again and says so.</li>
 <li><b>Every release of a title</b> is listed when you open its card, with the
 resolution, the codec, the audio format and the dynamic range (Dolby Vision,
 HDR10) read out of the release name, plus size, age and whether every part is
@@ -1208,7 +1230,11 @@ a little time rather than the download.</li>
 </ul>
 <p class="dim">The verdict is a prediction from evidence, not a guarantee. For a hard
 answer on one NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>) counts the
-actual articles.</p>
+actual articles. Both count answers, not contents. A clean check means the articles
+were there when asked, not that what they hold is undamaged: a small number of
+providers answer for removed articles with dummy data instead of refusing them, and
+that only shows up during the download itself, where the article fails its own
+checksum and is fetched again from another server or repaired.</p>
 <h3 id="memory">Memory budget: what low memory costs</h3>
 <p>All engine caches share one budget (default ¼ of physical RAM, clamped to
 256 MB–16 GB). Set it explicitly with <i>Memory limit</i> in Settings, or

@@ -6,6 +6,25 @@
 //! The verdict is advisory (the live ledger during download remains
 //! authoritative) but it lets an impossible NZB abort in seconds having
 //! downloaded nothing.
+//!
+//! **A clean sweep is not a clean post, and never treat it as one.**
+//! STAT answers exactly one question - does the server hold something
+//! under this message-id - and a small number of providers implement a
+//! takedown by REPLACING the article with a dummy body rather than
+//! deleting it. STAT still answers 223, the matrix fills with
+//! [`Avail::Have`], and the fake is only caught later, at the body's
+//! own yEnc CRC. So every verdict built on this sweep has a FALSE
+//! GREEN mode on a post that is gone, and no amount of extra STATs
+//! closes it. This is the trap that makes SABnzbd's pre-check
+//! unreliable against takedowns (their forum threads t=11214 and
+//! t=16658); it is documented here so nobody re-derives a "the sweep
+//! said it was fine" shortcut. The real download is the backstop, not
+//! this: a body that fails its CRC is corrupt-class evidence there
+//! (`Work::tried_fail`), steered to another server once and otherwise
+//! left to PAR2 repair. Corrupt-class evidence is deliberately kept
+//! out of the refusal machinery - it never opens the TODO 146 tail
+//! give-up - so widening it here would be the same conflation one
+//! layer up.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -360,6 +379,12 @@ impl SweepResult {
     /// Articles unavailable on every server that answered. An `Unknown`
     /// (sweep error) counts as available - pre-flight must not produce
     /// false IMPOSSIBLE verdicts.
+    ///
+    /// The bias runs one way on purpose, and the cost is the false
+    /// GREEN in the module doc: an empty result means nothing the
+    /// sweep asked about was refused everywhere, NOT that the post is
+    /// intact. A takedown served as dummy bodies answers 223 and
+    /// leaves this empty.
     pub fn union_missing(&self) -> Vec<usize> {
         let n = self.matrix.first().map_or(0, |m| m.len());
         (0..n)

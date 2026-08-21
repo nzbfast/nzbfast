@@ -820,6 +820,17 @@ pub(in crate::serve) fn dispatch(
         // in exactly the same position, and would rather show the file
         // than nothing.
         "log" => return m_log(d, req, params, ctx, api_body),
+        // "Create report": one download's facts and its own log span,
+        // as text to paste into a bug report. `mode=log` next door
+        // hands over the daemon's whole ring, which is the thing this
+        // exists to avoid asking people for.
+        "report" => {
+            let id = params.get("value").map(String::as_str).unwrap_or("");
+            match d.job_report(id) {
+                Some(text) => json!({"status": true, "report": text}),
+                None => json!({"status": false, "error": "no such job"}),
+            }
+        }
         // M18b: per-provider data-usage history (UTC days).
         "usage" => {
             json!({"days": Value::Object(d.usage.lock_ok().clone())})
@@ -964,6 +975,45 @@ pub(in crate::serve) fn dispatch(
         }),
         _ => return None,
     })
+}
+
+/// The instrument-first perf counters, as one stats-payload object.
+///
+/// These exist to answer optimization questions with evidence rather than
+/// with a guess, and neither has an implementation behind it yet:
+///
+/// - `crc_reuse` - what share of verified bytes an article's already-
+///   verified yEnc CRC32 could be reused for, which decides whether
+///   plumbing that CRC into block verification is worth doing at all.
+/// - `filename_fallback` - how much real traffic the unindexed filename
+///   scan in the NZBLNK header ladder takes, and what it costs, which
+///   decides whether a dedicated filename index earns its ingest writes.
+///
+/// Process-lifetime figures, alongside `nested_prevalence`. They live
+/// here rather than inline in the stats arm because that arm's file is
+/// one line under its size ceiling.
+pub(super) fn instrument_counters() -> Value {
+    let g = nzbkit::live::crc_reuse_geometry_total();
+    let crc_reuse = json!({
+        "spans": g.spans,
+        "spans_bytes": g.spans_bytes,
+        "qualifying": g.qualifying,
+        "qualifying_bytes": g.qualifying_bytes,
+    });
+    #[cfg(feature = "indexer")]
+    let filename_fallback = {
+        let f = nzbkit::index::filename_fallback_stats();
+        json!({
+            "calls": f.calls,
+            "hits": f.hits,
+            "misses": f.misses,
+            "hit_ms": f.hit_nanos / 1_000_000,
+            "miss_ms": f.miss_nanos / 1_000_000,
+        })
+    };
+    #[cfg(not(feature = "indexer"))]
+    let filename_fallback = Value::Null;
+    json!({"crc_reuse": crc_reuse, "filename_fallback": filename_fallback})
 }
 
 #[cfg(test)]

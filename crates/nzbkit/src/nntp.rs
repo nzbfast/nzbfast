@@ -160,11 +160,147 @@ pub const MAX_MULTILINE_BYTES: usize = 256 * 1024 * 1024;
 /// exists only to bound a peer that never sends the terminating newline.
 pub const MAX_STATUS_BYTES: usize = 64 * 1024;
 
+/// Inline capacity for a status line's text.
+///
+/// A status line is a code, an optional article number, usually the
+/// echoed message-id, and a few words of prose: "222 0 <id> body
+/// follows" with a 60-character powerpost-style id is 79 bytes, and
+/// the refusals are shorter still. Anything past this - a chatty
+/// greeting, a verbose 441 - spills to a `String`, which costs exactly
+/// what the old unconditional `to_string()` cost and only on lines
+/// that are not the per-article path.
+///
+/// `Status` is `STATUS_INLINE + 16` bytes (104 here), so this trades a
+/// wider move through the read path for a `malloc`/`free` pair per
+/// article on every reactor thread. The pair is the more expensive
+/// half, and it is the half that contends across threads.
+const STATUS_INLINE: usize = 88;
+
+/// Where a [`Status`]'s text lives. Always valid UTF-8: every
+/// constructor goes through a `&str`, and the one wire path that can
+/// see invalid bytes repairs them once, on the spot.
+#[derive(Clone)]
+enum StatusLine {
+    Inline { len: u8, buf: [u8; STATUS_INLINE] },
+    Heap(String),
+}
+
 /// A parsed status line, e.g. `222 0 <id> body follows`.
-#[derive(Debug, Clone)]
+///
+/// The text is held inline when it fits, so reading a status line
+/// allocates nothing on the reactor threads - the per-article readers
+/// only ever look at the BYTES ([`echoed_message_id`],
+/// [`takedown_flavoured`]), and the owned `String` the error variants
+/// carry is built by [`Status::into_line`] on a path that is already
+/// returning an error.
+#[derive(Clone)]
 pub struct Status {
     pub(crate) code: u16,
-    pub line: String,
+    line: StatusLine,
+}
+
+impl std::fmt::Debug for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Status")
+            .field("code", &self.code)
+            .field("line", &self.line())
+            .finish()
+    }
+}
+
+impl Status {
+    /// A status from an already-parsed code and text. The wire path
+    /// uses [`Status::from_wire`]; this is for callers that synthesize
+    /// one rather than reading it off a socket.
+    pub fn new(code: u16, line: &str) -> Status {
+        let line = if line.len() <= STATUS_INLINE {
+            let mut buf = [0u8; STATUS_INLINE];
+            buf[..line.len()].copy_from_slice(line.as_bytes());
+            StatusLine::Inline {
+                len: line.len() as u8,
+                buf,
+            }
+        } else {
+            StatusLine::Heap(line.to_string())
+        };
+        Status { code, line }
+    }
+
+    /// Parse one raw status line off the wire. Trailing CRLF (and any
+    /// other trailing ASCII whitespace) is dropped, and the code is the
+    /// leading three digits or 0.
+    ///
+    /// Both arms trim the same way, on the raw bytes, before anything
+    /// else looks at them. That is ASCII whitespace only, where the old
+    /// `from_utf8_lossy(..).trim_end()` trimmed UNICODE whitespace: a
+    /// status line ending in U+00A0 would now keep it. NNTP status
+    /// lines are ASCII by the grammar and no provider has ever sent
+    /// otherwise, and one rule across both arms is worth more here than
+    /// matching a case that cannot arise.
+    fn from_wire(raw: &[u8]) -> Status {
+        let end = raw
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |i| i + 1);
+        let trimmed = &raw[..end];
+        match std::str::from_utf8(trimmed) {
+            Ok(text) => Status::new(status_code_of(text), text),
+            // Not UTF-8. Repair it once, here, so everything downstream
+            // can assume the stored bytes are text - one allocation, on
+            // a line no real server sends. The repair EXPANDS (every
+            // bad byte becomes a 3-byte U+FFFD), which is why the
+            // length that picks inline-or-heap is measured on the
+            // repaired string inside `new`, never on the wire bytes.
+            Err(_) => {
+                let text = String::from_utf8_lossy(trimmed).into_owned();
+                Status::new(status_code_of(&text), &text)
+            }
+        }
+    }
+
+    /// The status line's text.
+    pub fn line(&self) -> &str {
+        match &self.line {
+            StatusLine::Inline { len, buf } => match std::str::from_utf8(&buf[..*len as usize]) {
+                Ok(text) => text,
+                // Unreachable: every constructor writes a `&str` in.
+                // A future one that does not is a bug worth failing a
+                // test over, but not worth panicking a live download
+                // over, so it is loud in debug and empty in release.
+                Err(_) => {
+                    debug_assert!(false, "a Status line must be built from a &str");
+                    ""
+                }
+            },
+            StatusLine::Heap(s) => s,
+        }
+    }
+
+    /// The status line's raw bytes - what the per-article readers use,
+    /// so the hot path never re-validates UTF-8.
+    pub fn line_bytes(&self) -> &[u8] {
+        match &self.line {
+            StatusLine::Inline { len, buf } => &buf[..*len as usize],
+            StatusLine::Heap(s) => s.as_bytes(),
+        }
+    }
+
+    /// The status line as an owned `String`. Allocates for an inline
+    /// line, which is why the callers are error paths.
+    pub fn into_line(self) -> String {
+        match self.line {
+            StatusLine::Inline { len, buf } => {
+                String::from_utf8_lossy(&buf[..len as usize]).into_owned()
+            }
+            StatusLine::Heap(s) => s,
+        }
+    }
+}
+
+/// The leading three digits of a status line, or 0 when they are not a
+/// number (a truncated or non-conforming response).
+fn status_code_of(text: &str) -> u16 {
+    text.get(..3).and_then(|c| c.parse().ok()).unwrap_or(0)
 }
 
 /// The message-id a status line echoes, when a plausible one is
@@ -174,9 +310,12 @@ pub struct Status {
 /// providers echo a bare `0` or omit the field entirely, so absence
 /// means "no evidence", never "mismatch". Plausible = an
 /// angle-bracketed token; anything else on the line is ignored.
-pub fn echoed_message_id(line: &str) -> Option<&str> {
-    line.split_ascii_whitespace()
-        .find(|t| t.len() > 2 && t.starts_with('<') && t.ends_with('>'))
+///
+/// Bytes rather than `&str`: this runs on every article the reactor
+/// threads read, and the caller already holds the line as bytes.
+pub fn echoed_message_id(line: &[u8]) -> Option<&[u8]> {
+    line.split(u8::is_ascii_whitespace)
+        .find(|t| t.len() > 2 && t.first() == Some(&b'<') && t.last() == Some(&b'>'))
 }
 
 /// Enforce the echoed message-id against the id the caller asked for,
@@ -188,15 +327,54 @@ pub fn echoed_message_id(line: &str) -> Option<&str> {
 /// Giganews's 451) alike.
 fn check_echoed_id(st: &Status, expected: Option<&str>) -> Result<(), NntpError> {
     if let Some(exp) = expected
-        && let Some(got) = echoed_message_id(&st.line)
-        && !got.eq_ignore_ascii_case(exp)
+        && let Some(got) = echoed_message_id(st.line_bytes())
+        && !got.eq_ignore_ascii_case(exp.as_bytes())
     {
         return Err(NntpError::IdMismatch {
             expected: exp.to_string(),
-            line: st.line.clone(),
+            line: st.line().to_string(),
         });
     }
     Ok(())
+}
+
+/// Does this refusal say the article was REMOVED, rather than merely
+/// never seen? Giganews documents the split outright and is the one
+/// backbone known to make it on the wire: 430 = "article not found,
+/// reason unknown", 451 = removed for a DMCA request (Supernews shares
+/// that spool). Omicron's own support pages lump takedowns under a
+/// generic 423/430, and the Dutch NTD providers document nothing at
+/// protocol level - so on most backbones this can never fire, and a
+/// FALSE here is no evidence either way. The token scan on refusal
+/// text is cheap insurance for providers that name the reason
+/// ("removed due to DMCA" was Astraweb's shape); no current client
+/// reads it, so expect the 451 arm to do the real work.
+///
+/// A takedown-flavoured refusal is a HINT and never a gate: it is still
+/// exactly one refusal for the unanimity contract and every routing
+/// decision. What it feeds is diagnosis (the failure summary can say
+/// "removed for a takedown request" instead of the propagation-shaped
+/// missing wording) and the availability oracle, where "the server said
+/// removed" is stronger gone-evidence than a bare not-found.
+///
+/// Only refusal codes are ever classified: a 2xx cannot be a takedown
+/// whatever its text says. Substring match on ASCII-lowercased text -
+/// the vocabulary on the wire is tiny and a false positive only colors
+/// a message about an article that is genuinely refused anyway.
+pub fn takedown_flavoured(code: u16, line: &[u8]) -> bool {
+    if code == 451 {
+        return true;
+    }
+    if !matches!(code, 423 | 430) {
+        return false;
+    }
+    // Bytes, like `echoed_message_id`: the caller runs this per article
+    // off the raw status line. The lowercasing copy is real but it is
+    // reached only by a refusal, never by a 222.
+    let l = line.to_ascii_lowercase();
+    [b"dmca".as_slice(), b"remov", b"takedown", b"taken down"]
+        .iter()
+        .any(|t| memchr::memmem::find(&l, t).is_some())
 }
 
 /// What a STAT status line means: `Ok(true)` the article exists (223),
@@ -218,7 +396,7 @@ fn stat_verdict(st: Status) -> Result<bool, NntpError> {
         423 | 430 | 451 => Ok(false),
         _ => Err(NntpError::Unexpected {
             cmd: "STAT".into(),
-            line: st.line,
+            line: st.into_line(),
         }),
     }
 }
@@ -936,6 +1114,12 @@ fn quit_bound() -> std::time::Duration {
 /// Complementary to `MAX_MULTILINE_BYTES`: that bounds the flood, this
 /// bounds the silence.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+// The multiline readers and the A6 rate floor live in a child module
+// (TODO 106 size-gate split); the glob re-export keeps every existing
+// `read_multiline_*` / `RateFloor` / `body_rate_floor` spelling.
+mod multiline;
+pub(crate) use multiline::*;
 
 /// Resolve `host` (prefer IPv4 - providers count simultaneous source
 /// IPs, and macOS can otherwise spread connections across IPv4 +
@@ -1858,16 +2042,16 @@ impl Connection {
             // denied" on some servers, and guessing Permanent there
             // would blacklist a server over a transient wording.
             if matches!(greeting.code, 400..=599)
-                && classify_auth_refusal(&greeting.line) == AuthRefusal::Capacity
+                && classify_auth_refusal(greeting.line()) == AuthRefusal::Capacity
             {
                 return Err(NntpError::AuthFailed {
                     kind: AuthRefusal::Capacity,
-                    line: greeting.line,
+                    line: greeting.into_line(),
                 });
             }
             return Err(NntpError::Unexpected {
                 cmd: "<greeting>".into(),
-                line: greeting.line,
+                line: greeting.into_line(),
             });
         }
 
@@ -1878,15 +2062,15 @@ impl Connection {
                 381 => conn.exec(&format!("AUTHINFO PASS {pass}")).await?,
                 _ => {
                     return Err(NntpError::AuthFailed {
-                        kind: classify_auth_refusal(&st.line),
-                        line: st.line,
+                        kind: classify_auth_refusal(st.line()),
+                        line: st.into_line(),
                     });
                 }
             };
             if st.code != 281 {
                 return Err(NntpError::AuthFailed {
-                    kind: classify_auth_refusal(&st.line),
-                    line: st.line,
+                    kind: classify_auth_refusal(st.line()),
+                    line: st.into_line(),
                 });
             }
         }
@@ -1936,6 +2120,26 @@ impl Connection {
         Ok(())
     }
 
+    /// [`send_unflushed`](Self::send_unflushed) for the verb-plus-one-
+    /// argument commands the download path dispatches per article
+    /// (`BODY <id>`, `STAT <id>`). `format!`ing those built a fresh
+    /// `String` per article on a reactor thread purely to hand it
+    /// straight to a buffered writer that copies it again; the three
+    /// pieces go in as three `write_all`s instead, which is three
+    /// memcpys into the same buffer and no allocation.
+    ///
+    /// `verb` is a caller-side literal and carries its own trailing
+    /// space; `arg` is the untrusted half, so it gets the CR/LF
+    /// backstop [`send_unflushed`](Self::send_unflushed) applies to a
+    /// whole command line.
+    async fn send_arg_unflushed(&mut self, verb: &str, arg: &str) -> Result<(), NntpError> {
+        Self::check_cmd(arg)?;
+        self.wire.write_all(verb.as_bytes()).await?;
+        self.wire.write_all(arg.as_bytes()).await?;
+        self.wire.write_all(b"\r\n").await?;
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> Result<(), NntpError> {
         self.wire.flush().await?;
         Ok(())
@@ -1965,9 +2169,7 @@ impl Connection {
         if n >= MAX_STATUS_BYTES && self.line.last() != Some(&b'\n') {
             return Err(NntpError::TooLarge(MAX_STATUS_BYTES));
         }
-        let text = String::from_utf8_lossy(&self.line).trim_end().to_string();
-        let code = text.get(..3).and_then(|c| c.parse().ok()).unwrap_or(0);
-        Ok(Status { code, line: text })
+        Ok(Status::from_wire(&self.line))
     }
 
     /// Send a command and read its (single-line) response.
@@ -2208,151 +2410,6 @@ where
     })
 }
 
-/// See [`Connection::read_multiline_into`]; generic so tests can drive
-/// it with tiny buffer capacities to hit every chunk-boundary case.
-pub(crate) async fn read_multiline_generic<R>(
-    reader: &mut R,
-    out: &mut Vec<u8>,
-) -> Result<(), NntpError>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    read_multiline_paced(reader, out, STREAM_IDLE_TIMEOUT).await
-}
-
-/// [`read_multiline_generic`] with a caller-chosen per-read no-progress
-/// deadline. Any byte arriving resets it, so a slow-but-alive transfer
-/// never trips; only a genuine mid-body stall does.
-pub(crate) async fn read_multiline_paced<R>(
-    reader: &mut R,
-    out: &mut Vec<u8>,
-    stall: std::time::Duration,
-) -> Result<(), NntpError>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    read_multiline_paced_max(reader, out, stall, MAX_MULTILINE_BYTES).await
-}
-
-/// [`read_multiline_paced`] with a caller-chosen SIZE ceiling as well.
-///
-/// The download path wants [`MAX_MULTILINE_BYTES`] (256 MiB): that bound
-/// exists to stop an unterminated response, not to budget anything. A
-/// CURIOSITY probe has a real budget - pre-flight's block-size probe
-/// allows itself 8 MiB total - and a budget checked after the whole
-/// response is buffered is not a budget: one well-formed 256 MiB body
-/// lands whole, 32x over, and is then decoded into a second body-sized
-/// Vec before the caller's accounting ever sees the length. Passing the
-/// caller's remaining allowance down here is what makes it real.
-pub(crate) async fn read_multiline_paced_max<R>(
-    reader: &mut R,
-    out: &mut Vec<u8>,
-    stall: std::time::Duration,
-    max: usize,
-) -> Result<(), NntpError>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    {
-        use tokio::io::AsyncBufReadExt;
-        let start = out.len();
-        loop {
-            let buf = idle_bounded_for(stall, reader.fill_buf()).await?;
-            if buf.is_empty() {
-                return Err(NntpError::Closed);
-            }
-            let block = &out[start..];
-
-            // A terminator begun in the previous chunk: the block so far
-            // ends with a dot line under construction. `drop` bytes come
-            // back off `out`, `consume` bytes complete it from `buf`.
-            let after_nl = |b: &[u8]| b.is_empty() || b.ends_with(b"\n");
-            let strad: Option<(usize, usize)> = if block.ends_with(b"\n.") || block == b"." {
-                if buf.starts_with(b"\r\n") {
-                    Some((1, 2))
-                } else if buf[0] == b'\n' {
-                    Some((1, 1))
-                } else {
-                    None
-                }
-            } else if block.ends_with(b"\n.\r") || block == b".\r" {
-                (buf[0] == b'\n').then_some((2, 1))
-            } else {
-                None
-            };
-            if let Some((drop, consume)) = strad {
-                out.truncate(out.len() - drop);
-                reader.consume(consume);
-                return Ok(());
-            }
-
-            // Scan this chunk for a terminator wholly inside it: a '.'
-            // at chunk start (when the block so far ends on a newline)
-            // or right after any '\n', followed by CRLF or bare LF. A
-            // candidate too close to the chunk end to confirm is left
-            // for the straddle logic next round.
-            let mut found: Option<(usize, usize)> = None; // (dot idx, term len)
-            let confirm = |d: usize| -> Option<(usize, usize)> {
-                match buf.get(d + 1) {
-                    Some(b'\r') if buf.get(d + 2) == Some(&b'\n') => Some((d, 2)),
-                    Some(b'\n') => Some((d, 1)),
-                    _ => None,
-                }
-            };
-            if buf[0] == b'.' && after_nl(block) {
-                found = confirm(0);
-            }
-            if found.is_none() {
-                for nl in memchr::memchr_iter(b'\n', buf) {
-                    if buf.get(nl + 1) == Some(&b'.')
-                        && let Some(hit) = confirm(nl + 1)
-                    {
-                        found = Some(hit);
-                        break;
-                    }
-                }
-            }
-
-            match found {
-                Some((dot, term)) => {
-                    // The cap binds here too. Checking it only in the
-                    // no-terminator arm below made the bound depend on
-                    // how the response happened to be chunked: the wire
-                    // reads through a 256 KiB buffer, so any response
-                    // that lands terminator-and-all inside one chunk
-                    // returned Ok having never compared against `max`.
-                    // A 200 KB body under an 8 KiB cap passed on Linux
-                    // and macOS purely because the loopback split it
-                    // across reads, and failed on Windows, which did
-                    // not - so the probe budget was inert exactly when
-                    // the server answered fastest.
-                    if out.len() - start + dot > max {
-                        return Err(NntpError::TooLarge(max));
-                    }
-                    out.extend_from_slice(&buf[..dot]);
-                    reader.consume(dot + 1 + term);
-                    return Ok(());
-                }
-                None => {
-                    let n = buf.len();
-                    out.extend_from_slice(buf);
-                    reader.consume(n);
-                    // What THIS response appended, not what the caller's
-                    // buffer already held - same as the compressed path.
-                    if out.len() - start > max {
-                        // Either the terminator never came (protocol
-                        // fault; the pool requeues elsewhere instead of
-                        // buffering unboundedly) or the caller set a
-                        // tighter budget than the wire bound and the
-                        // response has just blown it.
-                        return Err(NntpError::TooLarge(max));
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl Connection {
     // -- Convenience commands -------------------------------------------------
 
@@ -2361,7 +2418,7 @@ impl Connection {
         if st.code != 101 {
             return Err(NntpError::Unexpected {
                 cmd: "CAPABILITIES".into(),
-                line: st.line,
+                line: st.into_line(),
             });
         }
         let mut raw = Vec::new();
@@ -2412,7 +2469,7 @@ impl Connection {
         if st.code != 206 {
             return Err(NntpError::Unexpected {
                 cmd: "COMPRESS DEFLATE".into(),
-                line: st.line,
+                line: st.into_line(),
             });
         }
         // Anything read past the 206 line is already deflate-stream
@@ -2434,10 +2491,10 @@ impl Connection {
         if st.code != 211 {
             return Err(NntpError::Unexpected {
                 cmd: format!("GROUP {name}"),
-                line: st.line,
+                line: st.into_line(),
             });
         }
-        let mut parts = st.line.split_whitespace().skip(1);
+        let mut parts = st.line().split_whitespace().skip(1);
         let mut next = || {
             parts
                 .next()
@@ -2490,7 +2547,7 @@ impl Connection {
         if st.code != 215 {
             return Err(NntpError::Unexpected {
                 cmd: "LIST ACTIVE".into(),
-                line: st.line,
+                line: st.into_line(),
             });
         }
         let mut raw = Vec::new();
@@ -2505,7 +2562,7 @@ impl Connection {
         if st.code != 215 {
             return Err(NntpError::Unexpected {
                 cmd: "LIST NEWSGROUPS".into(),
-                line: st.line,
+                line: st.into_line(),
             });
         }
         let mut raw = Vec::new();
@@ -2561,7 +2618,7 @@ impl Connection {
             }
             return Err(NntpError::Unexpected {
                 cmd: "OVER".into(),
-                line: st.line,
+                line: st.into_line(),
             });
         }
         let mut raw = Vec::new();
@@ -2592,7 +2649,7 @@ impl Connection {
     /// Issue a BODY command without waiting for the response (pipelining).
     /// `message_id` must include the angle brackets.
     pub async fn send_body(&mut self, message_id: &str) -> Result<(), NntpError> {
-        self.send_unflushed(&format!("BODY {message_id}")).await
+        self.send_arg_unflushed("BODY ", message_id).await
     }
 
     /// §129 3g: the alignment fence, sent straight after a BODY on a
@@ -2628,7 +2685,7 @@ impl Connection {
         match st.code {
             222 | 220 | 423 | 430 | 451 => Err(NntpError::Unexpected {
                 cmd: "DATE".into(),
-                line: st.line,
+                line: st.into_line(),
             }),
             _ => Ok(()),
         }
@@ -2665,11 +2722,16 @@ impl Connection {
     /// echoed one is the opposite and is worth as much: it passed
     /// `check_echoed_id`, so it PROVES the socket was still aligned at
     /// this response, which is what bounds §129 3g's suspect window.
+    ///
+    /// `takedown`: set on a miss whose refusal says the article was
+    /// removed rather than never seen (see [`takedown_flavoured`]).
+    /// Hint only - the hit/miss verdict is unchanged either way.
     pub async fn read_body_into(
         &mut self,
         out: &mut Vec<u8>,
         expected: Option<&str>,
         id_echoed: &std::sync::atomic::AtomicBool,
+        takedown: &std::sync::atomic::AtomicBool,
     ) -> Result<bool, NntpError> {
         let st = self.read_status().await?;
         check_echoed_id(&st, expected)?;
@@ -2679,7 +2741,7 @@ impl Connection {
         // with `expected` None nothing was compared, and an id that was
         // never checked proves nothing about alignment.
         id_echoed.store(
-            expected.is_some() && echoed_message_id(&st.line).is_some(),
+            expected.is_some() && echoed_message_id(st.line_bytes()).is_some(),
             std::sync::atomic::Ordering::Release,
         );
         match st.code {
@@ -2687,10 +2749,16 @@ impl Connection {
                 self.read_multiline_into(out).await?;
                 Ok(true)
             }
-            423 | 430 | 451 => Ok(false),
+            423 | 430 | 451 => {
+                takedown.store(
+                    takedown_flavoured(st.code, st.line_bytes()),
+                    std::sync::atomic::Ordering::Release,
+                );
+                Ok(false)
+            }
             _ => Err(NntpError::Unexpected {
                 cmd: "BODY".into(),
-                line: st.line,
+                line: st.into_line(),
             }),
         }
     }
@@ -2705,7 +2773,11 @@ impl Connection {
     /// - **post-byte** (`stall`): a per-read no-progress deadline on the
     ///   body. Any byte arriving resets it, so a slow-but-alive transfer
     ///   is never killed for taking longer than a flat cap - only a
-    ///   genuine mid-body stall trips.
+    ///   genuine mid-body stall trips. On top of it rides the A6 rate
+    ///   floor ([`body_rate_floor`]): a body must also average a very
+    ///   low minimum rate over a rolling window, so a peer dribbling
+    ///   single bytes cannot reset the idle deadline forever and squat
+    ///   the connection slot for the run.
     ///
     /// Both expiries surface as [`NntpError::Timeout`]. Returns the
     /// measured time-to-status alongside the hit/miss so the caller can
@@ -2720,6 +2792,7 @@ impl Connection {
     ) -> Result<(bool, std::time::Duration), NntpError> {
         let status_seen = std::sync::atomic::AtomicBool::new(false);
         let id_echoed = std::sync::atomic::AtomicBool::new(false);
+        let takedown = std::sync::atomic::AtomicBool::new(false);
         self.read_body_into_two_phase_noting(
             out,
             expected,
@@ -2727,6 +2800,7 @@ impl Connection {
             stall,
             &status_seen,
             &id_echoed,
+            &takedown,
         )
         .await
     }
@@ -2744,6 +2818,7 @@ impl Connection {
         stall: std::time::Duration,
         status_seen: &std::sync::atomic::AtomicBool,
         id_echoed: &std::sync::atomic::AtomicBool,
+        takedown: &std::sync::atomic::AtomicBool,
     ) -> Result<(bool, std::time::Duration), NntpError> {
         let t0 = std::time::Instant::now();
         let st = match tokio::time::timeout(first_byte, self.read_status()).await {
@@ -2756,18 +2831,35 @@ impl Connection {
         // See `read_body_into`: a plausible id means it matched the
         // `expected` the caller named, hit or miss alike.
         id_echoed.store(
-            expected.is_some() && echoed_message_id(&st.line).is_some(),
+            expected.is_some() && echoed_message_id(st.line_bytes()).is_some(),
             std::sync::atomic::Ordering::Release,
         );
         match st.code {
             222 => {
-                read_multiline_paced(&mut self.wire, out, stall).await?;
+                // The A6 floor rides only this read: the article body is
+                // the one place a dribbling peer can hold a slot for a
+                // whole run (scans and probes have their own budgets,
+                // and the flat path is whole-response capped).
+                read_multiline_paced_max(
+                    &mut self.wire,
+                    out,
+                    stall,
+                    MAX_MULTILINE_BYTES,
+                    body_rate_floor(),
+                )
+                .await?;
                 Ok((true, ttfb))
             }
-            423 | 430 | 451 => Ok((false, ttfb)),
+            423 | 430 | 451 => {
+                takedown.store(
+                    takedown_flavoured(st.code, st.line_bytes()),
+                    std::sync::atomic::Ordering::Release,
+                );
+                Ok((false, ttfb))
+            }
             _ => Err(NntpError::Unexpected {
                 cmd: "BODY".into(),
-                line: st.line,
+                line: st.into_line(),
             }),
         }
     }
@@ -2791,7 +2883,7 @@ impl Connection {
             423 | 430 | 451 => Ok(None),
             _ => Err(NntpError::Unexpected {
                 cmd: "HEAD".into(),
-                line: st.line,
+                line: st.into_line(),
             }),
         }
     }
@@ -2800,7 +2892,7 @@ impl Connection {
     /// STAT transfers no body - ~50 bytes per round trip - which is what
     /// makes the pre-flight availability sweep near-free.
     pub async fn send_stat(&mut self, message_id: &str) -> Result<(), NntpError> {
-        self.send_unflushed(&format!("STAT {message_id}")).await
+        self.send_arg_unflushed("STAT ", message_id).await
     }
 
     /// Read one STAT response: `Ok(true)` if the article exists (223),
@@ -2836,6 +2928,7 @@ impl Connection {
         first_byte: std::time::Duration,
         status_seen: &std::sync::atomic::AtomicBool,
         id_echoed: &std::sync::atomic::AtomicBool,
+        takedown: &std::sync::atomic::AtomicBool,
     ) -> Result<(bool, std::time::Duration), NntpError> {
         let t0 = std::time::Instant::now();
         let st = match tokio::time::timeout(first_byte, self.read_status()).await {
@@ -2846,7 +2939,11 @@ impl Connection {
         let ttfb = t0.elapsed();
         check_echoed_id(&st, expected)?;
         id_echoed.store(
-            expected.is_some() && echoed_message_id(&st.line).is_some(),
+            expected.is_some() && echoed_message_id(st.line_bytes()).is_some(),
+            std::sync::atomic::Ordering::Release,
+        );
+        takedown.store(
+            takedown_flavoured(st.code, st.line_bytes()),
             std::sync::atomic::Ordering::Release,
         );
         Ok((stat_verdict(st)?, ttfb))
@@ -2858,8 +2955,9 @@ impl Connection {
     pub async fn read_body(&mut self) -> Result<Option<Vec<u8>>, NntpError> {
         let mut raw = Vec::with_capacity(800 * 1024);
         let id_echoed = std::sync::atomic::AtomicBool::new(false);
+        let takedown = std::sync::atomic::AtomicBool::new(false);
         Ok(self
-            .read_body_into(&mut raw, None, &id_echoed)
+            .read_body_into(&mut raw, None, &id_echoed, &takedown)
             .await?
             .then_some(raw))
     }
@@ -2922,14 +3020,14 @@ impl Connection {
         match st.code {
             222 => {
                 let mut raw = Vec::with_capacity(max.min(800 * 1024));
-                read_multiline_paced_max(&mut self.wire, &mut raw, STREAM_IDLE_TIMEOUT, max)
+                read_multiline_paced_max(&mut self.wire, &mut raw, STREAM_IDLE_TIMEOUT, max, None)
                     .await?;
                 Ok(Some(raw))
             }
             423 | 430 | 451 => Ok(None),
             _ => Err(NntpError::Unexpected {
                 cmd: "BODY".into(),
-                line: st.line,
+                line: st.into_line(),
             }),
         }
     }
@@ -3058,6 +3156,7 @@ mod capped_read_tests {
             &mut out,
             std::time::Duration::from_secs(5),
             8_192,
+            None,
         )
         .await
         .expect_err("a 200 KB body under an 8 KiB cap must be refused");
@@ -3077,6 +3176,7 @@ mod capped_read_tests {
             &mut out,
             std::time::Duration::from_secs(5),
             BODY - 1,
+            None,
         )
         .await
         .expect_err("one byte under the body must be refused");
@@ -3091,6 +3191,7 @@ mod capped_read_tests {
             &mut out,
             std::time::Duration::from_secs(5),
             BODY,
+            None,
         )
         .await
         .expect("a body exactly at the allowance must be returned");
@@ -3253,489 +3354,11 @@ mod over_tests {
     }
 }
 
+// Compression negotiation and BODY/STAT read-path tests - a child
+// module (the `unit_tests` pattern below) so nntp.rs stays inside its
+// size-gate entry.
 #[cfg(test)]
-mod compress_tests {
-    use super::{Connection, caps_support_compress_deflate};
-
-    #[test]
-    fn list_active_parses_and_skips_junk() {
-        let raw = b"alt.binaries.teevee 9000 100 y\n\
-                    rec.autos.sport.f1 555 12 m\n\
-                    broken-line\n\
-                    bad.numbers x y z\n\
-                    huge.high 4611686018427387904 1 y\n\
-                    no.status 50 10\n";
-        let g = super::parse_list_active(raw);
-        assert_eq!(g.len(), 3);
-        assert_eq!(g[0].name, "alt.binaries.teevee");
-        assert_eq!((g[0].high, g[0].low, g[0].status), (9000, 100, 'y'));
-        assert_eq!(g[1].status, 'm');
-        assert_eq!((g[2].name.as_str(), g[2].status), ("no.status", 'y'));
-    }
-
-    #[test]
-    fn list_newsgroups_parses_tab_and_space_and_drops_placeholders() {
-        let raw = b"rec.autos.sport.f1\tFormula 1 motor racing.\n\
-                    alt.binaries.sounds.mp3 Music binaries.\n\
-                    alt.empty.desc\t?\n\
-                    alt.no.desc\n";
-        let d = super::parse_list_newsgroups(raw);
-        assert_eq!(d.len(), 2);
-        assert_eq!(
-            d[0],
-            (
-                "rec.autos.sport.f1".into(),
-                "Formula 1 motor racing.".into()
-            )
-        );
-        assert_eq!(d[1].1, "Music binaries.");
-    }
-
-    fn caps(lines: &[&str]) -> Vec<String> {
-        lines.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn detects_compress_deflate_capability() {
-        assert!(caps_support_compress_deflate(&caps(&[
-            "VERSION 2",
-            "COMPRESS DEFLATE"
-        ])));
-        // Case-insensitive; DEFLATE may be one of several algorithms.
-        assert!(caps_support_compress_deflate(&caps(&[
-            "compress shrink deflate"
-        ])));
-        assert!(!caps_support_compress_deflate(&caps(&[
-            "VERSION 2",
-            "OVER"
-        ])));
-        assert!(!caps_support_compress_deflate(&caps(&["COMPRESS SHRINK"])));
-        // Label must be exactly COMPRESS, not merely contain it.
-        assert!(!caps_support_compress_deflate(&caps(&[
-            "XCOMPRESS DEFLATE"
-        ])));
-        assert!(!caps_support_compress_deflate(&[]));
-    }
-
-    fn test_server_config(port: u16) -> crate::config::ServerConfig {
-        crate::config::ServerConfig {
-            host: "127.0.0.1".into(),
-            port,
-            tls: false,
-            username: None,
-            password: None,
-            connections: 1,
-            pin_connections: false,
-            rcvbuf: None,
-            level: 0,
-            group: None,
-            retention_days: 0,
-            block_bytes: None,
-            block_account: false,
-            bind_ip: None,
-            socks5: None,
-            enabled: true,
-            warm_pool: false,
-            idle_release_secs: None,
-            idle_keep: None,
-            max_source_ips: None,
-        }
-    }
-
-    /// Read one CRLF line a byte at a time - deliberately unbuffered so
-    /// the plain→compressed switch can't strand bytes in a reader.
-    fn read_line<R: std::io::Read>(r: &mut R) -> std::io::Result<String> {
-        let mut line = Vec::new();
-        let mut b = [0u8; 1];
-        loop {
-            let n = r.read(&mut b)?;
-            if n == 0 || b[0] == b'\n' {
-                break;
-            }
-            line.push(b[0]);
-        }
-        while line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        Ok(String::from_utf8_lossy(&line).into_owned())
-    }
-
-    /// Minimal RFC 8054 server: plain greeting/CAPABILITIES, then after
-    /// COMPRESS DEFLATE → 206 both directions become raw deflate.
-    /// `rows` controls the size of each OVER block so tests can push the
-    /// adapter past its internal 16 KiB staging buffers.
-    fn spawn_deflate_server(rows: u64, refuse_compress: bool) -> u16 {
-        fn handle(
-            mut sock: std::net::TcpStream,
-            rows: u64,
-            refuse_compress: bool,
-        ) -> std::io::Result<()> {
-            use std::io::Write;
-            sock.write_all(b"200 deflate test server\r\n")?;
-            loop {
-                match read_line(&mut sock)?.as_str() {
-                    "CAPABILITIES" => {
-                        sock.write_all(b"101 caps\r\nVERSION 2\r\nCOMPRESS DEFLATE\r\n.\r\n")?
-                    }
-                    "COMPRESS DEFLATE" => {
-                        if refuse_compress {
-                            sock.write_all(b"502 compression not available\r\n")?;
-                            continue;
-                        }
-                        sock.write_all(b"206 compression active\r\n")?;
-                        break;
-                    }
-                    "QUIT" => return sock.write_all(b"205 bye\r\n"),
-                    "" => return Ok(()), // client hung up
-                    _ => sock.write_all(b"500 what\r\n")?,
-                }
-            }
-            // Compressed phase. flate2's blocking wrappers do the
-            // server-side framing: DeflateEncoder::flush is a sync
-            // flush, matching what the client adapter expects.
-            // The decoder MUST sit under a BufReader: miniz consumes a
-            // whole input frame eagerly and parks decoded bytes in its
-            // window, and flate2's read::DeflateDecoder blocks for MORE
-            // wire input before draining that window when handed tiny
-            // dst buffers - so read_line's 1-byte reads yield one byte
-            // and then deadlock on a socket that stays open. Reading
-            // through BufReader makes each decoder call an 8 KiB read,
-            // which drains whole lines per frame. (Found the hard way -
-            // this exact line was the round-trip "deadlock".)
-            let mut rd =
-                std::io::BufReader::new(flate2::read::DeflateDecoder::new(sock.try_clone()?));
-            let mut wr = flate2::write::DeflateEncoder::new(sock, flate2::Compression::default());
-            loop {
-                let cmd = read_line(&mut rd)?;
-                if cmd.starts_with("GROUP ") {
-                    write!(wr, "211 {rows} 1 {rows} mock.group\r\n")?;
-                } else if cmd.starts_with("OVER ") || cmd.starts_with("XOVER ") {
-                    wr.write_all(b"224 overview follows\r\n")?;
-                    for n in 1..=rows {
-                        write!(
-                            wr,
-                            "{n}\tpost {n} with a subject long enough to be worth \
-                             compressing\ta@b\tThu, 02 May 2024 12:34:56 +0000\t\
-                             <m{n}@x>\t\t1000\t10\r\n"
-                        )?;
-                    }
-                    wr.write_all(b".\r\n")?;
-                } else if cmd == "QUIT" || cmd.is_empty() {
-                    let _ = wr.write_all(b"205 bye\r\n");
-                    let _ = wr.flush();
-                    return Ok(());
-                } else {
-                    wr.write_all(b"500 what\r\n")?;
-                }
-                wr.flush()?;
-            }
-        }
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            // Sequential accepts: the refusal test reconnects after the
-            // failed COMPRESS exchange drops the first connection.
-            for sock in listener.incoming() {
-                let Ok(sock) = sock else { return };
-                let _ = handle(sock, rows, refuse_compress);
-            }
-        });
-        port
-    }
-
-    /// Adapter-only round trip over an in-memory duplex: no mock TCP
-    /// server, no flate2 blocking codecs on the far side - the test
-    /// itself decompresses what the adapter wrote and hand-compresses
-    /// the response. Isolates DeflateTransport correctness from the
-    /// mock-server plumbing when hunting the round-trip deadlock.
-    #[tokio::test]
-    async fn deflate_transport_duplex_isolated() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let (client_end, mut wire_end) = tokio::io::duplex(64 * 1024);
-        let boxed: Box<dyn super::Transport> = Box::new(client_end);
-        let wrapped: Box<dyn super::Transport> =
-            Box::new(super::DeflateTransport::new(boxed, Vec::new()));
-        let (mut r, mut w) = tokio::io::split(wrapped);
-
-        // Client → wire: write a command + flush, then read the raw
-        // compressed bytes off the far end and inflate them by hand.
-        w.write_all(b"GROUP mock.group\r\n").await.unwrap();
-        w.flush().await.unwrap();
-        let mut raw = vec![0u8; 4096];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(5), wire_end.read(&mut raw))
-            .await
-            .expect("adapter never wrote to the wire after flush")
-            .unwrap();
-        assert!(n > 0, "flush wrote nothing");
-        let mut dec = flate2::Decompress::new(false);
-        let mut out = Vec::with_capacity(1024);
-        dec.decompress_vec(&raw[..n], &mut out, flate2::FlushDecompress::None)
-            .expect("client frame inflates");
-        assert_eq!(&out, b"GROUP mock.group\r\n", "sync-flushed frame decodes");
-
-        // Wire → client: hand-compress a response with a sync flush and
-        // read it back through the adapter.
-        let mut enc = flate2::Compress::new(flate2::Compression::default(), false);
-        let mut frame = Vec::with_capacity(1024);
-        enc.compress_vec(
-            b"211 5 1 5 mock.group\r\n",
-            &mut frame,
-            flate2::FlushCompress::Sync,
-        )
-        .unwrap();
-        wire_end.write_all(&frame).await.unwrap();
-        let mut got = vec![0u8; 64];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(5), r.read(&mut got))
-            .await
-            .expect("adapter never yielded decompressed bytes")
-            .unwrap();
-        assert_eq!(&got[..n], b"211 5 1 5 mock.group\r\n");
-    }
-
-    // (The 24 Jul "deadlock" here was the MOCK SERVER's read pattern -
-    // 1-byte reads through a raw read::DeflateDecoder block for wire
-    // input while decoded bytes sit in miniz's window; see the BufReader
-    // note in spawn_deflate_server. The shipping adapter was never at
-    // fault - deflate_transport_duplex_isolated pins that directly.)
-    #[tokio::test]
-    async fn deflate_round_trip_group_and_over() {
-        // 2000 rows ≈ 250 KB of overview text - well past the adapter's
-        // 16 KiB staging buffers, so the chunked-decompress path runs.
-        let port = spawn_deflate_server(2000, false);
-        let cfg = test_server_config(port);
-        let (mut conn, _) = Connection::connect(&cfg).await.expect("connect");
-        let caps = conn.capabilities().await.expect("capabilities");
-        assert!(caps_support_compress_deflate(&caps));
-        let mut conn = conn.enable_compression().await.expect("206 + wrap");
-        let g = conn.group("mock.group").await.expect("group over deflate");
-        assert_eq!(g.high, 2000);
-        let es = conn.over(1, 2000).await.expect("over over deflate");
-        assert_eq!(es.len(), 2000);
-        assert_eq!(es[0].message_id, "<m1@x>");
-        assert_eq!(es[1999].number, 2000);
-        // A second command proves stream continuity across sync-flush
-        // boundaries - RFC 8054 is one continuous deflate stream, not
-        // per-response streams.
-        let es = conn.over(1, 2000).await.expect("second over");
-        assert_eq!(es.len(), 2000);
-        conn.quit().await;
-    }
-
-    /// A removed article answered with Giganews's nonstandard 451 is a
-    /// MISS, not a protocol error. `read_stat` has always known that; the
-    /// BODY path did not, and there it costs far more: a protocol error
-    /// drops the session and charges the session-backoff ladder, so a
-    /// takedown (hundreds of adjacent articles) retired every worker on
-    /// the server against the give-up ceiling and failed the whole job
-    /// instead of just the removed file.
-    #[tokio::test]
-    async fn a_451_takedown_on_body_is_a_miss_not_a_protocol_error() {
-        fn spawn_451_server() -> u16 {
-            use std::io::Write;
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            let port = l.local_addr().unwrap().port();
-            std::thread::spawn(move || {
-                let Ok((mut sock, _)) = l.accept() else {
-                    return;
-                };
-                let _ = sock.write_all(b"200 takedown test server\r\n");
-                loop {
-                    let Ok(line) = read_line(&mut sock) else {
-                        return;
-                    };
-                    if line.is_empty() {
-                        return;
-                    }
-                    if line == "QUIT" {
-                        let _ = sock.write_all(b"205 bye\r\n");
-                        return;
-                    }
-                    if line.starts_with("BODY ") {
-                        let _ = sock.write_all(b"451 0 <gone@example>\r\n");
-                    } else {
-                        let _ = sock.write_all(b"500 what\r\n");
-                    }
-                }
-            });
-            port
-        }
-
-        let cfg = test_server_config(spawn_451_server());
-        let (mut conn, _) = Connection::connect(&cfg).await.expect("connect");
-        conn.send_body("<gone@example>").await.expect("send BODY");
-        let mut raw = Vec::new();
-        // Expected id supplied: the 451 echoes the SAME id, so the
-        // echoed-id check must stay quiet and the miss must stand.
-        let id_echoed = std::sync::atomic::AtomicBool::new(false);
-        let got = conn
-            .read_body_into(&mut raw, Some("<gone@example>"), &id_echoed)
-            .await;
-        assert!(
-            matches!(got, Ok(false)),
-            "451 must read as a missing article, got {got:?}"
-        );
-        assert!(
-            id_echoed.load(std::sync::atomic::Ordering::Acquire),
-            "an id-echoing refusal must report a confirmed echo"
-        );
-        assert!(raw.is_empty(), "a miss must append no body bytes");
-        // The session survives: that is the whole point, since dropping it
-        // is what charged the backoff ladder.
-        conn.send_body("<gone2@example>")
-            .await
-            .expect("reuse session");
-        let mut raw2 = Vec::new();
-        // This rigged server echoes <gone@example> whatever was asked;
-        // the serial caller passes None, so no enforcement applies.
-        let id_echoed2 = std::sync::atomic::AtomicBool::new(false);
-        assert!(matches!(
-            conn.read_body_into(&mut raw2, None, &id_echoed2).await,
-            Ok(false)
-        ));
-        conn.quit().await;
-    }
-
-    /// §129 3g: `id_echoed` reports the echo on a HIT too, not only on a
-    /// refusal. The pool needs it there: a response whose id it could
-    /// check is proof the socket was still aligned at that point, which
-    /// is what bounds the window of bare refusals a later desync can
-    /// discredit. Reporting it only on misses left a bare-refusing
-    /// provider with no alignment proof at all between its refusals.
-    #[tokio::test]
-    async fn a_hit_reports_its_echoed_id_as_well_as_a_miss() {
-        fn spawn_echoing_body_server() -> u16 {
-            use std::io::Write;
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            let port = l.local_addr().unwrap().port();
-            std::thread::spawn(move || {
-                let Ok((mut sock, _)) = l.accept() else {
-                    return;
-                };
-                let _ = sock.write_all(b"200 echo test server\r\n");
-                loop {
-                    let Ok(line) = read_line(&mut sock) else {
-                        return;
-                    };
-                    if line.is_empty() || line == "QUIT" {
-                        let _ = sock.write_all(b"205 bye\r\n");
-                        return;
-                    }
-                    if line.starts_with("BODY ") {
-                        let _ = sock.write_all(b"222 0 <a@example> body\r\nhello\r\n.\r\n");
-                    } else {
-                        let _ = sock.write_all(b"500 what\r\n");
-                    }
-                }
-            });
-            port
-        }
-
-        let cfg = test_server_config(spawn_echoing_body_server());
-        let (mut conn, _) = Connection::connect(&cfg).await.expect("connect");
-        conn.send_body("<a@example>").await.expect("send BODY");
-        let mut raw = Vec::new();
-        let id_echoed = std::sync::atomic::AtomicBool::new(false);
-        let got = conn
-            .read_body_into(&mut raw, Some("<a@example>"), &id_echoed)
-            .await;
-        assert!(matches!(got, Ok(true)), "222 must read as a hit: {got:?}");
-        assert!(
-            id_echoed.load(std::sync::atomic::Ordering::Acquire),
-            "a hit that echoed the id we asked for is the pool's proof \
-             that this session was reading the right slot"
-        );
-        conn.quit().await;
-    }
-
-    /// §129 3g: the alignment fence reads a slot, and what may live in
-    /// that slot is the whole point. A server's own answer to DATE - or
-    /// its refusal to implement it - means the stream is where we think
-    /// it is; a BODY's answer means a response went missing upstream and
-    /// everything since has been one slot early.
-    #[tokio::test]
-    async fn the_fence_accepts_any_answer_that_is_not_a_bodys() {
-        fn spawn_fence_server(reply: &'static str) -> u16 {
-            use std::io::Write;
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            let port = l.local_addr().unwrap().port();
-            std::thread::spawn(move || {
-                let Ok((mut sock, _)) = l.accept() else {
-                    return;
-                };
-                let _ = sock.write_all(b"200 fence test server\r\n");
-                loop {
-                    let Ok(line) = read_line(&mut sock) else {
-                        return;
-                    };
-                    if line.is_empty() || line == "QUIT" {
-                        let _ = sock.write_all(b"205 bye\r\n");
-                        return;
-                    }
-                    let _ = sock.write_all(reply.as_bytes());
-                }
-            });
-            port
-        }
-
-        // The ordinary answer, and the answer of a server that has never
-        // heard of DATE. Both say the same thing: this slot is the
-        // fence's, so the response before it was the body's.
-        for reply in ["111 20260719000000\r\n", "500 unknown command\r\n"] {
-            let cfg = test_server_config(spawn_fence_server(reply));
-            let (mut conn, _) = Connection::connect(&cfg).await.expect("connect");
-            conn.send_fence().await.expect("send DATE");
-            conn.flush().await.expect("flush");
-            assert!(
-                conn.read_fence().await.is_ok(),
-                "{reply:?} is the fence's own answer, not a body's"
-            );
-            conn.quit().await;
-        }
-
-        // And the shapes that mean a response was dropped upstream: a
-        // body's answer arriving where the fence's belongs.
-        for reply in [
-            "222 0 <a@example> body\r\n",
-            "430 no such article\r\n",
-            "451 0 <gone@example>\r\n",
-        ] {
-            let cfg = test_server_config(spawn_fence_server(reply));
-            let (mut conn, _) = Connection::connect(&cfg).await.expect("connect");
-            conn.send_fence().await.expect("send DATE");
-            conn.flush().await.expect("flush");
-            assert!(
-                matches!(
-                    conn.read_fence().await,
-                    Err(super::NntpError::Unexpected { .. })
-                ),
-                "{reply:?} in the fence's slot means the stream is off by one"
-            );
-            conn.quit().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn refused_compress_errors_and_a_plain_reconnect_works() {
-        // A server that advertises COMPRESS but refuses the exchange:
-        // enable_compression must fail cleanly (connection consumed),
-        // and a fresh uncompressed connection must still work - the
-        // provider-tolerance contract the scan path relies on.
-        let port = spawn_deflate_server(5, true);
-        let cfg = test_server_config(port);
-        let (conn, _) = Connection::connect(&cfg).await.expect("connect");
-        let err = conn
-            .enable_compression()
-            .await
-            .err()
-            .expect("502 must error");
-        assert!(
-            matches!(err, super::NntpError::Unexpected { .. }),
-            "{err:?}"
-        );
-        let (conn2, _) = Connection::connect(&cfg).await.expect("plain reconnect");
-        conn2.quit().await;
-    }
-}
+mod compress_tests;
 
 // Read-ladder unit tests (coverage §122.5) - a child module, the
 // pool/unit_tests.rs pattern, so nntp.rs stays inside its size-gate

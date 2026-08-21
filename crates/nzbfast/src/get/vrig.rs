@@ -330,7 +330,7 @@ pub(super) fn build_rig(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_seek(
     slots: &[Arc<FileSlot>],
-    slot_arts: &mut Vec<(Vec<(u64, String)>, u64)>,
+    slot_arts: &mut Vec<(Vec<(u64, std::sync::Arc<str>)>, u64)>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
     abort_flag: &Arc<std::sync::atomic::AtomicBool>,
     extractor: &Arc<nzbkit::extract::Extractor>,

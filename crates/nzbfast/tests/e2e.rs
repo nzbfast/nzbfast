@@ -4060,6 +4060,15 @@ async fn tiny_mem_budget_fast_verify_never_spills() {
         log.contains(" 0 by read-back"),
         "settle still re-reading:\n{log}"
     );
+    // Instrument-first: every job reports its verified-CRC reuse
+    // geometry, and this set is the mismatched shape the census exists
+    // to catch - 100 articles of 300 kB against ONE 30 MB block, so not
+    // a single article is a block and nothing could be reused. (The
+    // counting rules themselves are pinned in nzbkit's live.rs.)
+    assert!(
+        log.contains("crc-reuse-geometry: 0/100 articles"),
+        "reuse geometry line missing or miscounted:\n{log}"
+    );
     assert_eq!(std::fs::read(fx.dir.join("out/big.bin")).unwrap(), data);
 }
 

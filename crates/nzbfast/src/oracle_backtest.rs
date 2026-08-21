@@ -4,7 +4,7 @@
 //! The oracle predicts "backbone B no longer carries family F at age
 //! bucket K" from counted article outcomes, and `oracle_route` steers a
 //! job away from the servers it calls gone. On 14 Aug 2026 that took 4
-//! of 6 providers off a job which then failed: the cell (omicron, hdtv,
+//! of 6 providers off a job which then failed: the cell (highwinds, hdtv,
 //! 7-30d) claimed a 4.8% carry rate, while direct STAT of 12
 //! independent releases in that exact cell found the articles present
 //! on every one of them. The ledger counts ARTICLES and Wilson assumes
@@ -912,9 +912,9 @@ mod tests {
     #[test]
     fn correlated_red_cell_scores_as_false_skip() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "hdtv", 2, 2871, 57071);
-        let backbones = vec!["omicron".to_string()];
-        let pairs: Vec<Pair> = (0..12).map(|i| pair(i, "omicron", 3, 0)).collect();
+        snap.insert("highwinds", "hdtv", 2, 2871, 57071);
+        let backbones = vec!["highwinds".to_string()];
+        let pairs: Vec<Pair> = (0..12).map(|i| pair(i, "highwinds", 3, 0)).collect();
         let (cells, skip, verdicts) = score(&pairs, &snap, &backbones, 0.5);
         assert_eq!(cells.len(), 1);
         let c = &cells[0];
@@ -962,9 +962,9 @@ mod tests {
     #[test]
     fn blind_spot_predicts_nothing() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "hdtv", 2, 2, 3); // under MIN_SAMPLES
-        let pairs: Vec<Pair> = (0..4).map(|i| pair(i, "omicron", 3, 0)).collect();
-        let (cells, skip, verdicts) = score(&pairs, &snap, &["omicron".into()], 0.5);
+        snap.insert("highwinds", "hdtv", 2, 2, 3); // under MIN_SAMPLES
+        let pairs: Vec<Pair> = (0..4).map(|i| pair(i, "highwinds", 3, 0)).collect();
+        let (cells, skip, verdicts) = score(&pairs, &snap, &["highwinds".into()], 0.5);
         assert_eq!(cells[0].pred_carry, None);
         assert!(!cells[0].gone);
         assert_eq!(cells[0].false_skip(), None);
@@ -993,9 +993,9 @@ mod tests {
     #[test]
     fn unmeasured_pairs_score_nothing() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "hdtv", 2, 2871, 57071);
-        let pairs = vec![pair(1, "omicron", 0, 0), pair(2, "omicron", 3, 0)];
-        let (cells, skip, verdicts) = score(&pairs, &snap, &["omicron".into()], 0.5);
+        snap.insert("highwinds", "hdtv", 2, 2871, 57071);
+        let pairs = vec![pair(1, "highwinds", 0, 0), pair(2, "highwinds", 3, 0)];
+        let (cells, skip, verdicts) = score(&pairs, &snap, &["highwinds".into()], 0.5);
         assert_eq!(cells[0].releases, 1);
         assert_eq!(skip.predicted(), 1);
         assert_eq!(verdicts.iter().map(|v| v.releases).sum::<usize>(), 1);
@@ -1010,12 +1010,12 @@ mod tests {
     fn unprobed_backbone_does_not_disprove_a_green_verdict() {
         let mut snap = Snapshot::default();
         snap.insert("alpha", "hdtv", 2, 6000, 60); // green
-        snap.insert("omicron", "hdtv", 2, 2871, 57071); // red
-        let backbones = vec!["alpha".to_string(), "omicron".to_string()];
-        // Only omicron answered, and it missed. Alpha contributes no
+        snap.insert("highwinds", "hdtv", 2, 2871, 57071); // red
+        let backbones = vec!["alpha".to_string(), "highwinds".to_string()];
+        // Only highwinds answered, and it missed. Alpha contributes no
         // pair at all: a failed connect is a MISSING pair, never a
         // zero-count one.
-        let (_, _, verdicts) = score(&[pair(1, "omicron", 0, 3)], &snap, &backbones, 0.5);
+        let (_, _, verdicts) = score(&[pair(1, "highwinds", 0, 3)], &snap, &backbones, 0.5);
         assert_eq!(verdicts.len(), 1);
         assert_eq!(verdicts[0].verdict, Some(Verdict::Ok));
         assert_eq!(
@@ -1030,7 +1030,7 @@ mod tests {
 
         // The other direction is preserved: a measured CARRIER is proof
         // whatever went unprobed, so partial coverage still scores.
-        let (_, _, verdicts) = score(&[pair(1, "omicron", 3, 0)], &snap, &backbones, 0.5);
+        let (_, _, verdicts) = score(&[pair(1, "highwinds", 3, 0)], &snap, &backbones, 0.5);
         assert_eq!(
             (
                 verdicts[0].releases,
@@ -1041,7 +1041,7 @@ mod tests {
         );
 
         // And full coverage with nobody carrying is conclusive.
-        let full = vec![pair(1, "omicron", 0, 3), pair(1, "alpha", 0, 3)];
+        let full = vec![pair(1, "highwinds", 0, 3), pair(1, "alpha", 0, 3)];
         let (_, _, verdicts) = score(&full, &snap, &backbones, 0.5);
         assert_eq!(
             (
@@ -1057,20 +1057,20 @@ mod tests {
     #[test]
     fn truth_threshold_moves_the_line() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "hdtv", 2, 2871, 57071);
-        let pairs = vec![pair(1, "omicron", 2, 2)];
-        let (_, lenient, _) = score(&pairs, &snap, &["omicron".into()], 0.5);
+        snap.insert("highwinds", "hdtv", 2, 2871, 57071);
+        let pairs = vec![pair(1, "highwinds", 2, 2)];
+        let (_, lenient, _) = score(&pairs, &snap, &["highwinds".into()], 0.5);
         assert_eq!(lenient.skipped_carried, 1);
-        let (_, strict, _) = score(&pairs, &snap, &["omicron".into()], 0.9);
+        let (_, strict, _) = score(&pairs, &snap, &["highwinds".into()], 0.9);
         assert_eq!(strict.skipped_gone, 1);
     }
 
     #[test]
     fn cells_are_picked_by_ledger_evidence() {
         let mut snap = Snapshot::default();
-        snap.insert("omicron", "hdtv", 2, 2871, 57071);
-        snap.insert("omicron", "teevee", 2, 1389, 48746);
-        snap.insert("omicron", "boneless", 0, 46081, 40);
+        snap.insert("highwinds", "hdtv", 2, 2871, 57071);
+        snap.insert("highwinds", "teevee", 2, 1389, 48746);
+        snap.insert("highwinds", "boneless", 0, 46081, 40);
         let o = Opts {
             db: PathBuf::new(),
             releases: 12,

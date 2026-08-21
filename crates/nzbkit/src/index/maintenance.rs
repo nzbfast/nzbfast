@@ -203,6 +203,9 @@ impl Index {
     /// scan re-adds the rest, so the cost is one sibling file, not the
     /// release. Returns rows removed.
     pub fn prune_size(&self, min: u64, max: u64) -> rusqlite::Result<usize> {
+        // Set once an orphan sweep has completed on this index under the
+        // current (transactional) shape - see the gate below.
+        const ORPHAN_SWEEP_STAMP: &str = "orphan_sweep_done_v1";
         // One transaction: releases.id has no AUTOINCREMENT, so SQLite
         // reuses max(rowid)+1 - exactly the just-pruned oversize ids. As
         // separate autocommit statements, a crash (or the n>0 gate)
@@ -222,7 +225,36 @@ impl Index {
                 [min as i64],
             )?;
         }
-        // Unconditional: also clears orphans left by an earlier crash.
+        // The sweep below is two anti-joins, and the `files` half reads
+        // every row of the biggest table in the index (through
+        // UNIQUE(release_id,filename), so an index walk rather than a
+        // table scan - still O(files)). It runs on the WRITER
+        // connection once per gated group scan, where the prune usually
+        // matches nothing, so gate it: sweep when this call deleted
+        // something, or when the stamp says no sweep has yet completed
+        // on this index.
+        //
+        // That stamp is the crash recovery, not a substitute for it. It
+        // is written inside this same transaction as the sweep, so the
+        // only committed states are "swept and stamped" and "neither":
+        // a crash or a rollback anywhere in between leaves it absent and
+        // the next call sweeps unconditionally. The hazard the
+        // unconditional shape guarded needs an orphan to outlive a
+        // COMMITTED delete, and no state reachable from here has one
+        // without the stamp being missing too. Its absence on an
+        // existing index is also what buys the single historical-repair
+        // pass, for orphans left behind by the autocommit era described
+        // above (and by the n>0 gate that shipped with it).
+        let swept_before = tx
+            .query_row("SELECT 1 FROM kv WHERE k=?1", [ORPHAN_SWEEP_STAMP], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        if n == 0 && swept_before {
+            tx.commit()?;
+            return Ok(0);
+        }
         tx.execute(
             "DELETE FROM files WHERE release_id NOT IN (SELECT id FROM releases)",
             [],
@@ -236,16 +268,39 @@ impl Index {
             "DELETE FROM pre_corr WHERE release_id NOT IN (SELECT id FROM releases)",
             [],
         )?;
+        tx.execute(
+            "INSERT INTO kv(k, v) VALUES(?1, '1') ON CONFLICT(k) DO NOTHING",
+            [ORPHAN_SWEEP_STAMP],
+        )?;
         tx.commit()?;
         Ok(n)
     }
 
     pub fn stats(&self) -> rusqlite::Result<(u64, u64)> {
-        self.db.query_row(
+        let snap = self.db.query_row(
             "SELECT COUNT(*), COALESCE(SUM(complete),0) FROM releases",
             [],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
-        )
+        )?;
+        self.stats_cache
+            .set(Some((std::time::Instant::now(), snap)));
+        Ok(snap)
+    }
+
+    /// [`Self::stats`] through a per-connection TTL memo. The exact
+    /// query is a full `SCAN releases` (nothing indexes `complete`),
+    /// seconds on a production-sized index - and the scan progress
+    /// line used to ask for it every ~100k headers on up to eight
+    /// concurrent group connections. A progress line tolerates figures
+    /// a TTL old; anything that needs the exact answer calls
+    /// [`Self::stats`], which also refreshes this memo for free.
+    pub fn stats_cached(&self, ttl: std::time::Duration) -> rusqlite::Result<(u64, u64)> {
+        if let Some((at, snap)) = self.stats_cache.get()
+            && at.elapsed() < ttl
+        {
+            return Ok(snap);
+        }
+        self.stats()
     }
 
     /// M31a: delete a batch of release ids and their files rows in one
@@ -253,6 +308,76 @@ impl Index {
     /// the `rel_fts_ad` trigger keeps FTS in sync on the releases delete.
     /// Returns rows removed from `releases`.
     pub(super) fn prune_batch(&self, ids: &[i64]) -> rusqlite::Result<usize> {
+        // Unbudgeted: the size-cap evictor re-measures the file between
+        // batches and has to know the batch it asked for actually left.
+        let no_budget = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
+        Ok(self.prune_batch_until(ids, no_budget).0)
+    }
+
+    /// The same delete, bounded in TIME rather than in rows: chunked, with
+    /// the clock read between chunks, and the chunk size re-measured each
+    /// time so the bound holds whatever a row costs. Returns (rows removed
+    /// from `releases`, ids consumed) - `consumed < ids.len()` means the
+    /// budget ran out and the tail is untouched, which the reapers' cursors
+    /// resume from.
+    ///
+    /// A row count cannot bound this and never could. Every caller passes a
+    /// count picked when a delete was a handful of b-tree writes, but the
+    /// cost of one is whatever `releases` currently carries - 14 secondary
+    /// indexes, two FTS tables and three trigger statements, on this index,
+    /// today - and a single delete statement has no await point, so nothing
+    /// preempts it once it starts. That is how 8000 ids became eleven minutes
+    /// of held write mutex when one trigger statement lost its index (see
+    /// `rel_identity_ad_v3` in schema.rs): the constant was still 8000 and
+    /// still looked reasonable. So the loop below measures instead of
+    /// assuming, and the next per-row regression costs a slower reap rather
+    /// than a wedged daemon.
+    pub(super) fn prune_batch_until(
+        &self,
+        ids: &[i64],
+        deadline: std::time::Instant,
+    ) -> (usize, usize) {
+        // What one chunk should take. Small enough that overshooting the
+        // caller's deadline by a whole chunk is not worth noticing, large
+        // enough that the per-transaction overhead stays in the noise.
+        const CHUNK_TARGET: std::time::Duration = std::time::Duration::from_millis(100);
+        // ...and the range the measurement is allowed to steer it over. The
+        // floor keeps a pathologically slow row from grinding to one-at-a-
+        // time; the ceiling is the row count every caller used to pass.
+        const CHUNK_MIN: usize = 64;
+        const CHUNK_MAX: usize = 8_000;
+        let (mut removed, mut done) = (0usize, 0usize);
+        // Start at the floor and let the measurement raise it. The first
+        // chunk is the only one whose cost is a guess, so it must be the
+        // cheapest thing we are willing to do; one extra transaction is a
+        // small price for never guessing large.
+        let mut chunk = CHUNK_MIN;
+        while done < ids.len() {
+            let take = chunk.min(ids.len() - done);
+            let started = std::time::Instant::now();
+            let Ok(n) = self.prune_chunk(&ids[done..done + take]) else {
+                // A busy or interrupted chunk stops the run rather than
+                // spinning on it: the ids are still there, and the caller's
+                // cursor has not moved past them.
+                break;
+            };
+            removed += n;
+            done += take;
+            // Re-aim at CHUNK_TARGET from what that chunk actually cost.
+            let spent = started.elapsed().max(std::time::Duration::from_micros(1));
+            let scaled = (take as f64 * CHUNK_TARGET.as_secs_f64() / spent.as_secs_f64()) as usize;
+            chunk = scaled.clamp(CHUNK_MIN, CHUNK_MAX);
+            // AFTER the chunk, never before: a caller that arrives already
+            // past its deadline still makes progress rather than none.
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        (removed, done)
+    }
+
+    /// One chunk of [`Self::prune_batch_until`], in one transaction.
+    fn prune_chunk(&self, ids: &[i64]) -> rusqlite::Result<usize> {
         if ids.is_empty() {
             return Ok(0);
         }
@@ -497,30 +622,7 @@ impl Index {
         // above drops duplicate filenames, so the pre-merge sums counted
         // the dropped copies' parts and a dropped incomplete duplicate
         // marked a wholly-complete merged row incomplete.
-        let (total, nfiles, ncomplete, nexe, have, need): (i64, i64, i64, i64, i64, i64) = tx
-            .query_row(
-                &format!(
-                    "SELECT COALESCE(SUM(bytes),0), COUNT(*),
-                            COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                     ELSE json_array_length(segments) END >= total_parts),0),
-                            COALESCE(SUM({EXE_FILE_SQL}),0),
-                            COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                              ELSE json_array_length(segments) END),0),
-                            COALESCE(SUM(total_parts),0)
-                       FROM files WHERE release_id=?1"
-                ),
-                [keep],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )?;
+        let agg = super::aggregates::RelAgg::recompute(&tx, keep)?;
         let fp = members
             .iter()
             .map(|m| m.first_posted)
@@ -528,7 +630,6 @@ impl Index {
             .min()
             .unwrap_or(0);
         let fs = members.iter().map(|m| m.first_seen).min().unwrap_or(now);
-        let complete = nfiles > 0 && ncomplete == nfiles;
         let has_par2 = members.iter().any(|m| m.has_par2);
         let p = crate::categories::classify(base, &self.custom);
         tx.execute(
@@ -538,23 +639,24 @@ impl Index {
                     kind=?11, res=?12, title_key=?13, junk=?14, langs=?15,
                     vcodec=?16, acodec=?17, hdr=?18,
                     pesto_ctr_min=?19, pesto_ctr_max=?20, pesto_clock=?21,
-                    sess_idx=?22, sess_total=?23
+                    sess_idx=?22, sess_total=?23,
+                    nfiles_complete=?24, nfiles_exe=?25
               WHERE id=?1",
             rusqlite::params![
                 keep,
                 base,
-                total,
-                nfiles,
-                complete,
+                agg.tbytes,
+                agg.nfiles,
+                agg.complete(),
                 has_par2,
                 fp,
                 fs,
-                have,
-                need,
+                agg.have,
+                agg.need,
                 kind_str(&p.kind),
                 p.res.as_deref().unwrap_or_default(),
                 p.key,
-                junk_score(base, &p, total.max(0) as u64, nexe > 0),
+                junk_score(base, &p, agg.tbytes.max(0) as u64, agg.nexe > 0),
                 p.langs.join(" "),
                 p.vcodec.as_deref().unwrap_or_default(),
                 p.acodec.as_deref().unwrap_or_default(),
@@ -563,7 +665,9 @@ impl Index {
                 pmax,
                 pck,
                 sidx,
-                stot
+                stot,
+                agg.ncomplete,
+                agg.nexe
             ],
         )?;
         // rel_fts has no UPDATE trigger (external-content over stems),
@@ -863,30 +967,7 @@ impl Index {
         // drops duplicate filenames, so the pre-merge sums counted the
         // dropped copies' parts and a dropped incomplete duplicate
         // marked a wholly-complete merged row incomplete.
-        let (total, nfiles, ncomplete, nexe, have, need): (i64, i64, i64, i64, i64, i64) = tx
-            .query_row(
-                &format!(
-                    "SELECT COALESCE(SUM(bytes),0), COUNT(*),
-                            COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                     ELSE json_array_length(segments) END >= total_parts),0),
-                            COALESCE(SUM({EXE_FILE_SQL}),0),
-                            COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                              ELSE json_array_length(segments) END),0),
-                            COALESCE(SUM(total_parts),0)
-                       FROM files WHERE release_id=?1"
-                ),
-                [cont.id],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )?;
+        let agg = super::aggregates::RelAgg::recompute(&tx, cont.id)?;
         let fp = [cont.first_posted, twin.first_posted]
             .into_iter()
             .filter(|v| *v > 0)
@@ -899,23 +980,26 @@ impl Index {
                     first_posted=?5, first_seen=?6, have_parts=?7, need_parts=?8,
                     junk=?9,
                     pesto_ctr_min=?10, pesto_ctr_max=?11, pesto_clock=?12,
-                    sess_idx=?13, sess_total=?14
+                    sess_idx=?13, sess_total=?14,
+                    nfiles_complete=?15, nfiles_exe=?16
               WHERE id=?1",
             rusqlite::params![
                 cont.id,
-                total,
-                nfiles,
-                nfiles > 0 && ncomplete == nfiles,
+                agg.tbytes,
+                agg.nfiles,
+                agg.complete(),
                 fp,
                 cont.first_seen.min(twin.first_seen),
-                have,
-                need,
-                junk_score(cstem, &p, total.max(0) as u64, nexe > 0),
+                agg.have,
+                agg.need,
+                junk_score(cstem, &p, agg.tbytes.max(0) as u64, agg.nexe > 0),
                 pmin,
                 pmax,
                 pck,
                 sidx,
-                stot
+                stot,
+                agg.ncomplete,
+                agg.nexe
             ],
         )?;
         tx.commit()?;
@@ -1381,7 +1465,8 @@ impl Index {
                     first_posted=?5, first_seen=?6, have_parts=?7, need_parts=?8,
                     junk=?9,
                     pesto_ctr_min=?10, pesto_ctr_max=?11, pesto_clock=?12,
-                    sess_idx=?13, sess_total=?14
+                    sess_idx=?13, sess_total=?14,
+                    nfiles_complete=?15, nfiles_exe=?16
               WHERE id=?1",
             rusqlite::params![
                 keep,
@@ -1398,6 +1483,11 @@ impl Index {
                 pck,
                 sidx,
                 stot,
+                // Recompute-exact for the one file row this release now
+                // holds, so the next ingest touch stays incremental: the
+                // stored total is `total_parts.max(need)`, not `need`.
+                i64::from(nsegs >= total_parts.max(need)),
+                i64::from(super::aggregates::is_exe_file(fname)),
             ],
         )?;
         // The stem is unchanged, so rel_fts needs no manual write; the
@@ -1449,11 +1539,17 @@ impl Index {
             if ids.is_empty() {
                 return Ok((removed, true));
             }
-            removed += self.prune_batch(&ids)?;
             // AFTER the batch, never before: an entry already past the
             // deadline still does one batch, so a budget the caller set
-            // too tight reaps slowly rather than never.
-            if std::time::Instant::now() >= deadline {
+            // too tight reaps slowly rather than never. The batch is
+            // budgeted too, so "one batch" is a bounded hold of the write
+            // mutex and not however long 8000 deletes happen to take; a
+            // short one simply leaves its tail for the next entry, which
+            // re-selects it (there is no cursor here - the selection is a
+            // seek on `idx_rel_posted` and the reaped rows leave it).
+            let (n, consumed) = self.prune_batch_until(&ids, deadline);
+            removed += n;
+            if consumed < ids.len() || std::time::Instant::now() >= deadline {
                 return Ok((removed, false));
             }
         }
@@ -1566,16 +1662,38 @@ impl Index {
                 stmt.query_map([cursor, hi, cutoff], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?
             };
-            removed += self.prune_batch(&ids)?;
-            cursor = hi;
-            if hi >= top {
+            // The stride bounds what the SELECT examines; this bounds
+            // what the DELETE costs, which is the other half and the one
+            // that wedged (see `prune_batch_until`). A budget spent
+            // part-way through the list parks the cursor on the last id
+            // that actually went, not at `hi` - the ids are in rowid
+            // order, so the untouched tail is exactly what the next pass
+            // re-selects.
+            let (n, consumed) = self.prune_batch_until(&ids, deadline);
+            removed += n;
+            let short = consumed < ids.len();
+            cursor = if short {
+                if consumed == 0 {
+                    // Nothing went at all (the deadline landed before
+                    // the first batch, or its delete errored). The
+                    // cursor must NOT move: the selection is `id > ?1`,
+                    // so parking on `ids[0]` - an id that was not
+                    // deleted - skips that release for an entire lap.
+                    cursor
+                } else {
+                    ids[consumed - 1]
+                }
+            } else {
+                hi
+            };
+            if !short && hi >= top {
                 self.kv_set("stale_prune_cursor", "0")?;
                 return Ok((removed, true));
             }
             // AFTER the stride, never before: an entry already past the
             // deadline still does one stride, so a budget the caller set
             // too tight reaps slowly rather than never.
-            if std::time::Instant::now() >= deadline {
+            if short || std::time::Instant::now() >= deadline {
                 self.kv_set("stale_prune_cursor", &cursor.to_string())?;
                 return Ok((removed, false));
             }
@@ -1780,6 +1898,46 @@ impl Index {
         }
     }
 
+    /// B1: the first deferred partial index this database is still
+    /// missing, if any - `Index::open` only builds them inline under
+    /// `PICKER_INDEX_INLINE_MAX`, so a large pre-existing index reaches
+    /// here without them and the daemon's maintenance pass backfills
+    /// them one per pass through `build_picker_index`. sqlite_master
+    /// presence IS the state; once all of `picker_index_ddl` exists
+    /// this is a sub-millisecond catalog probe.
+    pub fn missing_picker_index(&self) -> Option<&'static str> {
+        super::schema::picker_index_ddl()
+            .into_iter()
+            .map(|(name, _)| name)
+            .find(|name| {
+                !self
+                    .db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                          WHERE type='index' AND name=?1)",
+                        [name],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(true)
+            })
+    }
+
+    /// Build one named picker index (from `missing_picker_index`).
+    /// CREATE INDEX reads the whole `releases` table once holding the
+    /// write lock, so the caller owns making that visible and abortable
+    /// - the daemon runs this on a blocking thread under a
+    /// `MaintenanceArm`, exactly the ANALYZE shape, and an interrupt
+    /// rolls the build back cleanly for the next pass to retry.
+    pub fn build_picker_index(&self, name: &str) -> rusqlite::Result<()> {
+        let Some((_, ddl)) = super::schema::picker_index_ddl()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+        else {
+            return Ok(());
+        };
+        self.db.execute_batch(&ddl)
+    }
+
     /// A handle another thread can use to abort whatever statement this
     /// connection is currently running.
     ///
@@ -1874,6 +2032,132 @@ mod tests {
     /// what they reap, not when they stop.
     fn forever() -> std::time::Instant {
         std::time::Instant::now() + std::time::Duration::from_secs(3_600)
+    }
+
+    /// R3: the orphan sweep at the tail of `prune_size` stopped running
+    /// on every call. It runs when the prune deleted something, and
+    /// once on an index that has never been swept - the
+    /// historical-repair pass for the autocommit era, which is what the
+    /// stamp records. What it must never do is let an orphan outlive a
+    /// committed delete: the recycled rowid would adopt it.
+    #[test]
+    fn prune_size_sweeps_orphans_once_then_only_when_it_deleted() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        // Children of a release that is not there: exactly what a
+        // pre-transaction crash left behind.
+        let orphan = |id: i64| {
+            ix.db
+                .execute(
+                    "INSERT INTO files(release_id, filename, total_parts) VALUES(?1, 'a.rar', 1)",
+                    [id],
+                )
+                .unwrap();
+            ix.db
+                .execute(
+                    "INSERT INTO pre_corr(release_id, predb_id, score, delta, at)
+                     VALUES(?1, 1, 900, 0, 0)",
+                    [id],
+                )
+                .unwrap();
+        };
+        let orphans = || {
+            ix.db
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM files WHERE release_id NOT IN
+                               (SELECT id FROM releases))
+                          + (SELECT COUNT(*) FROM pre_corr WHERE release_id NOT IN
+                               (SELECT id FROM releases))",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+
+        orphan(901);
+        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0, "nothing to prune");
+        assert_eq!(orphans(), 0, "the historical-repair pass swept anyway");
+        assert_eq!(ix.kv_get("orphan_sweep_done_v1").as_deref(), Some("1"));
+
+        // Stamped, and this call deletes nothing: the two anti-joins -
+        // the point of the gate - are skipped, so the orphan survives.
+        orphan(902);
+        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0);
+        assert_eq!(orphans(), 2, "a no-op prune no longer walks `files`");
+
+        // A prune that deletes re-arms the sweep, and it clears the
+        // rows it just orphaned along with the ones it skipped: nothing
+        // a recycled id could adopt survives the commit.
+        ix.db
+            .execute(
+                "INSERT INTO releases(id, stem, poster, grp, total_bytes)
+                 VALUES(903, 'Huge.Rel', 'p', 'g', 9_000)",
+                [],
+            )
+            .unwrap();
+        orphan(903);
+        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 1, "oversize pruned");
+        assert_eq!(orphans(), 0, "the deleting prune swept");
+
+        // Crash recovery: an index whose sweep never got to stamp (the
+        // stamp is written in the sweep's own transaction, so this is
+        // the only shape a rollback can leave) sweeps on the next call
+        // whatever the prune matched.
+        ix.db
+            .execute("DELETE FROM kv WHERE k='orphan_sweep_done_v1'", [])
+            .unwrap();
+        orphan(904);
+        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0);
+        assert_eq!(orphans(), 0, "an unstamped index sweeps unconditionally");
+        teardown(&dir, ix);
+    }
+
+    /// A4: `stats_cached` memoizes the full-table-scan figures per
+    /// connection. Within the TTL a write - even one on this very
+    /// connection - is invisible (a progress line tolerates that);
+    /// a zero TTL always recomputes; and an exact `stats()` call
+    /// reseeds the memo for free.
+    #[test]
+    fn stats_cached_serves_the_memo_within_ttl_and_stats_reseeds_it() {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-index-statsmemo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        let ins = |stem: &str| {
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, first_posted, complete)
+                     VALUES(?1, 'p', 'g', 1000, 1)",
+                    [stem],
+                )
+                .unwrap();
+        };
+        let ttl = std::time::Duration::from_secs(3_600);
+        ins("a");
+        assert_eq!(ix.stats_cached(ttl).unwrap(), (1, 1), "cold memo computes");
+        ins("b");
+        assert_eq!(
+            ix.stats_cached(ttl).unwrap(),
+            (1, 1),
+            "within the TTL the memo is served - the new row stays unseen"
+        );
+        assert_eq!(
+            ix.stats_cached(std::time::Duration::ZERO).unwrap(),
+            (2, 2),
+            "a zero TTL always recomputes"
+        );
+        ins("c");
+        assert_eq!(ix.stats().unwrap(), (3, 3), "the exact query sees all");
+        ins("d");
+        assert_eq!(
+            ix.stats_cached(ttl).unwrap(),
+            (3, 3),
+            "stats() reseeded the memo in passing"
+        );
+        teardown(&dir, ix);
     }
 
     /// The sampler's pick, after it stopped sorting the whole table
@@ -2183,17 +2467,30 @@ mod tests {
 
         let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let (removed, done) = ix.prune_stale_partials(7 * DAY, now, spent).unwrap();
+        // One CHUNK, not one 8000-row batch. That is the 20 Aug tightening:
+        // the batch used to be the unbounded thing left, since a row count
+        // says nothing about what a row costs to delete (see
+        // `prune_batch_until`). A spent budget now buys the smallest unit of
+        // work there is, and the deleted rows are the FIRST 64 - the reaper
+        // walks in rowid order, so the tail is untouched, not skipped.
         assert_eq!(
-            removed, 8_000,
-            "a spent budget buys exactly one batch, never the whole reap"
+            removed, 64,
+            "a spent budget buys exactly one chunk, never a whole batch"
         );
         assert!(!done, "rows are still waiting - the caller must come back");
 
         // ...and coming back finishes it, which is what makes the
-        // hourly stamp safe to withhold above.
+        // hourly stamp safe to withhold above. Nothing may be lost in
+        // between: a short batch parks the cursor on the last id that
+        // actually went, so the next pass picks up the other 8,000.
         let (rest, done) = ix.prune_stale_partials(7 * DAY, now, forever()).unwrap();
-        assert_eq!(rest, 500, "the remainder, on the next pass");
+        assert_eq!(rest, 8_436, "the remainder, on the next pass");
         assert!(done, "nothing left to reap");
+        let left: i64 = ix
+            .db
+            .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "a short batch skipped rows instead of resuming");
         teardown(&dir, ix);
     }
 

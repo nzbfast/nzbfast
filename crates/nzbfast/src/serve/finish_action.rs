@@ -109,6 +109,9 @@ pub(in crate::serve) struct FinishState {
     /// emitter - which runs under the queue lock - does nothing but
     /// store a byte.
     drained: AtomicBool,
+    /// The refusal reason last logged, so a drain edge that is HELD
+    /// across many ticks says why once rather than every two seconds.
+    last_refusal: Mutex<Option<&'static str>>,
     pending: Mutex<Option<Pending>>,
 }
 
@@ -119,6 +122,7 @@ impl Default for FinishState {
             script: Mutex::new(None),
             delay_secs: AtomicU64::new(DEFAULT_DELAY_SECS),
             drained: AtomicBool::new(false),
+            last_refusal: Mutex::new(None),
             pending: Mutex::new(None),
         }
     }
@@ -230,10 +234,33 @@ pub(in crate::serve) fn drain_blocker(d: &Daemon) -> Option<&'static str> {
     if d.exiting.load(Ordering::Relaxed) {
         return Some("nzbfast is shutting down");
     }
+    // A payload the mover is still relocating has LEFT the queue - park
+    // files the record before handing the move over, precisely so the
+    // runner does not wait on a NAS copy - so the walk below cannot see
+    // it. Sleeping or powering off in the middle of a bulk copy to a
+    // network volume is the one outcome a queue-finished action must
+    // never produce, and it is likeliest exactly here: the copy is the
+    // slowest thing that happens after the queue looks empty.
+    // `mover_inflight` and not just the two structures: a job is in
+    // NEITHER `mover_q` nor `moving` while the dispatcher resolves its
+    // lane (a config read plus an fs metadata walk - seconds on a hung
+    // network mount) and for a lane's whole 2 s busy-requeue sleep. The
+    // counter covers the hand-off from enqueue to the lane's last word.
+    if d.mover_inflight.load(Ordering::Relaxed) > 0
+        || !d.moving.lock_ok().is_empty()
+        || !d.mover_q.lock_ok().is_empty()
+    {
+        return Some("a finished download is still being moved");
+    }
     let q = d.queue.lock_ok();
     for j in q.iter() {
         let g = j.lock_ok();
-        if matches!(g.state, JobState::Downloading | JobState::Finishing) {
+        // `finalizing` catches a Completed row whose post-processing
+        // tail (unlock/unpack, rename, the pp-script) is still running:
+        // it stays in the queue until park, but matches neither state
+        // arm below, and powering off mid-unpack is exactly what this
+        // walk exists to refuse.
+        if g.finalizing || matches!(g.state, JobState::Downloading | JobState::Finishing) {
             return Some("a download is still finishing");
         }
         if g.state == JobState::Queued {
@@ -282,6 +309,16 @@ fn tick(d: &Arc<Daemon>) -> std::time::Duration {
         if let Some(why) = drain_blocker(d) {
             if d.finish.clear_pending().is_some() {
                 announce(d, p.action, "cancelled", why);
+                // Give the edge back, exactly as the refusal path
+                // below does. The latch still being set means this
+                // idle period will never issue another edge, so a
+                // countdown cancelled by a transient blocker (a move
+                // auto-retry mid-drain) that merely SPENDS the edge
+                // has silently disarmed the action until unrelated
+                // new work drains again.
+                if d.queue_idle_latch.load(Ordering::Relaxed) {
+                    d.finish.note_drained();
+                }
             }
             return IDLE_TICK;
         }
@@ -304,13 +341,32 @@ fn tick(d: &Arc<Daemon>) -> std::time::Duration {
         return IDLE_TICK;
     }
     if let Some(why) = drain_blocker(d) {
-        info!(
-            target: "finish",
-            "queue-finished action ({}) not run: {why}",
-            action.as_str()
-        );
+        // Hold the edge rather than spend it. `note_queue_idle`
+        // short-circuits on the set latch, so it can never issue a
+        // SECOND edge for an idle period that is already announced -
+        // and a refusal that consumed this one therefore disarmed the
+        // action for good: emptying the queue by deleting the job that
+        // blocked it would then sit there and never fire. Re-armed only
+        // while the queue is still idle; if new work arrived the latch
+        // is already clear and the next drain issues its own edge.
+        if d.queue_idle_latch.load(Ordering::Relaxed) {
+            d.finish.note_drained();
+        }
+        // Once per distinct reason: the edge above is now held across
+        // every tick until the blocker clears, and this runs every two
+        // seconds.
+        let mut last = d.finish.last_refusal.lock_ok();
+        if *last != Some(why) {
+            *last = Some(why);
+            info!(
+                target: "finish",
+                "queue-finished action ({}) not run: {why}",
+                action.as_str()
+            );
+        }
         return IDLE_TICK;
     }
+    *d.finish.last_refusal.lock_ok() = None;
     if !action.counts_down() {
         fire(d, action);
         return IDLE_TICK;

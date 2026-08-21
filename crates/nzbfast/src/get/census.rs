@@ -39,6 +39,15 @@ pub(super) fn is_spared_metadata(hint: &str) -> bool {
 pub(super) struct Census {
     pub(super) total: u64,
     pub(super) dead_servers: Vec<String>,
+    /// Servers that connected and served, then LEFT before the run
+    /// ended - a permanent refusal, a spent prepaid block or quota, the
+    /// outage budget blown, the connect-attempt cap. Kept apart from
+    /// `dead_servers` because they are a different sentence for the
+    /// user (this one worked) and a different exclusion downstream: the
+    /// quorum shrank part-way through, so the survivors' 430s on the
+    /// segments this server alone carried were never unanimous
+    /// (error-detection audit 20 Aug, A3).
+    pub(super) left_servers: Vec<String>,
     pub(super) backbones: Vec<String>,
     pub(super) post_age_days: u32,
     pub(super) sniff_bootstrap: Option<usize>,
@@ -84,6 +93,11 @@ pub(super) fn take_census(
     // were decided by the others alone, and the failure summary must say
     // so - one dead backup silently turns a single 430 into "missing".
     let mut dead_servers: Vec<String> = Vec::new();
+    // Servers that DID work and then walked out mid-run. `ever_connected`
+    // stays true for them, so until this list existed they were invisible
+    // to every guard downstream while `live_mask` quietly dropped them
+    // from the quorum.
+    let mut left_servers: Vec<String> = Vec::new();
     for ((s, _), st) in servers.iter().zip(stats) {
         if st.ever_connected {
             // Session-end breakdown, printed only when something died:
@@ -130,6 +144,14 @@ pub(super) fn take_census(
                 why,
                 blocked
             );
+            if st.left_mid_run {
+                println!(
+                    "  {:<28} ⚠ served for part of the run and then stopped \
+             (refused, out of quota, or unreachable for too long)",
+                    s.host
+                );
+                left_servers.push(s.host.clone());
+            }
         } else {
             println!(
                 "  {:<28} ⚠ no usable connection for the entire run \
@@ -413,6 +435,7 @@ pub(super) fn take_census(
     Census {
         total,
         dead_servers,
+        left_servers,
         backbones,
         post_age_days,
         sniff_bootstrap,
@@ -505,8 +528,17 @@ mod tests {
             connects: 1,
             reconnects: 0,
             ever_connected,
+            left_mid_run: false,
             ends: Default::default(),
             blocked_ms: 0,
+        }
+    }
+
+    /// A server that connected, served, and then walked out mid-run.
+    fn stat_left(bytes: u64) -> nzbkit::pool::PoolStats {
+        nzbkit::pool::PoolStats {
+            left_mid_run: true,
+            ..stat(bytes, true)
         }
     }
 
@@ -706,6 +738,50 @@ mod tests {
         assert_eq!(c.derrs, 0);
         assert_eq!(c.recovery_missing, 0);
         assert_eq!(c.post_age_days, nzb_age_days(1_710_000_000));
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    /// A3: a server that served and then LEFT is its own list, separate
+    /// from the servers that never connected at all.
+    ///
+    /// `ever_connected` is true for both a server that carried the whole
+    /// run and one that carried ten minutes of it and then walked out, so
+    /// before `left_mid_run` existed the census could not tell them
+    /// apart - and downstream, `post_gone` and the auto-retry gate both
+    /// read a quorum that had silently shrunk as though it were whole.
+    /// The leaver still counts as a backbone opinion: it DID answer, for
+    /// as long as it was there.
+    #[test]
+    fn a_server_that_left_mid_run_is_listed_apart_from_a_dead_one() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"left.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="10" number="1">a@t</segment></segments>
+ </file>
+</nzb>"#);
+        let slots = [slot("left.mkv", false, 2, 0, 1, 0)];
+        let servers = [
+            srv("news.alphaprov.com"),
+            srv("news.betaprov.com"),
+            srv("news.deadprov.com"),
+        ];
+        // Beta served and then walked out; dead never connected at all.
+        let stats = [stat(100, true), stat_left(40), stat(0, false)];
+        let r = rig("leftmidrun", &n, slots.len());
+        let c = census(
+            &servers,
+            &stats,
+            &n,
+            &slots,
+            &r,
+            0,
+            0,
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(c.left_servers, ["news.betaprov.com"]);
+        assert_eq!(c.dead_servers, ["news.deadprov.com"]);
+        assert_eq!(c.backbones, ["alphaprov", "betaprov"]);
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 }

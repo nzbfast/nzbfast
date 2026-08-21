@@ -145,6 +145,13 @@ fn now_unix() -> i64 {
 /// writes a date writes UTC (history, quota rollover, RSS dates), and a
 /// log line that silently used local time would not survive being pasted
 /// into a bug report from another timezone.
+/// The same UTC stamp the log writes, for the per-job report - which
+/// travels between timezones for exactly the reason the note above
+/// gives.
+pub(crate) fn stamp_for_report(ts: i64) -> String {
+    stamp(ts)
+}
+
 fn stamp(ts: i64) -> String {
     let days = ts.div_euclid(86_400);
     let secs = ts.rem_euclid(86_400);

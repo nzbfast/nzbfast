@@ -477,11 +477,19 @@ pub(super) const RENAME: &[Setting] = &[
     // §129 D5: optional retention, BOTH default 0 = keep everything
     // (history is unlimited by ruling; the knobs exist for whoever
     // disagrees, and they ship OFF).
+    //
+    // Issue #45 gave the age knob a dashboard control and moved
+    // it from days to SECONDS, so "delete 20 minutes after it finished"
+    // is expressible. The old `history_keep_days` is NOT in this table:
+    // echoing it would mean answering "0 days" to someone who set 20
+    // minutes. It is still read out of settings.json at startup when
+    // this key is absent, which is what a config written before the
+    // change looks like.
     rw("history_keep_count", |c| {
         json!(c.d.history_keep_count.load(Ordering::Relaxed))
     }),
-    rw("history_keep_days", |c| {
-        json!(c.d.history_keep_days.load(Ordering::Relaxed))
+    rw("history_keep_secs", |c| {
+        json!(c.d.history_keep_secs.load(Ordering::Relaxed))
     }),
     rw("history_color_names", |c| {
         json!(c.d.history_color_names.load(Ordering::Relaxed))
@@ -2704,15 +2712,23 @@ pub(super) fn apply_setting(
             (true, json!(n))
         }
         "history_rows" => set_history_rows(d, name, v)?,
-        "history_keep_count" | "history_keep_days" => {
+        "history_keep_count" | "history_keep_secs" => {
             let n = v
                 .trim()
                 .parse::<u64>()
                 .map_err(|_| format!("{name}: a number, 0 = keep everything"))?;
+            // Clamped so the age cutoff arithmetic stays in i64 and a
+            // fat-fingered paste cannot become a negative cutoff that
+            // matches every row. A century is past any real intent.
+            let n = n.min(if name == "history_keep_count" {
+                1_000_000
+            } else {
+                100 * 365 * 86_400
+            });
             if name == "history_keep_count" {
                 d.history_keep_count.store(n, Ordering::Relaxed);
             } else {
-                d.history_keep_days.store(n, Ordering::Relaxed);
+                d.history_keep_secs.store(n, Ordering::Relaxed);
             }
             // Applies now, not at the next park - setting a cap on a
             // grown history is exactly when the user wants it enforced.

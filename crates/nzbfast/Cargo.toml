@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.2.0"
+version = "1.2.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -153,6 +153,14 @@ ffi = []
 # paying link time and disk there; nightly.yml (their home) and
 # pr-check.yml pass `--features heavy-tests` where they run them.
 heavy-tests = []
+
+# build.rs gzips the immutable embedded pages (i18n catalogues, manuals)
+# so the binary carries the compressed member rather than 9.0 MB of plain
+# text - see `precompress_pages`. Same crate the daemon already links for
+# the request path, so the lockfile and the dependency tree are unchanged;
+# this only asks for a host build of it.
+[build-dependencies]
+flate2 = "1"
 
 # Signing tooling for the update manifest (keygen + detached sign) lives
 # in examples/update_sign.rs so the daemon and the release pipeline use

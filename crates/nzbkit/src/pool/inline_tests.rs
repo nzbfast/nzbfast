@@ -28,7 +28,7 @@ fn retention_mask_excludes_only_outdated_servers() {
 #[test]
 fn seed_masks_and_unservable_split() {
     let reqs = vec![
-        ArticleReq::fresh("<fresh@x>".into()),
+        ArticleReq::fresh("<fresh@x>"),
         ArticleReq {
             id: "<old@x>".into(),
             age_days: 30,
@@ -70,13 +70,13 @@ fn seed_masks_and_unservable_split() {
     };
     let (shared, unservable) = Shared::new(reqs, &[srv(10), srv(90)]);
     // The 400-day article is outside every retention → never queued.
-    assert_eq!(unservable, vec!["<ancient@x>".to_string()]);
+    assert_eq!(unservable, vec!["<ancient@x>".into()]);
     assert_eq!(shared.pending.load(Ordering::Relaxed), 2);
     let q = shared.queue.try_lock().unwrap();
     assert_eq!(q.len(), 2);
-    assert_eq!(q[0].id, "<fresh@x>");
+    assert_eq!(&*q[0].id, "<fresh@x>");
     assert_eq!(q[0].tried_430, 0);
-    assert_eq!(q[1].id, "<old@x>");
+    assert_eq!(&*q[1].id, "<old@x>");
     assert_eq!(
         q[1].tried_430, 0b01,
         "30-day article pre-excluded from the 10-day server"
@@ -122,7 +122,7 @@ async fn retention_excluded_articles_report_cause_retention() {
     .expect("run hung");
 
     let mut done = 0;
-    let mut retention: Vec<String> = Vec::new();
+    let mut retention: Vec<Arc<str>> = Vec::new();
     while let Ok(o) = rx.try_recv() {
         match o {
             FetchOutcome::Done { .. } => done += 1,
@@ -134,7 +134,10 @@ async fn retention_excluded_articles_report_cause_retention() {
         }
     }
     assert_eq!(done, n_fresh, "fresh articles all served");
-    assert_eq!(retention, vec!["<ancient@x>".to_string()]);
+    assert_eq!(
+        retention.iter().map(|s| &**s).collect::<Vec<_>>(),
+        ["<ancient@x>"]
+    );
 }
 
 /// TODO 96.1: the adaptive two-phase read path serves a normal run
@@ -186,9 +189,9 @@ fn shared_new_dedupes_repeated_ids() {
     // the run non-terminal forever. Repeats are dropped at build time,
     // servable and unservable alike.
     let reqs = vec![
-        ArticleReq::fresh("<a@x>".into()),
-        ArticleReq::fresh("<b@x>".into()),
-        ArticleReq::fresh("<a@x>".into()), // servable repeat
+        ArticleReq::fresh("<a@x>"),
+        ArticleReq::fresh("<b@x>"),
+        ArticleReq::fresh("<a@x>"), // servable repeat
         ArticleReq {
             id: "<ancient@x>".into(),
             age_days: 400,
@@ -226,12 +229,12 @@ fn shared_new_dedupes_repeated_ids() {
         PoolConfig::default(),
     );
     let (shared, unservable) = Shared::new(reqs, &[srv]);
-    assert_eq!(unservable, vec!["<ancient@x>".to_string()]);
+    assert_eq!(unservable, vec!["<ancient@x>".into()]);
     assert_eq!(shared.pending.load(Ordering::Relaxed), 2);
     let q = shared.queue.try_lock().unwrap();
     assert_eq!(q.len(), 2);
-    assert_eq!(q[0].id, "<a@x>");
-    assert_eq!(q[1].id, "<b@x>");
+    assert_eq!(&*q[0].id, "<a@x>");
+    assert_eq!(&*q[1].id, "<b@x>");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -265,7 +268,7 @@ async fn duplicate_ids_reach_terminal_with_one_outcome_per_id() {
     // Drain in a task so a regression fails LOUD at the timeout below
     // instead of wedging the test on a channel that never closes.
     let collect = tokio::spawn(async move {
-        let mut done: Vec<String> = Vec::new();
+        let mut done: Vec<Arc<str>> = Vec::new();
         while let Some(o) = rx.recv().await {
             match o {
                 FetchOutcome::Done { id, .. } => done.push(id),
@@ -280,7 +283,7 @@ async fn duplicate_ids_reach_terminal_with_one_outcome_per_id() {
         .unwrap();
     let done = collect.await.unwrap();
     assert_eq!(done.len(), n_unique, "one outcome per unique id");
-    let uniq: HashSet<&str> = done.iter().map(String::as_str).collect();
+    let uniq: HashSet<&str> = done.iter().map(|s| &**s).collect();
     assert_eq!(uniq.len(), n_unique, "no id reported twice");
 }
 
@@ -350,6 +353,9 @@ async fn futile_scan_throttles_before_retrying() {
     // Fresh takeable work appears; within the throttle window the
     // server still sits out (documented ≤SCAN_RETRY_MS latency)…
     shared.queue.lock().await.push_front(Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<fresh>".into(),
         attempts: 0,
         promoted: false,
@@ -376,7 +382,7 @@ async fn futile_scan_throttles_before_retrying() {
     let w = next_work(&shared, ctx, &tx, Pipeline::payload(0))
         .await
         .expect("work after window");
-    assert_eq!(w.id, "<fresh>");
+    assert_eq!(&*w.id, "<fresh>");
 }
 
 /// M2c.4 endgame fan-out: with few articles left, a 430-laddering
@@ -420,6 +426,9 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
     let (shared, _) = Shared::new(reqs, &servers);
     // In flight on server 0, already 430'd by server 1's backbone.
     let lad = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<e0>".into(),
         attempts: 0,
         promoted: false,
@@ -459,7 +468,7 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
     let d = shared
         .pick_dup(2, 0b100, 0b100, 0, Pipeline::probes(3), 1)
         .expect("probes ride behind probes");
-    assert_eq!(d.id, "<e0>");
+    assert_eq!(&*d.id, "<e0>");
     assert!(d.dup);
     assert!(d.ladder, "a ladder pick is marked as one");
     // Each backbone races at most once.
@@ -484,6 +493,9 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
         .collect();
     let (big, _) = Shared::new(reqs, &servers);
     let lad2 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<n0>".into(),
         attempts: 0,
         promoted: false,
@@ -552,6 +564,9 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let (shared, _) = Shared::new(reqs, &servers);
     // Healthy (never 430'd) article in flight on server 0.
     let w = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<h0>".into(),
         attempts: 0,
         promoted: false,
@@ -580,6 +595,10 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
         .get_mut("<h0>")
         .unwrap()
         .dispatched = Instant::now() - Duration::from_secs(1);
+    // Aging an entry by hand is a map edit: bump the N6 gen the way
+    // every production mutation path does, or the futile record the
+    // too-young scan just left gates the scans below for a retry tick.
+    shared.bump_inflight_gen();
     // A busy pipeline is not idle capacity.
     assert!(
         shared
@@ -598,7 +617,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let d = shared
         .pick_dup(0, 0b001, 0b001, 0, Pipeline::payload(0), 0)
         .expect("same-server tail race");
-    assert_eq!(d.id, "<h0>");
+    assert_eq!(&*d.id, "<h0>");
     assert!(d.dup);
     // ...each server at most once...
     assert!(
@@ -611,11 +630,14 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let d2 = shared
         .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
         .expect("cross-server tail race");
-    assert_eq!(d2.id, "<h0>");
+    assert_eq!(&*d2.id, "<h0>");
 
     // A second straggler goes to the worker whose server is already
     // racing the first - idle capacity spreads, not piles.
     let w2 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<h1>".into(),
         attempts: 0,
         promoted: false,
@@ -639,7 +661,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let d3 = shared
         .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
         .expect("second straggler race");
-    assert_eq!(d3.id, "<h1>");
+    assert_eq!(&*d3.id, "<h1>");
 
     // OFF (the default): the identical shape yields no speculation.
     let servers_off = vec![mk("a", 0, false), mk("b", 0, false)];
@@ -664,6 +686,9 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
         .collect();
     let (big, _) = Shared::new(reqs, &servers_on);
     let w3 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<n0>".into(),
         attempts: 0,
         promoted: false,
@@ -685,6 +710,145 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
             .is_none(),
         "speculated outside the endgame"
     );
+}
+
+/// N6 endgame idle-spin gate: an idle `pick_dup` walk that found
+/// nothing arms a per-server skip for [`SCAN_RETRY_MS`]. Every map
+/// mutation path bumps the generation and re-opens it immediately, so
+/// a new candidate costs nothing; a candidate that arms purely by
+/// CLOCK (fan-out age) is delayed at most one retry window, never
+/// lost.
+#[tokio::test]
+async fn a_futile_idle_dup_scan_gates_until_the_map_moves_or_the_window_ends() {
+    let mk = |host: &str| {
+        (
+            ServerConfig {
+                host: host.into(),
+                port: 119,
+                tls: false,
+                username: None,
+                password: None,
+                connections: 1,
+                pin_connections: false,
+                level: 0,
+                group: None,
+                retention_days: 0,
+                rcvbuf: None,
+                block_bytes: None,
+                block_account: false,
+                bind_ip: None,
+                socks5: None,
+                enabled: true,
+                warm_pool: false,
+                idle_release_secs: None,
+                idle_keep: None,
+                max_source_ips: None,
+            },
+            PoolConfig {
+                tail_fanout: true,
+                ..Default::default()
+            },
+        )
+    };
+    let servers = vec![mk("a"), mk("b")];
+    // 3 pending ≤ ENDGAME_MAX → the endgame/fan-out rules apply.
+    let reqs: Vec<ArticleReq> = (0..3)
+        .map(|i| ArticleReq::fresh(format!("<g{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+
+    // A busy walk never arms the gate, futile or not.
+    assert!(
+        shared
+            .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(2), 0)
+            .is_none()
+    );
+    assert_eq!(
+        shared.dup_futile[1].load(Ordering::Relaxed),
+        u64::MAX,
+        "a busy picker's empty walk must not gate the idle ones"
+    );
+
+    // An idle walk of the empty map arms it.
+    assert!(
+        shared
+            .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
+            .is_none()
+    );
+    assert_ne!(
+        shared.dup_futile[1].load(Ordering::Relaxed),
+        u64::MAX,
+        "a futile idle walk must record itself"
+    );
+
+    // Plant a raceable candidate BEHIND the gate's back: a direct map
+    // edit with no gen bump (production cannot do this - every
+    // mutation path bumps). The gated walk skips it...
+    shared.inflight.lock_ok().insert(
+        "<g0>".into(),
+        Inflight {
+            age_days: 0,
+            part: 0,
+            ord: 0,
+            server: 0,
+            dispatched: Instant::now() - Duration::from_secs(1),
+            dups: 0,
+            tried_430: 0,
+            dup_servers: 0,
+            tried_fail: 0,
+            suspect: false,
+            found: 0,
+        },
+    );
+    assert!(
+        shared
+            .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
+            .is_none(),
+        "inside the window with an unmoved gen the walk is skipped"
+    );
+    // ...a gen bump re-opens it immediately...
+    shared.bump_inflight_gen();
+    let d = shared
+        .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
+        .expect("a gen bump wakes the gated scanner at once");
+    assert_eq!(&*d.id, "<g0>");
+    assert!(d.dup);
+
+    // ...and a candidate that arms by CLOCK alone (the fan-out age
+    // floor) is delayed at most one retry window, never lost: a walk
+    // that saw it too young re-arms the gate, and no gen ever moves.
+    let reqs: Vec<ArticleReq> = (0..3)
+        .map(|i| ArticleReq::fresh(format!("<y{i}>")))
+        .collect();
+    let (young, _) = Shared::new(reqs, &servers);
+    young.inflight.lock_ok().insert(
+        "<y0>".into(),
+        Inflight {
+            age_days: 0,
+            part: 0,
+            ord: 0,
+            server: 0,
+            dispatched: Instant::now(),
+            dups: 0,
+            tried_430: 0,
+            dup_servers: 0,
+            tried_fail: 0,
+            suspect: false,
+            found: 0,
+        },
+    );
+    assert!(
+        young
+            .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
+            .is_none(),
+        "younger than the age floor - futile, and the walk arms the gate"
+    );
+    assert_ne!(young.dup_futile[1].load(Ordering::Relaxed), u64::MAX);
+    std::thread::sleep(TAIL_FANOUT_MIN_AGE + Duration::from_millis(SCAN_RETRY_MS + 20));
+    let d2 = young
+        .pick_dup(1, 0b010, 0b010, 0, Pipeline::payload(0), 0)
+        .expect("past the retry window the walk runs again and finds the aged article");
+    assert_eq!(&*d2.id, "<y0>");
 }
 
 /// §35: a bigger server must not duplicate a smaller one's work just
@@ -743,6 +907,9 @@ async fn a_server_with_more_connections_is_not_mistaken_for_a_faster_one() {
     shared.bytes[1].store(100_000_000, Ordering::Relaxed);
 
     let w = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<r0>".into(),
         attempts: 0,
         promoted: false,
@@ -768,10 +935,13 @@ async fn a_server_with_more_connections_is_not_mistaken_for_a_faster_one() {
     // And the rule still fires when the owner really is slower per
     // connection: same worker counts, a quarter of the bytes.
     shared.bytes[1].store(25_000_000, Ordering::Relaxed);
+    // In production rate changes ride the delivery/deregister paths,
+    // which bump the N6 gen; a by-hand rate change must too.
+    shared.bump_inflight_gen();
     let d = shared
         .pick_dup(0, 0b01, 0b01, 0, Pipeline::payload(0), 0)
         .expect("a genuinely slow owner should still be raced");
-    assert_eq!(d.id, "<r0>");
+    assert_eq!(&*d.id, "<r0>");
     assert!(d.dup);
 }
 
@@ -826,6 +996,9 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
     shared.bytes[1].store(50_000_000, Ordering::Relaxed);
 
     let w = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<f0>".into(),
         attempts: 0,
         promoted: false,
@@ -847,6 +1020,10 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
             .is_none(),
         "a block server spent paid bytes racing an article already arriving"
     );
+    // Re-asking with the caller's level swapped is a synthetic shape (a
+    // server's level never changes in production, so the N6 futile
+    // record is level-stable there): clear it by bumping the gen.
+    shared.bump_inflight_gen();
     // The primary, in its place, would take it.
     assert!(
         shared
@@ -854,191 +1031,6 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
             .is_some(),
         "the rate rule itself should still fire for a level-0 server"
     );
-}
-
-#[tokio::test]
-async fn queue_control_promotes_to_front_preserving_order() {
-    // M11: promoted ids move to the front in their original relative
-    // order; everything else keeps its order behind them.
-    let servers: Vec<(ServerConfig, PoolConfig)> = vec![(
-        ServerConfig {
-            host: "s".into(),
-            port: 119,
-            tls: false,
-            username: None,
-            password: None,
-            connections: 1,
-            pin_connections: false,
-            level: 0,
-            group: None,
-            retention_days: 0,
-            rcvbuf: None,
-            block_bytes: None,
-            block_account: false,
-            bind_ip: None,
-            socks5: None,
-            enabled: true,
-            warm_pool: false,
-            idle_release_secs: None,
-            idle_keep: None,
-            max_source_ips: None,
-        },
-        PoolConfig::default(),
-    )];
-    let reqs: Vec<ArticleReq> = (0..10)
-        .map(|i| ArticleReq::fresh(format!("<a{i}>")))
-        .collect();
-    let (shared, unservable) = Shared::new(reqs, &servers);
-    assert!(unservable.is_empty());
-    let ctl = QueueControl::default();
-    ctl.attach(&shared);
-    // The caller's order (seek-point-first) is the front order - NOT
-    // the queue's relative order.
-    let ids: Vec<String> = ["<a7>", "<a3>", "<a9>"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    assert_eq!(ctl.promote(&ids), 3);
-    let q = shared.queue.lock().await;
-    let order: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
-    assert_eq!(
-        order,
-        [
-            "<a7>", "<a3>", "<a9>", "<a0>", "<a1>", "<a2>", "<a4>", "<a5>", "<a6>", "<a8>"
-        ]
-    );
-    drop(q);
-    // Unknown ids are a no-op; a dead pool (Weak gone) is a no-op.
-    assert_eq!(ctl.promote(&["<zz>".to_string()]), 0);
-    drop(shared);
-    assert_eq!(ctl.promote(&ids), 0);
-}
-
-#[tokio::test]
-async fn queue_control_cancel_removes_pending_and_completes_them() {
-    // Issue #14: cancelled articles leave the queue, count as
-    // terminal (pending reaches zero without them), and never emit
-    // an outcome. In-flight/unknown ids are untouched.
-    let servers = one_server();
-    let reqs: Vec<ArticleReq> = (0..6)
-        .map(|i| ArticleReq::fresh(format!("<c{i}>")))
-        .collect();
-    let (shared, unservable) = Shared::new(reqs, &servers);
-    assert!(unservable.is_empty());
-    let ctl = QueueControl::default();
-    ctl.attach(&shared);
-    let ids: HashSet<String> = ["<c1>", "<c4>", "<zz>"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let mut removed = ctl.cancel(&ids);
-    removed.sort();
-    assert_eq!(removed, ["<c1>", "<c4>"]);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 4);
-    let q = shared.queue.lock().await;
-    let order: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
-    assert_eq!(order, ["<c0>", "<c2>", "<c3>", "<c5>"]);
-    drop(q);
-    // A second cancel of the same ids is a no-op (already done).
-    assert!(ctl.cancel(&ids).is_empty());
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 4);
-    // Cancelling the rest drains the run: `finished` fires so the
-    // fleet winds down exactly as if the articles had resolved.
-    // (Subscribed BEFORE the send - a watch with no receivers drops
-    // the value, exactly like a workerless pool would.)
-    let fin = shared.finished.subscribe();
-    let rest: HashSet<String> = ["<c0>", "<c2>", "<c3>", "<c5>"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    assert_eq!(ctl.cancel(&rest).len(), 4);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 0);
-    assert!(*fin.borrow());
-    // A dead pool (Weak gone) is a no-op.
-    drop(shared);
-    assert!(ctl.cancel(&rest).is_empty());
-}
-
-#[tokio::test]
-async fn queue_control_requeue_resurrects_cancelled_work() {
-    // Issue #14 reconcile: a cancelled article can come back exactly
-    // as it was - pending restored, un-terminal, queued again. Only
-    // ids a prior cancel returned qualify, and a finished run
-    // refuses.
-    let servers = one_server();
-    let reqs: Vec<ArticleReq> = (0..4)
-        .map(|i| ArticleReq::fresh(format!("<r{i}>")))
-        .collect();
-    let (shared, _) = Shared::new(reqs, &servers);
-    let ctl = QueueControl::default();
-    ctl.attach(&shared);
-    let ids: HashSet<String> = ["<r1>", "<r2>"].iter().map(|s| s.to_string()).collect();
-    let cancelled = ctl.cancel(&ids);
-    assert_eq!(cancelled.len(), 2);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 2);
-    // Never-cancelled ids are ignored; cancelled ones come back.
-    let back: Vec<String> = ["<r0>", "<r1>", "<r2>"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    assert_eq!(ctl.requeue(&back), 2);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 4);
-    {
-        let q = shared.queue.lock().await;
-        let mut order: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
-        order.sort();
-        assert_eq!(order, ["<r0>", "<r1>", "<r2>", "<r3>"]);
-        let done = shared.done.lock().unwrap();
-        assert!(done.is_empty(), "requeued ids must be un-terminal");
-    }
-    // A second requeue finds an empty stash: no-op.
-    assert_eq!(ctl.requeue(&back), 0);
-    // Once the run has finished, a requeue must refuse and roll back.
-    let fin = shared.finished.subscribe();
-    let all: HashSet<String> = (0..4).map(|i| format!("<r{i}>")).collect();
-    assert_eq!(ctl.cancel(&all).len(), 4);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 0);
-    assert!(*fin.borrow());
-    assert_eq!(ctl.requeue(&back), 0);
-    assert_eq!(shared.pending.load(Ordering::Relaxed), 0);
-}
-
-/// Issue #14 sibling - a MEASUREMENT, not a gate (hence ignored).
-/// The in-stream deferral cancels every sniffed volume one
-/// `defer_sniffed_slot` at a time, and each `cancel` drains and
-/// rebuilds the whole pending queue while holding its mutex -
-/// O(queue) per volume, on the lock the dispatcher pops from, during
-/// every obfuscated download. This times that lock-hold at field
-/// scale so the "real dispatcher pressure" claim is a number. Run:
-/// `cargo test -p nzbkit --release queue_control_cancel_cost -- --ignored --nocapture`
-#[tokio::test]
-#[ignore = "hand-run measurement of the cancel lock-hold, not a regression gate"]
-async fn queue_control_cancel_cost_at_field_scale() {
-    let servers = one_server();
-    let n: usize = 100_000;
-    let reqs: Vec<ArticleReq> = (0..n)
-        .map(|i| ArticleReq::fresh(format!("<m{i}@bench>")))
-        .collect();
-    let (shared, _) = Shared::new(reqs, &servers);
-    let ctl = QueueControl::default();
-    ctl.attach(&shared);
-    // Eleven volumes of 60 articles each, at the queue tail - the
-    // deferral shape: volume bodies are queued after the payload.
-    let mut worst = std::time::Duration::ZERO;
-    let mut total = std::time::Duration::ZERO;
-    for v in 0..11 {
-        let ids: HashSet<String> = (0..60)
-            .map(|k| format!("<m{}@bench>", n - 1 - v * 60 - k))
-            .collect();
-        let t = std::time::Instant::now();
-        let removed = ctl.cancel(&ids);
-        let dt = t.elapsed();
-        assert_eq!(removed.len(), 60);
-        worst = worst.max(dt);
-        total += dt;
-        eprintln!("cancel of volume {v:2}: {dt:?}");
-    }
-    eprintln!("11 volumes vs a {n}-article queue: total {total:?}, worst single hold {worst:?}");
 }
 
 /// The queue side of the same rule. In the endgame a queued article
@@ -1056,7 +1048,7 @@ async fn queue_control_cancel_cost_at_field_scale() {
 #[tokio::test]
 async fn a_laddering_article_queues_behind_probes_but_never_behind_payload() {
     let servers = one_server();
-    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<lad@x>".into())], &servers);
+    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<lad@x>")], &servers);
     let ctx = ctx_for(&servers, 0);
     let (tx, _rx) = mpsc::channel(8);
     let _life = WorkerLife::birth(&shared, 0);
@@ -1085,11 +1077,20 @@ async fn a_laddering_article_queues_behind_probes_but_never_behind_payload() {
     let w = next_work(&shared, ctx, &tx, Pipeline::probes(2))
         .await
         .expect("probes ride behind probes");
-    assert_eq!(w.id, "<lad@x>");
+    assert_eq!(&*w.id, "<lad@x>");
     assert!(w.ladder, "and are dispatched as probes");
 }
 
-fn one_server() -> Vec<(ServerConfig, PoolConfig)> {
+/// A corpus's ids, bracketed and interned (R9) the way the fetch plan
+/// does it - the pool API takes handles, and building them inline three
+/// times cost this file more lines than its size-gate ceiling had.
+fn bracketed(segs: &[(String, u64, u32)]) -> Vec<Arc<str>> {
+    segs.iter()
+        .map(|(id, ..)| Arc::from(format!("<{id}>")))
+        .collect()
+}
+
+pub(super) fn one_server() -> Vec<(ServerConfig, PoolConfig)> {
     vec![(
         ServerConfig {
             host: "s".into(),
@@ -1121,7 +1122,7 @@ fn one_server() -> Vec<(ServerConfig, PoolConfig)> {
 fn wire_cap_accounting_charges_and_releases_symmetrically() {
     // B3: the cap gate reads the running estimate; every charge must
     // be matched by exactly one release, whichever exit path takes it.
-    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<w@x>".into())], &one_server());
+    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<w@x>")], &one_server());
     assert_eq!(shared.inflight_body_bytes.load(Ordering::Acquire), 0);
     assert!(
         !shared.wire_over_cap(EST_BODY_BYTES),
@@ -1172,10 +1173,7 @@ async fn a_dead_pipeline_releases_exactly_what_dispatch_charged() {
     // pipeline depth one. Model the worker's dispatch sequence.
     let servers = one_server();
     let (shared, _) = Shared::new(
-        vec![
-            ArticleReq::fresh("<f0@x>".into()),
-            ArticleReq::fresh("<f1@x>".into()),
-        ],
+        vec![ArticleReq::fresh("<f0@x>"), ArticleReq::fresh("<f1@x>")],
         &servers,
     );
     let ctx = ctx_for(&servers, 0);
@@ -1231,10 +1229,7 @@ async fn a_productive_sessions_death_charges_no_article() {
     // session-killing poison article to its terminal verdict.
     let servers = one_server();
     let (shared, _) = Shared::new(
-        vec![
-            ArticleReq::fresh("<p0@x>".into()),
-            ArticleReq::fresh("<p1@x>".into()),
-        ],
+        vec![ArticleReq::fresh("<p0@x>"), ArticleReq::fresh("<p1@x>")],
         &servers,
     );
     let ctx = ctx_for(&servers, 0);
@@ -1309,7 +1304,7 @@ async fn stream_mode_engages_on_promote_and_reader_touch() {
     );
     let ctl2 = QueueControl::default();
     ctl2.attach(&shared2);
-    assert_eq!(ctl2.promote(&["<zz>".to_string()]), 0);
+    assert_eq!(ctl2.promote(&["<zz>".into()]), 0);
     assert!(
         shared2.stream_active(),
         "a promote engages stream mode even when nothing moves"
@@ -1362,7 +1357,7 @@ async fn promoted_work_routes_to_the_faster_server() {
     shared.bytes[0].store(1_000_000, Ordering::Relaxed);
     shared.bytes[1].store(10_000_000, Ordering::Relaxed);
     // Promote a1 and a2; stream mode engages via the promote.
-    let ids: Vec<String> = ["<a1>", "<a2>"].iter().map(|s| s.to_string()).collect();
+    let ids: Vec<Arc<str>> = ["<a1>", "<a2>"].iter().map(|s| Arc::from(*s)).collect();
     assert_eq!(ctl.promote(&ids), 2);
 
     let slow = ServerCtx {
@@ -1386,7 +1381,7 @@ async fn promoted_work_routes_to_the_faster_server() {
     let w = next_work(&shared, slow, &tx, Pipeline::payload(0))
         .await
         .expect("slow gets non-promoted work");
-    assert_eq!(w.id, "<a0>");
+    assert_eq!(&*w.id, "<a0>");
     assert_eq!(
         shared.queue.lock().await.front().map(|w| w.id.clone()),
         Some("<a1>".into()),
@@ -1396,7 +1391,7 @@ async fn promoted_work_routes_to_the_faster_server() {
     let w = next_work(&shared, fast, &tx, Pipeline::payload(0))
         .await
         .expect("fast gets promoted work");
-    assert_eq!(w.id, "<a1>");
+    assert_eq!(&*w.id, "<a1>");
     assert!(w.promoted);
     // A promoted item some backbone already 430'd bypasses the
     // speed-matching: latency beats routing once it's on a recovery
@@ -1406,23 +1401,23 @@ async fn promoted_work_routes_to_the_faster_server() {
     let w = next_work(&shared, slow, &tx, Pipeline::payload(0))
         .await
         .expect("slow takes the 430-recovery item");
-    assert_eq!(w.id, "<a2>");
+    assert_eq!(&*w.id, "<a2>");
     assert!(w.promoted);
 
     // Kill the fast server; the slow one must take promoted work
     // rather than strand it.
-    let reqs2: Vec<ArticleReq> = vec![ArticleReq::fresh("<b0>".into())];
+    let reqs2: Vec<ArticleReq> = vec![ArticleReq::fresh("<b0>")];
     let (shared2, _) = Shared::new(reqs2, &servers);
     let _c = WorkerLife::birth(&shared2, 0);
     let ctl2 = QueueControl::default();
     ctl2.attach(&shared2);
     shared2.bytes[0].store(1_000_000, Ordering::Relaxed);
     shared2.bytes[1].store(10_000_000, Ordering::Relaxed);
-    assert_eq!(ctl2.promote(&["<b0>".to_string()]), 1);
+    assert_eq!(ctl2.promote(&["<b0>".into()]), 1);
     let w = next_work(&shared2, slow, &tx, Pipeline::payload(0))
         .await
         .expect("slow takes it when alone");
-    assert_eq!(w.id, "<b0>");
+    assert_eq!(&*w.id, "<b0>");
 }
 
 #[tokio::test]
@@ -1454,6 +1449,9 @@ async fn shed_pipeline_requeues_behind_promoted_run_uncharged() {
     // is just as real).
     shared.charge_wire();
     inflight.push_back(Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<a5>".into(),
         attempts: 0,
         promoted: false,
@@ -1468,13 +1466,13 @@ async fn shed_pipeline_requeues_behind_promoted_run_uncharged() {
         probe: false,
     });
     // A seek promotes a7 and a3 to the front (in that range order).
-    let ids: Vec<String> = ["<a7>", "<a3>"].iter().map(|s| s.to_string()).collect();
+    let ids: Vec<Arc<str>> = ["<a7>", "<a3>"].iter().map(|s| Arc::from(*s)).collect();
     assert_eq!(ctl.promote(&ids), 2);
 
     shed_pipeline(&shared, &mut inflight).await;
     assert!(inflight.is_empty());
     let q = shared.queue.lock().await;
-    let order: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
+    let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         order,
         [
@@ -1569,8 +1567,8 @@ async fn drain_signals_graceful_and_leaves_the_queue_intact() {
 /// Drain a finished run's outcome channel into id → outcome-count.
 /// `try_recv` on purpose: anything still missing here was NOT emitted
 /// before the pool returned, which is exactly the contract under test.
-fn tally(rx: &mut mpsc::Receiver<FetchOutcome>) -> HashMap<String, usize> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
+fn tally(rx: &mut mpsc::Receiver<FetchOutcome>) -> HashMap<Arc<str>, usize> {
+    let mut seen: HashMap<Arc<str>, usize> = HashMap::new();
     while let Ok(o) = rx.try_recv() {
         let id = match o {
             FetchOutcome::Done { id, .. }
@@ -1582,7 +1580,7 @@ fn tally(rx: &mut mpsc::Receiver<FetchOutcome>) -> HashMap<String, usize> {
     seen
 }
 
-fn assert_exactly_one_outcome_each(ids: &[String], seen: &HashMap<String, usize>) {
+fn assert_exactly_one_outcome_each(ids: &[Arc<str>], seen: &HashMap<Arc<str>, usize>) {
     for id in ids {
         assert_eq!(
             seen.get(id).copied().unwrap_or(0),
@@ -1630,7 +1628,7 @@ async fn dead_server_seals_every_article_before_returning() {
         cap_probe_bounces: 3,
         ..Default::default()
     };
-    let ids: Vec<String> = (0..5).map(|i| format!("<seal{i}@x>")).collect();
+    let ids: Vec<Arc<str>> = (0..5).map(|i| Arc::from(format!("<seal{i}@x>"))).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(64);
     tokio::time::timeout(
@@ -1675,7 +1673,7 @@ async fn a_rejected_credential_is_asked_once_per_server_not_once_per_worker() {
         max_connect_attempts: 5,
         ..Default::default()
     };
-    let ids: Vec<String> = (0..4).map(|i| format!("<perm{i}@x>")).collect();
+    let ids: Vec<Arc<str>> = (0..4).map(|i| Arc::from(format!("<perm{i}@x>"))).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(64);
     tokio::time::timeout(
@@ -1734,7 +1732,7 @@ async fn a_capacity_refusal_yields_connections_instead_of_hammering() {
         max_connect_attempts: ATTEMPTS,
         ..Default::default()
     };
-    let ids: Vec<String> = (0..4).map(|i| format!("<cap{i}@x>")).collect();
+    let ids: Vec<Arc<str>> = (0..4).map(|i| Arc::from(format!("<cap{i}@x>"))).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(64);
     tokio::time::timeout(
@@ -1800,7 +1798,7 @@ async fn a_capacity_refusal_records_what_the_provider_granted() {
     let data: Vec<u8> = (0..240_000u32).map(|i| i as u8).collect();
     let mut articles = std::collections::HashMap::new();
     let segs = crate::mock::make_file_articles("cap.bin", &data, 10_000, "gr", &mut articles);
-    let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+    let ids: Vec<Arc<str>> = bracketed(&segs);
     let srv = MockServer::start(
         articles,
         Chaos {
@@ -1876,7 +1874,7 @@ async fn an_idle_provider_never_reads_as_capped() {
     let data: Vec<u8> = (0..30_000u32).map(|i| i as u8).collect();
     let mut articles = std::collections::HashMap::new();
     let segs = crate::mock::make_file_articles("easy.bin", &data, 10_000, "ez", &mut articles);
-    let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+    let ids: Vec<Arc<str>> = bracketed(&segs);
     let srv = MockServer::start(articles, Chaos::default()).await;
     let mut server = srv.server_config();
     // Far more connections than there is work for: every one of them
@@ -1926,7 +1924,7 @@ async fn a_dead_server_does_not_hold_the_run_open_after_the_work_is_done() {
     let mut arts = std::collections::HashMap::new();
     let data: Vec<u8> = (0..20_000u32).map(|i| i as u8).collect();
     let segs = crate::mock::make_file_articles("t.bin", &data, 5_000, "tail", &mut arts);
-    let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+    let ids: Vec<Arc<str>> = bracketed(&segs);
     let live = MockServer::start(arts, Chaos::default()).await;
 
     // Dead: TCP connects, AUTHINFO never succeeds.
@@ -2117,7 +2115,7 @@ async fn server_that_never_authenticates_seals_every_article() {
         max_connect_attempts: 2,
         ..Default::default()
     };
-    let ids: Vec<String> = (0..4).map(|i| format!("<auth{i}@x>")).collect();
+    let ids: Vec<Arc<str>> = (0..4).map(|i| Arc::from(format!("<auth{i}@x>"))).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(64);
     tokio::time::timeout(
@@ -2166,7 +2164,7 @@ async fn one_dead_server_does_not_seal_work_the_live_one_can_still_do() {
         max_connect_attempts: 1,
         ..Default::default()
     };
-    let ids: Vec<String> = articles.keys().cloned().collect();
+    let ids: Vec<Arc<str>> = articles.keys().map(|k| Arc::from(k.as_str())).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(256);
     let stats = tokio::time::timeout(
@@ -2184,9 +2182,16 @@ async fn one_dead_server_does_not_seal_work_the_live_one_can_still_do() {
     // this is the bit it reads.
     assert!(stats[0].ever_connected, "the healthy server served");
     assert!(!stats[1].ever_connected, "the dead server never connected");
+    // A3: never-connected and left-mid-run are different facts, and the
+    // failure summary says different things about them. A server that
+    // never held a connection cannot have walked out of the run.
+    assert!(
+        !stats[1].left_mid_run,
+        "a server that never connected was reported as having LEFT the run"
+    );
 
     let mut done = 0;
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut seen: HashMap<Arc<str>, usize> = HashMap::new();
     while let Ok(o) = rx.try_recv() {
         let id = match o {
             FetchOutcome::Done { id, .. } => {
@@ -2573,7 +2578,7 @@ async fn a_server_that_never_serves_a_body_bows_out_within_the_ceiling() {
         article_retries: 250,
         ..Default::default()
     };
-    let ids: Vec<String> = articles.keys().cloned().collect();
+    let ids: Vec<Arc<str>> = articles.keys().map(|k| Arc::from(k.as_str())).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(256);
     // The ceiling's own arithmetic: the sleeps armed by failures
@@ -2648,7 +2653,7 @@ async fn a_server_recovering_just_under_the_ceiling_still_completes() {
         article_retries: 250,
         ..Default::default()
     };
-    let ids: Vec<String> = articles.keys().cloned().collect();
+    let ids: Vec<Arc<str>> = articles.keys().map(|k| Arc::from(k.as_str())).collect();
     let reqs: Vec<ArticleReq> = ids.iter().cloned().map(ArticleReq::fresh).collect();
     let (tx, mut rx) = mpsc::channel(256);
     tokio::time::timeout(
@@ -2734,4 +2739,82 @@ async fn a_slow_write_side_is_measured_and_not_confused_with_the_network() {
         "a slow CONSUMER was booked as {reconnects} network reconnect(s) - \
          the two causes are being conflated, which is the bug this exists to prevent"
     );
+}
+
+/// A3: a server that connects, serves, and then walks out while the run
+/// still has work outstanding must be RECORDED as having left.
+///
+/// `ever_connected` stays true for such a server, and `live_mask` (alive
+/// NOW) silently stops counting it, so the survivors' 430s on the
+/// segments it alone still had to answer for resolve "unanimous". With
+/// nothing recording the departure the failure summary could not say so,
+/// which let `post_gone` fire on a healthy post and cost the run its one
+/// automatic retry - and a suppressed retry is FINAL.
+///
+/// The four ways this happens (a permanent refusal, a spent prepaid
+/// block or quota, the outage budget blown, the connect-attempt cap) all
+/// end the same way: `DialStep::Quit`, the worker returns, and its
+/// `WorkerLife` comes down. So the latch sits on that one path and this
+/// test drives it directly rather than staging four provider deaths.
+#[test]
+fn a_server_that_leaves_mid_run_latches_the_marker() {
+    let mut servers = one_server();
+    let mut second = servers[0].clone();
+    second.0.host = "t".into();
+    servers.push(second);
+    let reqs: Vec<ArticleReq> = (0..8)
+        .map(|i| ArticleReq::fresh(format!("<lmr{i}@x>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+    let leaver = WorkerLife::birth(&shared, 0);
+    let _stayer = WorkerLife::birth(&shared, 1);
+    // Both servers served: this is the case `ever_connected` cannot see.
+    shared.connected[0].store(true, Ordering::Relaxed);
+    shared.connected[1].store(true, Ordering::Relaxed);
+
+    drop(leaver);
+    assert!(
+        shared.left_mid_run[0].load(Ordering::Relaxed),
+        "the server that served and then lost its last worker with work \
+         still pending was not recorded as having left"
+    );
+    assert!(
+        !shared.left_mid_run[1].load(Ordering::Relaxed),
+        "a server still carrying the run has not left it"
+    );
+}
+
+/// The three ways the marker must stay FALSE, because none of them is a
+/// server walking out on live work: a server that never connected at all
+/// (that is `ever_connected == false`, its own clause and its own
+/// sentence), a natural wind-down with nothing left to fetch, and a run
+/// that was aborted or drained out from under the fleet.
+#[test]
+fn a_natural_wind_down_is_not_a_mid_run_departure() {
+    let servers = one_server();
+    let reqs: Vec<ArticleReq> = (0..4)
+        .map(|i| ArticleReq::fresh(format!("<nwd{i}@x>")))
+        .collect();
+
+    // Never connected: not a departure, however the worker exits.
+    let (never, _) = Shared::new(reqs.clone(), &servers);
+    drop(WorkerLife::birth(&never, 0));
+    assert!(!never.left_mid_run[0].load(Ordering::Relaxed));
+
+    // Connected, but the queue is empty: the run is simply over.
+    let (done, _) = Shared::new(reqs.clone(), &servers);
+    done.connected[0].store(true, Ordering::Relaxed);
+    let life = WorkerLife::birth(&done, 0);
+    done.pending.store(0, Ordering::Release);
+    drop(life);
+    assert!(!done.left_mid_run[0].load(Ordering::Relaxed));
+
+    // Aborted mid-flight: every worker leaves, and none of it is the
+    // server's doing.
+    let (aborted, _) = Shared::new(reqs, &servers);
+    aborted.connected[0].store(true, Ordering::Relaxed);
+    let life = WorkerLife::birth(&aborted, 0);
+    aborted.aborted.store(true, Ordering::Release);
+    drop(life);
+    assert!(!aborted.left_mid_run[0].load(Ordering::Relaxed));
 }

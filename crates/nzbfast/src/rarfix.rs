@@ -42,6 +42,17 @@ pub(crate) fn try_unrar_spent(
         let rars: Vec<PathBuf> = paths
             .iter()
             .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("rar")))
+            // A `.rar` whose NAME carries no set (hash stem, no .part
+            // ordinal, no .rNN sibling) cannot lead the named path:
+            // each hash name is its own release_stem, so the group walk
+            // below would feed the extractor one volume of a split set
+            // per group and fail all of them (issue #47's shape, which
+            // extract_one_level's routing already refuses - this is the
+            // same rule for the demote/resume callers that land here
+            // directly). Dropping them from the lead pick makes `first`
+            // None for an all-hash directory, which is precisely the
+            // obfuscated hand-off below.
+            .filter(|p| !(unpack::rar_name_carries_no_set(p) && rar_magic(p)))
             .cloned()
             .collect();
         first = first_rar_volume(&rars);
@@ -1023,6 +1034,7 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
             if matches!(
                 e,
                 rars::Error::Rar5Recovery(rars::recovery::rar5::Error::RepairTooLarge)
+                    | rars::Error::LegacyRepairTooLarge
             ) {
                 return Err(anyhow::anyhow!(
                     "{text} - raise --mem-limit (or the mem_limit setting) to repair this volume"

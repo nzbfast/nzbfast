@@ -108,6 +108,64 @@ fn repair_buffered(damaged: &Path) -> Vec<u8> {
     archive.repair_recovery().expect("buffered repair")
 }
 
+/// Legacy (RAR 3.x NEWSUB) streaming repair against RARLab's own repair of
+/// the same damage. The fixture is genuine WinRAR output; modern `rar` can
+/// no longer CREATE legacy archives (`-ma4` was removed) but still repairs
+/// them, so `rar r` remains an independent oracle. WinRAR 7's RAR 2.x repair
+/// rebuilds the payload but rewrites the PROTECT_HEAD tail, so the RAR 2
+/// family is pinned against the pristine bytes in the inline lib tests
+/// instead.
+#[test]
+#[ignore = "needs the proprietary `rar` binary"]
+fn legacy_rar3_streaming_repair_matches_winrar_byte_for_byte() {
+    if !have_rar() {
+        eprintln!("SKIP: `rar` not on PATH - this test needs RARLab's binary");
+        return;
+    }
+    let dir = workdir("legacy-rar3");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rar15_40/rar300/with_recovery_rar300.rar");
+    let pristine = fs::read(&fixture).expect("read fixture");
+
+    let mut damaged_bytes = pristine.clone();
+    // Sector 1 and the partial final protected sector (RR block at 9819).
+    damaged_bytes[512 + 16..512 + 80].fill(0xa5);
+    damaged_bytes[9750..9800].fill(0x5a);
+    let damaged = dir.join("dmg.rar");
+    fs::write(&damaged, &damaged_bytes).expect("write damaged");
+
+    // Ours, through the daemon's streaming path.
+    let ours = dir.join("ours.rar");
+    let archive = rars::ArchiveReader::read_path(&damaged).expect("parse damaged");
+    let rebuilt = archive
+        .repair_recovery_to_path(&ours, None, 64 << 20)
+        .expect("streaming legacy repair");
+    assert_eq!(rebuilt, vec![1, 19]);
+    assert_eq!(
+        fs::read(&ours).expect("read ours"),
+        pristine,
+        "our repair is not byte-identical to the pristine archive"
+    );
+
+    // RARLab's repair of the SAME damage, as the independent oracle.
+    let status = Command::new("rar")
+        .args(["r", "-y", "-idq"])
+        .arg(&damaged)
+        .current_dir(&dir)
+        .status()
+        .expect("run rar r");
+    assert!(status.success(), "rar r failed");
+    let theirs = dir.join("fixed.dmg.rar");
+    assert_eq!(
+        fs::read(&ours).expect("read ours"),
+        fs::read(&theirs).expect("read theirs"),
+        "our repair differs from `rar r`'s"
+    );
+
+    eprintln!("legacy RAR3: byte-identical to pristine AND to `rar r`");
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 #[ignore = "needs the proprietary `rar` binary and builds >13 MB archives"]
 fn multi_group_recovery_matches_winrar_byte_for_byte() {

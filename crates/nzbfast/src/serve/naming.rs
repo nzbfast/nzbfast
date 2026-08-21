@@ -98,7 +98,7 @@ impl Daemon {
         let key = format!("eplist:{}", crate::wall::norm_title(&p.title));
         #[cfg(feature = "indexer")]
         let eps: Vec<crate::wall::EpInfo> = self
-            .with_index(|ix| ix.kv_get(&key))
+            .with_index_read(|ix| ix.kv_get(&key))
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| serde_json::from_value(v["episodes"].clone()).ok())
             .unwrap_or_default();
@@ -186,8 +186,13 @@ impl Daemon {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|t| t.as_secs() as i64)
                 .unwrap_or(0);
-            let verdict =
-                self.with_index_mut(|ix| ix.pre_corr_verdict(posted, &id.name, now).ok().flatten());
+            // Bounded like the tail's other index work: this runs on a
+            // finished job's post-processing thread, and a wedged index
+            // lane must not hold a completion behind a correlation
+            // verdict. See `with_index_bounded`.
+            let verdict = self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
+                ix.pre_corr_verdict(posted, &id.name, now).ok().flatten()
+            });
             match verdict {
                 Some(true) => {
                     info!(target: "predb", "correlation CONFIRMED by {}: {}", id.src, id.name)
@@ -239,7 +244,7 @@ impl Daemon {
                     key: sc.set_id.clone(),
                     source: "srrdb".into(),
                 });
-            let applied = self.with_index_mut(|ix| {
+            let applied = self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
                 let rids = ix.release_ids_by_stem(posted).unwrap_or_default();
                 let [rid] = rids[..] else { return None };
                 let out = ix.apply_proven_name(rid, &claim, now).ok()?;
@@ -292,7 +297,7 @@ impl Daemon {
         // future repost of these bytes the same non-answer, permanently.
         #[cfg(feature = "indexer")]
         if !prints.is_empty() && release::stem_is_a_name(best) {
-            self.with_index(|ix| {
+            self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
                 ix.par_hash_remember(&prints, best, &parsed.key, unix_now())
                     .ok()
             });
@@ -367,11 +372,13 @@ impl Daemon {
                 swept = crate::smart::sweep_junk(out_dir);
             }
         }
-        let parent = if cat.is_empty() {
-            self.out_dir()
-        } else {
-            self.out_dir().join(cat)
-        };
+        // The category's own name is NOT necessarily its folder: §129 2b
+        // lets a category rename its subfolder, and `base_out_dir` is
+        // what placed the job. Rebuilding the parent from the raw name
+        // here re-parented every folder-renaming arm into a directory
+        // the user never configured. `base_out_dir` with an empty stem
+        // gives exactly the parent it chose, sanitization included.
+        let parent = self.cat_dir(cat);
         // The container outranks the subject line: a "1080p" post over a
         // 720p stream gets the tag its bytes deserve. A measurement only
         // ever REPLACES a differing claim or ADDS an HD one - a name that
@@ -398,7 +405,7 @@ impl Daemon {
             && !nzb_naming
             && matches!(base, Base::Movie)
             && p.year.is_none()
-            && let Some(y) = self.with_index(|ix| {
+            && let Some(y) = self.with_index_read(|ix| {
                 ix.movie_year(&nzbkit::release::norm_title(&p.title))
                     .ok()
                     .flatten()

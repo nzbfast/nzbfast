@@ -5,28 +5,79 @@
 use super::*;
 
 impl Index {
+    /// The one insert both the single and the batch entry point run.
+    const SPOT_INSERT: &'static str =
+        "INSERT INTO spots(msgid, title, category, subcats, size, date,
+                           spotter_id, verified, hashcash_ok, nzb_msgids)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(msgid) DO NOTHING";
+
+    /// Bind one spot to [`Self::SPOT_INSERT`]; `Ok(true)` if the row was
+    /// new, `Ok(false)` if the message-id was already indexed.
+    fn insert_spot_stmt(stmt: &mut rusqlite::Statement<'_>, s: &Spot) -> rusqlite::Result<bool> {
+        let n = stmt.execute(rusqlite::params![
+            s.msgid,
+            s.title,
+            s.category,
+            s.subcats,
+            s.size as i64,
+            s.date,
+            s.spotter_id,
+            s.verified,
+            s.hashcash_ok,
+            serde_json::to_string(&s.nzb_msgids).unwrap(),
+        ])?;
+        Ok(n > 0)
+    }
+
     /// Insert one verified spot; `Ok(true)` if it was new, `Ok(false)` if
     /// the message-id was already indexed.
+    ///
+    /// One autocommit transaction per call. That is fine for the odd
+    /// single insert (and for the tests), but a scan pass holds thousands
+    /// of spots per OVER chunk - use [`Self::insert_spots`] there.
     pub fn insert_spot(&self, s: &Spot) -> rusqlite::Result<bool> {
-        let n = self.db.execute(
-            "INSERT INTO spots(msgid, title, category, subcats, size, date,
-                               spotter_id, verified, hashcash_ok, nzb_msgids)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(msgid) DO NOTHING",
-            rusqlite::params![
-                s.msgid,
-                s.title,
-                s.category,
-                s.subcats,
-                s.size as i64,
-                s.date,
-                s.spotter_id,
-                s.verified,
-                s.hashcash_ok,
-                serde_json::to_string(&s.nzb_msgids).unwrap(),
-            ],
-        )?;
-        Ok(n > 0)
+        let mut stmt = self.db.prepare_cached(Self::SPOT_INSERT)?;
+        Self::insert_spot_stmt(&mut stmt, s)
+    }
+
+    /// Insert a whole OVER chunk's worth of verified spots in ONE
+    /// transaction; returns how many rows were new.
+    ///
+    /// The per-row [`Self::insert_spot`] was one write transaction each -
+    /// its own lock acquisition, its own WAL commit and fsync - thousands
+    /// of times per chunk. The header scanner already batches its chunk
+    /// the same way (`ingest::ingest_pass`), and for the same reason.
+    ///
+    /// IMMEDIATE, not the default DEFERRED, for the reason written up at
+    /// that call site: a deferred transaction upgrades to a write lock
+    /// lazily and SQLite does NOT apply the busy timeout to the upgrade,
+    /// so a concurrent writer fails the whole batch outright instead of
+    /// waiting for it.
+    ///
+    /// Crash semantics only improve: the scan's high-water mark is
+    /// written after the batch, so a crash mid-batch re-reads the same
+    /// articles next pass and the insert is `ON CONFLICT DO NOTHING`.
+    /// Before this, a crash could leave part of a chunk stored with the
+    /// mark still behind it - the same outcome, reached less tidily.
+    pub fn insert_spots(&mut self, spots: &[Spot]) -> rusqlite::Result<usize> {
+        if spots.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut new = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(Self::SPOT_INSERT)?;
+            for s in spots {
+                if Self::insert_spot_stmt(&mut stmt, s)? {
+                    new += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(new)
     }
 
     /// Search spots by title substring (case-insensitive), newest first.
@@ -713,41 +764,23 @@ impl Index {
         // Aggregates, same formula as ingest. The naming-derived
         // columns (kind, junk, title_key, ...) come from apply_named
         // below, not from here.
-        let (nfiles, tbytes, ncomplete, npar2, have, need): (u32, i64, u32, u32, i64, i64) = self
-            .db
-            .prepare_cached(
-                "SELECT COUNT(*), COALESCE(SUM(bytes),0),
-                        SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                 ELSE json_array_length(segments) END >= total_parts),
-                        SUM(LOWER(filename) LIKE '%.par2'),
-                        COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                          ELSE json_array_length(segments) END),0),
-                        COALESCE(SUM(total_parts),0)
-                 FROM files WHERE release_id=?1",
-            )?
-            .query_row([rid], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            })?;
+        let agg = super::aggregates::RelAgg::recompute(&self.db, rid)?;
         self.db
             .prepare_cached(
                 "UPDATE releases SET files=?2, total_bytes=?3, has_par2=?4, complete=?5,
-                        have_parts=?6, need_parts=?7 WHERE id=?1",
+                        have_parts=?6, need_parts=?7, nfiles_complete=?8, nfiles_exe=?9
+                 WHERE id=?1",
             )?
             .execute(rusqlite::params![
                 rid,
-                nfiles,
-                tbytes,
-                npar2 > 0,
-                nfiles >= 1 && ncomplete == nfiles,
-                have,
-                need
+                agg.nfiles,
+                agg.tbytes,
+                agg.has_par2,
+                agg.complete(),
+                agg.have,
+                agg.need,
+                agg.ncomplete,
+                agg.nexe
             ])?;
         // The poster's own adult filing, carried onto the card they
         // filed. This is what lets `wall_hide_adult` work on spot-born
@@ -986,6 +1019,58 @@ mod tests {
     }
 
     /// A fetched spot becomes a real, named, wall-visible release: files
+    /// One OVER chunk is ONE transaction, and it stores exactly what the
+    /// row-at-a-time path stored.
+    ///
+    /// `insert_spot` autocommits, so a scan pass paid a write lock, a WAL
+    /// commit and an fsync per spot - thousands of them per chunk. The
+    /// batch entry point has to be a drop-in for that: same rows, same
+    /// `ON CONFLICT DO NOTHING` (a chunk re-read after a crash, or the
+    /// deepening leg walking back through a band the forward leg already
+    /// covered, must not duplicate anything), and the same "was it new?"
+    /// answer, which is the scan summary's `new` count.
+    #[test]
+    fn a_spot_batch_is_one_transaction_and_ignores_what_it_already_holds() {
+        let d = dir("batch");
+        let mut ix = Index::open(&d.join("index.db")).unwrap();
+        let batch = vec![
+            spot("<b1@spot>", "One.S01E01.1080p.WEB.x264-GRP", "a09"),
+            spot("<b2@spot>", "Two.S01E01.1080p.WEB.x264-GRP", "a09"),
+            // A duplicate INSIDE the batch: the OVER window can hand the
+            // same message-id twice across a chunk boundary.
+            spot("<b1@spot>", "One.S01E01.1080p.WEB.x264-GRP", "a09"),
+        ];
+        assert_eq!(
+            ix.insert_spots(&batch).unwrap(),
+            2,
+            "two distinct message-ids are two new rows"
+        );
+        let q = SpotQuery {
+            limit: 10,
+            ..Default::default()
+        };
+        let (rows, total) = ix.spot_browse(&q).unwrap();
+        assert_eq!((rows.len(), total), (2, 2));
+
+        // Re-offering the whole chunk stores nothing and says so - this
+        // is what makes the high-water mark safe to write AFTER the
+        // batch rather than before it.
+        assert_eq!(ix.insert_spots(&batch).unwrap(), 0);
+        assert_eq!(ix.spot_browse(&q).unwrap().1, 2);
+
+        // The single-row entry point still works and still agrees.
+        assert!(!ix.insert_spot(&batch[0]).unwrap());
+        assert!(
+            ix.insert_spot(&spot("<b3@spot>", "Three.S01E01.1080p.WEB.x264-GRP", "a09"))
+                .unwrap()
+        );
+        assert_eq!(ix.spot_browse(&q).unwrap().1, 3);
+
+        // An empty chunk opens no transaction at all.
+        assert_eq!(ix.insert_spots(&[]).unwrap(), 0);
+        teardown(&d, ix);
+    }
+
     /// rows from the NZB, the title through the sanctioned naming seam
     /// with its own provenance label, and an NZB synthesizable back out
     /// of the stored segments.

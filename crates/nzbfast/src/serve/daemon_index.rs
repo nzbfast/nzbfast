@@ -540,6 +540,74 @@ impl Daemon {
 
     /// Run `f` against the shared index, opening it lazily. Returns the
     /// closure's value, or `None` if the index can't be opened (feature
+    /// How long a finished job's tail will wait for the index write
+    /// mutex before giving up on its telemetry and finishing anyway.
+    ///
+    /// Generous enough that an ordinary ingest transaction (a busy
+    /// scan's batch, the 10 s SQLite busy_timeout behind it) is simply
+    /// waited out, so the samples are kept in every normal case; short
+    /// enough that it is not a stall anybody reports.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) const TAIL_INDEX_WAIT: std::time::Duration =
+        std::time::Duration::from_secs(15);
+
+    /// [`Self::with_index`], but it gives up rather than waiting for
+    /// ever. `None` covers both "the index is switched off" and "it was
+    /// busy for the whole budget" - callers here have nothing to do
+    /// differently, and the one that matters says so in the log itself.
+    ///
+    /// This exists because of what an unbounded wait cost on 20 Aug
+    /// 2026. An index scan lane wedged mid-I/O against a provider that
+    /// had stopped answering (the same host delivered 0.0 MB to the
+    /// download running beside it), and it held this mutex while it sat
+    /// there. The download itself was fine - `index_gate_rendezvous`
+    /// bounds the RUNNER's wait for exactly this shape, issue #38's
+    /// second wedge - but the post-processing tail's M29 oracle fold
+    /// took the mutex with no bound at all and sat on it for 8m46s,
+    /// with the row reading as a finishing job the whole time. The
+    /// runner had been taught to give up and the tail had not.
+    ///
+    /// Polled rather than parked: `std::sync::Mutex` has no timed
+    /// acquire, and the poll interval only has to be short against a
+    /// budget measured in seconds.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn with_index_bounded<T>(
+        &self,
+        wait: std::time::Duration,
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Option<T> {
+        if !self.index_db_wanted() {
+            return None;
+        }
+        crate::persist::blocking_db(|| {
+            let deadline = Instant::now() + wait;
+            loop {
+                // Poison is never fatal here (nzbkit::sync's whole
+                // point), and `try_lock` reports it as an error like
+                // any other - so it has to be unpacked rather than
+                // retried. Left as "busy", one panic under this mutex
+                // would make every tail silently drop its samples for
+                // the life of the process.
+                match self.index.try_lock() {
+                    Ok(mut guard) => {
+                        self.open_locked(&mut guard);
+                        return guard.as_mut().and_then(f);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => {
+                        let mut guard = e.into_inner();
+                        self.open_locked(&mut guard);
+                        return guard.as_mut().and_then(f);
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        })
+    }
+
     /// effectively off) - callers treat that as "no results".
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn with_index<T>(
@@ -804,18 +872,24 @@ impl Daemon {
 
     /// Best-effort write access: run `f` on the read-write connection if
     /// it is free RIGHT NOW, skip entirely if anything holds it. For
-    /// side-writes an interactive endpoint can shrug off (wall2's title
-    /// seeding) - the point of the read-only path is that those handlers
-    /// never park behind an ingest, so their embedded writes must not
-    /// park either.
+    /// side-writes an interactive endpoint can shrug off (the grab
+    /// path's spot-NZB cache line; wall2's title seeding takes the
+    /// `_mut` sibling) - the point of the read-only path is that those
+    /// handlers never park behind an ingest, so their embedded writes
+    /// must not park either.
     ///
     /// try_lock for the handle, `blocking_db` for the closure - the same
     /// split [`Self::try_with_index_mut`] documents: the WAIT is what
     /// this refuses, not the work. Winning the try_lock still buys a
     /// synchronous SQLite run, and that belongs off the async workers
-    /// for the reason `with_index` records. Not a hypothetical closure
-    /// either: the wall's title seeding loops `title_seed` over a whole
-    /// page of cards.
+    /// for the reason `with_index` records.
+    ///
+    /// Note what winning the try_lock does NOT win: the SQLite WRITE
+    /// lock. A closure that autocommits row by row still takes that once
+    /// per row, and each one can wait out the full `busy_timeout` behind
+    /// another connection's transaction - so a loop of writes belongs in
+    /// one transaction even through this door. wall2's title seeding is
+    /// the worked example (`title_seed_many`).
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn try_with_index<T>(
         &self,
@@ -865,12 +939,15 @@ impl Daemon {
     }
 
     /// Retire every read-only connection so the next `with_index_read`
-    /// opens fresh ones. Called wherever the write side republishes or
-    /// drops its own connection. For committed data this is
-    /// belt-and-braces (a WAL reader picks up every commit on its next
-    /// query anyway), but it is what keeps the readers correct across
-    /// index_wipe deleting the file out from under them - a read-only
-    /// handle would otherwise serve the deleted inode forever.
+    /// opens fresh ones. Called on the IDENTITY and SCHEMA events only:
+    /// wipe (the file is deleted under the pooled handles - a read-only
+    /// handle would otherwise serve the deleted inode forever),
+    /// source-off, shutdown, and the named-feed index's first creation
+    /// (see `with_index_mut_retiring_ddl`). NOT called at the end of an
+    /// ordinary pass any more (B4): for committed data a WAL reader
+    /// picks up every commit on its next query anyway, so the per-pass
+    /// flush bought nothing and threw away up to four warmed 64 MB page
+    /// caches each time.
     ///
     /// Connections lent out right now are retired by the generation
     /// bump: their query finishes on the old handle and the guard closes
@@ -890,11 +967,15 @@ impl Daemon {
 
     /// index_stats' database figures (releases, complete, db_bytes,
     /// live_bytes) without ever parking the caller on the index mutex.
-    /// try_lock: when the connection is free, compute fresh and refresh
-    /// the cache; when a scan batch or maintenance pass holds it, serve
-    /// the last known figures. A few-seconds-stale count is fine for a
-    /// status pill - four HTTP workers queued behind a 62s lock hold
-    /// is how one dashboard tab wedged the whole daemon.
+    /// A4: a real TTL cache, not a busy-fallback - a fresh snapshot is
+    /// served without touching ANY index lock, even when the writer
+    /// mutex is free (this used to recompute the full `SCAN releases`
+    /// on every poll the moment try_lock succeeded). On expiry, one
+    /// caller recomputes (singleflight) while everyone else keeps the
+    /// stale figures; a wipe or source-off bumps the era, which orphans
+    /// the snapshot instantly. A TTL-stale count is fine for a status
+    /// pill - four HTTP workers queued behind a 62s lock hold is how
+    /// one dashboard tab wedged the whole daemon.
     ///
     /// None means "no figures yet", not "empty index": every read path
     /// was busy and nothing has seeded the cache since this daemon came
@@ -905,47 +986,101 @@ impl Daemon {
     /// empty index.
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn index_stats_snapshot(&self) -> Option<(u64, u64, u64, u64)> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(45);
         if !self.index_db_wanted() {
             return Some((0, 0, 0, 0));
         }
-        if let Ok(mut guard) = self.index.try_lock() {
-            self.open_locked(&mut guard);
-            if let Some(ix) = guard.as_ref() {
-                let (total, complete) = ix.stats().unwrap_or((0, 0));
-                let snap = (
-                    total,
-                    complete,
-                    ix.db_bytes().unwrap_or(0),
-                    ix.live_bytes().unwrap_or(0),
-                );
-                *self.index_stats_cache.lock_ok() = Some(snap);
+        let era = self.index_era();
+        {
+            let mut c = self.index_stats_cache.lock_ok();
+            if c.era == era
+                && let Some(snap) = c.snap
+                && c.at.is_some_and(|at| at.elapsed() < TTL)
+            {
                 return Some(snap);
             }
-            return Some((0, 0, 0, 0));
+            if c.refreshing {
+                // Singleflight: another caller is already paying for
+                // the recompute. Same-era stale figures beat queueing
+                // a second table scan; a cross-era snapshot (the index
+                // was just wiped or switched) must not be served.
+                return if c.era == era { c.snap } else { None };
+            }
+            c.refreshing = true;
         }
-        if let Some(snap) = *self.index_stats_cache.lock_ok() {
-            return Some(snap);
+        let computed = self.index_stats_compute();
+        let mut c = self.index_stats_cache.lock_ok();
+        c.refreshing = false;
+        if self.index_era() != era {
+            // Wiped or switched off while we computed: the figures
+            // describe a database that no longer exists. Answer cold
+            // and let the next poll recompute under the new era.
+            return None;
         }
-        // The cache is only empty before the first successful read - the
-        // restart window. A scan batch that reclaims the write connection
-        // straight away used to make a 19 GB index report zero releases
-        // to every dashboard load until the batch finished; the pooled
-        // read-only connections run concurrently with that writer, so
-        // ask one of them instead. Busy/Unavailable answer None: the
-        // pool's bounded wait is the whole point of it, and "could not
-        // read" must not be dressed up as a count.
-        if let Reader::Got(ix) = self.index_read_acquire() {
+        match computed {
+            Some(snap) => {
+                c.snap = Some(snap);
+                c.at = Some(std::time::Instant::now());
+                c.era = era;
+                Some(snap)
+            }
+            // Every read path was busy: serve same-era stale figures
+            // if any exist, cold otherwise. A failed compute must not
+            // seed the cache - the next poll should try the real read
+            // paths again, not replay a placeholder.
+            None => {
+                if c.era == era {
+                    c.snap
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The expensive half of [`Self::index_stats_snapshot`]: one full
+    /// read of the figures, off the writer connection when it is free,
+    /// off a pooled read-only connection when a scan batch holds it
+    /// (a scan batch that reclaims the write connection straight away
+    /// used to make a 19 GB index report zero releases to every
+    /// dashboard load until the batch finished). Busy/Unavailable on
+    /// both paths answers None: "could not read" must not be dressed
+    /// up as a count.
+    #[cfg(feature = "indexer")]
+    fn index_stats_compute(&self) -> Option<(u64, u64, u64, u64)> {
+        let read = |ix: &nzbkit::index::Index| {
             let (total, complete) = ix.stats().unwrap_or((0, 0));
-            let snap = (
+            (
                 total,
                 complete,
                 ix.db_bytes().unwrap_or(0),
                 ix.live_bytes().unwrap_or(0),
-            );
-            *self.index_stats_cache.lock_ok() = Some(snap);
-            return Some(snap);
+            )
+        };
+        if let Ok(mut guard) = self.index.try_lock() {
+            self.open_locked(&mut guard);
+            return match guard.as_ref() {
+                Some(ix) => Some(read(ix)),
+                // Wanted but would not open: genuinely zero.
+                None => Some((0, 0, 0, 0)),
+            };
+        }
+        if let Reader::Got(ix) = self.index_read_acquire() {
+            return Some(read(&ix));
         }
         None
+    }
+
+    /// Force the next figures out of [`Self::index_stats_snapshot`] to
+    /// be freshly computed, and compute them now. Called once per scan
+    /// pass, after the whole multi-group JoinSet - the one exact
+    /// recompute that replaces the per-group scans (A4) - so the
+    /// dashboard pill shows the pass's result without waiting out the
+    /// TTL.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn refresh_index_stats(&self) {
+        self.index_stats_cache.lock_ok().at = None;
+        let _ = self.index_stats_snapshot();
     }
 
     /// Mutable variant for the odd transaction-shaped call (IMDb
@@ -965,6 +1100,29 @@ impl Daemon {
             self.open_locked(&mut guard);
             guard.as_mut().and_then(f)
         })
+    }
+
+    /// [`Self::with_index_mut`] for the writes that can run runtime DDL
+    /// (the pre-feed store paths, whose first activity builds the
+    /// named-count index). Drains the connection's DDL stamp inside the
+    /// same lock hold and retires the read-only pool when the schema
+    /// actually changed - the one freshness event a pooled reader's
+    /// prepared statements can predate. This is what preserves the
+    /// dynamic-DDL half of the old per-pass reader flush now that
+    /// ordinary passes no longer retire anything (B4).
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn with_index_mut_retiring_ddl<T>(
+        &self,
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Option<T> {
+        let (r, ddl) = self.with_index_mut(|ix| {
+            let r = f(ix)?;
+            Some((r, ix.take_schema_ddl()))
+        })?;
+        if ddl {
+            self.drop_index_read();
+        }
+        Some(r)
     }
 
     /// Every path to the index database goes through `with_index` or its
@@ -1007,10 +1165,12 @@ impl Daemon {
         self.index_generation.load(Ordering::SeqCst)
     }
 
-    /// Publish a freshly-opened shared connection on behalf of a scan
+    /// Hand a pass's connection back as the shared one, on behalf of a
     /// pass that started at `era` - unless the index was switched off or
     /// wiped while that pass ran, in which case the pass's connection is
-    /// simply dropped and the index stays closed.
+    /// simply dropped and the index stays closed. When a shared
+    /// connection already exists it is KEPT and the offered one dropped:
+    /// see `publish_locked` for why that is enough.
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn publish_index(&self, era: u64, fresh: nzbkit::index::Index) {
         let mut guard = self.index.lock_ok();
@@ -1081,7 +1241,7 @@ impl Daemon {
         &self,
         guard: &mut std::sync::MutexGuard<'_, Option<nzbkit::index::Index>>,
         era: u64,
-        fresh: nzbkit::index::Index,
+        mut fresh: nzbkit::index::Index,
     ) {
         // `index_db_wanted`, not `index_enabled`: a spot pass republishes
         // the same shared connection, and on a spots-only install the
@@ -1090,9 +1250,38 @@ impl Daemon {
         if !may_publish_index(self.index_era(), era, self.index_db_wanted()) {
             return;
         }
-        **guard = Some(fresh);
-        // `fresh` came from a read-write `Index::open`, so the migrations
-        // HAVE run - which is the whole question `index_migrated` answers.
+        // An existing shared connection is KEPT, not replaced (B4). The
+        // database is WAL, so a connection outside a transaction begins
+        // a fresh read snapshot on every statement and sees whatever the
+        // pass's own connection committed - the replacement bought no
+        // freshness, and on a many-group install it cost a full
+        // `Index::open` migration-ladder run per group per pass. What a
+        // handover CANNOT carry is connection-local state, which is why
+        // the tip watcher re-installs its gate/watch hooks on every use
+        // rather than assuming they survive (see
+        // `install_live_ingest_policy`). Replacement stays reserved for
+        // the identity events - wipe and source-off `take()` the guard,
+        // so the next publish or lazy open installs against the new
+        // file.
+        if guard.is_none() {
+            // The caller may hand over a scan-pass scratch connection
+            // wholesale. Its arrival watch is that PASS's matcher over
+            // that pass's journal - the pass drained the journal before
+            // handing over, and every shared-connection ingest installs
+            // its own watch - so clear it rather than let a stale
+            // predicate journal hits nobody will drain.
+            let (leftover, _) = fresh.take_watch_hits();
+            debug_assert!(
+                leftover.is_empty(),
+                "a pass handed over its connection without draining its watch hits"
+            );
+            fresh.set_watch_names(None);
+            **guard = Some(fresh);
+        }
+        // The connection in the guard came from a read-write
+        // `Index::open` (this pass's, or an earlier install), so the
+        // migrations HAVE run - which is the whole question
+        // `index_migrated` answers.
         //
         // Setting it here is load-bearing, not tidiness. The other four
         // writers of this mutex only set the flag on the branch where

@@ -378,6 +378,16 @@ A gaveta de cada linha diz quem adicionou o trabalho e tem o mesmo botão
 <b>Transferir o .nzb</b> da fila - útil para baixar um lançamento de novo em outro
 lugar, ou para anexar o <code>.nzb</code> a um relato de problema.</p>
 <p>O cartão lista dez downloads por padrão e o restante fica a um clique, no botão ▤. Status, local e o motivo de uma falha ficam atrás de um clique na própria linha, de modo que o caso comum - o que terminou, de que tamanho, quando - continua legível sem rolagem. Arraste a borda inferior do cartão para que a lista role numa altura à sua escolha. <b>History rows</b> em Ajustes → Interface muda esse dez; por ser uma propriedade do daemon e não do seu navegador, vale para todos os dispositivos que olham para esta instalação. <b>Colour History names</b>, ao lado, tinge de verde os nomes concluídos e de vermelho os que falharam; desligado, os nomes ficam neutros, e o ponto colorido e os detalhes da linha continuam dizendo qual é qual.</p>
+<p>O nzbfast guarda o histórico para sempre, a não ser que diga o contrário.
+<b>Limpeza do histórico</b> em Definições → Sistema remove as entradas antigas por
+duas regras independentes: uma idade (<b>Remover entradas com mais de</b>, contada a
+partir do momento em que a descarga terminou, em minutos, horas ou dias) e um
+comprimento (<b>Guardar no máximo este número de entradas</b>). Se ambas estiverem
+definidas, ambas se aplicam, e 0 desliga cada uma por si. Só a entrada do histórico
+é removida: os ficheiros descarregados ficam exatamente onde estão. A regra de idade
+só leva descargas concluídas, por isso uma que falhou espera que a repita ou apague
+você mesmo; o limite de comprimento conta todas as entradas, seja qual for o
+resultado delas.</p>
 <h3 id="dash-usage">Uso de dados</h3>
 <p>Barras diárias por provedor e totais de Hoje / 7 dias / 30 dias - essencial para contas
 medidas e de bloco. Contas de bloco mostram o uso acumulado contra seu tamanho.</p>
@@ -500,7 +510,7 @@ endereço web normal chega; uma entrada Prowlarr parece-se com
 que veio de volta, o que prova o endereço e a chave num clique. Uma chave guardada nunca
 é mostrada outra vez: a caixa diz isso, e deixá-la em branco mantém a que já lá
 está.</p>
-<p><b>Pesquisar.</b> Abra <b>🎬 o mural</b> no cabeçalho e passe à lista de releases. A
+<p><b>Pesquisar.</b> Abra <b>🎬 o mural</b> no cabeçalho e escolha <b>Lançamentos</b>. A
 lista pendente ao lado da caixa de pesquisa decide onde a pesquisa olha: <b>Este
 índice</b>, ou seja o que esta máquina analisou por si, <b>Indexadores</b>, ou
 <b>Ambos</b>. A sua escolha fica guardada. Perguntar às suas contas exige algo escrito na
@@ -569,6 +579,15 @@ resposta vem só do índice local.</li>
 mídia: cada filme e lançamento de TV reconhecido como um bloco de pôster com nota, ano,
 gêneros, elenco e sinopse - seus newsgroups, navegáveis como um catálogo.</p>
 <ul>
+<li><b>Mural</b> e <b>Lançamentos</b> são duas formas de ver o mesmo índice, e o
+par sob <b>Vista</b> alterna entre elas. A sua escolha fica guardada.</li>
+<li><b>Densidade dos pôsteres</b> é <b>S</b> / <b>M</b> / <b>L</b> ao lado desse par:
+pequeno põe mais no ecrã, grande menos.</li>
+<li><b>Prévia ao passar o mouse</b>, por cima da tabela de Lançamentos: pouse o ponteiro
+numa linha para ver pôster e sinopse, tudo do seu próprio índice.</li>
+<li><b>Agrupar por título</b>, o interruptor ao lado: uma linha por título com os seus
+lançamentos por baixo. Abra-a com <b>&#9656;</b> ou clicando na linha; a caixa do título
+seleciona os lançamentos mostrados. O agrupamento só vale para <b>Este índice</b>.</li>
 <li><b>Separadores</b> de Filmes / Séries / Outros, pesquisa instantânea e sete
 ordenações: <b>Para você</b>, Publicações mais recentes, Ano de lançamento, Mais bem
 avaliados, Título A–Z, Maiores e Mais publicados.</li>
@@ -1160,7 +1179,11 @@ release, esse fornecedor é consultado por último nesse download em vez de prim
 </ul>
 <p class="dim">O veredito é uma previsão a partir de indícios, não uma garantia. Para
 uma resposta firme sobre um NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>)
-conta os artigos reais.</p>
+conta os artigos reais. Ambos contam respostas, não conteúdos. Uma verificação limpa significa que os artigos
+estavam lá quando foram pedidos, não que aquilo que contêm esteja intacto: um pequeno
+número de fornecedores responde por artigos removidos com dados fictícios em vez de os
+recusar, e isso só aparece durante o próprio download, onde o artigo falha a sua própria
+soma de verificação e é obtido de novo noutro servidor ou reparado.</p>
 <h3 id="memory">Orçamento de memória - e o que a pouca memória custa</h3>
 <p>Todos os caches do motor compartilham um orçamento (padrão ¼ da RAM física, limitado a
 256 MB–16 GB). Defina-o explicitamente com o <i>Limite de memória</i> em Ajustes, ou

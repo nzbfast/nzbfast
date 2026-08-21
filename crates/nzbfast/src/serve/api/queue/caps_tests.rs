@@ -1,8 +1,9 @@
 //! Unit tests for the Providers card's connection-cap payload.
 //!
-//! A sibling file rather than an inline `mod` because queue.rs sits on
+//! A sibling file rather than an inline `mod` because queue.rs sat on
 //! the size gate's file ceiling (TODO 106): test code moves out, the
-//! baseline does not move up.
+//! baseline does not move up. It moved here with its subject when the
+//! §106 split gave `cap_payload` and its two neighbours their own file.
 
 use super::*;
 use crate::serve::testutil::test_daemon;

@@ -385,6 +385,10 @@ pub(super) struct PassOutcome {
     /// rows nothing will ever improve, and these are rows the next boot
     /// will try again.
     pub(super) unreadable: u32,
+    /// The daemon began shutting down mid-walk, so the remaining rows
+    /// were not looked at. Suppresses the version stamp: an unfinished
+    /// pass must leave the next boot free to run again.
+    pub(super) stopped: bool,
 }
 
 impl PassOutcome {
@@ -421,6 +425,16 @@ pub(super) fn run_pass(d: &Arc<Daemon>) -> PassOutcome {
     let rest = probe_rest();
     let mut out = PassOutcome::default();
     for job in rows {
+        // Checked per row, not once at the top: the walk is minutes long
+        // on a large history and every row costs a disk probe. Leaving
+        // early simply means the stamp is not written and the next boot
+        // runs the pass again, which `a_second_pass_finds_nothing_left_to_do`
+        // already pins as nearly free - the same outcome as any other
+        // pass that does not finish cleanly.
+        if d.exiting.load(Ordering::Relaxed) {
+            out.stopped = true;
+            break;
+        }
         let outcome = rederive_row(d, &job);
         match outcome {
             RowOutcome::Gone => out.kept += 1,
@@ -509,6 +523,18 @@ pub(super) fn migrate_once(d: &Arc<Daemon>) {
     // which `a_second_pass_finds_nothing_left_to_do` pins as nearly free
     // (Codex sweep 7, M5 and M6). It records the attempt instead, so
     // "again" is bounded.
+    // A shutdown is not a failed attempt. Returning before the counter
+    // below leaves both the stamp and the retry budget untouched, so the
+    // next start runs the pass from the top - where being stopped again
+    // costs nothing but where a genuinely unreadable disk still spends
+    // its bounded MAX_ATTEMPTS.
+    if pass.stopped {
+        info!(
+            target: "media",
+            "history re-derivation stopped at shutdown - it will run again at the next start"
+        );
+        return;
+    }
     let mut state = d.hist_migrate_state();
     if !pass.complete() {
         if state.attempt_version != env!("CARGO_PKG_VERSION") {
@@ -546,10 +572,15 @@ pub(super) fn spawn_history_media_migrate(daemon: &Arc<Daemon>) {
         return;
     }
     let d = daemon.clone();
-    std::thread::Builder::new()
-        .name("hist-media".into())
-        .spawn(move || migrate_once(&d))
-        .ok();
+    // Through `spawn_aux`, not a bare `Builder`: this pass walks every
+    // history row and probes each payload off disk, so on a large
+    // install it runs for minutes while holding a strong `Arc<Daemon>`.
+    // Unregistered it was invisible to the aux census, so a host that
+    // stops the engine and starts another in the same process kept the
+    // old daemon alive underneath the new one - and this thread went on
+    // appending to the shared `history.jsonl` while its presence guard
+    // consulted the DEAD generation's `self.history`.
+    crate::serve::spawn_aux("hist-media", move || migrate_once(&d));
 }
 
 #[cfg(test)]

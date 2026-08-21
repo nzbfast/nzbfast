@@ -184,6 +184,24 @@ impl Index {
         // sort). None on cold start -> Affinity degrades to Releases.
         affinity: Option<&AffinityCtx>,
     ) -> rusqlite::Result<(Vec<Card>, u64)> {
+        // C3 prototype: when the one-row-per-title summaries are
+        // installed, fresh, and this request adds no release-level
+        // predicate they were not built under, the whole query below is
+        // replaced by an indexed walk of the summary rows. Anything
+        // else - a kind or resolution chip, a size floor, a search, a
+        // release-level hide rule, curation off - lands here as it
+        // always did. `None` means "not eligible", never "no cards".
+        if self.summaries
+            && let Some(hit) = self.browse_cards_summary(
+                q,
+                sort,
+                matched_only,
+                group_by_kind,
+                affinity.is_some_and(|a| !a.is_empty()),
+            )?
+        {
+            return Ok(hit);
+        }
         // Per-release predicates are written with `{}` where the releases
         // alias goes, the same way browse() does: the page renders them
         // against `r.`, and the representative subqueries at the bottom

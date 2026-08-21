@@ -127,17 +127,55 @@ fn nzo_ids_select_directly_and_skip_pagination() {
     assert!(ids.contains("SABnzbd_nzo_nzbfast1"));
     assert!(ids.contains("SABnzbd_nzo_nzbfast7"));
     assert_eq!(ids.len(), 2);
-    // The selection path must not paginate: the same params carry a
-    // limit that would hide the row, and the history/queue builders
-    // branch on `ids.is_some()` to skip `paginate`. Guard the
-    // paginate half here: with limit=1 and start=1 the second slot
-    // survives only via the ids branch.
-    let slots = vec![json!({"nzo_id": "a"}), json!({"nzo_id": "b"})];
-    let paged = paginate(
-        slots,
-        &p(&[("start", "0"), ("limit", "1"), ("nzo_ids", "b")]),
-    );
-    assert_eq!(paged.len(), 1, "paginate itself stays id-blind");
+    // The selection path must not page: the same params carry a limit
+    // that would hide the row, and `queue_json` branches on
+    // `ids.is_some()` to leave its window off entirely. The window
+    // itself stays id-blind - it is asked about a rank, nothing else -
+    // so with start=0 limit=1 rank 1 is out however the ids read.
+    let sel = p(&[("start", "0"), ("limit", "1"), ("nzo_ids", "b")]);
+    assert_eq!(window_of(&sel), (0, 1));
+    assert!(in_window(0, window_of(&sel)));
+    assert!(!in_window(1, window_of(&sel)), "the window stays id-blind");
+}
+
+/// SAB's start/limit, and the three ways a caller declines to use them:
+/// absent, unparseable, and `limit=0` = "everything from `start`".
+#[test]
+fn window_follows_sab_start_limit_semantics() {
+    use super::apiutil::{in_window, window_of};
+    let p = |kv: &[(&str, &str)]| {
+        kv.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::HashMap<String, String>>()
+    };
+    // Nothing asked for is the whole collection - the shape every SAB
+    // client that never learned about paging sends, and the one the
+    // *arrs send. It must stay "everything".
+    assert_eq!(window_of(&p(&[])), (0, 0));
+    assert!(in_window(0, (0, 0)));
+    assert!(in_window(14_999, (0, 0)));
+    // A limit of 0 with a start is still everything from that start.
+    assert!(!in_window(2, (3, 0)));
+    assert!(in_window(3, (3, 0)));
+    assert!(in_window(999_999, (3, 0)));
+    // Garbage reads as absent rather than as an error - SAB's own
+    // int_conv does the same, and a remote sending limit=abc wants a
+    // queue back, not a 400.
+    assert_eq!(window_of(&p(&[("start", "x"), ("limit", "y")])), (0, 0));
+    // A real page: [start, start+limit).
+    let w = window_of(&p(&[("start", "10"), ("limit", "5")]));
+    assert_eq!(w, (10, 5));
+    assert!(!in_window(9, w));
+    assert!(in_window(10, w));
+    assert!(in_window(14, w));
+    assert!(!in_window(15, w));
+    // start+limit must not wrap: a client asking for everything from
+    // here with a nonsense limit gets everything from here, not an
+    // empty page (and not a panic in a debug build).
+    let huge = (5usize, usize::MAX);
+    assert!(!in_window(4, huge));
+    assert!(in_window(5, huge));
+    assert!(in_window(usize::MAX - 1, huge));
 }
 
 /// SAB accepts priorities as numbers or words; unknown words stay

@@ -66,7 +66,7 @@ fn corpus(n: usize) -> (HashMap<String, Vec<u8>>, Vec<ArticleReq>) {
     let reqs = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
         })
@@ -194,7 +194,8 @@ async fn run(label: &str, mocks: Vec<(&MockServer, PoolConfig)>, reqs: Vec<Artic
             (s, c)
         })
         .collect();
-    let expected_part: HashMap<String, u32> = reqs.iter().map(|r| (r.id.clone(), r.part)).collect();
+    let expected_part: HashMap<Arc<str>, u32> =
+        reqs.iter().map(|r| (r.id.clone(), r.part)).collect();
     let ctl = Arc::new(QueueControl::default());
     let (tx, mut rx) = mpsc::channel(64);
     let t0 = Instant::now();
@@ -251,7 +252,7 @@ async fn run(label: &str, mocks: Vec<(&MockServer, PoolConfig)>, reqs: Vec<Artic
                         {
                             continue;
                         }
-                        if let (Some(want), Some(got)) = (expected_part.get(&id), meta.part)
+                        if let (Some(want), Some(got)) = (expected_part.get(&*id), meta.part)
                             && *want != got
                         {
                             misfiled += 1;
@@ -408,16 +409,18 @@ async fn envelope_racing_completes_clean_with_bounded_spend() {
 async fn raced_desync_never_creates_false_missing_or_misfiles() {
     let n = 240;
     let (articles, reqs) = corpus(n);
-    let ids: Vec<String> = reqs.iter().map(|r| r.id.clone()).collect();
+    let ids: Vec<Arc<str>> = reqs.iter().map(|r| r.id.clone()).collect();
     // 40% of the corpus absent ON THE DESYNCED SERVER ONLY (the twin
     // holds everything, so nothing may go terminally Missing), bare
     // refusals, one response in 5 silently withheld - an aggressive
     // desync dose (the shipped profile's default is 1-in-60).
+    // The mock server is keyed by the wire id as a `String`, so the
+    // absent set converts at that boundary; the pool side stays interned.
     let absent: std::collections::HashSet<String> = ids
         .iter()
         .enumerate()
         .filter(|(i, _)| i % 5 < 2)
-        .map(|(_, id)| id.clone())
+        .map(|(_, id)| id.to_string())
         .collect();
     let fast = MockServer::start(articles.clone(), throttled(FAST_BPS)).await;
     let desynced = MockServer::start(

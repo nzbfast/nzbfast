@@ -570,8 +570,17 @@ impl Daemon {
         let Ok(raw) = std::fs::read(&path) else {
             return (Vec::new(), false);
         };
-        let mut order: Vec<String> = Vec::new();
-        let mut live: std::collections::HashMap<String, Job> = std::collections::HashMap::new();
+        // Append order as SLOTS, and every live record carrying the index
+        // of its own slot. A tombstone used to `retain` the id out of a
+        // Vec - O(n) per delete, so replay was quadratic in a
+        // delete-heavy store (tens of seconds at 50k rows with a few
+        // thousand tombstones, every start). Punching a hole through the
+        // stored index is O(1) and the holes cost one `Option<String>`
+        // each; the drain below skips them, so first-APPEND order and
+        // last-line-wins are exactly what they were.
+        let mut order: Vec<Option<String>> = Vec::new();
+        let mut live: std::collections::HashMap<String, (usize, Job)> =
+            std::collections::HashMap::new();
         let mut lines = 0usize;
         for chunk in raw.split(|b| *b == b'\n') {
             let Ok(line) = std::str::from_utf8(chunk) else {
@@ -604,11 +613,10 @@ impl Daemon {
                 // delete, retention) stays unconditional.
                 let applies = match v.get("move_seq").and_then(Value::as_u64) {
                     None => true,
-                    Some(ts) => live.get(&id).is_none_or(|j| j.move_seq <= ts),
+                    Some(ts) => live.get(&id).is_none_or(|(_, j)| j.move_seq <= ts),
                 };
-                if applies {
-                    live.remove(&id);
-                    order.retain(|o| *o != id);
+                if applies && let Some((slot, _)) = live.remove(&id) {
+                    order[slot] = None;
                 }
                 continue;
             }
@@ -631,14 +639,21 @@ impl Daemon {
             // clear it here, whichever write path persisted the stale
             // true.
             job.finalizing = false;
-            if !live.contains_key(&id) {
-                order.push(id.clone());
+            // An upsert refreshes the record in place - a resurrected id
+            // (tombstoned, then appended again) takes a fresh slot at the
+            // end, which is where the retain-based order put it too.
+            match live.get_mut(&id) {
+                Some((_, held)) => *held = job,
+                None => {
+                    order.push(Some(id.clone()));
+                    live.insert(id, (order.len() - 1, job));
+                }
             }
-            live.insert(id, job);
         }
         let records: Vec<Job> = order
             .into_iter()
-            .filter_map(|id| live.remove(&id))
+            .flatten()
+            .filter_map(|id| live.remove(&id).map(|(_, j)| j))
             .collect();
         // More dead lines than live rows: worth a rewrite once loaded.
         let wants_compaction = lines > records.len().saturating_mul(2).max(64);
@@ -829,14 +844,21 @@ impl Daemon {
     }
 
     /// §129 D5: the optional retention knobs, both 0 = unlimited (the
-    /// default; unlimited SHIPS by ruling). Applied at park and at load.
+    /// default; unlimited SHIPS by ruling). Applied at park, at load, at
+    /// a client history clear, and - since the age knob gained sub-day
+    /// granularity (issue #45) - on a one-minute sweep, because an
+    /// "after 10 minutes" rule that only fires when the NEXT job parks
+    /// is not the rule the user set.
+    ///
     /// Count cap drops oldest-first regardless of state; the age cap
     /// only ever drops Completed rows (a Failed row is a pending
     /// decision, not a memory). Rows mid-move/unlock are never touched.
+    /// Only the RECORD and its spooled .nzb go: the downloaded files are
+    /// the user's, and nothing here reaches them.
     pub(super) fn history_enforce_retention(&self) {
         let keep_count = self.history_keep_count.load(Ordering::Relaxed) as usize;
-        let keep_days = self.history_keep_days.load(Ordering::Relaxed);
-        if keep_count == 0 && keep_days == 0 {
+        let keep_secs = self.history_keep_secs.load(Ordering::Relaxed);
+        if keep_count == 0 && keep_secs == 0 {
             return;
         }
         let now = std::time::SystemTime::now()
@@ -849,8 +871,12 @@ impl Daemon {
             let mut h = self.history.lock_ok();
             let moving = self.moving.lock_ok();
             let untouchable = |g: &Job| g.finalizing || moving.contains(&g.nzo_id);
-            if keep_days > 0 {
-                let cutoff = now - (keep_days as i64) * 86_400;
+            if keep_secs > 0 {
+                // Saturating: the knob is a u64 the API clamps, but a
+                // hand-written settings.json can hold anything, and a
+                // plain subtraction would panic in a debug build rather
+                // than mean "keep everything".
+                let cutoff = now.saturating_sub(keep_secs.min(i64::MAX as u64) as i64);
                 h.retain(|j| {
                     let g = j.lock_ok();
                     let old = g.state == JobState::Completed
@@ -891,14 +917,40 @@ impl Daemon {
         if !doomed.is_empty() {
             info!(
                 target: "queue",
-                "history retention: dropped {} old record(s) (keep_count {}, keep_days {})",
+                "history retention: dropped {} old record(s) (keep_count {}, keep_secs {})",
                 doomed.len(),
                 keep_count,
-                keep_days
+                keep_secs
             );
             self.history_tombstone(&doomed);
         }
     }
+}
+
+/// The retention sweep's own clock.
+///
+/// Retention used to be enforced only at three edges - daemon start, a
+/// job parking, and a client clearing history - which is enough for a
+/// rule measured in days, because a daemon that has not finished a
+/// download in a day has nothing new to expire either. Issue #45
+/// let the rule be measured in minutes, and at that scale the edges are
+/// no longer close enough together: "remove them 20 minutes after they
+/// finish" on a queue that has gone quiet would hold the last few
+/// records until the next download parked, which could be days.
+///
+/// A minute is the resolution the dashboard offers, so a minute is the
+/// tick. It costs two relaxed atomic loads while the feature is off -
+/// `history_enforce_retention` returns before it takes a single lock -
+/// which is why this is unconditional rather than started and stopped
+/// with the setting.
+pub(super) fn spawn_retention_sweep(daemon: &Arc<Daemon>) {
+    let d = daemon.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            d.history_enforce_retention();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -953,6 +1005,49 @@ mod store_tests {
             ids,
             ["a1", "a2"],
             "a torn tail took the whole history with it"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Tombstones punch holes in the append order instead of compacting
+    /// it, and everything the old `Vec::retain` guaranteed still holds:
+    /// a buried id is gone, the survivors keep first-APPEND order, a
+    /// re-appended id comes back at the END, and a generation-bound
+    /// tombstone leaves a LATER generation alone.
+    #[test]
+    fn tombstones_keep_append_order_and_let_an_id_come_back() {
+        let dir = tmp("order");
+        let d = test_daemon(&dir);
+        let path = d.history_store_path();
+
+        let row = |id: &str, seq: u64| {
+            format!(
+                r#"{{"nzo_id":"{id}","name":"{id}.Release","out_dir":"/tmp/o","nzb_path":"/tmp/n.nzb","state":"Completed","move_seq":{seq}}}"#
+            )
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for id in ["a1", "a2", "a3", "a4"] {
+            lines.push(row(id, 0));
+        }
+        // a2 is buried by an id-only tombstone, then posted again: it
+        // belongs at the end, not back in its original slot.
+        lines.push(r#"{"nzo_id":"a2","deleted":true}"#.into());
+        lines.push(row("a2", 0));
+        // a3's record is stamped at generation 5; a tombstone from
+        // generation 4 is stale and must not touch it.
+        lines.push(row("a3", 5));
+        lines.push(r#"{"nzo_id":"a3","deleted":true,"move_seq":4}"#.into());
+        // a4 goes for good.
+        lines.push(r#"{"nzo_id":"a4","deleted":true}"#.into());
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let (rows, _) = d.history_replay();
+        let ids: Vec<String> = rows.iter().map(|j| j.nzo_id.clone()).collect();
+        assert_eq!(ids, ["a1", "a3", "a2"], "replay order changed");
+        assert_eq!(
+            rows.iter().find(|j| j.nzo_id == "a3").map(|j| j.move_seq),
+            Some(5),
+            "a stale generation's tombstone buried a newer record"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1508,5 +1603,270 @@ mod store_tests {
         d.note_queue_idle();
         assert_eq!(idles(&d), 2, "the latch must keep repeats silent");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The C8 measuring stick: replay a REAL `history.jsonl` and report
+    /// what it cost.
+    ///
+    /// Codex audit C8 proposes an indexed on-disk history store, and the
+    /// handoff holds it "conditional on real long-lived history scale".
+    /// That condition needs a number, and a number needs a rig that runs
+    /// against a real file rather than a synthetic one - the per-row cost
+    /// here is dominated by fields a fixture would not bother to fill in
+    /// (`cleaned_files`, identity metadata, failure detail), so a made-up
+    /// row prices the wrong thing by an order of magnitude.
+    ///
+    /// Ignored by default because it takes a path:
+    ///
+    /// ```sh
+    /// NZBFAST_NO_ENRICH=1 NZBFAST_HIST_REPLAY_FILE=/path/to/history.jsonl \
+    ///   NZBFAST_HIST_REPLAY_SCALE=10 \
+    ///   cargo test -p nzbfast --bin nzbfast -- --ignored --nocapture \
+    ///   measure_history_replay
+    /// ```
+    ///
+    /// `SCALE` replicates the file's LINES that many times, re-stamping
+    /// every `nzo_id` with a per-copy suffix so the copies are distinct
+    /// records rather than upserts of each other. Tombstones replicate
+    /// with their ids, so the live:dead ratio - which is what the
+    /// quadratic-replay fix (1d1460f7c) turns on - is preserved at every
+    /// scale. That is the whole point: a 10x file is what years of use
+    /// look like, and it is the only honest way to extrapolate from a
+    /// store that is five days old.
+    #[test]
+    #[ignore = "measuring stick: set NZBFAST_HIST_REPLAY_FILE"]
+    fn measure_history_replay() {
+        let Ok(src) = std::env::var("NZBFAST_HIST_REPLAY_FILE") else {
+            eprintln!("set NZBFAST_HIST_REPLAY_FILE=/path/to/history.jsonl");
+            return;
+        };
+        let scale: usize = std::env::var("NZBFAST_HIST_REPLAY_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+
+        let raw = std::fs::read(&src).expect("read the source history file");
+        let dir = tmp("measure");
+        let d = test_daemon(&dir);
+        let path = d.history_store_path();
+
+        // Build the file to replay. At scale 1 this is a byte copy; above
+        // it, every line is re-stamped through serde so the copies are
+        // separate records. Lines that do not parse (a torn tail) are
+        // carried through verbatim on the first copy and dropped from the
+        // rest - replay's per-line tolerance is being measured, not the
+        // tear itself.
+        let mut out: Vec<u8> = Vec::with_capacity(raw.len() * scale);
+        for copy in 0..scale {
+            for chunk in raw.split(|b| *b == b'\n') {
+                let Ok(line) = std::str::from_utf8(chunk) else {
+                    if copy == 0 {
+                        out.extend_from_slice(chunk);
+                        out.push(b'\n');
+                    }
+                    continue;
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if copy == 0 && scale == 1 {
+                    out.extend_from_slice(line.as_bytes());
+                    out.push(b'\n');
+                    continue;
+                }
+                match serde_json::from_str::<Value>(line) {
+                    Ok(mut v) => {
+                        if let Some(id) = v.get("nzo_id").and_then(Value::as_str) {
+                            let fresh = format!("{id}-c{copy}");
+                            v["nzo_id"] = Value::String(fresh);
+                        }
+                        out.extend_from_slice(v.to_string().as_bytes());
+                        out.push(b'\n');
+                    }
+                    Err(_) if copy == 0 => {
+                        out.extend_from_slice(line.as_bytes());
+                        out.push(b'\n');
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        std::fs::write(&path, &out).expect("write the replay fixture");
+        let file_bytes = out.len();
+        let file_lines = out.iter().filter(|b| **b == b'\n').count();
+
+        // Three runs: the first pays the page-cache fault, and the spread
+        // says whether the number is stable enough to extrapolate from.
+        let mut times = Vec::new();
+        let mut rows = 0usize;
+        let mut wants_compaction = false;
+        let rss_before = rss_kb();
+        let peak_start = peak_rss_kb();
+        let mut held: Vec<Arc<Mutex<Job>>> = Vec::new();
+        for run in 0..3 {
+            let t0 = std::time::Instant::now();
+            let (jobs, wants) = d.history_replay();
+            let dt = t0.elapsed();
+            times.push(dt);
+            rows = jobs.len();
+            wants_compaction = wants;
+            if run == 2 {
+                // Hold them the way `install_records` does - one Arc<Mutex>
+                // per row - so the RSS reading below prices what the daemon
+                // actually keeps resident, not the transient Vec<Job>.
+                held = jobs.into_iter().map(|j| Arc::new(Mutex::new(j))).collect();
+            }
+        }
+        let rss_after = rss_kb();
+        let peak_replay = peak_rss_kb();
+
+        let best = times.iter().min().copied().unwrap_or_default();
+        let worst = times.iter().max().copied().unwrap_or_default();
+        println!("--- history replay measurement ---");
+        println!("source          {src}");
+        println!("scale           {scale}x");
+        println!("file            {file_bytes} bytes, {file_lines} lines");
+        println!("live rows       {rows} (wants_compaction {wants_compaction})");
+        println!("replay          best {best:?}, worst {worst:?}, runs {times:?}");
+        println!(
+            "per row         {:.1} us, {} file bytes",
+            best.as_secs_f64() * 1e6 / rows.max(1) as f64,
+            file_bytes / rows.max(1)
+        );
+        println!("size_of::<Job>  {}", std::mem::size_of::<Job>());
+        match (rss_before, rss_after) {
+            (Some(a), Some(b)) => println!(
+                "rss             {a} -> {b} kB (delta {} kB, {:.1} kB/row)",
+                b.saturating_sub(a),
+                b.saturating_sub(a) as f64 / rows.max(1) as f64
+            ),
+            _ => println!("rss             unavailable"),
+        }
+        assert!(!held.is_empty(), "the rows must outlive the RSS reading");
+
+        // ...and the OTHER full scan C8 names: `history_page`, which
+        // clones the whole Arc vector and walks every row. Install the
+        // replayed rows the way the daemon does and time both shapes.
+        // The dashboard poll takes this path only when `history_rev`
+        // moved (api/queue.rs gates it on `client_h != hrev`); the SAB
+        // facade's `mode=history` - what every *arr polls - is UNGATED
+        // and pays it on every request, which is the one that scales
+        // with client count rather than with download rate.
+        *d.history.lock_ok() = held;
+        let page = |summary: bool, limit: usize| {
+            let q = super::super::history::HistQuery {
+                failed_only: false,
+                category: None,
+                ids: None,
+                search: None,
+                bucket: None,
+                start: 0,
+                limit,
+            };
+            let mut best = std::time::Duration::MAX;
+            let mut n = 0usize;
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                let (slots, matched, _) =
+                    super::super::history::history_page(d.as_ref(), &q, summary);
+                best = best.min(t0.elapsed());
+                n = matched;
+                std::hint::black_box(slots);
+            }
+            (best, n)
+        };
+        let (dash, n) = page(true, 50);
+        let peak_dash = peak_rss_kb();
+        // What a bare `mode=history` costs NOW: `from_params` defaults
+        // an absent (or zero) `limit` to `HISTORY_DEFAULT_LIMIT`.
+        let (capped, _) = page(false, super::super::history::HISTORY_DEFAULT_LIMIT);
+        let peak_capped = peak_rss_kb();
+        // ...and what it cost before that default existed, which is
+        // still what an explicit `limit` big enough to cover the store
+        // buys whoever asks for it.
+        let (sab, _) = page(false, 0);
+        let peak_sab = peak_rss_kb();
+        println!("history_page    dashboard window (summary, 50 of {n}): {dash:?}");
+        println!(
+            "history_page    SAB facade, default cap ({} of {n} full rows): {capped:?}",
+            super::super::history::HISTORY_DEFAULT_LIMIT
+        );
+        println!("history_page    SAB facade (full rows, unbounded): {sab:?}");
+        if let (Some(a), Some(b), Some(c), Some(dd), Some(e)) =
+            (peak_start, peak_replay, peak_dash, peak_capped, peak_sab)
+        {
+            println!(
+                "peak rss        start {a} kB -> replay+install {b} kB (+{}) -> \
+                 dashboard page {c} kB (+{}) -> capped SAB page {dd} kB (+{}) -> \
+                 unbounded SAB page {e} kB (+{})",
+                b.saturating_sub(a),
+                c.saturating_sub(b),
+                dd.saturating_sub(c),
+                e.saturating_sub(dd)
+            );
+        }
+
+        // Compaction is the other thing startup can owe: `load_queue`
+        // runs it inline when replay reports more dead lines than live
+        // rows, so on a delete-heavy store it lands on the critical path
+        // beside the replay. Time it whenever the fixture asked for it.
+        if wants_compaction {
+            let t0 = std::time::Instant::now();
+            let ok = d.history_compact();
+            let dt = t0.elapsed();
+            let after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            println!("history_compact {dt:?} (ok {ok}), file {file_bytes} -> {after} bytes");
+        }
+
+        d.history.lock_ok().clear();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// This process's resident set in kB, or None where `ps` cannot say.
+    ///
+    /// Deliberately a shell-out rather than a crate: `ps -o rss=` is
+    /// spelled the same on macOS and Linux, and the measuring stick is
+    /// not worth a dependency.
+    fn rss_kb() -> Option<u64> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p"])
+            .arg(std::process::id().to_string())
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
+    /// The process's PEAK resident set in kB - the high-water mark, which
+    /// is what a memory verdict actually turns on.
+    ///
+    /// Current RSS answers the wrong question here. Replay's transients
+    /// (the whole-file byte vector C8 names, and the per-line `Value`)
+    /// are freed before it returns, and a large one goes back to the OS
+    /// through munmap, so a reading taken afterwards can be LOWER than
+    /// the moment that decides whether a small box survives the start.
+    /// `ru_maxrss` is monotone, so the deltas between checkpoints
+    /// attribute the peak to the phase that caused it.
+    ///
+    /// Unit trap: macOS reports `ru_maxrss` in BYTES and Linux in
+    /// KILOBYTES, for the same field of the same struct.
+    #[cfg(unix)]
+    fn peak_rss_kb() -> Option<u64> {
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } != 0 {
+            return None;
+        }
+        let raw = u.ru_maxrss as u64;
+        Some(if cfg!(target_os = "macos") {
+            raw / 1024
+        } else {
+            raw
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn peak_rss_kb() -> Option<u64> {
+        None
     }
 }

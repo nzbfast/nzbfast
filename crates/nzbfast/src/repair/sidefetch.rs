@@ -90,6 +90,13 @@ pub(crate) fn vol_count_from_name(name: &str) -> Option<usize> {
 /// Download the chosen recovery volumes to `out_dir` (same decode→pwrite
 /// path as the main run). Shared by the disk repair path and the mapped
 /// (into-the-output) path.
+///
+/// Returns the article-failure count. `Ok(0)` is the only value that
+/// means every chosen volume landed whole; any nonzero count means at
+/// least one of them is PARTIAL, and only a complete volume may ever
+/// enter a whole-file exclusion list (the escalation fetch strips
+/// excluded files, so excluding a partial one makes its missing slices
+/// unreachable for the rest of the job).
 pub(crate) async fn fetch_volumes(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     nzb: &Nzb,
@@ -97,20 +104,12 @@ pub(crate) async fn fetch_volumes(
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     file_indexes: &[usize],
     cancel: Option<&SideCancel>,
-) -> Result<()> {
+) -> Result<usize> {
     let mut ids: Vec<nzbkit::pool::ArticleReq> = Vec::new();
-    let mut id_to_file: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut id_to_file: std::collections::HashMap<Arc<str>, usize> =
+        std::collections::HashMap::new();
     for &fi in file_indexes {
-        let age_days = nzb_age_days(nzb.files[fi].date);
-        for seg in &nzb.files[fi].segments {
-            let b = format!("<{}>", seg.message_id);
-            id_to_file.insert(b.clone(), fi);
-            ids.push(nzbkit::pool::ArticleReq {
-                id: b,
-                age_days,
-                part: seg.number,
-            });
-        }
+        volume_reqs(nzb, fi, &mut ids, &mut id_to_file);
     }
     fetch_volume_articles(
         servers,
@@ -122,7 +121,33 @@ pub(crate) async fn fetch_volumes(
         cancel,
     )
     .await
-    .map(|_| ())
+    .map(|(failures, _paths)| failures)
+}
+
+/// One volume's `ArticleReq`s and id → file-index entries, appended to
+/// the caller's holders. R9: one interned handle per id, shared with
+/// the ArticleReq (and so with the Work, the in-flight entry and the
+/// outcome). Every caller is a side pool of its own - the disk/mapped
+/// repair fetch after the main run's plan is gone, and the speculative
+/// prefetch, which builds a rung's requests only AT RUNG SELECTION
+/// (C5) - so it interns at its own birth site rather than borrowing
+/// the plan's.
+pub(crate) fn volume_reqs(
+    nzb: &Nzb,
+    fi: usize,
+    ids: &mut Vec<nzbkit::pool::ArticleReq>,
+    id_to_file: &mut std::collections::HashMap<Arc<str>, usize>,
+) {
+    let age_days = nzb_age_days(nzb.files[fi].date);
+    for seg in &nzb.files[fi].segments {
+        let b: Arc<str> = format!("<{}>", seg.message_id).into();
+        id_to_file.insert(b.clone(), fi);
+        ids.push(nzbkit::pool::ArticleReq {
+            id: b,
+            age_days,
+            part: seg.number,
+        });
+    }
 }
 
 /// Reservation ceiling for a recovery-volume side-fetch, the same bound
@@ -193,7 +218,7 @@ pub(crate) fn side_pool_servers(
 pub(crate) async fn fetch_volume_articles(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     ids: Vec<nzbkit::pool::ArticleReq>,
-    id_to_file: std::collections::HashMap<String, usize>,
+    id_to_file: std::collections::HashMap<Arc<str>, usize>,
     out_dir: &Path,
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     // Ceiling on what one volume writer may RESERVE - see
@@ -291,7 +316,7 @@ pub(crate) async fn fetch_volume_articles(
 /// from the files that actually landed, so nothing is over-credited.
 pub(crate) async fn consume_volume_articles(
     mut rx: tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>,
-    id_to_file: std::collections::HashMap<String, usize>,
+    id_to_file: std::collections::HashMap<Arc<str>, usize>,
     out_dir: PathBuf,
     buf_pool: Arc<nzbkit::pool::BufPool>,
     prealloc_cap: u64,
@@ -311,7 +336,7 @@ pub(crate) async fn consume_volume_articles(
     while let Some(outcome) = rx.recv().await {
         match outcome {
             FetchOutcome::Done { id, raw } => {
-                let Some(&fi) = id_to_file.get(&id) else {
+                let Some(&fi) = id_to_file.get(&*id) else {
                     buf_pool.give(raw);
                     continue;
                 };
@@ -380,7 +405,7 @@ mod recovery_volume_tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(16);
         let mut id_to_file = HashMap::new();
         for (n, (fi, body)) in arts.into_iter().enumerate() {
-            let id = format!("<a{n}@test>");
+            let id: Arc<str> = format!("<a{n}@test>").into();
             id_to_file.insert(id.clone(), fi);
             tx.send(FetchOutcome::Done { id, raw: body }).await.unwrap();
         }

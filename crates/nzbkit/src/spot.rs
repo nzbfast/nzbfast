@@ -931,6 +931,10 @@ fn ingest_over(
     entries: &[crate::nntp::OverEntry],
     sum: &mut SpotScanSummary,
 ) -> Result<(), SpotError> {
+    // Collected, then stored in ONE transaction below. Row-at-a-time
+    // autocommit was a write lock, a WAL commit and an fsync per spot,
+    // thousands of times per OVER chunk - see `Index::insert_spots`.
+    let mut batch: Vec<Spot> = Vec::new();
     for e in entries {
         sum.scanned += 1;
         let Some(h) = parse_spot_from(&e.from) else {
@@ -986,10 +990,9 @@ fn ingest_over(
             hashcash_ok: v.hashcash_ok,
             nzb_msgids: Vec::new(),
         };
-        if ix.insert_spot(&spot)? {
-            sum.new += 1;
-        }
+        batch.push(spot);
     }
+    sum.new += ix.insert_spots(&batch)? as u64;
     Ok(())
 }
 

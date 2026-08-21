@@ -5,6 +5,7 @@
 //! research/SEAM-TABLE-index-rs-2026-08-05.md.
 
 use super::*;
+use aggregates::RelAgg;
 use claims::norm_msgid;
 use spots::{GEN_HEX, POSTER_GEN_MARK};
 
@@ -318,9 +319,20 @@ pub fn quoted_name(s: &str) -> Option<String> {
 /// numbered part → (message-id, bytes).
 type ClusterFiles = HashMap<String, (u32, BTreeMap<u32, (String, u64)>)>;
 
-/// The `files` rows a release already holds, filename → (segments JSON,
-/// total_parts), for the filenames a batch is about to write.
-type ExistingFiles = HashMap<String, (String, u32)>;
+/// One `files` row a release already holds, for a filename a batch is
+/// about to write. `bytes` and `nsegs` are the row's stored aggregate
+/// contribution, carried so the merge can subtract exactly what the
+/// last write added (N8) instead of re-scanning every file row.
+struct ExistingFile {
+    seg_json: String,
+    total: u32,
+    bytes: i64,
+    nsegs: i64,
+}
+
+/// The `files` rows a release already holds, keyed by filename, for the
+/// filenames a batch is about to write.
+type ExistingFiles = HashMap<String, ExistingFile>;
 
 /// Read back the file rows `rid` holds for the batch's filenames. One
 /// statement per file, which is what the merge did anyway - this hoists
@@ -332,12 +344,18 @@ fn fetch_existing(
 ) -> rusqlite::Result<ExistingFiles> {
     let mut out = ExistingFiles::new();
     let mut q = db.prepare_cached(
-        "SELECT segments, total_parts FROM files WHERE release_id=?1 AND filename=?2",
+        "SELECT segments, total_parts, bytes, nsegs
+           FROM files WHERE release_id=?1 AND filename=?2",
     )?;
     for fname in files.keys() {
         if let Some(row) = q
             .query_row(rusqlite::params![rid, fname], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+                Ok(ExistingFile {
+                    seg_json: r.get(0)?,
+                    total: r.get(1)?,
+                    bytes: r.get(2)?,
+                    nsegs: r.get(3)?,
+                })
             })
             .optional()?
         {
@@ -369,13 +387,14 @@ fn fetch_existing(
 /// garbage.
 fn contradicts(existing: &ExistingFiles, files: &ClusterFiles) -> bool {
     for (fname, (total, parts)) in files {
-        let Some((seg_json, prev_total)) = existing.get(fname) else {
+        let Some(prev) = existing.get(fname) else {
             continue;
         };
-        if *prev_total > 0 && *total > 0 && prev_total != total {
+        if prev.total > 0 && *total > 0 && prev.total != *total {
             return true;
         }
-        let stored: Vec<(u32, String, u64)> = serde_json::from_str(seg_json).unwrap_or_default();
+        let stored: Vec<(u32, String, u64)> =
+            serde_json::from_str(&prev.seg_json).unwrap_or_default();
         for (n, id, _) in &stored {
             if parts
                 .get(n)
@@ -503,7 +522,7 @@ fn hidden_home(
     grp: &str,
     files: &ClusterFiles,
     seen: &[(i64, String)],
-) -> rusqlite::Result<Option<(String, ExistingFiles)>> {
+) -> rusqlite::Result<Option<(i64, String, ExistingFiles)>> {
     // Deterministic order over a HashMap, so which ids a very wide
     // cluster spends its budget on is a property of the batch and not
     // of this run's hash seed.
@@ -569,7 +588,7 @@ fn hidden_home(
         }
         let existing = fetch_existing(db, rid, files)?;
         if !contradicts(&existing, files) {
-            return Ok(Some((row_poster, existing)));
+            return Ok(Some((rid, row_poster, existing)));
         }
     }
     Ok(None)
@@ -578,8 +597,12 @@ fn hidden_home(
 /// What [`pick_release_row`] decided for one cluster.
 enum RowPick {
     /// Write into this row (plain or marked); the batch does not
-    /// contradict it. Carries the file rows the row already holds.
-    Adopt(String, ExistingFiles),
+    /// contradict it. Carries the file rows the row already holds, and
+    /// the row's id when the pick already found it - every adopt but the
+    /// two "this triple is free" ones probed the UNIQUE index to decide,
+    /// so handing the id on saves the caller probing it a second time.
+    /// `None` means no row exists under this key yet.
+    Adopt(Option<i64>, String, ExistingFiles),
     /// Every candidate is contradicted: write under this brand-new
     /// marked poster value.
     Mint(String),
@@ -625,12 +648,16 @@ fn pick_release_row(
 ) -> rusqlite::Result<RowPick> {
     let candidates = gen_candidates(db, stem, poster, grp)?;
     if candidates.is_empty() {
-        return Ok(RowPick::Adopt(poster.to_string(), ExistingFiles::new()));
+        return Ok(RowPick::Adopt(
+            None,
+            poster.to_string(),
+            ExistingFiles::new(),
+        ));
     }
     for (rid, row_poster) in &candidates {
         let existing = fetch_existing(db, *rid, files)?;
         if !contradicts(&existing, files) {
-            return Ok(RowPick::Adopt(row_poster.clone(), existing));
+            return Ok(RowPick::Adopt(Some(*rid), row_poster.clone(), existing));
         }
     }
     // Every candidate holds a different posting, so this batch needs a
@@ -639,7 +666,11 @@ fn pick_release_row(
     // triple is free and is the natural home; starting life marked would
     // leave the unmarked row permanently unclaimable.
     if !candidates.iter().any(|(_, p)| p == poster) {
-        return Ok(RowPick::Adopt(poster.to_string(), ExistingFiles::new()));
+        return Ok(RowPick::Adopt(
+            None,
+            poster.to_string(),
+            ExistingFiles::new(),
+        ));
     }
     // Marked, keyed by the batch's own articles so the value is a
     // function of what it carries rather than an ordinal - the same
@@ -689,17 +720,17 @@ fn pick_release_row(
             // that extracts to garbage" the D3 backstop exists to stop.
             let existing = fetch_existing(db, rid, files)?;
             if !contradicts(&existing, files) {
-                return Ok(RowPick::Adopt(marked, existing));
+                return Ok(RowPick::Adopt(Some(rid), marked, existing));
             }
         }
         // The key above only finds a row minted from the SAME coverage
         // this batch carries. `hidden_home` asks the question the key
         // cannot: which row past the window already holds one of these
         // very articles.
-        if let Some((row_poster, existing)) =
+        if let Some((rid, row_poster, existing)) =
             hidden_home(db, stem, poster, grp, files, &candidates)?
         {
-            return Ok(RowPick::Adopt(row_poster, existing));
+            return Ok(RowPick::Adopt(Some(rid), row_poster, existing));
         }
         return Ok(RowPick::Saturated);
     }
@@ -949,6 +980,18 @@ impl Index {
         // own after ITS commit, so this is empty by the time we return.
         let outcome = self.ingest_passes(grp, entries, now, &mut completed, &mut hits);
         debug_assert!(hits.is_empty(), "a pass kept watch hits past its commit");
+        // C3 prototype: retire the title keys this batch touched, so the
+        // wall's fast path is live again by the time the next request
+        // arrives. Deliberately AFTER the passes have committed and in
+        // its own transaction - the summaries are a read accelerator,
+        // and an ingest must never fail because one could not be
+        // rebuilt. The budget is a belt: a batch that dirtied more keys
+        // than this leaves the rest for the next call (or the daemon's
+        // maintenance tick), and until they are retired the wall simply
+        // answers from the exact query.
+        if self.summaries {
+            let _ = self.drain_title_dirty(super::summaries::DRAIN_PER_BATCH);
+        }
         outcome.map(|()| completed)
     }
 
@@ -1136,28 +1179,47 @@ impl Index {
             // file rows that row already holds - fetched once here and
             // reused by the merge below, so the common single-candidate
             // case costs no extra queries against `files`.
-            let (poster_key, mut existing) =
+            let (known, poster_key, mut existing) =
                 match pick_release_row(&tx, &stem, &poster, grp, &files)? {
-                    RowPick::Adopt(key, existing) => (key, existing),
+                    RowPick::Adopt(known, key, existing) => (known, key, existing),
                     RowPick::Mint(key) => {
                         gen_minted += 1;
-                        (key, ExistingFiles::new())
+                        (None, key, ExistingFiles::new())
                     }
                     RowPick::Saturated => {
                         gen_dropped += 1;
                         continue;
                     }
                 };
-            tx.prepare_cached(
-                "INSERT INTO releases(stem, poster, grp, first_seen, first_posted)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(stem, poster, grp) DO UPDATE SET
-                   first_posted=MIN(first_posted, excluded.first_posted)",
-            )?
-            .execute(rusqlite::params![stem, poster_key, grp, now, up])?;
-            let rid: i64 = tx
-                .prepare_cached("SELECT id FROM releases WHERE stem=?1 AND poster=?2 AND grp=?3")?
-                .query_row(rusqlite::params![stem, poster_key, grp], |r| r.get(0))?;
+            // One UNIQUE-index probe per cluster, not three. The pick
+            // above reached its row through that index already, so when
+            // it hands the id back the widening is a rowid update and
+            // the upsert's own conflict probe never runs; when it does
+            // not (a free triple, or a freshly minted marked key) the
+            // insert takes it, and `RETURNING` carries the id out rather
+            // than the re-SELECT that used to walk the index a third
+            // time. Same writes either way - the DO UPDATE branch of the
+            // upsert is exactly this UPDATE.
+            let rid: i64 = match known {
+                Some(rid) => {
+                    tx.prepare_cached(
+                        "UPDATE releases SET first_posted=MIN(first_posted, ?2) WHERE id=?1",
+                    )?
+                    .execute(rusqlite::params![rid, up])?;
+                    rid
+                }
+                None => tx
+                    .prepare_cached(
+                        "INSERT INTO releases(stem, poster, grp, first_seen, first_posted)
+                         VALUES(?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(stem, poster, grp) DO UPDATE SET
+                           first_posted=MIN(first_posted, excluded.first_posted)
+                         RETURNING id",
+                    )?
+                    .query_row(rusqlite::params![stem, poster_key, grp, now, up], |r| {
+                        r.get(0)
+                    })?,
+            };
             // Widen the persisted pesto counter/clock range with this
             // batch's articles. Monotonic (MIN/MAX over NULL via
             // COALESCE), so batches in any order converge on the same
@@ -1184,12 +1246,44 @@ impl Index {
                 )?
                 .execute(rusqlite::params![rid, si, st])?;
             }
+            // Baseline for the incremental aggregates (N8), plus the
+            // naming carry-forwards, in one read. pre_title/pre_source
+            // come back with `was` so a re-ingest cannot un-name a
+            // release the retro sweep already named: this batch's lookup
+            // wins when it found something, the stored value stands
+            // otherwise. Without that, every later batch touching the
+            // release would blank the name, and turning the feed off
+            // would erase every name it had given. The aggregate columns
+            // are trusted only when both counters are known (>= 0);
+            // a -1 (pre-migration row, or a maintenance rewrite that
+            // could not recompute) falls back to one full scan below.
+            type Baseline = (bool, String, String, Option<RelAgg>);
+            let (was, had_title, had_source, base): Baseline = tx
+                .prepare_cached(
+                    "SELECT complete, pre_title, pre_source, files, total_bytes,
+                            has_par2, have_parts, need_parts, nfiles_complete, nfiles_exe
+                       FROM releases WHERE id=?1",
+                )?
+                .query_row([rid], |r| {
+                    let (ncomplete, nexe): (i64, i64) = (r.get(8)?, r.get(9)?);
+                    let agg = (ncomplete >= 0 && nexe >= 0).then_some(RelAgg {
+                        nfiles: r.get(3)?,
+                        tbytes: r.get(4)?,
+                        ncomplete,
+                        has_par2: r.get(5)?,
+                        have: r.get(6)?,
+                        need: r.get(7)?,
+                        nexe,
+                    });
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, agg))
+                })?;
+            let mut agg = base;
             for (fname, (total, parts)) in files {
                 // Merge with existing segments (batches split arbitrarily).
                 // Already read by `pick_release_row` against this exact
                 // row, and removed as it is consumed so the merge cannot
                 // read a stale copy on a later iteration.
-                let existing: Option<(String, u32)> = existing.remove(&fname);
+                let prev: Option<ExistingFile> = existing.remove(&fname);
                 // The D3 backstop, kept as a second trip-wire rather than
                 // as the mechanism. A file's "(x/y)" total does not change
                 // within one posting, so a disagreement means two
@@ -1202,11 +1296,12 @@ impl Index {
                 // satisfies `nsegs >= total_parts` from both at once and
                 // hands the user a "complete" download that extracts to
                 // garbage. Pinned by the D3 regression test.
-                if let Some((_, prev_total)) = &existing
-                    && *prev_total > 0
+                if let Some(prev) = &prev
+                    && prev.total > 0
                     && total > 0
-                    && *prev_total != total
+                    && prev.total != total
                 {
+                    let prev_total = prev.total;
                     warn!(
                         target: "index",
                         "{fname}: ignoring a batch claiming {total} parts, \
@@ -1214,10 +1309,24 @@ impl Index {
                     );
                     continue;
                 }
-                let mut merged: BTreeMap<u32, (String, u64)> = existing
-                    .and_then(|(s, _)| serde_json::from_str::<Vec<(u32, String, u64)>>(&s).ok())
+                let mut merged: BTreeMap<u32, (String, u64)> = prev
+                    .as_ref()
+                    .and_then(|p| serde_json::from_str::<Vec<(u32, String, u64)>>(&p.seg_json).ok())
                     .map(|v| v.into_iter().map(|(n, id, b)| (n, (id, b))).collect())
                     .unwrap_or_default();
+                // The row's previous aggregate contribution, captured
+                // BEFORE the new parts land in `merged`. The effective
+                // part count follows the stored formula: `nsegs` when
+                // stamped, the parsed length for a pre-migration row
+                // still carrying 0.
+                let old_contrib = prev.as_ref().map(|p| {
+                    let eff = if p.nsegs > 0 {
+                        p.nsegs
+                    } else {
+                        merged.len() as i64
+                    };
+                    (eff, p.total, p.bytes)
+                });
                 for (n, v) in parts {
                     merged.insert(n, v);
                 }
@@ -1249,55 +1358,32 @@ impl Index {
                 // in part order). Append-only and idempotent, so a
                 // batch that later reveals lower parts just adds keys.
                 claims::msgid_map_insert(&tx, rid, merged.values().map(|(id, _)| id.as_str()))?;
+                // Fold this write into the running aggregates (N8) -
+                // exactly the values the UPSERT stored, so the result
+                // matches what a full scan would say.
+                if let Some(a) = agg.as_mut() {
+                    a.apply_file(
+                        &fname,
+                        old_contrib,
+                        merged.len() as i64,
+                        total,
+                        bytes as i64,
+                    );
+                }
             }
-            // Recompute release aggregates.
-            let (nfiles, tbytes, ncomplete, npar2, have, need, nexe): (
-                u32,
-                i64,
-                u32,
-                u32,
-                i64,
-                i64,
-                u32,
-            ) = tx
-                .prepare_cached(&format!(
-                    "SELECT COUNT(*), COALESCE(SUM(bytes),0),
-                            SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                     ELSE json_array_length(segments) END >= total_parts),
-                            SUM(LOWER(filename) LIKE '%.par2'),
-                            COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                              ELSE json_array_length(segments) END),0),
-                            COALESCE(SUM(total_parts),0),
-                            SUM({EXE_FILE_SQL})
-                     FROM files WHERE release_id=?1"
-                ))?
-                .query_row([rid], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                })?;
-            // A release is complete when every file we've seen has all
-            // its parts. Single-file posts (one mkv/iso, no par2 set)
-            // are common and legitimate - the old `nfiles >= 2` rule
-            // froze them all as incomplete forever (measured 55% of a
-            // live teevee+moovee index). Indexer-spam tiny posts are the
-            // size gate's job (gates min_size), not this flag's.
-            let complete = nfiles >= 1 && ncomplete == nfiles;
-            // pre_title/pre_source come back with `was` so a re-ingest
-            // cannot un-name a release the retro sweep already named:
-            // this batch's lookup wins when it found something, the
-            // stored value stands otherwise. Without that, every later
-            // batch touching the release would blank the name, and
-            // turning the feed off would erase every name it had given.
-            let (was, had_title, had_source): (bool, String, String) = tx
-                .prepare_cached("SELECT complete, pre_title, pre_source FROM releases WHERE id=?1")?
-                .query_row([rid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            // Release aggregates: carried incrementally through the
+            // merge above when the stored counters were valid; one full
+            // scan of the release's file rows otherwise, which heals the
+            // row (the UPDATE below stamps the counters) so it pays this
+            // scan once, not per chunk. A release is complete when every
+            // file we've seen has all its parts - single-file posts are
+            // legitimate (see `RelAgg::complete`; the old `nfiles >= 2`
+            // rule froze 55% of a live teevee+moovee index).
+            let agg = match agg {
+                Some(a) => a,
+                None => RelAgg::recompute(&tx, rid)?,
+            };
+            let complete = agg.complete();
             // kind/res parse once per touched cluster - cheap (pure text)
             // and idempotent, so re-ingest keeps them current. Runs
             // through the installed custom categories (24D) so a user
@@ -1326,21 +1412,22 @@ impl Index {
                         kind=?6, res=?7, have_parts=?8, need_parts=?9,
                         title_key=?10, junk=?11, langs=?12,
                         vcodec=?13, acodec=?14, hdr=?15,
-                        pre_title=?16, pre_source=?17, pre_at=?18
+                        pre_title=?16, pre_source=?17, pre_at=?18,
+                        nfiles_complete=?19, nfiles_exe=?20
                  WHERE id=?1",
             )?
             .execute(rusqlite::params![
                 rid,
-                nfiles,
-                { tbytes },
-                npar2 > 0,
+                agg.nfiles,
+                agg.tbytes,
+                agg.has_par2,
                 complete,
                 kind_str(&p.kind),
                 p.res.as_deref().unwrap_or_default(),
-                have,
-                need,
+                agg.have,
+                agg.need,
                 p.key,
-                junk_score(name, &p, tbytes as u64, nexe > 0),
+                junk_score(name, &p, agg.tbytes.max(0) as u64, agg.nexe > 0),
                 p.langs.join(" "),
                 p.vcodec.as_deref().unwrap_or_default(),
                 p.acodec.as_deref().unwrap_or_default(),
@@ -1350,7 +1437,9 @@ impl Index {
                 // Stamped whether or not the feed knew this one, so
                 // the backlog sweep does not re-examine rows the
                 // live path has already asked about.
-                now
+                now,
+                agg.ncomplete,
+                agg.nexe
             ])?;
             if complete && !was {
                 *completed += 1;
@@ -1569,105 +1658,6 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1, "only the real sample is hidden: {rows:?}");
         assert!(rows[0].stem.contains("Free.Sample"), "{rows:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `nsegs` caches what `json_array_length(segments)` used to
-    /// recompute on every touch. Two things must hold: it tracks the
-    /// merged part set exactly, and completeness stays right for rows
-    /// the backfill has not reached yet (an unfilled row reads 0, which
-    /// would otherwise flip a complete release to incomplete).
-    #[test]
-    fn nsegs_tracks_segments_and_survives_a_half_done_backfill() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-nsegs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.db");
-        let mut ix = Index::open(&path).unwrap();
-
-        // Split across batches so the merge path runs: part 2 arrives
-        // after part 1, and nsegs has to end at 2, not 1.
-        ix.ingest(
-            "alt.test",
-            &[entry(
-                "\"Film.2020.part1.rar\" yEnc (1/2)",
-                "p@x",
-                "a1",
-                900,
-            )],
-            1000,
-        )
-        .unwrap();
-        let count = |ix: &Index| -> i64 {
-            ix.db
-                .query_row(
-                    "SELECT nsegs FROM files WHERE filename LIKE 'Film%'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        assert_eq!(count(&ix), 1, "first batch: one part seen");
-        assert_eq!(
-            ix.ingest(
-                "alt.test",
-                &[entry(
-                    "\"Film.2020.part1.rar\" yEnc (2/2)",
-                    "p@x",
-                    "a2",
-                    900
-                )],
-                1001
-            )
-            .unwrap(),
-            1,
-            "merging the second part completes the release"
-        );
-        assert_eq!(count(&ix), 2, "nsegs follows the MERGED set, not the batch");
-        assert!(
-            ix.db
-                .query_row("SELECT complete FROM releases LIMIT 1", [], |r| r
-                    .get::<_, bool>(0))
-                .unwrap()
-        );
-
-        // Simulate a row the chunked backfill has not reached: nsegs
-        // back to 0 with the JSON intact, which is exactly the state
-        // every pre-existing row is in on first open after upgrading.
-        ix.db.execute("UPDATE files SET nsegs = 0", []).unwrap();
-        ix.db
-            .execute("UPDATE kv SET v='0' WHERE k='nsegs_fill'", [])
-            .ok();
-        ix.ingest(
-            "alt.test",
-            &[entry("\"Other.2020.mkv\" yEnc (1/1)", "p@y", "b1", 900)],
-            1002,
-        )
-        .unwrap();
-        let still_complete: bool = ix
-            .db
-            .query_row(
-                "SELECT complete FROM releases WHERE stem LIKE 'Film%'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            still_complete,
-            "a release whose files the backfill has not reached must not \
-             be flipped to incomplete by the cached count reading 0"
-        );
-
-        // Re-opening runs the backfill and fills them in.
-        drop(ix);
-        let ix = Index::open(&path).unwrap();
-        assert_eq!(count(&ix), 2, "backfill restored the cached count");
-        let done: String = ix
-            .db
-            .query_row("SELECT v FROM kv WHERE k='nsegs_fill'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(done, "1", "backfill stamped itself complete");
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 

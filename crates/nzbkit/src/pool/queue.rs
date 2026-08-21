@@ -6,6 +6,23 @@
 
 use super::*;
 
+/// §146 census currency (C4): one refusal-walker, named by message-id
+/// AND by its completion ordinal. The pair must travel together from
+/// [`QueueControl::verdict_walkers`] to
+/// [`QueueControl::give_up_covered`]: an article in transit between a
+/// refusal and its requeue is in neither the queue nor the inflight
+/// map when the commit runs, so the ordinal the census recorded is the
+/// only way the claim can still name its bit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Walker {
+    /// R9: the interned id. A census taken over the queue and the
+    /// in-flight map hands back handles, not copies - a full-queue
+    /// walk at 100k pending used to allocate the whole id set twice
+    /// (here, and again in `give_up_covered`'s claim set).
+    pub id: Arc<str>,
+    pub ord: u32,
+}
+
 /// M11 seek re-prioritization: a live handle to a running fetch's pending
 /// queue. The streaming layer promotes the articles under a player's seek
 /// point to the queue front; workers pick them up on their next pop.
@@ -40,7 +57,7 @@ impl QueueControl {
     /// would otherwise download tail-first while the player starves at
     /// the seek point.) Articles already fetched or in flight are
     /// unaffected. Returns how many were moved.
-    pub fn promote(&self, ids: &[String]) -> usize {
+    pub fn promote(&self, ids: &[Arc<str>]) -> usize {
         self.promote_opts(ids, true)
     }
 
@@ -50,7 +67,7 @@ impl QueueControl {
     /// its article sooner, but nothing blocks on it, and a scrambled
     /// many-volume set probes once per slot - each 60 s stream-mode
     /// linger would chain into the whole download running shallow.
-    pub fn promote_opts(&self, ids: &[String], engage_stream: bool) -> usize {
+    pub fn promote_opts(&self, ids: &[Arc<str>], engage_stream: bool) -> usize {
         let Some(sh) = self
             .shared
             .lock()
@@ -91,12 +108,12 @@ impl QueueControl {
         // wins for duplicate ids).
         let mut rank: HashMap<&str, usize> = HashMap::with_capacity(ids.len());
         for (r, id) in ids.iter().enumerate() {
-            rank.entry(id.as_str()).or_insert(r);
+            rank.entry(&**id).or_insert(r);
         }
         let mut front: Vec<(usize, Work)> = Vec::new();
         let mut rest: VecDeque<Work> = VecDeque::with_capacity(q.len());
         for mut w in q.drain(..) {
-            if let Some(&r) = rank.get(w.id.as_str()) {
+            if let Some(&r) = rank.get(&*w.id) {
                 w.promoted = true;
                 front.push((r, w));
             } else {
@@ -173,7 +190,7 @@ impl QueueControl {
     /// must therefore require consecutive negative verdicts spaced
     /// longer than that window (the stream reader votes 1 s apart)
     /// before acting.
-    pub fn any_live(&self, ids: &[String]) -> Option<bool> {
+    pub fn any_live(&self, ids: &[Arc<str>]) -> Option<bool> {
         let sh = self
             .shared
             .lock()
@@ -185,7 +202,7 @@ impl QueueControl {
         }
         {
             let inf = sh.inflight.lock_ok();
-            if ids.iter().any(|id| inf.contains_key(id.as_str())) {
+            if ids.iter().any(|id| inf.contains_key(&**id)) {
                 return Some(true);
             }
         }
@@ -197,7 +214,7 @@ impl QueueControl {
         // already had.
         {
             let ok = sh.done_ok.lock_ok();
-            if ids.iter().any(|id| ok.contains(id.as_str())) {
+            if ids.iter().any(|id| ok.contains(&**id)) {
                 return Some(true);
             }
         }
@@ -209,11 +226,7 @@ impl QueueControl {
         // the steer is about to rewrite.
         {
             let inbox = sh.steer_inbox.lock_ok();
-            if !inbox.is_empty()
-                && ids
-                    .iter()
-                    .any(|id| inbox.iter().any(|w| w.id.as_str() == id.as_str()))
-            {
+            if !inbox.is_empty() && ids.iter().any(|id| inbox.iter().any(|w| w.id == *id)) {
                 return Some(true);
             }
         }
@@ -230,8 +243,8 @@ impl QueueControl {
                 Err(_) => return Some(true),
             }
         };
-        let set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        Some(q.iter().any(|w| set.contains(w.id.as_str())))
+        let set: HashSet<&str> = ids.iter().map(|s| &**s).collect();
+        Some(q.iter().any(|w| set.contains(&*w.id)))
     }
 
     /// In-stream PAR2 deferral (issue #14): permanently remove every
@@ -242,7 +255,7 @@ impl QueueControl {
     /// through their normal outcome; a duplicate call for an id already
     /// cancelled is a no-op. Best-effort like `promote`: a missed lock
     /// returns an empty list and the caller may retry.
-    pub fn cancel(&self, ids: &HashSet<String>) -> Vec<String> {
+    pub fn cancel(&self, ids: &HashSet<Arc<str>>) -> Vec<Arc<str>> {
         let Some(sh) = self
             .shared
             .lock()
@@ -272,7 +285,7 @@ impl QueueControl {
         let mut removed: Vec<Work> = Vec::new();
         let mut kept: VecDeque<Work> = VecDeque::with_capacity(q.len());
         for w in q.drain(..) {
-            if ids.contains(w.id.as_str()) {
+            if ids.contains(&*w.id) {
                 removed.push(w);
             } else {
                 kept.push_back(w);
@@ -292,7 +305,7 @@ impl QueueControl {
         // items are stashed whole so `requeue` can resurrect them.
         let mut out = Vec::with_capacity(removed.len());
         for w in removed {
-            if sh.claim_done(&w.id) {
+            if sh.claim_done(&w.id, w.ord) {
                 sh.complete_one();
                 out.push(w.id.clone());
                 sh.cancelled.lock_ok().insert(w.id.clone(), w);
@@ -308,7 +321,7 @@ impl QueueControl {
     /// is returned - the caller keeps its deferred accounting. Only ids
     /// a prior `cancel` returned can ever be requeued; unknown ids are
     /// ignored (and do not count toward the return value).
-    pub fn requeue(&self, ids: &[String]) -> usize {
+    pub fn requeue(&self, ids: &[Arc<str>]) -> usize {
         let Some(sh) = self
             .shared
             .lock()
@@ -323,7 +336,7 @@ impl QueueControl {
         }
         let works: Vec<Work> = {
             let mut stash = sh.cancelled.lock_ok();
-            ids.iter().filter_map(|id| stash.remove(id)).collect()
+            ids.iter().filter_map(|id| stash.remove(&**id)).collect()
         };
         if works.is_empty() {
             return 0;
@@ -396,7 +409,7 @@ impl QueueControl {
         {
             let mut done = sh.done.lock_ok();
             for w in &works {
-                done.remove(&w.id);
+                done.clear(w.ord);
             }
         }
         // Undo everything this call has done so far, in reverse:
@@ -405,7 +418,7 @@ impl QueueControl {
         let roll_back = |ws: Vec<Work>| {
             let mut done = sh.done.lock_ok();
             for w in &ws {
-                done.insert(w.id.clone());
+                done.claim(w.ord);
             }
             drop(done);
             sub_pending(ws.len());
@@ -484,7 +497,12 @@ impl QueueControl {
     /// keep that trade off the table. Also `None` while draining or
     /// aborted (a pause must keep the queue intact for resume), and
     /// whenever the snapshot cannot account for every pending article.
-    pub fn verdict_walkers(&self) -> Option<Vec<String>> {
+    ///
+    /// Answers `{id, ordinal}` pairs (see [`Walker`]): the commit half
+    /// claims by ordinal, and a walker that is mid-requeue when the
+    /// commit runs has no queue or inflight record left to look its
+    /// ordinal up in - the census is where the pair is captured.
+    pub fn verdict_walkers(&self) -> Option<Vec<Walker>> {
         let sh = self
             .shared
             .lock_ok()
@@ -512,7 +530,9 @@ impl QueueControl {
             closed("steer inbox or handoff holds payload");
             return None;
         }
-        let mut ids: HashSet<String> = HashSet::with_capacity(pending);
+        // Keyed by id (same article can transiently show in both
+        // sweeps); the value is its ordinal, identical wherever seen.
+        let mut ids: HashMap<Arc<str>, u32> = HashMap::with_capacity(pending);
         // `done` first, `inflight` second - pick_dup's lock order. Both
         // sweeps filter through it: an article the dup-union already
         // drove terminal keeps its inflight entry (and can even ride
@@ -526,7 +546,7 @@ impl QueueControl {
         {
             let inf = sh.inflight.lock_ok();
             for (id, e) in inf.iter() {
-                if done.contains(id) {
+                if done.contains(e.ord) {
                     continue; // already terminal - a lingering original
                 }
                 if e.tried_430 == 0 {
@@ -534,7 +554,7 @@ impl QueueControl {
                     closed("a clean article is on the wire");
                     return None; // a clean article is still on the wire
                 }
-                ids.insert(id.clone());
+                ids.insert(id.clone(), e.ord);
             }
         }
         // Same bounded try_lock discipline as `promote`/`cancel`.
@@ -553,7 +573,7 @@ impl QueueControl {
             }
         };
         for w in q.iter() {
-            if done.contains(&w.id) {
+            if done.contains(w.ord) {
                 continue; // already terminal - a zombie queue entry
             }
             if w.tried_430 == 0 && w.soft_430 == 0 {
@@ -561,7 +581,7 @@ impl QueueControl {
                 closed("untried payload still queued");
                 return None; // untried payload still queued
             }
-            ids.insert(w.id.clone());
+            ids.insert(w.id.clone(), w.ord);
         }
         drop(q);
         drop(done);
@@ -577,7 +597,11 @@ impl QueueControl {
             ));
             return None;
         }
-        Some(ids.into_iter().collect())
+        Some(
+            ids.into_iter()
+                .map(|(id, ord)| Walker { id, ord })
+                .collect(),
+        )
     }
 
     /// §146 tail give-up, the commit half: mark every article in `ids`
@@ -598,7 +622,11 @@ impl QueueControl {
     /// was 60 articles serially buying "no such article" answers nobody
     /// needed. Unlike `cancel` there is no requeue path back: callers
     /// verify coverage BEFORE committing.
-    pub fn give_up_covered(&self, ids: &HashSet<String>) -> Vec<String> {
+    /// Takes the [`Walker`] pairs the census handed out: the queue
+    /// half still cancels by id, but an article in transit between a
+    /// refusal and its requeue has no record left to name its ordinal,
+    /// so the claim below spends the one the census captured.
+    pub fn give_up_covered(&self, walkers: &[Walker]) -> Vec<Arc<str>> {
         let Some(sh) = self
             .shared
             .lock_ok()
@@ -612,11 +640,12 @@ impl QueueControl {
         }
         // Queued walkers first, via the cancel machinery (queue removal,
         // promoted-count upkeep, terminal bookkeeping).
-        let mut out = self.cancel(ids);
-        let claimed: HashSet<&str> = out.iter().map(|s| s.as_str()).collect();
-        let rest: Vec<&String> = ids
+        let ids: HashSet<Arc<str>> = walkers.iter().map(|w| w.id.clone()).collect();
+        let mut out = self.cancel(&ids);
+        let claimed: HashSet<&str> = out.iter().map(|s| &**s).collect();
+        let rest: Vec<&Walker> = walkers
             .iter()
-            .filter(|id| !claimed.contains(id.as_str()))
+            .filter(|w| !claimed.contains(&*w.id))
             .collect();
         drop(claimed);
         // Everything else - in flight mid-hop, or in transit between a
@@ -626,10 +655,10 @@ impl QueueControl {
         // dup race does. An id that already went terminal on its own
         // claims false and is not returned (the run's outcome for it
         // stands).
-        for id in rest {
-            if sh.claim_done(id) {
+        for w in rest {
+            if sh.claim_done(&w.id, w.ord) {
                 sh.complete_one();
-                out.push(id.clone());
+                out.push(w.id.clone());
             }
         }
         out
@@ -693,8 +722,12 @@ impl QueueControl {
         };
         let why = match report {
             DecodeReport::Bad { why } => why,
-            DecodeReport::Clean { part } => match (sh.parts.get(id), part) {
-                (Some(&want), Some(got)) if got != want => {
+            // The expected part rides the stashed Work (h.work is
+            // rebuilt from whatever copy DELIVERED, dups included, so
+            // a dup-delivered wrong-part body still trips this); 0
+            // means the segment declared no part - no gate.
+            DecodeReport::Clean { part } => match (h.work.part, part) {
+                (want, Some(got)) if want != 0 && got != want => {
                     "valid body for the wrong article (part mismatch)"
                 }
                 _ => return finalize(&sh),
@@ -719,6 +752,9 @@ impl QueueControl {
             return finalize(&sh);
         }
         let mut w = h.work;
+        // Captured before the Work moves into the steer inbox: the
+        // un-claim below names this bit.
+        let ord = w.ord;
         // Group siblings fold FIRST so other_can_take skips the whole
         // backbone serving the same bad copy - and a fill server's
         // pickup gate (the primary's 430 bit) is enforced inside, so a
@@ -776,13 +812,13 @@ impl QueueControl {
         // and the consumer owning the body is exactly what the guard
         // above would have done.
         if sh.workers_live.load(Ordering::Acquire) == 0 {
-            sh.steer_inbox.lock_ok().retain(|x| x.id != *id);
+            sh.steer_inbox.lock_ok().retain(|x| &*x.id != id);
             if dbg {
                 eprintln!("[crc-steer] {id}: own (fleet died during the steer)");
             }
             return finalize(&sh);
         }
-        sh.done.lock_ok().remove(id);
+        sh.done.lock_ok().clear(ord);
         // The body the consumer holds is dead weight now; the article
         // stays in any_live's sight through the inbox entry pushed
         // above until a worker drains it into the queue.

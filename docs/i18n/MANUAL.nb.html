@@ -377,6 +377,15 @@ Skuffen til hver rad sier hvem som la til jobben og har den samme
 <b>Last ned .nzb-filen</b>-knappen som køen - praktisk for å laste ned en utgivelse
 på nytt et annet sted, eller for å legge ved <code>.nzb</code>-filen i en feilrapport.</p>
 <p>Kortet viser ti nedlastinger som standard, og resten er ett klikk unna, på knappen ▤. Status, plassering og grunnen til at en jobb feilet ligger bak et klikk på selve raden, slik at det vanlige tilfellet - hva som ble ferdig, hvor stort, når - forblir lesbart uten å rulle. Dra i kortets nederste kant for i stedet å la lista rulle i en høyde du velger selv. <b>History rows</b> under Innstillinger → Grensesnitt endrer de ti; siden det er en egenskap ved daemonen og ikke ved nettleseren din, gjelder det enhver enhet som ser på denne installasjonen. <b>Colour History names</b> ved siden av farger ferdige navn grønne og feilede røde; slått av forblir navnene nøytrale, og den fargede prikken og radens egne detaljer sier fortsatt hva som er hva.</p>
+<p>nzbfast beholder historikken for alltid med mindre du sier noe annet. <b>Rydd i
+historikken</b> under Innstillinger → System fjerner gamle oppføringer etter to
+uavhengige regler: en alder (<b>Fjern oppføringer eldre enn</b>, talt fra det
+øyeblikket nedlastingen ble ferdig, i minutter, timer eller dager) og en lengde
+(<b>Behold høyst så mange oppføringer</b>). Er begge satt, gjelder begge, og 0 slår
+av hver av dem for seg. Bare historikkoppføringen fjernes - de nedlastede filene blir
+liggende akkurat der de er. Aldersregelen tar bare fullførte nedlastinger, så en
+mislykket venter til du prøver på nytt eller sletter den selv; lengdegrensen teller
+hver oppføring, uansett hvordan det gikk med den.</p>
 <h3 id="dash-usage">Dataforbruk</h3>
 <p>Daglige søyler per leverandør og totaler for I dag / 7 dager / 30 dager - essensielt for
 målte kontoer og blokk-kontoer. Blokk-kontoer viser forbruk over levetiden mot størrelsen sin.</p>
@@ -494,7 +503,7 @@ med seg hver eneste indekser bak seg.</p>
 tilbake, som beviser adressen og nøkkelen med ett klikk. En lagret nøkkel vises aldri
 igjen: feltet sier det, og lar du det stå tomt, beholdes nøkkelen som allerede er
 der.</p>
-<p><b>Å søke.</b> Åpne <b>🎬 veggen</b> i toppfeltet og bytt til release-lista.
+<p><b>Å søke.</b> Åpne <b>🎬 veggen</b> i toppfeltet og velg <b>Utgivelser</b>.
 Nedtrekkslista ved siden av søkefeltet avgjør hvor et søk ser: <b>Denne indeksen</b>,
 altså det denne maskinen selv har skannet, <b>Indeksere</b>, eller <b>Begge</b>. Valget
 ditt huskes. Å spørre kontoene dine krever noe i feltet, for å bla i dem med et tomt søk
@@ -558,6 +567,16 @@ indekset.</li>
 hver gjenkjente film- og TV-utgivelse som en plakatflis med vurdering, år, sjangere,
 rollebesetning og sammendrag - newsgroupene dine, som du kan bla i som en katalog.</p>
 <ul>
+<li><b>Vegg</b> og <b>Utgivelser</b> er to måter å se den samme indeksen på, og
+paret under <b>Visning</b> bytter mellom dem. Valget ditt huskes.</li>
+<li><b>Plakattetthet</b> er <b>S</b> / <b>M</b> / <b>L</b> ved siden av det paret: lite
+får flere på skjermen, stort færre.</li>
+<li><b>Hover-forhåndsvisning</b>, over Utgivelser-tabellen: hvil pekeren på en rad for
+plakat og handling, alt fra din egen indeks.</li>
+<li><b>Grupper etter tittel</b>, bryteren ved siden av: én rad per tittel med
+utgivelsene under. Åpne den med <b>&#9656;</b> eller ved å klikke på raden; avkryssingen
+på tittelen velger utgivelsene som vises. Gruppering gjelder bare <b>Denne
+indeksen</b>.</li>
 <li><b>Faner</b> for Filmer / Serier / Annet, direktesøk og sju sorteringer:
 <b>For deg</b>, Nyeste poster, Utgivelsesår, Best vurdert, Tittel A–Å, Størst og
 Mest postet.</li>
@@ -1139,7 +1158,11 @@ vurdering koster litt tid i stedet for selve nedlastingen.</li>
 </ul>
 <p class="dim">Dommen er en forutsigelse ut fra indisier, ikke en garanti. For et hardt
 svar om én NZB teller <code>nzbfast check</code> (<a href="#cli">§15</a>) de faktiske
-artiklene.</p>
+artiklene. Begge teller svar, ikke innhold. En ren sjekk betyr at artiklene var der da det ble
+spurt, ikke at det de inneholder er uskadd: et lite antall leverandører svarer for
+fjernede artikler med attrappdata i stedet for å avvise dem, og det viser seg først
+under selve nedlastingen, der artikkelen faller på sin egen kontrollsum og hentes på
+nytt fra en annen server eller repareres.</p>
 <h3 id="memory">Minnebudsjett - og hva lite minne koster</h3>
 <p>Alle motorens buffere deler ett budsjett (standard ¼ av fysisk RAM, avgrenset til
 256 MB–16 GB). Sett det eksplisitt med <i>Minnegrense</i> i Innstillinger, eller

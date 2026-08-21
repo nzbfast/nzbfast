@@ -252,6 +252,10 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
 #ltable th.sortable.on::after{content:' ↓'}
 #ltable th.sortable.on.asc::after{content:' ↑'}
 #ltable .selcol{width:26px;padding-inline-end:0}
+/* G2: the title row's own checkbox. It sits at the head of the NAME
+   cell rather than in .selcol, which is 26px and already holds the
+   expander. Aligned to the text it selects, not to the row. */
+#ltable tr.grp .gsel{margin-inline-end:8px;vertical-align:middle}
 #ltable input[type=checkbox]{accent-color:var(--acc);margin:0;vertical-align:middle}
 /* Under-name badge row: only facts the index holds (par2, source group,
    decoded). DrunkenSlug's pattern - extras ride as badges, not columns. */
@@ -2191,7 +2195,11 @@ function grpRow(c){
     <td class="selcol"><button class="exp" data-i18n-skip aria-expanded="${open}"
       title="${esc(t('wall.exp.title',"Show this title's releases"))}"
       aria-label="${esc(t('wall.exp.title',"Show this title's releases"))}">${open?'▾':'▸'}</button></td>
-    <td class="name"><span class="stem">${esc(fixCase(c.title))}</span>${c.year?` <span class="dim">(${c.year})</span>`:''}</td>
+    <td class="name"><input type="checkbox" class="gsel" data-gsel="${esc(c.key)}"${
+      grpSelState(c)?' checked':''}
+      title="${esc(t('wall.gsel.title',"Select this title's releases"))}"
+      aria-label="${esc(t('wall.gsel.title',"Select this title's releases"))}"
+      ><span class="stem">${esc(fixCase(c.title))}</span>${c.year?` <span class="dim">(${c.year})</span>`:''}</td>
     <td>${catChip({kind:c.kind, quality:c.res||''})}</td>
     <td class="mono dim">${age(c.latest)}</td>
     <td class="mono">${gb(c.size||0)}</td>
@@ -2215,6 +2223,56 @@ function emptyRowHtml(){
        `<a href="#" data-show-inc>${t('wall.empty.showinc','Show incomplete')}</a>`;
   return `<tr><td colspan="8" class="dim">${h}</td></tr>`;
 }
+// G2. The title row had the expander where a release row has its
+// checkbox, so a title could not be selected at all; and `#selAll`
+// reads `[data-sel]`, which in grouped mode matches only rows the user
+// had already expanded - so "select everything" selected nothing on a
+// freshly grouped page, with no error and no clue.
+function grpLoaded(c){
+  const rows=relCache.get(`${c.key}|${document.getElementById('onlyComplete').checked?1:0}`);
+  return rows||[];
+}
+// The rows this title puts ON THE PAGE. The fetch asks for cap+1 to
+// detect the cut, so the extra one is never rendered and never
+// selectable: a checkbox must not claim a release the table is not
+// showing.
+function grpShown(c){
+  return grpLoaded(c).slice(0, relLimit.get(c.key)||REL_PAGE);
+}
+// Ticked when every release this title has on the page is selected.
+// On the page, not "every release it has": the ids of an unexpanded
+// title are not here, and a checkbox that claimed them would be
+// claiming rows it cannot show.
+function grpSelState(c){
+  const rows=grpShown(c);
+  return rows.length>0 && rows.every(r=>lsel.has(r.id));
+}
+// Selecting a title expands it first when it has to: the releases ARE
+// the selection, so there is nothing to select until they are loaded.
+async function grpSelect(k,on){
+  const c=(lgroups||[]).find(x=>x.key===k); if(!c) return;
+  if(!gexp.has(k)) await toggleExp(k);
+  for(const r of grpShown(c)){
+    if(on) lsel.add(r.id); else lsel.delete(r.id);
+  }
+  renderGroups();
+}
+// The tail of a nested list the cap cut short. It states the fact and
+// offers the one click that lifts it. It does NOT invent a number: the
+// only count to hand is the title's total, and that counts releases the
+// completeness filter is hiding on purpose - reporting those as
+// truncation blamed the cap for the user's own filter and offered a
+// "show them" that could not show them. Past `REL_MAX` there is no
+// button, because a control that would silently truncate again is worse
+// than a sentence.
+function moreRow(c,lim){
+  return `<tr class="sub"><td class="selcol"></td>
+    <td class="name" colspan="7"><span class="dim">${esc(
+      t('wall.grp.cut','Not every release is shown here.'))}</span>`
+    +(lim<REL_MAX?` <a href="#" data-more="${esc(c.key)}">${esc(t('wall.grp.showall','Show them all'))}</a>`
+                 :` <span class="dim">${esc(t('wall.grp.refine','Narrow the search to see the rest'))}</span>`)
+    +`</td></tr>`;
+}
 function renderGroups(){
   const body=document.getElementById('lbody');
   hovHide();
@@ -2228,14 +2286,51 @@ function renderGroups(){
     // Same composite key toggleExp caches under, so nested rows always
     // match the filter the parent rows were fetched with.
     const ck=k=>`${k}|${document.getElementById('onlyComplete').checked?1:0}`;
-    body.innerHTML=lgroups.map(c=>grpRow(c)
-      +(gexp.has(c.key)&&relCache.get(ck(c.key))
-        ?relCache.get(ck(c.key)).map(r=>relRow(r,true)).join(''):'')).join('');
+    body.innerHTML=lgroups.map(c=>{
+      const all=gexp.has(c.key)?relCache.get(ck(c.key)):null;
+      if(!all) return grpRow(c);
+      const lim=relLimit.get(c.key)||REL_PAGE;
+      const rows=all.slice(0,lim);
+      return grpRow(c)+rows.map(r=>relRow(r,true)).join('')
+        +(all.length>lim?moreRow(c,lim):'');
+    }).join('');
   }
   markSortHeads();
   updateSelBar();
   pageFoot();
 }
+// G3: how many nested releases one title loads. A title with more than
+// this used to stop at the cap with nothing saying so, and the last row
+// it drew looked exactly like the title's last release. `REL_PAGE` is
+// what an expand costs; `REL_MAX` is what "Show all" raises it to, and
+// it is a CAP rather than "everything" because a nested table is real
+// DOM under a row the user opened with one click.
+const REL_PAGE=200, REL_MAX=2000;
+const relLimit=new Map();   // title key -> the cap this title is loaded at
+// Both of the per-title maps below are keyed by title and only ever
+// grew: a long wall session that hovers and expands its way through
+// thousands of titles held an entry for every one of them until the tab
+// was closed. Map iterates in insertion order, so the first keys out are
+// the oldest. `keep` protects entries the page is still drawing from -
+// dropping an expanded title's raised cap would silently re-truncate a
+// list the user asked to see in full.
+function capMap(m,cap,keep){
+  if(m.size<=cap) return;
+  for(const k of [...m.keys()]){
+    if(m.size<=cap) break;
+    if(keep&&keep(k)) continue;
+    m.delete(k);
+  }
+}
+// How many titles' rows, raised caps and hover cards are remembered.
+// All three are far past a page of results, so nothing on screen is ever
+// evicted; the caps only bite on a session that has walked through
+// thousands of titles. `relCache` is the one that holds real bytes - a
+// full release list per expanded title - and an eviction there costs
+// only the refetch the first expand paid.
+const REL_CACHE_MAX=200, REL_LIMIT_MAX=500, HOV_CACHE_MAX=300;
+// relCache is keyed `title|complete`; the expanded set is keyed by title.
+const relCacheKeep=k=>gexp.has(k.slice(0,k.lastIndexOf('|')));
 async function toggleExp(k){
   if(gexp.has(k)){ gexp.delete(k); renderGroups(); return; }
   gexp.add(k);
@@ -2252,8 +2347,14 @@ async function toggleExp(k){
   if(!relCache.has(ck)){
     try{
       const j=await api('index_browse',
-        `&title_key=${encodeURIComponent(k)}&all=1&complete=${complete}&limit=200`);
+        `&title_key=${encodeURIComponent(k)}&all=1&complete=${complete}`+
+        // One MORE than the cap, deliberately: whether the list was
+      // cut is then a fact about this response rather than a guess from
+      // the parent's release count, which counts releases the
+      // completeness filter is excluding on purpose.
+      `&limit=${(relLimit.get(k)||REL_PAGE)+1}`);
       relCache.set(ck, j.results||[]);
+      capMap(relCache,REL_CACHE_MAX,relCacheKeep);
     }catch(e){
       // Do not leave the row claiming to be open with nothing under it.
       relCache.delete(ck);
@@ -2497,7 +2598,7 @@ function extSrcRow(s,gi,headTitle){
     <td class="mono dim">–</td>
     <td class="mono dim" title="${esc(t('wall.ext.grabs','How often this indexer’s users grabbed it'))}">${s.grabs?s.grabs+'↓':''}</td>
     <td style="text-align:end;white-space:nowrap">
-      <button class="act quiet" onclick="grabExt('${esc(s.token)}',this)">${t('wall.download','Download')}</button>
+      <button class="act quiet" data-grab-ext="${esc(s.token)}">${t('wall.download','Download')}</button>
     </td>
   </tr>`;
 }
@@ -2535,7 +2636,7 @@ function extRow(x,gi){
     <td class="mono dim">–</td>
     <td class="mono dim" title="${esc(t('wall.ext.grabs','How often this indexer’s users grabbed it'))}">${x.grabs?x.grabs+'↓':''}</td>
     <td style="text-align:end;white-space:nowrap">
-      <button class="act quiet" onclick="grabExt('${esc(x.token)}',this)">${t('wall.download','Download')}</button>
+      <button class="act quiet" data-grab-ext="${esc(x.token)}">${t('wall.download','Download')}</button>
     </td>
   </tr>${many?srcs.slice(1).map(s=>extSrcRow(s,gi,x.title||'')).join(''):''}`;
 }
@@ -2585,13 +2686,15 @@ function spotRow(x){
     <td class="mono dim">–</td>
     <td class="mono dim">–</td>
     <td style="text-align:end;white-space:nowrap">
-      <button class="act" onclick="grabSpot('${esc(x.msgid)}',this)">${t('wall.download','Download')}</button>
+      <button class="act" data-grab-spot="${esc(x.msgid)}">${t('wall.download','Download')}</button>
     </td>
   </tr>`;
 }
 // Grab a spot: the daemon fetches the NZB the spot points at and queues
-// it. The message-id is one it indexed itself, which is what makes it
-// safe to hand back.
+// it. The message-id is one it indexed itself - which says nothing about
+// its SHAPE: `parse_over_line` takes OVER field 5 verbatim off the wire
+// and nothing between there and here validates a character of it. It is
+// reached through a delegated listener for that reason; see the button.
 async function grabSpot(msgid,btn){
   if(btn) btn.disabled=true;
   const j=await api('spot_grab',`&msgid=${encodeURIComponent(msgid)}&priority=1`);
@@ -2701,13 +2804,41 @@ function updateSelBar(){
   }
 }
 document.getElementById('lbody').addEventListener('change',e=>{
+  const g=e.target.closest('[data-gsel]');
+  if(g){ grpSelect(g.dataset.gsel, g.checked); return; }
   const c=e.target.closest('[data-sel]'); if(!c) return;
   const id=+c.dataset.sel;
   if(c.checked) lsel.add(id); else lsel.delete(id);
+  // The title row's checkbox states "every shown release is selected",
+  // and it is stamped at render time - re-derive it here or it keeps
+  // yesterday's answer until the next full render (the 45 s tick).
+  // The nested rows sit between their title row and the next one, so
+  // the owning title is the nearest .grp row above.
+  const row=c.closest('tr');
+  if(row&&row.classList.contains('sub')){
+    let p=row.previousElementSibling;
+    while(p&&!p.classList.contains('grp')) p=p.previousElementSibling;
+    const gk=p&&p.querySelector('[data-gsel]');
+    if(gk){
+      const grp=(lgroups||[]).find(x=>x.key===gk.dataset.gsel);
+      if(grp) gk.checked=grpSelState(grp);
+    }
+  }
   updateSelBar();
 });
 document.getElementById('selAll').addEventListener('change',e=>{
-  document.querySelectorAll('#lbody [data-sel]').forEach(c=>{
+  const boxes=document.querySelectorAll('#lbody [data-sel]');
+  // Grouped mode lists TITLES, and a title's release ids are not on the
+  // page until it is expanded - so there is genuinely nothing here to
+  // select, and the honest answer is to say so. Silently doing nothing
+  // is what this control did before (G2).
+  if(!boxes.length && grpOn()){
+    e.target.checked=false;
+    announce(t('wall.selall.grouped','Open a title first - selecting works on releases, and a closed title has none on the page.'));
+    toast(t('wall.selall.grouped','Open a title first - selecting works on releases, and a closed title has none on the page.'));
+    return;
+  }
+  boxes.forEach(c=>{
     c.checked=e.target.checked;
     const id=+c.dataset.sel;
     if(e.target.checked) lsel.add(id); else lsel.delete(id);
@@ -3548,7 +3679,9 @@ async function wallFetch(reset){
       // full render() here re-parsed the entire grid's innerHTML on
       // every page - O(n²) HTML churn by page 10, and it yanked
       // hover/focus state mid-scroll.
-      cards=cards.concat(page);
+      // push, not concat: concat copies the whole array on every
+      // page, which is O(n^2) copy churn over a long scroll.
+      cards.push(...page);
       appendCards(page);
     }
     // Refresh art/meta inside an open sheet - but never while the user
@@ -3650,8 +3783,9 @@ new IntersectionObserver(()=>maybeMore(), {rootMargin:'600px'})
 addEventListener('scroll', ()=>maybeMore(), {passive:true});
 // Belt and braces: embedded/throttled viewports can swallow scroll and
 // observer callbacks - a slow tick keeps pagination alive everywhere
-// (guards make it a no-op unless the sentinel is actually near).
-setInterval(()=>maybeMore(), 2000);
+// (guards make it a no-op unless the sentinel is actually near). N7:
+// not while hidden - the visibilitychange catch-up covers the return.
+setInterval(()=>{ if(!document.hidden) maybeMore(); }, 2000);
 
 // ---- M30 curation: "Not interested" hides + suggest-confirm rules ----
 let hidCount=0, curSug=null;
@@ -4024,13 +4158,39 @@ document.getElementById('lbody').addEventListener('click', e=>{
     c.checked=false; c.dispatchEvent(new Event('change'));
     return;
   }
-  const b=e.target.closest('[data-info-key]'); if(b) listInfo(b.dataset.infoKey);
+  const b=e.target.closest('[data-info-key]'); if(b){ listInfo(b.dataset.infoKey); return; }
+  // Same treatment, and the same reason, for the two Download buttons
+  // whose identifier is attacker-supplied. A spot's message-id comes off
+  // the OVER line verbatim; `esc` turns `'` into `&#39;`, which the HTML
+  // parser decodes back to a live apostrophe BEFORE an inline handler is
+  // compiled as JavaScript - so in an onclick JS-string it neutralised
+  // nothing. In a data attribute it is inert and dataset hands back the
+  // literal value.
+  const gs=e.target.closest('[data-grab-spot]');
+  if(gs){ grabSpot(gs.dataset.grabSpot,gs); return; }
+  const gx=e.target.closest('[data-grab-ext]');
+  if(gx){ grabExt(gx.dataset.grabExt,gx); return; }
 });
 // Group-by-title expander: the ▸ button or anywhere on the title row
 // that isn't a control.
 document.getElementById('lbody').addEventListener('click', e=>{
   const x=e.target.closest('.exp');
   if(x){ toggleExp(x.closest('[data-exp]').dataset.exp); return; }
+  // G3: "Show them" on a truncated nested list. Raises this title's cap
+  // and drops its cached page so the expand re-runs against the new one;
+  // the group stays open across the refetch.
+  const m=e.target.closest('[data-more]');
+  if(m){
+    e.preventDefault();
+    const k=m.dataset.more;
+    relLimit.set(k,REL_MAX);
+    capMap(relLimit,REL_LIMIT_MAX,k=>gexp.has(k));
+    const complete=document.getElementById('onlyComplete').checked?1:0;
+    relCache.delete(`${k}|${complete}`);
+    gexp.delete(k);
+    toggleExp(k);
+    return;
+  }
   if(e.target.closest('button,a,input')) return;
   const g=e.target.closest('tr[data-exp]');
   if(g) toggleExp(g.dataset.exp);
@@ -4050,10 +4210,14 @@ function hovFetch(k){
   // that title's preview for the rest of the session. Drop the entry on
   // failure so the next hover retries; a real "no card" answer still
   // caches, because that is an answer.
-  if(!hovCache.has(k))
+  if(!hovCache.has(k)){
     hovCache.set(k, api('wall2',`&key=${encodeURIComponent(k)}&matched=0&all=1&limit=1`)
       .then(j=>(j.cards||[])[0]||null)
       .catch(e=>{ hovCache.delete(k); throw e; }));
+    // Evicting the title under the pointer would only cost it one
+    // refetch, so no `keep` set here.
+    capMap(hovCache,HOV_CACHE_MAX);
+  }
   return hovCache.get(k);
 }
 function hovHide(){
@@ -4241,7 +4405,11 @@ function showArrivals(explicit){
   // top has nowhere to scroll to anyway.
   if(explicit) scrollTo({top:0,behavior:REDUCED?'auto':'smooth'});
 }
-function initArrivals(){ tipPoll(); setInterval(tipPoll, 5000); }
+// N7: gated on document.hidden - a background tab used to keep this 5 s
+// poll (and the 45 s refresh, and maybeMore's 2 s belt) running forever,
+// ~17k requests a day per forgotten tab. The visibilitychange catch-up
+// below fires the moment the tab is looked at again.
+function initArrivals(){ tipPoll(); setInterval(()=>{ if(!document.hidden) tipPoll(); }, 5000); }
 
 // M31b: reflect the persisted sort (affinity leads the option list, so
 // without this the select would show "For you" while sortBy is 'latest').
@@ -4287,14 +4455,20 @@ initArrivals();
 // refresh() (its markup defaults are already wall-shaped).
 if(view==='releases') setView(view); else refresh();
 renderAffNote();
-setInterval(()=>{
+function periodicRefresh(){
   if(view==='releases'){ browseFetch(); return; }
   // The periodic refresh replaces the window with page 1 - correct at
   // the top (fresh posts land there), a scroll-position wipe when the
   // user is 10 pages deep or reading a sheet. Skip it then; the next
   // top-of-page tick catches up.
   if(scrollY<400 && !document.getElementById('ovl').classList.contains('open')) refresh();
-}, 45000);
+}
+// N7: hidden tabs skip the refresh; the catch-up below repaints on return.
+setInterval(()=>{ if(!document.hidden) periodicRefresh(); }, 45000);
+addEventListener('visibilitychange', ()=>{
+  if(document.hidden) return;
+  tipPoll(); periodicRefresh(); maybeMore();
+});
 // M30: hidden-count chip + any pending rule suggestion.
 loadHidCount(); fetchSuggest();
 // Manual link: English at /manual, translations at /manual/<lang> (#wall anchor).

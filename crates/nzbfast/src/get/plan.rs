@@ -21,9 +21,14 @@ pub(super) struct FetchPlan {
     pub(super) resume_deferred_bytes: u64,
     pub(super) resume_have_bytes: u64,
     pub(super) slots: Vec<Arc<FileSlot>>,
-    pub(super) id_to_slot: crate::unpack::IdSlots,
+    /// Shared, not cloned: the map is complete when the plan returns and
+    /// every consumer only reads it, so the decode fleet takes an `Arc`
+    /// clone instead of a deep copy per thread (§A1). At ~110-130 B per
+    /// entry a 128k-article job used to carry four to six extra copies -
+    /// 75-90 MiB - for the life of the download.
+    pub(super) id_to_slot: Arc<crate::unpack::IdSlots>,
     pub(super) slot_file: Vec<usize>,
-    pub(super) slot_arts: Vec<(Vec<(u64, String)>, u64)>,
+    pub(super) slot_arts: Vec<(Vec<(u64, std::sync::Arc<str>)>, u64)>,
     pub(super) ids: Vec<ArticleReq>,
     pub(super) fetch_done: Arc<AtomicU64>,
 }
@@ -99,7 +104,7 @@ pub(super) fn build_fetch_plan(
     let mut slot_file: Vec<usize> = Vec::new();
     // M11: per-slot article ladder (encoded cumulative offset → id) for
     // seek promotion; aligned with `slots` (empty for par2 slots).
-    let mut slot_arts: Vec<(Vec<(u64, String)>, u64)> = Vec::new();
+    let mut slot_arts: Vec<(Vec<(u64, std::sync::Arc<str>)>, u64)> = Vec::new();
     let mut par2_ids: Vec<ArticleReq> = Vec::new();
     // Each data file's FIRST segment goes right after the par2 index:
     // the offset-0 article carries the RAR signature + headers, so the
@@ -150,10 +155,20 @@ pub(super) fn build_fetch_plan(
         if sample_skipped {
             skipped_sample_names.push(slots[idx].hint.clone());
         }
-        let mut arts: Vec<(u64, String)> = Vec::new();
+        let mut arts: Vec<(u64, std::sync::Arc<str>)> = Vec::new();
         let mut enc_cum = 0u64;
         for (si, seg) in f.segments.iter().enumerate() {
-            let bracketed = format!("<{}>", seg.message_id);
+            // R9: the run's ONE heap copy of this bracketed id. Every
+            // later holder - `id_to_slot`, the seek ladder, the pool's
+            // queue item and its in-flight/steer maps, the outcome the
+            // decode consumer receives - takes a handle to this
+            // allocation, so an id costs one `format!` per run instead
+            // of the six to nine copies the plain `String` cost.
+            // `Segment.message_id` stays an unbracketed `String` inside
+            // the retained `Arc<Nzb>`: nothing downstream points into
+            // the manifest, so dropping payload segments from it stays
+            // a separate, independent win.
+            let bracketed: std::sync::Arc<str> = format!("<{}>", seg.message_id).into();
             // Malformed NZBs repeat a message-id, within one file or across
             // two. The pool fetches each id exactly once (a second request
             // would never turn terminal - the duplicate-id forever-hang),
@@ -162,7 +177,7 @@ pub(super) fn build_fetch_plan(
             // (yEnc offsets come from the article, not the NZB); a
             // cross-file repeat means these bytes never reach THIS file -
             // count it missing and let PAR2 repair fill the hole.
-            if let Some(&(owner, _)) = id_to_slot.get(&bracketed) {
+            if let Some(&(owner, _)) = id_to_slot.get(&*bracketed) {
                 dup_segments += 1;
                 slots[idx].remaining.fetch_sub(1, Ordering::Relaxed);
                 if owner as usize != idx {
@@ -211,7 +226,7 @@ pub(super) fn build_fetch_plan(
             // their bytes are on disk and the settle pass verifies them.
             // Par2-main articles always refetch (tiny; activation needs
             // the packets in memory).
-            if !is_par2_main && completed.contains(&bracketed) {
+            if !is_par2_main && completed.contains(&*bracketed) {
                 slots[idx].remaining.fetch_sub(1, Ordering::Relaxed);
                 resume_have_bytes = resume_have_bytes.saturating_add(seg.bytes);
                 continue;
@@ -281,6 +296,20 @@ pub(super) fn build_fetch_plan(
     );
     if let Some(h) = hub.as_ref() {
         h.fetch_plan.store(plan_bytes, Ordering::Relaxed);
+        // §129 4b: the post's own age, for the LIVE verdict. The
+        // youngest article is the newest date in the set, and the whole
+        // set has to be dated for the answer to mean anything - an NZB
+        // with one undated file is exactly the case `take_census`
+        // resolves to "age 0, do not call this gone", so it reaches the
+        // live surface as 0 = unknown rather than as a date derived from
+        // the files that happened to carry one.
+        h.post_unix.store(
+            match nzb.files.iter().all(|f| f.date > 0) {
+                true => nzb.files.iter().map(|f| f.date).max().unwrap_or(0),
+                false => 0,
+            },
+            Ordering::Relaxed,
+        );
     }
     // M11 head+tail burst (hub-attached runs, i.e. the daemon): the first
     // volume's opening ~16 MB and the last volume's closing ~8 MB jump the
@@ -305,7 +334,7 @@ pub(super) fn build_fetch_plan(
                 if *off >= 16_000_000 {
                     break;
                 }
-                burst.insert(id.as_str());
+                burst.insert(&**id);
             }
         }
         if let Some(&last) = data_slots.last() {
@@ -314,13 +343,12 @@ pub(super) fn build_fetch_plan(
                 if off + 8_000_000 <= *total {
                     break;
                 }
-                burst.insert(id.as_str());
+                burst.insert(&**id);
             }
         }
         if !burst.is_empty() {
-            let (mut early, rest): (Vec<_>, Vec<_>) = data_ids
-                .into_iter()
-                .partition(|r| burst.contains(r.id.as_str()));
+            let (mut early, rest): (Vec<_>, Vec<_>) =
+                data_ids.into_iter().partition(|r| burst.contains(&*r.id));
             early.extend(rest);
             data_ids = early;
         }
@@ -341,7 +369,7 @@ pub(super) fn build_fetch_plan(
         resume_deferred_bytes,
         resume_have_bytes,
         slots,
-        id_to_slot,
+        id_to_slot: Arc::new(id_to_slot),
         slot_file,
         slot_arts,
         ids,
@@ -360,7 +388,12 @@ pub(super) struct Intake {
     pub(super) job_posted: Option<i64>,
     pub(super) password: Option<String>,
     pub(super) journal: Arc<nzbkit::journal::Journal>,
+    /// Resume seeds only: `build_intake` MOVES `restored.ids` into
+    /// `completed`, so this arrives with an empty id set. Every consumer
+    /// (rig.rs, tail.rs) reads `.seeds`; ask `completed` for the ids.
     pub(super) restored: nzbkit::journal::Restored,
+    /// The resume id set, read once by `build_fetch_plan` and dropped
+    /// immediately after - never held across the fetch.
     pub(super) completed: HashSet<String>,
     pub(super) resuming: bool,
     pub(super) has_main: bool,
@@ -400,8 +433,9 @@ pub(super) struct Intake {
 /// genuinely doomed content, now paid at the end of the ladder.
 ///
 /// There is deliberately no "only if at least one server survives" guard.
-/// It counted SERVERS while verdicts are per BACKBONE - 3 omicron mirrors
-/// plus 1 xsnews passes it and drops 3 of 4 - and it is redundant here:
+/// It counted SERVERS while verdicts are per BACKBONE - 3 Highwinds
+/// mirrors plus 1 Abavia passes it and drops 3 of 4 - and it is
+/// redundant here:
 /// if every server is predicted gone they all land on the SAME new level,
 /// every `required_mask` is empty, and the run is exactly what it would
 /// have been with no verdict at all.
@@ -590,7 +624,7 @@ pub(super) fn build_intake(
     let journal = Arc::new(journal);
     // Plaintext-once (`D`) records re-encrypt through the password; with
     // no password those articles refetch instead - never guessed.
-    let restored = crate::persist::blocking_db(|| {
+    let mut restored = crate::persist::blocking_db(|| {
         nzbkit::journal::restore(out_dir, &resume_state, password.as_deref())
     });
     let mut completed = resume_state.completed;
@@ -605,8 +639,15 @@ pub(super) fn build_intake(
             restored.ids.len(),
             moved as f64 / 1e6
         );
-        completed.extend(restored.ids.iter().cloned());
+        // Move the ids in rather than cloning each one: the set is dead to
+        // `restored` after this (every later consumer - rig.rs, tail.rs -
+        // reads only `.seeds`), and a clone would hold a full second copy
+        // of every restored id alive for the whole run. The len() above is
+        // read BEFORE the take, so the banner is unchanged.
+        completed.extend(std::mem::take(&mut restored.ids));
     }
+    // Computed while `completed` is still whole - `get()` drops it as soon
+    // as the fetch plan is built.
     let resuming = !completed.is_empty();
 
     // Eager set: everything except PAR2 recovery volumes (minimality layer 1).
@@ -754,8 +795,74 @@ mod tests {
         )
     }
 
+    /// §129 4b: the post's own date reaches the hub, so the LIVE
+    /// verdict can tell "not here yet" from "not here any more". The
+    /// youngest article is the NEWEST date in the set.
+    #[test]
+    fn the_hub_gets_the_youngest_article_date() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">a@t</segment></segments>
+ </file>
+ <file subject='"m.part2.rar" yEnc (1/1)' date="1700086400">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">b@t</segment></segments>
+ </file>
+</nzb>"#);
+        let hub = Arc::new(crate::streamhub::StreamHub::default());
+        let opt = Some(hub.clone());
+        build_fetch_plan(
+            &n,
+            &opt,
+            &HashSet::new(),
+            false,
+            None,
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(
+            hub.post_unix.load(Ordering::Relaxed),
+            1_700_086_400,
+            "the newest date in the set is the youngest article"
+        );
+    }
+
+    /// One undated file and the whole answer is UNKNOWN, not a date
+    /// derived from the files that happened to carry one. Mirrors what
+    /// `take_census` does with the same NZB (its per-file minimum age
+    /// collapses to 0), and unknown must never read as "posted just
+    /// now" - that would promise a wait that may never end.
+    #[test]
+    fn one_undated_file_makes_the_post_date_unknown() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">a@t</segment></segments>
+ </file>
+ <file subject='"m.part2.rar" yEnc (1/1)'>
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">b@t</segment></segments>
+ </file>
+</nzb>"#);
+        let hub = Arc::new(crate::streamhub::StreamHub::default());
+        let opt = Some(hub.clone());
+        build_fetch_plan(
+            &n,
+            &opt,
+            &HashSet::new(),
+            false,
+            None,
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(hub.post_unix.load(Ordering::Relaxed), 0);
+    }
+
     fn ids_of(p: &FetchPlan) -> Vec<&str> {
-        p.ids.iter().map(|r| r.id.as_str()).collect()
+        p.ids.iter().map(|r| &*r.id).collect()
     }
 
     /// Queue order: the par2 main's articles first (the recovery set
@@ -805,15 +912,176 @@ mod tests {
         assert_eq!(
             p.slot_arts[0].0,
             vec![
-                (0, "<a@t>".to_string()),
-                (100, "<b@t>".to_string()),
-                (300, "<c@t>".to_string())
+                (0, std::sync::Arc::<str>::from("<a@t>")),
+                (100, std::sync::Arc::<str>::from("<b@t>")),
+                (300, std::sync::Arc::<str>::from("<c@t>"))
             ]
         );
         assert_eq!(p.slot_arts[0].1, 600);
         assert!(p.slot_arts[1].0.is_empty());
         // Fresh run: nothing pre-credited on the progress counter.
         assert_eq!(p.fetch_done.load(Ordering::Relaxed), 0);
+    }
+
+    /// R9 measurement (ignored - it is a number, not a gate). Builds a
+    /// plan for a 100k-segment job and reports the process RSS the
+    /// plan's three id holders cost: `id_to_slot`, the seek ladder, and
+    /// the queued `ArticleReq`s.
+    ///
+    /// Measured 20 Aug 2026, release, M-series, three runs each and
+    /// stable to +/-16 KB: 28,768 KB before the interning against 9,392
+    /// KB after, so 67% of the plan's id memory (19.4 MB at this size)
+    /// was the two duplicate copies. That is the RETAINED half of R9's
+    /// win only - the pool's per-article churn (inflight, done_ok, the
+    /// handed pair, promoted_ids) is transient and does not show here.
+    ///
+    /// Re-run on any tree, including one without the interning, since
+    /// the body is type-agnostic:
+    /// `cargo test -p nzbfast --release --bin nzbfast r9_plan_rss -- --ignored --nocapture`
+    /// macOS: ps is the portable-enough RSS read for a one-shot.
+    fn rss_kb() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// A field-scale NZB for the ignored RSS measurements: `files` rar
+    /// parts of `segs` segments each, with representative ~50-byte
+    /// (bracketed) powerpost message-ids.
+    fn field_scale_xml(files: usize, segs: usize) -> String {
+        let mut xml = String::from(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+        );
+        for f in 0..files {
+            xml.push_str(&format!(
+                " <file subject='\"big.part{f:03}.rar\" yEnc (1/{segs})' date=\"1700000000\">\n\
+                 <groups><group>alt.binaries.test</group></groups>\n<segments>\n"
+            ));
+            for s in 0..segs {
+                xml.push_str(&format!(
+                    "<segment bytes=\"768000\" number=\"{}\">part{f:03}seg{s:04}.\
+                     aBcDeFgHiJkLmNoPqRsT@powerpost.local</segment>\n",
+                    s + 1
+                ));
+            }
+            xml.push_str("</segments>\n </file>\n");
+        }
+        xml.push_str("</nzb>\n");
+        xml
+    }
+
+    #[test]
+    #[ignore]
+    fn r9_plan_rss_at_field_scale() {
+        const FILES: usize = 100;
+        const SEGS: usize = 1000;
+        let xml = field_scale_xml(FILES, SEGS);
+        let n = nzb(&xml);
+        drop(xml);
+        let before = rss_kb();
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        let after = rss_kb();
+        let ids: usize = p.slot_arts.iter().map(|(a, _)| a.len()).sum();
+        eprintln!(
+            "R9 plan RSS: {} segments, {} ladder entries, {} queued; \
+             RSS {} -> {} KB (delta {} KB)",
+            FILES * SEGS,
+            ids,
+            p.ids.len(),
+            before,
+            after,
+            after as i64 - before as i64
+        );
+        assert_eq!(p.ids.len(), FILES * SEGS);
+    }
+
+    /// C6 measurement (ignored - it is a number, not a gate). Prices
+    /// what the retained `Arc<Nzb>` itself holds at field scale: parse
+    /// one 100k-segment NZB to warm the allocator, then hold three more
+    /// copies and divide the RSS delta - the per-copy figure is the
+    /// manifest's retained footprint, dominated by `Segment` structs
+    /// and their unbracketed `message_id` Strings (which do NOT share
+    /// the plan's interned bracketed handles - see the R9 note at the
+    /// interning site above).
+    ///
+    /// Run: `cargo test -p nzbfast --release --bin nzbfast c6_nzb -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn c6_nzb_retained_rss_at_field_scale() {
+        const FILES: usize = 100;
+        const SEGS: usize = 1000;
+        const COPIES: usize = 3;
+        let xml = field_scale_xml(FILES, SEGS);
+        let warm = nzb(&xml);
+        let before = rss_kb();
+        let held: Vec<_> = (0..COPIES).map(|_| nzb(&xml)).collect();
+        let after = rss_kb();
+        eprintln!(
+            "C6 Arc<Nzb> retained: {} segments; {COPIES} extra copies cost \
+             RSS {before} -> {after} KB ({} KB per copy)",
+            FILES * SEGS,
+            (after as i64 - before as i64) / COPIES as i64,
+        );
+        assert_eq!(warm.files.len(), FILES);
+        drop(held);
+    }
+
+    /// R9: the plan interns each bracketed id ONCE, and the three
+    /// holders it hands out share that one allocation. Pointer
+    /// equality, not string equality - the whole point of the change is
+    /// that `id_to_slot`, the seek ladder and the queued `ArticleReq`
+    /// stop being three full copies of the run's id set, and only
+    /// `Arc::ptr_eq` can tell a shared handle from an equal string. A
+    /// future `format!("<{}>", ..)` re-introduced on any of these paths
+    /// still passes every other test in this file; it fails here.
+    #[test]
+    fn the_plan_interns_each_id_once() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="100" number="1">a@t</segment>
+   <segment bytes="200" number="2">b@t</segment>
+  </segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        // Every ladder entry is the same allocation as its `id_to_slot`
+        // key and as the `ArticleReq` the pool was handed.
+        let ladder = &p.slot_arts[0].0;
+        assert_eq!(ladder.len(), 2, "both segments on the ladder");
+        for (_, id) in ladder {
+            let (key, _) = p
+                .id_to_slot
+                .get_key_value(&**id)
+                .expect("every ladder id owns a slot");
+            assert!(
+                std::sync::Arc::ptr_eq(key, id),
+                "{id}: the ladder holds a COPY of the id_to_slot key, not the handle"
+            );
+            let req = p
+                .ids
+                .iter()
+                .find(|r| *r.id == **id)
+                .expect("every ladder id is queued");
+            assert!(
+                std::sync::Arc::ptr_eq(&req.id, id),
+                "{id}: the ArticleReq holds a COPY of the ladder id, not the handle"
+            );
+        }
+        // And the count is exactly one strong reference per holder, so
+        // a fourth copy cannot hide behind an equal string either.
+        assert_eq!(
+            std::sync::Arc::strong_count(&ladder[0].1),
+            3,
+            "id_to_slot + ladder + ArticleReq, and nothing else"
+        );
     }
 
     /// The sample skip, end to end at plan level: the teaser's articles
@@ -1147,9 +1415,9 @@ mod tests {
     #[test]
     fn three_mirrors_plus_one_keeps_every_server() {
         let mut servers = vec![
-            srv("news.omicron-a.example", 0),
-            srv("news.omicron-b.example", 0),
-            srv("news.omicron-c.example", 0),
+            srv("news.mirror-a.example", 0),
+            srv("news.mirror-b.example", 0),
+            srv("news.mirror-c.example", 0),
             srv("news.xsnews.nl", 0),
         ];
         let gone: Vec<String> = servers[..3].iter().map(|s| s.host.clone()).collect();

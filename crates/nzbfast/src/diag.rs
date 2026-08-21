@@ -85,10 +85,19 @@ pub(crate) fn print_failure_diagnostics(
         };
         let outcome = if st.ever_connected {
             format!(
-                "served {:.1} MB ({} connects, {} reconnects)",
+                "served {:.1} MB ({} connects, {} reconnects){}",
                 st.bytes as f64 / 1e6,
                 st.connects,
-                st.reconnects
+                st.reconnects,
+                // A3: the bug-report block is where someone reading a
+                // failed job first looks, and "served 4.2 GB" alone hides
+                // the single most misleading thing a run can do - lose a
+                // server half way and keep counting the rest as unanimous.
+                if st.left_mid_run {
+                    " then LEFT THE RUN with work outstanding"
+                } else {
+                    ""
+                }
             )
         } else {
             "NO USABLE CONNECTION for the entire run".to_string()
@@ -122,7 +131,8 @@ pub(crate) fn print_failure_diagnostics(
 /// `fail_kind` and the tests pin the opening, so additions must append):
 /// segments excluded by a configured `retention_days`, transport-error
 /// losses with the first error quoted, servers that never held a usable
-/// connection for the whole run, and repair's block arithmetic. All of
+/// connection for the whole run, servers that served and then left it
+/// part-way through, and repair's block arithmetic. All of
 /// it turns "missing segments" from a dead-post verdict into something
 /// the user can act on - the Hblife report ("every file failed, SAB got
 /// them fine") was undiagnosable precisely because the summary never
@@ -137,6 +147,13 @@ pub(crate) fn print_failure_diagnostics(
 pub(crate) struct LossCauses<'a> {
     /// Segments where every live server was asked and said 430/423.
     pub(crate) missing_430: u64,
+    /// Of those, segments where at least one refusing server SAID the
+    /// article was removed (Giganews's documented 451, or refusal text
+    /// naming a takedown) rather than merely not found. Wording only -
+    /// a takedown-flavoured refusal is still exactly one refusal for
+    /// every count and verdict above, and 0 is no evidence either way
+    /// (most backbones never name the reason).
+    pub(crate) takedown_430: u64,
     /// Never requested: outside every server's configured retention.
     pub(crate) retention_excluded: u64,
     /// Lost to transport errors (timeouts, resets, exhausted retries).
@@ -150,8 +167,34 @@ pub(crate) struct LossCauses<'a> {
     /// still damage, and a journal-resume retry can fetch clean parity
     /// from another provider (Codex sweep 5, M6).
     pub(crate) recovery_errs: u64,
+    /// Segments LOST on recovery slots - the recovery-side share of
+    /// `missing_430` + `transport_failed` + `retention_excluded`, which
+    /// count every slot alike while `missing_segments` and `derrs` are
+    /// payload-only. The two gates that ask "did the PAYLOAD lose
+    /// anything to this cause?" need this to subtract the recovery
+    /// noise: one 430 on a `.vol` article used to defeat the
+    /// size-header verdict and produce "1 file(s) with missing
+    /// segments; 0 of 240 segment(s) never arrived" in one breath
+    /// (error-detection audit 20 Aug, A2).
+    pub(crate) recovery_lost: u64,
     /// Servers with no usable connection at any point in the run.
     pub(crate) dead_servers: &'a [String],
+    /// Servers that connected and served and then LEFT before the run
+    /// ended - a permanent refusal, a spent block or quota, the outage
+    /// budget blown, the connect-attempt cap.
+    ///
+    /// The quorum shrank part-way through and nothing said so: the pool
+    /// decides terminal outcomes against `live_mask` (alive NOW), so
+    /// once a server's last worker retires, the survivors' 430s on the
+    /// segments it alone still had to answer for read as unanimous.
+    /// `dead_servers` could not carry this - it keys on
+    /// `!ever_connected`, which is FALSE for a server that worked for
+    /// ten minutes first. Consequences of the silence: `post_gone`
+    /// firing on a healthy post, and `missing_articles_proven_stale`
+    /// seeing no ambiguity and suppressing the one automatic retry -
+    /// which also makes the failure final (error-detection audit 20
+    /// Aug, A3).
+    pub(crate) left_servers: &'a [String],
     /// PAR2 recovery slots the NZB carries. Zero means the post has no
     /// parity at all, so a confirmed-missing segment can never be
     /// reconstructed and no amount of retrying changes that.
@@ -259,13 +302,29 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // for every article asked for), never the mere ABSENCE of other
         // causes - a caller with no per-slot accounting leaves the totals
         // at 0 and must fall through to the classic opening.
+        // The byte belt tolerates arrivals when the post carries
+        // recovery slots: `bytes_arrived` is wire bytes over ALL slots,
+        // so a takedown that left the `.par2` volumes up (a common
+        // shape) used to block this verdict on the parity's bytes alone
+        // and spend a pointless full retry proving the same payload
+        // absent. The payload side needs no byte belt - the census term
+        // above it already says every payload segment resolved to
+        // nothing (error-detection audit 20 Aug, A2).
         let post_gone = causes.total_segments > 0
             && causes.missing_segments >= causes.total_segments
-            && causes.bytes_arrived == 0
+            && (causes.bytes_arrived == 0 || causes.par2_slots > 0)
             && causes.missing_430 > 0
             && causes.transport_failed == 0
             && causes.retention_excluded == 0
             && causes.dead_servers.is_empty()
+            // A server that served and then LEFT disqualifies the verdict
+            // for exactly the reason a server that never connected does:
+            // from the moment its last worker retired it stopped voting,
+            // and "not one article is on ANY server" is a claim about a
+            // quorum that was still whole. It is the more dangerous of the
+            // two, because `ever_connected` stays true and nothing else in
+            // this struct would have noticed (audit 20 Aug, A3).
+            && causes.left_servers.is_empty()
             && causes.post_age_days >= GONE_MIN_AGE_DAYS;
         // Every article accounted for, nothing lost anywhere, and files
         // short all the same: that is the yEnc coverage census speaking,
@@ -289,24 +348,36 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // A corrupt article is exactly the case a journal-resume retry
         // can heal, so the previous opening was RIGHT for it: the bytes
         // were posted, they merely arrived damaged.
+        // The three cause counters count every slot alike, but the two
+        // payload terms above them (`missing_segments`, `derrs`) are
+        // payload-only - so one 430 on a `.vol` article used to defeat
+        // this verdict and fall through to "1 file(s) with missing
+        // segments; 0 of 240 segment(s) never arrived" in one breath,
+        // the exact self-contradiction this branch exists to eliminate.
+        // Any PAYLOAD loss shows in `missing_segments` (every cause
+        // routes through `article_lost`, which bumps the slot), so the
+        // cause counters here only need to not exceed the recovery-side
+        // losses the census counted separately. `<=` and not `==`,
+        // because an outcome whose id maps to no slot bumps a counter
+        // and no slot - that pushes the sum OVER and blocks the verdict,
+        // which is the conservative direction (audit 20 Aug, A2).
         let size_header_lies = causes.total_segments > 0
             && causes.missing_segments == 0
             && derrs == 0
-            && causes.missing_430 == 0
-            && causes.transport_failed == 0
-            && causes.retention_excluded == 0;
+            && causes.missing_430 + causes.transport_failed + causes.retention_excluded
+                <= causes.recovery_lost;
         let mut msg = if size_header_lies {
             format!(
-                "post size header disagrees with its parts: every article arrived and \
-                 decoded, but {incomplete} file(s) declare more bytes than the post \
-                 actually carries, {derrs} decode/write errors. Re-downloading cannot \
-                 change this - the missing bytes were never posted"
+                "post size header disagrees with its parts: every payload article \
+                 arrived and decoded, but {incomplete} file(s) declare more bytes than \
+                 the post actually carries, {derrs} decode/write errors. Re-downloading \
+                 cannot change this - the missing bytes were never posted"
             )
         } else if post_gone {
             format!(
                 "post is gone: not one of the {} article(s) is on any server - all \
-                 {incomplete} file(s) came back empty and not a byte arrived, \
-                 {derrs} decode/write errors",
+                 {incomplete} file(s) came back empty and none of the payload \
+                 arrived, {derrs} decode/write errors",
                 causes.total_segments
             )
         } else if all_transport {
@@ -414,6 +485,31 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                 causes.missing_430
             ));
         }
+        // The takedown flavour, where a server actually named it. Most
+        // backbones answer a plain "no such article" for a takedown and
+        // a not-yet-propagated post alike, so this clause only appears
+        // when a refusal put "removed" on the record - and then it is
+        // the most diagnostic thing the summary can say: the copy was
+        // taken down, so waiting cannot help and another version of the
+        // release is the answer. Deliberately an appended CLAUSE and
+        // never an opening: `fail_kind` classifies on the opening, and
+        // a takedown hint must not move the verdict class (a hint,
+        // never a gate). The dominant form says so outright; a minority
+        // of flagged segments only states the fact.
+        if causes.takedown_430 > 0 {
+            let (t, m) = (causes.takedown_430, causes.missing_430);
+            if t * 2 >= m {
+                msg.push_str(&format!(
+                    "; a server reported {t} of the {m} refused segment(s) as removed \
+                     for a takedown request, so this copy was taken down rather than \
+                     lost in propagation - another release is the likely answer"
+                ));
+            } else {
+                msg.push_str(&format!(
+                    "; a server reported {t} segment(s) as removed for a takedown request"
+                ));
+            }
+        }
         if causes.retention_excluded > 0 {
             msg.push_str(&format!(
                 "; {} segment(s) were never requested because they are older than every \
@@ -439,6 +535,23 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                  refused the login) - segments only that server carries were counted \
                  as missing",
                 causes.dead_servers.join(", ")
+            ));
+        }
+        // Its mid-run twin, and deliberately its OWN sentence rather than
+        // a second host in the clause above. To the user these are
+        // different facts: one server was never any use, the other worked
+        // and then stopped, which is what a spent block, an expired
+        // account or a takedown-shaped refusal looks like from here, and
+        // it is the one they can often fix. To the retry gate they are the
+        // same fact - the quorum was short - so the wording carries its
+        // own exclusion in `missing_articles_proven_stale`, pinned by
+        // `a_server_that_left_mid_run_is_never_proven_stale`.
+        if !causes.left_servers.is_empty() {
+            msg.push_str(&format!(
+                "; {} served for part of the run and then stopped (refused, out of \
+                 quota, or unreachable for too long) - segments only that server \
+                 carries were decided without it",
+                causes.left_servers.join(", ")
             ));
         }
         // How many INDEPENDENT opinions the verdict rests on. Only where
@@ -546,6 +659,30 @@ pub(crate) fn missing_articles_proven_stale(msg: &str) -> bool {
         // articles are bytes that were posted, so a journal-resume retry
         // can still heal them however old the post is.
         && !msg.contains("damaged articles rather than absent ones")
+        // Fourth exclusion, and the purest ambiguous loss of the lot:
+        // retention-excluded segments were never REQUESTED - the
+        // configured retention_days pre-seeded the refusal mask, so no
+        // server ever gave an opinion. An old post behind a mis-set
+        // retention_days therefore looked exactly like a proven-dead
+        // one, lost its retry, and the suppression made the failure
+        // final: indexer dead-report, FailureLink re-grab, duplicate
+        // promotion - all from the user's own settings row. Fixing the
+        // setting and retrying is precisely what heals it.
+        && !msg.contains("older than every server's configured retention")
+        // Fifth exclusion, the mid-run twin of the second one above. A
+        // server that authenticated, served, and then left (permanent
+        // refusal, spent block or quota, outage budget blown,
+        // connect-attempt cap) shrinks the quorum silently: from that
+        // moment `live_mask` stops counting it, so the survivors' 430s on
+        // the segments it alone carried resolve "unanimous" without it.
+        // That is an ambiguous loss by the same definition as a server
+        // that never connected, and it must not lose the run its one
+        // automatic retry - a suppressed retry is also FINAL (indexer
+        // dead-report, FailureLink re-grab, duplicate promotion). The
+        // clause text IS the contract; the round trip is pinned by
+        // `a_server_that_left_mid_run_is_never_proven_stale` (audit 20
+        // Aug, A3).
+        && !msg.contains("served for part of the run and then stopped")
 }
 
 /// A zip an extraction pass reported and could not produce, with the
@@ -858,6 +995,7 @@ mod main_tests {
             &LossCauses {
                 stalled: true,
                 missing_430: 2031,
+                takedown_430: 0,
                 par2_slots: 4,
                 ..no_causes()
             },
@@ -896,6 +1034,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 2031,
+                takedown_430: 0,
                 par2_slots: 0,
                 ..no_causes()
             },
@@ -916,6 +1055,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 5,
+                takedown_430: 0,
                 par2_slots: 4,
                 ..no_causes()
             },
@@ -974,6 +1114,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 9,
+                takedown_430: 0,
                 ..no_causes()
             },
         );
@@ -984,16 +1125,140 @@ mod main_tests {
         );
     }
 
+    /// A3: a server that authenticated, served, and then LEFT before the
+    /// run ended must reach the user in the message, must never let the
+    /// `post_gone` verdict fire, and must never let the one automatic
+    /// retry be suppressed.
+    ///
+    /// The mechanism: terminal outcomes are decided against `live_mask`,
+    /// which counts servers that are alive NOW. The moment a server's
+    /// last worker retires (a permanent refusal, a spent block or quota,
+    /// the outage budget blown, the connect-attempt cap) the quorum
+    /// shrinks and nothing says so - `dead_servers` keys on
+    /// `!ever_connected`, which is FALSE for a server that worked first.
+    /// So the survivors' 430s on the segments only that server carried
+    /// read as unanimous, and a healthy post could be reported gone, its
+    /// retry suppressed, and the release dead-reported to the indexer.
+    ///
+    /// This pins the PRODUCER/PARSER round trip, exactly as
+    /// `an_ambiguous_loss_is_never_proven_stale` does for the other four
+    /// exclusions: the gate reads the clause back off the message, so
+    /// the wording IS the contract and prose gets rewritten.
+    #[test]
+    fn a_server_that_left_mid_run_is_never_proven_stale() {
+        let left: Vec<String> = vec!["news.blockprov.example".to_string()];
+        fn causes(left: &[String]) -> LossCauses<'_> {
+            LossCauses {
+                missing_430: 12,
+                missing_segments: 1965,
+                total_segments: 4506,
+                bytes_arrived: 1_879_000_000,
+                post_age_days: 9,
+                left_servers: left,
+                ..no_causes()
+            }
+        }
+        let msg = super::incomplete_reason(1, 0, &causes(&left));
+        // The clause the user reads: it says the server WORKED and then
+        // stopped, which is a different fact from never connecting, and
+        // it says what that cost the verdict.
+        assert!(
+            msg.contains("news.blockprov.example served for part of the run and then stopped"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("decided without it"),
+            "the clause has to say what the departure cost the verdict: {msg}"
+        );
+        // Distinct from the never-connected clause: the user must not be
+        // told a server that served them was unreachable all run.
+        assert!(
+            !msg.contains("no usable connection"),
+            "a server that served must not be described as never connecting: {msg}"
+        );
+        // The age is still stated - that is honest, and Gary asked for it.
+        assert!(msg.contains("well past the minutes-to-hours"), "{msg}");
+        assert!(
+            !super::missing_articles_proven_stale(&msg),
+            "segments decided after a server walked out are not proven absent: {msg}"
+        );
+        // Appending a clause must not move the OPENING: `fail_kind` and
+        // the *arr health mapping key on it.
+        assert!(msg.starts_with("download incomplete"), "{msg}");
+        assert_eq!(
+            crate::serve::fail_kind(&msg),
+            crate::serve::FailKind::MissingArticles
+        );
+
+        // Control: the identical run with every server present all the
+        // way through is still proven stale and still loses its retry.
+        let whole = super::incomplete_reason(1, 0, &causes(&[]));
+        assert!(
+            super::missing_articles_proven_stale(&whole),
+            "a full quorum on an aged post must still suppress its retry: {whole}"
+        );
+    }
+
+    /// The `post_gone` half of A3: "not one article is on any server" is
+    /// a claim about a quorum that was still whole when the last verdict
+    /// landed. A server that served and then left makes it unsafe for
+    /// the same reason a server that never connected does - and it is
+    /// the more dangerous of the two, because `ever_connected` stays
+    /// true and nothing else in `LossCauses` would have noticed.
+    #[test]
+    fn a_server_leaving_mid_run_disqualifies_the_gone_verdict() {
+        let left: Vec<String> = vec!["news.blockprov.example".to_string()];
+        fn gone_shape(left: &[String]) -> LossCauses<'_> {
+            LossCauses {
+                missing_430: 12_018,
+                missing_segments: 12_018,
+                total_segments: 12_018,
+                bytes_arrived: 0,
+                post_age_days: 21,
+                left_servers: left,
+                ..no_causes()
+            }
+        }
+        // Control: the whole fleet answered, so the verdict stands.
+        let whole = super::incomplete_reason(94, 0, &gone_shape(&[]));
+        assert!(whole.starts_with("post is gone"), "{whole}");
+        assert_eq!(
+            crate::serve::fail_kind(&whole),
+            crate::serve::FailKind::Gone
+        );
+
+        let short_quorum = super::incomplete_reason(94, 0, &gone_shape(&left));
+        assert!(
+            !short_quorum.starts_with("post is gone"),
+            "a post cannot be called gone by a quorum that shrank mid-run: {short_quorum}"
+        );
+        assert!(
+            short_quorum.starts_with("download incomplete"),
+            "{short_quorum}"
+        );
+        // And it keeps its retry: Gone never retries, MissingArticles does.
+        let kind = crate::serve::fail_kind(&short_quorum);
+        assert_eq!(kind, crate::serve::FailKind::MissingArticles);
+        assert!(kind.transient(), "{short_quorum}");
+        assert!(
+            !super::missing_articles_proven_stale(&short_quorum),
+            "{short_quorum}"
+        );
+    }
+
     /// A LossCauses with nothing known - each test overrides one field.
     fn no_causes() -> LossCauses<'static> {
         LossCauses {
             missing_430: 0,
+            takedown_430: 0,
             retention_excluded: 0,
             transport_failed: 0,
             transport_sample: None,
             decode_sample: None,
             recovery_errs: 0,
+            recovery_lost: 0,
             dead_servers: &[],
+            left_servers: &[],
             par2_slots: 1,
             stalled: false,
             missing_segments: 0,
@@ -1014,6 +1279,7 @@ mod main_tests {
     fn a_local_write_fault_does_not_claim_missing_segments() {
         let c = LossCauses {
             missing_430: 3,
+            takedown_430: 0,
             ..no_causes()
         };
         let missing = super::incomplete_reason(3, 0, &c);
@@ -1045,6 +1311,66 @@ mod main_tests {
             },
         );
         assert!(sampled.contains("No space left on device"), "{sampled}");
+    }
+
+    /// The takedown flavour: when a server put "removed" on the record,
+    /// the summary says so - dominant misses get the plain-language
+    /// verdict, a minority gets the bare fact, and zero flagged (the
+    /// normal case on backbones that never name the reason) leaves the
+    /// message exactly as before. The clause is APPENDED: the opening,
+    /// and with it `fail_kind`, must not move for a hint.
+    #[test]
+    fn takedown_flavoured_refusals_are_named_but_never_reclassify() {
+        // Dominant: most refused segments carried a removal notice.
+        let dominant = super::incomplete_reason(
+            2,
+            0,
+            &LossCauses {
+                missing_430: 10,
+                takedown_430: 9,
+                ..no_causes()
+            },
+        );
+        assert!(dominant.starts_with("download incomplete"), "{dominant}");
+        assert!(
+            dominant.contains("9 of the 10 refused segment(s) as removed for a takedown request"),
+            "{dominant}"
+        );
+        assert!(
+            dominant.contains("another release is the likely answer"),
+            "{dominant}"
+        );
+
+        // Minority: state the fact, claim no verdict.
+        let minority = super::incomplete_reason(
+            2,
+            0,
+            &LossCauses {
+                missing_430: 10,
+                takedown_430: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            minority.contains("a server reported 1 segment(s) as removed for a takedown request"),
+            "{minority}"
+        );
+        assert!(
+            !minority.contains("likely answer"),
+            "a minority of flagged refusals must not claim the verdict: {minority}"
+        );
+
+        // Unflagged: nothing new appears anywhere in the message.
+        let plain = super::incomplete_reason(
+            2,
+            0,
+            &LossCauses {
+                missing_430: 10,
+                takedown_430: 0,
+                ..no_causes()
+            },
+        );
+        assert!(!plain.contains("takedown"), "{plain}");
     }
 
     /// A run where NO server ever said 430 is a provider problem, not a
@@ -1080,6 +1406,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 2,
+                takedown_430: 0,
                 transport_failed: 38,
                 transport_sample: Some("read timed out".into()),
                 ..no_causes()
@@ -1123,6 +1450,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 9,
+                takedown_430: 0,
                 dead_servers: &hosts,
                 ..no_causes()
             },
@@ -1140,6 +1468,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 1,
+                takedown_430: 0,
                 retention_excluded: 7,
                 dead_servers: &two,
                 ..no_causes()
@@ -1177,6 +1506,7 @@ mod main_tests {
                 0,
                 &LossCauses {
                     missing_430: 1965,
+                    takedown_430: 0,
                     missing_segments: 1965,
                     total_segments: 4506,
                     bytes_arrived: 1_879_000_000,
@@ -1250,6 +1580,7 @@ mod main_tests {
                 0,
                 &LossCauses {
                     missing_430: 1965,
+                    takedown_430: 0,
                     missing_segments: 1965,
                     total_segments: 4506,
                     bytes_arrived: 1_879_000_000,
@@ -1296,6 +1627,7 @@ mod main_tests {
         fn causes(transport: u64, dead: &[String]) -> LossCauses<'_> {
             LossCauses {
                 missing_430: 12,
+                takedown_430: 0,
                 missing_segments: 1965,
                 total_segments: 4506,
                 bytes_arrived: 1_879_000_000,
@@ -1374,6 +1706,29 @@ mod main_tests {
             !super::missing_articles_proven_stale(&parity),
             "corrupt parity is re-fetchable at any age: {parity}"
         );
+
+        // Retention-excluded segments were never REQUESTED: the
+        // configured retention_days pre-seeded the refusal mask, so no
+        // server gave an opinion about them. Age proves nothing about a
+        // question nobody was asked - and an old post is exactly the one
+        // a retention setting excludes, so without this exclusion the
+        // user's own settings row suppressed the retry and went final.
+        let excluded = super::incomplete_reason(
+            1,
+            0,
+            &LossCauses {
+                retention_excluded: 1900,
+                ..causes(0, &[])
+            },
+        );
+        assert!(
+            excluded.contains("older than every server's configured retention"),
+            "{excluded}"
+        );
+        assert!(
+            !super::missing_articles_proven_stale(&excluded),
+            "a retention exclusion is a settings problem, not a dead post: {excluded}"
+        );
         // The narrower shape the challenger established, and it needs no
         // 430 at all: a decode error makes `incomplete` non-zero on its
         // own, so an aged post whose ONLY fault is corrupt payload took
@@ -1383,6 +1738,7 @@ mod main_tests {
             2,
             &LossCauses {
                 missing_430: 0,
+                takedown_430: 0,
                 missing_segments: 0,
                 ..causes(0, &[])
             },
@@ -1406,6 +1762,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 3,
+                takedown_430: 0,
                 missing_segments: 3,
                 total_segments: 12_018,
                 bytes_arrived: 8_100_000_000,
@@ -1431,6 +1788,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 3,
+                takedown_430: 0,
                 ..no_causes()
             },
         );
@@ -1447,12 +1805,13 @@ mod main_tests {
     /// never on the absence of other causes.
     #[test]
     fn a_wholly_dead_post_says_so() {
-        let backbones = ["omicron".to_string(), "usenetexpress".to_string()];
+        let backbones = ["highwinds".to_string(), "usenetexpress".to_string()];
         let gone = super::incomplete_reason(
             94,
             0,
             &LossCauses {
                 missing_430: 12_018,
+                takedown_430: 0,
                 missing_segments: 12_018,
                 total_segments: 12_018,
                 bytes_arrived: 0,
@@ -1466,11 +1825,53 @@ mod main_tests {
         assert!(gone.contains("all 94 file(s)"), "{gone}");
         // Two providers of one backbone are ONE opinion; the count says so.
         assert!(
-            gone.contains("asked 2 backbone(s): omicron, usenetexpress"),
+            gone.contains("asked 2 backbone(s): highwinds, usenetexpress"),
             "{gone}"
         );
         // Already said every article was absent - no census on top.
         assert!(!gone.contains("segment(s) never arrived"), "{gone}");
+
+        // Audit 20 Aug, A2: a takedown that left the `.par2` volumes up
+        // is the COMMON gone shape, and `bytes_arrived` counts every
+        // slot's wire bytes - so the parity's bytes used to block this
+        // verdict and the job spent a full retry re-proving the same
+        // payload absent. The census terms are payload-only and already
+        // say nothing payload arrived; recovery bytes are tolerated.
+        let parity_survived = super::incomplete_reason(
+            94,
+            0,
+            &LossCauses {
+                missing_430: 12_018,
+                missing_segments: 12_018,
+                total_segments: 12_018,
+                bytes_arrived: 312_000_000,
+                post_age_days: 21,
+                ..no_causes()
+            },
+        );
+        assert!(
+            parity_survived.starts_with("post is gone"),
+            "surviving parity bytes must not veto a wholly-dead payload: {parity_survived}"
+        );
+        // Without recovery slots those bytes are unexplained, and the
+        // old belt stands: unexplained arrivals block the verdict.
+        let unexplained = super::incomplete_reason(
+            94,
+            0,
+            &LossCauses {
+                missing_430: 12_018,
+                missing_segments: 12_018,
+                total_segments: 12_018,
+                bytes_arrived: 312_000_000,
+                post_age_days: 21,
+                par2_slots: 0,
+                ..no_causes()
+            },
+        );
+        assert!(
+            unexplained.starts_with("download incomplete"),
+            "{unexplained}"
+        );
 
         // One byte arrived: the post is damaged, not dead.
         let damaged = super::incomplete_reason(
@@ -1478,6 +1879,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 12_017,
+                takedown_430: 0,
                 missing_segments: 12_017,
                 total_segments: 12_018,
                 bytes_arrived: 1,
@@ -1508,6 +1910,43 @@ mod main_tests {
             "{lying}"
         );
 
+        // Audit 20 Aug, A2: the cause counters count RECOVERY slots too,
+        // while `missing_segments` is payload-only - so one 430 on a
+        // `.vol` article used to defeat this verdict and fall through to
+        // "1 file(s) with missing segments; 0 of 240 segment(s) never
+        // arrived" in one breath, arming a retry that replays the same
+        // spans to the same gap. Losses the census attributes to
+        // recovery slots must not veto a payload-side verdict.
+        let lying_vol_430 = super::incomplete_reason(
+            1,
+            0,
+            &LossCauses {
+                total_segments: 240,
+                missing_430: 1,
+                recovery_lost: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            lying_vol_430.starts_with("post size header disagrees with its parts"),
+            "a recovery-slot 430 must not defeat the size-header verdict: {lying_vol_430}"
+        );
+        // A loss NOT accounted to a recovery slot is (or may be) payload
+        // loss, and the verdict stands down exactly as before.
+        let lying_payload_430 = super::incomplete_reason(
+            1,
+            0,
+            &LossCauses {
+                total_segments: 240,
+                missing_430: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            lying_payload_430.starts_with("download incomplete"),
+            "{lying_payload_430}"
+        );
+
         // ...but a DECODE error is not that. The article was posted and
         // arrived, it merely arrived damaged, so `missing_segments`
         // stays at zero while the bytes are a real gap. Claiming "every
@@ -1533,6 +1972,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 12_018,
+                takedown_430: 0,
                 missing_segments: 12_018,
                 total_segments: 12_018,
                 bytes_arrived: 0,
@@ -1550,6 +1990,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 12_000,
+                takedown_430: 0,
                 transport_failed: 18,
                 missing_segments: 12_018,
                 total_segments: 12_018,
@@ -1575,6 +2016,7 @@ mod main_tests {
                 0,
                 &LossCauses {
                     missing_430: 900,
+                    takedown_430: 0,
                     missing_segments: 900,
                     total_segments: 900,
                     bytes_arrived: 0,
@@ -1605,17 +2047,18 @@ mod main_tests {
     /// unanimous verdict.
     #[test]
     fn backbones_are_named_only_when_someone_voted() {
-        let backbones = ["omicron".to_string()];
+        let backbones = ["highwinds".to_string()];
         let voted = super::incomplete_reason(
             1,
             0,
             &LossCauses {
                 missing_430: 5,
+                takedown_430: 0,
                 backbones: &backbones,
                 ..no_causes()
             },
         );
-        assert!(voted.contains("asked 1 backbone(s): omicron"), "{voted}");
+        assert!(voted.contains("asked 1 backbone(s): highwinds"), "{voted}");
 
         let no_vote = super::incomplete_reason(
             1,
@@ -1638,6 +2081,7 @@ mod main_tests {
             0,
             &LossCauses {
                 missing_430: 5,
+                takedown_430: 0,
                 backbones: &[],
                 ..no_causes()
             },

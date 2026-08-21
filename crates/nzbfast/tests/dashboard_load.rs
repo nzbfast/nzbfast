@@ -302,6 +302,84 @@ fn a_year_of_history_does_not_tax_an_unchanged_refresh() {
     );
 }
 
+/// Gate 3: a bare `mode=history` is a page, not the whole store.
+///
+/// The SAB facade page is ungated - unlike the dashboard poll, which
+/// api/queue.rs revision-gates and clamps to 1..=500 - so before
+/// `HISTORY_DEFAULT_LIMIT` every bare request rendered every row of
+/// every client's poll: 554 ms and 512 MB of transient allocation at
+/// 105,000 rows (20 Aug measurement, "C8 measured"). The bound has to
+/// hold without taking anything away from a client that asks properly,
+/// so all four halves are pinned together: the default caps, an
+/// explicit `limit=0` reads as SAB reads it, a bigger explicit window
+/// is still served in full, and a named id is still found past the cap.
+#[test]
+fn a_bare_history_request_is_bounded() {
+    let dir = scratch("barehist");
+    seed_history_jsonl(&dir, 8760);
+    let d = serve(&dir);
+    let port = d.port;
+
+    // The default cap, and the total still reported in full so a client
+    // knows how far it has to page.
+    let (bare, bare_bytes) = api_raw(port, "mode=history");
+    assert_eq!(
+        bare["history"]["slots"].as_array().map(Vec::len),
+        Some(500),
+        "a bare mode=history was not capped: {}",
+        bare["history"]["noofslots"]
+    );
+    assert_eq!(bare["history"]["noofslots"], 8760, "{bare}");
+
+    // SAB's `if not limit` treats an explicit zero as "none given"; so
+    // do we. This is the shape an older client borrows from the queue
+    // call, and answering it with the year would reopen the hole.
+    let zero = api(port, "mode=history&limit=0");
+    assert_eq!(
+        zero["history"]["slots"].as_array().map(Vec::len),
+        Some(500),
+        "limit=0 was read as unbounded: {}",
+        zero["history"]["noofslots"]
+    );
+
+    // Asking IS still answered: an explicit window past the default is
+    // served whole - paging is the escape hatch for the whole store.
+    let wide = api(port, "mode=history&start=0&limit=1000");
+    assert_eq!(
+        wide["history"]["slots"].as_array().map(Vec::len),
+        Some(1000),
+        "an explicit limit was clamped: {}",
+        wide["history"]["noofslots"]
+    );
+
+    // And the cap is what makes the difference, not some other filter:
+    // the whole-store render is an order of magnitude heavier.
+    let (all, all_bytes) = api_raw(port, "mode=history&start=0&limit=8760");
+    assert_eq!(
+        all["history"]["slots"].as_array().map(Vec::len),
+        Some(8760),
+        "{}",
+        all["history"]["noofslots"]
+    );
+    assert!(
+        bare_bytes * 8 < all_bytes,
+        "the bare page weighed {bare_bytes} bytes against {all_bytes} for the whole store - \
+         the default cap is not bounding anything"
+    );
+
+    // Direct id selection bypasses the window, as it always has (SAB
+    // semantics). y10 is the 8750th row newest-first: far outside any
+    // window, and the only way the dashboard's row drawer and an *arr
+    // asking about one grab can find it.
+    let byid = api(port, "mode=history&nzo_ids=SABnzbd_nzo_y10");
+    let slots = byid["history"]["slots"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(slots.len(), 1, "{byid}");
+    assert_eq!(slots[0]["nzo_id"], "SABnzbd_nzo_y10", "{byid}");
+}
+
 /// Gate 2: five open tabs cannot starve the 8-worker pool. Five threads
 /// poll the revisioned round-trip at 1 Hz against the year-deep daemon
 /// while a sixth pages through history; throughout, `mode=version` and

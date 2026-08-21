@@ -1,10 +1,8 @@
 //! Small shared helpers for the API surface: person-art URLs and
-//! thumbnails, the nzo_ids selector, and slot pagination.
+//! thumbnails, the nzo_ids selector, and the start/limit window.
 //!
 //! Split out of serve/mod.rs by TODO 106 phase 4 - the code is verbatim,
 //! only visibility changed.
-
-use super::*;
 
 /// A person's headshot URL, or "" when the cache does not hold one.
 ///
@@ -82,24 +80,24 @@ pub(super) fn nzo_ids_param(
     (!set.is_empty()).then_some(set)
 }
 
-/// start/limit pagination over already-built slots (SAB semantics: both
-/// optional; limit 0 = everything).
-pub(super) fn paginate(
-    slots: Vec<Value>,
-    params: &std::collections::HashMap<String, String>,
-) -> Vec<Value> {
-    let start: usize = params
-        .get("start")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let limit: usize = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let it = slots.into_iter().skip(start);
-    if limit == 0 {
-        it.collect()
-    } else {
-        it.take(limit).collect()
-    }
+/// The caller's start/limit window, SAB semantics: both optional,
+/// absent or unparseable is 0, and limit 0 means "everything from
+/// `start`". ONE parse, because three places now act on the same
+/// answer - `paginate` below, the header's echoed `start`/`limit`, and
+/// `queue_json`'s walk, which skips building the rows outside it. Two
+/// of those disagreeing would page one way and report another.
+pub(super) fn window_of(params: &std::collections::HashMap<String, String>) -> (usize, usize) {
+    let num = |k: &str| {
+        params
+            .get(k)
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    (num("start"), num("limit"))
+}
+
+/// True for row `rank` (0-based, counted over the rows that passed the
+/// caller's filter) inside the `(start, limit)` window.
+pub(super) fn in_window(rank: usize, (start, limit): (usize, usize)) -> bool {
+    rank >= start && (limit == 0 || rank < start.saturating_add(limit))
 }

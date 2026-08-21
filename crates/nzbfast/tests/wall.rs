@@ -1326,6 +1326,324 @@ async fn session_siblings_surface_on_the_sheet_and_grab() {
     .unwrap();
 }
 
+/// A wall2 poll seeds a titles row for every unenriched card it draws,
+/// and re-polling the same page changes nothing.
+///
+/// The seeding itself is one transaction for the whole page now, where
+/// it used to be one autocommit INSERT per card - each of which can wait
+/// out SQLite's 10 s `busy_timeout` behind a scan chunk's IMMEDIATE
+/// transaction, so a page of 60 cards was 60 chances to stall an
+/// interactive poll on a fresh index.
+///
+/// What the batching must not change is that the rows appear, because
+/// they are load-bearing beyond the enricher, and a freshly-scanned
+/// card's only row is the one this poll writes. `OR IGNORE` is the
+/// other half - a poll of an enriched page must not walk it back to
+/// pending.
+///
+/// The endpoints that read-modify-write such a row no longer DEPEND on
+/// the poll having run: `wall_art` and `wall_refresh` seed what they
+/// act on, the same way `wall_fix` always has - see
+/// `wall_art_and_refresh_seed_the_row_they_act_on`. This test pins the
+/// poll's own seeding, which is what feeds the enricher.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wall_poll_seeds_its_page_without_disturbing_enriched_rows() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-wallseed-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[
+                over(
+                    1,
+                    "\"The.Matrix.1999.2160p.BluRay.REMUX-GRP.rar\" yEnc (1/1)",
+                    "<w1@x>",
+                    5000,
+                ),
+                over(
+                    2,
+                    "\"Severance.S01E01.1080p.WEB-DL-NTb.rar\" yEnc (1/1)",
+                    "<w2@x>",
+                    1000,
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let keys = tokio::task::spawn_blocking(move || {
+        // Polled twice: the second poll re-offers the same page, which
+        // is what every real wall does on its refresh interval.
+        let mut keys: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let (code, body) = http_get(port, "/api?mode=wall2&matched=0&all=1&apikey=sekrit");
+            assert_eq!(code, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let cards = v["cards"].as_array().cloned().unwrap_or_default();
+            assert!(
+                cards.iter().any(|c| c["title"] == "The Matrix"),
+                "the poll answers with its cards: {body}"
+            );
+            keys = cards
+                .iter()
+                .filter_map(|c| c["key"].as_str().map(str::to_string))
+                .collect();
+        }
+        assert_eq!(keys.len(), 2, "two cards on the page");
+        keys
+    })
+    .await
+    .unwrap();
+
+    // Read the db with the daemon gone: it holds the write connection,
+    // and a second writer opening under it would race the migrations.
+    drop(d);
+    let ix = nzbkit::index::Index::open(&db).unwrap();
+    for k in &keys {
+        let row = ix
+            .title_get(k)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the poll seeds `{k}` - wall_art needs the row"));
+        assert_eq!(row.checked, 0, "a seeded row is pending, not answered");
+        assert!(!row.title.is_empty(), "seeded with a display title: {k}");
+    }
+    assert!(
+        keys.iter().any(|k| k.starts_with("m:")) && keys.iter().any(|k| k.starts_with("t:")),
+        "both lanes are represented: {keys:?}"
+    );
+}
+
+/// `wall_art` and `wall_refresh` act on a row they seed themselves.
+///
+/// Neither used to. `title_fill` and `title_reset` are bare UPDATEs, so
+/// on a card the wall has never DRAWN - which has no `titles` row,
+/// because a poll of its page is what writes one - they matched nothing
+/// and the endpoint answered "unknown title key" about a perfectly good
+/// title. Every way into a card that is not a poll of its own page hits
+/// that: a direct link, the Releases surface's hover preview, a page the
+/// user never scrolled to. `wall_fix` never had it (`title_set_identity`
+/// upserts) and is the shape the other two now follow.
+///
+/// This daemon is never asked for a wall page, which is the whole point:
+/// every row the endpoints below touch is one they seeded themselves.
+/// The keys come from `index_browse`, which reads releases and seeds
+/// nothing.
+///
+/// The distinction that has to survive: a key naming NO releases is
+/// still unknown, and still says so. Seeding is for a card that exists
+/// and has no row yet, never for a bad key.
+#[tokio::test(flavor = "multi_thread")]
+async fn wall_art_and_refresh_seed_the_row_they_act_on() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-wallseed2-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        ix.ingest(
+            "alt.binaries.teevee",
+            &[
+                over(
+                    1,
+                    "\"The.Matrix.1999.2160p.BluRay.REMUX-GRP.rar\" yEnc (1/1)",
+                    "<s1@x>",
+                    5000,
+                ),
+                over(
+                    2,
+                    "\"Severance.S01E01.1080p.WEB-DL-NTb.rar\" yEnc (1/1)",
+                    "<s2@x>",
+                    1000,
+                ),
+            ],
+            1_700_000_000,
+        )
+        .unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let (movie, tv) = tokio::task::spawn_blocking(move || {
+        // Release rows, not cards: index_browse hands back each row's
+        // wall-card key and writes nothing to `titles`.
+        let (code, body) = http_get(port, "/api?mode=index_browse&all=1&apikey=sekrit");
+        assert_eq!(code, 200, "{body}");
+        let rows = serde_json::from_str::<serde_json::Value>(&body).unwrap()["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let key_of = |needle: &str| -> String {
+            rows.iter()
+                .find(|r| r["name"].as_str().is_some_and(|n| n.contains(needle)))
+                .unwrap_or_else(|| panic!("no row for {needle}: {rows:?}"))["key"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (movie, tv) = (key_of("The.Matrix"), key_of("Severance"));
+
+        // A poster for a card that has never been on screen.
+        let png = b"\x89PNG\r\n\x1a\nfake-poster-bytes";
+        let (code, body) = http_post(
+            port,
+            &format!(
+                "/api?mode=wall_art&key={}&apikey=sekrit",
+                urlencoding(&movie)
+            ),
+            "multipart/form-data; boundary=artb",
+            &multipart("artb", "p.png", png),
+        );
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+            true,
+            "an unpolled card is not an unknown title: {body}"
+        );
+        // ...and the art cache holds it, so the seed reached the row the
+        // fill then named.
+        let (code, art) = http_get(port, "/art/m_the_matrix_1999.jpg");
+        assert_eq!(code, 200, "{art}");
+        assert!(art.contains("fake-poster-bytes"), "{art}");
+
+        // Refresh: same shape, and a freshly seeded row IS the
+        // post-reset state, so the endpoint reports the reset it asked
+        // for rather than refusing the key.
+        let (code, body) = http_get(
+            port,
+            &format!(
+                "/api?mode=wall_refresh&value={}&apikey=sekrit",
+                urlencoding(&tv)
+            ),
+        );
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+            true,
+            "an unpolled card is not an unknown title: {body}"
+        );
+
+        // A key naming no releases is a bad key, on both endpoints. This
+        // is the half seeding must not swallow - "unknown title key" has
+        // to keep meaning something.
+        let (_, body) = http_post(
+            port,
+            "/api?mode=wall_art&key=m%3Anope%3A1900&apikey=sekrit",
+            "multipart/form-data; boundary=artb",
+            &multipart("artb", "p.png", png),
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            (v["status"].as_bool(), v["error"].as_str()),
+            (Some(false), Some("unknown title key")),
+            "{body}"
+        );
+        let (_, body) = http_get(
+            port,
+            "/api?mode=wall_refresh&value=m%3Anope%3A1900&apikey=sekrit",
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            (v["status"].as_bool(), v["error"].as_str()),
+            (Some(false), Some("unknown title key")),
+            "{body}"
+        );
+        (movie, tv)
+    })
+    .await
+    .unwrap();
+
+    // Read the db with the daemon gone - it holds the write connection.
+    drop(d);
+    let ix = nzbkit::index::Index::open(&db).unwrap();
+    let art = ix
+        .title_get(&movie)
+        .unwrap()
+        .unwrap_or_else(|| panic!("wall_art seeds `{movie}` before filling it"));
+    // Seeded from the release stem, not blank: the row has to carry the
+    // display title a card without metadata is drawn under.
+    assert_eq!(
+        (art.title.as_str(), art.year),
+        ("The Matrix", 1999),
+        "{art:?}"
+    );
+    assert_eq!(art.poster, "m_the_matrix_1999.jpg", "{art:?}");
+    assert!(
+        art.checked > 0,
+        "hand-picked art answers the lookup: {art:?}"
+    );
+    let refreshed = ix
+        .title_get(&tv)
+        .unwrap()
+        .unwrap_or_else(|| panic!("wall_refresh seeds `{tv}` before resetting it"));
+    assert_eq!(refreshed.title, "Severance", "{refreshed:?}");
+    assert_eq!(refreshed.kind, "tv", "{refreshed:?}");
+    assert_eq!(
+        (refreshed.checked, refreshed.poster.as_str()),
+        (0, ""),
+        "a reset row is pending with no art: {refreshed:?}"
+    );
+}
+
 /// Percent-encode a settings value for the GET config API.
 fn urlencoding(v: &str) -> String {
     v.bytes()

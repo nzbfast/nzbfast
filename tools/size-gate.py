@@ -188,14 +188,21 @@ BASELINE_FILES = {
     # to 4,337 through the 133.1 self-prove and Codex-sweep merges;
     # `impl Reconstructor` moved whole to par2repair/reconstruct.rs
     # (a child of the defining module, so the private fields stay in
-    # scope): 3,791.
-    "crates/nzbkit/src/par2repair.rs": 3791,
+    # scope): 3,791. Then extra-file adoption - the candidate walk, the
+    # whole-file fast path and the sliding scan - went the same way to
+    # par2repair/adopt.rs when R2 fanned it out across candidates:
+    # 3,596. Still over the ceiling, so the entry stays, ratcheted.
+    "crates/nzbkit/src/par2repair.rs": 3596,
     # rar.rs was here at 4,088 and reached 4,363 as the shatter-fold and
     # fuzz-crash rounds landed. Its inline `mod tests` (1,255 lines) moved
     # to rar/tests.rs beside v4_header_tests.rs, and the fixture writers
     # (a public module, its `nzbkit::rar::fixtures` path unchanged) to
     # rar/fixtures.rs. 2,494, under the ceiling, so its entry is GONE.
-    "crates/nzbkit/src/nntp.rs": 3688,
+    # 3688 when first measured; the 20 Aug takedown-classifier round
+    # pushed it past the slack, so `mod compress_tests` (518 lines)
+    # moved whole to nntp/compress_tests.rs, the unit_tests pattern.
+    # 3339 with it, so the entry ratchets DOWN.
+    "crates/nzbkit/src/nntp.rs": 3339,
     # release.rs was here at 3,505 and reached 3,586 as the dark-verdict
     # and year-is-an-extension rounds landed. Its inline `mod tests` was
     # 1,427 lines - nearly half the file - and moved whole to

@@ -12,6 +12,14 @@
 //!  * Cache-Control stays no-cache, so a daemon upgrade still reaches
 //!    the UI at the next load (as a fresh 200, because the bytes - and
 //!    therefore the tag - changed).
+//!
+//! R10 / Codex C9 added two things underneath that contract without
+//! changing it: the catalogues and the manuals are compressed and
+//! hashed at build time, and a built dashboard/wall is cached under the
+//! daemon state it was stamped with. The last test here is the one that
+//! matters for the second: a page cache that misses an input serves one
+//! visitor a page built from someone else's settings, so a LIVE setting
+//! change has to move the bytes and the validator with it.
 
 mod scratch;
 
@@ -118,6 +126,9 @@ fn serve(dir: &std::path::Path) -> (KillOnDrop, u16) {
             .arg(port.to_string())
             .arg("--out")
             .arg(dir.join("complete"))
+            // The locale test drives one setting through the API.
+            .arg("--apikey")
+            .arg("sekrit")
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
             .spawn()
@@ -252,4 +263,134 @@ fn the_user_stylesheet_is_live_from_the_config_folder() {
         .find(r#"<link rel="stylesheet" href="/custom.css">"#)
         .expect("dashboard links the user stylesheet");
     assert!(link > page.rfind("</style>").expect("no style block"));
+}
+
+/// R10 / C9: the built dashboard is cached, so every input that shapes
+/// it has to be part of the key. This drives the one input a user can
+/// change while the daemon runs - the UI locale - and checks the three
+/// things a missed key would break: the new page comes back, the
+/// validator moves with it, and the tag the browser was holding no
+/// longer revalidates.
+#[test]
+fn a_live_setting_change_is_not_pinned_by_the_page_cache() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-shellcache-{}", std::process::id()));
+    let dir = scratch::ScratchDir::attach(&dir);
+    std::fs::write(dir.join("config.json"), "{\"servers\":[]}").unwrap();
+    let (_daemon, port) = serve(&dir);
+
+    let page = |extra: &str| -> (String, String) {
+        let (head, body) = http_raw(port, "/", extra);
+        let body = if head.contains("Content-Encoding: gzip") {
+            gunzip(&body)
+        } else {
+            body
+        };
+        (head, String::from_utf8_lossy(&body).into_owned())
+    };
+    let set = |name: &str, value: &str| {
+        let (head, body) = http_raw(
+            port,
+            &format!("/api?output=json&apikey=sekrit&mode=config&name={name}&value={value}"),
+            "",
+        );
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+        assert!(
+            !body.contains("\"error\""),
+            "setting {name}={value}: {body}"
+        );
+    };
+
+    set("ui_locale", "en");
+    let (head, en) = page("Accept-Encoding: gzip\r\n");
+    let en_tag = header(&head, "ETag")
+        .expect("dashboard carries an ETag")
+        .to_string();
+    assert!(
+        en.contains("const DAEMON_LOCALE='en'"),
+        "locale not stamped"
+    );
+    // Served twice with nothing changed: the same page, the same tag.
+    let (head, again) = page("Accept-Encoding: gzip\r\n");
+    assert_eq!(header(&head, "ETag"), Some(en_tag.as_str()));
+    assert_eq!(again, en);
+    // ...and a browser holding that tag is told so without a rebuild.
+    let (head, _) = http_raw(
+        port,
+        "/",
+        &format!("Accept-Encoding: gzip\r\nIf-None-Match: {en_tag}\r\n"),
+    );
+    assert!(head.starts_with("HTTP/1.1 304"), "{head}");
+
+    // The setting moves. The page must move with it.
+    set("ui_locale", "de");
+    let (head, de) = page("Accept-Encoding: gzip\r\n");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        de.contains("const DAEMON_LOCALE='de'"),
+        "stale page after a locale change"
+    );
+    let de_tag = header(&head, "ETag").expect("ETag").to_string();
+    assert_ne!(de_tag, en_tag, "two pages, one validator");
+    // THE assertion: the old tag no longer matches, so a browser that
+    // kept the English page is handed the German one rather than a 304.
+    let (head, body) = http_raw(
+        port,
+        "/",
+        &format!("Accept-Encoding: gzip\r\nIf-None-Match: {en_tag}\r\n"),
+    );
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "a stale tag revalidated: {head}"
+    );
+    assert!(String::from_utf8_lossy(&gunzip(&body)).contains("const DAEMON_LOCALE='de'"));
+
+    // Back again: the first page is still exactly the first page, tag
+    // and all - an entry cannot be corrupted by having been evicted.
+    set("ui_locale", "en");
+    let (head, back) = page("Accept-Encoding: gzip\r\n");
+    assert_eq!(header(&head, "ETag"), Some(en_tag.as_str()), "{head}");
+    assert_eq!(back, en);
+}
+
+/// The manuals ship compressed, with the shared design tokens already
+/// folded in by build.rs - so the route neither substitutes nor
+/// deflates, and a revalidation is a header compare.
+#[test]
+fn the_manual_is_served_from_its_build_time_member() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-manual-{}", std::process::id()));
+    let dir = scratch::ScratchDir::attach(&dir);
+    std::fs::write(dir.join("config.json"), "{\"servers\":[]}").unwrap();
+    let (_daemon, port) = serve(&dir);
+
+    for path in ["/manual", "/manual/fr", "/manual/ja"] {
+        let (head, body) = http_raw(port, path, "Accept-Encoding: gzip\r\n");
+        assert!(head.starts_with("HTTP/1.1 200"), "{path}: {head}");
+        assert_eq!(header(&head, "Content-Encoding"), Some("gzip"), "{path}");
+        let etag = header(&head, "ETag")
+            .unwrap_or_else(|| panic!("{path} carries no ETag"))
+            .to_string();
+        let plain = String::from_utf8(gunzip(&body)).expect("a manual is UTF-8");
+        // ja has no translated manual yet and falls back to English.
+        assert!(plain.contains("<html"), "{path} is not a page");
+        assert!(
+            !plain.contains("__NZBFAST_"),
+            "{path} shipped with a placeholder"
+        );
+        assert!(
+            plain.contains("--surface:"),
+            "{path} did not get the shared design tokens"
+        );
+        // Same tag on the identity body: the validator covers content,
+        // not encoding.
+        let (head2, body2) = http_raw(port, path, "");
+        assert_eq!(header(&head2, "ETag"), Some(etag.as_str()), "{path}");
+        assert_eq!(String::from_utf8_lossy(&body2), plain, "{path}");
+        let (head3, body3) = http_raw(port, path, &format!("If-None-Match: {etag}\r\n"));
+        assert!(head3.starts_with("HTTP/1.1 304"), "{path}: {head3}");
+        assert!(body3.is_empty(), "{path}: 304 carries a body");
+    }
+    // An unknown locale is still a 404, not a fallback.
+    let (head, _) = http_raw(port, "/manual/zz", "");
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
 }

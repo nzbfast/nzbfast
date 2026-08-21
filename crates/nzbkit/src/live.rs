@@ -283,6 +283,10 @@ enum Src {
 struct SlotState {
     /// yEnc-header name (authoritative once seen; NZB subjects lie).
     name: Option<String>,
+    /// `name`'s lookup keys (ASCII-lowercased, sanitized), computed once on
+    /// first `try_match` - the name never changes after it is set, and an
+    /// unmatched slot re-matches on every article.
+    name_keys: Option<(String, String)>,
     /// First min(16 KiB, file) bytes for md5_16k matching - articles arrive
     /// out of order, so this fills interval-wise like a boundary block.
     head: Option<Partial>,
@@ -337,6 +341,40 @@ struct Active {
     /// mutex: matching happens while holding a slot lock, and two slots
     /// must not race a claim.
     claimed: Mutex<Vec<Option<usize>>>,
+    /// Name lookups built once at activation so `try_match` consults short
+    /// candidate lists under the claimed mutex instead of scanning (and
+    /// re-sanitizing) every descriptor per call - the mutex serializes all
+    /// decode threads, and unmatched slots retry on every article. Values
+    /// are descriptor indexes in FileDesc order, so "first candidate" and
+    /// duplicate-name precedence stay byte-identical to a linear scan.
+    /// Exact byte-equal matches are found inside their fold bucket (byte
+    /// equality implies ASCII-case equality, so no third map is needed).
+    by_fold: HashMap<String, Vec<usize>>,
+    by_sanitized: HashMap<String, Vec<usize>>,
+}
+
+impl Active {
+    fn new(set: Arc<Par2Set>) -> Active {
+        let claimed = Mutex::new(vec![None; set.files.len()]);
+        let mut by_fold: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_sanitized: HashMap<String, Vec<usize>> = HashMap::new();
+        for (fi, f) in set.files.iter().enumerate() {
+            by_fold
+                .entry(f.name.to_ascii_lowercase())
+                .or_default()
+                .push(fi);
+            by_sanitized
+                .entry(crate::disk::sanitize_filename(&f.name))
+                .or_default()
+                .push(fi);
+        }
+        Active {
+            set,
+            claimed,
+            by_fold,
+            by_sanitized,
+        }
+    }
 }
 
 /// Result of settling one slot at completion time.
@@ -356,6 +394,126 @@ pub struct SlotReport {
 impl SlotReport {
     pub fn all_ok(&self) -> bool {
         self.par2_name.is_some() && self.bad_blocks.is_empty()
+    }
+}
+
+// ---- Instrument-first: yEnc verified-CRC reuse geometry ----
+//
+// The SIMD yEnc decoder already computes a VERIFIED whole-article CRC32
+// (`yenc_simd::DecodeIntegrity::verified_article_crc`) and hands it to the
+// download workers, which spend it on RAR STORE composition and then drop
+// it. Under fast verify a full PAR2 block is claimed on its own CRC32
+// alone - so an article whose bytes ARE exactly one block could be claimed
+// on the CRC the decoder already computed, saving one CRC32 pass over
+// every such byte.
+//
+// That reuse is sound ONLY for an article that is exactly one UNTRIMMED,
+// BLOCK-ALIGNED, FULL PAR2 block, fed from a decoder-fresh span
+// (`Src::Fresh` - the only source holding a wire CRC at feed time) while
+// fast verify is on. A file's SHORT last block counts as full: the IFSC
+// CRC32 is taken over the block zero-padded to `block_size`, and
+// `crc32_zeros` extends a CRC over that padding in O(log n) rather than
+// hashing it - which is exactly where a reuse would splice in. Whether real posts have that geometry is an empirical
+// question and nothing here can reason it out: article size and PAR2 block
+// size are chosen independently by whoever posted the set. So this counts
+// it rather than guessing, and changes NOTHING about what gets hashed -
+// the decision to implement the reuse waits on the numbers.
+//
+// The denominator is spans that REACH block mapping: an active plan, a
+// slot matched to a PAR2 file, and that file carrying IFSC blocks. An
+// article that never gets that far could not have benefited whatever its
+// geometry, so counting it would only dilute the ratio.
+//
+// One caveat the geometry deliberately does not model: the bare-LF scalar
+// decode fallback reports `crc_checked` with no VALUE, so a small slice of
+// geometrically-qualifying articles would still have to hash. That is a
+// decoder-path term, not a geometry one, and an implementation would
+// measure it separately.
+
+/// The four relaxed tallies behind [`CrcReuseGeometry`]. One instance
+/// rides each [`LiveVerifier`] (the per-job answer, printed at the end of
+/// a run) and one is process-global (the cumulative answer the daemon
+/// stats API surfaces).
+#[derive(Default)]
+struct GeomTally {
+    spans: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    qualifying: std::sync::atomic::AtomicU64,
+    qualifying_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl GeomTally {
+    const fn new() -> GeomTally {
+        use std::sync::atomic::AtomicU64;
+        GeomTally {
+            spans: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            qualifying: AtomicU64::new(0),
+            qualifying_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn note(&self, len: usize, qualifies: bool) {
+        use std::sync::atomic::Ordering;
+        self.spans.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(len as u64, Ordering::Relaxed);
+        if qualifies {
+            self.qualifying.fetch_add(1, Ordering::Relaxed);
+            self.qualifying_bytes
+                .fetch_add(len as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> CrcReuseGeometry {
+        use std::sync::atomic::Ordering;
+        CrcReuseGeometry {
+            spans: self.spans.load(Ordering::Relaxed),
+            spans_bytes: self.bytes.load(Ordering::Relaxed),
+            qualifying: self.qualifying.load(Ordering::Relaxed),
+            qualifying_bytes: self.qualifying_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Process-lifetime reuse geometry - see [`crc_reuse_geometry_total`].
+static CRC_REUSE_GEOMETRY: GeomTally = GeomTally::new();
+
+/// A snapshot of the verified-CRC reuse geometry census (see the section
+/// note above). The question it answers is the byte ratio: what share of
+/// the bytes fast verify CRC32s would a reuse implementation stop hashing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CrcReuseGeometry {
+    /// Article spans that reached PAR2 block mapping.
+    pub spans: u64,
+    /// Their bytes, after the clamp to the PAR2-declared file length.
+    pub spans_bytes: u64,
+    /// Of those spans, the ones that are exactly one untrimmed,
+    /// block-aligned, full PAR2 block from a decoder-fresh source with
+    /// fast verify on - the geometry the decoder's CRC is reusable for.
+    pub qualifying: u64,
+    /// Their bytes - the share that reuse would stop hashing.
+    pub qualifying_bytes: u64,
+}
+
+/// Cumulative (process-lifetime) verified-CRC reuse geometry. Surfaced by
+/// the daemon stats API; a single run's own numbers come from
+/// [`LiveVerifier::crc_reuse_geometry`].
+pub fn crc_reuse_geometry_total() -> CrcReuseGeometry {
+    CRC_REUSE_GEOMETRY.snapshot()
+}
+
+/// Reset the process-global tally to zero. Test-only: the counter is
+/// process-global, so a test asserting exact counts must isolate first.
+#[doc(hidden)]
+pub fn reset_crc_reuse_geometry_total() {
+    use std::sync::atomic::Ordering;
+    for c in [
+        &CRC_REUSE_GEOMETRY.spans,
+        &CRC_REUSE_GEOMETRY.bytes,
+        &CRC_REUSE_GEOMETRY.qualifying,
+        &CRC_REUSE_GEOMETRY.qualifying_bytes,
+    ] {
+        c.store(0, Ordering::Relaxed);
     }
 }
 
@@ -383,6 +541,9 @@ pub struct LiveVerifier {
     /// M32 lean mode: CRC-only claims allowed for untrusted spans too
     /// (article CRCs are being skipped upstream). See [`Self::set_lean`].
     lean: std::sync::atomic::AtomicBool,
+    /// THIS run's verified-CRC reuse geometry census (see [`GeomTally`]).
+    /// Every bump here also bumps the process-global twin.
+    geom: GeomTally,
 }
 
 impl LiveVerifier {
@@ -403,26 +564,10 @@ impl LiveVerifier {
             partials_spilled: Default::default(),
             fast: Default::default(),
             lean: Default::default(),
+            geom: Default::default(),
             gate: Mutex::new(None),
             slots: (0..n_slots)
-                .map(|_| {
-                    Mutex::new(SlotState {
-                        name: None,
-                        head: None,
-                        file_size: 0,
-                        file: None,
-                        blocks: Vec::new(),
-                        partials: HashMap::new(),
-                        partial_bytes: 0,
-                        pre_spans: Vec::new(),
-                        resume_seeded: false,
-                        pre_unvouched: false,
-                        unmatchable: false,
-                        live_ok: 0,
-                        live_bad: 0,
-                        ok_prefix: 0,
-                    })
-                })
+                .map(|_| Mutex::new(SlotState::empty()))
                 .collect(),
         }
     }
@@ -495,11 +640,7 @@ impl LiveVerifier {
     /// own use (repair planning, reporting).
     pub fn activate(&self, inputs: &[&[u8]]) -> Result<Arc<Par2Set>, Par2Error> {
         let set = Arc::new(pick_set(inputs)?);
-        let claimed = Mutex::new(vec![None; set.files.len()]);
-        *self.plan.write_ok() = Plan::Active(Active {
-            set: set.clone(),
-            claimed,
-        });
+        *self.plan.write_ok() = Plan::Active(Active::new(set.clone()));
         Ok(set)
     }
 
@@ -684,12 +825,17 @@ impl LiveVerifier {
         }
 
         // Clamp the span to the PAR2 length (yEnc padding beyond it is noise).
+        let raw_len = data.len();
         let len = (data.len() as u64).min(file.length.saturating_sub(offset)) as usize;
         if len == 0 {
             return;
         }
         let data = &data[..len];
         let span = offset as usize..offset as usize + len;
+        // Instrument-first census, no behaviour: could this article have
+        // been claimed on the CRC32 its decoder already verified? See the
+        // reuse-geometry section note above [`LiveVerifier`].
+        self.note_reuse_geometry(src, raw_len, &span, bs, file.length);
 
         // Claim work under the lock, hash outside it. Fast/lean spans
         // (decided below, same condition as the check fn) route boundary
@@ -952,6 +1098,39 @@ impl LiveVerifier {
         (out.into_iter().map(|(s, e)| (s, e - s)).collect(), how)
     }
 
+    /// Record one mapped span against the verified-CRC reuse geometry
+    /// census - the per-run tally and the process-global one together.
+    ///
+    /// `raw_len` is the span BEFORE the clamp to the PAR2-declared file
+    /// length: a clamped (trimmed) article's verified CRC covers bytes the
+    /// block does not, so it is not reusable however well the rest lines
+    /// up. `Src::Fresh` is the only source with a wire CRC in hand at feed
+    /// time - `Src::Rehash` claims just as strongly but its bytes came
+    /// back off disk, with the article CRC long gone.
+    fn note_reuse_geometry(
+        &self,
+        src: Src,
+        raw_len: usize,
+        span: &std::ops::Range<usize>,
+        bs: usize,
+        file_length: u64,
+    ) {
+        let len = span.end - span.start;
+        let qualifies = src == Src::Fresh
+            && self.fast.load(std::sync::atomic::Ordering::Relaxed)
+            && len == raw_len
+            && span.start.is_multiple_of(bs)
+            && len == block_len(file_length, bs, span.start / bs);
+        self.geom.note(len, qualifies);
+        CRC_REUSE_GEOMETRY.note(len, qualifies);
+    }
+
+    /// THIS run's verified-CRC reuse geometry (see [`CrcReuseGeometry`]).
+    /// The cumulative twin is [`crc_reuse_geometry_total`].
+    pub fn crc_reuse_geometry(&self) -> CrcReuseGeometry {
+        self.geom.snapshot()
+    }
+
     /// (peak partial-buffer bytes, blocks spilled to read-back) - the
     /// end-of-run memory summary (M15).
     pub fn partials_stats(&self) -> (usize, u64) {
@@ -1130,6 +1309,26 @@ impl LiveVerifier {
 }
 
 impl SlotState {
+    fn empty() -> SlotState {
+        SlotState {
+            name: None,
+            name_keys: None,
+            head: None,
+            file_size: 0,
+            file: None,
+            blocks: Vec::new(),
+            partials: HashMap::new(),
+            partial_bytes: 0,
+            pre_spans: Vec::new(),
+            resume_seeded: false,
+            pre_unvouched: false,
+            unmatchable: false,
+            live_ok: 0,
+            live_bad: 0,
+            ok_prefix: 0,
+        }
+    }
+
     fn head_want(&self) -> usize {
         if self.file_size > 0 {
             (self.file_size as usize).min(HEAD_LEN)
@@ -1178,30 +1377,53 @@ impl SlotState {
             // repairing and publishing under the other's name, up to
             // and including one rename unlinking the other's inode
             // (Codex sweep 13 Aug R1).
-            let sname = crate::disk::sanitize_filename(name);
-            let exact = files
+            let (fold, sname) = self.name_keys.get_or_insert_with(|| {
+                (
+                    name.to_ascii_lowercase(),
+                    crate::disk::sanitize_filename(name),
+                )
+            });
+            let folded: &[usize] = active.by_fold.get(fold.as_str()).map_or(&[], |v| v);
+            let sanit: &[usize] = active.by_sanitized.get(sname.as_str()).map_or(&[], |v| v);
+            let exact = folded
                 .iter()
-                .enumerate()
-                .find(|(fi, f)| claimed[*fi].is_none() && f.name == **name)
-                .map(|(fi, _)| fi);
+                .copied()
+                .find(|&fi| claimed[fi].is_none() && files[fi].name == **name);
             let hit = exact.or_else(|| {
                 // Approximate (case-folded or sanitized) only when it is
                 // UNIQUE among the unclaimed descriptors. Two candidates
                 // is ambiguity, not a choice for FileDesc order to make:
                 // leave the slot unclaimed and let the md5-16k fallback
-                // below settle it by content.
-                let mut it = files.iter().enumerate().filter(|(fi, f)| {
-                    claimed[*fi].is_none()
-                        && (f.name.eq_ignore_ascii_case(name)
-                            || crate::disk::sanitize_filename(&f.name) == sname)
-                });
-                let first = it.next();
-                if it.next().is_none() {
-                    first.map(|(fi, _)| fi)
-                } else {
-                    name_ambiguous = true;
-                    None
+                // below settle it by content. The two sorted candidate
+                // lists are merge-walked with dedup so a descriptor
+                // matching both keys counts once, in FileDesc order -
+                // identical answers to the pre-index linear drain
+                // (`try_match_linear`, kept below as the test oracle).
+                let (mut i, mut j) = (0usize, 0usize);
+                let mut first = None;
+                while i < folded.len() || j < sanit.len() {
+                    let fi;
+                    if i < folded.len() && (j >= sanit.len() || folded[i] <= sanit[j]) {
+                        fi = folded[i];
+                        i += 1;
+                        if j < sanit.len() && sanit[j] == fi {
+                            j += 1;
+                        }
+                    } else {
+                        fi = sanit[j];
+                        j += 1;
+                    }
+                    if claimed[fi].is_none() {
+                        if first.is_none() {
+                            first = Some(fi);
+                        } else {
+                            name_ambiguous = true;
+                            first = None;
+                            break;
+                        }
+                    }
                 }
+                first
             });
             if let Some(fi) = hit {
                 claimed[fi] = Some(slot);
@@ -1242,6 +1464,109 @@ impl SlotState {
         }
         false
     }
+
+    /// The pre-B6 linear matcher, byte-for-byte: full descriptor scans and
+    /// per-candidate `sanitize_filename` calls. NOT called in production -
+    /// kept as the oracle for the differential tests and as the baseline
+    /// leg of [`bench_match`], so any drift between the indexed tiers and
+    /// the original semantics fails a test instead of crossing a claim.
+    fn try_match_linear(&mut self, slot: usize, active: &Active) -> bool {
+        let files = &active.set.files;
+        let mut claimed = active.claimed.lock_ok();
+
+        let mut name_ambiguous = false;
+        if let Some(name) = &self.name {
+            let sname = crate::disk::sanitize_filename(name);
+            let exact = files
+                .iter()
+                .enumerate()
+                .find(|(fi, f)| claimed[*fi].is_none() && f.name == **name)
+                .map(|(fi, _)| fi);
+            let hit = exact.or_else(|| {
+                let mut it = files.iter().enumerate().filter(|(fi, f)| {
+                    claimed[*fi].is_none()
+                        && (f.name.eq_ignore_ascii_case(name)
+                            || crate::disk::sanitize_filename(&f.name) == sname)
+                });
+                let first = it.next();
+                if it.next().is_none() {
+                    first.map(|(fi, _)| fi)
+                } else {
+                    name_ambiguous = true;
+                    None
+                }
+            });
+            if let Some(fi) = hit {
+                claimed[fi] = Some(slot);
+                self.file = Some(fi);
+                self.blocks = vec![BlockState::Pending; files[fi].blocks.len()];
+                return true;
+            }
+        }
+        let want = self.head_want();
+        if want > 0
+            && self
+                .head
+                .as_ref()
+                .is_some_and(|h| h.buf.len() == want && h.complete())
+        {
+            let head_md5: [u8; 16] = Md5::digest(&self.head.as_ref().unwrap().buf).into();
+            for (fi, f) in files.iter().enumerate() {
+                if claimed[fi].is_some() || f.length.min(HEAD_LEN as u64) != want as u64 {
+                    continue;
+                }
+                if f.md5_16k == head_md5 {
+                    claimed[fi] = Some(slot);
+                    self.file = Some(fi);
+                    self.blocks = vec![BlockState::Pending; f.blocks.len()];
+                    return true;
+                }
+            }
+            if self.name.is_some() && !name_ambiguous {
+                self.unmatchable = true;
+            }
+        }
+        false
+    }
+}
+
+/// Matcher microbench hook (`examples/live_match_bench.rs`) - drives the
+/// match tiers the way `on_data` hits them: `calls` attempts round-robin
+/// over one slot per probe name, against a fresh claim table for `set`
+/// (map build included, as activation pays it). `indexed` picks the
+/// production pre-index matcher or the pre-B6 linear reference. Returns
+/// how many probes ended claimed, so the harness can assert both paths
+/// agree and the work is not optimized away.
+#[doc(hidden)]
+pub fn bench_match(
+    set: &Arc<Par2Set>,
+    probe_names: &[String],
+    calls: usize,
+    indexed: bool,
+) -> usize {
+    let active = Active::new(set.clone());
+    let mut slots: Vec<SlotState> = probe_names
+        .iter()
+        .map(|n| {
+            let mut s = SlotState::empty();
+            if !n.is_empty() {
+                s.name = Some(n.clone());
+            }
+            s
+        })
+        .collect();
+    for c in 0..calls {
+        let i = c % slots.len();
+        let s = &mut slots[i];
+        if s.file.is_none() && !s.unmatchable {
+            if indexed {
+                s.try_match(i, &active);
+            } else {
+                s.try_match_linear(i, &active);
+            }
+        }
+    }
+    slots.iter().filter(|s| s.file.is_some()).count()
 }
 
 /// Real (unpadded) length of block `bi` of a `length`-byte file.
@@ -1274,8 +1599,15 @@ pub fn check_block_crc(check: &BlockCheck, block_size: usize, bytes: &[u8]) -> b
     debug_assert!(bytes.len() <= block_size);
     let mut crc = crc32fast::Hasher::new();
     crc.update(bytes);
-    pad_to(block_size, bytes.len(), |z| crc.update(z));
-    crc.finalize() == check.crc32
+    // O(log n) through the padding rather than hashing it, exactly as
+    // `StreamedBlock::finish` does. Saturating so a caller that broke
+    // the assert above pays a wrong answer, not a wrapped length.
+    // (The MD5 half of `check_block` keeps the real zero bytes - MD5
+    // has no zero-extension trick.)
+    crate::yenc_simd::crc32_zeros(
+        crc.finalize(),
+        (block_size.saturating_sub(bytes.len())) as u64,
+    ) == check.crc32
 }
 
 /// [`check_block`] fed in pieces, for a block too big to hold at once.
@@ -1620,6 +1952,55 @@ mod tests {
         assert!(v.unclaimed_files().is_empty());
         let (peak, spilled) = v.partials_stats();
         assert_eq!((peak, spilled), (0, 0));
+    }
+
+    /// The instrument-first reuse-geometry census counts what it claims:
+    /// only a decoder-fresh span under fast verify that is exactly one
+    /// untrimmed, block-aligned PAR2 block. Everything else is a span
+    /// seen and nothing more.
+    ///
+    /// The short FINAL block still qualifies - its padded IFSC CRC32
+    /// follows from the article's own by zero-extension (`crc32_zeros`),
+    /// which is where the reuse would splice in, not a second hash.
+    #[test]
+    fn crc_reuse_geometry_counts_exact_blocks_only() {
+        let data = data_of(2048 + 100, 5); // blocks of 1024 / 1024 / 100
+        let (v, _set) = active_verifier(&[("a.bin", &data)], 1024);
+        v.set_fast_verify(true);
+
+        // Exactly block 0, untrimmed, decoder-fresh: the geometry in
+        // question, and the only thing that may ever count.
+        v.on_data(0, "a.bin", data.len() as u64, 0, &data[..1024]);
+        let g = v.crc_reuse_geometry();
+        assert_eq!((g.spans, g.qualifying), (1, 1), "{g:?}");
+        assert_eq!((g.spans_bytes, g.qualifying_bytes), (1024, 1024), "{g:?}");
+
+        // The short last block qualifies too (see the note above).
+        v.on_data(0, "a.bin", data.len() as u64, 2048, &data[2048..]);
+        assert_eq!(v.crc_reuse_geometry().qualifying, 2);
+
+        // Aligned to no block boundary: two half-blocks, neither whole.
+        v.on_data(0, "a.bin", data.len() as u64, 512, &data[512..1536]);
+        // Half a block: block-aligned, but the CRC covers half the bytes.
+        v.on_data(0, "a.bin", data.len() as u64, 1024, &data[1024..1536]);
+        // yEnc padding past the PAR2 length: the clamp trims the span, so
+        // the article's CRC covers bytes the block does not.
+        let overrun = data_of(200, 6);
+        v.on_data(0, "a.bin", data.len() as u64, 2048, &overrun);
+        // A span with no wire CRC behind it has no CRC to reuse.
+        v.on_data_unverified(0, "a.bin", data.len() as u64, 0, &data[..1024]);
+        // And under full MD5 there is no CRC-only claim to shortcut.
+        v.set_fast_verify(false);
+        v.on_data(0, "a.bin", data.len() as u64, 0, &data[..1024]);
+
+        let g = v.crc_reuse_geometry();
+        assert_eq!(g.qualifying, 2, "a disqualified span was counted: {g:?}");
+        assert_eq!(g.spans, 7, "every mapped span is seen: {g:?}");
+        assert_eq!(g.qualifying_bytes, 1024 + 100, "{g:?}");
+        // The process-global twin takes every bump this run made, and
+        // whatever the rest of the suite made - a lower bound, since the
+        // unit suite runs its tests as threads of one process.
+        assert!(crc_reuse_geometry_total().spans >= g.spans);
     }
 
     /// Boundary blocks under full-MD5 mode accumulate byte partials; the
@@ -2073,5 +2454,194 @@ mod tests {
         assert_eq!(rb.par2_name.as_deref(), Some("b.bin"));
         assert!(ra.all_ok() && rb.all_ok());
         assert!(v.unclaimed_files().is_empty());
+    }
+
+    // ===== B6 differential: the indexed matcher vs the pre-B6 linear =====
+    // ===== drain. Same scripted sequence through both, every visible  =====
+    // ===== outcome must agree at every step.                          =====
+
+    /// One matcher step: optionally learn a name (the `on_data` rule: only
+    /// if none yet, only if non-empty), optionally feed head bytes from
+    /// offset 0 with a declared file size, then attempt a match under the
+    /// caller guards (skip if claimed or latched unmatchable).
+    type Step<'a> = (usize, Option<&'a str>, Option<(&'a [u8], u64)>);
+
+    fn mk_active(files: &[(&str, &[u8])], bs: usize) -> Active {
+        let v = LiveVerifier::new(0);
+        let meta = par2_meta([7u8; 16], bs, files, true);
+        Active::new(v.activate(&[meta.as_slice()]).expect("fixture parses"))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn run_world(
+        files: &[(&str, &[u8])],
+        steps: &[Step],
+        indexed: bool,
+    ) -> (Vec<Option<usize>>, Vec<(Option<usize>, bool)>, Vec<bool>) {
+        let active = mk_active(files, 512);
+        let nslots = steps.iter().map(|s| s.0 + 1).max().unwrap_or(0);
+        let mut slots: Vec<SlotState> = (0..nslots).map(|_| SlotState::empty()).collect();
+        let mut rets = Vec::new();
+        for &(si, name, head) in steps {
+            let s = &mut slots[si];
+            if let Some(n) = name
+                && s.name.is_none()
+                && !n.is_empty()
+            {
+                s.name = Some(n.to_string());
+            }
+            if let Some((bytes, size)) = head {
+                if s.file_size == 0 {
+                    s.file_size = size;
+                }
+                s.capture_head(0, bytes);
+            }
+            let r = if s.file.is_some() || s.unmatchable {
+                false
+            } else if indexed {
+                s.try_match(si, &active)
+            } else {
+                s.try_match_linear(si, &active)
+            };
+            rets.push(r);
+        }
+        let claimed = active.claimed.lock_ok().clone();
+        let state = slots.iter().map(|s| (s.file, s.unmatchable)).collect();
+        (claimed, state, rets)
+    }
+
+    fn assert_matchers_agree(files: &[(&str, &[u8])], steps: &[Step]) {
+        let a = run_world(files, steps, true);
+        let b = run_world(files, steps, false);
+        assert_eq!(
+            a,
+            b,
+            "indexed vs linear diverged; files {:?} steps {:?}",
+            files.iter().map(|f| f.0).collect::<Vec<_>>(),
+            steps
+                .iter()
+                .map(|(s, n, h)| (*s, *n, h.map(|(b, sz)| (b.len(), sz))))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The Codex-R1 case-cross shape plus duplicates: exact must beat
+    /// approximate in both impls whichever arrival order, and duplicate
+    /// names must claim in FileDesc order.
+    #[test]
+    fn differential_exact_precedence_and_duplicates() {
+        let d: Vec<Vec<u8>> = (0..4).map(|i| data_of(700, i as u8 + 40)).collect();
+        let files: &[(&str, &[u8])] = &[
+            ("a.txt", &d[0]),
+            ("A.txt", &d[1]),
+            ("dup.bin", &d[2]),
+            ("dup.bin", &d[3]),
+        ];
+        for order in [[0usize, 1, 2, 3], [3, 2, 1, 0], [1, 0, 3, 2]] {
+            let names = ["A.txt", "a.txt", "dup.bin", "dup.bin"];
+            let steps: Vec<Step> = order.iter().map(|&s| (s, Some(names[s]), None)).collect();
+            assert_matchers_agree(files, &steps);
+        }
+    }
+
+    /// Ambiguity must stay retryable identically: a slot whose name folds
+    /// onto two descriptors (one via case, one via sanitize) claims nothing
+    /// and never latches, then claims once a twin's exact match removes the
+    /// other candidate.
+    #[test]
+    fn differential_ambiguity_across_both_key_classes() {
+        let d: Vec<Vec<u8>> = (0..2).map(|i| data_of(600, i as u8 + 50)).collect();
+        // "ab.txt." matches "AB.TXT." case-folded and "ab.txt" sanitized.
+        let files: &[(&str, &[u8])] = &[("AB.TXT.", &d[0]), ("ab.txt", &d[1])];
+        let junk = data_of(600, 99);
+        let steps: &[Step] = &[
+            // Ambiguous, complete head that md5-matches nothing: no claim,
+            // and the latch must NOT set (retryable ambiguity).
+            (0, Some("ab.txt."), Some((&junk, 600))),
+            (1, Some("AB.TXT."), None), // exact claims descriptor 0
+            (0, None, None),            // retry: now unique via sanitize
+        ];
+        assert_matchers_agree(files, steps);
+    }
+
+    /// Sanitize-tier variants (separators, trims) and the md5-16k
+    /// fallback + unmatchable latch, same answers from both impls.
+    #[test]
+    fn differential_sanitize_and_md5_paths() {
+        let d: Vec<Vec<u8>> = (0..3).map(|i| data_of(900, i as u8 + 60)).collect();
+        let files: &[(&str, &[u8])] = &[("al/pha.bin", &d[0]), ("beta.bin", &d[1]), ("x", &d[2])];
+        let junk = data_of(900, 98);
+        let steps: &[Step] = &[
+            (0, Some("al_pha.bin"), None),               // sanitize-only hit
+            (1, Some(" beta.bin"), None),                // leading space, sanitize hit
+            (2, Some("obfuscated"), Some((&d[2], 900))), // md5-16k claim
+            (3, Some("junk.nfo"), Some((&junk, 900))),   // full miss: latch
+            (3, None, None),                             // latched: caller skips
+            (4, Some(""), Some((&junk, 900))),           // nameless: md5 miss, NO latch
+            (4, None, None),
+        ];
+        assert_matchers_agree(files, steps);
+    }
+
+    /// Seeded fuzz over name-variant pools (case flips, separators,
+    /// trailing dots, duplicates, empties) and random step orders, with
+    /// occasional matching or junk heads - every world pair must agree.
+    #[test]
+    fn differential_fuzz_variant_pools() {
+        let mut rng = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let pool = [
+            "alpha.bin",
+            "Alpha.bin",
+            "ALPHA.BIN",
+            "alpha.bin.",
+            " alpha.bin",
+            "al/pha.bin",
+            "al_pha.bin",
+            "beta.bin",
+            "beta.nfo",
+            "..",
+            "",
+        ];
+        let data: Vec<Vec<u8>> = (0..pool.len())
+            .map(|i| data_of(400 + i * 37, i as u8))
+            .collect();
+        let junk = data_of(4096, 250);
+        for _ in 0..300 {
+            let nf = 2 + (next() % 7) as usize;
+            let files: Vec<(&str, &[u8])> = (0..nf)
+                .map(|_| {
+                    let p = (next() % pool.len() as u64) as usize;
+                    // Descriptor names must be non-empty to survive parsing;
+                    // fall back to a fixed name for the "" pool entry.
+                    let name = if pool[p].is_empty() { "x" } else { pool[p] };
+                    (name, data[p].as_slice())
+                })
+                .collect();
+            let mut steps: Vec<Step> = Vec::new();
+            for _ in 0..24 {
+                let slot = (next() % 8) as usize;
+                let name = if next() % 4 == 0 {
+                    None
+                } else {
+                    Some(pool[(next() % pool.len() as u64) as usize])
+                };
+                let head = match next() % 5 {
+                    0 => {
+                        let (_, d) = files[(next() % nf as u64) as usize];
+                        Some((d, d.len() as u64))
+                    }
+                    1 => Some((junk.as_slice(), junk.len() as u64)),
+                    _ => None,
+                };
+                steps.push((slot, name, head));
+            }
+            assert_matchers_agree(&files, &steps);
+        }
     }
 }

@@ -27,6 +27,12 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+/// Post-processing longer than this gets a line in the log naming what
+/// it cost. Two minutes: past any plausible unlock probe, identity
+/// lookup or sweep, and comfortably inside what a real repair or a
+/// large disk unpack is allowed to spend without comment.
+const TAIL_SLOW_SECS: f64 = 120.0;
+
 /// Test seam: [`run_tail`] trips it once the download task has resolved
 /// and before the tail's FIRST mutation of the record - the window a
 /// delete-then-retry lands in. Keyed by nzo_id so a lane tail belonging
@@ -308,6 +314,21 @@ impl PostprocLane {
             if let Err(e) = hooks.await {
                 file_crashed_tail(&job, &e, gen0);
             }
+            // Close the bracket `tasks.rs` opened at pick, exactly as the
+            // full lane does at the end of its tail. Without it these
+            // three arms park with `log_end` still 0, and `mode=report`
+            // reads "no closing mark" as "still running" and runs the
+            // span to the present - so a job that finished an hour ago
+            // is handed every line every OTHER job has printed since.
+            // Same generation fence as the full lane, and for the same
+            // reason: a record that left this lane's custody belongs to
+            // a live download now.
+            {
+                let mut j = job.lock_ok();
+                if Daemon::same_generation(&j, gen0) {
+                    j.log_end = nzbkit::logtee::mark();
+                }
+            }
             d.park_gen(job, gen0);
         });
         if self.inline {
@@ -437,6 +458,11 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         oracle_samples,
     } = t;
     let _index_job_guard = index_job_guard;
+    // When this tail started, for `Job::postproc_secs`. Taken before
+    // the oracle fold below rather than after `fetch.await`, because the
+    // fold takes the index write mutex and a wait there is time the user
+    // spends looking at a `Finishing` row like any other.
+    let tail_began = Instant::now();
     // M29: fold this job's per-article outcomes into the availability
     // ledger. On the lane, not on the runner - `with_index` waits on
     // the index write mutex, and a wait there stops the queue picking
@@ -450,12 +476,39 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
             .map(|t| t.as_secs() as i64)
             .unwrap_or(0);
         let d3 = d2.clone();
+        let n = oracle_samples.len();
         // A blocking SQLite fold does not belong on an async worker,
         // and this one has a whole tail waiting behind it either way.
-        let _ = tokio::task::spawn_blocking(move || {
-            d3.with_index(|ix| ix.oracle_ingest(&oracle_samples, now).ok())
+        //
+        // BOUNDED, and that bound is load-bearing. On 20 Aug 2026 an
+        // index scan lane wedged mid-I/O against a provider that had
+        // stopped answering and held the index write mutex while it
+        // sat there; this fold waited 8m46s for it, and because the
+        // fold runs before `fetch.await` the whole tail waited with it,
+        // showing the user a finishing row that did nothing for nine
+        // minutes. The runner is already protected from that exact
+        // shape (`index_gate_rendezvous`, issue #38's second wedge);
+        // the tail was not.
+        //
+        // Giving up loses availability samples for one job, which is
+        // sampled telemetry and the cheapest thing in this function.
+        // The job's own completion is not negotiable against it.
+        let folded = tokio::task::spawn_blocking(move || {
+            d3.with_index_bounded(Daemon::TAIL_INDEX_WAIT, |ix| {
+                ix.oracle_ingest(&oracle_samples, now).ok()
+            })
+            .is_some()
         })
-        .await;
+        .await
+        .unwrap_or(false);
+        if !folded {
+            info!(
+                target: "oracle",
+                "index busy for {}s - dropping {n} availability sample(s) rather than \
+                 holding this job's post-processing behind it",
+                Daemon::TAIL_INDEX_WAIT.as_secs()
+            );
+        }
     }
     let res = match fetch.await {
         Ok(r) => r,
@@ -491,6 +544,17 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     {
         warn!(target: "cleanup", "could not release the output handles: {e}");
     }
+    // The engine's own pipeline is over, so its last activity token -
+    // "extracting", written when the disk-unpack ladder began - has
+    // stopped being true. Everything below is the daemon's tail, and it
+    // says so from here on: see `Daemon::note_tail_stage`.
+    // The id is read into a local FIRST, so the job lock is released
+    // before the activity lock is taken. Same discipline as
+    // `daemon_park`'s seam: a job lock held across another of the
+    // daemon's mutexes orders the two the opposite way from every other
+    // reader of this record, and that is how lock-order bugs are grown.
+    let tail_id = job2.lock_ok().nzo_id.clone();
+    d2.note_tail_stage(&tail_id, "finalizing");
     // The record may have left this lane's custody while the download
     // ran, and everything below here writes to it: terminal state,
     // statistics, timestamps, the finalize marker, the payload
@@ -716,6 +780,38 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
     // exist to express.
     if !demoted {
         d2.run_post_job_hooks_before_park(&job2, Some(gen0)).await;
+    }
+    // The tail is over: record what it cost. Written under the same
+    // generation fence as every other stat this tail owns - a record
+    // that left this lane's custody belongs to a live download now, and
+    // stamping it with THIS run's timing would be describing the wrong
+    // job (read-only sweep 2, H1).
+    let tail_secs = tail_began.elapsed().as_secs_f64();
+    {
+        let mut j = job2.lock_ok();
+        if Daemon::same_generation(&j, Some(gen0)) {
+            j.postproc_secs = tail_secs;
+            // Closes the bracket `tasks.rs` opened at pick: everything
+            // this job printed lies between the two, and `mode=report`
+            // slices exactly that. Taken here rather than after `park`
+            // because park is where the record leaves the queue.
+            j.log_end = nzbkit::logtee::mark();
+        }
+    }
+    // Said out loud only when it is worth saying. Post-processing that
+    // outlasts the download it followed is the shape a user reports as
+    // "stuck at 100%", and until now the log recorded no trace of it at
+    // all - so the one line that names the cost is worth more than the
+    // silence it replaces. The threshold is deliberately generous: a
+    // repair or a big unpack legitimately takes minutes, and a warning
+    // that fires on healthy work is a warning people learn to skip.
+    if tail_secs >= TAIL_SLOW_SECS {
+        warn!(
+            target: "lane",
+            "{}: post-processing took {tail_secs:.0}s after a {dl_secs:.0}s download - \
+             the queue row showed this as a finishing job the whole time",
+            tail_id
+        );
     }
     // With the generation this lane started on: a delete verb can file
     // this job into history mid-tail, and a retry of that row re-queues

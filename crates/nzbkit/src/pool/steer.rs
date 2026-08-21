@@ -579,9 +579,7 @@ mod tests {
     }
 
     fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
-        ids.iter()
-            .map(|id| ArticleReq::fresh((*id).into()))
-            .collect()
+        ids.iter().map(|id| ArticleReq::fresh(*id)).collect()
     }
 
     fn two_server_shared() -> Arc<Shared> {
@@ -766,8 +764,11 @@ mod tests {
     /// An in-flight entry owned by `server`, dispatched `age` ago.
     fn inflight_entry(sh: &Shared, id: &str, server: usize, age: Duration) {
         sh.inflight.lock_ok().insert(
-            id.to_string(),
+            id.into(),
             Inflight {
+                age_days: 0,
+                part: 0,
+                ord: 0,
                 server,
                 dispatched: Instant::now() - age,
                 dups: 0,
@@ -793,7 +794,7 @@ mod tests {
         let w = sh
             .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
             .expect("envelope race fires");
-        assert_eq!(w.id, "<old@x>");
+        assert_eq!(&*w.id, "<old@x>");
         assert!(w.dup);
     }
 
@@ -833,6 +834,9 @@ mod tests {
         sh.inflight.lock_ok().insert(
             "<laddered@x>".into(),
             Inflight {
+                age_days: 0,
+                part: 0,
+                ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
                 dups: 0,
@@ -846,7 +850,7 @@ mod tests {
         let w = sh
             .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
             .expect("the verdict ladder is never throttled by the cap");
-        assert_eq!(w.id, "<laddered@x>");
+        assert_eq!(&*w.id, "<laddered@x>");
     }
 
     /// TODO 96.4: the block-account exemption stops at the ladder, and
@@ -871,6 +875,9 @@ mod tests {
         sh.inflight.lock_ok().insert(
             "<laddered@x>".into(),
             Inflight {
+                age_days: 0,
+                part: 0,
+                ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
                 dups: 0,
@@ -884,7 +891,7 @@ mod tests {
         let w = sh
             .pick_dup(0, 1, 1, 0, Pipeline::payload(0), 0)
             .expect("the verdict ladder is exempt from the block gate");
-        assert_eq!(w.id, "<laddered@x>");
+        assert_eq!(&*w.id, "<laddered@x>");
         assert!(w.ladder, "a ladder pick must be classified as one");
         assert!(
             !w.probe,
@@ -913,6 +920,9 @@ mod tests {
         sh.inflight.lock_ok().insert(
             "<laddered@x>".into(),
             Inflight {
+                age_days: 0,
+                part: 0,
+                ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
                 dups: 0,
@@ -960,12 +970,38 @@ mod tests {
         let w = sh
             .pick_dup(0, 1, 1, 0, Pipeline::payload(1), 0)
             .expect("per-owner stale fires");
-        assert_eq!(w.id, "<stale@x>");
+        assert_eq!(&*w.id, "<stale@x>");
         assert_eq!(
             sh.hedges_issued.load(Ordering::Relaxed),
             before + 1,
             "a stale-only pick counts against the hedge issue-rate cap"
         );
+    }
+
+    /// A2 dup-path trap, `pick_dup` flavour (the suspect-race twin
+    /// lives in pool/unit_tests.rs): the stale-owner dup is a fresh
+    /// Work seeded from the inflight entry, and must inherit the
+    /// original's age and part or a dup-delivered body trains the
+    /// oracle at age 0 and slips the split-brain part gate.
+    #[test]
+    fn a_stale_race_dup_inherits_the_originals_age_and_part() {
+        let sh = racing_shared(false);
+        sh.note_srv_art(1, 400);
+        inflight_entry(&sh, "<stale@x>", 1, Duration::from_secs(2));
+        {
+            let mut inf = sh.inflight.lock_ok();
+            let e = inf.get_mut("<stale@x>").unwrap();
+            e.age_days = 30;
+            e.part = 2;
+            e.ord = 5;
+        }
+        let w = sh
+            .pick_dup(0, 1, 1, 0, Pipeline::payload(1), 0)
+            .expect("per-owner stale fires");
+        assert!(w.dup);
+        assert_eq!(w.age_days, 30, "a dup delivery charges the TRUE age");
+        assert_eq!(w.part, 2, "a dup delivery still faces the part gate");
+        assert_eq!(w.ord, 5, "a dup claims the original's completion bit");
     }
 
     #[test]
@@ -974,6 +1010,9 @@ mod tests {
         sh.alive[0].store(1, Ordering::Relaxed);
         sh.alive[1].store(1, Ordering::Relaxed);
         let w = Work {
+            age_days: 0,
+            part: 0,
+            ord: 0,
             id: "<a@x>".into(),
             attempts: 0,
             promoted: true,

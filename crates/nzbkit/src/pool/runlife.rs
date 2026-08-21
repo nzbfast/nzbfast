@@ -30,8 +30,8 @@ pub(super) fn seal_run_blocking(
     {
         return 0;
     }
-    let mut orphans: Vec<String> = match shared.queue.try_lock() {
-        Ok(mut q) => q.drain(..).map(|w| w.id).collect(),
+    let mut orphans: Vec<(Arc<str>, u32)> = match shared.queue.try_lock() {
+        Ok(mut q) => q.drain(..).map(|w| (w.id, w.ord)).collect(),
         // The shards are joined, but a QueueControl holder is not a
         // shard: the steer consumer can be inside `requeue` right now.
         // Seal what IS reachable rather than panicking the process -
@@ -39,11 +39,17 @@ pub(super) fn seal_run_blocking(
         // ends the run either way.
         Err(_) => Vec::new(),
     };
-    orphans.extend(shared.inflight.lock_ok().drain().map(|(id, _)| id));
-    orphans.extend(shared.steer_inbox.lock_ok().drain(..).map(|w| w.id));
+    orphans.extend(shared.inflight.lock_ok().drain().map(|(id, e)| (id, e.ord)));
+    orphans.extend(
+        shared
+            .steer_inbox
+            .lock_ok()
+            .drain(..)
+            .map(|w| (w.id, w.ord)),
+    );
     let mut sealed = 0;
-    for id in orphans {
-        if !shared.claim_done(&id) {
+    for (id, ord) in orphans {
+        if !shared.claim_done(&id, ord) {
             continue;
         }
         let _ = out.blocking_send(FetchOutcome::Failed {
@@ -278,17 +284,23 @@ pub(super) async fn seal_run(
     // send that parks on a slow consumer while the queue is held would
     // stall anything still touching the pool. Queue then inflight is the
     // lock order every other path here uses.
-    let mut orphans: Vec<String> = Vec::new();
+    let mut orphans: Vec<(Arc<str>, u32)> = Vec::new();
     {
         let mut q = shared.queue.lock().await;
-        orphans.extend(q.drain(..).map(|w| w.id));
+        orphans.extend(q.drain(..).map(|w| (w.id, w.ord)));
         let mut inf = shared.inflight.lock_ok();
-        orphans.extend(inf.drain().map(|(id, _)| id));
-        orphans.extend(shared.steer_inbox.lock_ok().drain(..).map(|w| w.id));
+        orphans.extend(inf.drain().map(|(id, e)| (id, e.ord)));
+        orphans.extend(
+            shared
+                .steer_inbox
+                .lock_ok()
+                .drain(..)
+                .map(|w| (w.id, w.ord)),
+        );
     }
     let mut sealed = 0usize;
-    for id in orphans {
-        if !shared.claim_done(&id) {
+    for (id, ord) in orphans {
+        if !shared.claim_done(&id, ord) {
             continue; // a duplicate dispatch already owns this outcome
         }
         let _ = out
@@ -327,7 +339,7 @@ pub(super) async fn shed_pipeline(shared: &Shared, inflight: &mut VecDeque<Work>
             continue;
         }
         shared.deregister_inflight(&w);
-        if shared.done.lock_ok().contains(&w.id) {
+        if shared.done.lock_ok().contains(w.ord) {
             continue; // a dup already emitted this article's outcome
         }
         if w.promoted {
@@ -434,7 +446,7 @@ pub(super) async fn requeue_or_fail(
     // Failed outcomes are emitted AFTER the queue lock drops: `out` is a
     // bounded channel, and a send that parks on a slow consumer while the
     // queue is locked would stall every worker that needs the queue.
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed: Vec<Arc<str>> = Vec::new();
     // B3 wire-cap: the dead connection's whole pipeline leaves flight.
     shared.release_wire(inflight.len());
     {
@@ -461,7 +473,7 @@ pub(super) async fn requeue_or_fail(
                 continue;
             }
             shared.deregister_inflight(&w);
-            if shared.done.lock_ok().contains(&w.id) {
+            if shared.done.lock_ok().contains(w.ord) {
                 continue; // a dup already emitted this article's outcome
             }
             if charged {
@@ -482,7 +494,7 @@ pub(super) async fn requeue_or_fail(
                     if shared.note_spent(&w, ctx.bit) {
                         w.attempts = 0;
                     } else {
-                        if shared.claim_done(&w.id) {
+                        if shared.claim_done(&w.id, w.ord) {
                             failed.push(w.id);
                         }
                         continue;
@@ -519,4 +531,60 @@ pub(super) async fn requeue_or_fail(
             .await;
         shared.complete_one();
     }
+}
+
+/// The fleet shrank: `prev == 1` means the departing worker was its
+/// server's LAST, so from this moment the server contributes nothing to
+/// the run - `live_mask` no longer counts it. That is the single most
+/// throughput-denting thing a pool can do quietly, and until this marker
+/// existed it WAS quiet: each worker bowed out alone (session or connect
+/// exhaustion, an auth yield) and no one said the server itself was gone.
+///
+/// Natural wind-downs are not bow-outs: with no work pending, or the run
+/// aborted or draining, every worker leaves and none of it belongs on
+/// the graph. Fires at most once per server per run by construction -
+/// `alive` only ever crosses 1 -> 0 once, since workers are never
+/// re-spawned after the ramp. The same test also latches
+/// [`PoolStats::left_mid_run`] for the failure summary.
+///
+/// Moved here from pool.rs whole (TODO 106 size gate): a worker leaving
+/// the fleet, and what it means when it was the last one, is this
+/// module's subject.
+pub(super) fn note_server_dark(shared: &Shared, idx: usize, prev: usize) {
+    if prev != 1
+        || shared.pending.load(Ordering::Acquire) == 0
+        || shared.aborted.load(Ordering::Acquire)
+        || shared.draining.load(Ordering::Acquire)
+    {
+        return;
+    }
+    // A3: the same moment, for the failure summary rather than the graph
+    // - everything above IS the "left while work remained" test. Latched
+    // ahead of both stand-downs below, which the summary must still hear
+    // about: a spent block is one of the four departures, and a CLI job
+    // has no live sink but still fails with a message someone reads.
+    if shared.connected[idx].load(Ordering::Relaxed) {
+        shared.left_mid_run[idx].store(true, Ordering::Relaxed);
+    }
+    // §96.5: a budget bow-out already told its own story ("block
+    // spent") - the connections-kept-failing copy below would be a
+    // lie about a server that was serving fine.
+    if shared.budget_noted[idx].load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(live) = &shared.live else {
+        return;
+    };
+    let others = shared
+        .alive
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| *i != idx && a.load(Ordering::Relaxed) > 0)
+        .count();
+    let detail = match others {
+        0 => "out of the run - its connections kept failing, and no other server is left",
+        1 => "out of the run - its connections kept failing; the remaining server carries on",
+        _ => "out of the run - its connections kept failing; the other servers carry on",
+    };
+    live.note(idx, "retired", detail);
 }

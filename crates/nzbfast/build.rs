@@ -7,6 +7,12 @@
 // reputation scoring that flagged us. nzbtray.exe has had a version
 // resource all along, so this brings the daemon in line with it.
 //
+// It has a SECOND job since R10/C9 that has nothing to do with Windows:
+// `precompress_pages` gzips the immutable embedded pages (the i18n
+// catalogues and the manuals) so the binary carries the compressed
+// member rather than 9.0 MB of plain text. That runs on every target -
+// see the note above the early return in main().
+//
 // TWIN FILE: crates/nzbtray/build.rs does the same job for the tray and
 // carries the same rc_path / find_rc_exe / compile_rc_* helpers. They
 // diverged once - §172 fixed the tray for MSVC and left this one on
@@ -33,11 +39,15 @@ fn main() {
         .map(|n| n.to_string())
         .unwrap_or_default();
     println!("cargo:rustc-env=NZBFAST_BETA={beta}");
+
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Every target, before the Windows-only half below returns.
+    precompress_pages(&root, &out);
+
     if std::env::var("CARGO_CFG_WINDOWS").is_err() {
         return;
     }
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let Ok(ico) = root.join("packaging/icon/nzbfast.ico").canonicalize() else {
         println!("cargo:warning=nzbfast.ico missing - building without an embedded icon");
         return;
@@ -218,4 +228,110 @@ fn find_rc_exe() -> Option<std::path::PathBuf> {
     // order over `10.0.<build>.0` directory names is version order.
     found.sort();
     found.pop()
+}
+
+/// Compress the embedded pages that CANNOT change between builds, and
+/// compute their validators here rather than per request (R10 / Codex
+/// C9).
+///
+/// The 27 i18n catalogues and the 16 manuals are 9.0 MB of plain text
+/// in the binary's read-only data - a quarter of the whole executable -
+/// and every byte of them goes to a browser that would have taken gzip.
+/// Embedding the gzip MEMBER instead costs 2.8 MB (-69%), and the
+/// request path stops deflating a 250 KB catalogue on every fetch: the
+/// ETag lands beside it as a string constant, so a revalidation is a
+/// header compare with no page to build and nothing to hash.
+///
+/// Only pages with no per-request input may pass through here. The
+/// manuals have exactly one substitution - `__NZBFAST_UI_TOKENS__`, the
+/// shared design system - and its input is another compiled-in file, so
+/// it is folded in HERE and the manual route no longer calls
+/// `ui_themed`. The dashboard and the wall are deliberately NOT in this
+/// set: they carry daemon state (locale, indexer switches) and are
+/// cached at run time instead, keyed on those inputs.
+///
+/// The keys written here are named one by one in
+/// `crates/nzbfast/src/serve/assets.rs`, so a locale that loses its file
+/// is a compile error naming the key, not a page that quietly stops
+/// being served.
+fn precompress_pages(root: &std::path::Path, out: &std::path::Path) {
+    let tokens_at = root.join("web/ui-tokens.html");
+    println!("cargo:rerun-if-changed={}", tokens_at.display());
+    let tokens = std::fs::read_to_string(&tokens_at)
+        .unwrap_or_else(|e| panic!("{}: {e}", tokens_at.display()));
+
+    // The DIRECTORY dependency catches an added or removed locale; the
+    // per-file ones inside `emit_page` catch an edited translation.
+    for (dir, key, prefix, suffix, themed) in [
+        (root.join("web/i18n"), "i18n", "", ".json", false),
+        (root.join("docs/i18n"), "manual", "MANUAL.", ".html", true),
+    ] {
+        println!("cargo:rerun-if-changed={}", dir.display());
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Two lowercase letters and nothing else, which is what every
+            // UI locale tag is. It is also what keeps the translators'
+            // own files out: `en.reference.json` sits in web/i18n and is
+            // not a served catalogue.
+            let Some(tag) = name
+                .strip_prefix(prefix)
+                .and_then(|n| n.strip_suffix(suffix))
+                .filter(|t| t.len() == 2 && t.bytes().all(|b| b.is_ascii_lowercase()))
+            else {
+                continue;
+            };
+            let tokens = themed.then_some(tokens.as_str());
+            emit_page(&entry.path(), out, &format!("{key}-{tag}"), tokens);
+        }
+    }
+    // English is the source language: its manual is the one at the top
+    // of docs/, not a translation.
+    emit_page(
+        &root.join("docs/MANUAL.html"),
+        out,
+        "manual-en",
+        Some(&tokens),
+    );
+}
+
+/// Write one asset's gzip member and its ETag into OUT_DIR under `key`.
+fn emit_page(src: &std::path::Path, out: &std::path::Path, key: &str, tokens: Option<&str>) {
+    use std::io::Write as _;
+    println!("cargo:rerun-if-changed={}", src.display());
+    let body = std::fs::read(src).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
+    let body = match tokens {
+        // The one substitution an immutable page has, folded in once
+        // here instead of once per request - `ui_themed`'s job, done at
+        // build time. A page that does not name the placeholder simply
+        // keeps its bytes.
+        Some(t) => String::from_utf8(body)
+            .unwrap_or_else(|e| panic!("{}: {e}", src.display()))
+            .replace("__NZBFAST_UI_TOKENS__", t)
+            .into_bytes(),
+        None => body,
+    };
+
+    // FNV-1a over the FINAL bytes, byte for byte the function
+    // serve/webasset.rs runs for the pages it still builds per request.
+    // The two kinds of asset therefore carry the same shape of
+    // validator, and a browser cannot tell them apart.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in &body {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    let etag = out.join(format!("{key}.etag"));
+    std::fs::write(&etag, format!("\"{h:016x}\""))
+        .unwrap_or_else(|e| panic!("{}: {e}", etag.display()));
+
+    // Level 9 rather than the request path's 6: this runs once per
+    // build, not once per load, so there is no reason to leave bytes on
+    // the table. flate2 stamps mtime 0, so the member is byte-identical
+    // from one build of the same input to the next - a rebuild that
+    // changes nothing must not change the ETag.
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(9));
+    enc.write_all(&body).expect("gzip to a Vec");
+    let gz = out.join(format!("{key}.gz"));
+    std::fs::write(&gz, enc.finish().expect("gzip trailer"))
+        .unwrap_or_else(|e| panic!("{}: {e}", gz.display()));
 }

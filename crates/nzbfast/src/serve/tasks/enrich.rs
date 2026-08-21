@@ -937,7 +937,11 @@ pub(in crate::serve) fn spawn_predb_feed(daemon: &Arc<Daemon>) {
                 if !batch.is_empty() {
                     let _busy = daemon2.busy.hold("predb");
                     let n = batch.len();
-                    let stored = daemon2.with_index_mut(|ix| ix.predb_store(&batch, now).ok());
+                    // retiring_ddl: the first-ever feed batch builds the
+                    // named-count index, and the pooled readers must not
+                    // keep statements prepared against the old schema.
+                    let stored =
+                        daemon2.with_index_mut_retiring_ddl(|ix| ix.predb_store(&batch, now).ok());
                     match stored {
                         Some(nameable) => {
                             info!(

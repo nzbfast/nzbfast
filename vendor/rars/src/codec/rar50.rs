@@ -2312,6 +2312,11 @@ struct StreamingOutput {
     /// ring streams a single member; see `member_base_of`.
     member_ends: Vec<usize>,
     filter_scratch: Vec<u8>,
+    /// The delta filter's working buffer, kept alongside `filter_scratch`
+    /// so a member full of delta blocks allocates once rather than once
+    /// per block. Never read outside `apply_filter_to_range`.
+    /// (nzbfast-local change, 20 Aug 2026 - see vendor/rars/VENDORING.md.)
+    delta_scratch: Vec<u8>,
     next_flush_check: usize,
 }
 
@@ -2369,6 +2374,7 @@ impl StreamingOutput {
             pending_filters: std::collections::VecDeque::new(),
             member_ends: Vec::new(),
             filter_scratch: Vec::new(),
+            delta_scratch: Vec::new(),
         }
     }
 
@@ -2937,6 +2943,7 @@ impl StreamingOutput {
                     &mut self.filter_scratch,
                     &held.filter,
                     held.filter.file_start,
+                    &mut self.delta_scratch,
                 )?;
                 match self.pending_filters.front() {
                     Some(next)
@@ -4048,6 +4055,8 @@ struct FlatOutput {
     /// buffer holds a single member; see `member_base_of`.
     member_ends: Vec<usize>,
     filter_scratch: Vec<u8>,
+    /// See `StreamingOutput::delta_scratch`.
+    delta_scratch: Vec<u8>,
     /// Emit is attempted once per `FLAT_EMIT_THRESHOLD` of new bytes.
     next_emit_check: usize,
 }
@@ -4087,6 +4096,7 @@ impl FlatOutput {
             pending_filters: std::collections::VecDeque::new(),
             member_ends: Vec::new(),
             filter_scratch: Vec::new(),
+            delta_scratch: Vec::new(),
             next_emit_check: seed.len() + FLAT_EMIT_THRESHOLD,
         }
     }
@@ -4336,7 +4346,12 @@ impl FlatOutput {
                 // serial walk. `add_filter` pinned that origin at
                 // declaration; slice with the physical index, translate
                 // with the member-local one.
-                apply_filter_to_range(&mut self.filter_scratch, &held, held.file_start)?;
+                apply_filter_to_range(
+                    &mut self.filter_scratch,
+                    &held,
+                    held.file_start,
+                    &mut self.delta_scratch,
+                )?;
                 match self.pending_filters.front() {
                     Some(next) if next.start == held.start && next.length == held.length => {
                         continue;
@@ -4578,6 +4593,8 @@ fn write_filter_data(writer: &mut BitWriter, value: u32) {
 }
 
 fn apply_filters(output: &mut [u8], filters: &[PendingFilter]) -> Result<()> {
+    // One delta buffer for the whole run of filters, not one per block.
+    let mut scratch = Vec::new();
     for filter in filters {
         let end = filter
             .start
@@ -4586,19 +4603,27 @@ fn apply_filters(output: &mut [u8], filters: &[PendingFilter]) -> Result<()> {
         let data = output
             .get_mut(filter.start..end)
             .ok_or(Error::InvalidData("RAR 5 filter range exceeds output"))?;
-        apply_filter_to_range(data, filter, filter.start)?;
+        apply_filter_to_range(data, filter, filter.start, &mut scratch)?;
     }
     Ok(())
 }
 
 /// Apply one filter to `data`, which must be exactly the filter's range.
 /// `file_start` is the member-output offset of `data[0]` (address-translating
-/// filters mix it into the transformed values).
-fn apply_filter_to_range(data: &mut [u8], filter: &PendingFilter, file_start: usize) -> Result<()> {
+/// filters mix it into the transformed values). `scratch` is the delta
+/// filter's working buffer, owned by the caller so a member full of delta
+/// blocks allocates once rather than once per block; the other filters never
+/// touch it.
+fn apply_filter_to_range(
+    data: &mut [u8],
+    filter: &PendingFilter,
+    file_start: usize,
+    scratch: &mut Vec<u8>,
+) -> Result<()> {
     match filter.filter_type {
         FilterType::Delta => {
-            let decoded = filters::delta_decode(data, filter.channels, rar50_delta_messages())?;
-            data.copy_from_slice(&decoded);
+            filters::delta_decode_into(data, filter.channels, rar50_delta_messages(), scratch)?;
+            data.copy_from_slice(scratch);
         }
         FilterType::E8 => e8e9_decode(data, file_start as u32, false),
         FilterType::E8E9 => e8e9_decode(data, file_start as u32, true),

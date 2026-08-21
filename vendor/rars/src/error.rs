@@ -95,6 +95,12 @@ pub enum Error {
     HashMismatch {
         hash_type: u64,
     },
+    /// A legacy (RAR 2/3) recovery-record repair is arithmetically possible
+    /// but its working set does not fit the caller's memory budget. The
+    /// legacy analogue of [`crate::recovery::rar5::Error::RepairTooLarge`]:
+    /// answered by widening the budget, not by a different archive.
+    /// (nzbfast-local change, 20 Aug 2026 - see vendor/rars/VENDORING.md.)
+    LegacyRepairTooLarge,
     Codec(crate::codec::Error),
     Rar3Recovery(crate::recovery::rar3::Error),
     Rar5Recovery(crate::recovery::rar5::Error),
@@ -187,6 +193,9 @@ impl std::fmt::Display for Error {
             Self::HashMismatch { hash_type } => {
                 write!(f, "hash mismatch for hash type {hash_type}")
             }
+            Self::LegacyRepairTooLarge => f.write_str(
+                "legacy RAR recovery repair needs more working memory than the budget allows",
+            ),
             Self::Codec(error) => write!(f, "{error}"),
             Self::Rar3Recovery(error) => write!(f, "{error}"),
             Self::Rar5Recovery(error) => write!(f, "{error}"),

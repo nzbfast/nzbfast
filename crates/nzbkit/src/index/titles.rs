@@ -35,11 +35,95 @@ const VISIBLE: &str = "EXISTS (SELECT 1 FROM releases r WHERE r.title_key = t.ke
 /// would advertise the parameter against rows the lane is never going to
 /// reach, which is the false promise TODO 187 exists to prevent. See
 /// [`Index::titles_missing_tvdb`] for what each clause is doing.
-fn tvdb_queue_where() -> String {
+pub(super) fn tvdb_queue_where() -> String {
     format!(
         "kind = 'tv' AND checked > 0 AND tvdb_tried = 0 AND tvdb = 0
-           AND tmdb_id <> 0 AND id_src IN ('tvmaze','') AND {VISIBLE}"
+           AND tmdb_id <> 0 AND id_src = 'tvmaze' AND {VISIBLE}"
     )
+}
+
+/// What it means for a title to be waiting on the enricher's FIRST
+/// lookup, in one lane, as one predicate over the `t`-aliased row.
+///
+/// One literal for the same reason [`tvdb_queue_where`] is one: the
+/// pick and the EXISTS pre-check that decides whether to run the pick
+/// have to describe the same queue, and a drifted copy makes the
+/// pre-check answer about a different set than the one that gets
+/// drained.
+///
+/// `checked = 0` is written out because `idx_titles_unchecked` is
+/// PARTIAL on exactly that term, and SQLite reaches a partial index
+/// only when the statement's own WHERE implies its predicate. Without
+/// it every call here is a full pass over `titles` (see the note on
+/// the index in schema.rs, and the plan gate that keeps the pairing
+/// honest).
+pub(super) fn pending_lane_where(lane: Lane) -> String {
+    format!("checked = 0 AND {} AND {VISIBLE}", lane.sql())
+}
+
+/// What it means for a title to be waiting on the release-date
+/// backfill, in one lane. Same contract as the two above; the partial
+/// index this one has to reach is `idx_titles_air_backfill`, on
+/// `air_tried = 0`.
+pub(super) fn missing_date_where(lane: Lane) -> String {
+    format!(
+        "checked > 0 AND air_tried = 0 AND air_date = ''
+           AND tmdb_id <> 0 AND {} AND {VISIBLE}",
+        lane.sql()
+    )
+}
+
+/// M28's priority: newest upload first, ranked over the releases the
+/// wall would actually show. No index can carry this - the sort key is
+/// a correlated subquery - so a statement ordering by it always builds
+/// a temp B-tree. What keeps that affordable is the candidate SET, and
+/// that is what the partial indexes and the EXISTS pre-checks are for.
+const NEWEST_FIRST: &str = "COALESCE((SELECT MAX(r.first_posted) FROM releases r
+                                WHERE r.title_key=t.key AND r.junk < 50), 0) DESC";
+
+/// The statement [`Index::titles_pending_lane`] prepares.
+///
+/// A builder rather than an inline `format!` for one reason: the plan
+/// gate in plan_tests.rs then plans the shape the daemon actually runs,
+/// instead of a re-typed paraphrase that can drift away from it while
+/// the test keeps passing. The three below are the same bargain.
+pub(super) fn pending_lane_sql(lane: Lane) -> String {
+    format!(
+        "SELECT {} FROM titles t WHERE {}
+         ORDER BY {NEWEST_FIRST}
+         LIMIT ?1",
+        Index::TITLE_COLS,
+        pending_lane_where(lane)
+    )
+}
+
+/// The statement [`Index::titles_missing_date`] prepares.
+pub(super) fn missing_date_sql(lane: Lane) -> String {
+    format!(
+        "SELECT {} FROM titles t WHERE {}
+         ORDER BY {NEWEST_FIRST}
+         LIMIT ?1",
+        Index::TITLE_COLS,
+        missing_date_where(lane)
+    )
+}
+
+/// The statement [`Index::titles_missing_tvdb`] prepares. The `t.key`
+/// tie-break is part of the shape, not decoration - see that function.
+pub(super) fn missing_tvdb_sql() -> String {
+    format!(
+        "SELECT {} FROM titles t WHERE {}
+         ORDER BY {NEWEST_FIRST}, t.key ASC
+         LIMIT ?1",
+        Index::TITLE_COLS,
+        tvdb_queue_where()
+    )
+}
+
+/// The cheap "is this queue drained?" statement, for any of the
+/// where-builders above.
+pub(super) fn titles_any_sql(whr: &str) -> String {
+    format!("SELECT EXISTS(SELECT 1 FROM titles t WHERE {whr})")
 }
 
 /// What a lookup learned about one title. A struct rather than the ten
@@ -160,8 +244,32 @@ pub struct PersonHit {
     pub n_titles: i64,
 }
 
+/// One pending title row waiting to be seeded - what the wall knows
+/// about a card it is showing without metadata yet.
+///
+/// Carried as a value rather than four positional arguments because the
+/// wall queues these to the enricher instead of writing them on the HTTP
+/// request path (`Daemon::title_seeds`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleSeed {
+    /// `titles.key` - the card's identity.
+    pub key: String,
+    /// `titles.kind`: movie / tv / music / book / software / other. It
+    /// decides which enricher lane picks the row up.
+    pub kind: String,
+    /// Display title, parsed from the release stem when the card has none.
+    pub title: String,
+    /// Release year, 0 when unknown.
+    pub year: u32,
+}
+
 /// One cached title-metadata row (M13 wall).
-#[derive(Debug, Clone)]
+///
+/// `Default` is the "row that does not exist yet" value, and it is what
+/// the seed-then-act endpoints in `serve::api::wall` fill from: a row
+/// they just seeded holds nothing but its identity, and every metadata
+/// column below is empty by construction.
+#[derive(Debug, Clone, Default)]
 pub struct TitleRow {
     pub key: String,
     pub kind: String,
@@ -201,10 +309,42 @@ impl Index {
         year: u32,
     ) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT OR IGNORE INTO titles(key, kind, title, year) VALUES(?1, ?2, ?3, ?4)",
+            Self::TITLE_SEED_SQL,
             rusqlite::params![key, kind, title, year],
         )?;
         Ok(())
+    }
+
+    const TITLE_SEED_SQL: &'static str =
+        "INSERT OR IGNORE INTO titles(key, kind, title, year) VALUES(?1, ?2, ?3, ?4)";
+
+    /// Seed a whole page of pending title rows in ONE transaction.
+    ///
+    /// [`Self::title_seed`] autocommits, so seeding the wall's viewport a
+    /// row at a time was one write-lock acquisition per card - and each
+    /// one can sit in the 10 s `busy_timeout` behind a scan chunk's
+    /// IMMEDIATE transaction. IMMEDIATE here for the reason
+    /// `ingest::ingest_pass` writes up: a DEFERRED transaction upgrades
+    /// its lock lazily and SQLite skips the busy timeout on that upgrade.
+    ///
+    /// Every row is `INSERT OR IGNORE`, so re-offering a batch costs
+    /// nothing and callers need not track what they have already seeded.
+    pub fn title_seed_many(&mut self, seeds: &[TitleSeed]) -> rusqlite::Result<usize> {
+        if seeds.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut n = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(Self::TITLE_SEED_SQL)?;
+            for s in seeds {
+                n += stmt.execute(rusqlite::params![s.key, s.kind, s.title, s.year])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     fn title_row(r: &rusqlite::Row) -> rusqlite::Result<TitleRow> {
@@ -227,7 +367,8 @@ impl Index {
         })
     }
 
-    const TITLE_COLS: &'static str = "key, kind, title, year, tmdb_id, overview, rating, genres,
+    pub(super) const TITLE_COLS: &'static str =
+        "key, kind, title, year, tmdb_id, overview, rating, genres,
          poster, backdrop, checked, imdb, actors, air_date, id_src";
 
     /// All cached title rows (the wall joins them to parsed releases).
@@ -253,21 +394,42 @@ impl Index {
     /// because every provider's rate limit is independent and a serial
     /// loop makes each kind queue behind the slowest one.
     pub fn titles_pending_lane(&self, limit: u32, lane: Lane) -> rusqlite::Result<Vec<TitleRow>> {
+        // A drained queue answers here, without the sort (N1). The lane
+        // thread asks this every 15 s forever, and on a settled install
+        // the honest answer is always "nothing" - but finding that out
+        // through the pick below means computing the correlated MAX for
+        // every candidate row and building a temp B-tree over the
+        // result, under the index WRITE mutex, to return zero rows.
+        // EXISTS stops at the first row and needs no ordering at all,
+        // the same trade [`Self::tvdb_backfill_pending`] makes for the
+        // caps gate.
+        if !self.titles_any(&pending_lane_where(lane))? {
+            return Ok(Vec::new());
+        }
         // M28: enrich in the order the wall shows cards - newest upload
         // first (idx_rel_title_key makes the correlated MAX cheap), junk
         // groups last. Fresh titles used to queue behind the whole
         // historical backlog in rowid order, so a new post's art could
         // be hours away on a big index.
-        let mut stmt = self.db.prepare(&format!(
-            "SELECT {} FROM titles t WHERE checked=0 AND {} AND {VISIBLE}
-             ORDER BY COALESCE((SELECT MAX(r.first_posted) FROM releases r
-                                WHERE r.title_key=t.key AND r.junk < 50), 0) DESC
-             LIMIT ?1",
-            Self::TITLE_COLS,
-            lane.sql()
-        ))?;
+        //
+        // The temp B-tree is inherent to that ordering - the sort key is
+        // a correlated subquery, which no index can carry - so what the
+        // partial index buys is the candidate SET: the sort runs over
+        // the rows still waiting rather than over every title ever seen.
+        let mut stmt = self.db.prepare(&pending_lane_sql(lane))?;
         let rows = stmt.query_map(rusqlite::params![limit], Self::title_row)?;
         rows.collect()
+    }
+
+    /// Is any `titles` row still matching `whr`? The cheap question the
+    /// three enricher lanes ask before paying for a prioritised pick.
+    ///
+    /// `whr` is SQL built by this module's own where-builders - static
+    /// text only, never a caller-supplied value.
+    fn titles_any(&self, whr: &str) -> rusqlite::Result<bool> {
+        self.db.query_row(&titles_any_sql(whr), [], |r| {
+            r.get::<_, i64>(0).map(|n| n != 0)
+        })
     }
 
     /// M30: viewport-priority enrichment - the still-pending subset of
@@ -471,6 +633,21 @@ impl Index {
     ) -> rusqlite::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         self.title_set_identity(key, kind, title, year)?;
+        // The identity CASE compares kind/title/year, but a wall-fix can
+        // move a card to a DIFFERENT series wearing the identical display
+        // identity - two shows with one name, and TV seeds commonly carry
+        // year 0, which reduces the CASE to a byte-equal title compare.
+        // The id pair is the actual series claim, so a changed id retires
+        // the old TVDB answer exactly as a changed title does (and puts
+        // the row back in the backfill queue). Before `title_fill`, which
+        // is what overwrites the stored pair being compared.
+        if m.tmdb_id != 0 {
+            self.db.execute(
+                "UPDATE titles SET tvdb = 0, tvdb_tried = 0
+                  WHERE key = ?1 AND (tmdb_id <> ?2 OR id_src <> ?3)",
+                rusqlite::params![key, m.tmdb_id, m.id_src],
+            )?;
+        }
         self.title_fill(key, m, now)?;
         tx.commit()
     }
@@ -529,16 +706,14 @@ impl Index {
     /// titles indexed from here on. tmdb_id<>0 skips the rows no provider
     /// recognised: there is no date to go and fetch for those.
     pub fn titles_missing_date(&self, limit: u32, lane: Lane) -> rusqlite::Result<Vec<TitleRow>> {
-        let mut stmt = self.db.prepare(&format!(
-            "SELECT {} FROM titles t
-             WHERE checked > 0 AND air_tried = 0 AND air_date = ''
-               AND tmdb_id <> 0 AND {} AND {VISIBLE}
-             ORDER BY COALESCE((SELECT MAX(r.first_posted) FROM releases r
-                                WHERE r.title_key=t.key AND r.junk < 50), 0) DESC
-             LIMIT ?1",
-            Self::TITLE_COLS,
-            lane.sql()
-        ))?;
+        // Drained-queue fast path, as in `titles_pending_lane` - and it
+        // matters most here, because this lane is a BACKFILL: it exists
+        // to be finished, and once it is, every 15 s tick for the life
+        // of the install is asking a question whose answer is no.
+        if !self.titles_any(&missing_date_where(lane))? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.db.prepare(&missing_date_sql(lane))?;
         let rows = stmt.query_map(rusqlite::params![limit], Self::title_row)?;
         rows.collect()
     }
@@ -554,9 +729,9 @@ impl Index {
     /// `tmdb_id <> 0` is not a nicety: the backfill asks TVmaze with
     /// that number, so a row without one has no cheap question to ask.
     ///
-    /// `id_src IN ('tvmaze','')` is what makes asking TVmaze with it
-    /// safe. Under the keyless default a TV row holds an AniList media
-    /// id whenever TVmaze missed the title (the routine anime case), and
+    /// `id_src = 'tvmaze'` is what makes asking TVmaze with it safe.
+    /// Under the keyless default a TV row holds an AniList media id
+    /// whenever TVmaze missed the title (the routine anime case), and
     /// with a TMDB key it holds a TMDB series id - neither addresses
     /// TVmaze. The consequence was not a miss but a permanent wrong
     /// write: `tvdb_of_show`'s only guard is that the payload is about
@@ -564,23 +739,26 @@ impl Index {
     /// whenever it is also a live TVmaze show id, so an unrelated
     /// series' thetvdb id was stamped on the row with `tvdb_tried=1` and
     /// Sonarr's `tvdbid=` then resolved to the wrong title key (Codex
-    /// sweep 7, H2). '' is the legacy value and keeps the meaning this
-    /// doc-comment carried before the column existed.
+    /// sweep 7, H2). The legacy '' rows used to be admitted on the
+    /// assumption that unlabelled meant TVmaze - but the AniList
+    /// fallback was writing media ids into `tmdb_id` for three weeks
+    /// BEFORE the `id_src` column landed, so '' proves nothing and an
+    /// unlabelled anime row fed this lane exactly the wrong-write above
+    /// (bug sweep 20 Aug). Those rows simply never backfill.
     ///
     /// The `t.key` tie-break is not cosmetic either: this queue is
     /// head-stable, so ties left to SQLite's row order make the head SET
     /// itself undefined, and the lane's backoff bookkeeping is reasoning
     /// about which rows it just skipped (Codex sweep 7, M2).
     pub fn titles_missing_tvdb(&self, limit: u32) -> rusqlite::Result<Vec<TitleRow>> {
-        let mut stmt = self.db.prepare(&format!(
-            "SELECT {} FROM titles t WHERE {}
-             ORDER BY COALESCE((SELECT MAX(r.first_posted) FROM releases r
-                                WHERE r.title_key=t.key AND r.junk < 50), 0) DESC,
-                      t.key ASC
-             LIMIT ?1",
-            Self::TITLE_COLS,
-            tvdb_queue_where(),
-        ))?;
+        // The caps gate has always taken the EXISTS route (below); the
+        // lane that DRAINS the queue used to pay for the full pick on
+        // every idle tick even after the last row was filled. Same
+        // question, same predicate, so ask it the same cheap way first.
+        if !self.titles_any(&tvdb_queue_where())? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.db.prepare(&missing_tvdb_sql())?;
         let rows = stmt.query_map(rusqlite::params![limit], Self::title_row)?;
         rows.collect()
     }
@@ -594,14 +772,7 @@ impl Index {
     /// care WHICH row is outstanding, only whether one is (Codex sweep
     /// 7, M1).
     pub fn tvdb_backfill_pending(&self) -> rusqlite::Result<bool> {
-        self.db.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM titles t WHERE {})",
-                tvdb_queue_where()
-            ),
-            [],
-            |r| r.get::<_, i64>(0).map(|n| n != 0),
-        )
+        self.titles_any(&tvdb_queue_where())
     }
 
     /// Store a backfilled TVDB id. `0` records only that TVmaze was
@@ -710,12 +881,20 @@ impl Index {
                 "empty person name".into(),
             ));
         }
+        // Each handle lookup REPEATS its partial index's predicate, and
+        // none of the three is redundant with the Rust-side guard beside
+        // it. `idx_people_tvmaze` is `... WHERE tvmaze_id > 0` and the
+        // other two are `<> ''`; SQLite will not use a partial index
+        // unless the query's own WHERE clause proves the row is inside
+        // it, so without these the planner falls back to a full scan of
+        // `people` - three of them, per credit, under the index write
+        // mutex. Same trap `query.rs` documents for `idx_titles_imdb`.
         let mut existing: Option<i64> = None;
         if c.tvmaze_id > 0 {
             existing = self
                 .db
                 .query_row(
-                    "SELECT id FROM people WHERE tvmaze_id=?1",
+                    "SELECT id FROM people WHERE tvmaze_id=?1 AND tvmaze_id > 0",
                     [c.tvmaze_id],
                     |r| r.get(0),
                 )
@@ -725,7 +904,7 @@ impl Index {
             existing = self
                 .db
                 .query_row(
-                    "SELECT id FROM people WHERE wikidata_qid=?1",
+                    "SELECT id FROM people WHERE wikidata_qid=?1 AND wikidata_qid <> ''",
                     [&c.wikidata_qid],
                     |r| r.get(0),
                 )
@@ -734,9 +913,11 @@ impl Index {
         if existing.is_none() && !c.imdb.is_empty() {
             existing = self
                 .db
-                .query_row("SELECT id FROM people WHERE imdb=?1", [&c.imdb], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT id FROM people WHERE imdb=?1 AND imdb <> ''",
+                    [&c.imdb],
+                    |r| r.get(0),
+                )
                 .optional()?;
         }
         if existing.is_none() {
@@ -1136,13 +1317,32 @@ mod tests {
         // Unenriched: nothing to ask TVmaze WITH, so not yet eligible.
         assert!(pending(&ix).is_empty());
 
-        // Enriched: the row now carries the TVmaze show id the lane
-        // asks WITH, so it becomes eligible. Enrichment itself never
-        // writes tvdb - one writer, and it is the lane that asked.
+        // An unlabelled id is not eligible either - '' names no
+        // namespace, so the lane must not ask TVmaze with it.
         ix.title_fill(
             &bb,
             &TitleFill {
                 tmdb_id: 431,
+                ..Default::default()
+            },
+            5,
+        )
+        .unwrap();
+        assert!(pending(&ix).is_empty(), "'' id_src must not queue");
+
+        // Enriched: the row now carries the TVmaze show id the lane
+        // asks WITH, so it becomes eligible. Enrichment itself never
+        // writes tvdb - one writer, and it is the lane that asked.
+        // Labelled, as the enricher writes it since the id_src column
+        // landed. An UNLABELLED id is deliberately ineligible: '' rows
+        // may hold AniList media ids written before the column existed,
+        // and asking TVmaze with one of those is the permanent
+        // wrong-write documented on `titles_missing_tvdb`.
+        ix.title_fill(
+            &bb,
+            &TitleFill {
+                tmdb_id: 431,
+                id_src: "tvmaze",
                 ..Default::default()
             },
             5,
@@ -1204,6 +1404,7 @@ mod tests {
             &bb,
             &TitleFill {
                 tmdb_id: 431,
+                id_src: "tvmaze",
                 ..Default::default()
             },
             7,
@@ -1277,6 +1478,74 @@ mod tests {
             "the superseded series' tvdbid still names this row"
         );
         assert_eq!(pending(&ix), vec![bb]);
+        teardown(&dir, ix);
+    }
+
+    /// A page of seeds is ONE transaction, and it lands exactly what a
+    /// page of `title_seed` calls landed.
+    ///
+    /// The wall used to run one autocommit INSERT per unenriched card on
+    /// the HTTP request path, each able to wait out the 10 s busy_timeout
+    /// behind a scan chunk. The batch entry point has to keep both of the
+    /// properties that made the loop safe to re-run: `OR IGNORE`, so an
+    /// already-seeded key is untouched (in particular it must NOT reset
+    /// an enriched row back to pending), and no bookkeeping demanded of
+    /// the caller.
+    #[test]
+    fn a_page_of_title_seeds_is_one_transaction_and_never_overwrites() {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-index-seedmany-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        let seed = |key: &str, kind: &str, title: &str, year: u32| TitleSeed {
+            key: key.into(),
+            kind: kind.into(),
+            title: title.into(),
+            year,
+        };
+
+        assert_eq!(ix.title_seed_many(&[]).unwrap(), 0, "no rows, no txn");
+        let page = vec![
+            seed("m:top gun maverick:2022", "movie", "Top Gun Maverick", 2022),
+            seed("t:breaking bad", "tv", "Breaking Bad", 0),
+        ];
+        assert_eq!(ix.title_seed_many(&page).unwrap(), 2);
+        assert_eq!(
+            ix.title_get("t:breaking bad").unwrap().map(|r| r.title),
+            Some("Breaking Bad".to_string())
+        );
+
+        // Enrichment stamps one of them; the next wall poll re-offers
+        // the same page (the queue does not remember what it sent).
+        ix.title_fill(
+            "t:breaking bad",
+            &TitleFill {
+                tmdb_id: 1396,
+                overview: "chemistry",
+                id_src: "tvmaze",
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            ix.title_seed_many(&page).unwrap(),
+            0,
+            "every key already exists: nothing is written"
+        );
+        let row = ix.title_get("t:breaking bad").unwrap().expect("the row");
+        assert_eq!(
+            (row.checked, row.tmdb_id, row.overview.as_str()),
+            (1, 1396, "chemistry"),
+            "a re-offered seed must not undo enrichment"
+        );
+
+        // A new card mixed into an already-seeded page still lands.
+        let mut page2 = page.clone();
+        page2.push(seed("m:dune:2021", "movie", "Dune", 2021));
+        assert_eq!(ix.title_seed_many(&page2).unwrap(), 1);
+        assert!(ix.title_get("m:dune:2021").unwrap().is_some());
         teardown(&dir, ix);
     }
 

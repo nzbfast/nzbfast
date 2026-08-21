@@ -49,13 +49,14 @@ fn server(host: &str) -> ServerConfig {
 }
 
 fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
-    ids.iter()
-        .map(|id| ArticleReq::fresh((*id).into()))
-        .collect()
+    ids.iter().map(|id| ArticleReq::fresh(*id)).collect()
 }
 
 fn work(id: &str) -> Work {
     Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: id.into(),
         attempts: 0,
         promoted: false,
@@ -876,7 +877,7 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
     };
     let mut inflight: VecDeque<Work> = [dup()].into_iter().collect();
     sh.charge_wire();
-    let mut bare: VecDeque<String> = VecDeque::new();
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
@@ -884,6 +885,7 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         &tx,
         &mut inflight,
         Vec::new(),
+        false,
         false,
         &mut bare,
     )
@@ -908,13 +910,14 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         &mut inflight,
         Vec::new(),
         true,
+        false,
         &mut bare,
     )
     .await;
     match rx.try_recv() {
         Ok(FetchOutcome::Missing { id, cause }) => {
-            assert_eq!(id, "<d@x>");
-            assert!(matches!(cause, MissingCause::Gone));
+            assert_eq!(&*id, "<d@x>");
+            assert!(matches!(cause, MissingCause::Gone { .. }));
         }
         other => panic!("expected a terminal Missing off the dup's own answer, got {other:?}"),
     }
@@ -923,6 +926,85 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         0,
         "the article went terminal without the original finishing its ladder"
     );
+}
+
+/// The takedown hint rides the refusal ladder to the terminal verdict:
+/// one backbone naming the removal ("430 ... DMCA", Giganews's 451)
+/// flavours the final Missing even when every other backbone answered a
+/// plain 430 - and a ladder of plain 430s stays unflavoured. The
+/// verdict itself is identical either way: the hint never gates.
+#[tokio::test]
+async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    let cfg = PoolConfig::default();
+    let (sh, _) = Shared::new(fresh(&["<t@x>", "<p@x>"]), &servers);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    sh.alive[1].store(1, Ordering::SeqCst);
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
+    let pop_id = |q: &mut VecDeque<Work>, id: &str| {
+        let at = q.iter().position(|w| &*w.id == id).expect("queued");
+        q.remove(at).expect("present")
+    };
+    // <t@x>: server a's refusal says removed (takedown = true), server
+    // b's is a plain 430. The union is unanimous at b, and a's hint
+    // survives to the outcome.
+    for (si, takedown) in [(0usize, true), (1usize, false)] {
+        let w = pop_id(&mut *sh.queue.lock().await, "<t@x>");
+        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+        sh.charge_wire();
+        handle_missing(
+            &cfg,
+            ctx_for(&servers, si),
+            &sh,
+            &tx,
+            &mut inflight,
+            Vec::new(),
+            true,
+            takedown,
+            &mut bare,
+        )
+        .await;
+    }
+    match rx.try_recv() {
+        Ok(FetchOutcome::Missing { id, cause }) => {
+            assert_eq!(&*id, "<t@x>");
+            assert_eq!(
+                cause,
+                MissingCause::Gone { takedown: true },
+                "the removal notice must survive to the terminal verdict"
+            );
+        }
+        other => panic!("expected a terminal Missing, got {other:?}"),
+    }
+    // <p@x>: plain 430s all the way down stay unflavoured.
+    for si in [0usize, 1] {
+        let w = pop_id(&mut *sh.queue.lock().await, "<p@x>");
+        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+        sh.charge_wire();
+        handle_missing(
+            &cfg,
+            ctx_for(&servers, si),
+            &sh,
+            &tx,
+            &mut inflight,
+            Vec::new(),
+            true,
+            false,
+            &mut bare,
+        )
+        .await;
+    }
+    match rx.try_recv() {
+        Ok(FetchOutcome::Missing { id, cause }) => {
+            assert_eq!(&*id, "<p@x>");
+            assert_eq!(cause, MissingCause::Gone { takedown: false });
+        }
+        other => panic!("expected a terminal Missing, got {other:?}"),
+    }
 }
 
 /// A promoted (playhead) article that 430s must go back to the FRONT of
@@ -947,17 +1029,17 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
     // the position AFTER it rather than the head of the queue.
     {
         let mut q = sh.queue.lock().await;
-        q.retain(|w| w.id != "<p@x>");
+        q.retain(|w| &*w.id != "<p@x>");
         let mut ahead = work("<q@x>");
         ahead.promoted = true;
-        q.retain(|w| w.id != "<q@x>");
+        q.retain(|w| &*w.id != "<q@x>");
         q.push_front(ahead);
     }
     let mut w = work("<p@x>");
     w.promoted = true;
     let mut inflight: VecDeque<Work> = [w].into_iter().collect();
     sh.charge_wire();
-    let mut bare: VecDeque<String> = VecDeque::new();
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
     handle_missing(
         &cfg,
         ctx,
@@ -966,12 +1048,13 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
         &mut inflight,
         Vec::new(),
         true,
+        false,
         &mut bare,
     )
     .await;
     assert!(rx.try_recv().is_err(), "another backbone can still answer");
     let q = sh.queue.lock().await;
-    let order: Vec<&str> = q.iter().map(|w| w.id.as_str()).collect();
+    let order: Vec<&str> = q.iter().map(|w| &*w.id).collect();
     assert_eq!(
         order.first().copied(),
         Some("<q@x>"),
@@ -1011,7 +1094,7 @@ async fn a_body_that_waits_on_the_write_side_is_timed_and_marked() {
     let (tx, mut rx) = mpsc::channel(1);
     tx.try_send(FetchOutcome::Missing {
         id: "<filler@x>".into(),
-        cause: MissingCause::Gone,
+        cause: MissingCause::Gone { takedown: false },
     })
     .expect("prime the channel full");
     tokio::spawn(async move {
@@ -1102,8 +1185,13 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
     assert_eq!(sh.bytes[0].load(Ordering::Relaxed), 2_048);
 
     // The same response for an article a duplicate already claimed.
-    assert!(sh.claim_done("<l@x>"));
-    let mut inflight: VecDeque<Work> = [work("<l@x>")].into_iter().collect();
+    assert!(sh.claim_done("<l@x>", 1));
+    let mut inflight: VecDeque<Work> = [Work {
+        ord: 1,
+        ..work("<l@x>")
+    }]
+    .into_iter()
+    .collect();
     sh.charge_wire();
     handle_body(
         &cfg,

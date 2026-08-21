@@ -627,8 +627,40 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
             daemon.history_keep_count.store(v, Ordering::Relaxed);
             retention_set = v > 0;
         }
-        if let Some(v) = saved.get("history_keep_days").and_then(Value::as_u64) {
-            daemon.history_keep_days.store(v, Ordering::Relaxed);
+        // Issue #45: the age knob is SECONDS now. `history_keep_days`
+        // is what a config written before that change holds, and it is read
+        // only when the new key is absent - the two are the same setting, so
+        // the one the dashboard writes has to win, or a value saved today
+        // would be overruled by a value saved last month.
+        //
+        // Deliberately NOT migrated in place. Rewriting the file would take
+        // the setting away from a user who downgrades, and deleting the old
+        // key would throw away the only record of what they had chosen.
+        // Left alone, it keeps working untouched for anyone who never opens
+        // the new control, and goes quietly inert for anyone who does.
+        let secs = saved
+            .get("history_keep_secs")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                saved
+                    .get("history_keep_days")
+                    .and_then(Value::as_u64)
+                    .map(|d| {
+                        let secs = d.saturating_mul(86_400);
+                        if d > 0 {
+                            info!(
+                                target: "queue",
+                                "history retention: history_keep_days={d} \
+                                 read as {secs}s (the setting is seconds now)"
+                            );
+                        }
+                        secs
+                    })
+            });
+        if let Some(v) = secs {
+            daemon
+                .history_keep_secs
+                .store(v.min(100 * 365 * 86_400), Ordering::Relaxed);
             retention_set |= v > 0;
         }
         if retention_set {
@@ -1567,6 +1599,10 @@ pub(super) fn spawn_core_tasks(
     // §129 3e: the chronic slow-storage judge. Inert unless a job is
     // downloading (or its own pause is holding).
     super::slowstore::spawn(daemon);
+    // Issue #45: the History retention sweep. Inert unless a retention knob
+    // is set; see `spawn_retention_sweep` for why a park-time pass alone
+    // stopped being enough once the age rule could be minutes.
+    super::histstore::spawn_retention_sweep(daemon);
     Ok(())
 }
 
@@ -1978,10 +2014,11 @@ fn build_daemon(
         saver_armed: AtomicBool::new(false),
         hooks_tx: Mutex::new(None),
         history_keep_count: AtomicU64::new(0),
-        history_keep_days: AtomicU64::new(0),
+        history_keep_secs: AtomicU64::new(0),
         add_lock: Mutex::new(()),
         moving: Mutex::new(std::collections::HashSet::new()),
         mover_q: Mutex::new(VecDeque::new()),
+        mover_inflight: std::sync::atomic::AtomicUsize::new(0),
         mover_wake: tokio::sync::Notify::new(),
         mover_bucket: Mutex::new(mover::PaceState::default()),
         move_pace: Mutex::new("yield".to_string()),
@@ -2026,7 +2063,7 @@ fn build_daemon(
         #[cfg(feature = "indexer")]
         index_migrated: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
-        index_stats_cache: Mutex::new(None),
+        index_stats_cache: Mutex::new(Default::default()),
         auto_speed: std::sync::atomic::AtomicBool::new(auto_speed),
         preflight: std::sync::atomic::AtomicBool::new(preflight),
         auto_connections: std::sync::atomic::AtomicBool::new(true),
@@ -2074,7 +2111,7 @@ fn build_daemon(
         cors_origin: Mutex::new(CORS_DEFAULT.to_string()),
         sidecar: Mutex::new(None),
         sidecar_tails: Mutex::new(Vec::new()),
-        media_rejudge: Mutex::new(Vec::new()),
+        media_final_owed: Mutex::new(Vec::new()),
         best_rate_bps: AtomicU64::new(0),
         speed_ceiling: AtomicU64::new(0),
         mem_budget_total: mem_budget.total,
@@ -2359,6 +2396,10 @@ fn build_daemon(
         settings_path: settings_path.clone(),
         #[cfg(feature = "indexer")]
         taste_cache: Mutex::new(None),
+        #[cfg(feature = "indexer")]
+        owned_keys_cache: Mutex::new(None),
+        #[cfg(feature = "indexer")]
+        oracle_bb_cache: Mutex::new(None),
     })
 }
 

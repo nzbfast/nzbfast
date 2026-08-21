@@ -179,6 +179,12 @@ impl Daemon {
         };
         let chain = std::mem::take(&mut owed.script);
         if !chain.is_empty() {
+            // The longest thing a tail can legitimately do - the chain is
+            // bounded by `script_timeout_secs`, an hour by default - and
+            // the one whose slowness is entirely the user's own to fix.
+            // It has to name itself on the row.
+            let id = job.lock_ok().nzo_id.clone();
+            self.note_tail_stage(&id, "scripting");
             let (d, j) = (self.clone(), job.clone());
             if let Err(e) = tokio::task::spawn_blocking(move || {
                 d.run_script_chain(&chain, &j, gen0, Fence::Generation)

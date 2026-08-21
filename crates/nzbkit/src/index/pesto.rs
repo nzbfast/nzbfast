@@ -43,6 +43,48 @@ pub const PESTO_TINY_MAX: i64 = 100_000;
 /// a payload still mid-post).
 const RETRY_SECS: i64 = 21_600;
 
+/// The pesto tiny-sidecar band, as LITERAL terms - the WHERE prefix of
+/// `pesto_pick` and, verbatim, the predicate of `idx_rel_pesto_tiny`
+/// (schema.rs). One builder feeds both so they cannot drift; literals
+/// because a partial index is reachable only when the statement's own
+/// WHERE implies its predicate, proven from literal terms and never
+/// from a bound parameter (the N1 rule). The rotation terms (probe_at,
+/// probe_tries) stay out of the band for the same reason as the 7z
+/// lane's.
+pub(crate) fn pesto_band_sql() -> String {
+    format!(
+        "pesto_ctr_min IS NOT NULL AND junk>=70 AND files=1 \
+         AND total_bytes>0 AND total_bytes<{PESTO_TINY_MAX}"
+    )
+}
+
+/// The pick's full SQL, shared with plan_tests.rs so the plan gate
+/// asserts the statement the daemon actually runs. Pinned, and for
+/// this lane the pin is not just insurance: the planner actually
+/// prefers an `idx_rel_size` range plus a temp sort here (measured on
+/// a fresh database AND the 10 M row prototype), because the
+/// `total_bytes<100000` term looks selective to a cost model that
+/// cannot see the junk band it drags in. The unpinned form is the
+/// pre-backfill fallback, where INDEXED BY would fail to prepare.
+pub(crate) fn pesto_pick_sql() -> String {
+    pesto_pick_sql_with("INDEXED BY idx_rel_pesto_tiny")
+}
+
+pub(crate) fn pesto_pick_sql_unpinned() -> String {
+    pesto_pick_sql_with("")
+}
+
+fn pesto_pick_sql_with(pin: &str) -> String {
+    format!(
+        "SELECT id, stem, total_bytes FROM releases {pin}
+          WHERE {}
+            AND probe_tries<?3
+            AND probe_at<=?1
+          ORDER BY first_posted DESC LIMIT ?2",
+        pesto_band_sql()
+    )
+}
+
 /// One parsed recovery set awaiting (or done with) its backward link.
 #[derive(Debug, Clone)]
 pub struct PestoSetRow {
@@ -152,23 +194,15 @@ impl Index {
         now: i64,
         limit: usize,
     ) -> rusqlite::Result<Vec<super::ProbeCandidate>> {
-        let mut stmt = self.db.prepare_cached(
-            "SELECT id, stem, total_bytes FROM releases
-              WHERE pesto_ctr_min IS NOT NULL
-                AND junk>=70 AND files=1
-                AND total_bytes>0 AND total_bytes<?3
-                AND probe_tries<?4
-                AND probe_at<=?1
-              ORDER BY first_posted DESC LIMIT ?2",
-        )?;
+        // Pinned form first, unpinned for a pre-backfill database -
+        // see probe7z_pick.
+        let mut stmt = match self.db.prepare_cached(&pesto_pick_sql()) {
+            Ok(s) => s,
+            Err(_) => self.db.prepare_cached(&pesto_pick_sql_unpinned())?,
+        };
         let rows: Vec<super::ProbeCandidate> = stmt
             .query_map(
-                rusqlite::params![
-                    now - RETRY_SECS,
-                    (limit * 4).max(16) as i64,
-                    PESTO_TINY_MAX,
-                    PESTO_GIVE_UP
-                ],
+                rusqlite::params![now - RETRY_SECS, (limit * 4).max(16) as i64, PESTO_GIVE_UP],
                 |r| {
                     Ok(super::ProbeCandidate {
                         id: r.get(0)?,

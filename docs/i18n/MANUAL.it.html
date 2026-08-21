@@ -397,6 +397,15 @@ Il pannello di ogni riga dice chi ha aggiunto il job e ha lo stesso pulsante
 un'altra parte, o per allegare il <code>.nzb</code> a una segnalazione di
 problema.</p>
 <p>La scheda elenca dieci download per impostazione predefinita e il resto è a un clic, sul pulsante ▤. Stato, posizione e il motivo di un fallimento stanno dietro un clic sulla riga stessa, così il caso comune - cosa è finito, quanto grande, quando - resta leggibile senza scorrere. Trascina invece il bordo inferiore della scheda per far scorrere l'elenco a un'altezza scelta da te. <b>History rows</b> in Impostazioni → Interfaccia cambia quel dieci; essendo una proprietà del daemon e non del tuo browser, vale per ogni dispositivo che guarda questa installazione. <b>Colour History names</b>, lì accanto, tinge di verde i nomi completati e di rosso quelli falliti; disattivandolo i nomi restano neutri, e il pallino colorato e i dettagli della riga continuano a dire qual è quale.</p>
+<p>nzbfast conserva lo storico per sempre, salvo diversa indicazione. <b>Pulizia dello
+storico</b> in Impostazioni → Sistema rimuove le vecchie voci secondo due regole
+indipendenti: un’età (<b>Rimuovi le voci più vecchie di</b>, contata dal momento in
+cui il download è terminato, in minuti, ore o giorni) e una lunghezza (<b>Conserva al
+massimo questo numero di voci</b>). Se sono impostate entrambe valgono entrambe, e 0
+disattiva ciascuna per conto suo. Viene rimossa solo la voce dello storico: i file
+scaricati restano esattamente dove sono. La regola sull’età prende solo i download
+completati, quindi uno fallito aspetta che tu lo riprovi o lo elimini; il limite di
+lunghezza conta ogni voce, qualunque sia stato il suo esito.</p>
 <h3 id="dash-usage">Utilizzo dati</h3>
 <p>Barre giornaliere per provider e totali Oggi / 7 giorni / 30 giorni - essenziali
 per gli account a consumo e a blocchi. Gli account a blocco mostrano l'uso
@@ -523,8 +532,7 @@ normale indirizzo web basta; una voce Prowlarr somiglia a
 <b>Applica indexer</b>. <b>Prova</b> chiede al sito che cosa supporta e mostra la
 risposta, il che convalida indirizzo e chiave con un clic. Una chiave salvata non viene
 più mostrata: il campo lo dice, e lasciarlo vuoto conserva quella già presente.</p>
-<p><b>Cercare.</b> Apri <b>🎬 la bacheca</b> nell'intestazione e passa alla lista delle
-release. Il menu a tendina accanto al campo di ricerca decide dove guarda una ricerca:
+<p><b>Cercare.</b> Apri <b>🎬 la bacheca</b> nell'intestazione e scegli <b>Release</b>. Il menu a tendina accanto al campo di ricerca decide dove guarda una ricerca:
 <b>Questo indice</b>, cioè quello che questa macchina ha scansionato da sé,
 <b>Indexer</b>, oppure <b>Entrambi</b>. La tua scelta viene ricordata. Interrogare i
 tuoi account richiede qualcosa nel campo, perché sfogliarli con una richiesta vuota
@@ -592,6 +600,15 @@ un browser multimediale: ogni film e ogni release TV riconosciuti diventano un
 riquadro-poster con voto, anno, generi, cast e trama - i tuoi newsgroup,
 sfogliabili come un catalogo.</p>
 <ul>
+<li><b>Bacheca</b> e <b>Release</b> sono due modi di guardare lo stesso indice, e
+la coppia sotto <b>Vista</b> passa dall'uno all'altro. La scelta viene ricordata.</li>
+<li><b>Densità dei poster</b> è <b>S</b> / <b>M</b> / <b>L</b> accanto a quella coppia:
+piccolo ne mette di più sullo schermo, grande di meno.</li>
+<li><b>Anteprime al passaggio</b>, sopra la tabella Release: posa il puntatore su una
+riga per poster e trama, presi dal tuo stesso indice.</li>
+<li><b>Raggruppa per titolo</b>, l'interruttore accanto: una riga per titolo, con le
+sue release sotto. Aprila con <b>&#9656;</b> o cliccando la riga; la casella sul titolo
+seleziona le release mostrate. Il raggruppamento vale solo per <b>Questo indice</b>.</li>
 <li><b>Schede</b> Film / Serie TV / Altro, ricerca istantanea e sette ordinamenti:
 <b>Per te</b>, Post più recenti, Anno di uscita, Più votati, Titolo A–Z, Più grandi e
 I più postati.</li>
@@ -1203,7 +1220,11 @@ rimosso nulla, quindi un giudizio sbagliato costa un po' di tempo anziché il do
 </ul>
 <p class="dim">Il verdetto è una previsione basata su indizi, non una garanzia. Per una
 risposta netta su un NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>) conta gli
-articoli reali.</p>
+articoli reali. Entrambi contano risposte, non contenuti. Un controllo pulito significa che gli
+articoli c'erano quando sono stati chiesti, non che ciò che contengono sia integro: un
+piccolo numero di provider risponde per gli articoli rimossi con dati fittizi invece di
+rifiutarli, e questo emerge solo durante il download stesso, dove l'articolo fallisce il
+proprio checksum e viene recuperato da un altro server o riparato.</p>
 <h3 id="memory">Budget di memoria - e quanto costa poca memoria</h3>
 <p>Tutte le cache del motore condividono un unico budget (default ¼ della RAM
 fisica, limitato a 256 MB–16 GB). Impostalo esplicitamente con <i>Budget di

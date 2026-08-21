@@ -1,5 +1,5 @@
 use super::*;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // The index-handle discipline and the M34 size cap - a second `impl Daemon`,
 // moved out bodily (TODO 106). A child module, so it keeps the private
@@ -338,10 +338,21 @@ pub struct Daemon {
     /// the emitter never blocks on delivery.
     pub(super) hooks_tx: Mutex<Option<std::sync::mpsc::SyncSender<Value>>>,
     /// §129 D5: optional retention, BOTH 0 = unlimited (the shipped
-    /// default, by ruling). Count keeps the newest N records;
-    /// days drops Completed records older than N days.
+    /// default, by ruling). Count keeps the newest N records; age drops
+    /// Completed records that finished more than N seconds ago.
+    ///
+    /// The age knob is stored in SECONDS, and was days until issue #45. The
+    /// unit is in the name because the value is compared against
+    /// `finished_unix` directly, and a reader who guesses wrong here
+    /// deletes the user's history 86,400x too eagerly. Issue #45 asked
+    /// for minutes ("immediately after the download ended, or after XY
+    /// minutes"), which days cannot express; seconds is also the unit
+    /// every other duration setting here uses (`watch_interval_secs`,
+    /// `library_recheck_secs`, `script_timeout_secs`). A saved
+    /// `history_keep_days` from before the change is still read, and
+    /// multiplied - see `restore_ui_and_index_settings`.
     pub history_keep_count: AtomicU64,
-    pub history_keep_days: AtomicU64,
+    pub history_keep_secs: AtomicU64,
     /// Serializes "decide where this job goes" against "publish it".
     ///
     /// `choose_out_dir` asks `dir_claim`, which takes and RELEASES the
@@ -376,6 +387,13 @@ pub struct Daemon {
     /// lanes (serve/mover.rs) - same destination stays serial, two
     /// different destinations never queue behind each other.
     pub(super) mover_q: Mutex<VecDeque<Arc<Mutex<Job>>>>,
+    /// Moves in mover custody: counted up by `mover_enqueue`, down when
+    /// a lane's `mover_process` returns without a requeue. `mover_q`
+    /// and `moving` are BOTH empty while a job is in transit between
+    /// them (the dispatcher's lane-key resolution, a lane's 2 s busy
+    /// requeue sleep); the queue-finished drain check reads this so a
+    /// sleep or shutdown cannot fire inside those windows.
+    pub(super) mover_inflight: std::sync::atomic::AtomicUsize,
     /// Wakes the mover when `mover_q` gains work.
     pub(super) mover_wake: tokio::sync::Notify,
     /// The mover's pacing token bucket - ONE for the whole daemon, so
@@ -541,14 +559,13 @@ pub struct Daemon {
     /// older binary wrote and trip over a missing column.
     #[cfg(feature = "indexer")]
     pub index_migrated: std::sync::atomic::AtomicBool,
-    /// Last computed index_stats figures (releases, complete, db_bytes,
-    /// live_bytes), served whenever the connection above is busy. The
-    /// dashboard's 15s status poll must never park an HTTP worker on
-    /// that mutex: a catch-up ingest once held it 62s straight, each
+    /// index_stats figures cache - see [`IndexStatsCache`]. The
+    /// dashboard's status polls must never park an HTTP worker on the
+    /// index mutex: a catch-up ingest once held it 62s straight, each
     /// poll parked another of the 4 workers, and one open dashboard
     /// tab wedged the whole API (28 Jul hang).
     #[cfg(feature = "indexer")]
-    pub index_stats_cache: Mutex<Option<(u64, u64, u64, u64)>>,
+    pub index_stats_cache: Mutex<IndexStatsCache>,
     /// M14g3 auto-speed governor on/off (live-toggleable).
     pub auto_speed: std::sync::atomic::AtomicBool,
     /// STAT-sample every job before downloading it (settings.json
@@ -778,12 +795,21 @@ pub struct Daemon {
     /// 2, M6). Keyed by the flag's ALLOCATION, like every other sidecar
     /// identity test here: a retry keeps its nzo_id.
     pub sidecar_tails: Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>,
-    /// nzo_ids whose media chip settled before the identity oracle
-    /// answered, so the §76 prober owes them one more on-disk pass
-    /// against the canonical name. Pushed by post-processing, drained
-    /// by the prober each tick (its final-pass list is task-local, and
-    /// a settled job has already left it).
-    pub media_rejudge: Mutex<Vec<String>>,
+    /// nzo_ids owed the §76 prober's final on-disk pass. Drained by the
+    /// prober each tick (its final-pass list is task-local, and a
+    /// settled job has already left it).
+    ///
+    /// Two producers, both of them EVENTS rather than something the
+    /// prober could notice for itself:
+    ///
+    /// - `park`, when the record reaches history. The prober cannot
+    ///   infer this: it would have to catch the job Downloading at one
+    ///   tick and stopped at the next, and a download shorter than one
+    ///   tick is never caught at all.
+    /// - post-processing, when the identity oracle answers after the
+    ///   chip settled - the facts are complete but the NAME they were
+    ///   judged against has changed.
+    pub media_final_owed: Mutex<Vec<String>>,
     /// Best sustained download rate seen this session (bytes/sec) - the
     /// reference healthy jobs set for judging slow ones. Fed by the
     /// watchdog's rolling window and by completed-job averages.
@@ -1753,6 +1779,47 @@ pub struct Daemon {
     /// history rows is cheap, but the affinity sort hits it per page.
     #[cfg(feature = "indexer")]
     pub(super) taste_cache: Mutex<Option<(std::time::Instant, TasteProfile)>>,
+    /// N12: `owned_title_keys`'s answer, tagged with the
+    /// `(queue_rev, history_rev)` pair it was derived under. See that
+    /// method for why the revision pair, and not a TTL, is the dirty
+    /// signal here.
+    #[cfg(feature = "indexer")]
+    pub(super) owned_keys_cache: Mutex<Option<(u64, u64, Arc<std::collections::HashSet<String>>)>>,
+    /// N12: the enabled-backbone list `oracle_ctx` needs, tagged with the
+    /// [`CfgStamp`] of the config file it was read from. See
+    /// `enabled_backbones`.
+    #[cfg(feature = "indexer")]
+    pub(super) oracle_bb_cache: Mutex<Option<(CfgStamp, Vec<String>)>>,
+}
+
+/// N12: what makes a cached config read stale - length, mtime and, on
+/// unix, inode.
+///
+/// `write_atomic` publishes by RENAME, so every write the dashboard, the
+/// scheduler or the setup wizard performs lands a NEW inode; an editor
+/// that rewrites the file in place moves the length or the mtime
+/// instead. One `stat` is cheap enough to take per poll, which is the
+/// whole point - the alternative it replaces is a disk read plus a JSON
+/// parse per poll.
+#[cfg(feature = "indexer")]
+pub(super) type CfgStamp = (u64, Option<std::time::SystemTime>, u64);
+
+/// The stamp of `path`, or None when there is nothing there to stat.
+///
+/// None is not a failure: `Config::load` answers a missing file by
+/// searching for a SABnzbd ini, and the list it then returns came from a
+/// path this stamp does not describe. Uncacheable, so uncached.
+#[cfg(feature = "indexer")]
+fn cfg_stamp(path: &std::path::Path) -> Option<CfgStamp> {
+    let md = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        md.ino()
+    };
+    #[cfg(not(unix))]
+    let ino = 0u64;
+    Some((md.len(), md.modified().ok(), ino))
 }
 
 /// M31b: the user's demonstrated taste, distilled from their completed
@@ -1908,6 +1975,29 @@ pub struct ServerRefusal {
     /// the words that tell the user what to do.
     pub line: String,
     pub at: i64, // unix seconds, last seen
+}
+
+/// A4: the index_stats figures behind [`Daemon::index_stats_snapshot`],
+/// with what makes them a real cache rather than a busy-fallback: a
+/// TTL (a fresh snapshot is served without touching any index lock,
+/// even when the writer mutex is free), an era stamp (a wipe or
+/// source-off bumps [`Daemon::index_era`], which orphans the figures
+/// instantly), and a singleflight flag (one caller recomputes the
+/// expensive `SCAN releases`; everyone else serves the stale snapshot
+/// instead of queueing more scans behind it).
+#[cfg(feature = "indexer")]
+#[derive(Default)]
+pub struct IndexStatsCache {
+    /// (releases, complete, db_bytes, live_bytes). None until the
+    /// first successful read - the API forwards that as stats_cold.
+    pub snap: Option<(u64, u64, u64, u64)>,
+    /// When `snap` was computed. None forces the next snapshot call to
+    /// recompute (the post-scan-pass refresh does exactly this).
+    pub at: Option<std::time::Instant>,
+    /// The [`Daemon::index_era`] the figures belong to.
+    pub era: u64,
+    /// A recompute is in flight on some other caller's thread.
+    pub refreshing: bool,
 }
 
 /// What the scan loop is doing right now - the shared counter is bumped
@@ -2905,8 +2995,55 @@ impl Daemon {
     /// completed history plus the live queue. These are `title_key`s (the
     /// wall's grouping key), NOT dupe keys, so the Affinity sort can sink
     /// owned titles with a plain `title_key IN (...)`.
+    ///
+    /// N12: cached against `(queue_rev, history_rev)`. Both consumers are
+    /// per-poll - the Affinity wall sort through `affinity_ctx`, and the
+    /// eviction pass through `protected_set` - and the walk below is a
+    /// `parse_release` per job under that job's lock, ~14,500 of them at
+    /// issue #38's history size.
+    ///
+    /// The revision pair rather than a TTL, deliberately: `protected_set`
+    /// decides what eviction may NOT delete, so a key that went missing
+    /// for a TTL's worth of seconds is a window in which the index can
+    /// drop rows for a title the user has just finished. Both counters
+    /// move at the persistence seams (`save_queue`, `histstore`), which
+    /// every membership, state and name change comes through, and the
+    /// house rule at those seams is store-before-bump (spelled out at
+    /// `publish_hold`) - so a reader can see a change ahead of its bump,
+    /// but never a bump ahead of its change.
+    ///
+    /// Which is why the revisions are read BEFORE the walk. A mutation
+    /// landing mid-walk gets tagged with the pre-mutation revision and is
+    /// discarded by the very next caller; reading them afterwards would
+    /// instead stamp a pre-mutation answer as current and keep it.
     #[cfg(feature = "indexer")]
     pub(super) fn owned_title_keys(&self) -> std::collections::HashSet<String> {
+        let rev = (
+            self.queue_rev.load(Ordering::Relaxed),
+            self.history_rev.load(Ordering::Relaxed),
+        );
+        // A leaf lock taken twice, not held across the walk: the walk
+        // takes the queue and history locks and then a job lock, and a
+        // cache mutex outranking those would add a fourth edge to that
+        // order to de-duplicate a miss only two callers can race.
+        let hit = self
+            .owned_keys_cache
+            .lock_ok()
+            .as_ref()
+            .filter(|(q, h, _)| (*q, *h) == rev)
+            .map(|(_, _, set)| Arc::clone(set));
+        if let Some(set) = hit {
+            return (*set).clone();
+        }
+        let fresh = Arc::new(self.owned_title_keys_uncached());
+        *self.owned_keys_cache.lock_ok() = Some((rev.0, rev.1, Arc::clone(&fresh)));
+        (*fresh).clone()
+    }
+
+    /// The walk itself: what `owned_title_keys` answers on a miss, and
+    /// the ground truth its tests check the cached answer against.
+    #[cfg(feature = "indexer")]
+    pub(super) fn owned_title_keys_uncached(&self) -> std::collections::HashSet<String> {
         let mut set = std::collections::HashSet::new();
         let mut push = |name: &str| {
             let k = crate::wall::parse_release(name).key;
@@ -2988,6 +3125,39 @@ impl Daemon {
         if snap.is_empty() {
             return None;
         }
+        let bbs = self.enabled_backbones(cfg_path);
+        (!bbs.is_empty()).then_some((snap, bbs))
+    }
+
+    /// The sorted, deduped backbone of every ENABLED server, cached
+    /// against the config file's [`CfgStamp`].
+    ///
+    /// N12: `oracle_ctx` runs on the wall2 poll, and this was a full
+    /// `Config::load` - a disk read and a JSON parse - on every one of
+    /// them, for a list that changes only when somebody edits the server
+    /// set. The dashboard edits it through the API, which publishes by
+    /// atomic rename, so the stamp moves the instant that write lands and
+    /// the very next poll re-reads; an out-of-process edit moves it too.
+    ///
+    /// The stamp is taken BEFORE the load, for the same reason
+    /// `owned_title_keys` reads its revisions first: a write landing
+    /// mid-load is then tagged with the pre-write stamp and re-read by
+    /// the next caller, where stamping afterwards would file bytes read
+    /// before the write under metadata written after it and keep them.
+    #[cfg(feature = "indexer")]
+    fn enabled_backbones(&self, cfg_path: &std::path::Path) -> Vec<String> {
+        let stamp = cfg_stamp(cfg_path);
+        if let Some(stamp) = stamp.as_ref() {
+            let hit = self
+                .oracle_bb_cache
+                .lock_ok()
+                .as_ref()
+                .filter(|(s, _)| s == stamp)
+                .map(|(_, bbs)| bbs.clone());
+            if let Some(bbs) = hit {
+                return bbs;
+            }
+        }
         let mut bbs: Vec<String> = nzbkit::config::Config::load(cfg_path)
             .map(|c| {
                 c.servers
@@ -2999,7 +3169,10 @@ impl Daemon {
             .unwrap_or_default();
         bbs.sort();
         bbs.dedup();
-        (!bbs.is_empty()).then_some((snap, bbs))
+        if let Some(stamp) = stamp {
+            *self.oracle_bb_cache.lock_ok() = Some((stamp, bbs.clone()));
+        }
+        bbs
     }
 
     /// Enqueue an NZB that arrived over HTTP, keeping what the indexer
@@ -3084,15 +3257,23 @@ impl Daemon {
         }
     }
 
-    /// The canonical (pre-collision) output directory for a name+category.
-    pub(super) fn base_out_dir(&self, category: &str, dir_stem: &str) -> PathBuf {
+    /// The directory a category's jobs are placed UNDER - the download
+    /// root for an empty category, and otherwise the category's own
+    /// subfolder.
+    ///
+    /// §129 2b: a category can rename that subfolder (SAB's relative
+    /// "Folder"). Sanitized per component so "tv/anime" nests and
+    /// nothing escapes the download root; the default stays the
+    /// category's own name, exactly as before.
+    ///
+    /// Split out because `finalize_names` needs the SAME answer and was
+    /// recomputing it as `out_dir().join(category)` from the raw name -
+    /// which silently re-parented every renamed payload out of the
+    /// folder the user configured, whenever the two disagreed.
+    pub(super) fn cat_dir(&self, category: &str) -> PathBuf {
         if category.is_empty() {
-            return self.out_dir().join(dir_stem);
+            return self.out_dir();
         }
-        // §129 2b: a category can rename its subfolder (SAB's relative
-        // "Folder"). Sanitized per component so "tv/anime" nests and
-        // nothing escapes the download root; the default stays the
-        // category's own name, exactly as before.
         let sub = self
             .cat_meta
             .lock_ok()
@@ -3100,7 +3281,7 @@ impl Daemon {
             .map(|m| m.dir.clone())
             .unwrap_or_default();
         if sub.is_empty() {
-            return self.out_dir().join(category).join(dir_stem);
+            return self.out_dir().join(category);
         }
         let mut p = self.out_dir();
         for c in sub
@@ -3109,7 +3290,12 @@ impl Daemon {
         {
             p = p.join(nzbkit::disk::sanitize_filename(c));
         }
-        p.join(dir_stem)
+        p
+    }
+
+    /// The canonical (pre-collision) output directory for a name+category.
+    pub(super) fn base_out_dir(&self, category: &str, dir_stem: &str) -> PathBuf {
+        self.cat_dir(category).join(dir_stem)
     }
 
     /// All-core CPU% (0-100) from the process cpu-time delta since the
@@ -3323,6 +3509,46 @@ impl Daemon {
         self.active_stream.lock_ok().as_deref().is_some_and(want)
     }
 
+    /// Advance the queue row's activity token through a stage the
+    /// DAEMON owns, after the engine's own pipeline has finished with
+    /// it.
+    ///
+    /// The engine advances `hub.activity` at each of its section
+    /// transitions and its last word is `"extracting"`, written when the
+    /// disk-unpack ladder begins (`get/tail.rs`). Nothing wrote to the
+    /// map after that and only `park` removes the entry - so every stage
+    /// from the end of extraction to the history row inclusive rendered
+    /// as "unpacking": the unlock probes, `resolve_identity` and its two
+    /// third-party requests, the cleanup sweeps, the rename and TV
+    /// filing, the M29 oracle fold on the index write mutex, and the
+    /// post-processing script. A tester watching four minutes of that
+    /// was told "unpacking" throughout and reported the job as hung,
+    /// which is the reasonable reading of a word that never changes.
+    ///
+    /// The wire vocabulary is deliberately NOT extended here. Every
+    /// token this writes maps to SABnzbd's `Moving` in
+    /// [`Self::tail_phase`] - the same word a `Finishing` row already
+    /// reported - so Sonarr and Radarr are told exactly what they were
+    /// told before; only the dashboard's own sub-line, which is
+    /// composed from the raw token, gets finer. Widening what the
+    /// *arrs are told is a compatibility question and does not belong
+    /// in a diagnostic change.
+    ///
+    /// They are mapped rather than left unknown because "unknown"
+    /// silently means "not in a tail at all" to every caller of
+    /// `tail_phase`, and the engine writes the first of these tokens
+    /// (`finalizing`, from `get/tail.rs`) while the record is still
+    /// `Downloading` - the lane only marks it `Finishing` when it takes
+    /// custody, one hand-off later. A queue poll landing in that window
+    /// found no phase, so the row fell back to `downloaded_bytes` (0 at
+    /// that instant, the counters having been released at net-drain)
+    /// and rendered `Downloading 0%` between `Extracting 100%` and
+    /// `Moving 100%`. See `tail_phase`.
+    pub(super) fn note_tail_stage(&self, nzo_id: &str, tok: &'static str) {
+        self.hub.activity.lock_ok().insert(nzo_id.to_string(), tok);
+        debug!(target: "lane", "{nzo_id}: tail stage -> {tok}");
+    }
+
     /// The wire status for a job that has left the network but is still
     /// inside the pipeline - or None if it is not in a post-network tail.
     ///
@@ -3335,14 +3561,34 @@ impl Daemon {
     /// so the phase word is read from there rather than from a second
     /// mechanism that would have to be kept in step with it.
     ///
-    /// The words are SABnzbd's own state vocabulary, like `Moving`
-    /// beside them in queue_json: Sonarr and Radarr already read all
-    /// three as "busy, keep waiting", which is exactly what they mean.
+    /// The words are SABnzbd's own state vocabulary - the same
+    /// `Moving` queue_json renders a `Completed` row as: Sonarr and
+    /// Radarr already read every one of them as "busy, keep waiting",
+    /// which is exactly what they mean.
+    ///
+    /// Every token that means "past the network" must have an arm here,
+    /// and the tokens are matched by NAME rather than by a catch-all:
+    /// the same map also carries pre-network words (`preflight`, from
+    /// the metadata-only check in `tasks.rs`) that are written while the
+    /// record is `Downloading` and nothing has been fetched. A default
+    /// arm answering `Some` would report those rows as all-in at 100%,
+    /// which is the bug this function exists to prevent, pointed the
+    /// other way.
     pub(super) fn tail_phase(&self, nzo_id: &str) -> Option<&'static str> {
         match self.hub.activity.lock_ok().get(nzo_id).copied() {
             Some("verifying") => Some("Verifying"),
             Some("repairing") => Some("Repairing"),
             Some("extracting") => Some("Extracting"),
+            // The engine's hand-off word and the daemon's own tail
+            // stages (`note_tail_stage`), which follow it. All one wire
+            // word - `Moving` - so nothing new reaches the *arrs; what
+            // changes is that the stretch from the end of extraction to
+            // the history row is a TAIL to every caller, in the
+            // `Downloading` window before the lane marks the record
+            // `Finishing` just as much as after it.
+            Some("finalizing" | "unlocking" | "identifying" | "renaming" | "scripting") => {
+                Some("Moving")
+            }
             _ => None,
         }
     }
@@ -3402,7 +3648,9 @@ impl Daemon {
             // during an unpack turned that unpack's failure into a
             // silent re-queue, with no history record and no failure
             // notification. `state == Downloading` cannot tell the two
-            // apart on its own; the pipeline's phase word can.
+            // apart on its own; the pipeline's phase word can - for the
+            // whole tail, hand-off window included, which is why every
+            // token past the network has an arm in `tail_phase`.
             if g.state == JobState::Downloading
                 && g.priority < 2
                 && !g.tombstone

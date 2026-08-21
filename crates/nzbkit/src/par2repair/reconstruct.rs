@@ -9,21 +9,26 @@
 use super::*;
 
 impl Reconstructor {
-    pub fn new(
+    /// `recovery` payloads are only READ here (widened into the u16
+    /// syndrome rows before the fold worker spawns), so borrowed slices
+    /// into a caller's corpus are as good as owned buffers - the mapped
+    /// repair path selects `(u32, &[u8])` pairs to avoid cloning ~m x
+    /// block_size of payload it would immediately discard.
+    pub fn new<D: AsRef<[u8]>>(
         block_size: usize,
         n_inputs: usize,
         missing: &[usize],
-        recovery: &[(u32, Vec<u8>)],
+        recovery: &[(u32, D)],
     ) -> Result<Reconstructor, RepairError> {
         Self::new_with_path(block_size, n_inputs, missing, recovery, SyndromePath::Auto)
     }
 
     #[doc(hidden)]
-    pub fn new_with_path(
+    pub fn new_with_path<D: AsRef<[u8]>>(
         block_size: usize,
         n_inputs: usize,
         missing: &[usize],
-        recovery: &[(u32, Vec<u8>)],
+        recovery: &[(u32, D)],
         path: SyndromePath,
     ) -> Result<Reconstructor, RepairError> {
         if block_size == 0 || !block_size.is_multiple_of(2) {
@@ -71,10 +76,10 @@ impl Reconstructor {
                 // A[r][c] = g_{missing[c]}^{e_r} = 2^{k·e mod 65535}
                 let a: Vec<Vec<u16>> = recovery
                     .iter()
-                    .map(|&(e, _)| {
+                    .map(|(e, _)| {
                         missing
                             .iter()
-                            .map(|&j| gf16::pow2(base_logs[j] as u64 * e as u64))
+                            .map(|&j| gf16::pow2(base_logs[j] as u64 * *e as u64))
                             .collect()
                     })
                     .collect();
@@ -93,6 +98,7 @@ impl Reconstructor {
         let mut exponents = Vec::with_capacity(recovery.len());
         let mut syndromes = Vec::with_capacity(recovery.len());
         for (e, data) in recovery {
+            let data = data.as_ref();
             if data.len() != block_size {
                 return Err(RepairError::Malformed(format!(
                     "recovery slice (exponent {e}) is {} bytes, block size is {block_size}",

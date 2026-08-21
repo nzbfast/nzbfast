@@ -1146,9 +1146,10 @@ mod multi_server_selection {
     #[test]
     fn scan_servers_skip_blocks_and_dedupe_backbones() {
         let c = cfg(serde_json::json!([
-            { "host": "news.eweka.nl" },
-            // Same backbone (omicron reseller): contributes nothing.
             { "host": "news.newshosting.com" },
+            // Same SPOOL (another Highwinds reseller): contributes
+            // nothing. Eweka would NOT qualify - same owner, own spool.
+            { "host": "news.usenetserver.com" },
             // Prepaid block: OVER would burn rescue credit.
             { "host": "news.blocknews.net", "block_bytes": 5_000_000_000u64 },
             // Fill server, flatrate, own backbone: eligible, ranked after
@@ -1157,7 +1158,7 @@ mod multi_server_selection {
             { "host": "news.usenetexpress.com", "enabled": false },
         ]));
         let picked: Vec<String> = scan_servers(&c).into_iter().map(|s| s.host).collect();
-        assert_eq!(picked, ["news.eweka.nl", "news.xsnews.nl"]);
+        assert_eq!(picked, ["news.newshosting.com", "news.xsnews.nl"]);
     }
 
     /// M7b.2 §5.7: the block-account flag keeps headers off a metered

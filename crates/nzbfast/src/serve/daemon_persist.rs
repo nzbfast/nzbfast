@@ -307,6 +307,16 @@ impl Daemon {
                 }
                 self.history_enforce_retention();
                 if nh > 0 {
+                    // A history-only restore is still a restore: those
+                    // rows' ids carry permanent stream tokens, and a
+                    // fresh allocator starting at 1 would re-mint them
+                    // (old bearer URL authorizes the new job, and the
+                    // next boot's move-sequence reconciliation can drop
+                    // the new queue row as a half-written move). Same
+                    // wall-clock floor as the snapshot path below.
+                    let cur = self.next_id.load(Ordering::Relaxed);
+                    self.next_id
+                        .store(cur.max(Self::id_floor()), Ordering::Relaxed);
                     info!(target: "queue", "restored {nh} history jobs");
                 }
                 return;

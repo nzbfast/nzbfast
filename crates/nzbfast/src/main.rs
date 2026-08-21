@@ -956,11 +956,15 @@ async fn run() -> Result<()> {
                 "lean" => (true, true),
                 other => anyhow::bail!("--verify must be fast, full, or lean, not {other:?}"),
             };
-            // M32 perf: CLI downloads have no /stream readers, so
-            // dropping settled page cache is safe and saves real CPU on
-            // small-RAM Linux boxes (see disk.rs maybe_drop_cache).
+            // M32/C1 perf: CLI downloads have no /stream readers, so
+            // dropping settled page cache is SAFE here - but only a WIN
+            // on small-memory boxes, so the default is memory-aware
+            // rather than the old flat `true` (threshold rationale and
+            // the measured crossover: `drop_cache_auto` in nzbkit's
+            // disk.rs).
+            // NZBFAST_DROP_CACHE=1/0 force-overrides either way.
             #[cfg(target_os = "linux")]
-            nzbkit::disk::set_drop_cache_default(true);
+            nzbkit::disk::set_drop_cache_default(nzbkit::disk::drop_cache_auto());
             if preflight {
                 let verdict = check(&cli.config, &nzb, 10, 4, 50, true).await?;
                 if let Verdict::Impossible {

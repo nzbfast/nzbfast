@@ -72,6 +72,34 @@ pub struct Job {
     /// LunaSea) showed a week of history as finished seconds ago,
     /// re-sorted it wrongly, and re-notified every old item as new.
     pub finished_unix: Option<i64>,
+    /// Wall-clock seconds this job spent in the post-network tail: from
+    /// the moment the lane took custody (the record turns `Finishing`)
+    /// to the moment `park` files it. 0.0 until a tail has run.
+    ///
+    /// The number exists because its absence cost a triage round. A
+    /// tester reported a 389 MB download sitting on "unpacking" for four
+    /// to five minutes with the daemon's own CPU, disk-write and network
+    /// gauges all reading near zero, and nothing anywhere recorded which
+    /// stage had eaten the time - the SAB-facing `postproc_time` was a
+    /// hardcoded 0, and `elapsed_secs` covers the network leg alone. The
+    /// tail is where the unlock probes, the identity oracles' two
+    /// third-party requests, the sweeps, the rename and the index fold
+    /// live, and any of them can be slow on someone else's machine.
+    /// Recording it is what makes the next such report answerable from
+    /// a history row instead of from a `sample` of the process.
+    pub postproc_secs: f64,
+    /// The captured-output cursors bracketing this run, for
+    /// `mode=report`. Both 0 = nothing to slice.
+    ///
+    /// DELIBERATELY NOT PERSISTED (see `job_wire`). They index the
+    /// process-global log ring, which a restart re-creates from zero -
+    /// so a mark restored from `history.jsonl` would name a span of
+    /// somebody else's output. `logtee::between` refuses a mark it
+    /// cannot have issued, and dropping them at the boundary means it
+    /// never has to. The cost of not persisting is that a report for a
+    /// job from before the last restart carries no log, which it says.
+    pub log_mark: u64,
+    pub log_end: u64,
     /// SABnzbd priority: 2 Force, 1 High, 0 Normal, -1 Low, -100 Default.
     /// Force jobs start even while the queue is paused.
     pub priority: i32,
@@ -765,6 +793,10 @@ pub(super) async fn finalize_completed_gen(
     job: &Arc<Mutex<Job>>,
     gen0: Option<(u32, u64)>,
 ) {
+    // The key the activity map is stamped with while this tail runs. A
+    // record's nzo_id never changes, so one read outside every fence is
+    // enough and it costs no place in the snapshot tuple below.
+    let nzo = job.lock_ok().nzo_id.clone();
     let snapshot = {
         let j = job.lock_ok();
         if !Daemon::same_generation(&j, gen0) {
@@ -916,8 +948,9 @@ pub(super) async fn finalize_completed_gen(
         // For the §99 association record on the in-stream probe's
         // winner, which lands after the closure returns.
         let site3 = site2.clone();
+        let nzo3 = nzo.clone();
         let nzb3 = nzb2.clone();
-        let (
+        let FinalizeOutcome {
             needs_pw,
             pw_used,
             blocked_by,
@@ -927,189 +960,11 @@ pub(super) async fn finalize_completed_gen(
             ident,
             identified,
             cleaned,
-        ) = tokio::task::spawn_blocking(move || {
-            // Test hook: hold this job's tail open the way the field
-            // does (a Finder-trash stall, a NAS move), so the queue
-            // suite can pin the window where the NEXT job has drained
-            // but is still Downloading behind this tail. No effect
-            // unless the suite sets it.
-            if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_FINALIZE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-            {
-                std::thread::sleep(std::time::Duration::from_millis(ms));
-            }
-            // A6: this job downloaded beside a previous
-            // successful result of the same name. It verified,
-            // so it takes the canonical directory over now -
-            // before the unlock / still-packed / cleanup /
-            // rename steps below, every one of which reads the
-            // finished directory and must see the final one.
-            let mut out2 = out2;
-            let mut moved = repl2.and_then(|canon| publish_over_previous(&out2, &canon));
-            if let Some(dest) = &moved {
-                out2 = dest.clone();
-            }
-            let mut needs_pw = false;
-            let mut pw_used: Option<String> = None;
-            let mut locked_name = String::new();
-            if let Some(vol) = crate::smart::encrypted_archive(&out2) {
-                locked_name = vol
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                // §99 try-order keys, read once per locked job: which
-                // site supplied the NZB, and who posted it.
-                let poster2 = crate::smart::nzb_poster(&nzb2);
-                match pw2.as_deref() {
-                    Some(pw) if crate::smart::unlock(&out2, pw) => {
-                        // The job's own password worked - refresh the
-                        // §99 association so the next job from this
-                        // site or poster tries it first.
-                        d3.record_unlock_password(&site2, &poster2, pw);
-                    }
-                    _ => {
-                        // SAB/NZBGet-parity passwords file: the job's
-                        // own password is absent (or just failed), so
-                        // try the file's candidates - read fresh, so a
-                        // line added minutes ago counts, in §99 order
-                        // (site association, poster association, then
-                        // the file top to bottom). The winner is
-                        // recorded onto the job below - history then
-                        // shows has_password, and a retry of this job
-                        // reuses it directly.
-                        match d3
-                            .read_unpack_passwords_for(&site2, &poster2)
-                            .into_iter()
-                            .find(|pw| crate::smart::unlock(&out2, pw))
-                        {
-                            Some(pw) => {
-                                info!(
-                                    target: "unlock",
-                                    "{name2:?}: unlocked with a password from the passwords file"
-                                );
-                                d3.record_unlock_password(&site2, &poster2, &pw);
-                                pw_used = Some(pw);
-                            }
-                            None => {
-                                info!(
-                                    target: "unlock",
-                                    "{name2:?}: volumes are password-protected - set a password to unpack"
-                                );
-                                needs_pw = true;
-                            }
-                        }
-                    }
-                }
-            }
-            // Something in a SUCCESSFUL job is still packed
-            // and we have no unpacker for it (today: any
-            // zip). Read off the finished directory rather
-            // than threaded out of the engine, exactly like
-            // the encrypted-volume check above - which also
-            // means a resumed or retried job reports it
-            // just the same.
-            //
-            // Sidecars only. A zip that IS the payload
-            // fails the job outright now, so it arrives
-            // here as a fail_message and never reaches
-            // this block; what is left is the
-            // `Subs/subs.zip` beside a feature that
-            // unpacked fine, which is worth saying and is
-            // not worth failing over.
-            let mut blocked_by = crate::unsupported_archive_present(&out2)
-                .filter(|u| !u.blocking)
-                .map(|u| u.display)
-                .unwrap_or_default();
-            // "never ask" prompt mode: the job completes with the set
-            // left packed for manual extraction, and since no failure
-            // text will say so, the amber still-packed note has to
-            // carry the WHY - the locked archive's own name.
-            if needs_pw
-                && blocked_by.is_empty()
-                && d3.password_prompt.lock_ok().as_str() == "never"
-            {
-                blocked_by = locked_name;
-            }
-            // BEFORE the sweeps: the .par2 sidecars the fingerprint
-            // rung reads are exactly what a cleanup rule deletes, and
-            // `keep_media_only` inside finalize_names deletes them
-            // whether or not one is configured.
-            let ident = if needs_pw {
-                // A still-locked job has no unpacked payload to inspect
-                // and no name to teach anything, and its archive headers
-                // never parsed - so there is nothing to ask about.
-                crate::identity::Identity::default()
-            } else {
-                d3.resolve_identity(&out2, &name2, crc2)
-            };
-            // The counts survive into the job record now (see
-            // Job::cleaned_files): these sweeps delete files out of a
-            // finished download under settings and defaults, and nothing
-            // in the UI ever said so. Whether the deletes were
-            // recoverable is read AFTER the sweeps run - the setting is
-            // live and the drawer renders later, so only this moment
-            // knows - and reading it after means a Trash that latched
-            // unresponsive mid-sweep reports "removed", never a Trash
-            // that was not really used.
-            let mut cleaned = (0usize, 0usize);
-            if !exts.is_empty() {
-                cleaned = crate::smart::cleanup(&out2, &exts);
-            }
-            // Auto-rename & cleanup run only once the payload is
-            // actually unpacked (a still-locked job has no media
-            // to rename or non-junk to keep).
-            // `.or(moved)`: a renamed/relocated folder wins,
-            // but an A6 hand-over with no rename still has to
-            // report its new directory.
-            //
-            // The suffix comes back with it: it is what filing
-            // wrote onto the files, and only this moment knows
-            // it. A still-locked job never got that far, so it
-            // has none to record (None, not "").
-            let mut filed_sfx = None;
-            let mut filed_ttl = None;
-            let mut identify = String::new();
-            // UX §18: set only when the relocation stopped part way and
-            // left the payload in two directories. Nothing else in the
-            // record can say so - `moved` follows the bytes that made
-            // it, which is exactly what makes the other half invisible.
-            if !needs_pw {
-                // Rename off the canonical name when an oracle supplied
-                // one: `name2` is what the submitter called this and
-                // stays on the record, but it is not necessarily what
-                // the release IS.
-                let naming =
-                    if ident.name.is_empty() { name2.as_str() } else { ident.name.as_str() };
-                let post_year = match post_year_of(&nzb2) {
-                    0 => crate::identify::current_year(),
-                    y => y,
-                };
-                let done = d3.finalize_names(
-                    &out2,
-                    &FinalizeJob {
-                        name: naming,
-                        cat: &cat2,
-                        tv_sort: tv2,
-                        post_year,
-                    },
-                );
-                moved = done.moved.or(moved);
-                filed_sfx = Some(done.suffix);
-                filed_ttl = Some(done.filed_title);
-                identify = done.identify;
-                cleaned.0 += done.swept;
-            }
-            let cleaned = (
-                cleaned.0,
-                cleaned.1,
-                crate::smart::delete_to_trash() && !crate::smart::trash_unresponsive(),
-            );
-            (
-                needs_pw, pw_used, blocked_by, moved, filed_sfx, filed_ttl, ident, identify,
-                cleaned,
+        } = tokio::task::spawn_blocking(move || {
+            job_finalize::finalize_payload(
+                d3, nzo3, out2, repl2, pw2, nzb2, site2, name2, crc2, exts, cat2, tv2,
             )
-            })
+        })
         .await
         .unwrap_or_else(|e| {
             // A PANIC in the tail, not a result. This used to be
@@ -1126,18 +981,7 @@ pub(super) async fn finalize_completed_gen(
                  untouched at {}; retry the job to re-run unpack, rename and move",
                 out_log.display()
             );
-            (
-                false,
-                None,
-                "post-processing did not finish (internal error) - retry the job to re-run it"
-                    .to_string(),
-                None,
-                None,
-                None,
-                crate::identity::Identity::default(),
-                String::new(),
-                (0, 0, false),
-            )
+            FinalizeOutcome::crashed()
         });
         // The probe winner taken below, held past the job lock so the
         // §99 association write (file IO) never runs under it.
@@ -1203,7 +1047,7 @@ pub(super) async fn finalize_completed_gen(
                     && j.media.as_ref().is_some_and(|m| m.complete && m.any())
                 {
                     j.media_rejudge = true;
-                    d.media_rejudge.lock_ok().push(j.nzo_id.clone());
+                    d.media_final_owed.lock_ok().push(j.nzo_id.clone());
                 }
                 j.identity_name = ident.name;
                 j.identity_imdb = ident.imdb;

@@ -2878,3 +2878,41 @@ fn a_replacement_pairing_starts_unchecked() {
     );
     teardown(&d, ix);
 }
+
+/// B4: with the per-pass reader flush gone, the daemon retires its
+/// pooled read-only connections only when the schema actually changes -
+/// and the one runtime schema change is the named-count index, built by
+/// the first feed activity. `predb_store` stamps the connection when it
+/// BUILDS the index; the stamp drains once and never re-arms while the
+/// index already exists, so steady-state feed batches cost the pool
+/// nothing.
+#[test]
+fn the_named_index_build_is_stamped_once_and_drained() {
+    let d = dir("ddl-stamp");
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    assert!(!ix.take_schema_ddl(), "a fresh open stamps nothing");
+    ix.predb_store(&[pre("Some.Release.2026-GRP", "some.release.r00")], 1000)
+        .unwrap();
+    assert!(
+        ix.take_schema_ddl(),
+        "the first feed batch built the named index - the pool must hear"
+    );
+    assert!(!ix.take_schema_ddl(), "the stamp drains on the first read");
+    ix.predb_store(&[pre("Other.Release.2026-GRP", "other.release.r00")], 1001)
+        .unwrap();
+    assert!(
+        !ix.take_schema_ddl(),
+        "the index already exists - a later batch is not a schema change"
+    );
+    // A reopen runs the ladder's own build (feed activity is recorded),
+    // so a restarted daemon's first batch stamps nothing either.
+    drop(ix);
+    let mut ix = Index::open(&d.join("index.db")).unwrap();
+    ix.predb_store(&[pre("Third.Release.2026-GRP", "third.release.r00")], 1002)
+        .unwrap();
+    assert!(
+        !ix.take_schema_ddl(),
+        "open's ladder built it before the batch could"
+    );
+    teardown(&d, ix);
+}

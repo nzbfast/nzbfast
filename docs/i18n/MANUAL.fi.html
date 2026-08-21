@@ -376,6 +376,16 @@ Jokaisen rivin tietolaatikko kertoo, kuka työn lisäsi, ja siinä on sama
 <b>Lataa .nzb-tiedosto</b> -painike kuin jonossa - kätevä, kun haluat ladata julkaisun
 uudelleen muualla tai liittää <code>.nzb</code>-tiedoston ongelmaraporttiin.</p>
 <p>Kortti listaa oletuksena kymmenen latausta, ja loput ovat yhden klikkauksen päässä ▤-painikkeesta. Tila, sijainti ja epäonnistumisen syy ovat rivin oman klikkauksen takana, joten tavallinen tapaus - mikä valmistui, kuinka suuri, milloin - pysyy luettavana ilman vieritystä. Vedä sen sijaan kortin alareunasta, niin lista vierii valitsemallasi korkeudella. <b>History rows</b> kohdassa Asetukset → Käyttöliittymä muuttaa tuota kymmentä; koska se on daemonin eikä selaimesi ominaisuus, se koskee jokaista tätä asennusta katsovaa laitetta. <b>Colour History names</b> sen vieressä värjää valmiit nimet vihreiksi ja epäonnistuneet punaisiksi; pois päältä nimet pysyvät neutraaleina, ja värillinen piste ja rivin omat tiedot kertovat yhä kumpi on kumpi.</p>
+<p>nzbfast säilyttää historian ikuisesti, ellet toisin sano. <b>Historian siivous</b>
+kohdassa Asetukset → Järjestelmä poistaa vanhat merkinnät kahden toisistaan
+riippumattoman säännön mukaan: iän (<b>Poista merkinnät, jotka ovat vanhempia
+kuin</b>, laskettuna hetkestä, jolloin lataus valmistui, minuutteina, tunteina tai
+päivinä) ja pituuden (<b>Säilytä enintään näin monta merkintää</b>). Jos molemmat on
+asetettu, molemmat pätevät, ja 0 kytkee kumman tahansa erikseen pois. Vain
+historiamerkintä poistetaan - ladatut tiedostot jäävät täsmälleen paikoilleen.
+Ikäsääntö ottaa vain valmistuneet lataukset, joten epäonnistunut odottaa, kunnes
+yrität sitä uudelleen tai poistat sen itse; pituusraja laskee mukaan jokaisen
+merkinnän riippumatta siitä, miten sen kävi.</p>
 <h3 id="dash-usage">Datan käyttö</h3>
 <p>Palveluntarjoajakohtaiset päiväpalkit ja Tänään / 7 päivää / 30 päivää -kokonaismäärät - olennaista
 mitatuille ja lohkotileille. Lohkotilit näyttävät elinaikaisen käytön kokoaan vasten.</p>
@@ -497,7 +507,7 @@ tavallinen verkko-osoite riittää; Prowlarr-rivi näyttää tältä:
 mitä tuli takaisin, mikä todistaa osoitteen ja avaimen yhdellä napsautuksella.
 Tallennettua avainta ei näytetä enää: kenttä sanoo niin, ja tyhjäksi jättäminen säilyttää
 jo tallennetun avaimen.</p>
-<p><b>Hakeminen.</b> Avaa <b>🎬 seinä</b> yläpalkista ja vaihda julkaisulistaan.
+<p><b>Hakeminen.</b> Avaa <b>🎬 seinä</b> yläpalkista ja valitse <b>Julkaisut</b>.
 Hakukentän vieressä oleva valikko päättää mistä haku katsoo: <b>Tämä indeksi</b>, eli se
 mitä tämä kone on itse skannannut, <b>Indeksoijat</b> tai <b>Molemmat</b>. Valintasi
 muistetaan. Tilien kysyminen vaatii jotain kenttään, sillä niiden selailu tyhjällä
@@ -564,6 +574,16 @@ pelkästä paikallisesta indeksistä.</li>
 jokainen tunnistettu elokuva- ja TV-julkaisu julistelaattana, jossa on arvosana, vuosi,
 genret, näyttelijät ja juoni - keskusteluryhmäsi, selattavissa kuin luettelo.</p>
 <ul>
+<li><b>Seinä</b> ja <b>Julkaisut</b> ovat kaksi tapaa katsoa samaa indeksiä, ja
+<b>Näkymä</b>-kohdan pari vaihtaa niiden välillä. Valintasi muistetaan.</li>
+<li><b>Julistetiheys</b> on <b>S</b> / <b>M</b> / <b>L</b> tuon parin vieressä: pieni
+mahduttaa ruudulle enemmän, suuri vähemmän.</li>
+<li><b>Esikatselu osoittimella</b>, Julkaisut-taulukon yläpuolella: pidä osoitinta rivin
+päällä, niin saat julisteen ja juonen omasta indeksistäsi.</li>
+<li><b>Ryhmittele nimikkeittäin</b>, viereinen valitsin: yksi rivi nimikettä kohden ja
+sen julkaisut alla. Avaa se painikkeella <b>&#9656;</b> tai napsauttamalla riviä;
+nimikkeen valintaruutu valitsee näytetyt julkaisut. Ryhmittely koskee vain <b>Tätä
+indeksiä</b>.</li>
 <li><b>Välilehdet</b> Elokuvat / Sarjat / Muut, pikahaku ja seitsemän
 järjestystä: <b>Sinulle</b>, Uusimmat julkaisut, Julkaisuvuosi, Parhaiten arvostellut,
 Nimike A–Ö, Suurimmat ja Eniten julkaistut.</li>
@@ -1159,7 +1179,12 @@ poisteta, joten väärä arvio maksaa hieman aikaa eikä latausta.</li>
 </ul>
 <p class="dim">Tuomio on aihetodisteisiin perustuva ennuste, ei takuu. Yhtä NZB:tä
 koskevan varman vastauksen antaa <code>nzbfast check</code>
-(<a href="#cli">§15</a>), joka laskee todelliset artikkelit.</p>
+(<a href="#cli">§15</a>), joka laskee todelliset artikkelit. Molemmat laskevat vastauksia, eivät sisältöä. Puhdas tarkistus tarkoittaa, että
+artikkelit olivat siellä kysyttäessä, ei sitä, että niiden sisältö on vahingoittumaton:
+pieni joukko palveluntarjoajia vastaa poistettujen artikkelien puolesta valedatalla sen
+sijaan, että kieltäytyisi niistä, ja se paljastuu vasta itse latauksen aikana, jossa
+artikkeli kaatuu omaan tarkistussummaansa ja haetaan uudelleen toiselta palvelimelta tai
+korjataan.</p>
 <h3 id="memory">Muistibudjetti - ja mitä vähäinen muisti maksaa</h3>
 <p>Kaikki moottorin välimuistit jakavat yhden budjetin (oletus ¼ fyysisestä RAM:ista, rajattu
 256 MB–16 GB). Aseta se nimenomaisesti <i>Muistiraja</i>lla Asetuksissa tai

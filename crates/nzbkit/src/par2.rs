@@ -234,6 +234,7 @@ pub struct FileVerify {
 }
 
 /// FileDesc body fields, keyed by file id during parsing.
+#[derive(Clone)]
 pub(crate) struct Desc {
     pub(crate) name: String,
     pub(crate) length: u64,
@@ -709,6 +710,114 @@ pub fn verify_file(file: &Par2File, block_size: u64, data: &[u8]) -> FileVerify 
     }
 }
 
+/// One read pass' worth of bytes. Big enough that the per-read syscall and
+/// the hashers' per-call overhead vanish against the copy, small enough to
+/// stay resident in L2 while both MD5 passes and the CRC walk it - the same
+/// figure `par2repair`'s self-prove reader uses.
+const VERIFY_CHUNK: usize = 1 << 20;
+
+/// Streaming twin of [`verify_file`]: identical verdicts, one pass over the
+/// bytes, ~1 MiB resident whatever the file's size.
+///
+/// [`verify_file`] needs the whole candidate in memory and then walks it
+/// twice - once for the whole-file MD5, once again per block - so a 30 GB
+/// set member cost 30 GB of RSS and two full MD5 passes over cold pages.
+/// This reads `src` in [`VERIFY_CHUNK`] pieces and feeds the whole-file
+/// MD5, the 16k head MD5 and the per-block MD5+CRC32 from the one copy.
+///
+/// The buffered form stays as the reference implementation these results
+/// are differential-tested against (see `verify_file_blocks`' docs); a
+/// divergence between the two is a verification verdict changing under a
+/// performance change, which this crate does not permit.
+///
+/// `src` is read to EOF, so the byte count it yields plays the role
+/// `data.len()` plays in [`verify_file`]: short input leaves the blocks
+/// past it `false` and fails the whole-file MD5, trailing input past the
+/// last expected block feeds only the whole-file MD5.
+pub fn verify_file_streaming<R: std::io::Read>(
+    file: &Par2File,
+    block_size: u64,
+    mut src: R,
+) -> std::io::Result<FileVerify> {
+    let bs = block_size as usize;
+    let mut buf = vec![0u8; VERIFY_CHUNK];
+    let mut whole = Md5::new();
+    let mut head = Md5::new();
+    let mut total: u64 = 0;
+
+    let mut blocks: Vec<bool> = Vec::with_capacity(file.blocks.len());
+    let mut bmd5 = Md5::new();
+    let mut bcrc = crc32fast::Hasher::new();
+    let mut filled = 0usize; // bytes of the current block already fed
+
+    loop {
+        let n = match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        whole.update(&buf[..n]);
+        // See module docs: first min(len, 16k) bytes, NOT zero-padded.
+        if total < HASH16K_LEN as u64 {
+            let take = ((HASH16K_LEN as u64 - total) as usize).min(n);
+            head.update(&buf[..take]);
+        }
+        total += n as u64;
+
+        // Blocks straddle reads freely; the hashers accumulate across them
+        // and close at each boundary. Stops once every expected block has a
+        // flag - trailing bytes past the last block are the whole-file
+        // MD5's business only, exactly as in the buffered form.
+        if bs > 0 {
+            let mut p = 0usize;
+            while p < n && blocks.len() < file.blocks.len() {
+                let seg = (bs - filled).min(n - p);
+                bmd5.update(&buf[p..p + seg]);
+                bcrc.update(&buf[p..p + seg]);
+                filled += seg;
+                p += seg;
+                if filled == bs {
+                    let check = &file.blocks[blocks.len()];
+                    let md5: [u8; 16] = std::mem::take(&mut bmd5).finalize().into();
+                    let crc = std::mem::replace(&mut bcrc, crc32fast::Hasher::new()).finalize();
+                    blocks.push(md5 == check.md5 && crc == check.crc32);
+                    filled = 0;
+                }
+            }
+        }
+    }
+
+    // The final short block is zero-padded to `block_size` per spec. MD5
+    // has to digest that padding for real, so it is fed from a small
+    // reused run of zeros rather than from a `bs`-sized allocation - `bs`
+    // reaches 256 MiB. CRC32 reaches the same answer arithmetically and
+    // touches nothing.
+    if filled > 0 && blocks.len() < file.blocks.len() {
+        const ZEROS: [u8; 8192] = [0u8; 8192];
+        let mut pad = bs - filled;
+        while pad > 0 {
+            let take = pad.min(ZEROS.len());
+            bmd5.update(&ZEROS[..take]);
+            pad -= take;
+        }
+        let check = &file.blocks[blocks.len()];
+        let md5: [u8; 16] = bmd5.finalize().into();
+        let crc = crate::yenc_simd::crc32_zeros(bcrc.finalize(), (bs - filled) as u64);
+        blocks.push(md5 == check.md5 && crc == check.crc32);
+    }
+    // Blocks the input never reached at all.
+    blocks.resize(file.blocks.len(), false);
+
+    let md5: [u8; 16] = whole.finalize().into();
+    let md5_16k: [u8; 16] = head.finalize().into();
+    Ok(FileVerify {
+        blocks,
+        md5_ok: total == file.length && md5 == file.md5,
+        md5_16k_ok: md5_16k == file.md5_16k,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,5 +1141,97 @@ mod tests {
         // And the ordering the whole module rests on holds across the
         // boundary: equal bytes on both sides never condemns.
         assert!(min_damaged_blocks(4 * WRAP, 4) <= max_recovery_blocks(4 * WRAP, 4));
+    }
+
+    // -- streaming vs buffered verification -------------------------------
+    //
+    // `verify_file` stays the reference implementation (see its docs and
+    // `verify_file_blocks`'). `verify_file_streaming` is the one the
+    // download and CLI paths actually run, so every verdict it reaches has
+    // to be the reference's verdict, byte for byte. The fixture-driven
+    // half of this differential - real par2cmdline output, choked reads,
+    // corrupt/short/empty inputs - lives in tests/par2_parse.rs; this half
+    // covers what a 33 KiB fixture cannot reach: a file several read
+    // windows long, whose blocks straddle those windows at an offset that
+    // never repeats.
+
+    /// A `Par2File` describing `data` exactly, with honest per-block
+    /// checksums (last block zero-padded per spec). Deliberately built
+    /// with the plain one-shot hashers rather than with either verifier,
+    /// so it is an independent third party to the comparison.
+    fn synth_file(data: &[u8], bs: usize) -> Par2File {
+        let mut padded = vec![0u8; bs];
+        let blocks = (0..data.len().div_ceil(bs))
+            .map(|i| {
+                let start = i * bs;
+                let end = (start + bs).min(data.len());
+                padded.fill(0);
+                padded[..end - start].copy_from_slice(&data[start..end]);
+                BlockCheck {
+                    md5: Md5::digest(&padded).into(),
+                    crc32: crc32fast::hash(&padded),
+                }
+            })
+            .collect();
+        Par2File {
+            file_id: [0u8; 16],
+            name: "synth.bin".into(),
+            length: data.len() as u64,
+            md5: Md5::digest(data).into(),
+            md5_16k: Md5::digest(&data[..data.len().min(HASH16K_LEN)]).into(),
+            blocks,
+        }
+    }
+
+    fn assert_agrees(file: &Par2File, block_size: u64, data: &[u8], case: &str) {
+        let want = verify_file(file, block_size, data);
+        let got = verify_file_streaming(file, block_size, std::io::Cursor::new(data))
+            .expect("a cursor cannot fail to read");
+        assert_eq!(want.blocks, got.blocks, "{case}: per-block flags");
+        assert_eq!(want.md5_ok, got.md5_ok, "{case}: whole-file MD5");
+        assert_eq!(want.md5_16k_ok, got.md5_16k_ok, "{case}: MD5-16k");
+    }
+
+    /// Blocks that straddle the read window - the one thing the streaming
+    /// form does that the buffered form never had to. 300,004 bytes into a
+    /// 1 MiB window means no block boundary ever lands on a window
+    /// boundary, and the file spans four windows, so a block is split at
+    /// three different offsets within itself.
+    #[test]
+    fn streaming_verify_matches_reference_across_read_windows() {
+        const BS: usize = 300_004;
+        // Not a round multiple of BS: the last block is short and padded.
+        let len = 3 * super::VERIFY_CHUNK + 7;
+        let data: Vec<u8> = (0..len as u64)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
+        let f = synth_file(&data, BS);
+        assert!(f.blocks.len() > 10, "the case needs several blocks");
+
+        // Guard the guard: with garbage checksums both implementations
+        // would answer `false` everywhere and agree vacuously.
+        let clean = verify_file(&f, BS as u64, &data);
+        assert!(clean.blocks.iter().all(|&ok| ok) && clean.md5_ok && clean.md5_16k_ok);
+        assert_agrees(&f, BS as u64, &data, "clean");
+
+        // One flipped byte in a block that a read window splits.
+        let mut hurt = data.clone();
+        hurt[super::VERIFY_CHUNK + 3] ^= 0xff;
+        let v = verify_file(&f, BS as u64, &hurt);
+        assert_eq!(v.blocks.iter().filter(|ok| !**ok).count(), 1);
+        assert_agrees(&f, BS as u64, &hurt, "one flipped byte");
+
+        // A flip inside the short, zero-padded final block.
+        let mut tail = data.clone();
+        let last = tail.len() - 1;
+        tail[last] ^= 0x01;
+        assert_agrees(&f, BS as u64, &tail, "flipped tail byte");
+
+        // Truncated mid-block, and grown past the last expected block.
+        assert_agrees(&f, BS as u64, &data[..len - 5], "truncated");
+        assert_agrees(&f, BS as u64, &data[..BS + 17], "truncated to one block");
+        let mut longer = data.clone();
+        longer.extend_from_slice(b"trailing bytes past the recovery set");
+        assert_agrees(&f, BS as u64, &longer, "trailing bytes");
     }
 }

@@ -505,7 +505,14 @@ pub(super) fn spawn_sidecar(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|t| t.as_secs() as i64)
                         .unwrap_or(0);
-                    d.with_index(|ix| ix.oracle_ingest(&samples, now).ok());
+                    // Bounded like the primary tail's fold: the queue
+                    // runner awaits this task through `stop_sidecar`
+                    // before starting its next pick, so an unbounded
+                    // wait here parks the whole picker behind a wedged
+                    // scan lane (the 20 Aug 8m46s hold).
+                    d.with_index_bounded(Daemon::TAIL_INDEX_WAIT, |ix| {
+                        ix.oracle_ingest(&samples, now).ok()
+                    });
                 }
             }
             match res {

@@ -685,6 +685,17 @@ fn m_index_wipe(
                 // wiped rows; dropping it last closes any
                 // such straggler too.
                 d.drop_index_read();
+                // A4: the generation bump above already
+                // orphans the cached stats, but install the
+                // truth - zero - synchronously so the next
+                // poll serves it instead of paying a
+                // recompute against the recreated file. A
+                // refresh in flight keeps its flag; its
+                // result fails the era check and is dropped.
+                let mut c = d.index_stats_cache.lock_ok();
+                c.snap = Some((0, 0, 0, 0));
+                c.at = Some(std::time::Instant::now());
+                c.era = d.index_era();
             }
             let art = d.spool.join("art");
             if let Err(e) = std::fs::remove_dir_all(&art)
@@ -780,6 +791,11 @@ fn m_index_shrink_to(
                                                "error": "index unavailable"})
                         }
                         EvictOutcome::Ran(rep, n_prot) => {
+                            // A4: the stats cache still holds the
+                            // pre-shrink counts; expire it so the
+                            // dashboard's follow-up poll recomputes
+                            // instead of serving them out the TTL.
+                            d.index_stats_cache.lock_ok().at = None;
                             let reached = rep.live_after <= target;
                             json!({
                                 "status": true,
@@ -848,6 +864,8 @@ fn m_index_evict_now(
                     json!({"status": false, "error": "index unavailable"})
                 }
                 EvictOutcome::Ran(rep, n_prot) => {
+                    // A4: same cache expiry as index_shrink_to above.
+                    d.index_stats_cache.lock_ok().at = None;
                     let reached = rep.live_after <= cap;
                     json!({
                         "status": true,
@@ -1330,37 +1348,55 @@ fn m_wall2(
                 // enricher at all - and (b) a slot in the
                 // hot queue, so on-screen titles get art
                 // first.
-                // try_with_index, not with_index: the seed is
-                // a shrug-off side-write, and parking here
-                // would hand back the very ingest-holds-the-
-                // lock wait the read-only path just avoided.
-                // A busy connection skips the seed; the next
-                // wall poll re-offers the same cards.
-                d.try_with_index(|ix| {
-                    for c in cards.iter().filter(|c| c.checked == 0) {
+                // try_with_index_mut, not with_index_mut:
+                // the seed is a shrug-off side-write, and
+                // parking here would hand back the very
+                // ingest-holds-the-lock wait the read-only
+                // path just avoided. A busy connection skips
+                // the seed; the next wall poll re-offers the
+                // same cards.
+                //
+                // ONE transaction for the whole page, not one
+                // autocommit INSERT per card. Winning that
+                // try_lock does not win the SQLite WRITE lock,
+                // and every autocommit had to take that for
+                // itself: on a fresh index each one could sit
+                // out the full 10 s busy_timeout behind a scan
+                // chunk's IMMEDIATE transaction, so a page of
+                // 60 unenriched cards was 60 chances to stall
+                // an interactive poll. Now it is one lock
+                // acquisition and one WAL commit.
+                //
+                // Built first, so a page with nothing to seed
+                // - the steady state - never opens the index
+                // at all.
+                let seeds: Vec<nzbkit::index::TitleSeed> = cards
+                    .iter()
+                    .filter(|c| c.checked == 0)
+                    .map(|c| {
                         let p = crate::wall::parse_release(&c.rep_stem);
-                        let _ = ix.title_seed(
-                            &c.title_key,
-                            &c.kind,
-                            if c.title.is_empty() {
-                                &p.title
+                        nzbkit::index::TitleSeed {
+                            key: c.title_key.clone(),
+                            kind: c.kind.clone(),
+                            title: if c.title.is_empty() {
+                                p.title.clone()
                             } else {
-                                &c.title
+                                c.title.clone()
                             },
-                            if c.year > 0 {
+                            year: if c.year > 0 {
                                 c.year
                             } else {
                                 p.year.unwrap_or(0)
                             },
-                        );
-                    }
-                    Some(())
-                });
-                {
+                        }
+                    })
+                    .collect();
+                if !seeds.is_empty() {
+                    d.try_with_index_mut(|ix| ix.title_seed_many(&seeds).ok());
                     let mut hot = d.enrich_hot.lock_ok();
-                    for c in cards.iter().filter(|c| c.checked == 0) {
-                        if !hot.contains(&c.title_key) {
-                            hot.push_back(c.title_key.clone());
+                    for s in &seeds {
+                        if !hot.contains(&s.key) {
+                            hot.push_back(s.key.clone());
                         }
                     }
                     while hot.len() > 120 {
@@ -1541,7 +1577,16 @@ fn m_index_browse(
         // group-by-title off was a way round the setting.
         bq.hide_adult = bq.curated && d.wall_hide_adult.load(Ordering::Relaxed);
         if let Ok(n) = get("limit").parse::<u32>() {
-            bq.limit = n.clamp(1, 200);
+            // The grouped wall's nested expand asks for its cap PLUS
+            // ONE (REL_PAGE/REL_MAX in wall.html) and reads an
+            // over-full answer as "this list was cut" - clamping that
+            // ask to 200 made the sentinel unreachable, so the G3
+            // truncation row never rendered and the cut was silent
+            // again. A title-scoped ask is bounded by one title's own
+            // releases, so it may run to the Show-all cap's sentinel;
+            // the curated feed keeps the tight page.
+            let cap = if bq.title_keys.is_empty() { 200 } else { 2001 };
+            bq.limit = n.clamp(1, cap);
         }
         if let Ok(n) = get("offset").parse::<u32>() {
             bq.offset = n;

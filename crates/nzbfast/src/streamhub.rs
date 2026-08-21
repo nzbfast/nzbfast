@@ -32,6 +32,27 @@ pub(crate) struct StreamHub {
     /// falls back rather than dividing by it.
     pub fetch_plan: Arc<std::sync::atomic::AtomicU64>,
     pub fetch_done: Arc<std::sync::atomic::AtomicU64>,
+    /// Unix seconds of the YOUNGEST article in the ACTIVE run's NZB, or
+    /// 0 for "we do not know" - which is NOT the same as "posted just
+    /// now" and must never be read as it.
+    ///
+    /// The live twin of [`crate::diag::LossCauses::post_age_days`], and
+    /// deliberately the same reading: a post nobody carries YET and a
+    /// post nobody carries ANY MORE are the same picture from inside the
+    /// pool (every article 430, nothing arriving), and only the calendar
+    /// tells them apart. The failure summary has had that calendar since
+    /// 16 Aug; §129 4b's live verdict had no way to reach it, so a
+    /// download slowed to a crawl by a release that was minutes old read
+    /// exactly like one slowed by a takedown - and the user's move is
+    /// opposite in the two cases.
+    ///
+    /// Unknown when ANY file in the NZB carries no usable date, matching
+    /// what `take_census` does with a partially-dated NZB (its per-file
+    /// minimum age collapses to 0 for exactly that reason). Published by
+    /// `build_fetch_plan` beside `fetch_plan` and zeroed with it at the
+    /// Downloading transition, so no reader can pair one job's date with
+    /// another job's counters.
+    pub post_unix: std::sync::atomic::AtomicI64,
     /// M14h dashboard feeds: in-stream verifier + per-server pool gauges
     /// of the ACTIVE download.
     pub verifier: std::sync::Mutex<Option<Arc<nzbkit::live::LiveVerifier>>>,
@@ -319,7 +340,14 @@ pub(crate) struct SeekCtl {
     /// total encoded bytes. Offsets are NZB-declared (encoded) sizes;
     /// callers scale decoded positions proportionally, and ±2 articles of
     /// slack absorb the yEnc-overhead estimate error.
-    pub(crate) slot_articles: Vec<(Vec<(u64, String)>, u64)>,
+    ///
+    /// R9: the ids are the interned handles the fetch plan built, not a
+    /// second copy of the id set. This ladder covers EVERY data segment
+    /// in the job, so as `String` it was a full duplicate of the run's
+    /// ids - ~8-15 MB at 100k segments, allocated on every run whether
+    /// or not anything ever streamed - and every span read cloned its
+    /// slice of it again.
+    pub(crate) slot_articles: Vec<(Vec<(u64, Arc<str>)>, u64)>,
     pub(crate) ctl: Arc<nzbkit::pool::QueueControl>,
     pub(crate) extractor: Arc<nzbkit::extract::Extractor>,
     /// Volume-sorted non-par2 slot indices (NZB metadata, known before a
@@ -427,8 +455,8 @@ impl SeekCtl {
         name: &str,
         file_size: u64,
         spans: &[(u64, u64)],
-    ) -> Vec<String> {
-        let mut ids: Vec<String> = Vec::new();
+    ) -> Vec<Arc<str>> {
+        let mut ids: Vec<Arc<str>> = Vec::new();
         for &(start, end) in spans {
             if start >= end {
                 continue;
@@ -540,7 +568,7 @@ impl SeekCtl {
         file_size: u64,
         start: u64,
         end: u64,
-        ids: &mut Vec<String>,
+        ids: &mut Vec<Arc<str>>,
     ) {
         let total_enc: u64 = self
             .vol_slots

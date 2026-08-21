@@ -673,8 +673,9 @@ pub(in crate::serve) fn spawn_tip_watcher(
                             // absence of a gate means anyway.
                             install_live_ingest_policy(ix, gates, cats);
                             // §74: same re-install discipline for the
-                            // arrival watch, and for the same reason - the
-                            // handle is republished after every full pass.
+                            // arrival watch, and for the same reason - a
+                            // scan pass can hand the shared handle over
+                            // (and the hand-back clears the watch).
                             install_instant_watch(ix, matcher);
                             let n = ix.ingest(g, &entries, now).ok()?;
                             // The mark moves only with the rows: an
@@ -2101,7 +2102,7 @@ pub(in crate::serve) async fn spot_pass(
         // dropped rather than handed back (which would
         // reopen, and after a wipe RECREATE, the file).
         let era = daemon2.index_era();
-        let mut scratch = match nzbkit::index::Index::open(db) {
+        let mut scratch = match nzbkit::index::Index::open_scratch(db) {
             Ok(ix) => ix,
             Err(e) => {
                 warn!(target: "spots", "open {}: {e}", db.display());
@@ -2149,12 +2150,10 @@ pub(in crate::serve) async fn spot_pass(
                 Daemon::pause_phrase(reason)
             ),
         }
-        drop(scratch);
-        // Republish so queries see this pass's writes.
-        if let Ok(fresh) = nzbkit::index::Index::open(db) {
-            daemon2.publish_index(era, fresh);
-        }
-        daemon2.drop_index_read();
+        // Hand the connection back (B4): kept-or-installed under the
+        // era check, no reopen, no reader retirement - WAL gives every
+        // other connection this pass's commits on their next statement.
+        daemon2.publish_index(era, scratch);
     }
     // E3 / TODO 131: promote scanned spots to first-class
     // release rows (fetch NZB, dedup against the index,
@@ -2165,7 +2164,7 @@ pub(in crate::serve) async fn spot_pass(
     let resolve_budget = daemon2.spot_resolve.load(Ordering::Relaxed) as u32;
     if daemon2.spot_pause_reason().is_none() && resolve_budget > 0 {
         let era = daemon2.index_era();
-        match nzbkit::index::Index::open(db) {
+        match nzbkit::index::Index::open_scratch(db) {
             Ok(mut scratch) => {
                 let d3 = daemon2.clone();
                 let resolve = crate::spot_resolve_pass(config, &mut scratch, resolve_budget, {
@@ -2183,11 +2182,8 @@ pub(in crate::serve) async fn spot_pass(
                     result = resolve => Ok(result),
                     reason = pause => Err(reason),
                 };
-                drop(scratch);
-                if let Ok(fresh) = nzbkit::index::Index::open(db) {
-                    daemon2.publish_index(era, fresh);
-                }
-                daemon2.drop_index_read();
+                // Same B4 hand-back as the scan above.
+                daemon2.publish_index(era, scratch);
                 match outcome {
                     Ok(Ok(sum)) => {
                         if sum.fetched + sum.failed > 0 {
@@ -2265,13 +2261,10 @@ pub(in crate::serve) async fn reclassify_pending_rows(
         if changed > 0 {
             info!(target: "cats", "reclassified {changed} releases under the new category rules");
             // Freshly re-keyed cards need titles rows for the
-            // wall; the seeder below only covers recent posts,
-            // so republish + seed now.
-            let era = daemon2.index_era();
-            if let Ok(fresh) = nzbkit::index::Index::open(db) {
-                daemon2.publish_index(era, fresh);
-            }
-            daemon2.drop_index_read();
+            // wall; the seeder below only covers recent posts, so
+            // seed now. No republish (B4): the sweep's own
+            // connection committed, and WAL makes that visible to
+            // the shared connection and the pooled readers alike.
             let _ = daemon2.with_index(|ix| ix.seed_missing_titles(3650, 2000).ok());
         }
     }
@@ -2320,10 +2313,7 @@ pub(in crate::serve) fn shatter_fold_pass(daemon2: &Arc<Daemon>) {
     }
 }
 
-pub(in crate::serve) async fn retention_and_statistics(
-    daemon2: &Arc<Daemon>,
-    index_db: &std::path::Path,
-) {
+pub(in crate::serve) async fn retention_and_statistics(daemon2: &Arc<Daemon>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|t| t.as_secs() as i64)
@@ -2346,7 +2336,8 @@ pub(in crate::serve) async fn retention_and_statistics(
         // interval, so a reap with millions of rows to go never starves
         // the scan it shares this loop with. It resumes next pass.
         const PRUNE_PASS: std::time::Duration = std::time::Duration::from_secs(30);
-        let pass_end = std::time::Instant::now() + PRUNE_PASS;
+        let pass_started = std::time::Instant::now();
+        let pass_end = pass_started + PRUNE_PASS;
         let mut caught_up = false;
         while !caught_up {
             // The same stand-down every other maintenance slice takes:
@@ -2420,17 +2411,23 @@ pub(in crate::serve) async fn retention_and_statistics(
             Some(())
         });
         if aged + stale > 0 {
+            // The elapsed is the diagnostic, not decoration. The pass is
+            // bounded at PRUNE_PASS, so anything much past 30 s is by
+            // definition a single statement that ran long with the index
+            // write mutex held - which is what every consumer waiting on
+            // that mutex experiences as a stall, the download runner's
+            // tail included. Gary's 20 Aug report had to be inferred from
+            // an 8m46s GAP between two log lines, because this one did
+            // not say. Now it says.
             info!(
                 target: "index",
-                "retention pruned {aged} old + {stale} stale-partial rows{}",
+                "retention pruned {aged} old + {stale} stale-partial rows in {:.1}s{}",
+                pass_started.elapsed().as_secs_f64(),
                 if caught_up { "" } else { " (more to reap next pass)" }
             );
-            // Republish so queries see the smaller db.
-            let era = daemon2.index_era();
-            if let Ok(fresh) = nzbkit::index::Index::open(index_db) {
-                daemon2.publish_index(era, fresh);
-            }
-            daemon2.drop_index_read();
+            // No republish (B4): the reap ran on the shared connection
+            // itself, and the pooled readers see its commits through
+            // WAL on their next query.
         }
     }
     // Query-planner statistics, on the same gate and a
@@ -2529,6 +2526,84 @@ pub(in crate::serve) async fn retention_and_statistics(
     }
 }
 
+/// B1: backfill the deferred partial indexes on an index too big for
+/// `Index::open` to build them inline - the three background-picker
+/// ones and, since §198, the two `complete` browse ones. One index per
+/// pass, so one pass each carries the whole migration; each build is a
+/// CREATE INDEX that reads the whole `releases` table once holding the
+/// write lock, so it runs exactly like the daily ANALYZE - a blocking
+/// thread, a `MaintenanceArm`, and a watcher that aborts the statement
+/// the moment a download starts. An aborted build rolls back cleanly
+/// and the next pass retries; sqlite_master is the only state, so
+/// there is no stamp to get wrong. Once they all exist the probe is a
+/// sub-millisecond catalog read and this returns immediately.
+#[cfg(feature = "indexer")]
+pub(in crate::serve) async fn picker_index_backfill(daemon2: &Arc<Daemon>) {
+    let Some(name) = daemon2.with_index(|ix| ix.missing_picker_index()) else {
+        return;
+    };
+    if !daemon2.index_maintenance_ok() {
+        return;
+    }
+    info!(
+        target: "index",
+        "building deferred index {name} (one-time, holds the index writer; \
+         stands down if a download starts)"
+    );
+    let started = std::time::Instant::now();
+    let arm = Arc::new(super::daemon::MaintenanceArm::default());
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = {
+        let jobs = daemon2.index_jobs_active.clone();
+        let done = done.clone();
+        let arm = arm.clone();
+        tokio::spawn(abort_compact_when_job_starts(jobs, done, move || {
+            arm.abort();
+        }))
+    };
+    let d3 = daemon2.clone();
+    let done2 = done.clone();
+    let arm2 = arm.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        d3.with_index(|ix| {
+            if !arm2.arm(ix.interrupt_handle()) {
+                // A download started before we got the guard: do
+                // not begin at all.
+                done2.store(true, Ordering::Release);
+                return None;
+            }
+            let r = ix.build_picker_index(name);
+            arm2.disarm();
+            // Inside the closure, same as ANALYZE: the watcher must
+            // never see "running" on a connection somebody else has
+            // already started using.
+            done2.store(true, Ordering::Release);
+            Some(r)
+        })
+    })
+    .await;
+    done.store(true, Ordering::Release);
+    let aborted = matches!(watch.await, Ok(true));
+    match outcome {
+        _ if aborted => {
+            info!(
+                target: "index",
+                "deferred index {name} stood down for a download - \
+                 it will be built on a later pass"
+            );
+        }
+        Ok(Some(Ok(()))) => {
+            info!(
+                target: "index",
+                "deferred index {name} built in {:.1}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        Ok(Some(Err(e))) => warn!(target: "index", "deferred index {name}: {e}"),
+        Ok(None) | Err(_) => {}
+    }
+}
+
 /// M34: hold the database under its size cap. BETWEEN passes, never
 /// inside one - the scan JoinSet is fully drained by the time this
 /// runs, so no scan task is holding the write lock or about to
@@ -2539,10 +2614,7 @@ pub(in crate::serve) async fn retention_and_statistics(
 /// this. It never compacts: reclaiming the freed pages is a VACUUM, and
 /// that waits for the idle window in `spawn_index_compact`.
 #[cfg(feature = "indexer")]
-pub(in crate::serve) async fn evict_pass_and_republish(
-    daemon2: &Arc<Daemon>,
-    index_db: &std::path::Path,
-) {
+pub(in crate::serve) async fn evict_between_passes(daemon2: &Arc<Daemon>) {
     {
         let d3 = daemon2.clone();
         // The prune is synchronous SQLite work on a shared
@@ -2563,15 +2635,10 @@ pub(in crate::serve) async fn evict_pass_and_republish(
                 rep.removed as u64,
             ));
         }
-        if daemon2.compact_pending.load(Ordering::Relaxed) {
-            // Republish so queries see the smaller db (the
-            // file is still big - the pages are free, not
-            // returned - but the rows are gone).
-            let era = daemon2.index_era();
-            if let Ok(fresh) = nzbkit::index::Index::open(index_db) {
-                daemon2.publish_index(era, fresh);
-            }
-            daemon2.drop_index_read();
-        }
+        // No republish (B4): eviction ran on the shared connection
+        // through `with_index`, and WAL hands its commits to the pooled
+        // readers on their next query. The rows are gone even though
+        // the file is still big - the pages are free, not returned,
+        // until the deferred compact runs.
     }
 }

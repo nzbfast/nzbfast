@@ -21,12 +21,15 @@ pub use rusqlite::InterruptHandle;
 use crate::extract::release_stem;
 use crate::nntp::OverEntry;
 
+mod aggregates;
 mod browse;
 mod cards;
 mod claims;
 mod encrypted;
 mod evict;
 mod ingest;
+#[cfg(test)]
+mod ingest_diff_tests;
 mod maintenance;
 mod nzbimport;
 mod pesto;
@@ -43,6 +46,7 @@ mod scoreboard;
 mod searchlog;
 mod session;
 mod spots;
+mod summaries;
 #[cfg(test)]
 mod testutil;
 mod titles;
@@ -57,6 +61,7 @@ pub use maintenance::*;
 pub use nzbimport::*;
 pub use pesto::*;
 pub use probe::*;
+pub use query::{FilenameFallback, filename_fallback_stats, reset_filename_fallback_stats};
 pub use schema::WAL_SIZE_LIMIT;
 pub use scoreboard::*;
 pub use searchlog::*;
@@ -108,6 +113,27 @@ pub struct Index {
     /// failed with a stale statement even after re-preparing, plus the
     /// injector that gives that path a deterministic test. See `retry`.
     retry: retry::SchemaRetry,
+    /// Set when THIS connection just ran a piece of runtime DDL (today:
+    /// the named-feed partial index, built lazily on first feed
+    /// activity). Drained via [`Self::take_schema_ddl`] so the daemon
+    /// can retire its pooled read-only connections exactly when the
+    /// schema actually changed, instead of flushing them after every
+    /// scan pass. A Cell because one of the creation sites
+    /// (`predb_named_count`'s self-heal) runs on `&self`.
+    ddl: std::cell::Cell<bool>,
+    /// C3 prototype: the one-row-per-title wall summaries are installed
+    /// on this database (`title_summaries` + the `releases` triggers
+    /// that keep `title_dirty`). Off unless `NZBFAST_TITLE_SUMMARIES=1`
+    /// was set at open, or the table was already there from a previous
+    /// run with it on - the schema is the flag's persistent half, so a
+    /// read-only handle detects it the same way it detects FTS.
+    summaries: bool,
+    /// TTL memo for [`Index::stats_cached`]: when the figures were
+    /// computed and what they were. Per connection like everything
+    /// else here (a Cell, because the index is single-threaded behind
+    /// its owner's mutex); callers that need the exact answer use
+    /// [`Index::stats`].
+    stats_cache: std::cell::Cell<Option<(std::time::Instant, (u64, u64))>>,
 }
 
 /// A release a batch just touched that [`Index::set_watch_names`] said
@@ -317,6 +343,47 @@ pub fn kind_str(k: &crate::release::Kind) -> &str {
     }
 }
 
+/// The gapfill band, as LITERAL terms - the WHERE prefix of
+/// `gapfill_pick` and, verbatim, the predicate of `idx_rel_gapfill`
+/// (schema.rs). One constant feeds both so they cannot drift, and the
+/// terms are literals because a partial index is reachable only when
+/// the statement's own WHERE implies its predicate, proven from literal
+/// terms and never from a bound parameter (the N1 rule). `first_seen`
+/// stays out: its cutoff is a moving clock.
+pub(crate) const GAPFILL_BAND_SQL: &str = "complete=0 AND junk < 50 AND first_posted > 0";
+
+/// The pick's rotation order, verbatim in `idx_rel_gapfill`'s columns:
+/// least-recently-tried first, then a multiplicative hash of the id so
+/// never-tried rows (gapfill_at=0, the standing majority) are visited
+/// in a scattered order rather than oldest-first. The index carries the
+/// expression itself; ORDER BY must match it byte for byte or the temp
+/// B-tree comes back silently - plan_tests.rs holds the line.
+pub(crate) const GAPFILL_ORDER_SQL: &str = "gapfill_at ASC, (id * 2654435761) % 4294967296";
+
+/// The pick's full SQL, shared with plan_tests.rs so the plan gate
+/// asserts the statement the daemon actually runs. Pinned to the band
+/// index (the cards.rs `INDEXED BY` rationale - a background statement
+/// whose wrong plan is a per-pass temp sort of the whole incomplete
+/// band does not get left to the cost model); the unpinned form is the
+/// fallback for a database the maintenance backfill has not reached
+/// yet, where INDEXED BY would fail to prepare.
+pub(crate) fn gapfill_pick_sql() -> String {
+    gapfill_pick_sql_with("INDEXED BY idx_rel_gapfill")
+}
+
+pub(crate) fn gapfill_pick_sql_unpinned() -> String {
+    gapfill_pick_sql_with("")
+}
+
+fn gapfill_pick_sql_with(pin: &str) -> String {
+    format!(
+        "SELECT id, grp, first_posted FROM releases {pin}
+         WHERE {GAPFILL_BAND_SQL}
+           AND first_seen < ?2
+         ORDER BY {GAPFILL_ORDER_SQL} LIMIT ?1"
+    )
+}
+
 impl Index {
     // ---- M29 availability oracle -------------------------------------
 
@@ -493,34 +560,60 @@ impl Index {
     /// Up to `max` probe message-ids for a release, spread evenly across
     /// its files' segments (bracketed, STAT-ready).
     pub fn oracle_msgids(&self, release_id: i64, max: usize) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT segments FROM files WHERE release_id=?1 ORDER BY filename")?;
-        let segs: Vec<String> = stmt
-            .query_map([release_id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut ids: Vec<String> = Vec::new();
-        for s in segs {
-            let parsed: Vec<(u32, String, u64)> = serde_json::from_str(&s).unwrap_or_default();
-            ids.extend(parsed.into_iter().map(|(_, id, _)| id));
+        if max == 0 {
+            return Ok(Vec::new());
         }
-        if ids.is_empty() || max == 0 {
+        // How many segments the release HAS, without materialising one
+        // of them: sampling a dozen ids used to build the whole
+        // release's id list first, which on a 50 GB pack is hundreds of
+        // thousands of Strings for a handful of STATs. `nsegs` is the
+        // stored count, in the nsegs-or-count shape every other site
+        // uses (pre-migration rows carry nsegs=0 until the backfill
+        // converges).
+        let total: i64 = self
+            .db
+            .prepare_cached(
+                "SELECT COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
+                          ELSE COALESCE(json_array_length(segments), 0) END), 0)
+                   FROM files WHERE release_id=?1",
+            )?
+            .query_row([release_id], |r| r.get(0))?;
+        let total = total.max(0) as usize;
+        if total == 0 {
             return Ok(Vec::new());
         }
         // Even spread over the whole release - head-only sampling would
-        // miss partial takedowns of the tail.
-        let step = (ids.len() as f64 / max.min(ids.len()) as f64).max(1.0);
-        let mut out = Vec::with_capacity(max.min(ids.len()));
+        // miss partial takedowns of the tail. Walked file by file in the
+        // same `ORDER BY filename` order, so the sample is the one the
+        // materialising version drew; only one file's segment list is
+        // ever held at a time, and a stored count that disagrees with
+        // what parses just yields fewer ids ("up to `max`").
+        let step = (total as f64 / max.min(total) as f64).max(1.0);
+        let mut out = Vec::with_capacity(max.min(total));
+        let mut stmt = self
+            .db
+            .prepare_cached("SELECT segments FROM files WHERE release_id=?1 ORDER BY filename")?;
+        let mut rows = stmt.query([release_id])?;
+        // `base` is the global index of this file's first segment; `at`
+        // the next sampling position, both in that same global space.
+        let mut base = 0usize;
         let mut at = 0.0f64;
-        while (at as usize) < ids.len() && out.len() < max {
-            let id = &ids[at as usize];
-            let b = if id.starts_with('<') {
-                id.clone()
-            } else {
-                format!("<{id}>")
-            };
-            out.push(b);
-            at += step;
+        while let Some(row) = rows.next()? {
+            if out.len() >= max {
+                break;
+            }
+            let s: String = row.get(0)?;
+            let parsed: Vec<(u32, String, u64)> = serde_json::from_str(&s).unwrap_or_default();
+            while out.len() < max && (at as usize) < base + parsed.len() {
+                let id = &parsed[(at as usize).saturating_sub(base)].1;
+                out.push(if id.starts_with('<') {
+                    id.clone()
+                } else {
+                    format!("<{id}>")
+                });
+                at += step;
+            }
+            base += parsed.len();
         }
         Ok(out)
     }
@@ -661,12 +754,12 @@ impl Index {
     /// and the next tip pass gets them for free.
     /// Returns (id, group, first_posted).
     pub fn gapfill_pick(&self, limit: u32, now: i64) -> rusqlite::Result<Vec<(i64, String, i64)>> {
-        let mut stmt = self.db.prepare(
-            "SELECT id, grp, first_posted FROM releases
-             WHERE complete=0 AND junk < 50 AND first_posted > 0
-               AND first_seen < ?2
-             ORDER BY gapfill_at ASC, (id * 2654435761) % 4294967296 LIMIT ?1",
-        )?;
+        // Pinned form first, unpinned for a pre-backfill database -
+        // see probe7z_pick.
+        let mut stmt = match self.db.prepare(&gapfill_pick_sql()) {
+            Ok(s) => s,
+            Err(_) => self.db.prepare(&gapfill_pick_sql_unpinned())?,
+        };
         let rows = stmt.query_map(rusqlite::params![limit, now - 3600], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
@@ -775,6 +868,15 @@ impl Index {
         (std::mem::take(&mut h.list), std::mem::take(&mut h.dropped))
     }
 
+    /// True once, right after this connection ran runtime DDL (see the
+    /// `ddl` field). The daemon reads it after the write that could have
+    /// built the named-feed index and retires its read-only pool on
+    /// true - the one freshness event WAL visibility does not cover is
+    /// a schema change a pooled statement was prepared before.
+    pub fn take_schema_ddl(&self) -> bool {
+        self.ddl.replace(false)
+    }
+
     /// Offer one touched release to the arrival watch. Costs a null check
     /// when nothing is installed, which is every install that has no
     /// watchlist.
@@ -807,6 +909,104 @@ mod tests {
     use super::*;
 
     const DAY_SECS: i64 = 86_400;
+
+    /// The probe sampler draws the SAME spread it always did, and does
+    /// it without building the release's whole message-id list first -
+    /// a 50 GB pack is hundreds of thousands of ids for a dozen STATs.
+    /// Covers the three shapes the walk has to survive: a stored
+    /// `nsegs`, a pre-migration row still carrying 0, and ids that
+    /// arrive already bracketed.
+    #[test]
+    fn oracle_msgids_spreads_across_files_without_listing_them_all() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-msgids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                      first_seen)
+                 VALUES('Big.Pack','p@x','alt.binaries.misc',3,1,50,50)",
+                [],
+            )
+            .unwrap();
+        let rid = ix.db.last_insert_rowid();
+        // Uneven files, so a per-file quota that ignored the global
+        // position would drift off the reference spread.
+        let files: [(&str, usize, i64, bool); 3] = [
+            ("a.part1.rar", 40, 40, false),
+            ("b.part2.rar", 7, 0, false), // pre-migration: nsegs still 0
+            ("c.part3.rar", 13, 13, true), // already bracketed
+        ];
+        let mut all: Vec<String> = Vec::new();
+        for (fi, (name, n, nsegs, bracketed)) in files.iter().enumerate() {
+            let ids: Vec<String> = (0..*n)
+                .map(|i| {
+                    if *bracketed {
+                        format!("<seg-{fi}-{i}@news>")
+                    } else {
+                        format!("seg-{fi}-{i}@news")
+                    }
+                })
+                .collect();
+            let segs = format!(
+                "[{}]",
+                ids.iter()
+                    .enumerate()
+                    .map(|(i, id)| format!("[{},{},500]", i + 1, serde_json::json!(id)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            all.extend(ids);
+            ix.db
+                .execute(
+                    "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
+                     VALUES(?1, ?2, ?3, 500, ?4, ?5)",
+                    rusqlite::params![rid, name, *n as i64, segs, nsegs],
+                )
+                .unwrap();
+        }
+
+        // The reference: what the materialising sampler produced.
+        let reference = |want: usize| -> Vec<String> {
+            if want == 0 || all.is_empty() {
+                return Vec::new();
+            }
+            let step = (all.len() as f64 / want.min(all.len()) as f64).max(1.0);
+            let mut out = Vec::new();
+            let mut at = 0.0f64;
+            while (at as usize) < all.len() && out.len() < want {
+                let id = &all[at as usize];
+                out.push(if id.starts_with('<') {
+                    id.clone()
+                } else {
+                    format!("<{id}>")
+                });
+                at += step;
+            }
+            out
+        };
+
+        for want in [1usize, 9, 12, 60] {
+            assert_eq!(
+                ix.oracle_msgids(rid, want).unwrap(),
+                reference(want),
+                "the sample moved at max={want}"
+            );
+        }
+        // A budget of nothing asks for nothing; an unknown release has
+        // nothing to sample.
+        assert!(ix.oracle_msgids(rid, 0).unwrap().is_empty());
+        assert!(ix.oracle_msgids(rid + 999, 8).unwrap().is_empty());
+        // The spread reaches the tail - a takedown of the last file is
+        // exactly what head-only sampling would miss.
+        let ids = ix.oracle_msgids(rid, 9).unwrap();
+        assert!(
+            ids.iter().any(|i| i.starts_with("<seg-2-")),
+            "no probe landed in the last file: {ids:?}"
+        );
+        teardown(&dir, ix);
+    }
 
     /// `--sample-secs` is a bare `u64` on the CLI, so the draw budget
     /// arrives here unbounded. Building the deadline with a plain

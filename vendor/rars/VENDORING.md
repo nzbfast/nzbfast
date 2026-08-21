@@ -56,6 +56,20 @@ git add -A vendor/rars
 git commit -m "vendor/rars: sync to fork rev <rev>"
 ```
 
+## Local divergences (re-apply after every sync)
+
+`sync-from-fork.sh` mirrors `src/**` with `rsync --delete`, so anything we
+change under `src/` is GONE the moment someone re-vendors. Keep the ledger
+below current, and walk it after every sync. Each entry names a marker
+comment carrying the same date, so `git grep 'nzbfast-local change'` under
+`vendor/rars/src` finds what should be here.
+
+| Date | What | Where |
+| --- | --- | --- |
+| 2026-08-20 | `delta_decode_into`: the RAR 5 filter path reuses one delta buffer per member instead of allocating and zeroing a fresh one per filter block. Adds the `delta_scratch` field on both RAR 5 output structs and a fourth argument to `apply_filter_to_range`. `delta_decode` (the allocating shape) stays for RAR 2.9 and the tests. | `src/codec/filters.rs`, `src/codec/rar50.rs` |
+| 2026-08-20 | Streaming legacy (RAR 2/3) recovery repair, C7: `repair_protect_to_file`/`_to_path` on the rar15_40 `Archive` scan protected sectors by bounded range reads and patch a cloned/copied destination in place, instead of `repair_protect_head`'s two whole-volume buffers (2.02 GiB -> 11 MiB peak RSS on a 1 GiB volume). Adds `Error::LegacyRepairTooLarge` (budget refusal, incl. the compressed-NEWSUB decode pre-check), reroutes the `ArchiveReader::repair_recovery_to_file`/`_to_path` Rar15To40 arms, and adds 7 `streaming_protect_*` lib tests plus the `legacy_rar3_streaming_repair_matches_winrar_byte_for_byte` leg in `tests/winrar_recovery.rs`. `repair_protect_head` (buffered) stays as the tests' oracle. | `src/rar15_40.rs`, `src/lib.rs`, `src/error.rs`, `tests/winrar_recovery.rs` |
+| 2026-08-20 | C7 rider (sweep 8 M9): `repair_protect_sectors` pass 1 bails at `parity_sectors + 1` mismatches (same `InvalidHeader(exceeds_parity)` value as the post-scan check) instead of collecting every damaged sector index first - the unbounded `Vec<usize>` grew source_len/64 bytes on a widely-corrupt volume before any check ran, breaking the documented peak-memory contract. The `working > budget` check also moved above the `used_slots` allocation it already accounts for. | `src/rar15_40.rs` |
+
 ## Deep gate before a release (decoder changes especially)
 
 The `--lib` gate above and the fuzzers use small inputs, so they are blind to

@@ -30,11 +30,33 @@ mod index_read_tests;
 #[path = "daemon_tests/park_gen_tests.rs"]
 mod park_gen_tests;
 
+// B5's queue window, out for the ceiling and carrying the same
+// #[path] requirement.
+#[path = "daemon_tests/queue_window_tests.rs"]
+mod queue_window_tests;
+
 // §74's instant kick and its lock ordering, moved out for the ceiling
 // and carrying the same #[path] requirement.
 #[cfg(feature = "indexer")]
 #[path = "daemon_tests/instant_tests.rs"]
 mod instant_tests;
+
+// B4's connection hand-back and era gating, in their own file for the
+// ceiling and carrying the same #[path] requirement.
+#[cfg(feature = "indexer")]
+#[path = "daemon_tests/handback_tests.rs"]
+mod handback_tests;
+
+// A4's index_stats TTL cache, same ceiling and #[path] requirement.
+#[cfg(feature = "indexer")]
+#[path = "daemon_tests/stats_cache_tests.rs"]
+mod stats_cache_tests;
+
+// N12's per-poll caches (owned title keys, enabled backbones), out for
+// the ceiling and carrying the same #[path] requirement.
+#[cfg(feature = "indexer")]
+#[path = "daemon_tests/owned_cache_tests.rs"]
+mod owned_cache_tests;
 
 fn with_daemon(name: &str, f: impl FnOnce(&Arc<Daemon>)) {
     let dir = std::env::temp_dir().join(format!("nzbfast-dmn-{name}-{}", std::process::id()));
@@ -1365,6 +1387,37 @@ fn tail_phase_maps_hub_activity_to_sab_vocabulary() {
         assert_eq!(d.tail_phase("nzo3"), Some("Extracting"));
         assert_eq!(d.tail_phase("nzo4"), None, "unmapped phases stay quiet");
         assert_eq!(d.tail_phase("nzo9"), None);
+        // The engine's hand-off word and every stage the daemon writes
+        // after it. One wire word between them, and it is the one a
+        // `Finishing` row already reported - so this maps the window,
+        // it does not widen the vocabulary the *arrs are told.
+        for tok in [
+            "finalizing",
+            "unlocking",
+            "identifying",
+            "renaming",
+            "scripting",
+        ] {
+            d.hub.activity.lock_ok().insert("nzo5".to_string(), tok);
+            assert_eq!(
+                d.tail_phase("nzo5"),
+                Some("Moving"),
+                "{tok} is a post-network stage and must read as a tail"
+            );
+        }
+        // ...and the one word in this map that is written BEFORE the
+        // network, while the record already says Downloading and
+        // nothing has been fetched. A catch-all arm would report it as
+        // all-in at 100%.
+        d.hub
+            .activity
+            .lock_ok()
+            .insert("nzo6".to_string(), "preflight");
+        assert_eq!(
+            d.tail_phase("nzo6"),
+            None,
+            "preflight is not a tail - the bytes have not started"
+        );
     });
 }
 
@@ -1862,7 +1915,7 @@ fn index_stats_answer_from_the_read_pool_while_the_writer_is_busy() {
         // connection, exactly as startup's first ingest would.
         d.with_index(|_ix| Some(())).expect("index open");
         assert!(
-            d.index_stats_cache.lock_ok().is_none(),
+            d.index_stats_cache.lock_ok().snap.is_none(),
             "precondition: no successful stats read has seeded the cache"
         );
         // A scan batch owns the write connection for the whole window.
@@ -1875,7 +1928,7 @@ fn index_stats_answer_from_the_read_pool_while_the_writer_is_busy() {
             "a busy write lock must not read as an empty index: {snap:?}"
         );
         // And the answer seeds the cache for the next busy poll.
-        assert_eq!(*d.index_stats_cache.lock_ok(), Some(snap));
+        assert_eq!(d.index_stats_cache.lock_ok().snap, Some(snap));
     });
 }
 
@@ -1889,7 +1942,7 @@ fn index_stats_answer_from_the_read_pool_while_the_writer_is_busy() {
 fn index_stats_answer_cold_not_zero_when_no_read_path_is_available() {
     with_daemon("statscold", |d| {
         d.index_enabled.store(true, Ordering::Relaxed);
-        assert!(d.index_stats_cache.lock_ok().is_none());
+        assert!(d.index_stats_cache.lock_ok().snap.is_none());
         let _writer = d.index.lock_ok();
         assert_eq!(
             d.index_stats_snapshot(),
@@ -1898,7 +1951,7 @@ fn index_stats_answer_cold_not_zero_when_no_read_path_is_available() {
         );
         // Cold answers must not seed the cache: the next poll should
         // try the real read paths again, not replay the placeholder.
-        assert!(d.index_stats_cache.lock_ok().is_none());
+        assert!(d.index_stats_cache.lock_ok().snap.is_none());
     });
 }
 
@@ -2418,6 +2471,32 @@ fn save_queue_lock_hold_at_15k_jobs() {
                 d.note_queue_idle();
             }
         });
+        // Phase 5 (perf audit B5): the dashboard's once-a-second queue body,
+        // x4. The whole walk runs under the queue lock, so the contender
+        // wait here is what every other API request and every pick_job
+        // pays for a poll. The two legs are the same walk with and
+        // without a window: `limit=60` is the dashboard's page, no
+        // params is the third-party SAB client that never sends one.
+        let qp = |kv: &[(&str, &str)]| {
+            kv.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<String, String>>()
+        };
+        let (all_took, all_worst) = contend(&d.clone(), || {
+            for _ in 0..4 {
+                let v = super::sabcompat::queue_json(d, &qp(&[]));
+                assert_eq!(v["queue"]["slots"].as_array().map(Vec::len), Some(N));
+            }
+        });
+        let (win_took, win_worst) = contend(&d.clone(), || {
+            for _ in 0..4 {
+                let v = super::sabcompat::queue_json(d, &qp(&[("start", "0"), ("limit", "60")]));
+                assert_eq!(v["queue"]["slots"].as_array().map(Vec::len), Some(60));
+                // The header still describes the WHOLE queue - that is
+                // the property the window must not cost.
+                assert_eq!(v["queue"]["noofslots"], N);
+            }
+        });
         println!(
             "15k-queue probe:\n\
              \x20 old shape (serialize under queue lock, x1): {old_took:?}, \
@@ -2431,7 +2510,11 @@ fn save_queue_lock_hold_at_15k_jobs() {
              \x20 note_queue_idle, arming edge (full walk):   {idle_took:?}, \
              worst contender lock wait {idle_worst} us\n\
              \x20 note_queue_idle x100, latch already set:    {latched_took:?}, \
-             worst contender lock wait {latched_worst} us"
+             worst contender lock wait {latched_worst} us\n\
+             \x20 queue_json x4, no window (15k rows built):   {all_took:?}, \
+             worst contender lock wait {all_worst} us\n\
+             \x20 queue_json x4, limit=60 (60 rows built):     {win_took:?}, \
+             worst contender lock wait {win_worst} us"
         );
     });
 }
@@ -2676,10 +2759,14 @@ fn dupe_alias_meets_one_show_under_two_names_and_never_a_spinoff() {
         );
 
         // Enrichment resolved BOTH spellings to the same TVmaze show.
+        // Labelled, as the enricher writes: an unlabelled '' id
+        // contributes no alias since the 20 Aug sweep (it may be an
+        // AniList media id from before the id_src column existed).
         let fill = |ix: &nzbkit::index::Index, key: &str, id: i64| {
             ix.title_seed(key, "tv", "Life Larry", 0).unwrap();
             let m = nzbkit::index::TitleFill {
                 tmdb_id: id,
+                id_src: "tvmaze",
                 ..Default::default()
             };
             ix.title_fill(key, &m, 1).unwrap();

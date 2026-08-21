@@ -205,10 +205,10 @@ fn corrupt_articles_offer_retry_and_a_short_post_offers_search() {
         "a re-fetch is the remedy for bytes the server damaged"
     );
 
-    let short = "post size header disagrees with its parts: every article arrived and \
-                 decoded, but 2 file(s) declare more bytes than the post actually \
-                 carries, 0 decode/write errors. Re-downloading cannot change this - \
-                 the missing bytes were never posted";
+    let short = "post size header disagrees with its parts: every payload article \
+                 arrived and decoded, but 2 file(s) declare more bytes than the post \
+                 actually carries, 0 decode/write errors. Re-downloading cannot change \
+                 this - the missing bytes were never posted";
     assert_eq!(fail_hint(short), "shortpost");
     assert_eq!(
         fail_action(fail_kind(short), fail_hint(short), short, false),

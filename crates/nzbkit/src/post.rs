@@ -438,22 +438,22 @@ pub async fn post_article(
                         // miss below reports, so it takes the same branch.
                         let exists = match stat_exists(conn, message_id).await {
                             Ok(v) => v,
-                            Err(e) if post_response_claims_duplicate(&st.line) => {
+                            Err(e) if post_response_claims_duplicate(st.line()) => {
                                 return Err(PostError::Unconfirmed(format!(
                                     "article <{message_id}>: resend rejected as a duplicate and \
                                      the server could not be asked whether it holds it ({e}): {}",
-                                    st.line
+                                    st.line()
                                 )));
                             }
                             Err(e) => return Err(e),
                         };
                         return if exists {
                             Ok(false)
-                        } else if post_response_claims_duplicate(&st.line) {
+                        } else if post_response_claims_duplicate(st.line()) {
                             Err(PostError::Unconfirmed(format!(
                                 "resend rejected as a duplicate and the article is not (yet) \
                                  confirmed on the server: {}",
-                                st.line
+                                st.line()
                             )))
                         } else {
                             // A 441 whose wording we do not recognise, with
@@ -471,13 +471,13 @@ pub async fn post_article(
                             Err(PostError::Retryable(format!(
                                 "article {message_id}: server rejected the resend and does not \
                                  (yet) have it: {}",
-                                st.line
+                                st.line()
                             )))
                         };
                     }
                     return Err(PostError::Other(format!(
                         "server rejected article after POST: {}",
-                        st.line
+                        st.line()
                     )));
                 }
                 return Ok(false);
@@ -489,13 +489,13 @@ pub async fn post_article(
             400 | 502 | 503 => {
                 return Err(PostError::Retryable(format!(
                     "server cannot take a POST right now: {}",
-                    st.line
+                    st.line()
                 )));
             }
             _ => {
                 return Err(PostError::Other(format!(
                     "unexpected response to POST: {}",
-                    st.line
+                    st.line()
                 )));
             }
         }
@@ -512,11 +512,11 @@ pub async fn post_article(
                 // "rejected, do not retry" and stays fatal below).
                 436 => Err(PostError::Retryable(format!(
                     "article <{message_id}>: server could not take it: {}",
-                    st.line
+                    st.line()
                 ))),
                 _ => Err(PostError::Other(format!(
                     "article <{message_id}>: server rejected it after IHAVE: {}",
-                    st.line
+                    st.line()
                 ))),
             }
         }
@@ -536,17 +536,17 @@ pub async fn post_article(
             } else {
                 Err(PostError::Other(format!(
                     "article <{message_id}>: server will not take it and does not have it: {}",
-                    st.line
+                    st.line()
                 )))
             }
         }
         400 | 436 | 502 | 503 => Err(PostError::Retryable(format!(
             "article <{message_id}>: server cannot take an IHAVE right now: {}",
-            st.line
+            st.line()
         ))),
         _ => Err(PostError::Other(format!(
             "article <{message_id}>: server refused both POST and IHAVE: {}",
-            st.line
+            st.line()
         ))),
     }
 }

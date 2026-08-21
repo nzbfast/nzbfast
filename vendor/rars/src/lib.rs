@@ -494,17 +494,12 @@ impl Archive {
         budget: u64,
     ) -> Result<Vec<usize>> {
         match self {
-            // RAR 2/3 protect records are a whole-file transform on archives
-            // orders of magnitude smaller than a RAR5 volume set; they keep
-            // the buffered path.
-            Self::Rar15To40(archive) => {
-                use std::io::{Seek as _, Write as _};
-                let repaired = archive.repair_protect_head()?;
-                dest.seek(std::io::SeekFrom::Start(0))?;
-                dest.write_all(&repaired)?;
-                dest.set_len(repaired.len() as u64)?;
-                Ok(Vec::new())
-            }
+            // RAR 2/3 protect records were designed for small archives, but
+            // the volumes carrying them are not: a legacy volume through the
+            // buffered path needs over twice its size resident. The
+            // streaming form scans 512-byte sectors by bounded range reads
+            // and patches only the damaged ones.
+            Self::Rar15To40(archive) => archive.repair_protect_to_file(dest, budget),
             Self::Rar50Plus(archive) => archive.repair_recovery_to_file(dest, password, budget),
             Self::Rar13(_) => Err(Error::UnsupportedFamilyFeature {
                 family: ArchiveFamily::Rar13,
@@ -526,15 +521,14 @@ impl Archive {
     ) -> Result<Vec<usize>> {
         match self {
             Self::Rar50Plus(archive) => archive.repair_recovery_to_path(dest, password, budget),
-            _ => {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .read(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(dest)?;
-                self.repair_recovery_to_file(&mut file, password, budget)
-            }
+            // The path form matters for the legacy families too: their
+            // whole-volume prefill becomes a filesystem clone where the
+            // platform supports one.
+            Self::Rar15To40(archive) => archive.repair_protect_to_path(dest, budget),
+            Self::Rar13(_) => Err(Error::UnsupportedFamilyFeature {
+                family: ArchiveFamily::Rar13,
+                feature: "recovery repair for RAR 1.3/1.4 archives",
+            }),
         }
     }
 
@@ -4602,6 +4596,197 @@ mod tests {
         assert_eq!(
             collect_extract(&repaired_archive, None).unwrap()[0].name,
             b"bigtext_64k.bin"
+        );
+    }
+
+    /// Runs the streaming legacy repair over `bytes` through BOTH public
+    /// shapes - opened from a file via `repair_recovery_to_path` (the
+    /// clone-prefill path the daemon uses) and opened from memory via
+    /// `repair_recovery_to_file` (the streaming-copy path) - asserts the two
+    /// agree, and returns the repaired bytes plus rebuilt sector indices.
+    fn protect_repair_streaming(bytes: &[u8], budget: u64) -> Result<(Vec<u8>, Vec<usize>)> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let src = dir.join(format!("rars-protect-src-{pid}-{seq}.rar"));
+        let path_dst = dir.join(format!("rars-protect-pathdst-{pid}-{seq}.rar"));
+        let file_dst = dir.join(format!("rars-protect-filedst-{pid}-{seq}.rar"));
+        std::fs::write(&src, bytes).unwrap();
+
+        let from_path = ArchiveReader::read_path(&src)
+            .and_then(|archive| archive.repair_recovery_to_path(&path_dst, None, budget))
+            .map(|rebuilt| (std::fs::read(&path_dst).unwrap(), rebuilt));
+        let from_file = ArchiveReader::read(bytes).and_then(|archive| {
+            let mut dest = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&file_dst)?;
+            let rebuilt = archive.repair_recovery_to_file(&mut dest, None, budget)?;
+            Ok((std::fs::read(&file_dst).unwrap(), rebuilt))
+        });
+        for path in [&src, &path_dst, &file_dst] {
+            let _ = std::fs::remove_file(path);
+        }
+        assert_eq!(
+            from_path, from_file,
+            "file-backed and memory-backed streaming repairs disagree"
+        );
+        from_path
+    }
+
+    #[test]
+    fn streaming_protect_repair_matches_buffered_for_rar2() {
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        // Two damaged sectors in distinct parity groups (rec_sectors = 5).
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        damaged[7 * 512 + 10..7 * 512 + 200].fill(0x5a);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+        assert!(collect_extract(&damaged_archive, None).is_err());
+
+        let buffered = damaged_archive
+            .as_rar15_40()
+            .unwrap()
+            .repair_protect_head()
+            .unwrap();
+        let (streamed, rebuilt) = protect_repair_streaming(&damaged, u64::MAX).unwrap();
+        assert_eq!(rebuilt, vec![1, 7]);
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed, bytes);
+        assert_eq!(
+            collect_extract(&ArchiveReader::read(&streamed).unwrap(), None).unwrap()[0].data,
+            collect_extract(&ArchiveReader::read(&bytes).unwrap(), None).unwrap()[0].data
+        );
+    }
+
+    #[test]
+    fn streaming_protect_repair_passes_through_rar2_with_no_repairable_sectors() {
+        // rr1's PROTECT_HEAD sits at offset 111, so no complete sector
+        // precedes it and nothing is repairable; the streaming path must
+        // still hand back a byte-complete copy, exactly like the buffered
+        // path's undamaged passthrough.
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr1.rar")).unwrap();
+        let (streamed, rebuilt) = protect_repair_streaming(&bytes, u64::MAX).unwrap();
+        assert_eq!(rebuilt, Vec::<usize>::new());
+        assert_eq!(streamed, bytes);
+    }
+
+    #[test]
+    fn streaming_protect_repair_matches_buffered_for_rar3_newsub() {
+        let bytes = std::fs::read(rar15_40_fixture("rar300/with_recovery_rar300.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        // Sector 1, and the PARTIAL final protected sector: the RR block
+        // starts at 9819, so sector 19 covers bytes 9728..9819 and is
+        // zero-padded for CRC/XOR purposes.
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        damaged[9750..9800].fill(0x5a);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+        assert!(collect_extract(&damaged_archive, None).is_err());
+
+        let buffered = damaged_archive
+            .as_rar15_40()
+            .unwrap()
+            .repair_protect_head()
+            .unwrap();
+        let (streamed, rebuilt) = protect_repair_streaming(&damaged, u64::MAX).unwrap();
+        assert_eq!(rebuilt, vec![1, 19]);
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed, bytes);
+        assert_eq!(
+            collect_extract(&ArchiveReader::read(&streamed).unwrap(), None).unwrap()[0].data,
+            collect_extract(&ArchiveReader::read(&bytes).unwrap(), None).unwrap()[0].data
+        );
+    }
+
+    #[test]
+    fn streaming_protect_repair_matches_buffered_for_rar3_newsub_behind_sfx_stub() {
+        // A genuine archive behind an SFX stub: the protected sectors start
+        // at sfx_offset, not 0, and the record still repairs them because
+        // the archive bytes are unchanged.
+        let bytes = std::fs::read(rar15_40_fixture("rar300/with_recovery_rar300.rar")).unwrap();
+        let mut stub = vec![0x4du8; 1024];
+        stub[1] = 0x5a; // "MZ" without any RAR signature in the stub
+        let mut sfx = stub.clone();
+        sfx.extend_from_slice(&bytes);
+        let mut damaged = sfx.clone();
+        damaged[1024 + 512 + 16..1024 + 512 + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+
+        let buffered = damaged_archive
+            .as_rar15_40()
+            .unwrap()
+            .repair_protect_head()
+            .unwrap();
+        let (streamed, rebuilt) = protect_repair_streaming(&damaged, u64::MAX).unwrap();
+        assert_eq!(rebuilt, vec![1]);
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed, sfx);
+    }
+
+    #[test]
+    fn streaming_protect_repair_matches_buffered_for_rar3_compressed_newsub() {
+        let bytes = std::fs::read(rar15_40_fixture(
+            "rar300/with_compressed_recovery_rar300.rar",
+        ))
+        .unwrap();
+        let mut damaged = bytes.clone();
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        let damaged_archive = ArchiveReader::read(&damaged).unwrap();
+
+        let buffered = damaged_archive
+            .as_rar15_40()
+            .unwrap()
+            .repair_protect_head()
+            .unwrap();
+        let (streamed, rebuilt) = protect_repair_streaming(&damaged, u64::MAX).unwrap();
+        assert_eq!(rebuilt, vec![1]);
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed, bytes);
+    }
+
+    #[test]
+    fn streaming_protect_repair_reports_budget_exhaustion() {
+        // A damaged stored-record repair whose working set cannot fit.
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[512 + 16..512 + 80].fill(0xa5);
+        assert_eq!(
+            protect_repair_streaming(&damaged, 1).unwrap_err(),
+            Error::LegacyRepairTooLarge
+        );
+
+        // A compressed NEWSUB record is refused BEFORE its decode allocates.
+        let bytes = std::fs::read(rar15_40_fixture(
+            "rar300/with_compressed_recovery_rar300.rar",
+        ))
+        .unwrap();
+        assert_eq!(
+            protect_repair_streaming(&bytes, 1).unwrap_err(),
+            Error::LegacyRepairTooLarge
+        );
+    }
+
+    #[test]
+    fn streaming_protect_repair_rejects_damage_beyond_parity_like_buffered() {
+        // Six damaged sectors against five parity sectors: the streaming
+        // path must refuse with the same error the buffered path raises.
+        let bytes = std::fs::read(rar15_40_fixture("rar250_protect_head_rr5.rar")).unwrap();
+        let mut damaged = bytes.clone();
+        for sector in 1..=6usize {
+            damaged[sector * 512 + 16..sector * 512 + 80].fill(0xa5);
+        }
+        let buffered_err = ArchiveReader::read(&damaged)
+            .unwrap()
+            .as_rar15_40()
+            .unwrap()
+            .repair_protect_head()
+            .unwrap_err();
+        assert_eq!(
+            protect_repair_streaming(&damaged, u64::MAX).unwrap_err(),
+            buffered_err
         );
     }
 

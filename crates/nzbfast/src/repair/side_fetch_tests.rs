@@ -47,9 +47,9 @@ async fn a_steer_config_side_fetch_still_completes() {
     let servers = vec![(srv.server_config(), pc)];
     let dir = tdir("steer-complete");
     let mut idm = std::collections::HashMap::new();
-    idm.insert("<vol@wedge>".to_string(), 0usize);
+    idm.insert(std::sync::Arc::<str>::from("<vol@wedge>"), 0usize);
     let ids = vec![ArticleReq {
-        id: "<vol@wedge>".to_string(),
+        id: "<vol@wedge>".into(),
         age_days: 0,
         part: 1,
     }];
@@ -109,9 +109,9 @@ async fn a_cancelled_side_fetch_returns_promptly() {
         })
     };
     let mut idm = std::collections::HashMap::new();
-    idm.insert("<vol@x>".to_string(), 0usize);
+    idm.insert(std::sync::Arc::<str>::from("<vol@x>"), 0usize);
     let ids = vec![ArticleReq {
-        id: "<vol@x>".to_string(),
+        id: "<vol@x>".into(),
         age_days: 0,
         part: 1,
     }];
@@ -167,12 +167,12 @@ async fn a_pre_cancelled_side_fetch_never_dials() {
     let cancel = SideCancel::new();
     cancel.cancel();
     let mut idm = std::collections::HashMap::new();
-    idm.insert("<vol@x>".to_string(), 0usize);
+    idm.insert(std::sync::Arc::<str>::from("<vol@x>"), 0usize);
     let t0 = std::time::Instant::now();
     let res = fetch_volume_articles(
         &servers,
         vec![ArticleReq {
-            id: "<vol@x>".to_string(),
+            id: "<vol@x>".into(),
             age_days: 0,
             part: 1,
         }],

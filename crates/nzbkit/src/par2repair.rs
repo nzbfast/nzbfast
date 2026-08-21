@@ -51,7 +51,7 @@
 //! targets are scanned too (mid-file insertions leave a half-verified
 //! file whose remaining content is byte-shifted inside itself).
 
-use crate::gf16::{self, MulTable};
+use crate::gf16::{self, FoldTable, MulTable};
 use crate::par2::{self, BlockCheck, Par2File};
 use crate::sync::{MutexExt, RwLockExt};
 use md5::{Digest, Md5};
@@ -219,7 +219,7 @@ fn fold_chunk_tiled(
     }
     let words = dsts[0].len();
     debug_assert!(dsts.iter().all(|d| d.len() == words));
-    let per_src = std::mem::size_of::<MulTable>() * dsts.len();
+    let per_src = std::mem::size_of::<FoldTable>() * dsts.len();
     let group = (table_budget / per_src.max(1)).clamp(1, srcs.len());
     // One column tile is walked across EVERY row this thread owns before
     // moving on, so the resident set is tile x rows, not tile. A fixed
@@ -230,7 +230,7 @@ fn fold_chunk_tiled(
     // tile). A zero tile would not advance the loop below.
     let ceiling = tile_words.max(1);
     let tile_words = (L2_TARGET_WORDS / dsts.len()).clamp(MIN_TILE_WORDS.min(ceiling), ceiling);
-    let mut tables: Vec<MulTable> = Vec::with_capacity(group * dsts.len());
+    let mut tables: Vec<FoldTable> = Vec::with_capacity(group * dsts.len());
     // Coefficients hoisted out of the tile loop: the zero test used to
     // recompute one per (tile, source, row), and for the syndrome fold
     // that is a u64 multiply plus a `% 65535` division.
@@ -244,7 +244,7 @@ fn fold_chunk_tiled(
             for i in g0..g1 {
                 let c = coeff(row_base + j, i);
                 coeffs.push(c);
-                tables.push(MulTable::new(c));
+                tables.push(FoldTable::new(c));
             }
         }
         let mut w0 = 0usize;
@@ -350,7 +350,7 @@ fn fold_chunk_multi(
                         // Only a non-32-byte-aligned FINAL tile lands here.
                         for (s, c) in full[..n].iter().zip(&gc[..n]) {
                             if *c != 0 {
-                                MulTable::new(*c).xor_mul_into(&mut dtile[done..], &s[done * 2..]);
+                                FoldTable::new(*c).xor_mul_into(&mut dtile[done..], &s[done * 2..]);
                             }
                         }
                     }
@@ -358,7 +358,7 @@ fn fold_chunk_multi(
                 for &(gi, s) in &partial[..np] {
                     let c = coeffs[j * (g1 - g0) + gi];
                     if c != 0 {
-                        MulTable::new(c).xor_mul_into(&mut dtile[..s.len().div_ceil(2)], s);
+                        FoldTable::new(c).xor_mul_into(&mut dtile[..s.len().div_ceil(2)], s);
                     }
                 }
             }
@@ -408,6 +408,34 @@ pub fn bench_fold(
     coeff: &(dyn Fn(usize, usize) -> u16 + Sync),
 ) {
     fold_parallel(dsts, srcs, coeff);
+}
+
+/// Bench hook: the scalar matrix work (Vandermonde inverse and
+/// Gauss-Jordan) in isolation, so fold-table A/Bs can prove the scalar
+/// solve path untouched. Returns a checksum over both inverses so the
+/// work cannot be optimized away. Not part of the supported API.
+#[doc(hidden)]
+pub fn bench_invert(m: usize) -> u16 {
+    let ks: Vec<u32> = (0..m as u32).map(|k| 2 * k + 1).collect();
+    let v = invert_vandermonde(&ks, 7).expect("distinct bases");
+    let a: Vec<Vec<u16>> = (0..m)
+        .map(|r| {
+            ks.iter()
+                .map(|&k| gf16::pow2(k as u64 * (7 + r as u64)))
+                .collect()
+        })
+        .collect();
+    let g = invert(a).expect("nonsingular");
+    // Rotate between words: v and g are inverses of the SAME matrix, so
+    // a plain XOR would structurally cancel to zero and discriminate
+    // nothing.
+    let mut sum = 0u16;
+    for row in v.iter().chain(g.iter()) {
+        for &x in row {
+            sum = sum.rotate_left(1) ^ x;
+        }
+    }
+    sum
 }
 
 /// Physical core count on Windows (P and E cores, SMT siblings
@@ -529,7 +557,7 @@ fn fold_parallel(
     };
     // A column boundary that is not a multiple of 16 words leaves every
     // unit's tiles with a sub-32-byte-chunk remainder, and the remainder
-    // path builds a full MulTable per (row, group, source) - measured as
+    // path builds a fold table per (row, group, source) - measured as
     // a 7-25x fold COLLAPSE the first time a cache-derived col_chunk
     // landed off-alignment (the old fixed 8-way split only survived
     // because 32768/8 happened to be aligned). Align up: whole blocks
@@ -1060,7 +1088,11 @@ fn resolve_syndrome_path(
 
 // `impl Reconstructor` lives in par2repair/reconstruct.rs (TODO 106
 // size-gate split).
+mod catalog;
 mod reconstruct;
+
+pub use catalog::PacketCatalog;
+use catalog::{Crit, RecLoc, SetReplay, load_selected_recovery};
 
 /// One producer's handle into a [`Reconstructor`]'s fold worker (M2c.2
 /// parallel feed reads). Same batching as the built-in feed path, but
@@ -1441,6 +1473,30 @@ pub fn repair_mapped(
     )
 }
 
+/// [`repair_mapped`] fed from a [`PacketCatalog`] instead of a
+/// harvested-in-memory recovery corpus (B3 stage 2 on the B2 catalog):
+/// the smallest exponents actually needed are selected from the
+/// catalog's validated locators, pread one block each, and re-proven
+/// against their packet MD5s as they load. Peak recovery memory is
+/// missing x block_size instead of every slice on disk, and the NTT
+/// fallback retry reloads from disk rather than pinning the corpus.
+/// Selection, dedupe, error arithmetic and fallback semantics are
+/// [`repair_mapped`]'s own - the loaded set IS the set it would have
+/// chosen out of the full harvest.
+pub fn repair_mapped_catalog(
+    files: &[(Par2File, Vec<bool>)],
+    block_size: usize,
+    cat: &mut PacketCatalog,
+    set_id: &[u8; 16],
+    io: &dyn VolumeIo,
+    full_verify: bool,
+) -> Result<usize, RepairError> {
+    run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
+        let recovery = catalog::load_mapped_recovery(cat, set_id, files, block_size)?;
+        repair_mapped_inner(files, block_size, &recovery, io, full_verify, path, probe)
+    })
+}
+
 /// [`repair_mapped`] with an explicit initial syndrome path (test hook
 /// for the NTT fallback machinery). Not part of the supported API
 /// surface. The verify-failure fold retry applies here too: a rerun on
@@ -1513,10 +1569,10 @@ fn repair_mapped_inner(
     }
 
     // Smallest exponents win, deduped; exactly one per missing slice.
-    let mut by_exp: HashMap<u32, &Vec<u8>> = HashMap::new();
+    let mut by_exp: HashMap<u32, &[u8]> = HashMap::new();
     for (e, data) in recovery {
         if data.len() == block_size {
-            by_exp.entry(*e).or_insert(data);
+            by_exp.entry(*e).or_insert(data.as_slice());
         }
     }
     if by_exp.len() < missing.len() {
@@ -1529,7 +1585,13 @@ fn repair_mapped_inner(
     let mut exps: Vec<u32> = by_exp.keys().copied().collect();
     exps.sort_unstable();
     exps.truncate(missing.len());
-    let chosen: Vec<(u32, Vec<u8>)> = exps.iter().map(|e| (*e, by_exp[e].clone())).collect();
+    // Borrowed payloads, not clones: the caller's corpus outlives the
+    // whole attempt (it is pinned across the NTT-fallback retry), and
+    // `Reconstructor::new_with_path` widens these into its own u16
+    // syndrome rows before its fold worker spawns, so nothing borrowed
+    // crosses a thread. The old per-selection clone was ~m x block_size
+    // (512 MiB at 128 missing x 4 MiB) of dead weight.
+    let chosen: Vec<(u32, &[u8])> = exps.iter().map(|e| (*e, by_exp[e])).collect();
 
     // Syndrome pass: stream every present slice once via io.read.
     // M2c.2: the reads were the measured hot spot (4.0 s of a 4.96 s
@@ -1904,239 +1966,11 @@ fn adoption_candidates(
     Ok(out)
 }
 
-fn md5_of_file(path: &Path, limit: Option<u64>) -> Result<[u8; 16], RepairError> {
-    let mut f = File::open(path)?;
-    let mut hasher = Md5::new();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut left = limit.unwrap_or(u64::MAX);
-    while left > 0 {
-        let want = buf.len().min(left.min(usize::MAX as u64) as usize);
-        let n = f.read(&mut buf[..want])?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        left -= n as u64;
-    }
-    Ok(hasher.finalize().into())
-}
-
-/// Locate missing blocks' content in the candidate files. Fast path
-/// first: a candidate that is a missing file whole (same length + MD5,
-/// prefiltered on md5_16k) adopts every slice at aligned offsets - the
-/// common renamed-file case, no per-byte scan. Whatever is still missing
-/// then goes through the sliding scan: roll the block-size CRC32 window
-/// over each candidate (continuing with virtual zeros past end-of-file,
-/// matching the spec's zero-padded tail checksums), confirm CRC hits by
-/// block MD5, and record the first source found per slice.
-fn adopt_blocks(
-    dir: &Path,
-    targets: &[Target],
-    missing: &[usize],
-    bs: usize,
-    exclude: &HashSet<PathBuf>,
-) -> Result<(Vec<(PathBuf, u64)>, HashMap<usize, AdoptSrc>), RepairError> {
-    let cands = adoption_candidates(dir, targets, exclude)?;
-    let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
-    if cands.is_empty() {
-        return Ok((cands, adopted));
-    }
-    let missing_set: HashSet<usize> = missing.iter().copied().collect();
-
-    let mut consumed = vec![false; cands.len()];
-    // Each candidate is hashed at most once, however many targets probe
-    // it (renamed multi-volume sets pair N missing files with N
-    // candidates - without the cache that's N² hashing passes).
-    let mut head_cache: Vec<Option<[u8; 16]>> = vec![None; cands.len()];
-    let mut md5_cache: Vec<Option<[u8; 16]>> = vec![None; cands.len()];
-    for t in targets {
-        let unidentified = !(t.exists && (t.intact || t.present.iter().any(|&p| p)));
-        if t.n_slices == 0 || t.file.length == 0 || !unidentified {
-            continue;
-        }
-        for (ci, (p, len)) in cands.iter().enumerate() {
-            if consumed[ci] || *len != t.file.length {
-                continue;
-            }
-            let head = match head_cache[ci] {
-                Some(h) => h,
-                None => {
-                    let h = md5_of_file(p, Some((*len).min(16384)))?;
-                    head_cache[ci] = Some(h);
-                    h
-                }
-            };
-            if head != t.file.md5_16k {
-                continue;
-            }
-            let whole = match md5_cache[ci] {
-                Some(h) => h,
-                None => {
-                    let h = md5_of_file(p, None)?;
-                    md5_cache[ci] = Some(h);
-                    h
-                }
-            };
-            if whole != t.file.md5 {
-                continue;
-            }
-            for i in 0..t.n_slices {
-                let g = t.first_slice + i;
-                if missing_set.contains(&g) {
-                    adopted.entry(g).or_insert(AdoptSrc {
-                        cand: ci,
-                        offset: i as u64 * bs as u64,
-                    });
-                }
-            }
-            consumed[ci] = true;
-            break;
-        }
-    }
-
-    let indices: Vec<usize> = (0..cands.len()).filter(|&ci| !consumed[ci]).collect();
-    sliding_scan(&cands, &indices, targets, &missing_set, bs, &mut adopted)?;
-    Ok((cands, adopted))
-}
-
-/// Sliding-scan the candidate slots named by `indices` for the content
-/// of every slice in `missing_set` not already adopted. Slices without
-/// IFSC data can only be found by the whole-file fast path.
-fn sliding_scan(
-    cands: &[(PathBuf, u64)],
-    indices: &[usize],
-    targets: &[Target],
-    missing_set: &HashSet<usize>,
-    bs: usize,
-    adopted: &mut HashMap<usize, AdoptSrc>,
-) -> Result<(), RepairError> {
-    let mut by_crc: HashMap<u32, Vec<usize>> = HashMap::new();
-    let mut md5s: HashMap<usize, [u8; 16]> = HashMap::new();
-    for t in targets {
-        for (i, c) in t.file.blocks.iter().enumerate() {
-            let g = t.first_slice + i;
-            if missing_set.contains(&g) && !adopted.contains_key(&g) {
-                by_crc.entry(c.crc32).or_default().push(g);
-                md5s.insert(g, c.md5);
-            }
-        }
-    }
-    if by_crc.is_empty() {
-        return Ok(());
-    }
-    // 65536-bit prefilter on the CRC's low 16 bits: the per-byte hot
-    // path is one table probe, not a HashMap lookup.
-    let mut filter = vec![0u64; 1024];
-    for &crc in by_crc.keys() {
-        filter[(crc & 0xFFFF) as usize >> 6] |= 1 << (crc & 63);
-    }
-    let roll = RollingCrc::new(bs);
-    let mut remaining = md5s.len();
-    for &ci in indices {
-        if remaining == 0 {
-            break;
-        }
-        let (p, len) = &cands[ci];
-        scan_candidate(
-            p,
-            *len,
-            bs,
-            &roll,
-            &filter,
-            &by_crc,
-            &md5s,
-            ci,
-            adopted,
-            &mut remaining,
-        )?;
-    }
-    Ok(())
-}
-
-/// Slide the block-size window over one candidate file (plus `bs - 1`
-/// virtual zero bytes so tail blocks match at end-of-file) and adopt
-/// every still-missing slice whose CRC32 and MD5 both match.
-#[allow(clippy::too_many_arguments)]
-fn scan_candidate(
-    path: &Path,
-    len: u64,
-    bs: usize,
-    roll: &RollingCrc,
-    filter: &[u64],
-    by_crc: &HashMap<u32, Vec<usize>>,
-    md5s: &HashMap<usize, [u8; 16]>,
-    cand: usize,
-    adopted: &mut HashMap<usize, AdoptSrc>,
-    remaining: &mut usize,
-) -> Result<(), RepairError> {
-    let mut f = File::open(path)?;
-    let mut ring = vec![0u8; bs];
-    let mut pos = 0usize; // ring slot of the window's oldest byte
-    let mut reg = 0xFFFF_FFFFu32;
-    let mut buf = vec![0u8; 1 << 18];
-    let mut i: u64 = 0; // stream index: file bytes, then virtual zeros
-    let total = len + bs as u64 - 1;
-    'stream: while i < total {
-        let n = if i < len {
-            let want = buf.len().min((len - i) as usize);
-            let got = f.read(&mut buf[..want])?;
-            if got == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "candidate file shrank mid-scan",
-                )
-                .into());
-            }
-            got
-        } else {
-            let want = buf.len().min((total - i) as usize);
-            buf[..want].fill(0);
-            want
-        };
-        for &b in &buf[..n] {
-            let old = ring[pos];
-            reg = if i < bs as u64 {
-                roll.push(reg, b)
-            } else {
-                roll.roll(reg, old, b)
-            };
-            ring[pos] = b;
-            pos += 1;
-            if pos == bs {
-                pos = 0;
-            }
-            i += 1;
-            if i < bs as u64 {
-                continue;
-            }
-            let crc = reg ^ 0xFFFF_FFFF;
-            if filter[(crc & 0xFFFF) as usize >> 6] & (1 << (crc & 63)) == 0 {
-                continue;
-            }
-            let Some(slices) = by_crc.get(&crc) else {
-                continue;
-            };
-            if slices.iter().all(|g| adopted.contains_key(g)) {
-                continue;
-            }
-            let mut h = Md5::new();
-            h.update(&ring[pos..]);
-            h.update(&ring[..pos]);
-            let md5: [u8; 16] = h.finalize().into();
-            let offset = i - bs as u64;
-            for &g in slices {
-                if md5s[&g] == md5 && !adopted.contains_key(&g) {
-                    adopted.insert(g, AdoptSrc { cand, offset });
-                    *remaining -= 1;
-                    if *remaining == 0 {
-                        break 'stream;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
+// Extra-file adoption - the candidate walk, the whole-file fast path
+// and the rolling-CRC sliding scan - lives in par2repair/adopt.rs, a
+// child module (size gate, TODO 106), and fans out across candidates
+// (R2 / N11).
+mod adopt;
 
 /// Reads adopted block bytes from candidate files, keeping each source
 /// open across calls. Bytes past a candidate's end are the zero padding
@@ -2313,7 +2147,11 @@ pub fn sniffed_packet_files(dir: &Path) -> Result<Vec<PathBuf>, RepairError> {
 /// When the dir carries packets from more than one recovery set, the
 /// first set seen (sorted packet-file order) is the one repaired.
 pub fn repair_dir(dir: &Path) -> Result<RepairStatus, RepairError> {
-    repair_dir_set(dir, None, &DirContext::default())
+    // Lazy build keeps the historical shape: criticals from the first
+    // file(s), the recovery-volume tail scanned in the background under
+    // the target-verify pass.
+    let mut cat = PacketCatalog::build_lazy(dir)?;
+    repair_dir_set(&mut cat, None, &DirContext::default(), true)
 }
 
 /// Every file name the PAR2 packets in `dir` describe, across EVERY
@@ -2327,21 +2165,22 @@ pub fn repair_dir(dir: &Path) -> Result<RepairStatus, RepairError> {
 /// packets spell them; compare on-disk names through
 /// [`crate::disk::sanitize_filename`], as the repair itself does.
 pub fn covered_names(dir: &Path) -> Result<Vec<String>, RepairError> {
-    let (packet_files, _) = collect_packet_files(dir)?;
+    Ok(covered_names_catalog(&PacketCatalog::build(dir)?))
+}
+
+/// [`covered_names`] replayed over an already-built catalog: same
+/// dedupe-by-name over FileDesc packets in sorted-file order, no reread.
+fn covered_names_catalog(cat: &PacketCatalog) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for path in &packet_files {
-        let bytes = std::fs::read(path)?;
-        par2::scan_packets(&bytes, |pkt| {
-            if pkt.ptype == *par2::TYPE_FILEDESC
-                && let Some((_, d)) = par2::parse_filedesc(pkt.body)
-                && seen.insert(d.name.clone())
-            {
-                out.push(d.name);
-            }
-        });
+    for (_, occ) in cat.walk() {
+        if let Some(Crit::FileDesc(_, d)) = cat.crit(&occ.md5)
+            && seen.insert(d.name.clone())
+        {
+            out.push(d.name.clone());
+        }
     }
-    Ok(out)
+    out
 }
 
 /// Repair every recovery set in `dir` whose data files are actually
@@ -2396,8 +2235,21 @@ pub struct SetOutcome {
 }
 
 fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcome>, RepairError> {
-    let (packet_files, _) = collect_packet_files(dir)?;
-    if packet_files.is_empty() {
+    let mut cat = PacketCatalog::build(dir)?;
+    repair_sets_catalog(&mut cat, renamed_fallback)
+}
+
+/// [`repair_sets_inner`] over a shared catalog: the discovery walk (set
+/// order, declared names, contested-name claims) replays occurrences,
+/// and each qualifying set's repair consults the same catalog instead
+/// of rescanning the corpus.
+fn repair_sets_catalog(
+    cat: &mut PacketCatalog,
+    renamed_fallback: bool,
+) -> Result<Vec<SetOutcome>, RepairError> {
+    let dir = cat.dir().to_path_buf();
+    let dir = dir.as_path();
+    if cat.is_empty() {
         return Ok(Vec::new());
     }
     let fold = crate::disk::case_insensitive_dir(dir);
@@ -2408,23 +2260,18 @@ fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcom
     // holding two different files; a name claimed by one descriptor in
     // two sets is the same file described twice, which is fine.
     let mut claims: HashMap<String, HashSet<([u8; 16], u64, [u8; 16])>> = HashMap::new();
-    for path in &packet_files {
-        let bytes = std::fs::read(path)?;
-        par2::scan_packets(&bytes, |pkt| {
-            names.entry(pkt.set_id).or_insert_with(|| {
-                order.push(pkt.set_id);
-                Vec::new()
-            });
-            if pkt.ptype == *par2::TYPE_FILEDESC
-                && let Some((fid, d)) = par2::parse_filedesc(pkt.body)
-            {
-                claims
-                    .entry(name_identity_key(fold, &d.name))
-                    .or_default()
-                    .insert((fid, d.length, d.md5));
-                names.get_mut(&pkt.set_id).unwrap().push(d.name);
-            }
+    for (_, occ) in cat.walk() {
+        names.entry(occ.set_id).or_insert_with(|| {
+            order.push(occ.set_id);
+            Vec::new()
         });
+        if let Some(Crit::FileDesc(fid, d)) = cat.crit(&occ.md5) {
+            claims
+                .entry(name_identity_key(fold, &d.name))
+                .or_default()
+                .insert((*fid, d.length, d.md5));
+            names.get_mut(&occ.set_id).unwrap().push(d.name.clone());
+        }
     }
     let ctx = DirContext {
         contested: claims
@@ -2442,7 +2289,7 @@ fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcom
         if present {
             out.push(SetOutcome {
                 names: names[id].clone(),
-                status: repair_dir_set(dir, Some(*id), &ctx),
+                status: repair_dir_set(cat, Some(*id), &ctx, false),
             });
         }
     }
@@ -2464,15 +2311,15 @@ fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcom
     // job that was already failing - so a foreign junk set going
     // Unrepairable here fails nothing that used to succeed.
     if renamed_fallback && out.is_empty() {
-        let packet_set: HashSet<&PathBuf> = packet_files.iter().collect();
-        let has_candidates = std::fs::read_dir(dir)?
-            .flatten()
-            .any(|e| e.file_type().is_ok_and(|t| t.is_file()) && !packet_set.contains(&e.path()));
+        let packet_set: HashSet<&Path> = cat.packet_paths().collect();
+        let has_candidates = std::fs::read_dir(dir)?.flatten().any(|e| {
+            e.file_type().is_ok_and(|t| t.is_file()) && !packet_set.contains(e.path().as_path())
+        });
         if has_candidates {
             for id in &order {
                 out.push(SetOutcome {
                     names: names[id].clone(),
-                    status: repair_dir_set(dir, Some(*id), &ctx),
+                    status: repair_dir_set(cat, Some(*id), &ctx, false),
                 });
             }
         }
@@ -2484,29 +2331,42 @@ fn repair_sets_inner(dir: &Path, renamed_fallback: bool) -> Result<Vec<SetOutcom
 /// `want` pins the recovery set to operate on (packets from other sets
 /// are ignored, exactly as foreign-set packets always were); `None`
 /// keeps the historical first-seen binding.
+/// `fresh`: the catalog was listed inside THIS repair call and nothing
+/// has consulted it before, so its lazy prefix scan happens here and
+/// selected recovery slices need no re-proof - the exact trust the
+/// historical scan-then-pread had. A reused catalog (`false`) is a
+/// snapshot: the inner pass rechecks file identity/size/mtime first and
+/// re-proves each selected recovery packet against its MD5 at pread.
 fn repair_dir_set(
-    dir: &Path,
+    cat: &mut PacketCatalog,
     want: Option<[u8; 16]>,
     ctx: &DirContext,
+    fresh: bool,
 ) -> Result<RepairStatus, RepairError> {
     // The NTT verify-failure retry is safe to run as a full re-attempt
     // here: the rerun re-verifies every target from disk, so any block
     // the failed attempt patched in place with wrong bytes fails its
     // checksum again, lands back in `missing`, and is rebuilt by the
     // fold; temp-file rebuilds were already cleaned up before the
-    // VerifyFailed returned.
+    // VerifyFailed returned. The retry drops `fresh`: the first attempt
+    // wrote to the directory, so the rerun rechecks and re-proves.
+    let mut fresh = fresh;
     run_with_ntt_fallback(SyndromePath::Auto, |path, probe| {
-        repair_dir_set_inner(dir, want, ctx, path, probe)
+        let f = std::mem::replace(&mut fresh, false);
+        repair_dir_set_inner(cat, want, ctx, f, path, probe)
     })
 }
 
 fn repair_dir_set_inner(
-    dir: &Path,
+    cat: &mut PacketCatalog,
     want: Option<[u8; 16]>,
     ctx: &DirContext,
+    fresh: bool,
     path: SyndromePath,
     probe: &mut NttProbe,
 ) -> Result<RepairStatus, RepairError> {
+    let dir = cat.dir().to_path_buf();
+    let dir = dir.as_path();
     let timing = std::env::var_os("NZBFAST_REPAIR_TIMING").is_some();
     let t0 = std::time::Instant::now();
     let mut mark = {
@@ -2524,75 +2384,34 @@ fn repair_dir_set_inner(
             }
         }
     };
-    let (packet_files, mut sniffed) = collect_packet_files(dir)?;
-    if packet_files.is_empty() {
+    if !fresh {
+        // Reused catalog: recheck every file's identity/size/mtime and
+        // selectively rescan whatever moved before trusting a byte of it
+        // (the previous set's repair may have patched, recreated, or
+        // disambiguated files in this directory).
+        cat.refresh()?;
+    }
+    if cat.is_empty() {
         return Err(RepairError::NoMainPacket);
     }
 
     // --- incremental packet scan (one file's bytes in memory at a time) ---
     // Critical packets (Main + every FileDesc + IFSC) are duplicated in
     // every volume, so they normally all come out of the FIRST (index)
-    // file. The loop stops as soon as the critical set is complete; the
-    // remaining files - the recovery volumes, i.e. almost all the bytes -
-    // carry only RecvSlic locations we still need, and that scan runs in
-    // the background UNDER the target-verify pass below (disjoint files:
-    // .par2 volumes here, data files there).
-    let mut set_id: Option<[u8; 16]> = want;
-    let mut main: Option<(u64, Vec<[u8; 16]>)> = None;
-    let mut descs: HashMap<[u8; 16], par2::Desc> = HashMap::new();
-    let mut ifscs: HashMap<[u8; 16], Vec<BlockCheck>> = HashMap::new();
-    let mut seen: HashSet<[u8; 16]> = HashSet::new();
-    // (packet file idx, data offset, exponent, data len)
-    let mut rec_locs: Vec<(usize, usize, u32, usize)> = Vec::new();
-    let mut scanned = 0usize;
-    for (pfi, path) in packet_files.iter().enumerate() {
-        let bytes = std::fs::read(path)?;
-        par2::scan_packets(&bytes, |pkt| {
-            if !seen.insert(pkt.md5) {
-                return;
-            }
-            match set_id {
-                None => set_id = Some(pkt.set_id),
-                Some(id) if id != pkt.set_id => return,
-                _ => {}
-            }
-            match &pkt.ptype {
-                t if t == par2::TYPE_MAIN => {
-                    if main.is_none() {
-                        main = par2::parse_main(pkt.body);
-                    }
-                }
-                t if t == par2::TYPE_FILEDESC => {
-                    if let Some((fid, d)) = par2::parse_filedesc(pkt.body) {
-                        descs.entry(fid).or_insert(d);
-                    }
-                }
-                t if t == par2::TYPE_IFSC => {
-                    if let Some((fid, blocks)) = par2::parse_ifsc(pkt.body) {
-                        ifscs.entry(fid).or_insert(blocks);
-                    }
-                }
-                t if t == par2::TYPE_RECVSLIC && pkt.body.len() >= 4 => {
-                    let e = u32::from_le_bytes(pkt.body[0..4].try_into().unwrap());
-                    rec_locs.push((pfi, pkt.body_offset + 4, e, pkt.body.len() - 4));
-                }
-                _ => {}
-            }
-        });
-        scanned = pfi + 1;
-        let critical_complete = main.as_ref().is_some_and(|(_, ids)| {
-            ids.iter()
-                .all(|fid| descs.contains_key(fid) && ifscs.contains_key(fid))
-        });
-        if critical_complete {
-            break;
-        }
-        // Sets whose files carry no IFSC never look "complete", so they
-        // scan everything here and skip the background leg - exactly the
-        // historical behavior.
+    // file. On a lazily-built catalog the loop stops reading files as
+    // soon as the critical set is complete; the remaining files - the
+    // recovery volumes, i.e. almost all the bytes - carry only RecvSlic
+    // locations we still need, and that scan runs in the background
+    // UNDER the target-verify pass below (disjoint files: .par2 volumes
+    // here, data files there). A prebuilt catalog replays the same walk
+    // from memory and reads nothing.
+    let mut replay = SetReplay::new(want);
+    let mut fed = replay.feed_files(cat, 0, SetReplay::criticals_complete);
+    while !replay.criticals_complete() && cat.scan_next()? {
+        fed = replay.feed_files(cat, fed, SetReplay::criticals_complete);
     }
     mark("packet scan (critical)");
-    let (block_size, file_ids) = main.ok_or(RepairError::NoMainPacket)?;
+    let (block_size, file_ids) = replay.main.take().ok_or(RepairError::NoMainPacket)?;
     let bs = block_size as usize;
     // Whether two destination paths that differ only in case name ONE file is
     // a property of this volume, so probe it rather than guessing from the
@@ -2603,7 +2422,7 @@ fn repair_dir_set_inner(
     let mut targets: Vec<Target> = Vec::with_capacity(file_ids.len());
     let mut next_slice = 0usize;
     for fid in &file_ids {
-        let Some(d) = descs.remove(fid) else {
+        let Some(d) = replay.descs.remove(fid) else {
             // Without the FileDesc we know neither name nor length, and
             // the global constant assignment shifts - unrecoverable here.
             return Err(RepairError::Malformed(format!(
@@ -2629,7 +2448,8 @@ fn repair_dir_set_inner(
         // byte. Failing the call instead abandoned every other file in the
         // set (19 repairable files lost to one malformed packet) when the
         // recovery blocks to fix them were sitting right there.
-        let blocks = ifscs
+        let blocks = replay
+            .ifscs
             .remove(fid)
             .filter(|b| b.len() == n_slices)
             .unwrap_or_default();
@@ -2724,6 +2544,7 @@ fn repair_dir_set_inner(
     // object, and an exact compare left the file in `exclude`, so the
     // adoption scan never looked at the one file holding the missing blocks
     // and the set reported Unrepairable when it was repairable.
+    let mut sniffed = cat.sniffed_paths();
     sniffed.retain(|p| {
         !targets
             .iter()
@@ -2732,45 +2553,23 @@ fn repair_dir_set_inner(
 
     // --- verify every target from disk, overlapped with the recovery-
     //     volume scan (they touch disjoint files: data files here, .par2
-    //     volumes there) ---
-    let remaining = &packet_files[scanned..];
-    if remaining.is_empty() {
+    //     volumes there). A prebuilt catalog has no tail left to scan,
+    //     so verify runs alone and the replay just finishes from memory.
+    if cat.complete() {
         verify_all_targets(&mut targets, bs)?;
     } else {
-        let seen_bg = std::mem::take(&mut seen);
-        let sid = set_id;
         let mut verify_res: Result<(), RepairError> = Ok(());
-        let mut bg_res: Result<Vec<(usize, usize, u32, usize)>, RepairError> = Ok(Vec::new());
+        let mut bg_res: Result<(), RepairError> = Ok(());
         std::thread::scope(|s| {
-            let h = s.spawn(move || {
-                let mut seen = seen_bg;
-                let mut locs = Vec::new();
-                for (i, path) in remaining.iter().enumerate() {
-                    let pfi = scanned + i;
-                    let bytes = std::fs::read(path)?;
-                    par2::scan_packets(&bytes, |pkt| {
-                        if !seen.insert(pkt.md5) {
-                            return;
-                        }
-                        // Criticals are already complete, so only the
-                        // recovery-slice locations are still wanted here.
-                        if Some(pkt.set_id) == sid
-                            && pkt.ptype == *par2::TYPE_RECVSLIC
-                            && pkt.body.len() >= 4
-                        {
-                            let e = u32::from_le_bytes(pkt.body[0..4].try_into().unwrap());
-                            locs.push((pfi, pkt.body_offset + 4, e, pkt.body.len() - 4));
-                        }
-                    });
-                }
-                Ok(locs)
-            });
+            let h = s.spawn(|| cat.scan_rest());
             verify_res = verify_all_targets(&mut targets, bs);
             bg_res = h.join().expect("volume scan worker panicked");
         });
         verify_res?;
-        rec_locs.extend(bg_res?);
+        bg_res?;
     }
+    replay.feed_files(cat, fed, |_| false);
+    let rec_locs = std::mem::take(&mut replay.rec_locs);
     mark("verify targets + volume scan");
     let mut missing: Vec<usize> = Vec::new();
     for t in &targets {
@@ -2791,10 +2590,10 @@ fn repair_dir_set_inner(
     }
 
     // --- pick recovery slices: smallest exponents, deduped ---
-    let mut by_exp: HashMap<u32, (usize, usize)> = HashMap::new();
-    for &(pfi, off, e, len) in &rec_locs {
-        if len == bs {
-            by_exp.entry(e).or_insert((pfi, off));
+    let mut by_exp: HashMap<u32, RecLoc> = HashMap::new();
+    for loc in &rec_locs {
+        if loc.len as usize == bs {
+            by_exp.entry(loc.exp).or_insert(*loc);
         }
     }
 
@@ -2808,7 +2607,7 @@ fn repair_dir_set_inner(
         .any(|t| t.n_slices > 0 && !(t.exists && (t.intact || t.present.iter().any(|&p| p))));
     let (mut cands, mut adopted) =
         if !missing.is_empty() && (any_unidentified || missing.len() > by_exp.len()) {
-            adopt_blocks(dir, &targets, &missing, bs, &sniffed)?
+            adopt::adopt_blocks(dir, &targets, &missing, bs, &sniffed)?
         } else {
             (Vec::new(), HashMap::new())
         };
@@ -2838,7 +2637,7 @@ fn repair_dir_set_inner(
         if cands.len() > start {
             let missing_set: HashSet<usize> = missing.iter().copied().collect();
             let indices: Vec<usize> = (start..cands.len()).collect();
-            sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut adopted)?;
+            adopt::sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut adopted)?;
             missing.retain(|g| !adopted.contains_key(g));
         }
     }
@@ -2859,24 +2658,18 @@ fn repair_dir_set_inner(
         });
     }
     let recovery = if needed > 0 {
-        let mut exps: Vec<u32> = by_exp.keys().copied().collect();
-        exps.sort_unstable();
-        exps.truncate(needed);
-        let mut loaded: Vec<(u32, Vec<u8>)> = Vec::with_capacity(needed);
-        let mut open: HashMap<usize, File> = HashMap::new();
-        for e in exps {
-            let (pfi, off) = by_exp[&e];
-            let f = match open.entry(pfi) {
-                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(File::open(&packet_files[pfi])?)
-                }
-            };
-            let mut data = vec![0u8; bs];
-            crate::disk::read_exact_at(f, &mut data, off as u64)?;
-            loaded.push((e, data));
+        match load_selected_recovery(cat, &mut by_exp, needed, bs, !fresh)? {
+            Some(loaded) => loaded,
+            // Re-proof at pread dropped enough mutated packets to fall
+            // short - the same verdict a fresh scan of the changed file
+            // would have reached.
+            None => {
+                return Ok(RepairStatus::Unrepairable {
+                    needed,
+                    have: by_exp.len(),
+                });
+            }
         }
-        loaded
     } else {
         Vec::new()
     };
@@ -3242,7 +3035,7 @@ fn repair_dir_set_inner(
             .map(|t| t.file.md5)
             .collect();
         // A hash that cannot be read decides nothing: keep the file.
-        if !want.is_empty() && md5_of_file(p, None).is_ok_and(|h| want.contains(&h)) {
+        if !want.is_empty() && adopt::md5_of_file(p, None).is_ok_and(|h| want.contains(&h)) {
             spent_donors.push(p.clone());
         }
     }

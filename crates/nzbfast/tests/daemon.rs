@@ -30,6 +30,8 @@ mod daemon_retry;
 // moved to a child module by TODO 106. Declared here, so they still run in
 // this binary against these fixtures.
 mod daemon_unpackroute;
+// §76 fast-job media chip regression (sibling dir, size gate).
+mod daemon_mediafast;
 mod playback_contract;
 // §73 phase 3 remux endpoint (sibling dir, size gate).
 mod preview_media;
@@ -9195,7 +9197,14 @@ async fn whyslow_block_rides_the_queue_payload() {
                 assert!(
                     matches!(
                         layer,
-                        "limit" | "line" | "disk" | "cpu" | "client" | "provider" | "unknown"
+                        "limit"
+                            | "line"
+                            | "disk"
+                            | "cpu"
+                            | "client"
+                            | "provider"
+                            | "missing"
+                            | "unknown"
                     ),
                     "unexpected layer token {layer:?}: {q}"
                 );
@@ -9203,6 +9212,13 @@ async fn whyslow_block_rides_the_queue_payload() {
                 assert!(w["achieved_bps"].is_u64(), "{q}");
                 assert!(w["servers"].is_array(), "{q}");
                 assert!(w["timeline"].is_array(), "{q}");
+                // ...including the post-verdict working, which the
+                // panel reads unconditionally: the post's own date (0 =
+                // none), the fleet miss rate, and how many unrelated
+                // backbones are seeing it.
+                assert!(w["post_unix"].is_i64(), "{q}");
+                assert!(w["missing_pct"].is_number(), "{q}");
+                assert!(w["missing_backbones"].is_u64(), "{q}");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

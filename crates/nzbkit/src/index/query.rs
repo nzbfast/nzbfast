@@ -5,6 +5,103 @@
 
 use super::*;
 
+// ---- Instrument-first: the filename fallback's cost ----
+//
+// Rung 3 of [`Index::find_by_header_once`] is a full scan of `files`: no
+// index covers `filename` alone. Measured on a 16.5M-release /
+// 17.7M-file index, a header that matches NOTHING costs 2.4 s warm and
+// 4.3 s cold there, all of it holding the single shared read connection
+// every other index reader queues behind; a header the indexed rungs
+// answer is sub-millisecond.
+//
+// The fix would be a dedicated filename index, which is large on disk and
+// adds a write to every ingested file - a real, permanent cost paid on
+// every scan pass. It is only worth that if genuine miss traffic exists,
+// which is a question about how people actually use NZBLNK links, not one
+// the code can answer. So this counts the rung: how often it runs, how
+// often it earns its scan, and the wall time it spends either way. The
+// hit time is kept beside the miss time deliberately - the comparison is
+// what says whether an index would pay.
+//
+// Double-counting note: `retry_on_schema_change` re-runs the whole ladder
+// when the schema moves under a reader, so such a retry counts its second
+// pass too. That is rare and it IS work the process really did.
+
+static FN_FALLBACK_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FN_FALLBACK_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FN_FALLBACK_HIT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FN_FALLBACK_MISS_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A snapshot of the filename-fallback census (see the section note).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FilenameFallback {
+    /// Times the header ladder fell through to the unindexed filename
+    /// scan - both indexed rungs and the FTS rung having answered nothing.
+    pub calls: u64,
+    /// Of those, the scans that returned at least one release.
+    pub hits: u64,
+    /// Of those, the scans that returned nothing at all - the case a
+    /// dedicated filename index would turn from a scan into a lookup.
+    pub misses: u64,
+    /// Wall time inside the scan on the hit path.
+    pub hit_nanos: u64,
+    /// Wall time inside the scan on the miss path.
+    pub miss_nanos: u64,
+}
+
+/// Record one filename-fallback scan: bump the census and log one
+/// greppable line. Cheap by construction - the scan it brackets is
+/// measured in seconds, so an `Instant` and four relaxed adds are free,
+/// and nothing but this rung ever reaches it.
+fn note_filename_fallback(header: &str, hit: bool, took: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let nanos = took.as_nanos().min(u128::from(u64::MAX)) as u64;
+    FN_FALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+    if hit {
+        FN_FALLBACK_HITS.fetch_add(1, Ordering::Relaxed);
+        FN_FALLBACK_HIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    } else {
+        FN_FALLBACK_MISS_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    }
+    tracing::info!(
+        target: "index",
+        "filename-fallback: chars={} result={} took={:.3}s",
+        header.chars().count(),
+        if hit { "hit" } else { "miss" },
+        took.as_secs_f64(),
+    );
+}
+
+/// Current filename-fallback census (process lifetime). Surfaced by the
+/// daemon stats API and asserted by the census tests.
+pub fn filename_fallback_stats() -> FilenameFallback {
+    use std::sync::atomic::Ordering;
+    let calls = FN_FALLBACK_CALLS.load(Ordering::Relaxed);
+    let hits = FN_FALLBACK_HITS.load(Ordering::Relaxed);
+    FilenameFallback {
+        calls,
+        hits,
+        misses: calls.saturating_sub(hits),
+        hit_nanos: FN_FALLBACK_HIT_NANOS.load(Ordering::Relaxed),
+        miss_nanos: FN_FALLBACK_MISS_NANOS.load(Ordering::Relaxed),
+    }
+}
+
+/// Reset the census to zero. Test-only: the counters are process-global,
+/// so a test that asserts exact counts must isolate itself first.
+#[doc(hidden)]
+pub fn reset_filename_fallback_stats() {
+    use std::sync::atomic::Ordering;
+    for c in [
+        &FN_FALLBACK_CALLS,
+        &FN_FALLBACK_HITS,
+        &FN_FALLBACK_HIT_NANOS,
+        &FN_FALLBACK_MISS_NANOS,
+    ] {
+        c.store(0, Ordering::Relaxed);
+    }
+}
+
 /// FTS5 MATCH string for user query terms: each term quoted (embedded
 /// quotes doubled) with a `*` prefix marker - "kill bill" → `"kill"* "bill"*`
 /// (space = implicit AND). Empty when the query has no usable terms.
@@ -245,9 +342,13 @@ impl Index {
                   WHERE filename LIKE ?1 || '%' ESCAPE '\\' LIMIT ?2)
               ORDER BY first_seen DESC"
         ))?;
+        // Instrument-first: this scan is the one an index would replace -
+        // time it and record how it went. See `note_filename_fallback`.
+        let t0 = std::time::Instant::now();
         let rows: Vec<Release> = stmt
             .query_map(rusqlite::params![esc, FIND_SCAN_CAP], release_from_row)?
             .collect::<Result<_, _>>()?;
+        note_filename_fallback(header, !rows.is_empty(), t0.elapsed());
         push(rows, &mut out);
         out.truncate(limit as usize);
         Ok(out)
@@ -361,7 +462,7 @@ impl Index {
         }
         self.title_keys(
             "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='movie'
-               AND id_src IN ('tmdb','')",
+               AND id_src = 'tmdb'",
             rusqlite::params![tmdb],
         )
     }
@@ -382,8 +483,14 @@ impl Index {
     /// default, AniList whenever TVmaze missed the title (no key needed
     /// - anime posted under a romaji title is the routine case), and
     /// TMDB when a key is configured. `id_src` is what tells them apart,
-    /// so a `tvmazeid=` takes only TVmaze-sourced rows and the legacy
-    /// unlabelled ones (Codex sweep 7, H2).
+    /// so a `tvmazeid=` takes only TVmaze-sourced rows (Codex sweep 7,
+    /// H2). Unlabelled legacy rows (`id_src=''`) are NOT admitted: the
+    /// AniList fallback was writing its media ids into `tmdb_id` for
+    /// three weeks before the `id_src` column existed, so '' names no
+    /// namespace at all - answering an id search from one, or handing
+    /// one to the TVDB backfill lane, resolves a number in the wrong
+    /// numbering and stamps or serves the wrong series permanently
+    /// (bug sweep 20 Aug).
     ///
     /// Returns every matching key: one show posted under two spellings
     /// parses into two title keys that enrich to the SAME show id, which
@@ -402,7 +509,7 @@ impl Index {
         }
         self.title_keys(
             "SELECT key FROM titles WHERE tmdb_id=?1 AND tmdb_id > 0 AND kind='tv'
-               AND id_src IN ('tvmaze','')",
+               AND id_src = 'tvmaze'",
             rusqlite::params![id],
         )
     }
@@ -490,9 +597,13 @@ impl Index {
     /// default is AniList-sourced whenever TVmaze lacked the romaji
     /// title, and that is most of it.
     ///
-    /// A legacy '' reads as 'tvmaze': that is what the column meant
-    /// before the provenance existed, so rows of both vintages still
-    /// meet.
+    /// A legacy '' answers NOTHING. It used to read as 'tvmaze' - the
+    /// column's pre-provenance meaning - but the AniList fallback was
+    /// writing media ids into the column for three weeks before id_src
+    /// existed, so '' names no namespace at all, and an oracle that
+    /// guessed one could call an unrelated pair one show and hold a
+    /// download as a duplicate of it (bug sweep 20 Aug). Legacy rows
+    /// simply stop contributing aliases, which is the recoverable miss.
     pub fn tv_show_id(&self, key: &str) -> rusqlite::Result<Option<(String, i64)>> {
         if key.is_empty() {
             return Ok(None);
@@ -506,10 +617,7 @@ impl Index {
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
             .optional()?;
-        Ok(row.map(|(src, id)| {
-            let src = if src.is_empty() { "tvmaze" } else { &src }.to_string();
-            (src, id)
-        }))
+        Ok(row.filter(|(src, _)| !src.is_empty()))
     }
 
     /// The one year the index knows a movie title by - or None when it
@@ -546,6 +654,21 @@ mod tests {
     use super::*;
     use crate::index::testutil::{entry, teardown};
 
+    /// The filename-fallback census (`FN_FALLBACK_*`) is process-global
+    /// and `cargo test` runs the lib tests as threads in ONE process, so
+    /// the two tests that reach the unindexed rung would otherwise
+    /// interleave: a sibling's miss landing between the census test's
+    /// snapshots filed a hit as a miss, roughly once in three runs.
+    /// Every test that calls `find_by_header` takes this first. (Under
+    /// nextest each test gets its own process and it costs nothing.)
+    static CENSUS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the census lock, ignoring poisoning - a panic in one of
+    /// these tests must fail that test, not cascade into the other.
+    fn census_lock() -> std::sync::MutexGuard<'static, ()> {
+        CENSUS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// `titles.tmdb_id` holds a TMDB movie id on a movie row and a
     /// TVmaze SHOW id on a TV row. Both namespaces are small dense
     /// integers, so a collision is the expected state of a populated
@@ -558,12 +681,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ix = Index::open(&dir.join("index.db")).unwrap();
+        // Labelled rows, as every provider writes them since the id_src
+        // column landed: this test is about the KIND filter, and the
+        // provenance filter (its own test below) must not mask it.
         let put = |key: &str, kind: &str, id: i64| {
+            let src = if kind == "movie" { "tmdb" } else { "tvmaze" };
             ix.db
                 .execute(
-                    "INSERT INTO titles(key, kind, title, year, tmdb_id)
-                     VALUES(?1, ?2, ?3, 0, ?4)",
-                    rusqlite::params![key, kind, "x", id],
+                    "INSERT INTO titles(key, kind, title, year, tmdb_id, id_src)
+                     VALUES(?1, ?2, ?3, 0, ?4, ?5)",
+                    rusqlite::params![key, kind, "x", id, src],
                 )
                 .unwrap();
         };
@@ -643,12 +770,19 @@ mod tests {
         // very same place.
         put("t:a series", "tv", 1399, "tmdb");
         assert!(ix.title_key_for_tvmaze(1399).unwrap().is_empty());
-        // What a tvmazeid IS for, plus the legacy rows that predate the
-        // provenance column and mean what they always did.
+        // What a tvmazeid IS for. An unlabelled legacy row does NOT
+        // resolve: '' was assumed to mean "written before the column
+        // existed, so TVmaze" - but the AniList fallback was writing
+        // media ids into this column for three weeks before the column
+        // landed, so '' proves nothing about the namespace and answering
+        // from it serves the wrong series (bug sweep 20 Aug).
         put("t:a tvmaze show", "tv", 82856, "tvmaze");
         put("t:a legacy show", "tv", 33333, "");
         assert_eq!(ix.title_key_for_tvmaze(82856).unwrap(), ["t:a tvmaze show"]);
-        assert_eq!(ix.title_key_for_tvmaze(33333).unwrap(), ["t:a legacy show"]);
+        assert!(
+            ix.title_key_for_tvmaze(33333).unwrap().is_empty(),
+            "an unlabelled id must not answer a tvmazeid lookup"
+        );
 
         // The movie side of the same fault: with no TMDB key the chain
         // runs OMDb, which has no TMDB id and writes the numeric half of
@@ -723,8 +857,17 @@ mod tests {
         put("t:a series", "tv", 1399);
         put("t:unresolved", "tv", 0);
         put("m:a film", "movie", 77);
-        // A legacy row - no provenance recorded - reads as TVmaze,
-        // which is what the column meant before id_src existed.
+        // A legacy row - no provenance recorded - answers NOTHING: ''
+        // was assumed to mean TVmaze, but AniList wrote media ids into
+        // this column before id_src existed, so a guessed namespace
+        // could alias two unrelated shows (bug sweep 20 Aug).
+        assert_eq!(ix.tv_show_id("t:a series").unwrap(), None);
+        ix.db
+            .execute(
+                "UPDATE titles SET id_src='tvmaze' WHERE key='t:a series'",
+                [],
+            )
+            .unwrap();
         assert_eq!(
             ix.tv_show_id("t:a series").unwrap(),
             Some(("tvmaze".into(), 1399))
@@ -883,6 +1026,7 @@ mod tests {
     /// resolved against our own scan data and turned back into an NZB.
     #[test]
     fn find_by_header_resolves_a_link_from_our_own_scan() {
+        let _census = census_lock();
         let dir = std::env::temp_dir().join(format!("nzbfast-hdr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -970,6 +1114,101 @@ mod tests {
         assert!(
             ix.find_by_header("7f3", 10).unwrap().is_empty(),
             "too short to identify"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// The instrument-first census records the rung it brackets: a
+    /// filename-only header pays for the scan and is counted a HIT, a
+    /// header nothing holds is counted a MISS with its wall time, and a
+    /// header the indexed rungs answer never reaches the scan at all -
+    /// which is the whole distinction the counter exists to measure.
+    ///
+    /// The tally is process-global and the unit suite runs its tests as
+    /// threads, so this holds [`CENSUS`] for the duration - within that
+    /// lock the deltas below are this test's own, and nothing else in
+    /// the crate reaches the rung.
+    #[test]
+    fn the_filename_fallback_census_records_only_the_unindexed_rung() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-fnfb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        ix.ingest(
+            "alt.binaries.boneless",
+            &[entry(
+                "\"5c1d0a77b2.part01.rar\" yEnc (1/1)",
+                "p@x",
+                "s1",
+                900,
+            )],
+            1000,
+        )
+        .unwrap();
+        // Per-file obfuscation: the header names a FILE, so only the
+        // unindexed rung can answer it.
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                      first_seen)
+                 VALUES('Some.Release.Name','p2@x','alt.binaries.misc',1,1,50,50)",
+                [],
+            )
+            .unwrap();
+        let rid = ix.db.last_insert_rowid();
+        ix.db
+            .execute(
+                "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
+                 VALUES(?1, 'zz19f4c0d8.part1.rar', 1, 500, '[[1,\"f1\",500]]', 1)",
+                [rid],
+            )
+            .unwrap();
+
+        // An indexed hit: the ladder stops at rung 1, so the census must
+        // not move at all.
+        let before = filename_fallback_stats();
+        assert_eq!(ix.find_by_header("5c1d0a77b2", 10).unwrap().len(), 1);
+        let after_indexed = filename_fallback_stats();
+        assert_eq!(
+            after_indexed.calls, before.calls,
+            "an indexed hit reached the unindexed scan"
+        );
+
+        // A filename-only hit: the scan runs and earns its keep.
+        assert_eq!(ix.find_by_header("zz19f4c0d8", 10).unwrap().len(), 1);
+        let after_hit = filename_fallback_stats();
+        assert!(
+            after_hit.calls > after_indexed.calls && after_hit.hits > after_indexed.hits,
+            "filename hit not counted ({after_indexed:?} -> {after_hit:?})"
+        );
+        assert_eq!(
+            after_hit.misses, after_indexed.misses,
+            "a hit was filed as a miss"
+        );
+
+        // A genuine miss: the case a dedicated filename index would kill.
+        assert!(
+            ix.find_by_header("nothingholdsthis", 10)
+                .unwrap()
+                .is_empty()
+        );
+        let after_miss = filename_fallback_stats();
+        assert!(
+            after_miss.misses > after_hit.misses,
+            "miss not counted ({after_hit:?} -> {after_miss:?})"
+        );
+        // `misses` is derived as `calls - hits`, so splitting it back
+        // out asserts nothing. The wall-time counters are NOT derived,
+        // and each path must charge its own: a hit must leave the miss
+        // clock alone, and a miss the hit clock.
+        assert_eq!(
+            after_hit.miss_nanos, after_indexed.miss_nanos,
+            "a hit charged its wall time to the miss path"
+        );
+        assert_eq!(
+            after_miss.hit_nanos, after_hit.hit_nanos,
+            "a miss charged its wall time to the hit path"
         );
         teardown(&dir, ix);
     }

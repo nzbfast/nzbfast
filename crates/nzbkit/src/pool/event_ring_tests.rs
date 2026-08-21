@@ -150,7 +150,7 @@ fn shared_with_live(hosts: &[&str]) -> (Arc<Shared>, Arc<LiveStats>) {
             (sc, cfg)
         })
         .collect();
-    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<a@x>".into())], &servers);
+    let (shared, _) = Shared::new(vec![ArticleReq::fresh("<a@x>")], &servers);
     (shared, l)
 }
 

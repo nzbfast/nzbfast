@@ -100,8 +100,8 @@ struct Cost {
     /// is exactly the set of articles the server genuinely does not
     /// have, and a false Missing is only visible as an id that should
     /// not be in it.
-    missing_ids: Vec<String>,
-    failed_ids: Vec<String>,
+    missing_ids: Vec<Arc<str>>,
+    failed_ids: Vec<Arc<str>>,
     /// Bodies that decoded cleanly but arrived under the WRONG id - the
     /// yEnc part number in the payload disagrees with the id the pool
     /// filed it against. This is the OTHER half of a desync's damage:
@@ -184,7 +184,7 @@ fn corpus_of(age_days: u32, n: usize) -> (HashMap<String, Vec<u8>>, Vec<ArticleR
     let reqs = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days,
             part: *part,
         })
@@ -194,20 +194,20 @@ fn corpus_of(age_days: u32, n: usize) -> (HashMap<String, Vec<u8>>, Vec<ArticleR
 
 /// Every id in NZB order (the mock map is unordered, the fault set is
 /// not - a propagation hole is spread over the post, not clustered).
-fn ids_in_order(reqs: &[ArticleReq]) -> Vec<String> {
+fn ids_in_order(reqs: &[ArticleReq]) -> Vec<Arc<str>> {
     reqs.iter().map(|r| r.id.clone()).collect()
 }
 
 /// `count` ids spread evenly over the whole corpus - the same selection
 /// `chaos_serve.rs::stride_positions` makes for the standalone profile,
 /// so in-process and standalone numbers describe the same fault.
-fn stride(ids: &[String], count: usize) -> std::collections::HashSet<String> {
+fn stride(ids: &[Arc<str>], count: usize) -> std::collections::HashSet<String> {
     let n = ids.len();
     if n == 0 || count == 0 {
         return Default::default();
     }
     let count = count.min(n);
-    (0..count).map(|k| ids[k * n / count].clone()).collect()
+    (0..count).map(|k| ids[k * n / count].to_string()).collect()
 }
 
 fn healthy() -> Throttle {
@@ -273,7 +273,8 @@ async fn leg_capped(
     let ctl_fetch = ctl.clone();
     // The part number each id is SUPPOSED to carry, so the collector can
     // tell a body filed under the wrong article from a correct one.
-    let expected_part: HashMap<String, u32> = reqs.iter().map(|r| (r.id.clone(), r.part)).collect();
+    let expected_part: HashMap<Arc<str>, u32> =
+        reqs.iter().map(|r| (r.id.clone(), r.part)).collect();
     let t0 = Instant::now();
     let fetch =
         tokio::spawn(
@@ -317,7 +318,7 @@ async fn leg_capped(
                         // in the payload is not the part this id was
                         // requested for, the pool has just filed one
                         // article's bytes under another's name.
-                        if let (Some(want), Some(got)) = (expected_part.get(&id), meta.part)
+                        if let (Some(want), Some(got)) = (expected_part.get(&*id), meta.part)
                             && *want != got
                         {
                             misfiled += 1;
@@ -360,7 +361,7 @@ async fn leg_capped(
 
 /// Faulty server + clean twin, one leg. `age_days` is what the NZB
 /// declares, `chaos` what the faulty server does.
-async fn twin_leg(label: &str, age_days: u32, mk_chaos: impl Fn(&[String]) -> Chaos) -> Cost {
+async fn twin_leg(label: &str, age_days: u32, mk_chaos: impl Fn(&[Arc<str>]) -> Chaos) -> Cost {
     twin_leg_conns(label, age_days, CONNS, mk_chaos).await
 }
 
@@ -370,7 +371,7 @@ async fn twin_leg_conns(
     label: &str,
     age_days: u32,
     a_conns: usize,
-    mk_chaos: impl Fn(&[String]) -> Chaos,
+    mk_chaos: impl Fn(&[Arc<str>]) -> Chaos,
 ) -> Cost {
     twin_leg_sized(label, age_days, a_conns, N_ARTICLES, mk_chaos).await
 }
@@ -396,7 +397,7 @@ async fn twin_leg_sized(
     age_days: u32,
     a_conns: usize,
     n: usize,
-    mk_chaos: impl Fn(&[String]) -> Chaos,
+    mk_chaos: impl Fn(&[Arc<str>]) -> Chaos,
 ) -> Cost {
     twin_leg_cfg(
         label,
@@ -423,7 +424,7 @@ async fn twin_leg_cfg(
     a_conns: usize,
     n: usize,
     cfg: PoolConfig,
-    mk_chaos: impl Fn(&[String]) -> Chaos,
+    mk_chaos: impl Fn(&[Arc<str>]) -> Chaos,
 ) -> Cost {
     let (arts_a, reqs) = corpus_of(age_days, n);
     let (arts_b, _) = corpus_of(age_days, n);
@@ -566,7 +567,7 @@ async fn desync_leg_sized(
 /// every live lower-level server has already 430'd, so here the whole
 /// job is serialized behind the faulty primary's refusals - the worst
 /// case this item could have, and a very ordinary way to be configured.
-async fn backup_leg(label: &str, age_days: u32, mk_chaos: impl Fn(&[String]) -> Chaos) -> Cost {
+async fn backup_leg(label: &str, age_days: u32, mk_chaos: impl Fn(&[Arc<str>]) -> Chaos) -> Cost {
     let (arts_a, reqs) = corpus(age_days);
     let (arts_b, _) = corpus(age_days);
     let ids = ids_in_order(&reqs);
@@ -589,7 +590,7 @@ async fn backup_leg(label: &str, age_days: u32, mk_chaos: impl Fn(&[String]) -> 
     leg(label, vec![primary, backup], &[&a, &b], reqs).await
 }
 
-fn miss_chaos(ids: &[String], count: usize) -> Chaos {
+fn miss_chaos(ids: &[Arc<str>], count: usize) -> Chaos {
     Chaos {
         missing: stride(ids, count),
         throttle: healthy(),
@@ -601,7 +602,7 @@ fn miss_chaos(ids: &[String], count: usize) -> Chaos {
 /// refusal line. The pool can then charge the 430 to the article on the
 /// spot instead of requeueing it uncharged for a confirming repeat, so
 /// this is the cheap half of the shape.
-fn miss_chaos_echoing(ids: &[String], count: usize) -> Chaos {
+fn miss_chaos_echoing(ids: &[Arc<str>], count: usize) -> Chaos {
     Chaos {
         echo_missing_id: true,
         ..miss_chaos(ids, count)
@@ -796,10 +797,10 @@ async fn a_desynced_bare_refusing_server_never_declares_a_present_article_missin
 
     // THE assertion. Every id the pool gave up on must be one the
     // server genuinely does not have.
-    let falsely_missing: Vec<&String> = c
+    let falsely_missing: Vec<&Arc<str>> = c
         .missing_ids
         .iter()
-        .filter(|id| !absent.contains(*id))
+        .filter(|id| !absent.contains(&***id))
         .collect();
     assert!(
         falsely_missing.is_empty(),
@@ -896,7 +897,7 @@ async fn desync_rate_sweep_bare_vs_echoed() {
             let false_missing = c
                 .missing_ids
                 .iter()
-                .filter(|id| !absent.contains(*id))
+                .filter(|id| !absent.contains(&***id))
                 .count();
             println!(
                 "  1-in-{skip:<4} wall {:>6.2}s  done {:>3}/{:<3} missing {:>3} \
@@ -954,7 +955,7 @@ async fn desync_rate_sweep_bare_vs_echoed() {
             let false_failed = c
                 .failed_ids
                 .iter()
-                .filter(|id| !absent.contains(*id))
+                .filter(|id| !absent.contains(&***id))
                 .count();
             assert_eq!(
                 false_failed, 0,

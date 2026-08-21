@@ -149,6 +149,58 @@ fn span_len(mark: u64, seen: u64, held: usize, max: usize) -> usize {
     seen.saturating_sub(mark).min(held as u64).min(max as u64) as usize
 }
 
+/// Lines captured between two marks, oldest first, at most `max` of
+/// them (keeping the LAST `max`, like [`since`]).
+///
+/// [`since`] runs a span to the present, which is right while the work
+/// is still going and wrong once it has finished: a report assembled
+/// minutes later would carry every line the daemon's background lanes
+/// printed after the job ended, attributed to that job. Bracketing both
+/// ends is what makes a per-job slice a slice rather than a tail.
+///
+/// `to` behind `from`, or either one from a previous process's ring,
+/// yields nothing rather than a guess - the same clamping discipline
+/// [`span_len`] documents, applied at both ends.
+pub fn between(from: u64, to: u64, max: usize) -> Vec<String> {
+    let Some(r) = RING.get() else {
+        return Vec::new();
+    };
+    // Under the ring lock, like `since`: SEEN is bumped under it, so a
+    // load taken outside can disagree with the held lines by however
+    // many appends land in between - which shifts the whole (skip,
+    // take) window that many lines newer, splicing another job's
+    // output into this span's tail.
+    let g = r.lock_ok();
+    let seen = SEEN.load(Ordering::Relaxed);
+    let (skip, take) = between_span(from, to, seen, g.len(), max);
+    g.iter().skip(skip).take(take).cloned().collect()
+}
+
+/// Where the span `from..to` sits in a ring holding `held` newest lines,
+/// as `(skip, take)`. Pure, and tested as such - the ring and the seen
+/// counter are process-global, so arithmetic that could only be checked
+/// by mutating them could not be checked in a suite that runs in
+/// parallel (the same reason [`span_len`] is split out).
+///
+/// Every term can outrun another, and one more can here than in
+/// [`span_len`]: `to` is a mark too, so it can also be nonsense. A
+/// restart resets `SEEN` to 0 and it climbs again, so a mark kept from a
+/// previous process really can name a span of somebody ELSE's output -
+/// which is the one answer this must never give. Both ends are required
+/// to be in the past of what has actually been captured; anything else
+/// yields nothing.
+fn between_span(from: u64, to: u64, seen: u64, held: usize, max: usize) -> (usize, usize) {
+    if to <= from || from > seen || to > seen {
+        return (0, 0);
+    }
+    // Lines printed after `to` are not this span's. Drop them first,
+    // then take the span's own tail out of what is left.
+    let after = span_len(to, seen, held, usize::MAX);
+    let upto = held - after;
+    let want = span_len(from, to, upto, max);
+    (upto - want, want)
+}
+
 /// True when the tee is capturing on this platform.
 pub fn active() -> bool {
     RING.get().is_some()
@@ -426,7 +478,7 @@ pub fn drain() {
 
 #[cfg(test)]
 mod tests {
-    use super::{CAP, ECHO_DROPPED, capture, ring_line, span_len};
+    use super::{CAP, ECHO_DROPPED, between_span, capture, ring_line, span_len};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -483,6 +535,38 @@ mod tests {
         // Nothing printed since the mark: an empty snapshot, not the tail
         // of somebody else's job.
         assert_eq!(span_len(140, 140, 500, 160), 0);
+    }
+
+    /// The property the per-job report rests on. `since` runs its span
+    /// to the present, which is right while the work is still going and
+    /// wrong once it has finished: a report assembled minutes later
+    /// would carry every line the daemon's background lanes printed
+    /// after the job ended, filed under that job.
+    #[test]
+    fn a_bracketed_span_excludes_what_came_after_it() {
+        // 7 lines held, job owns 2..5, two more printed since.
+        assert_eq!(between_span(2, 5, 7, 7, 100), (2, 3));
+        // The cap keeps the END of the span, like `since`: a run's
+        // verdict and its server table are the last things it prints.
+        assert_eq!(between_span(0, 4, 5, 5, 2), (2, 2));
+        // A span whose front the ring has already evicted comes back
+        // short rather than wrong - and shorter than the ring, because
+        // 50 of the lines it does hold were printed after the span
+        // ended and are not the span's to give.
+        assert_eq!(between_span(0, 10_000, 10_050, CAP, 100_000), (0, CAP - 50));
+    }
+
+    /// Every way two marks can be nonsense yields nothing, never a slice
+    /// of somebody else's output.
+    #[test]
+    fn nonsense_marks_yield_no_span() {
+        assert_eq!(between_span(2, 1, 7, 7, 100), (0, 0), "to behind from");
+        assert_eq!(between_span(1, 1, 7, 7, 100), (0, 0), "empty span");
+        // Both of these are what a mark kept across a restart looks
+        // like: SEEN went back to zero and has not climbed this far.
+        assert_eq!(between_span(0, 99, 7, 7, 100), (0, 0), "to past capture");
+        assert_eq!(between_span(99, 200, 7, 7, 100), (0, 0), "both past it");
+        assert_eq!(between_span(0, 3, 7, 7, 0), (3, 0), "no room asked for");
     }
 
     #[test]

@@ -917,3 +917,184 @@ fn repair_dir_resumed_prove_lands_identical_bytes() {
     assert_eq!(std::fs::read(dir.join("b.bin")).unwrap(), b, "b.bin bytes");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// B2: the settle-tail sequence (multi-set repair, then covered_names,
+/// then the sniffed sweep) against ONE catalog reads the packet corpus
+/// exactly once, and every answer matches what the rescanning free
+/// functions say about the same directory.
+#[test]
+fn one_catalog_scan_serves_repairs_names_and_sniff() {
+    let dir = tmpdir("catalog-once");
+    let mut corpus_bytes = 0u64;
+    let mut write = |name: &str, bytes: &[u8]| {
+        std::fs::write(dir.join(name), bytes).unwrap();
+        corpus_bytes += bytes.len() as u64;
+    };
+    // Three sets, one damaged data file each; the third set's volume is
+    // an extensionless sniffed file.
+    let mut payloads = Vec::new();
+    for s in 0..3u8 {
+        payloads.push(payload(200, 10 + s as u64));
+    }
+    for (s, data) in payloads.iter().enumerate() {
+        let set = [40 + s as u8; 16];
+        let name = format!("f{s}.bin");
+        let files: &[(&str, &[u8])] = &[(&name, data)];
+        let mut damaged = data.clone();
+        damaged[70] ^= 0x5a;
+        std::fs::write(dir.join(&name), &damaged).unwrap();
+        write(&format!("set{s}.par2"), &par2_index(set, BS, files));
+        let vol = par2_volume(set, BS, files, &[0, 1]);
+        if s == 2 {
+            write("0badc0ffee", &vol);
+        } else {
+            write(&format!("set{s}.vol0+2.par2"), &vol);
+        }
+    }
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    let results = cat.repair_present_sets().expect("sets walk");
+    assert_eq!(results.len(), 3, "every set's file is on disk");
+    for r in &results {
+        match &r.status {
+            Ok(RepairStatus::Repaired(rep)) => assert_eq!(rep.blocks_rebuilt, 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+    for (s, data) in payloads.iter().enumerate() {
+        assert_eq!(&std::fs::read(dir.join(format!("f{s}.bin"))).unwrap(), data);
+    }
+    let mut names = cat.covered_names().expect("names replay");
+    names.sort();
+    assert_eq!(names, ["f0.bin", "f1.bin", "f2.bin"]);
+    assert_eq!(
+        cat.sniffed_packet_files().expect("sniff replay"),
+        [dir.join("0badc0ffee")]
+    );
+    // The free functions agree with the catalog's replayed answers.
+    let mut free_names = covered_names(&dir).unwrap();
+    free_names.sort();
+    assert_eq!(free_names, names);
+    assert_eq!(
+        sniffed_packet_files(&dir).unwrap(),
+        [dir.join("0badc0ffee")]
+    );
+    // One corpus scan total: three repairs, a name query and a sniff
+    // sweep did not reread a single unchanged packet file.
+    assert_eq!(
+        cat.bytes_scanned(),
+        corpus_bytes,
+        "the catalog read each packet file exactly once"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Rewrite `bytes` inside `path` while restoring its mtime, so size,
+/// identity and mtime all read unchanged - the below-stat-granularity
+/// mutation the pread re-proof exists for.
+fn mutate_silently(path: &Path, off: u64, xor: u8) {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::Start(off)).unwrap();
+    f.read_exact(&mut b).unwrap();
+    b[0] ^= xor;
+    f.seek(SeekFrom::Start(off)).unwrap();
+    f.write_all(&b).unwrap();
+    f.set_modified(mtime).unwrap();
+}
+
+/// B2 mutation safety: a recovery packet whose bytes changed under an
+/// unchanged size+mtime+identity stamp is caught by the packet-MD5
+/// re-proof at pread, dropped, and the repair completes from the next
+/// exponent up.
+#[test]
+fn reused_catalog_reproves_a_silently_mutated_recovery_slice() {
+    let dir = tmpdir("catalog-reprove");
+    let a = payload(200, 21);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a)];
+    let mut damaged = a.clone();
+    damaged[10] ^= 0x77;
+    std::fs::write(dir.join("a.bin"), &damaged).unwrap();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    let vol = dir.join("set.vol0+2.par2");
+    std::fs::write(&vol, par2_volume(SET, BS, files, &[0, 1])).unwrap();
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    // Corrupt one byte of exponent 0's slice payload (64-byte header +
+    // 4-byte exponent + 3), stamp restored.
+    mutate_silently(&vol, 64 + 4 + 3, 0xff);
+    let results = cat.repair_present_sets().expect("sets walk");
+    assert_eq!(results.len(), 1);
+    match &results[0].status {
+        Ok(RepairStatus::Repaired(rep)) => {
+            assert_eq!(rep.blocks_rebuilt, 1, "exponent 1 carried the repair")
+        }
+        other => panic!("expected Repaired via the surviving exponent, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+
+    // Same shape with EVERY slice mutated: the drops leave the selection
+    // short and the verdict is the Unrepairable arithmetic a fresh scan
+    // of the mutated file would also have reached.
+    let dir2 = tmpdir("catalog-reprove-all");
+    std::fs::write(dir2.join("a.bin"), &damaged).unwrap();
+    std::fs::write(dir2.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+    let vol2 = dir2.join("set.vol0+2.par2");
+    std::fs::write(&vol2, par2_volume(SET, BS, files, &[0, 1])).unwrap();
+    let mut cat2 = PacketCatalog::build(&dir2).expect("catalog builds");
+    let slice_stride = (64 + 4 + BS) as u64;
+    mutate_silently(&vol2, 64 + 4 + 3, 0xff);
+    mutate_silently(&vol2, slice_stride + 64 + 4 + 3, 0xff);
+    let results = cat2.repair_present_sets().expect("sets walk");
+    match &results[0].status {
+        Ok(RepairStatus::Unrepairable { needed: 1, have: 0 }) => {}
+        other => panic!("expected Unrepairable {{1, 0}}, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+}
+
+/// B2 refresh: files that appear, change (with a visible stamp), or
+/// vanish after build are picked up by the identity/size/mtime recheck -
+/// the catalog's answers track the directory, not the snapshot.
+#[test]
+fn refresh_tracks_new_changed_and_removed_packet_files() {
+    let dir = tmpdir("catalog-refresh");
+    let a = payload(200, 31);
+    let files_a: &[(&str, &[u8])] = &[("a.bin", &a)];
+    std::fs::write(dir.join("a.bin"), &a).unwrap();
+    std::fs::write(dir.join("seta.par2"), par2_index(SET, BS, files_a)).unwrap();
+    let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+    assert_eq!(cat.covered_names().unwrap(), ["a.bin"]);
+    // A second set lands after build.
+    let b = payload(97, 32);
+    let files_b: &[(&str, &[u8])] = &[("b.bin", &b)];
+    let mut b_damaged = b.clone();
+    b_damaged[5] ^= 0x11;
+    std::fs::write(dir.join("b.bin"), &b_damaged).unwrap();
+    std::fs::write(dir.join("setb.par2"), par2_index([7u8; 16], BS, files_b)).unwrap();
+    std::fs::write(
+        dir.join("setb.vol0+1.par2"),
+        par2_volume([7u8; 16], BS, files_b, &[0]),
+    )
+    .unwrap();
+    let mut names = cat.covered_names().unwrap();
+    names.sort();
+    assert_eq!(names, ["a.bin", "b.bin"], "refresh adopted the new set");
+    let results = cat.repair_present_sets().expect("sets walk");
+    assert_eq!(results.len(), 2);
+    assert!(
+        matches!(&results[1].status, Ok(RepairStatus::Repaired(_))),
+        "the set that landed after build repairs from the refreshed catalog"
+    );
+    assert_eq!(std::fs::read(dir.join("b.bin")).unwrap(), b);
+    // And its packet files leaving takes its names with them.
+    std::fs::remove_file(dir.join("setb.par2")).unwrap();
+    std::fs::remove_file(dir.join("setb.vol0+1.par2")).unwrap();
+    assert_eq!(cat.covered_names().unwrap(), ["a.bin"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

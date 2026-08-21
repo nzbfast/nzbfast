@@ -337,6 +337,112 @@ fn m_server_block_refilled(
     )
 }
 
+/// What the editor should propose in the mirror-group box, or None
+/// when the hostname says nothing useful.
+pub(in crate::serve) struct GroupSuggestion {
+    /// The backbone the hostname resolves to, as the oracle names it.
+    backbone: String,
+    /// The string to offer: a sibling's existing group name where there
+    /// is one, otherwise the backbone name itself.
+    suggest: String,
+    /// The configured server whose name is being echoed, if any.
+    same_as: Option<String>,
+}
+
+/// Derive the mirror-group suggestion for the server being edited.
+///
+/// Two rules, in this order:
+///
+/// 1. If another configured server resolves to the SAME backbone key
+///    and already carries a group name, that string is the suggestion.
+///    The field only does anything when both servers spell it
+///    identically, so a second spelling beside a working one would fold
+///    nothing while looking like it had. This rule holds even for a key
+///    the alias table has never heard of - two hosts of one unlisted
+///    brand are still one network, and the evidence for the name came
+///    from the user's own config rather than from the table.
+/// 2. Otherwise the backbone's own name, but ONLY when the table
+///    actually LISTS it. An unlisted host keys under its own label
+///    ("myisp"), which is a fine ledger key and a terrible thing to
+///    propose to someone as the name of a provider network.
+///
+/// `editing` is the index being edited (-1 when adding), so a server
+/// never has its own name suggested back to it.
+///
+/// This is a SUGGESTION and the caller must treat it as one: the alias
+/// table is a hand-maintained snapshot of who resells whom, it goes
+/// stale on its own schedule, and a wrong group name folds 430s across
+/// servers that are not mirrors - which loses articles one of them
+/// could have served.
+pub(in crate::serve) fn group_suggestion(
+    servers: &[nzbkit::config::ServerConfig],
+    host: &str,
+    editing: i64,
+) -> Option<GroupSuggestion> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let key = nzbkit::oracle::backbone_of(host);
+    let sibling = servers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i64::try_from(*i).unwrap_or(i64::MAX) != editing)
+        .find_map(|(_, s)| {
+            let group = s.group.as_deref().unwrap_or_default().trim();
+            (!group.is_empty() && nzbkit::oracle::backbone_of(&s.host) == key)
+                .then(|| (s.host.clone(), group.to_string()))
+        });
+    match sibling {
+        Some((host, group)) => Some(GroupSuggestion {
+            backbone: key,
+            suggest: group,
+            same_as: Some(host),
+        }),
+        None => nzbkit::oracle::known_backbone_of(host).map(|backbone| GroupSuggestion {
+            suggest: backbone.clone(),
+            backbone,
+            same_as: None,
+        }),
+    }
+}
+
+/// Answer what the mirror-group box should GHOST for a hostname the
+/// user is typing. `value` = the hostname in the form (which may not be
+/// saved, or may not exist, yet), `value2` = the index being edited.
+///
+/// Nothing here writes anything. The editor shows the answer as a
+/// placeholder plus a one-click accept, and the value only reaches the
+/// config if the person accepts it - see `group_suggestion` for why the
+/// heuristic must never set the field by itself.
+fn m_server_backbone(
+    _d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    let host = params.get("value").map(String::as_str).unwrap_or_default();
+    let editing = params
+        .get("value2")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(-1);
+    let servers = nzbkit::config::Config::load(ctx.cfg_path)
+        .map(|c| c.servers)
+        .unwrap_or_default();
+    Some(match group_suggestion(&servers, host, editing) {
+        Some(g) => json!({
+            "status": true,
+            "backbone": g.backbone,
+            "suggest": g.suggest,
+            "same_as": g.same_as,
+        }),
+        // A hostname the table does not know is not an error: the box
+        // stays blank and quiet, which is what it did before.
+        None => json!({"status": true, "backbone": null, "suggest": null, "same_as": null}),
+    })
+}
+
 fn m_server_test(
     _d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -380,7 +486,7 @@ fn m_server_test(
                     Ok(Ok((conn, greeting))) => {
                         let ms = t0.elapsed().as_millis() as u64;
                         tokio::runtime::Handle::current().block_on(conn.quit());
-                        json!({"status": true, "greeting": greeting.line, "latency_ms": ms})
+                        json!({"status": true, "greeting": greeting.line(), "latency_ms": ms})
                     }
                     Ok(Err(e)) => {
                         // §G: the pool already tells a capacity cap
@@ -1164,6 +1270,10 @@ pub(in crate::serve) fn dispatch(
         "server_block_refilled" => {
             return m_server_block_refilled(d, req, params, ctx, api_body);
         }
+        // Which provider network a hostname belongs to, so the editor
+        // can GHOST a mirror-group name (value=host, value2=index being
+        // edited). Read-only and advisory: see `group_suggestion`.
+        "server_backbone" => return m_server_backbone(d, req, params, ctx, api_body),
         // §G: fetch and parse ONE feed right now and say what came
         // back. The poller runs on the feed's own interval - up to a
         // quarter of an hour - so without this the only way to find out
@@ -1292,5 +1402,102 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    fn srv(host: &str, group: Option<&str>) -> nzbkit::config::ServerConfig {
+        serde_json::from_value(json!({"host": host, "group": group})).unwrap()
+    }
+
+    /// The editor may only ghost a name it can defend. A hostname the
+    /// alias table does not list resolves to its own label, and
+    /// proposing "myisp" as a provider network teaches the user that
+    /// the field means something it does not.
+    #[test]
+    fn an_unlisted_host_is_offered_no_group_at_all() {
+        assert!(group_suggestion(&[], "news.myisp.example", -1).is_none());
+        assert!(group_suggestion(&[], "localhost", -1).is_none());
+        assert!(group_suggestion(&[], "   ", -1).is_none());
+        // Nor does an unlisted twin invent one between them: two hosts
+        // of one unknown brand with no name yet are still two servers
+        // the page has nothing to call.
+        let cfg = [srv("news1.myisp.example", None)];
+        assert!(group_suggestion(&cfg, "news2.myisp.example", -1).is_none());
+    }
+
+    /// ...but once one of that pair HAS a name, the other is offered it.
+    /// The evidence there is the user's own config, not the alias table,
+    /// and two hosts of one brand really are one network.
+    #[test]
+    fn an_unlisted_twin_still_lends_the_name_its_owner_chose() {
+        let cfg = [srv("news1.myisp.example", Some("my isp"))];
+        let g = group_suggestion(&cfg, "news2.myisp.example", -1).expect("same key as the twin");
+        assert_eq!(g.suggest, "my isp");
+        assert_eq!(g.same_as.as_deref(), Some("news1.myisp.example"));
+    }
+
+    /// With nothing else configured on that backbone, the oracle's own
+    /// name for it is the proposal.
+    #[test]
+    fn a_listed_host_alone_is_offered_the_backbone_name() {
+        let g = group_suggestion(&[], "news.eweka.nl", -1).expect("eweka is listed");
+        assert_eq!(g.backbone, "eweka");
+        assert_eq!(g.suggest, "eweka");
+        assert_eq!(g.same_as, None);
+    }
+
+    /// The point of the field is that both servers spell the group
+    /// IDENTICALLY - a second spelling folds nothing. So an existing
+    /// name on the same backbone wins over the backbone's own name,
+    /// whatever the user called it.
+    #[test]
+    fn a_sibling_on_the_same_backbone_lends_its_own_spelling() {
+        let cfg = [
+            srv("news.myisp.example", Some("ignore me")),
+            srv("news.newshosting.com", Some("Highwinds")),
+        ];
+        let g = group_suggestion(&cfg, "news.usenetserver.com", -1).expect("listed");
+        assert_eq!(g.backbone, "highwinds");
+        assert_eq!(g.suggest, "Highwinds");
+        assert_eq!(g.same_as.as_deref(), Some("news.newshosting.com"));
+        // A server on a DIFFERENT backbone lends nothing, even though
+        // it has a perfectly good name. Eweka qualifies: same OWNER as
+        // Newshosting, its own spool, so it is not a sibling here.
+        for other in [
+            [srv("news.giganews.com", Some("giga"))],
+            [srv("news.eweka.nl", Some("eweka"))],
+        ] {
+            let g = group_suggestion(&other, "news.usenetserver.com", -1).expect("listed");
+            assert_eq!(g.suggest, "highwinds");
+            assert_eq!(g.same_as, None);
+        }
+    }
+
+    /// The server being edited must not have its own name handed back
+    /// to it: the box is blank because the user cleared or never set it,
+    /// and echoing the stored value would look like the field had
+    /// refilled itself.
+    #[test]
+    fn the_server_being_edited_is_not_its_own_sibling() {
+        let cfg = [srv("news.newshosting.com", Some("mine"))];
+        let g = group_suggestion(&cfg, "news.newshosting.com", 0).expect("listed");
+        assert_eq!(g.suggest, "highwinds");
+        assert_eq!(g.same_as, None);
+        // ...but the SAME list, seen while adding a second server, does
+        // lend that name.
+        let g = group_suggestion(&cfg, "news.usenetserver.com", -1).expect("listed");
+        assert_eq!(g.suggest, "mine");
+        assert_eq!(g.same_as.as_deref(), Some("news.newshosting.com"));
+    }
+
+    /// A blank or whitespace group on a sibling is not a name.
+    #[test]
+    fn a_sibling_with_an_empty_group_lends_nothing() {
+        let cfg = [
+            srv("news.newshosting.com", Some("  ")),
+            srv("news.easynews.com", None),
+        ];
+        let g = group_suggestion(&cfg, "news.usenetserver.com", -1).expect("listed");
+        assert_eq!(g.suggest, "highwinds");
+        assert_eq!(g.same_as, None);
     }
 }

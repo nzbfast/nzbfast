@@ -57,7 +57,7 @@
 use crate::sync::MutexExt;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -79,6 +79,29 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
 
 fn from_hex16(s: &str) -> Option<[u8; 16]> {
     from_hex(s)?.try_into().ok()
+}
+
+/// Reused per-thread composition buffers for the record writers. Every
+/// decode consumer records one line per placed article; reusing the
+/// buffers keeps the per-article cost to formatting alone (no
+/// allocations), and thread-locality keeps them entirely outside the
+/// shared `WriteState` mutex.
+#[derive(Default)]
+struct Compose {
+    /// The record's full byte image - what one `write_all` lands.
+    out: String,
+    /// Per-fragment offset tails (`:file_off:vol_off:len[:c]`),
+    /// concatenated - the state-free part of a placement line, composed
+    /// before the lock is taken.
+    tails: String,
+    /// End offset of each fragment's tail within `tails`.
+    ends: Vec<usize>,
+    /// Each fragment's resolved `F`-table index (needs the lock).
+    fidxs: Vec<usize>,
+}
+
+thread_local! {
+    static COMPOSE: std::cell::RefCell<Compose> = std::cell::RefCell::new(Compose::default());
 }
 
 struct WriteState {
@@ -214,12 +237,12 @@ impl Journal {
         let mut resume = ResumeState::default();
         let mut valid = false;
         if let Ok(f) = File::open(&path) {
-            let mut lines = std::io::BufReader::new(f).lines();
-            if let Some(Ok(header)) = lines.next()
+            let mut lines = utf8_lines(std::io::BufReader::new(f));
+            if let Some(header) = lines.next()
                 && header.strip_prefix("nzbfast-journal v1 ") == Some(fp.as_str())
             {
                 valid = true;
-                parse_lines(lines.map_while(Result::ok), &mut resume);
+                parse_lines(lines, &mut resume);
             }
         }
         let mut file = std::fs::OpenOptions::new()
@@ -256,11 +279,13 @@ impl Journal {
     /// Record one terminal article the v1 way (bytes at final offsets in
     /// the slot's own file) - used for par2-main slots.
     pub fn record(&self, id: &str) {
-        let mut line = String::with_capacity(id.len() + 1);
-        line.push_str(id);
-        line.push('\n');
-        let mut st = self.state.lock_ok();
-        let _ = st.file.write_all(line.as_bytes());
+        COMPOSE.with_borrow_mut(|c| {
+            c.out.clear();
+            c.out.push_str(id);
+            c.out.push('\n');
+            let mut st = self.state.lock_ok();
+            let _ = st.file.write_all(c.out.as_bytes());
+        });
     }
 
     /// Record one terminal article with its physical placement.
@@ -327,49 +352,80 @@ impl Journal {
         // write(2): the kill-safety contract is per-record, and writeln!
         // on a raw File issues a syscall per format fragment - several
         // per article, all inside this mutex the decoders share.
+        //
+        // The buffers are thread-local and reused, and everything that
+        // does not need `state` - the per-fragment offset tails, which
+        // are the bulk of the formatting - is composed BEFORE taking the
+        // lock. Only the dedup lookups (slots_emitted / files /
+        // used_names), the fidx interleave they feed, and the write
+        // itself sit inside it: releasing the lock between fidx
+        // assignment and the write could let another decoder's record
+        // for the same slot land ahead of its `S` line.
         use std::fmt::Write as _;
-        let mut out = String::new();
-        let mut st = self.state.lock_ok();
-        if !st.slots_emitted.contains(&slot) {
-            let (dest, dsize) = match slot_file {
-                Some((n, s)) => (n, s),
-                None => {
-                    let mut n = sanitize_filename(name);
-                    if st.used_names.contains(&n) {
-                        n = format!("{slot:03}-{n}");
-                    }
-                    (n, size)
+        COMPOSE.with_borrow_mut(|c| {
+            let Compose {
+                out,
+                tails,
+                ends,
+                fidxs,
+            } = c;
+            out.clear();
+            tails.clear();
+            ends.clear();
+            for (i, f) in frags.iter().enumerate() {
+                let _ = write!(tails, ":{}:{}:{}", f.file_off, f.vol_off, f.len);
+                if let Some(mask) = crypto_mask {
+                    tails.push_str(if mask.get(i).copied().unwrap_or(true) {
+                        ":1"
+                    } else {
+                        ":0"
+                    });
                 }
-            };
-            st.used_names.insert(dest.clone());
-            st.slots_emitted.insert(slot);
-            let _ = writeln!(out, "S {slot} {dsize} {dest}");
-        }
-        let mut list = String::new();
-        for (i, f) in frags.iter().enumerate() {
-            let fidx = match st.files.get(&f.file) {
-                Some(&i) => i,
-                None => {
-                    let i = st.files.len();
-                    st.files.insert(f.file.clone(), i);
-                    let _ = writeln!(out, "F {i} {}", f.file);
-                    i
-                }
-            };
-            if !list.is_empty() {
-                list.push(',');
+                ends.push(tails.len());
             }
-            list.push_str(&format!("{fidx}:{}:{}:{}", f.file_off, f.vol_off, f.len));
-            if let Some(mask) = crypto_mask {
-                list.push_str(if mask.get(i).copied().unwrap_or(true) {
-                    ":1"
-                } else {
-                    ":0"
+            let mut st = self.state.lock_ok();
+            if !st.slots_emitted.contains(&slot) {
+                let (dest, dsize) = match slot_file {
+                    Some((n, s)) => (n, s),
+                    None => {
+                        let mut n = sanitize_filename(name);
+                        if st.used_names.contains(&n) {
+                            n = format!("{slot:03}-{n}");
+                        }
+                        (n, size)
+                    }
+                };
+                st.used_names.insert(dest.clone());
+                st.slots_emitted.insert(slot);
+                let _ = writeln!(out, "S {slot} {dsize} {dest}");
+            }
+            // F lines first (a placement may only reference an already
+            // defined index), then the placement line in one piece.
+            fidxs.clear();
+            for f in frags {
+                fidxs.push(match st.files.get(&f.file) {
+                    Some(&i) => i,
+                    None => {
+                        let i = st.files.len();
+                        st.files.insert(f.file.clone(), i);
+                        let _ = writeln!(out, "F {i} {}", f.file);
+                        i
+                    }
                 });
             }
-        }
-        let _ = writeln!(out, "{letter} {slot} {list} {id}");
-        let _ = st.file.write_all(out.as_bytes());
+            let _ = write!(out, "{letter} {slot} ");
+            let mut start = 0usize;
+            for (i, fidx) in fidxs.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "{fidx}");
+                out.push_str(&tails[start..ends[i]]);
+                start = ends[i];
+            }
+            let _ = writeln!(out, " {id}");
+            let _ = st.file.write_all(out.as_bytes());
+        });
     }
 
     /// Record that a slot demoted to a materialized volume, with its
@@ -525,7 +581,7 @@ impl Journal {
         };
         let mut resume = ResumeState::default();
         if let Ok(f) = File::open(&self.path) {
-            let mut lines = std::io::BufReader::new(f).lines();
+            let mut lines = utf8_lines(std::io::BufReader::new(f));
             let _ = lines.next(); // header: fingerprint already matched at open
             // Read THROUGH this run's own decrypt retirements. A sibling
             // worker's `X` drops every placement that names its file -
@@ -537,7 +593,7 @@ impl Journal {
             // decrypted. `record_decrypted` re-adjudicates every
             // fragment against `restorable`, so nothing parked here can
             // publish a claim the file cannot honour.
-            parse_lines_through(lines.map_while(Result::ok), &mut resume, &mutating);
+            parse_lines_through(lines, &mut resume, &mutating);
         }
         let mut stash = Vec::new();
         for name in mine {
@@ -683,6 +739,41 @@ static RETIRE_STASH_BARRIER: Mutex<
         std::sync::Arc<std::sync::Barrier>,
     )>,
 > = Mutex::new(None);
+
+/// Line iterator that survives a torn record. `BufRead::lines()` yields
+/// `Err(InvalidData)` at the first invalid-UTF-8 line, and the
+/// `map_while(Result::ok)` this replaces turned that into a permanent
+/// stop: one record torn mid-multibyte-filename (ENOSPC, power loss)
+/// hid every VALID record appended after it, on every later open, so
+/// completed ranges were refetched forever. Journal records can carry
+/// Unicode filenames, so the torn byte can land anywhere. This reads
+/// raw lines, SKIPS a malformed one (the parser ignores unknown lines
+/// anyway, so skipping is conservative in the same direction), and
+/// stops only on a real I/O error.
+fn utf8_lines<R: std::io::BufRead>(mut r: R) -> impl Iterator<Item = String> {
+    let mut buf = Vec::new();
+    std::iter::from_fn(move || {
+        loop {
+            buf.clear();
+            match r.read_until(b'\n', &mut buf) {
+                Ok(0) => return None,
+                Ok(_) => {
+                    if buf.last() == Some(&b'\n') {
+                        buf.pop();
+                        if buf.last() == Some(&b'\r') {
+                            buf.pop();
+                        }
+                    }
+                    match std::str::from_utf8(&buf) {
+                        Ok(s) => return Some(s.to_owned()),
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+    })
+}
 
 fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
     parse_lines_through(lines, resume, &HashSet::new());
@@ -1481,6 +1572,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// One record torn mid-multibyte (ENOSPC, power loss) must not hide
+    /// the valid records appended after it. `lines()` +
+    /// `map_while(Result::ok)` stopped permanently at the first
+    /// invalid-UTF-8 line, so every later completion was re-fetched on
+    /// every retry, forever.
+    #[test]
+    fn a_torn_journal_line_does_not_hide_the_records_after_it() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-journal-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let nzb = b"<nzb>torn</nzb>";
+        let (j, _) = Journal::open(&dir, nzb).unwrap();
+        j.record("<a@x>");
+        drop(j);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join(".nzbfast.journal"))
+                .unwrap();
+            f.write_all(b"F 0 \xff\xfe torn\n").unwrap();
+        }
+        // This open must still see <a@x>, and the record IT appends
+        // lands after the torn line.
+        let (j2, resume) = Journal::open(&dir, nzb).unwrap();
+        assert!(resume.completed.contains("<a@x>"));
+        j2.record("<c@x>");
+        drop(j2);
+
+        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
+        assert!(
+            resume.completed.contains("<c@x>"),
+            "a record appended after a torn line must restore: {:?}",
+            resume.completed
+        );
+        assert_eq!(resume.completed.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn qdir(name: &str) -> PathBuf {
         let d =
             std::env::temp_dir().join(format!("nzbfast-quarantine-{name}-{}", std::process::id()));
@@ -1602,6 +1731,51 @@ mod tests {
             vol_off,
             len,
         }
+    }
+
+    /// N5 moved record composition out of the shared lock into reused
+    /// thread-local buffers. The grammar is a compatibility surface (an
+    /// old binary resumes from these bytes), so pin the exact lines: S
+    /// before any placement of its slot, every F before the first line
+    /// that references its index, one record per line.
+    #[test]
+    fn record_letter_emits_the_exact_line_grammar() {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-journal-golden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (j, _) = Journal::open(&dir, b"<nzb>golden</nzb>").unwrap();
+        j.record_placed(
+            3,
+            "<a@x>",
+            None,
+            "vol.rar",
+            100,
+            &[frag("in.bin", 1, 2, 3), frag("in2.bin", 40, 50, 60)],
+        );
+        j.record_placed_crypto(
+            3,
+            "<b@x>",
+            None,
+            "vol.rar",
+            100,
+            &[frag("in.bin", 7, 8, 9)],
+            &[false],
+        );
+        j.record("<c@x>");
+        let path = j.path.clone();
+        drop(j);
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut lines = text.lines();
+        assert!(lines.next().unwrap().starts_with("nzbfast-journal v1 "));
+        assert_eq!(lines.next(), Some("S 3 100 vol.rar"));
+        assert_eq!(lines.next(), Some("F 0 in.bin"));
+        assert_eq!(lines.next(), Some("F 1 in2.bin"));
+        assert_eq!(lines.next(), Some("R 3 0:1:2:3,1:40:50:60 <a@x>"));
+        assert_eq!(lines.next(), Some("D 3 0:7:8:9:0 <b@x>"));
+        assert_eq!(lines.next(), Some("<c@x>"));
+        assert_eq!(lines.next(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

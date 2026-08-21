@@ -74,6 +74,12 @@ pub(crate) async fn bisect_cutoff(
     lo
 }
 
+/// How stale the index totals on a scan progress or per-group summary
+/// line may be. The exact query behind them is a full `SCAN releases`
+/// (seconds on a production-sized index), asked every ~100k headers by
+/// up to eight concurrent groups before this memo existed.
+const SCAN_STATS_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+
 pub(crate) async fn index_scan(
     config: &Path,
     group: &str,
@@ -104,7 +110,12 @@ pub(crate) async fn index_scan(
         // arrival TO.
         None,
     )
-    .await
+    .await?;
+    // The one exact summary a CLI scan gets - the per-group line above
+    // serves the TTL memo (A4).
+    let (rel, comp) = ix.stats()?;
+    println!("index now {rel} releases, {comp} complete");
+    Ok(())
 }
 
 /// §74: arm the arrival watch for ONE leg, or stand it down.
@@ -506,9 +517,15 @@ pub(crate) async fn index_scan_into(
             }
         }
     }
-    let (rel, comp) = ix.stats()?;
+    // A4: no exact stats query here - this runs once per GROUP, and the
+    // daemon fans out up to eight groups per pass, each of which would
+    // pay a full `SCAN releases` on a production-sized index. The
+    // cached figures cost nothing a progress line already paid; the
+    // daemon computes one exact set per pass after its JoinSet, and the
+    // CLI prints an exact summary in `index_scan`.
+    let (rel, comp) = ix.stats_cached(SCAN_STATS_TTL)?;
     println!(
-        "done: {scanned} headers in {:.1?} - index now {rel} releases, {comp} complete (+{completed} this run)",
+        "done: {scanned} headers in {:.1?} - index around {rel} releases, {comp} complete (+{completed} this run)",
         t0.elapsed()
     );
     Ok(())
@@ -553,13 +570,16 @@ pub(crate) async fn index_gapfill_pass(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let picks = ix.gapfill_pick(count, now)?;
-    if picks.is_empty() {
-        return Ok((0, 0));
-    }
     let servers = scan_servers(&cfg);
     if servers.len() < 2 {
         // One backbone total: there is no "other" provider to ask.
+        // Decided BEFORE the pick: the pick sorts the whole incomplete
+        // band, and a single-backbone install would otherwise pay that
+        // sort every pass to feed a loop that can never run (B1).
+        return Ok((0, 0));
+    }
+    let picks = ix.gapfill_pick(count, now)?;
+    if picks.is_empty() {
         return Ok((0, 0));
     }
     let snap = ix.oracle_snapshot().unwrap_or_default();
@@ -986,7 +1006,10 @@ pub(crate) async fn collect_scan_pass(
                     }
                 }
                 if scanned % 100_000 < chunk {
-                    let (rel, comp) = ix.stats()?;
+                    // A4: memoized - the exact query is a full table
+                    // scan and this line fires every ~100k headers on
+                    // each of up to eight concurrent group connections.
+                    let (rel, comp) = ix.stats_cached(SCAN_STATS_TTL)?;
                     println!(
                         "  … {scanned} headers, {rel} releases ({comp} complete), {:.0}/s",
                         scanned as f64 / t0.elapsed().as_secs_f64()

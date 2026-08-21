@@ -199,8 +199,8 @@ fn pool_cfg(connections: usize) -> PoolConfig {
 
 struct Leg {
     elapsed: Duration,
-    done: Vec<(String, Vec<u8>)>,
-    missing: Vec<String>,
+    done: Vec<(Arc<str>, Vec<u8>)>,
+    missing: Vec<Arc<str>>,
     failed: Vec<String>,
     stats: Vec<PoolStats>,
     /// The pool's own account of what went wrong, per host. A fault the

@@ -25,6 +25,52 @@ pub const PROBE7Z_MIN_BYTES: i64 = 100_000_000;
 /// Retry spacing for rows whose last attempt failed transiently.
 const RETRY_SECS: i64 = 21_600;
 
+/// The probe-worthy band, as LITERAL terms - the WHERE prefix of
+/// `probe7z_pick` and, verbatim, the predicate of `idx_rel_probe7z`
+/// (schema.rs). One builder feeds both so they cannot drift, and the
+/// terms are literals rather than bound parameters because SQLite
+/// reaches a partial index only when the statement's own WHERE implies
+/// its predicate, proven from literal terms - never from a parameter
+/// (the N1 rule; `idx_titles_*`). The rotation terms (probe_at,
+/// probe_tries, enc_class) stay OUT of the band: they move per row and
+/// per classifier generation, and a predicate that names them would
+/// stop being provable the day a constant changes.
+pub(crate) fn probe7z_band_sql() -> String {
+    format!("junk>=70 AND pre_title='' AND files>=2 AND total_bytes>={PROBE7Z_MIN_BYTES}")
+}
+
+/// The pick's full SQL, shared with plan_tests.rs so the plan gate
+/// asserts the statement the daemon actually runs. Pinned to the band
+/// index (the cards.rs `INDEXED BY` rationale: a background statement
+/// whose wrong plan is a wedge does not get left to the cost model);
+/// the unpinned form below is the fallback for a database the
+/// maintenance backfill has not reached yet, where INDEXED BY would
+/// fail to prepare at all.
+pub(crate) fn probe7z_pick_sql() -> String {
+    probe7z_pick_sql_with("INDEXED BY idx_rel_probe7z")
+}
+
+pub(crate) fn probe7z_pick_sql_unpinned() -> String {
+    probe7z_pick_sql_with("")
+}
+
+fn probe7z_pick_sql_with(pin: &str) -> String {
+    format!(
+        "SELECT id, stem, total_bytes FROM releases {pin}
+          WHERE {}
+            AND probe_tries<?3
+            AND probe_at<=?1
+            AND enc_class<>?4
+            AND EXISTS (SELECT 1 FROM files f
+                         WHERE f.release_id=releases.id
+                           AND (lower(f.filename) GLOB '*.7z'
+                             OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9]'
+                             OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9][0-9]'))
+          ORDER BY first_posted DESC LIMIT ?2",
+        probe7z_band_sql()
+    )
+}
+
 /// One release the prober should look at next.
 #[derive(Debug, Clone)]
 pub struct ProbeCandidate {
@@ -62,20 +108,13 @@ impl Index {
     /// Judging the raw stem here matched zero rows in production while
     /// the fixtures, which seed a bare stem, all passed.
     pub fn probe7z_pick(&self, now: i64, limit: usize) -> rusqlite::Result<Vec<ProbeCandidate>> {
-        let mut stmt = self.db.prepare_cached(
-            "SELECT id, stem, total_bytes FROM releases
-              WHERE junk>=70 AND pre_title='' AND files>=2
-                AND total_bytes>=?3
-                AND probe_tries<?4
-                AND probe_at<=?1
-                AND enc_class<>?5
-                AND EXISTS (SELECT 1 FROM files f
-                             WHERE f.release_id=releases.id
-                               AND (lower(f.filename) GLOB '*.7z'
-                                 OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9]'
-                                 OR lower(f.filename) GLOB '*.7z.[0-9][0-9][0-9][0-9]'))
-              ORDER BY first_posted DESC LIMIT ?2",
-        )?;
+        // Pinned form first; a pre-backfill database (large, opened
+        // before the daemon's maintenance pass built idx_rel_probe7z)
+        // cannot prepare it and keeps the old shape until then.
+        let mut stmt = match self.db.prepare_cached(&probe7z_pick_sql()) {
+            Ok(s) => s,
+            Err(_) => self.db.prepare_cached(&probe7z_pick_sql_unpinned())?,
+        };
         let rows: Vec<ProbeCandidate> = stmt
             .query_map(
                 rusqlite::params![
@@ -83,7 +122,6 @@ impl Index {
                     // Over-fetch so the semantic-obfuscation filter
                     // below cannot starve the pick.
                     (limit * 4).max(16) as i64,
-                    PROBE7Z_MIN_BYTES,
                     PROBE7Z_GIVE_UP,
                     // Header-encrypted under the CURRENT classifier
                     // generation: the archive itself says no. Excluded

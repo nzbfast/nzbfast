@@ -1003,25 +1003,14 @@ pub(super) fn spawn_http_workers(
                     Some(trimmed) => trimmed,
                 };
                 if path == "/" || path == "/index.html" {
-                    // §5 i18n: stamp the daemon-default locale into the page
-                    // (the JS token '__NZBFAST_LOCALE__') so embedded
-                    // webviews localize without a saved browser pref.
-                    // respond_page keeps no-cache (a stale cached page keeps
-                    // polling with old JS) but adds gzip + an ETag over the
-                    // substituted bytes, so a revalidation is 304-sized.
-                    // Cloned to a local FIRST: as a temporary in the
-                    // argument expression the guard lives until the `;`,
-                    // so the lock is held across respond_page's gzip and
-                    // the whole socket write - up to tiny_http's 30 s
-                    // write timeout on a slow reader, with every other
-                    // locale reader and writer queued behind it.
-                    let locale = d.ui_locale.lock_ok().clone();
-                    respond_page(
-                        req,
-                        ui_shell_state(&d, ui_themed(DASHBOARD_HTML))
-                            .replace("__NZBFAST_LOCALE__", &locale),
-                        "text/html",
-                    );
+                    // The daemon state the page needs BEFORE its first
+                    // paint - locale, indexer switches - is stamped in by
+                    // `ShellKey`, which owns every such input and is the
+                    // key the built page is cached under, so a
+                    // revalidation answers 304 without rebuilding 1.2 MB.
+                    // Cache-Control stays no-cache (a stale cached page
+                    // keeps polling with old JS).
+                    respond_shell(req, &d, Shell::Dashboard);
                     continue;
                 }
                 // The user's own stylesheet (TODO §140 / issue #31), read
@@ -1041,7 +1030,13 @@ pub(super) fn spawn_http_workers(
                     .and_then(|f| f.strip_suffix(".json"))
                 {
                     match i18n_catalog(lang) {
-                        Some(body) => respond_page(req, body.to_string(), "application/json"),
+                        Some(cat) => respond_static(req, cat, "application/json"),
+                        // English is the source language: it lives inline
+                        // in the pages, so its catalogue is the empty
+                        // object and is not worth a gzip member.
+                        None if lang == "en" => {
+                            respond_page(req, "{}".to_string(), "application/json");
+                        }
                         None => {
                             let _ = req.respond(
                                 tiny_http::Response::from_string("{}").with_status_code(404),
@@ -1096,36 +1091,28 @@ pub(super) fn spawn_http_workers(
                     // without a translated manual yet (Tier 1b: pt/sv/da/nb/…)
                     // falls back to English so the dashboard's 📖 pill - which
                     // links /manual/<active locale> - never 404s.
-                    let body = match path.trim_start_matches("/manual").trim_matches('/') {
-                        "" => Some(MANUAL_HTML),
+                    let page = match path.trim_start_matches("/manual").trim_matches('/') {
+                        "" => Some(MANUAL_EN),
                         lang => manual_i18n(lang)
-                            .or_else(|| UI_LOCALES.contains(&lang).then_some(MANUAL_HTML)),
+                            .or_else(|| UI_LOCALES.contains(&lang).then_some(MANUAL_EN)),
                     };
-                    let Some(body) = body else {
+                    let Some(page) = page else {
                         let _ = req.respond(
                             tiny_http::Response::from_string("not found").with_status_code(404),
                         );
                         continue;
                     };
-                    respond_page(req, ui_themed(body), "text/html");
+                    // Compressed and hashed at build time (the design
+                    // tokens are folded in there too), so this is a
+                    // header read and a write.
+                    respond_static(req, page, "text/html");
                     continue;
                 }
                 #[cfg(feature = "indexer")]
                 if path == "/wall" || path == "/wall/" {
-                    // M13: the poster wall (embedded like the dashboard).
-                    // Cloned to a local FIRST: as a temporary in the
-                    // argument expression the guard lives until the `;`,
-                    // so the lock is held across respond_page's gzip and
-                    // the whole socket write - up to tiny_http's 30 s
-                    // write timeout on a slow reader, with every other
-                    // locale reader and writer queued behind it.
-                    let locale = d.ui_locale.lock_ok().clone();
-                    respond_page(
-                        req,
-                        ui_shell_state(&d, ui_themed(WALL_HTML))
-                            .replace("__NZBFAST_LOCALE__", &locale),
-                        "text/html",
-                    );
+                    // M13: the poster wall, stamped and cached exactly as
+                    // the dashboard above.
+                    respond_shell(req, &d, Shell::Wall);
                     continue;
                 }
                 #[cfg(feature = "indexer")]

@@ -1714,7 +1714,7 @@ async fn payout_leg_steered(
     servers: Vec<(ServerConfig, PoolConfig)>,
     ids: Vec<ArticleReq>,
 ) -> (Duration, usize, usize, usize, Vec<String>) {
-    let parts: std::collections::HashMap<String, u32> = ids
+    let parts: std::collections::HashMap<Arc<str>, u32> = ids
         .iter()
         .filter(|r| r.part > 0)
         .map(|r| (r.id.clone(), r.part))
@@ -1759,7 +1759,7 @@ async fn payout_leg_steered(
                             continue;
                         }
                         done += 1;
-                        if let (Some(&want), Some(got)) = (parts.get(&id), meta.part)
+                        if let (Some(&want), Some(got)) = (parts.get(&*id), meta.part)
                             && got != want
                         {
                             wrong_part += 1;
@@ -1808,7 +1808,7 @@ async fn crc_steer_storm_steers_damage_from_the_consumer_seam() {
     let ids: Vec<ArticleReq> = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
         })
@@ -1848,7 +1848,7 @@ async fn crc_steer_storm_steers_damage_from_the_consumer_seam() {
 /// The consumer reports the DECODED
 /// part number; the expected-part comparison (the load-bearing
 /// identity check - these bodies PASS their own pcrc32) happens in
-/// the pool, which owns `Shared::parts`.
+/// the pool, which knows the requested part (`Work::part`).
 #[tokio::test(flavor = "multi_thread")]
 async fn crc_steer_covers_split_brain_from_the_consumer_seam() {
     let data: Vec<u8> = (0..320_000u32).map(|i| (i >> 2) as u8).collect();
@@ -1866,7 +1866,7 @@ async fn crc_steer_covers_split_brain_from_the_consumer_seam() {
     let ids: Vec<ArticleReq> = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
         })
@@ -1912,7 +1912,7 @@ async fn crc_steer_single_server_delivers_as_is_and_terminates() {
     let ids: Vec<ArticleReq> = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
         })
@@ -1961,7 +1961,7 @@ async fn crc_steer_second_bad_copy_is_owned_not_looped() {
     let ids: Vec<ArticleReq> = segs
         .iter()
         .map(|(id, _, part)| ArticleReq {
-            id: format!("<{id}>"),
+            id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
         })

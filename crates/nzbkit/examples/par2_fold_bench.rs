@@ -123,4 +123,18 @@ fn main() {
             rate / baseline_rate
         );
     }
+
+    // Scalar-path guard: matrix inversion timing (Vandermonde +
+    // Gauss-Jordan), so a fold-table A/B can prove the scalar solve
+    // untouched. Best of 3, like the fold rows.
+    for &m in &[128usize, 1024] {
+        let mut best = f64::MAX;
+        let mut sum = 0u16;
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            sum = nzbkit::par2repair::bench_invert(m);
+            best = best.min(t0.elapsed().as_secs_f64());
+        }
+        println!("invert m={m}: {:.1} ms (checksum {sum:04x})", best * 1e3);
+    }
 }

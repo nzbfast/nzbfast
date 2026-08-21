@@ -25,6 +25,13 @@
 //! say "of the ones I asked about, this many were not there", so every
 //! surface renders the sampled count beside the verdict and none of them
 //! phrases it as a percentage.
+//!
+//! And the green verdict has a blind spot the sample size has nothing
+//! to do with: STAT reports that an article ANSWERED, not that its
+//! body is intact, and a small number of providers answer for removed
+//! articles with dummy data instead of refusing them. Such a post
+//! reads green here at any K. The false-green mode is written up in
+//! `nzbkit::preflight`; the download's own CRC is what catches it.
 
 use crate::diag::GONE_MIN_AGE_DAYS;
 

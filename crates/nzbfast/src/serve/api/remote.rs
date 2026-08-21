@@ -48,7 +48,14 @@ pub(in crate::serve) fn move_by_offset(d: &Arc<Daemon>, ids: &[i64], offset: i64
     // applies the offset to each in a stable order.
     for id in ids {
         if let Some(from) = q.iter().position(|j| nzo_int(&j.lock_ok().nzo_id) == *id) {
-            let to = (from as i64 + offset).clamp(0, q.len() as i64 - 1) as usize;
+            // `offset` is parsed straight off the JSON-RPC parameter, so
+            // it can be any i64: a plain `+` overflows (a debug-build
+            // panic, and in release a wrap that clamps to the WRONG end
+            // - i64::MAX sends the job to the top instead of the bottom).
+            // Saturate, then clamp.
+            let to = (from as i64)
+                .saturating_add(offset)
+                .clamp(0, q.len() as i64 - 1) as usize;
             if let Some(j) = q.remove(from) {
                 q.insert(to, j);
                 ok = true;
@@ -157,6 +164,18 @@ pub(in crate::serve) fn set_parameter(d: &Arc<Daemon>, ids: &[i64], param: &str)
 /// does, so writing the label alone would leave the record saying one
 /// folder while the job downloads into another. Serves both fronts:
 /// SAB's `mode=queue&name=rename` and NZBGet's `GroupSetName`.
+///
+/// Persisting the result is the CALLER's, as it is for the
+/// `requeue_category` this wraps - and both fronts do it, `rename_arm`
+/// directly and `rename_by_ids` through the tail `save_queue` every
+/// `jr_editqueue` subcommand gets. That second one is a save several
+/// arms away from the verb that earned it, so it reads as absent: it
+/// was reported on 20 Aug 2026 as a rename lost across a restart, which
+/// it is not. It stays a caller's job because the two doors keep
+/// writing after this returns (the password, on the SAB side), and one
+/// save at the end of the request stores the whole edit rather than a
+/// half-applied record - and renames N jobs in one queue.json rewrite
+/// rather than N. `remote_compat.rs` pins the NZBGet door end to end.
 pub(in crate::serve) fn rename_queued(
     d: &Arc<Daemon>,
     job: &Arc<Mutex<Job>>,
@@ -175,6 +194,16 @@ pub(in crate::serve) fn rename_queued(
     // gap still downloads into the directory just derived from the
     // new name, so the two can never disagree.
     job.lock_ok().name = newname;
+    // The name is a queue payload rider AND, since N12, an input to the
+    // cached owned-title set, so the store above owes the revision a
+    // bump. `rename_arm` follows with a `save_queue` that bumps anyway;
+    // `rename_by_ids` (NZBGet's GroupSetName) does not itself - its
+    // store is `jr_editqueue`'s tail save - so without this the
+    // store-before-bump rule the caches rely on would sit outside the
+    // function that knows a rename happened. Bumping here covers both
+    // doors from one place, and the second bump on the SAB path costs
+    // an idle poll one payload.
+    d.queue_rev.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -281,4 +310,60 @@ pub(in crate::serve) fn sort_queue(d: &Arc<Daemon>, key: &str, asc: bool) -> boo
     drop(q);
     d.save_queue();
     true
+}
+
+// Clippy's `items_after_test_module` wants this last in the file; it is.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::testutil::test_daemon;
+
+    /// A rename moves `queue_rev`, on BOTH front doors.
+    ///
+    /// The name rides the revisioned queue payload and, since N12, is an
+    /// input to the cached owned-title set that the Affinity sort and
+    /// the index eviction pass both read. `rename_arm` (SAB) ends with a
+    /// `save_queue` that bumps; `rename_by_ids` (NZBGet's GroupSetName)
+    /// does not itself (its store is `jr_editqueue`'s tail save), so the
+    /// bump belongs to `rename_queued` or the two doors disagree about
+    /// whether a rename happened.
+    #[test]
+    fn a_rename_moves_the_queue_revision() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-renrev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+        let job = Arc::new(Mutex::new(
+            job_from_json(&json!({
+                "nzo_id": "SABnzbd_nzo_r1", "name": "Before.Rename",
+                "nzb_path": "/tmp/x.nzb", "out_dir": d.out_dir().join("Before.Rename"),
+                "state": "Queued",
+            }))
+            .expect("job_from_json"),
+        ));
+        d.queue.lock_ok().push_back(job.clone());
+
+        let rev = d.queue_rev.load(Ordering::Relaxed);
+        rename_queued(&d, &job, "After.Rename").expect("rename a queued job");
+        assert_eq!(job.lock_ok().name, "After.Rename");
+        assert!(
+            d.queue_rev.load(Ordering::Relaxed) > rev,
+            "the rename has to move the revision the payload and the \
+             owned-key cache are gated on"
+        );
+
+        // ...and a REFUSED rename must not: the payload is unchanged, so
+        // a bump there would re-send it to every idle tab for nothing.
+        job.lock_ok().state = JobState::Downloading;
+        let rev = d.queue_rev.load(Ordering::Relaxed);
+        assert!(
+            rename_queued(&d, &job, "Too.Late").is_err(),
+            "a started job cannot be renamed"
+        );
+        assert_eq!(job.lock_ok().name, "After.Rename");
+        assert_eq!(d.queue_rev.load(Ordering::Relaxed), rev);
+
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

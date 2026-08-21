@@ -1385,10 +1385,65 @@ impl Drop for OuterHold {
 }
 
 /// Is a normally-named RAR set present in `dir`?
+/// A `.rar` whose NAME says nothing about which set it belongs to, nor
+/// where in that set it sits: an obfuscated stem, a bare `.rar`, and no
+/// `.partNN` ordering.
+///
+/// The obfuscated-post handling assumed obfuscation meant EXTENSIONLESS
+/// - `looks_like_named_rar` is true for anything ending in `.rar`, and
+/// `collect_obfuscated_rar_volumes` excluded exactly that. Posters who
+/// hash the stem but keep the extension therefore fell between the two
+/// paths: 130 files called `<32 hex>.rar` are not one named set (no
+/// shared stem to group by, no suffix to order by) and were not
+/// collected as obfuscated either, so each was attempted as a
+/// standalone archive and every one of them failed with "RAR 5 split
+/// entry is missing its first part" (issue #47). Renaming the same
+/// volumes extensionless unpacked them.
+///
+/// Deliberately narrow. A real stem (`Some.Release-GRP.rar`) keeps its
+/// name-based path; so does `<hash>.part01.rar`, whose shared stem and
+/// ordinal are exactly what that path needs. Only a name carrying
+/// NEITHER is handed to the header-order grouping, which is the only
+/// thing that can order it.
+pub(crate) fn rar_name_carries_no_set(path: &std::path::Path) -> bool {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let Some(head) = name.strip_suffix(".rar") else {
+        // `.rNN` and the rollover tails order themselves by name.
+        return false;
+    };
+    let ordered = head.rfind(".part").is_some_and(|p| {
+        let tail = &head[p + 5..];
+        !tail.is_empty() && tail.bytes().all(|c| c.is_ascii_digit())
+    });
+    // An old-style `.r00` sibling orders the set by name even when this
+    // lead volume's own name says nothing: `<hash>.rar` + `<hash>.r00`
+    // is the RAR4 analogue of the `.partNN` case above, and the `.rNN`
+    // files already take the named path (they fail the strip_suffix
+    // gate). Calling the lead obfuscated too would DOUBLE-claim the
+    // set: the named arm extracts it and keeps the volumes, then the
+    // obfuscated arm re-attempts the still-present first volume alone,
+    // fails on the split entry, and its Failed poisons the level.
+    let old_style_sibling = || {
+        ["r00", "R00"]
+            .iter()
+            .any(|e| path.with_extension(e).is_file())
+    };
+    !ordered && !nzbkit::release::stem_is_a_name(head) && !old_style_sibling()
+}
+
 pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
-    Ok(std::fs::read_dir(dir)?
-        .flatten()
-        .any(|e| looks_like_named_rar(&e.path())))
+    Ok(std::fs::read_dir(dir)?.flatten().any(|e| {
+        let p = e.path();
+        // A volume the NAME cannot place belongs to the obfuscated arm,
+        // even though it ends in `.rar`. Claiming it here would run the
+        // named ladder over files it has no way to group, which is
+        // precisely what failed 130 times in issue #47.
+        looks_like_named_rar(&p) && !(rar_name_carries_no_set(&p) && rar_magic(&p))
+    }))
 }
 
 /// RAR volumes whose names carry NO recognized RAR extension but which
@@ -1402,7 +1457,7 @@ pub(crate) fn collect_obfuscated_rar_volumes(dir: &std::path::Path) -> Result<Ve
     for e in std::fs::read_dir(dir)?.flatten() {
         let path = e.path();
         if e.file_type().is_ok_and(|t| t.is_file())
-            && !looks_like_named_rar(&path)
+            && (!looks_like_named_rar(&path) || rar_name_carries_no_set(&path))
             && !nzbkit::extract::is_final_file(&path)
             && rar_magic(&path)
         {
@@ -1940,7 +1995,7 @@ pub(crate) fn collect_par2_bytes(
 }
 
 pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
-    use nzbkit::par2::{Par2Set, verify_file};
+    use nzbkit::par2::{Par2Set, verify_file_streaming};
 
     let cap = par2_scan_cap();
     let (par2_bytes, skipped) = collect_par2_bytes(dir, cap)?;
@@ -1981,9 +2036,14 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
     let mut all_ok = true;
     for f in &set.files {
         let path = dir.join(nzbkit::disk::sanitize_filename(&f.name));
-        match std::fs::read(&path) {
-            Ok(data) => {
-                let v = verify_file(f, set.block_size, &data);
+        // Streamed, never slurped: a set member is a payload file, so this
+        // is the 30 GB mkv in an obfuscated post's output dir, and
+        // `std::fs::read` here made its whole length resident at once
+        // outside any budget. `verify_file_streaming` returns the same
+        // verdicts off a ~1 MiB window.
+        match std::fs::File::open(&path).and_then(|fh| verify_file_streaming(f, set.block_size, fh))
+        {
+            Ok(v) => {
                 let bad = v.blocks.iter().filter(|ok| !**ok).count();
                 if bad == 0 && v.md5_ok {
                     println!("  ✔ {} - {} blocks, MD5 ok", f.name, v.blocks.len());
@@ -1997,9 +2057,16 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
                     );
                 }
             }
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 all_ok = false;
                 println!("  ✘ {} - file missing", f.name);
+            }
+            // Reached only now that the bytes are read here rather than
+            // up front: a mid-file read error is not a missing file and
+            // must not be reported as one.
+            Err(e) => {
+                all_ok = false;
+                println!("  ✘ {} - unreadable ({e})", f.name);
             }
         }
     }
@@ -2211,7 +2278,7 @@ pub(crate) struct SniffState {
     pub(crate) head16: std::collections::HashMap<usize, ([u8; 16], u64)>,
     /// Per deferred slot: the exact ids `cancel` removed (the only ids
     /// `requeue` may resurrect) and their encoded byte sum.
-    pub(crate) cancelled_ids: std::collections::HashMap<usize, (Vec<String>, u64)>,
+    pub(crate) cancelled_ids: std::collections::HashMap<usize, (Vec<std::sync::Arc<str>>, u64)>,
     /// Slots reconciled back to payload. A later duplicate offset-0
     /// article of such a slot still carries the magic - it must never
     /// re-defer what activation proved is payload.
@@ -2298,7 +2365,35 @@ impl SniffCtl {
 /// the same declarations in u64, and a skewed NZB declaring a segment
 /// past 4 GiB used to truncate here - crediting 1 byte against a 4 GB
 /// denominator, wedging the bar short of 100% for the whole job.
-pub(crate) type IdSlots = std::collections::HashMap<String, (u32, u64)>;
+pub(crate) type IdSlots = std::collections::HashMap<std::sync::Arc<str>, (u32, u64)>;
+
+/// R9: the interned handle `id_to_slot` already holds for a segment's
+/// bracketed id.
+///
+/// The fetch plan brackets and interns every segment id once
+/// (get/plan.rs); a later pass over the same NZB - the in-stream PAR2
+/// sniff, the par-race candidate walk - used to `format!` a second full
+/// copy of every id it touched just to name articles the pool is
+/// already holding. Looking the id up instead hands back the plan's
+/// allocation for the price of a hash.
+///
+/// `buf` is caller-owned scratch reused across the walk, so the lookup
+/// itself allocates nothing after the first segment. An id the plan
+/// never recorded (a parser-dropped segment) interns fresh, so the
+/// caller's set has exactly the members it had before.
+pub(crate) fn interned_bracketed(
+    buf: &mut String,
+    id_to_slot: &IdSlots,
+    message_id: &str,
+) -> std::sync::Arc<str> {
+    use std::fmt::Write;
+    buf.clear();
+    let _ = write!(buf, "<{message_id}>");
+    match id_to_slot.get_key_value(buf.as_str()) {
+        Some((interned, _)) => interned.clone(),
+        None => std::sync::Arc::from(buf.as_str()),
+    }
+}
 
 /// The offset-0 article of a payload-classified slot decoded to the
 /// `PAR2\0PKT` magic: reclassify it. Elects (or switches) the bootstrap
@@ -2396,11 +2491,12 @@ pub(crate) fn reclassify_sniffed_par2(
         // reconcile) to the download's tail. Promote them the way the
         // extractor's offset-0 probe promotes: to the front, without
         // engaging stream mode.
-        let promote: Vec<String> = ctl.nzb.files[ctl.slot_file[sidx]]
+        let mut buf = String::new();
+        let promote: Vec<std::sync::Arc<str>> = ctl.nzb.files[ctl.slot_file[sidx]]
             .segments
             .iter()
-            .map(|seg| format!("<{}>", seg.message_id))
-            .filter(|b| id_to_slot.get(b).map(|&(s, _)| s as usize) == Some(sidx))
+            .map(|seg| interned_bracketed(&mut buf, id_to_slot, &seg.message_id))
+            .filter(|b| id_to_slot.get(&**b).map(|&(s, _)| s as usize) == Some(sidx))
             .collect();
         queue.promote_opts(&promote, false);
     }
@@ -2426,11 +2522,12 @@ fn defer_sniffed_slot(
 ) -> f64 {
     use std::sync::atomic::Ordering;
     let f = &ctl.nzb.files[ctl.slot_file[sidx]];
-    let mut want: std::collections::HashSet<String> = Default::default();
-    let mut bytes_of: std::collections::HashMap<String, u64> = Default::default();
+    let mut want: std::collections::HashSet<std::sync::Arc<str>> = Default::default();
+    let mut bytes_of: std::collections::HashMap<std::sync::Arc<str>, u64> = Default::default();
+    let mut buf = String::new();
     for seg in &f.segments {
-        let b = format!("<{}>", seg.message_id);
-        if id_to_slot.get(&b).map(|&(s, _)| s as usize) == Some(sidx) {
+        let b = interned_bracketed(&mut buf, id_to_slot, &seg.message_id);
+        if id_to_slot.get(&*b).map(|&(s, _)| s as usize) == Some(sidx) {
             bytes_of.insert(b.clone(), seg.bytes);
             want.insert(b);
         }
@@ -2456,7 +2553,7 @@ fn defer_sniffed_slot(
     // declarations, and a plain sum panics in debug / wraps in release.
     let bytes: u64 = removed
         .iter()
-        .filter_map(|id| bytes_of.get(id))
+        .filter_map(|id| bytes_of.get(&**id))
         .fold(0u64, |a, b| a.saturating_add(*b));
     slots[sidx]
         .remaining
@@ -2687,3 +2784,90 @@ mod pwfile_tests;
 #[cfg(test)]
 #[path = "unpack/named_payload_tests.rs"]
 mod named_payload_tests;
+
+#[cfg(test)]
+mod obfuscated_rar_extension_tests {
+    use super::*;
+
+    fn p(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(name)
+    }
+
+    /// Issue #47: a poster who hashes the stem but KEEPS `.rar` produced
+    /// a set that fell between both paths - not one named set (no shared
+    /// stem to group by, no ordinal to sort by) and not collected as
+    /// obfuscated either, because that collector excluded everything
+    /// `looks_like_named_rar` claimed and `.rar` alone was enough to be
+    /// claimed. 130 volumes were each attempted alone and each failed
+    /// with "RAR 5 split entry is missing its first part".
+    #[test]
+    fn a_hash_stem_that_kept_its_rar_extension_carries_no_set() {
+        assert!(rar_name_carries_no_set(&p(
+            "0b47e3ccafff5cc68c0b77534e2e4c87e.rar"
+        )));
+        assert!(rar_name_carries_no_set(&p(
+            "2768fdf3d8a6dc8001998da1e7ca5c66.rar"
+        )));
+        // The extension is what the old rule keyed on, so pin that this
+        // name IS still claimed by it - the fix is the two rules
+        // disagreeing on purpose, not the old one changing.
+        assert!(looks_like_named_rar(&p(
+            "0b47e3ccafff5cc68c0b77534e2e4c87e.rar"
+        )));
+    }
+
+    /// The narrowness is the whole design: anything whose name can group
+    /// OR order it keeps the name-based path, which is better at it.
+    #[test]
+    fn a_name_that_can_group_or_order_itself_keeps_the_named_path() {
+        // A real stem: groups by stem, orders by ordinal.
+        assert!(!rar_name_carries_no_set(&p("Some.Release-GRP.rar")));
+        assert!(!rar_name_carries_no_set(&p("Some.Release-GRP.part01.rar")));
+        // A hash stem WITH an ordinal: the stem is shared across the set
+        // and the ordinal sorts it, which is all the named path needs.
+        assert!(!rar_name_carries_no_set(&p(
+            "deadbeefcafe1234deadbeefcafe1234.part1.rar"
+        )));
+        assert!(!rar_name_carries_no_set(&p(
+            "deadbeefcafe1234deadbeefcafe1234.part011.rar"
+        )));
+        // `.rNN` and the rollover tails order themselves by name and
+        // never reach this rule at all.
+        assert!(!rar_name_carries_no_set(&p("whatever.r00")));
+        assert!(!rar_name_carries_no_set(&p("whatever.001")));
+        // Extensionless obfuscated volumes were always handled; they are
+        // not this rule's business either.
+        assert!(!rar_name_carries_no_set(&p(
+            "0b47e3ccafff5cc68c0b77534e2e4c87e"
+        )));
+        // ".part" with no digits is part of somebody's title, not an
+        // ordinal - the stem is still unreadable, so this IS ours.
+        assert!(rar_name_carries_no_set(&p("a1b2c3d4e5f6a7b8.part.rar")));
+    }
+
+    /// A hash stem that kept OLD-STYLE extensions (`<hash>.rar` +
+    /// `<hash>.r00`) is one named set: the `.rNN` siblings share the
+    /// stem and order it, so the lead must keep the named path.
+    /// Judged per-file it was double-claimed - the named arm extracted
+    /// the whole set (keeping its volumes), then the obfuscated arm
+    /// re-attempted the still-present lead alone, failed on the split
+    /// entry, and its Failed poisoned the level (bug sweep 20 Aug).
+    #[test]
+    fn an_old_style_sibling_keeps_the_hash_lead_on_the_named_path() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-oldstyle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lead = dir.join("0b47e3ccafff5cc68c0b77534e2e4c87e.rar");
+        std::fs::write(&lead, b"x").unwrap();
+        assert!(
+            rar_name_carries_no_set(&lead),
+            "no sibling on disk: the lead is still the obfuscated arm's"
+        );
+        std::fs::write(dir.join("0b47e3ccafff5cc68c0b77534e2e4c87e.r00"), b"x").unwrap();
+        assert!(
+            !rar_name_carries_no_set(&lead),
+            "an .r00 sibling orders the set by name - named path, once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

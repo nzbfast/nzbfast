@@ -190,6 +190,12 @@ fn m_get_config(
                             "host": s.host,
                             "port": s.port,
                             "tls": s.tls,
+                            // The computed backbone key (oracle alias map),
+                            // so the Servers card can warn when two
+                            // configured servers are the same network under
+                            // different brands. Derived from the host, no
+                            // secret in it.
+                            "backbone": nzbkit::oracle::backbone_of(&s.host),
                             "username": s.username.clone().unwrap_or_default(),
                             "has_password": s.password.is_some(),
                             "connections": s.connections,
@@ -495,7 +501,9 @@ fn m_import_probe(
     Some({
         let mut cands: Vec<Value> = Vec::new();
         let mut paths: Vec<(String, PathBuf)> = Vec::new();
-        if let Some(p) = params.get("value").filter(|p| !p.is_empty()) {
+        let typed = params.get("value").filter(|p| !p.is_empty());
+        let explicit = typed.is_some();
+        if let Some(p) = typed {
             let kind = if p.ends_with(".ini") {
                 "sabnzbd"
             } else {
@@ -511,8 +519,14 @@ fn m_import_probe(
                 paths.push(("nzbget".into(), p));
             }
         }
+        // #46: with a user-typed path there is exactly one candidate, so
+        // "found nothing" has two very different remedies - fix the path
+        // vs accept the file really has no servers - and the UI can only
+        // tell them apart if the probe says which skip fired.
+        let mut miss: Option<&'static str> = None;
         for (kind, path) in paths {
             let Ok(text) = read_import_config(&path) else {
+                miss.get_or_insert("unreadable");
                 continue;
             };
             let servers = if kind == "sabnzbd" {
@@ -521,6 +535,7 @@ fn m_import_probe(
                 nzbkit::config::parse_nzbget_conf(&text)
             };
             if servers.is_empty() {
+                miss.get_or_insert("no_servers");
                 continue;
             }
             // #17: categories come over too, and the probe says so
@@ -547,7 +562,11 @@ fn m_import_probe(
                 "categories_dropped": cats.dropped,
             }));
         }
-        json!({"status": true, "candidates": cands})
+        json!({"status": true, "candidates": cands,
+            // Only for the explicit-path form: the discovery scan skips
+            // dozens of speculative locations and a reason from those
+            // would be noise.
+            "miss": if explicit && cands.is_empty() { json!(miss) } else { Value::Null }})
     })
 }
 

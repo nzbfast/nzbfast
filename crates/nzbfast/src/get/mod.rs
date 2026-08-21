@@ -237,6 +237,11 @@ pub(crate) async fn get_with_progress(
         &resume_vols,
         skip_samples,
     );
+    // The resume id set is read exactly once - by the plan walk above -
+    // and nothing downstream asks about it again (`resuming` already
+    // carries the only bit anyone needs). Free it here rather than let a
+    // 128k-article set sit resident through the whole fetch and tail.
+    drop(completed);
 
     // The verification rig - verifier, sniff control, the configured
     // extractor: see build_rig. The destructure keeps every downstream
@@ -328,6 +333,7 @@ pub(crate) async fn get_with_progress(
         decode_errors,
         retention_excluded,
         missing_430,
+        takedown_430,
         transport_failed,
         transport_sample,
         decode_error_sample,
@@ -351,6 +357,7 @@ pub(crate) async fn get_with_progress(
         &decode_errors,
         &retention_excluded,
         &missing_430,
+        &takedown_430,
         &transport_failed,
         &transport_sample,
         &decode_error_sample,
@@ -368,6 +375,12 @@ pub(crate) async fn get_with_progress(
         throttle_t0,
         servers.first().is_some_and(|(_, c)| c.crc_steer),
     );
+    // The consumers hold the only other references to the id manifest,
+    // and nothing downstream of the spawn reads it. Dropping the
+    // orchestrator's `Arc` here lets the map die when the decode fleet
+    // joins rather than staying resident through the repair tail, where
+    // PAR2 wants every byte of RAM it can get (§A1).
+    drop(id_to_slot);
 
     // Live rate ticker: see spawn_rate_ticker.
     let ticker = spawn_rate_ticker(decoded_bytes.clone(), slots.clone());
@@ -471,6 +484,7 @@ pub(crate) async fn get_with_progress(
         &retention_excluded,
         &decoded_bytes,
         &missing_430,
+        &takedown_430,
         &transport_failed,
         &transport_sample,
         &decode_error_sample,

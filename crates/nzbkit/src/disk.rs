@@ -123,12 +123,20 @@ pub fn bytes_written() -> u64 {
 }
 
 /// Positioned write, same cross-platform contract as [`read_exact_at`].
+///
+/// The telemetry counter is charged on SUCCESS, not on entry: charging
+/// the requested length up front showed phantom disk throughput during
+/// exactly the ENOSPC/EIO episodes where writes were failing and the
+/// retry ladder was re-attempting them. On unix a partial write that
+/// precedes an error goes uncounted - the conservative direction for a
+/// rate readout.
 pub fn write_all_at(f: &File, buf: &[u8], off: u64) -> io::Result<()> {
-    BYTES_WRITTEN.fetch_add(buf.len() as u64, Ordering::Relaxed);
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
-        f.write_all_at(buf, off)
+        f.write_all_at(buf, off).inspect(|()| {
+            BYTES_WRITTEN.fetch_add(buf.len() as u64, Ordering::Relaxed);
+        })
     }
     #[cfg(windows)]
     {
@@ -143,6 +151,7 @@ pub fn write_all_at(f: &File, buf: &[u8], off: u64) -> io::Result<()> {
                     ));
                 }
                 Ok(n) => {
+                    BYTES_WRITTEN.fetch_add(n as u64, Ordering::Relaxed);
                     buf = &buf[n..];
                     off += n as u64;
                 }
@@ -193,6 +202,45 @@ static DROP_CACHE_DEFAULT: std::sync::atomic::AtomicBool =
 
 pub fn set_drop_cache_default(on: bool) {
     DROP_CACHE_DEFAULT.store(on, Ordering::Relaxed);
+}
+
+/// C1: whether drop-behind should default ON for a reader-less run (the
+/// CLI `get` path) given this machine's memory - the RAM-aware policy
+/// replacing the old always-on CLI default. The mechanics are
+/// `maybe_drop_cache` below; `NZBFAST_DROP_CACHE=1/0` still force-
+/// overrides whatever this decides (see `drop_cache_enabled`).
+///
+/// Why memory-aware: the 1 GB-cgroup evidence said always-on (M32,
+/// ~17% of a core saved in memcg reclaim) and a 31 GB 8-core host
+/// said always-off (~30% wall cost, Aug 2026) - both measured right,
+/// both wrong as a global default. A 20 Aug 2026 six-tier cgroup-v2
+/// SSD ladder (512M-16G limits, 24 GB job each) located the
+/// crossover: at <= 1 GiB drop-behind zeroes reclaim scanning (5-6M
+/// pages per job -> ~0) at no wall cost and holds the job's physical
+/// footprint to ~0.25-0.6 GB, at 2 GiB it is a wash, and at 4 GiB+ it
+/// costs 25-40% wall (40-70% unconstrained) paying sync_file_range +
+/// DONTNEED per stride for evictions the kernel handles for free when
+/// it has room. The threshold encloses the wash cell on the protective
+/// side. HDD leg unmeasured (no reachable box) - if spinning rust
+/// later shows a different crossover, this constant is the one dial.
+pub fn drop_cache_auto() -> bool {
+    drop_cache_auto_for(crate::mem::physical_ram(), crate::mem::cgroup_mem_limit())
+}
+
+/// Enable at 2 GiB effective memory and below; the tighter of host RAM
+/// and the cgroup limit decides, same sources as `MemBudget::auto`.
+/// Unknown memory reads as "not small" (a failed probe is not a small
+/// box - the `concurrency_caps_for` convention), so probes failing on
+/// an exotic platform keep today's big-box behaviour, not the slow arm.
+fn drop_cache_auto_for(ram: Option<u64>, cgroup_limit: Option<u64>) -> bool {
+    const THRESHOLD: u64 = 2 << 30;
+    let eff = match (ram, cgroup_limit) {
+        (Some(r), Some(l)) => r.min(l),
+        (Some(r), None) => r,
+        (None, Some(l)) => l,
+        (None, None) => return false,
+    };
+    eff <= THRESHOLD
 }
 
 /// Default stride for write pacing (macOS, and the Linux daemon
@@ -346,7 +394,7 @@ fn win_writer_lanes() -> usize {
 }
 
 /// Default lane count: 1, i.e. the lane spread stays DARK. Measured on
-/// the mediatvpc loopback A/B (7 Aug, 80 GB mock, 2 reps): 4 lanes
+/// a native-Windows loopback A/B (7 Aug, 80 GB mock, 2 reps): 4 lanes
 /// alone moved nothing (135.7/165.6 s wall against a 132.3/173.2 s
 /// baseline, write-side blocking identical), and on top of the sparse
 /// fix they consistently cost ~10% (89.3/90.0 s against 79.3/86.4 s
@@ -627,7 +675,7 @@ pub struct FileWriter {
     /// spreads across them round-robin. The system cache is per FILE,
     /// not per handle, so reads through the primary handle and `park`'s
     /// sync still see and cover every lane's bytes. Emptied on park,
-    /// refilled on unpark. NOTE: measured a non-fix on mediatvpc (see
+    /// refilled on unpark. NOTE: measured a non-fix on Windows (see
     /// `WIN_WRITER_LANES_DEFAULT`) - the pool is empty by default and
     /// only `NZBFAST_WIN_WRITERS` fills it.
     #[cfg(windows)]
@@ -1543,6 +1591,30 @@ mod case_probe_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C1: the RAM-aware drop-behind default. The threshold itself is a
+    /// measured crossover (see the main.rs call site); what these rows
+    /// pin is the SHAPE - tighter-of-two source selection, the boundary
+    /// landing on "2 GiB is on, above is off", and a failed probe
+    /// reading as a big box rather than a small one.
+    #[test]
+    fn drop_cache_auto_is_memory_tiered() {
+        let g = 1u64 << 30;
+        // Small boxes: on. Roomy boxes: off.
+        assert!(drop_cache_auto_for(Some(g), None));
+        assert!(drop_cache_auto_for(Some(2 * g), None)); // boundary: on
+        assert!(!drop_cache_auto_for(Some(2 * g + 1), None));
+        assert!(!drop_cache_auto_for(Some(32 * g), None));
+        // A 1 GB docker limit on a 32 GB host is a small box (the
+        // cgroup, not the metal, is where reclaim pressure lives).
+        assert!(drop_cache_auto_for(Some(32 * g), Some(g)));
+        // A roomy limit does not shrink a roomy host into the slow arm.
+        assert!(!drop_cache_auto_for(Some(32 * g), Some(16 * g)));
+        // cgroup-only reading (host RAM probe failed): the limit decides.
+        assert!(drop_cache_auto_for(None, Some(g)));
+        // Both probes failed: not small - keep the big-box default.
+        assert!(!drop_cache_auto_for(None, None));
+    }
 
     /// The pacer's watermark step: the stride rule as measured on 6 Aug,
     /// plus the completion rule that closes the small-file blind spot

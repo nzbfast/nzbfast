@@ -330,9 +330,51 @@ pub(super) struct HistQuery {
     /// to it; the facet counts are computed before either applies.
     pub bucket: Option<String>,
     pub start: usize,
-    /// 0 = everything (SAB semantics).
+    /// The window size. 0 = everything from `start` - the shape the
+    /// dashboard poll and the internal callers use deliberately, and
+    /// what a `nzo_ids=` selection renders under whatever the window
+    /// says. `from_params` never produces it: a request that names no
+    /// limit gets `HISTORY_DEFAULT_LIMIT`.
     pub limit: usize,
 }
+
+/// What a `mode=history` request that names no window gets.
+///
+/// The page it bounds renders the FULL facade row per record and does up
+/// to two `exists()` stats each (`storage_deleted`), so an unbounded
+/// default made every bare request cost the whole store: measured at
+/// 112 ms + 30 MB of transient allocation at 22,000 rows and
+/// 562 ms + 304 MB at 110,000, against 3.1 ms / 6.6 ms and a flat
+/// +64 kB with this cap in place (`measure_history_replay` in
+/// histstore.rs prices both shapes in one run). Unlike the dashboard poll -
+/// which is revision-gated in api/queue.rs and clamps to 1..=500 - this
+/// one is ungated, so the cost scaled with the number of polling clients
+/// rather than with the download rate. Any *arr or phone client could
+/// stand it up at will.
+///
+/// **500 is more generous than SABnzbd's own answer and than every real
+/// client's ask**, which is what makes it safe to default:
+///
+/// - SABnzbd 4.5.x `_api_history_default` does `if not limit: limit =
+///   cfg.history_limit()`, and `cfg.history_limit` is
+///   `OptionNumber("misc", "history_limit", 10)` - real SAB answers a
+///   bare `mode=history` with **10 rows**. (`build_history`'s
+///   `limit: int = 1000000` signature default is unreachable from the
+///   API path.) So nothing written against SAB can depend on getting
+///   more than ten.
+/// - Sonarr and Radarr both send `start=0&limit=DownloadClientHistoryLimit`,
+///   default **60** (`Sabnzbd.cs` -> `SabnzbdProxy.GetHistory`).
+/// - nzb360 sends `start=0 limit=20` (sabnzbd/sabnzbd#872's traffic log).
+/// - LunaSea sends `limit: 200` (`sabnzbd/core/api/api.dart`
+///   `getHistory`), our own dashboard `start=0&limit=200`.
+///
+/// An explicit `limit` is still honoured as asked, however large: paging
+/// is the escape hatch for anyone who genuinely wants the whole store,
+/// `noofslots` keeps reporting the full matched count so they know how
+/// far to page, and a `nzo_ids=` selection bypasses the window entirely
+/// (SAB semantics: a named id is always findable). What is gone is
+/// paying for all of it without asking.
+pub(super) const HISTORY_DEFAULT_LIMIT: usize = 500;
 
 impl HistQuery {
     pub(super) fn from_params(params: &std::collections::HashMap<String, String>) -> Self {
@@ -355,10 +397,16 @@ impl HistQuery {
                 .get("start")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            // `limit=0` is SAB's own spelling of "no window given" -
+            // its `if not limit` treats an explicit zero and an absent
+            // param identically - so both land on the default cap here
+            // too. Answering a zero with an empty page would be the
+            // other reading, and no SAB client expects it.
             limit: params
                 .get("limit")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+                .filter(|n| *n > 0)
+                .unwrap_or(HISTORY_DEFAULT_LIMIT),
         }
     }
 }
@@ -938,7 +986,15 @@ fn history_row(d: &Daemon, j: &Job) -> Value {
             // whole elapsed time is download time and SAB's second
             // number is 0.
             "download_time": j.elapsed_secs.round() as u64,
-            "postproc_time": 0,
+            // SABnzbd sends whole seconds here and clients render it as
+            // "post-processing took N". It was a hardcoded 0 - not a
+            // rounded-down measurement, a placeholder - which made every
+            // slow tail invisible to the one surface built to show it.
+            // See `Job::postproc_secs` for what that cost.
+            "postproc_time": j.postproc_secs.round() as u64,
+            // Ours, not SAB's: the same figure unrounded, so a tail under
+            // a second is distinguishable from one that never ran.
+            "postproc_secs": (j.postproc_secs * 100.0).round() / 100.0,
             // SAB's per-stage action log. Nothing here writes one, and
             // an empty list is what SAB sends for a job that logged no
             // stages.

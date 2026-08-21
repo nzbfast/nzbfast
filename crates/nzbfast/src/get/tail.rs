@@ -561,11 +561,13 @@ pub(super) fn finish_job(
     derrs: u64,
     recovery_errs: u64,
     missing_430: &Arc<AtomicU64>,
+    takedown_430: &Arc<AtomicU64>,
     retention_skipped: u64,
     transport_failed: &Arc<AtomicU64>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
     dead_servers: &[String],
+    left_servers: &[String],
     slots: &[Arc<FileSlot>],
     stalled: &Arc<std::sync::atomic::AtomicBool>,
     missing_segments: u64,
@@ -640,12 +642,25 @@ pub(super) fn finish_job(
     if incomplete > 0 || derrs > 0 {
         let causes = LossCauses {
             missing_430: missing_430.load(Ordering::Relaxed),
+            takedown_430: takedown_430.load(Ordering::Relaxed),
             retention_excluded: retention_skipped,
             transport_failed: transport_failed.load(Ordering::Relaxed),
             transport_sample: transport_sample.lock_ok().clone(),
             decode_sample: decode_error_sample.lock_ok().clone(),
             recovery_errs,
+            // The recovery-side share of the three cause counters above:
+            // every counted loss also bumps its slot's `missing` via
+            // `article_lost`, so summing the recovery slots' counters
+            // here is the same ledger read back per class. `remaining`
+            // deliberately NOT included - an unresolved recovery article
+            // never bumped a cause counter.
+            recovery_lost: slots
+                .iter()
+                .filter(|s| s.is_par2())
+                .map(|s| s.missing.load(Ordering::Relaxed) as u64)
+                .sum(),
             dead_servers,
+            left_servers,
             // Sniffed slots count: "this post carries no PAR2 recovery
             // data" must not be claimed about a post whose recovery set
             // was identified in-stream (issue #14).
@@ -695,6 +710,40 @@ pub(super) fn finish_job(
 /// difference between a user getting two of three files (SABnzbd's
 /// answer on that post) and none (NZBGet's), and the round-4 evidence
 /// says two is the better answer.
+/// Instrument-first: this job's yEnc verified-CRC reuse geometry.
+///
+/// The decoder verifies a whole-article CRC32 that block verification
+/// currently throws away. Reusing it is only sound for an article that is
+/// exactly one untrimmed, block-aligned, full PAR2 block from a fresh
+/// decode under fast verify, and whether real posts are shaped that way
+/// is nobody's guess to make - so every job reports its own geometry and
+/// a later decision reads the numbers. Nothing is optimized yet.
+///
+/// Silent on a job that mapped no spans (no PAR2 set, or no IFSC blocks):
+/// there is no ratio to report and a zero line would only be noise.
+pub(super) fn print_crc_reuse_geometry(verifier: &Arc<nzbkit::live::LiveVerifier>) {
+    let g = verifier.crc_reuse_geometry();
+    if g.spans == 0 {
+        return;
+    }
+    let pct = |part: u64, whole: u64| {
+        if whole == 0 {
+            0.0
+        } else {
+            part as f64 * 100.0 / whole as f64
+        }
+    };
+    println!(
+        "crc-reuse-geometry: {}/{} articles ({:.1}%) are exactly one PAR2 block; {:.2} GB of {:.2} GB mapped ({:.1}% of bytes)",
+        g.qualifying,
+        g.spans,
+        pct(g.qualifying, g.spans),
+        g.qualifying_bytes as f64 / 1e9,
+        g.spans_bytes as f64 / 1e9,
+        pct(g.qualifying_bytes, g.spans_bytes),
+    );
+}
+
 /// M15 memory summary - the line benchmarks quote and budgets tune.
 /// Lifted out of `get_with_progress` for the size gate.
 pub(super) fn print_mem_summary(
@@ -946,6 +995,7 @@ pub(super) async fn finish_run(
     retention_excluded: &Arc<AtomicU64>,
     decoded_bytes: &Arc<AtomicU64>,
     missing_430: &Arc<AtomicU64>,
+    takedown_430: &Arc<AtomicU64>,
     transport_failed: &Arc<AtomicU64>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
@@ -974,6 +1024,7 @@ pub(super) async fn finish_run(
     let Census {
         total,
         dead_servers,
+        left_servers,
         backbones,
         post_age_days,
         sniff_bootstrap,
@@ -1058,10 +1109,10 @@ pub(super) async fn finish_run(
         .as_ref()
         .and_then(|h| h.late_password_for(stream_owner))
         .or(password);
-    // Everything from here to the end of the run is unpack work (the
-    // disk-side ladders below, or the nested second pass) - close
-    // enough for the queue row even on jobs that skip them all, since
-    // those reach the finish within moments.
+    // Everything from here to the end of `unpack_tail` is unpack work
+    // (the disk-side ladders below, or the nested second pass), and the
+    // token says so. It is retired the moment that call returns - see
+    // below.
     // The disk-unpack tail (eat-arm, unrar ladder, nested pass): see
     // get/tail.rs. Off the scheduler core (Codex sweep 8 Aug H11): the
     // tail is minutes of synchronous unrar work plus parked waits for
@@ -1094,9 +1145,20 @@ pub(super) async fn finish_run(
             reextract_failed,
         )
     })?;
+    // Unpacking is over. The token used to be left saying "extracting"
+    // from here to the end of the JOB - through this run's own sweeps
+    // and, in the daemon, through the whole post-processing tail behind
+    // it, because only `park` ever clears the entry. A user watching a
+    // finished download was told "unpacking" for minutes of work that
+    // was nothing of the kind. `finalizing` is the same word the queue
+    // payload falls back to when no token is set, so this asserts what
+    // was already the intended reading rather than inventing a stage.
+    note_activity("finalizing");
     // M15 memory summary - the line benchmarks quote and budgets tune:
     // see print_mem_summary in get/tail.rs.
     print_mem_summary(verifier, extractor, budget);
+    // Instrument-first, no behaviour: see print_crc_reuse_geometry.
+    print_crc_reuse_geometry(verifier);
 
     // Issue #14 tail - the sniffed-leftover sweep: see get/tail.rs.
     sweep_sniffed_leftovers(all_good, par_cleanup, sniff, sniff_covered, out_dir);
@@ -1116,11 +1178,13 @@ pub(super) async fn finish_run(
         derrs,
         recovery_errs,
         missing_430,
+        takedown_430,
         retention_skipped,
         transport_failed,
         transport_sample,
         decode_error_sample,
         &dead_servers,
+        &left_servers,
         slots,
         stalled,
         missing_segments,
@@ -1272,10 +1336,12 @@ mod tests {
             derrs,
             recovery_errs,
             &Arc::new(AtomicU64::new(0)),
+            &Arc::new(AtomicU64::new(0)),
             0,
             &Arc::new(AtomicU64::new(0)),
             &Arc::new(std::sync::Mutex::new(None)),
             &Arc::new(std::sync::Mutex::new(None)),
+            &[],
             &[],
             &[],
             &Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1318,10 +1384,12 @@ mod tests {
             derrs,
             0,
             &Arc::new(AtomicU64::new(0)),
+            &Arc::new(AtomicU64::new(0)),
             0,
             &Arc::new(AtomicU64::new(0)),
             &Arc::new(std::sync::Mutex::new(None)),
             &Arc::new(std::sync::Mutex::new(None)),
+            &[],
             &[],
             slots,
             &Arc::new(std::sync::atomic::AtomicBool::new(false)),

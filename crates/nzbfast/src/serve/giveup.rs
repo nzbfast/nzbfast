@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 // For the Daemon impl moved in from daemon.rs (§129 4a paydown).
-use super::{Daemon, Job, JobState, is_arr_origin};
+use super::{Daemon, Job, JobState, fail_kind, is_arr_origin};
 use crate::MutexExt;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -742,12 +742,29 @@ impl Daemon {
         if threshold == 0 {
             return;
         }
-        let (name, nzo_id, origin, state) = {
+        let (name, nzo_id, origin, state, fail_message) = {
             let g = job.lock_ok();
-            (g.name.clone(), g.nzo_id.clone(), g.origin.clone(), g.state)
+            (
+                g.name.clone(),
+                g.nzo_id.clone(),
+                g.origin.clone(),
+                g.state,
+                g.fail_message.clone(),
+            )
         };
         let from_arr = is_arr_origin(&origin);
         if !from_arr && origin != "watchlist" {
+            return;
+        }
+        // Only a post-unavailability failure is evidence about the
+        // TARGET - the same gate `report_failure` applies for the same
+        // reason. A full disk, a permission error or a crashed unpack
+        // fails every release of every episode alike, so counting them
+        // walks the breaker to its threshold on a fault entirely on this
+        // machine and then unmonitors + blocklists content that is
+        // perfectly obtainable. Skip, don't clear: a local fault is not
+        // a success either, and the target's real failure count stands.
+        if state == JobState::Failed && !fail_kind(&fail_message).post_unavailable() {
             return;
         }
         let p = crate::wall::parse_release(&name);
@@ -925,6 +942,73 @@ mod tests {
             keys("Show.S01E05.1080p.WEB.H264-AAA"),
             keys("Show.S01E06.1080p.WEB.H264-AAA")
         );
+    }
+
+    /// A LOCAL fault says nothing about whether a target is obtainable:
+    /// a full disk fails every release of every episode alike, so three
+    /// Sonarr grabs failing on ENOSPC used to walk the breaker to its
+    /// threshold and unmonitor + blocklist a perfectly healthy episode.
+    /// The breaker now applies the same `post_unavailable` gate the
+    /// indexer failure report has always had, and for the same reason
+    /// (error-detection audit 20 Aug, A4).
+    #[test]
+    fn a_local_fault_never_counts_toward_giving_a_target_up() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-giveup-local-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::serve::testutil::test_daemon(&dir);
+        // High enough that nothing fires; this test is about COUNTING.
+        d.arr_giveup_threshold
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        let job = |stem: &str, fail: &str| {
+            Arc::new(Mutex::new(
+                crate::serve::job::job_from_json(&json!({
+                    "nzo_id": format!("nzf_{}", stem.len()),
+                    "name": stem,
+                    "origin": "arr",
+                    "state": "Failed",
+                    "fail_message": fail,
+                    "out_dir": d.out_dir().join(stem).to_string_lossy(),
+                    "nzb_path": d.spool.join("t.nzb").to_string_lossy(),
+                }))
+                .expect("job"),
+            ))
+        };
+        let p = parse_release("Show.S01E05.1080p.WEB.H264-AAA");
+
+        // Disk full, permissions, a crashed unpack: FailKind::Local.
+        d.giveup_note_outcome(
+            &job(
+                "Show.S01E05.1080p.WEB.H264-AAA",
+                "could not write the download: 3 decode/write error(s) and no \
+                 missing segments - every article arrived, so check free space, \
+                 permissions and the log above",
+            ),
+            false,
+        );
+        assert!(
+            !d.giveup.lock_ok().tripped(&p, 1),
+            "a local fault must not count toward the target"
+        );
+
+        // A real post-unavailability failure still counts.
+        d.giveup_note_outcome(
+            &job(
+                "Show.S01E05.720p.HDTV.x264-BBB",
+                "download incomplete: 1 file(s) with missing segments, \
+                 0 decode/write errors",
+            ),
+            false,
+        );
+        assert!(
+            d.giveup.lock_ok().tripped(&p, 1),
+            "a dead-post failure still counts"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Codex sweep 2, 3 Aug M3. The *arr give-up runs on a spawned

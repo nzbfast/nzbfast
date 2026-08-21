@@ -458,7 +458,7 @@ async fn verify(
     while let Some(outcome) = rx.recv().await {
         match outcome {
             FetchOutcome::Done { id, raw } => {
-                let Some(&idx) = id_to_file.get(&id) else {
+                let Some(&idx) = id_to_file.get(&*id) else {
                     continue;
                 };
                 match nzbkit::yenc::decode(&raw) {

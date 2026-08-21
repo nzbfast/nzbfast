@@ -945,6 +945,134 @@ fn a_min_free_of_zero_survives_a_restart() {
 /// `move_tree`, so both are pinned. The ordering assertion is the point
 /// of the test: a refusal that fires AFTER `create_dir_all` still leaves
 /// the stray folder behind.
+/// History retention round-trips in SECONDS, and a config written
+/// before the unit changed still means what it meant.
+///
+/// The two knobs (§129 D5) existed for months with no control on the
+/// settings page - the only way to set them was to hand-edit
+/// settings.json, which is what issue #45 was told to do. That issue gave them
+/// a card, and moved the age knob from DAYS to seconds so "20 minutes
+/// after it finished" is expressible at all.
+///
+/// That is a unit change on a live key, and the thing it must never do
+/// is reinterpret one. A settings.json holding `history_keep_days: 30`
+/// has to keep meaning thirty days; read as thirty SECONDS it would wipe
+/// the user's entire history the first time the daemon came up. So the
+/// old key is still read - multiplied - and only when the new one is
+/// absent, since the two are one setting and the one the dashboard
+/// writes has to win.
+///
+/// Not covered by `settings_survive_a_restart` (booleans only), and the
+/// same "0 is a real value, not unset" trap as `min_free` sits under
+/// both halves: 0 means "this rule is off", and a restore path that read
+/// it as "nothing saved" would quietly re-arm a deletion the user had
+/// just turned off.
+#[test]
+fn history_retention_round_trips_in_seconds_and_reads_the_older_days_key() {
+    let dir = scratch("histkeep");
+
+    {
+        let d = serve(&dir);
+        // Ships OFF, by ruling: history is unlimited until asked otherwise.
+        let fresh = settings_block(d.port);
+        assert_eq!(
+            fresh.get("history_keep_secs").and_then(|v| v.as_u64()),
+            Some(0),
+            "history retention must ship off"
+        );
+        assert_eq!(
+            fresh.get("history_keep_count").and_then(|v| v.as_u64()),
+            Some(0),
+            "history retention must ship off"
+        );
+        // The value issue #45 actually asked for: minutes, not days.
+        for (k, v) in [("history_keep_secs", 1200), ("history_keep_count", 50)] {
+            let r = api(d.port, &format!("mode=config&name={k}&value={v}"));
+            assert_eq!(r["status"].as_bool(), Some(true), "{k}={v} rejected: {r}");
+        }
+        let live = settings_block(d.port);
+        assert_eq!(
+            live.get("history_keep_secs").and_then(|v| v.as_u64()),
+            Some(1200),
+            "20 minutes did not reach the running daemon"
+        );
+        assert_eq!(
+            live.get("history_keep_count").and_then(|v| v.as_u64()),
+            Some(50)
+        );
+    } // daemon killed here
+
+    {
+        let d = serve(&dir);
+        let back = settings_block(d.port);
+        assert_eq!(
+            back.get("history_keep_secs").and_then(|v| v.as_u64()),
+            Some(1200),
+            "the age rule did not survive the restart"
+        );
+        assert_eq!(
+            back.get("history_keep_count").and_then(|v| v.as_u64()),
+            Some(50),
+            "the count rule did not survive the restart"
+        );
+        // Turning it back off has to STAY off - this is the control that
+        // deletes things, so a 0 that reverts is the dangerous direction.
+        for k in ["history_keep_secs", "history_keep_count"] {
+            let r = api(d.port, &format!("mode=config&name={k}&value=0"));
+            assert_eq!(r["status"].as_bool(), Some(true), "{k}=0 rejected: {r}");
+        }
+    }
+
+    {
+        let d = serve(&dir);
+        let off = settings_block(d.port);
+        assert_eq!(
+            off.get("history_keep_secs").and_then(|v| v.as_u64()),
+            Some(0),
+            "an explicit 0 came back non-zero - retention re-armed itself"
+        );
+        assert_eq!(
+            off.get("history_keep_count").and_then(|v| v.as_u64()),
+            Some(0),
+            "an explicit 0 came back non-zero - retention re-armed itself"
+        );
+    }
+
+    // A settings.json written before the unit change: the old key, no new one.
+    std::fs::write(dir.join("settings.json"), "{\"history_keep_days\": 30}").unwrap();
+    {
+        let d = serve(&dir);
+        assert_eq!(
+            settings_block(d.port)
+                .get("history_keep_secs")
+                .and_then(|v| v.as_u64()),
+            Some(30 * 86_400),
+            "an existing history_keep_days was not read as days - a config \
+             from before the unit change now means something else entirely"
+        );
+    }
+
+    // Both keys present: the one the dashboard writes wins, or a value
+    // saved today would be overruled by one saved before the change.
+    std::fs::write(
+        dir.join("settings.json"),
+        "{\"history_keep_days\": 30, \"history_keep_secs\": 600}",
+    )
+    .unwrap();
+    {
+        let d = serve(&dir);
+        assert_eq!(
+            settings_block(d.port)
+                .get("history_keep_secs")
+                .and_then(|v| v.as_u64()),
+            Some(600),
+            "the legacy days key overruled the current one"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_relative_move_destination_is_refused_before_it_is_created() {
     let dir = scratch("relmove");
@@ -1282,6 +1410,38 @@ fn importing_a_sabnzbd_ini_merges_its_categories_and_says_what_it_could_not_take
     for want in ["order", "indexer-category"] {
         assert!(dropped.contains(want), "{want:?} not reported: {dropped:?}");
     }
+
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #46: probing a user-typed path says WHY it came up empty. There is
+/// exactly one candidate in that mode, and the two empty answers have
+/// opposite remedies - fix the path vs accept the file has no servers -
+/// so the probe must tell them apart or the UI can only shrug.
+#[test]
+fn probing_a_typed_path_says_why_it_found_nothing() {
+    let dir = scratch("probemiss");
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = serve(&dir);
+
+    let probe = |path: &str| api(d.port, &format!("mode=import_probe&value={}", urlenc(path)));
+
+    let r = probe(&dir.join("nowhere.conf").to_string_lossy());
+    assert_eq!(r["candidates"].as_array().map(Vec::len), Some(0), "{r}");
+    assert_eq!(r["miss"].as_str(), Some("unreadable"), "{r}");
+
+    let empty = dir.join("empty-nzbget.conf");
+    std::fs::write(&empty, "MainDir=/tmp\n").unwrap();
+    let r = probe(&empty.to_string_lossy());
+    assert_eq!(r["candidates"].as_array().map(Vec::len), Some(0), "{r}");
+    assert_eq!(r["miss"].as_str(), Some("no_servers"), "{r}");
+
+    let real = dir.join("real-nzbget.conf");
+    std::fs::write(&real, "Server1.Host=news.example.com\nServer1.Port=563\n").unwrap();
+    let r = probe(&real.to_string_lossy());
+    assert_eq!(r["candidates"].as_array().map(Vec::len), Some(1), "{r}");
+    assert!(r["miss"].is_null(), "{r}");
 
     drop(d);
     let _ = std::fs::remove_dir_all(&dir);

@@ -378,6 +378,15 @@ Hver rækkes skuffe fortæller, hvem der tilføjede jobbet, og har den samme
 <b>Hent .nzb-filen</b>-knap som køen - praktisk til at hente en release igen et andet
 sted, eller til at vedhæfte dens <code>.nzb</code> til en fejlrapport.</p>
 <p>Kortet viser ti downloads som standard, og resten er ét klik væk, på knappen ▤. Status, placering og årsagen til et fejlet job ligger bag et klik på selve rækken, så det almindelige tilfælde - hvad der blev færdigt, hvor stort, hvornår - forbliver læsbart uden at scrolle. Træk i kortets nederste kant for i stedet at lade listen scrolle i en højde, du selv vælger. <b>History rows</b> under Indstillinger → Grænseflade ændrer de ti; da det er en egenskab ved daemonen og ikke ved din browser, gælder det enhver enhed, der kigger på denne installation. <b>Colour History names</b> ved siden af farver færdige navne grønne og fejlede røde; slået fra forbliver navnene neutrale, og den farvede prik og rækkens egne detaljer siger stadig, hvad der er hvad.</p>
+<p>nzbfast beholder historikken for altid, medmindre du siger andet. <b>Ryd op i
+historikken</b> under Indstillinger → System fjerner gamle poster efter to
+uafhængige regler: en alder (<b>Fjern poster ældre end</b>, talt fra det øjeblik,
+downloadet blev færdigt, i minutter, timer eller dage) og en længde (<b>Behold højst
+så mange poster</b>). Er begge sat, gælder begge, og 0 slår hver af dem fra for sig.
+Kun historikposten fjernes - de hentede filer bliver liggende præcis, hvor de er.
+Aldersreglen tager kun fuldførte downloads, så et mislykket venter, til du prøver
+igen eller selv sletter det; længdegrænsen tæller hver post med, uanset hvordan den
+endte.</p>
 <h3 id="dash-usage">Dataforbrug</h3>
 <p>Daglige bjælker pr. udbyder og totaler for I dag / 7 dage / 30 dage - uundværligt for målte
 og blok-konti. Blok-konti viser livstidsforbrug mod deres størrelse.</p>
@@ -497,8 +506,7 @@ almindelige webadresse er nok; en Prowlarr-linje ser ud som
 hvad der kom tilbage, hvilket beviser adressen og nøglen med ét klik. En gemt nøgle vises
 aldrig igen: feltet siger det, og lader du det stå tomt, beholdes den nøgle, der allerede
 er der.</p>
-<p><b>At søge.</b> Åbn <b>🎬 væggen</b> i overskriftslinjen, og skift til
-release-listen. Rullemenuen ved siden af søgefeltet afgør, hvor en søgning kigger:
+<p><b>At søge.</b> Åbn <b>🎬 væggen</b> i overskriftslinjen, og vælg <b>Releases</b>. Rullemenuen ved siden af søgefeltet afgør, hvor en søgning kigger:
 <b>Dette indeks</b>, altså det, denne maskine selv har skannet, <b>Indeksere</b> eller
 <b>Begge</b>. Dit valg huskes. At spørge dine konti kræver noget i feltet, for at blade i
 dem med en tom forespørgsel ville bruge et døgns tildeling på en liste, ingen bad om. Med
@@ -562,6 +570,15 @@ indeks.</li>
 browser: hver genkendt film- og tv-release som en posterflise med bedømmelse, år,
 genrer, medvirkende og synopsis - dine newsgroups, til at gennemse som et katalog.</p>
 <ul>
+<li><b>Væg</b> og <b>Releases</b> er to måder at se det samme indeks på, og parret
+under <b>Visning</b> skifter mellem dem. Dit valg huskes.</li>
+<li><b>Plakattæthed</b> er <b>S</b> / <b>M</b> / <b>L</b> ved siden af det par: lille får
+flere på skærmen, stor færre.</li>
+<li><b>Hover-forhåndsvisning</b>, over Releases-tabellen: hold markøren på en række for
+plakat og handling, alt sammen fra dit eget indeks.</li>
+<li><b>Gruppér efter titel</b>, kontakten ved siden af: én række pr. titel med dens
+releases under. Åbn den med <b>&#9656;</b> eller ved at klikke på rækken; afkrydsningen
+på titlen vælger de viste releases. Gruppering gælder kun <b>Dette indeks</b>.</li>
 <li><b>Faneblade</b> til Film / Serier / Andet, øjeblikkelig søgning og syv
 sorteringer: <b>Til dig</b>, Nyeste poster, Udgivelsesår, Bedst bedømt, Titel A–Z,
 Største og Mest postet.</li>
@@ -1150,7 +1167,11 @@ koster lidt tid frem for selve downloadet.</li>
 </ul>
 <p class="dim">Dommen er en forudsigelse ud fra indicier, ikke en garanti. For et
 håndfast svar om én NZB tæller <code>nzbfast check</code> (<a href="#cli">§15</a>) de
-faktiske artikler.</p>
+faktiske artikler. Begge tæller svar, ikke indhold. Et rent tjek betyder, at artiklerne var der, da der
+blev spurgt, ikke at det, de indeholder, er ubeskadiget: et lille antal udbydere svarer
+for fjernede artikler med attrapdata i stedet for at afvise dem, og det viser sig først
+under selve downloadet, hvor artiklen falder på sin egen kontrolsum og hentes igen fra
+en anden server eller repareres.</p>
 <h3 id="memory">Hukommelsesbudget - og hvad lav hukommelse koster</h3>
 <p>Alle motorens caches deler ét budget (standard ¼ af den fysiske RAM, begrænset til
 256 MB–16 GB). Sæt det eksplicit med <i>Hukommelsesgrænse</i> under Indstillinger, eller

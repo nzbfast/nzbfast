@@ -162,10 +162,19 @@ impl Index {
                 .flatten()
                 .unwrap_or(0)
         };
+        // `AND enc_class>0` on every one of these is not redundant, and the
+        // `stale` line below has always carried it. `idx_rel_enc` is partial
+        // on `enc_class>0`, and SQLite reaches a partial index only when the
+        // statement implies its predicate - it cannot derive that from a
+        // bound `enc_class=?1`. Without the term these three planned as
+        // `SCAN releases`: on the 43.3 M-row index measured 20 Aug 2026, a
+        // full pass over the whole table to count the 184 rows that are
+        // actually classified, three times, per stats call. Same shape as the
+        // trigger wedge in schema.rs; `plan_tests.rs` now holds all four.
         let mut by_kind = serde_json::Map::new();
         if let Ok(mut stmt) = self.db.prepare(
             "SELECT enc_kind, COUNT(*), COALESCE(SUM(total_bytes),0)
-               FROM releases WHERE enc_class=?1 GROUP BY enc_kind",
+               FROM releases WHERE enc_class=?1 AND enc_class>0 GROUP BY enc_kind",
         ) && let Ok(rows) = stmt.query_map(rusqlite::params![ENC_CLASS], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -179,10 +188,13 @@ impl Index {
         }
         serde_json::json!({
             "class": ENC_CLASS,
-            "releases": scalar("SELECT COUNT(*) FROM releases WHERE enc_class=?1"),
+            "releases": scalar(
+                "SELECT COUNT(*) FROM releases WHERE enc_class=?1 AND enc_class>0",
+            ),
             // The number the pilot cared about: bytes never fetched again.
             "bytes": scalar(
-                "SELECT COALESCE(SUM(total_bytes),0) FROM releases WHERE enc_class=?1",
+                "SELECT COALESCE(SUM(total_bytes),0) FROM releases
+                   WHERE enc_class=?1 AND enc_class>0",
             ),
             "stale": scalar("SELECT COUNT(*) FROM releases WHERE enc_class>0 AND enc_class<>?1"),
             "by_kind": by_kind,

@@ -164,6 +164,36 @@ fn latch_media_never_downgrades_and_reports_real_changes() {
 }
 
 // ---------------------------------------------------------------------
+// 6b. media_line
+// ---------------------------------------------------------------------
+
+#[test]
+fn media_line_never_renders_empty() {
+    let mut f = facts(Some("1080p"), true);
+    f.vcodec = Some("HEVC".to_string());
+    f.audio = Some("DDP 5.1".to_string());
+    f.hdr = Some("HDR10".to_string());
+    assert_eq!(super::media_line(&f), "1080p · HEVC · DDP 5.1 · HDR10");
+    // Absent fields are dropped, not spelt as gaps.
+    let mut f = facts(Some("2160p"), true);
+    f.vcodec = Some("AV1".to_string());
+    assert_eq!(super::media_line(&f), "2160p · AV1");
+    // The interesting case: the container parsed and no track came out.
+    // This is the line that has to distinguish a probed row from an
+    // unprobed one, so it must never be the empty string.
+    let mut f = facts(None, true);
+    f.container = Some("mkv".to_string());
+    assert_eq!(
+        super::media_line(&f),
+        "mkv, but no track could be read from it"
+    );
+    assert_eq!(
+        super::media_line(&facts(None, false)),
+        "nothing could be read from the file"
+    );
+}
+
+// ---------------------------------------------------------------------
 // 7. StallTracker edges
 // ---------------------------------------------------------------------
 

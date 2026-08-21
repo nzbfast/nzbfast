@@ -642,8 +642,9 @@ pub(super) fn first_run_apikey(
 }
 
 /// Install the daemon's live ingest policy on an Index connection. The
-/// shared tip connection is reopened after full scans, so neither custom
-/// classification nor its gate closure can be assumed to survive.
+/// shared connection can be handed over wholesale at the end of a scan
+/// pass (B4), so neither custom classification nor its gate closure can
+/// be assumed to survive between uses - every ingest installs its own.
 #[cfg(feature = "indexer")]
 pub(super) fn install_live_ingest_policy(
     ix: &mut nzbkit::index::Index,

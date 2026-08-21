@@ -624,7 +624,7 @@ pub(super) fn spawn_index_scan(
                     // Scan into a dedicated connection, then republish
                     // - keeps the OVER round-trips off the lock that
                     // query handlers need.
-                    let mut scratch = match nzbkit::index::Index::open(&db) {
+                    let mut scratch = match nzbkit::index::Index::open_scratch(&db) {
                         Ok(ix) => ix,
                         Err(e) => {
                             warn!(target: "index", "open {}: {e}", db.display());
@@ -704,7 +704,6 @@ pub(super) fn spawn_index_scan(
                     // dropping those on the floor would be the very
                     // silence this exists to end.
                     let (hits, dropped) = scratch.take_watch_hits();
-                    drop(scratch);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -734,21 +733,20 @@ pub(super) fn spawn_index_scan(
                     // `nzbfast-scan-leg-swallows-arrivals`.
                     let ready = instant_ready(&daemon3, hits, dropped, now);
                     let names = ready.join(", ");
-                    // Re-open the shared connection so it sees this
-                    // task's now-committed writes (fresh read snapshot)
-                    // - unless the index was switched off or wiped
-                    // while we ran, in which case there is nothing to
-                    // publish to.
-                    let staged = if daemon3.index_era() == era
-                        && let Ok(fresh) = nzbkit::index::Index::open(&db)
-                    {
-                        daemon3.publish_index_with_arrivals(era, fresh, &ready, now)
-                    } else {
-                        // Nothing to be atomic with - the index was
-                        // wiped or switched off while this pass ran.
-                        daemon3.stage_instant_hint(&ready, now)
-                    };
-                    daemon3.drop_index_read();
+                    // Hand this task's own connection back (B4). When a
+                    // shared connection already exists it is kept - WAL
+                    // means it sees this task's committed writes on its
+                    // next statement - and when none does, `scratch`
+                    // becomes it, sparing the full `Index::open`
+                    // migration ladder this used to re-run per group
+                    // per pass. The era check lives inside: a wipe or
+                    // source-off mid-pass drops the connection and
+                    // stages only the hint (deciding what to do with it
+                    // is the pass's job either way). The pooled readers
+                    // are NOT retired here any more - a WAL reader
+                    // picks up commits on its next query, and the
+                    // identity events retire the pool themselves.
+                    let staged = daemon3.publish_index_with_arrivals(era, scratch, &ready, now);
                     // Last, so the woken pass finds both invalidations
                     // done. `notify_one` parks a permit when nobody is
                     // waiting, so nothing is lost by waking late.
@@ -763,6 +761,12 @@ pub(super) fn spawn_index_scan(
             }
             while set.join_next().await.is_some() {}
             daemon2.scan_active.store(false, Ordering::Relaxed);
+            // A4: the one exact stats recompute for the whole pass, now
+            // that every group's ingest is committed. The per-group
+            // scans and progress lines serve a TTL memo; this seeds the
+            // dashboard cache so the pill shows the pass's result
+            // without waiting out the TTL.
+            crate::persist::blocking_db(|| daemon2.refresh_index_stats());
             // Hand the one-off deep request back if this pass was cut
             // short before it could honour it. fetch_max so a newer
             // (or deeper) request made meanwhile is never clobbered.
@@ -841,7 +845,7 @@ pub(super) fn spawn_index_scan(
                 // it may only publish if the index it belongs to is
                 // still the current one.
                 let era = daemon2.index_era();
-                match nzbkit::index::Index::open(&db) {
+                match nzbkit::index::Index::open_scratch(&db) {
                     Ok(mut scratch) => {
                         install_live_ingest_policy(&mut scratch, gates2, cats2);
                         let d3 = daemon2.clone();
@@ -884,13 +888,11 @@ pub(super) fn spawn_index_scan(
                                 )
                             }
                         }
-                        drop(scratch);
-                        if daemon2.index_era() == era
-                            && let Ok(fresh) = nzbkit::index::Index::open(&db)
-                        {
-                            daemon2.publish_index(era, fresh);
-                        }
-                        daemon2.drop_index_read();
+                        // Hand the connection back rather than reopening
+                        // (B4) - kept-or-installed under the era check,
+                        // same as the scan tasks. No reader retirement:
+                        // WAL covers the freshness.
+                        daemon2.publish_index(era, scratch);
                     }
                     Err(e) => warn!(target: "gapfill", "open {}: {e}", db.display()),
                 }
@@ -902,7 +904,15 @@ pub(super) fn spawn_index_scan(
             // M31a retention prune + the planner-statistics refresh,
             // both on their own clocks inside.
             if !groups.is_empty() && daemon2.index_maintenance_ok() {
-                retention_and_statistics(&daemon2, &index_db).await;
+                retention_and_statistics(&daemon2).await;
+                if waiting() {
+                    drop(index_pass);
+                    continue;
+                }
+                // B1: one background-picker partial index per pass,
+                // until the three exist. Same stand-down contract as
+                // the statistics refresh it follows.
+                picker_index_backfill(&daemon2).await;
                 if waiting() {
                     drop(index_pass);
                     continue;
@@ -916,7 +926,7 @@ pub(super) fn spawn_index_scan(
                 drop(index_pass);
                 continue;
             }
-            evict_pass_and_republish(&daemon2, &index_db).await;
+            evict_between_passes(&daemon2).await;
             drop(index_pass);
             // The chip covers the whole pass (scan + gapfill + prune),
             // never the interval sleep below.
@@ -2024,6 +2034,12 @@ pub(super) fn spawn_download_worker(
                 // count.
                 d.hub.fetch_plan.store(0, Ordering::Relaxed);
                 d.hub.fetch_done.store(0, Ordering::Relaxed);
+                // §129 4b's post date goes with them, and for the same
+                // reason: a whyslow tick between the transition and the
+                // plan publish must not read the PREVIOUS job's post age
+                // against this job's article misses. 0 is "unknown",
+                // which asserts nothing.
+                d.hub.post_unix.store(0, Ordering::Relaxed);
                 *owner = Some(nzo_id.clone());
             }
             let t_start = Instant::now();
@@ -2100,6 +2116,17 @@ pub(super) fn spawn_download_worker(
             // that reaches history. Marked before any of this job's
             // work so the snapshots below are its lines, nobody else's.
             let log_mark = nzbkit::logtee::mark();
+            // Onto the RECORD as well, so `mode=report` can slice this
+            // job's lines later. The ticket's copy dies with the tail;
+            // a user asks for a report minutes or hours afterwards.
+            if let Some(j) = d
+                .queue
+                .lock_ok()
+                .iter()
+                .find(|j| j.lock_ok().nzo_id == nzo_id)
+            {
+                j.lock_ok().log_mark = log_mark;
+            }
 
             // TODO §138 (issue #29), opt-in `post_health_fail`: the §77
             // sample already asked every configured server about this
@@ -2406,6 +2433,46 @@ const MEDIA_SLOW: std::time::Duration = std::time::Duration::from_secs(30);
 /// NAS); half an hour covers that and stops a job that never reaches
 /// history from being retried forever.
 const MEDIA_FINAL_WINDOW: std::time::Duration = std::time::Duration::from_secs(1800);
+/// How many times an I/O fault on the final pass is worth retrying. A
+/// sleeping NAS wakes within a tick or two; a volume that is simply gone
+/// answers the same way every time, and the log line below has already
+/// said so once.
+const MEDIA_IO_RETRIES: u32 = 3;
+
+/// What the final pass read, in one line for the log. The same fields
+/// the chip shows, in the same order, so the log and the row agree.
+///
+/// Never empty: an `any()`-false answer is the interesting case here
+/// (the file parsed, no track came out of it) and must not print as a
+/// bare nzo_id with a colon after it.
+fn media_line(f: &nzbkit::mediaprobe::MediaFacts) -> String {
+    let parts: Vec<&str> = [
+        f.res.as_deref(),
+        f.vcodec.as_deref(),
+        f.audio.as_deref(),
+        f.hdr.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        match f.container.as_deref() {
+            Some(c) => format!("{c}, but no track could be read from it"),
+            None => "nothing could be read from the file".to_string(),
+        }
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// A job owed the final on-disk pass, with what it has cost so far.
+struct FinalPass {
+    id: String,
+    /// When it was admitted - `MEDIA_FINAL_WINDOW` runs from here, so an
+    /// I/O retry cannot extend its own deadline.
+    at: std::time::Instant,
+    io_faults: u32,
+}
 
 /// The name a mismatch is judged against: what an identity oracle
 /// concluded, when one answered, and the posted name otherwise.
@@ -2495,7 +2562,7 @@ pub(super) fn spawn_media_prober(daemon: &Arc<Daemon>) {
         let mut tries: u32 = 0;
         let mut due = std::time::Instant::now();
         // Jobs that left the queue owing a final on-disk pass.
-        let mut finals: Vec<(String, std::time::Instant)> = Vec::new();
+        let mut finals: Vec<FinalPass> = Vec::new();
         let tick = media_tick();
         loop {
             tokio::time::sleep(tick).await;
@@ -2525,8 +2592,13 @@ pub(super) fn spawn_media_prober(daemon: &Arc<Daemon>) {
             // watching is owed its final pass.
             if watching != live
                 && let Some(prev) = watching.take()
+                && !finals.iter().any(|f| f.id == prev)
             {
-                finals.push((prev, std::time::Instant::now()));
+                finals.push(FinalPass {
+                    id: prev,
+                    at: std::time::Instant::now(),
+                    io_faults: 0,
+                });
             }
             if let Some(id) = &live {
                 if watching.is_none() {
@@ -2567,30 +2639,39 @@ pub(super) fn spawn_media_prober(daemon: &Arc<Daemon>) {
                     }
                 }
             }
-            // Jobs whose chip settled before the identity oracle
-            // answered: post-processing queued them for one more pass
-            // against the canonical name (they left `finals` when they
-            // settled, so they have to be re-admitted here).
-            for id in d.media_rejudge.lock_ok().drain(..) {
-                if !finals.iter().any(|(f, _)| f == &id) {
-                    finals.push((id, std::time::Instant::now()));
+            // The two events that owe a final pass: a record reaching
+            // history, and an identity oracle answering after the chip
+            // had already settled (a settled job has left `finals`, so
+            // it has to be re-admitted here). Neither is something this
+            // task can see for itself - see `Daemon::media_final_owed`.
+            for id in d.media_final_owed.lock_ok().drain(..) {
+                if !finals.iter().any(|f| f.id == id) {
+                    finals.push(FinalPass {
+                        id,
+                        at: std::time::Instant::now(),
+                        io_faults: 0,
+                    });
                 }
             }
             // Pass 2. One job per tick, and only once post-processing
             // has published the payload: `finalizing` is set for the
             // whole of unpack/rename/move, during which out_dir names a
             // directory whose contents are still arriving.
-            finals.retain(|(_, at)| at.elapsed() < MEDIA_FINAL_WINDOW);
-            let ready = finals.iter().position(|(id, _)| {
-                d.history_job(id).is_some_and(|job| {
+            finals.retain(|f| f.at.elapsed() < MEDIA_FINAL_WINDOW);
+            let ready = finals.iter().position(|f| {
+                d.history_job(&f.id).is_some_and(|job| {
                     let j = job.lock_ok();
-                    !j.finalizing && !media_settled(&j)
+                    // A failed job has no settled payload to read. The
+                    // retain arm below already treats it that way; this
+                    // stops it costing a directory walk and a "no media
+                    // file" line first.
+                    !j.finalizing && !media_settled(&j) && j.state != JobState::Failed
                 })
             });
             match ready {
                 Some(i) => {
-                    let (id, _) = finals.remove(i);
-                    let Some(job) = d.history_job(&id) else {
+                    let entry = finals.remove(i);
+                    let Some(job) = d.history_job(&entry.id) else {
                         continue;
                     };
                     // This attempt IS the re-judge, whatever it reads:
@@ -2598,22 +2679,66 @@ pub(super) fn spawn_media_prober(daemon: &Arc<Daemon>) {
                     // the chip settled-as-judged, not owed forever.
                     job.lock_ok().media_rejudge = false;
                     let (d2, job2) = (d.clone(), job.clone());
-                    if let Ok(Some(facts)) =
-                        tokio::task::spawn_blocking(move || probe_disk_facts(&d2, &job2)).await
-                        && latch_media(&job, facts)
-                    {
-                        // Cosmetic, and self-healing on a build bump:
-                        // the §188 re-derivation pass walks every row
-                        // and writes the facts again. Log and carry on.
-                        d.history_publish_change(&job, "the media chip");
-                        d.save_queue();
+                    // `_checked`, not the lossy wrapper: the three
+                    // outcomes are three different things to say, and a
+                    // row with no chip used to look exactly like a row
+                    // nobody had probed. Every arm leaves a line.
+                    let read =
+                        tokio::task::spawn_blocking(move || probe_disk_facts_checked(&d2, &job2))
+                            .await;
+                    match read {
+                        Ok(Ok(Some(facts))) => {
+                            let shown = media_line(&facts);
+                            if latch_media(&job, facts) {
+                                info!(target: "media", "{}: {shown}", entry.id);
+                                // Cosmetic, and self-healing on a build
+                                // bump: the §188 re-derivation pass walks
+                                // every row and writes the facts again.
+                                d.history_publish_change(&job, "the media chip");
+                                d.save_queue();
+                            }
+                        }
+                        // A settled miss: the output holds no media file
+                        // of ours, or its bytes are not a container we
+                        // read. Both answer the same way forever, so this
+                        // is the end of it and the row keeps no chip.
+                        Ok(Ok(None)) => info!(
+                            target: "media",
+                            "{}: no media file to read in the output - the row keeps no chip",
+                            entry.id
+                        ),
+                        // A failure to LOOK: an absent volume, a sleeping
+                        // mount, a folder the OS declined. Worth another
+                        // try, and worth saying once.
+                        Ok(Err(e)) => {
+                            if entry.io_faults == 0 {
+                                warn!(
+                                    target: "media",
+                                    "{}: could not read the payload for the media chip - {e}",
+                                    entry.id
+                                );
+                            }
+                            if entry.io_faults + 1 < MEDIA_IO_RETRIES {
+                                finals.push(FinalPass {
+                                    io_faults: entry.io_faults + 1,
+                                    ..entry
+                                });
+                            }
+                        }
+                        // The blocking thread itself died. Nothing was
+                        // read and nothing can be said about the file.
+                        Err(e) => warn!(
+                            target: "media",
+                            "{}: the media probe did not finish - {e}",
+                            entry.id
+                        ),
                     }
                 }
                 // Nothing ready, but drop any entry that has already
                 // settled (pass 1 finished the job off) or that failed
                 // outright and has no payload to read.
-                None => finals.retain(|(id, _)| {
-                    d.history_job(id).is_none_or(|job| {
+                None => finals.retain(|f| {
+                    d.history_job(&f.id).is_none_or(|job| {
                         let j = job.lock_ok();
                         !media_settled(&j) && j.state != JobState::Failed
                     })
@@ -2638,23 +2763,19 @@ fn probe_live_facts(d: &Daemon, id: &str) -> Option<nzbkit::mediaprobe::MediaFac
     Some(nzbkit::mediaprobe::facts::check(&info, &name))
 }
 
-/// Pass 2: the finished payload, whatever post-processing left behind.
-pub(super) fn probe_disk_facts(
-    d: &Daemon,
-    job: &Arc<Mutex<Job>>,
-) -> Option<nzbkit::mediaprobe::MediaFacts> {
-    probe_disk_facts_checked(d, job).ok().flatten()
-}
-
-/// The same probe, keeping the difference between "there is nothing to
-/// read" and "I could not read it".
+/// Pass 2: the finished payload, whatever post-processing left behind,
+/// keeping the difference between "there is nothing to read" and "I
+/// could not read it".
 ///
 /// `Ok(None)` is a settled answer: no media file of ours in the output
 /// directory, or a file whose bytes are not a container we understand.
 /// `Err` is a failure to look, and only ever an I/O one - the volume,
-/// the permission, the network mount. Callers that will act on a miss
-/// PERMANENTLY need that distinction; `probe_disk_facts` above is for
-/// the ones that will simply try again next tick (Codex sweep 7, M6).
+/// the permission, the network mount. Every caller needs that
+/// distinction (Codex sweep 7, M6): the re-derivation pass must not
+/// record "no payload" for a disk it never managed to read, and the
+/// prober says a different thing in the log for each - a lossy wrapper
+/// that erased both into `None` is what made a chipless row and an
+/// unprobed row look identical.
 pub(super) fn probe_disk_facts_checked(
     d: &Daemon,
     job: &Arc<Mutex<Job>>,

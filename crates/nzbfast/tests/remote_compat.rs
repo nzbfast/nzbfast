@@ -370,6 +370,107 @@ fn lunasea_editqueue_surface_answers_true() {
     assert!(resumed, "scheduleresume never resumed the queue");
 }
 
+/// A rename and a recategorize through NZBGet's editqueue must still be
+/// there after the daemon is restarted.
+///
+/// Both verbs re-derive `out_dir` through `requeue_category`, which may
+/// already have MOVED the release's partial download to the new folder -
+/// so a record that came back with the old name and the old directory
+/// would name a folder the bytes have left, and the job would refetch
+/// the whole release into it.
+///
+/// Neither `rename_by_ids` nor the `GroupApplyCategory` arm writes on
+/// its own: what persists them is the single tail `save_queue` in
+/// `jr_editqueue`, one write for whichever subcommand ran. That is
+/// deliberate (see `requeue_category`) and cheap, but it is also a save
+/// at a distance from the two verbs that move files, so it is pinned
+/// here rather than left to be re-derived by whoever next restructures
+/// that match.
+///
+/// The daemon is SIGKILLed, not asked to stop: the write has to have
+/// landed by the time the call was answered, not at shutdown.
+#[test]
+fn a_remote_rename_and_recategorize_survive_a_restart() {
+    let dir = scratch("renamepersist");
+    let d = serve(&dir);
+    let p = d.port;
+
+    let v = rpc(
+        p,
+        "append",
+        &format!(
+            "[\"before.nzb\",\"{}\",\"\",0,false,true,\"before.nzb\",0,\"All\",[]]",
+            b64(NZB.as_bytes())
+        ),
+    );
+    assert!(v["result"].as_i64().unwrap_or(0) > 0, "{v}");
+    let id = rpc(p, "listgroups", "[]")["result"][0]["NZBID"]
+        .as_i64()
+        .expect("the appended job");
+
+    let ok = |v: &serde_json::Value| v["result"] == serde_json::Value::Bool(true);
+    let v = rpc(
+        p,
+        "editqueue",
+        &format!("[\"GroupSetName\",\"renamed-across-restart\",[{id}]]"),
+    );
+    assert!(ok(&v), "{v}");
+    let v = rpc(
+        p,
+        "editqueue",
+        &format!("[\"GroupApplyCategory\",\"movies\",[{id}]]"),
+    );
+    assert!(ok(&v), "{v}");
+
+    // The durable record, read while the daemon that wrote it is still
+    // up: `listgroups` answers from memory, so only the file can say
+    // whether the write happened when the call was answered. out_dir is
+    // the half no wire form exposes for a queued job, and the half a
+    // move has already acted on.
+    let stored = std::fs::read_to_string(dir.join(".spool").join("queue.json"))
+        .expect("queue.json after the two edits");
+    let stored: serde_json::Value = serde_json::from_str(&stored).expect("queue.json parses");
+    let saved = stored["queue"]
+        .as_array()
+        .expect("queue array")
+        .iter()
+        .find(|j| j["name"] == "renamed-across-restart")
+        .unwrap_or_else(|| panic!("the rename never reached queue.json: {stored}"));
+    assert_eq!(
+        saved["category"].as_str(),
+        Some("movies"),
+        "the category rode with the rename in memory but not to disk: {saved}"
+    );
+    let dest = saved["out_dir"].as_str().expect("out_dir").to_string();
+    assert!(
+        dest.ends_with("movies/renamed-across-restart")
+            || dest.ends_with("movies\\renamed-across-restart"),
+        "the saved record must name the re-derived folder, not the old one: {saved}"
+    );
+
+    // Kill it where it stands and start a second daemon on the same
+    // spool. `serve` picks a fresh port; the NZBID is independent of it.
+    drop(d);
+    let d = serve(&dir);
+    let after = rpc(d.port, "listgroups", "[]")["result"]
+        .as_array()
+        .expect("listgroups array")
+        .iter()
+        .find(|r| r["NZBID"].as_i64() == Some(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("job {id} did not come back into the queue"));
+    assert_eq!(
+        after["NZBName"].as_str(),
+        Some("renamed-across-restart"),
+        "the rename did not survive the restart: {after}"
+    );
+    assert_eq!(
+        after["Category"].as_str(),
+        Some("movies"),
+        "the category did not survive the restart: {after}"
+    );
+}
+
 /// `append` with a URL as the Content param fetches and enqueues -
 /// LunaSea's add-by-URL sends exactly that, with an empty NZBFileName,
 /// and used to be answered 0 ("failed") without a fetch.

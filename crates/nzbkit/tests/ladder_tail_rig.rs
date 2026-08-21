@@ -330,8 +330,7 @@ async fn a_covered_tail_ends_in_ticks_not_ladder_walks() {
         tokio::spawn(async move {
             loop {
                 if let Some(walkers) = ctl.verdict_walkers() {
-                    let ids: HashSet<String> = walkers.into_iter().collect();
-                    claimed.fetch_add(ctl.give_up_covered(&ids).len(), Ordering::Relaxed);
+                    claimed.fetch_add(ctl.give_up_covered(&walkers).len(), Ordering::Relaxed);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

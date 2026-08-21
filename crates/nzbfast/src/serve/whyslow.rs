@@ -84,6 +84,32 @@ const MISSING_BAR: f64 = 0.20;
 /// anything. Three misses out of four early requests is noise.
 const MISSING_MIN_TRIED: u64 = 200;
 
+/// How young a post may be and still be PROPAGATING rather than gone.
+///
+/// Deliberately [`crate::diag::GONE_MIN_AGE_DAYS`] and not a fourth
+/// opinion about how long propagation takes: the failure summary, the
+/// `fail_hint` copy and the M32 auto-retry gate all already draw the
+/// line there, and a live verdict that drew it somewhere else would
+/// tell the user one thing while the download ran and the opposite
+/// thing the moment it failed.
+const YOUNG_MAX_SECS: i64 = crate::diag::GONE_MIN_AGE_DAYS as i64 * 86_400;
+
+/// Distinct BACKBONES that must each have seen the shortfall on their
+/// own numbers before this surface may say "no provider has these".
+///
+/// Five resellers of one backbone are ONE opinion - the rule
+/// [`crate::diag::LossCauses::backbones`] exists to enforce - and the
+/// claim being made here is the strong one: waiting will not help, so
+/// the release is worth abandoning. One backbone's word is not enough
+/// for that, however emphatic it is; a single upstream can be missing
+/// a spool that another carries in full.
+const GONE_MIN_BACKBONES: usize = 2;
+
+/// Articles a single backbone must have been asked for before its own
+/// miss rate counts as one of the opinions above. A backup server that
+/// saw a dozen requests has an opinion about a dozen articles.
+const BACKBONE_MIN_TRIED: u64 = 50;
+
 /// A server persistently holding under this fraction of its
 /// connection budget is being capped by the provider (the 481
 /// max-simultaneous-IP shape), if it isn't refusing outright.
@@ -129,6 +155,10 @@ pub(super) enum Layer {
     /// Neither: most of what the run is asking for is not on the
     /// servers. The wire time goes on requests that return nothing,
     /// and no layer of the stack is at fault. See `MISSING_BAR`.
+    ///
+    /// Detail splits the two situations that produce this identical
+    /// picture - `young` (still propagating) and `gone` (no backbone
+    /// has it), empty when neither is evidenced. See `missing_case`.
     Missing,
     /// Not enough, or conflicting, evidence. The default.
     #[default]
@@ -186,6 +216,10 @@ pub(super) struct Tick {
     /// - so this is never a background opinion, only the reply to a
     /// question this tick's own evidence raised.
     pub storage_suspect: bool,
+    /// Unix seconds of the youngest article in the running job's post,
+    /// 0 = unknown. See [`crate::streamhub::StreamHub::post_unix`] -
+    /// unknown is NOT "posted just now" and never reads as young here.
+    pub post_unix: i64,
     pub servers: Vec<ServerTick>,
 }
 
@@ -243,6 +277,11 @@ pub(super) struct Core {
     /// This tick's diagnostic numbers, kept for the payload.
     last_blocked_pct: f64,
     last_cpu_pct: f64,
+    /// The running job's post date as of the last tick, 0 = unknown.
+    /// Kept so the payload can ship the number the verdict rests on -
+    /// the module's rule is that an asserted verdict travels with its
+    /// evidence, and "waiting will not help" rests entirely on this.
+    last_post_unix: i64,
     /// §108 option 2: this tick reached the downstream fork with the
     /// breaker not in force, so the volume is the open question.
     disk_question: bool,
@@ -312,6 +351,7 @@ impl Core {
         };
         self.last_blocked_pct = blocked_pct;
         self.last_cpu_pct = t.cpu_pct;
+        self.last_post_unix = t.post_unix;
 
         // The live envelope estimate: what the fleet delivered on a
         // tick where nothing of ours held it back - no user cap and no
@@ -411,7 +451,7 @@ impl Core {
         if let Some(rate) = self.fleet_missing()
             && rate >= MISSING_BAR
         {
-            return (Layer::Missing, String::new());
+            return (Layer::Missing, self.missing_case(t));
         }
         // Name a host when one host owns the evidence.
         let refusal = self.worst_refusal();
@@ -438,6 +478,82 @@ impl Core {
         let tried: u64 = self.servers.values().map(|s| s.tried).sum();
         let missing: u64 = self.servers.values().map(|s| s.missing).sum();
         (tried >= MISSING_MIN_TRIED).then(|| missing as f64 / tried as f64)
+    }
+
+    /// Which of the two situations a `Missing` verdict is looking at,
+    /// as a token the page turns into a sentence (`""` = neither is
+    /// evidenced). The whole point of the split: a post nobody carries
+    /// YET and a post nobody carries ANY MORE produce the identical
+    /// picture from in here - requests going out and nothing coming
+    /// back - and the reader's move is opposite in the two cases. Wait,
+    /// or give up. One sentence covering both told Gary neither.
+    ///
+    /// Language-neutral by construction, like the host names the
+    /// `Provider` detail carries: the numbers ride in the payload and
+    /// the sentence is composed in the page, so this stays translatable.
+    ///
+    /// The bar is asymmetric on purpose. "Not here yet" costs a wait if
+    /// it is wrong; "no provider has this" invites the user to delete a
+    /// job that a retry in the morning would have finished, which is the
+    /// exact failure `Layer::Missing` was created to stop. So the
+    /// pessimistic arm needs BOTH the calendar and independent
+    /// backbones, and anything short of that falls back to the plain
+    /// statement of fact - which is not a hedge, it is what we know.
+    fn missing_case(&self, t: &Tick) -> String {
+        // No usable date: state the shortfall, claim no cause. An
+        // undated NZB reads as 0 here and must never read as "brand
+        // new" (see `StreamHub::post_unix`).
+        if t.post_unix <= 0 {
+            return String::new();
+        }
+        let age = (t.at_ms / 1000) as i64 - t.post_unix;
+        // A post dated in the future is a clock or a mis-stamped NZB,
+        // not evidence about anything. Say nothing rather than call it
+        // fresh, which would promise a wait that may never end.
+        if age < 0 {
+            return String::new();
+        }
+        if age < YOUNG_MAX_SECS {
+            return "young".into();
+        }
+        match self.missing_backbones() >= GONE_MIN_BACKBONES {
+            true => "gone".into(),
+            // Old, but only one upstream has said so. That is a fact
+            // about the providers configured here, not about the post.
+            false => String::new(),
+        }
+    }
+
+    /// Distinct backbones that are EACH seeing this shortfall on their
+    /// own numbers - the count behind a "no provider has these" claim.
+    ///
+    /// Per backbone and not per host because resellers of one upstream
+    /// read the same spool: the misses agree because there is one
+    /// opinion, not five. A backbone qualifies only once it has been
+    /// asked enough to have an opinion and its own miss rate clears the
+    /// same bar the fleet's did - a fill server that saw two misses out
+    /// of six hundred is corroborating nothing.
+    ///
+    /// A server addressed by IP names no backbone (`backbone_of` gives
+    /// back a digit label) and sits the count out, exactly as it does in
+    /// `take_census`: it cannot support a claim about independent
+    /// opinions either way.
+    fn missing_backbones(&self) -> usize {
+        let mut per: HashMap<String, (u64, u64)> = HashMap::new();
+        for (host, s) in &self.servers {
+            let bb = nzbkit::oracle::backbone_of(host);
+            if !bb.chars().any(|c| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            let e = per.entry(bb).or_insert((0, 0));
+            e.0 += s.tried;
+            e.1 += s.missing;
+        }
+        per.values()
+            .filter(|&&(tried, missing)| {
+                tried >= BACKBONE_MIN_TRIED && missing as f64 / tried as f64 >= MISSING_BAR
+            })
+            .count()
     }
 
     /// A host refusing outright, or persistently capped under its
@@ -618,6 +734,7 @@ pub(super) fn feed(
         cpu_pct: d.cpu_pct(),
         storage: d.slow_storage.paused(),
         storage_suspect: d.slow_storage.suspect(nzbkit::pool::now_ms()),
+        post_unix: d.hub.post_unix.load(Ordering::Relaxed),
         servers,
     });
     // §108 option 2: publish the question the tick just raised, so the
@@ -762,6 +879,16 @@ impl WhySlow {
                 false => 0,
             },
             "envelope_bps": c.envelope_bps,
+            // The receipts behind a `missing` verdict, always shipped so
+            // the panel can show the working whichever arm is talking:
+            // the post's own date (0 = we have none, which is why the
+            // sentence hedges), the fleet-wide miss rate that opened the
+            // case, and how many INDEPENDENT backbones are seeing it -
+            // the number that does or does not license "no provider has
+            // these articles".
+            "post_unix": c.last_post_unix,
+            "missing_pct": (c.fleet_missing().unwrap_or(0.0) * 1000.0).round() / 10.0,
+            "missing_backbones": c.missing_backbones(),
             "hardware_bps": hardware_bps,
             "hardware_src": hardware_src,
             "bench_ts": bench_ts,
@@ -774,6 +901,12 @@ impl WhySlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rigs' wall clock: a real unix millisecond stamp, not a
+    /// small number. `missing_case` measures the post's age against
+    /// `at_ms`, so a toy epoch would put every plausible post date in
+    /// the future and quietly suppress the arm under test.
+    const T0: u64 = 1_755_000_000_000;
 
     fn srv(host: &str, connected: usize, budget: usize, bytes: u64, blocked: u64) -> ServerTick {
         ServerTick {
@@ -807,18 +940,23 @@ mod tests {
         /// as `suspect`: every other case wants `srv`'s default of 100
         /// tried and none missing.
         miss: Option<(u64, u64)>,
+        /// The running post's date, as `StreamHub::post_unix` publishes
+        /// it. 0 (the default every other case wants) is UNKNOWN, which
+        /// asserts neither propagation nor a takedown.
+        post_unix: i64,
     }
 
     impl Rig {
         fn new() -> Rig {
             Rig {
                 core: Core::default(),
-                t: 1_000_000,
+                t: T0,
                 bytes: HashMap::new(),
                 blocked: HashMap::new(),
                 recon: HashMap::new(),
                 suspect: false,
                 miss: None,
+                post_unix: 0,
             }
         }
 
@@ -864,6 +1002,7 @@ mod tests {
                     cpu_pct: cpu,
                     storage,
                     storage_suspect: self.suspect,
+                    post_unix: self.post_unix,
                     servers: sv,
                 });
             }
@@ -982,6 +1121,206 @@ mod tests {
             ],
         );
         assert_eq!(r.core.verdict().0, Layer::Provider);
+    }
+
+    /// The articles may not be available YET, or may have been taken
+    /// down. A release grabbed the hour it pre'd 430s everywhere while
+    /// the backbones fill in, and from in here that is pixel-for-pixel
+    /// a takedown. The calendar is the only thing that separates them,
+    /// so the young arm says so and nothing else does.
+    #[test]
+    fn a_brand_new_post_full_of_holes_is_still_propagating() {
+        let mut r = Rig::new();
+        r.miss = Some((2253, 982));
+        // Two hours old, against the rig's own wall clock.
+        r.post_unix = (r.t / 1000) as i64 - 2 * 3600;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[
+                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
+            ],
+        );
+        assert_eq!(r.core.verdict(), (Layer::Missing, "young"));
+    }
+
+    /// The other side of the same regime: old enough that propagation
+    /// is finished, and two independent backbones each saying so. Only
+    /// here may the surface tell a user that waiting will not help.
+    #[test]
+    fn an_old_post_two_backbones_agree_is_gone() {
+        let mut r = Rig::new();
+        r.miss = Some((2253, 982));
+        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[
+                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
+            ],
+        );
+        assert_eq!(r.core.verdict(), (Layer::Missing, "gone"));
+    }
+
+    /// Five resellers of ONE backbone are one opinion. The same old
+    /// post, the same misses, every server behind the same upstream:
+    /// the shortfall is asserted, the takedown is NOT.
+    #[test]
+    fn one_backbone_however_emphatic_cannot_say_gone() {
+        let mut r = Rig::new();
+        r.miss = Some((2253, 982));
+        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[
+                // Same brand, two hostnames: `backbone_of` folds them.
+                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                ("reader.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+            ],
+        );
+        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
+    }
+
+    /// An NZB with no usable date reads as post_unix 0, and 0 is
+    /// UNKNOWN, not "posted this second". Calling it young would
+    /// promise a wait that may never end.
+    #[test]
+    fn an_undated_post_claims_neither_cause() {
+        let mut r = Rig::new();
+        r.miss = Some((2253, 982));
+        r.post_unix = 0;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[
+                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
+            ],
+        );
+        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
+    }
+
+    /// A post dated in the future - a wrong clock, a mis-stamped NZB -
+    /// is not evidence of freshness. Neither arm may fire on it.
+    #[test]
+    fn a_post_dated_in_the_future_claims_neither_cause() {
+        let mut r = Rig::new();
+        r.miss = Some((2253, 982));
+        r.post_unix = (r.t / 1000) as i64 + 30 * 86_400;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[
+                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
+            ],
+        );
+        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
+    }
+
+    /// The boundary itself, walked both sides. `GONE_MIN_AGE_DAYS` is
+    /// where this project already draws the propagation line and this
+    /// surface must not draw a fourth one of its own.
+    #[test]
+    fn the_young_gone_boundary_is_gone_min_age_days() {
+        for (age_secs, want) in [
+            (YOUNG_MAX_SECS - 60, "young"),
+            (YOUNG_MAX_SECS, "gone"),
+            (YOUNG_MAX_SECS + 86_400, "gone"),
+        ] {
+            let mut r = Rig::new();
+            r.miss = Some((2253, 982));
+            r.post_unix = (r.t / 1000) as i64 - age_secs;
+            r.run(
+                WINDOW,
+                70e6,
+                0,
+                1_000_000_000,
+                30.0,
+                false,
+                &[
+                    ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
+                    ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
+                ],
+            );
+            assert_eq!(
+                r.core.verdict(),
+                (Layer::Missing, want),
+                "post {age_secs}s old"
+            );
+        }
+    }
+
+    /// A backbone that saw a handful of requests is not one of the
+    /// independent opinions "gone" needs, even at a 100% miss rate on
+    /// its own tiny sample. Under `BACKBONE_MIN_TRIED` it sits out.
+    #[test]
+    fn a_barely_used_backbone_is_not_a_second_opinion() {
+        let mut r = Rig::new();
+        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+        r.run(
+            WINDOW,
+            70e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[("news.alpha.com", 8, 8, 35_000_000, 100, 0, false)],
+        );
+        // The rig's `miss` is fleet-uniform, so the small server is
+        // built by hand: 4000 tried / 1900 missing on alpha, 10/10 on
+        // the fill host. Fleet-wide that clears MISSING_BAR; the fill
+        // host's own sample does not clear BACKBONE_MIN_TRIED.
+        let mut core = Core::default();
+        for i in 0..WINDOW {
+            core.tick(Tick {
+                owner: Some("job1".into()),
+                at_ms: T0 + (i as u64 + 1) * 1000,
+                achieved_bps: 70e6,
+                throttle_bps: 0,
+                anchor_bps: 1_000_000_000,
+                cpu_pct: 30.0,
+                storage: false,
+                storage_suspect: false,
+                post_unix: (T0 / 1000) as i64 - 9 * 86_400,
+                servers: vec![
+                    ServerTick {
+                        tried: 4000,
+                        missing: 1900,
+                        ..srv("news.alpha.com", 8, 8, 35_000_000 * (i as u64 + 1), 100)
+                    },
+                    ServerTick {
+                        tried: 10,
+                        missing: 10,
+                        ..srv("news.beta.com", 8, 8, 35_000_000 * (i as u64 + 1), 100)
+                    },
+                ],
+            });
+        }
+        assert_eq!(core.verdict(), (Layer::Missing, ""));
     }
 
     /// A handful of misses in the first seconds of a run is not a
@@ -1381,6 +1720,7 @@ mod tests {
             cpu_pct: 30.0,
             storage: false,
             storage_suspect: false,
+            post_unix: 0,
             servers: vec![srv("a", 8, 8, 500_000_000, 0)],
         });
         assert_eq!(r.core.verdict().0, Layer::Unknown);
@@ -1529,6 +1869,7 @@ mod tests {
             cpu_pct: 30.0,
             storage: false,
             storage_suspect: false,
+            post_unix: 0,
             servers: vec![srv("a", 8, 8, 1000, 0)],
         });
         assert_eq!(

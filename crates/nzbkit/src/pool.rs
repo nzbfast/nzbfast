@@ -712,7 +712,14 @@ impl PoolConfig {
 /// older than N days.
 #[derive(Debug, Clone)]
 pub struct ArticleReq {
-    pub id: String,
+    /// R9: the bracketed message-id, interned. The queue item, the
+    /// in-flight and steer maps and the outcome all share THIS
+    /// allocation, so an id is heap-copied once per run instead of the
+    /// six to nine times it used to be. `Arc<str>` rather than an arena
+    /// index because ids escape the run (see [`FetchOutcome`]), and
+    /// `HashMap<Arc<str>, _>` still answers `&str` lookups through
+    /// `Borrow`, so borrow-only readers kept their signatures.
+    pub id: Arc<str>,
     /// Article age in days (from the NZB `<file date>`); 0 = fresh/unknown.
     pub age_days: u32,
     /// Expected yEnc part number (the NZB `<segment number>`); 0 =
@@ -725,9 +732,12 @@ pub struct ArticleReq {
 
 impl ArticleReq {
     /// A request with no age information - never retention-excluded.
-    pub fn fresh(id: String) -> ArticleReq {
+    /// Takes anything an `Arc<str>` can be built from, so a caller that
+    /// already holds an interned handle passes it by refcount bump and
+    /// one that has just formatted a `String` pays the one copy here.
+    pub fn fresh(id: impl Into<Arc<str>>) -> ArticleReq {
         ArticleReq {
-            id,
+            id: id.into(),
             age_days: 0,
             part: 0,
         }
@@ -757,7 +767,12 @@ pub fn retention_mask(retention_days: &[u32], age_days: u32) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingCause {
     /// Every server still live was asked and answered 430/423.
-    Gone,
+    /// `takedown`: at least one of those refusals said the article was
+    /// REMOVED rather than not found ([`crate::nntp::takedown_flavoured`]
+    /// - Giganews's 451, or refusal text naming a removal). A hint for
+    /// the failure summary and the availability oracle, never part of
+    /// the verdict: the unanimity contract is identical either way.
+    Gone { takedown: bool },
     /// The article's age exceeds every configured server's
     /// `retention_days` - no server was ever asked.
     Retention,
@@ -766,8 +781,8 @@ pub enum MissingCause {
 /// The decode consumer's per-article verdict, reported back through
 /// [`QueueControl::note_decoded`] (TODO 114 consumer steer). The
 /// consumer reports only what its own decode saw; the expected part
-/// number stays in the pool (`Shared::parts`), which does the
-/// split-brain identity comparison itself.
+/// number stays in the pool (`Work::part`, via the stashed [`Handed`]
+/// copy), which does the split-brain identity comparison itself.
 #[derive(Debug, Clone, Copy)]
 pub enum DecodeReport<'a> {
     /// Decode succeeded; `part` is the body's declared yEnc part
@@ -793,11 +808,11 @@ pub enum DecodeAck {
 #[derive(Debug)]
 pub enum FetchOutcome {
     /// Raw dot-stuffed body, ready for `yenc::decode`.
-    Done { id: String, raw: Vec<u8> },
+    Done { id: Arc<str>, raw: Vec<u8> },
     /// No server can produce the article; `cause` says why.
-    Missing { id: String, cause: MissingCause },
+    Missing { id: Arc<str>, cause: MissingCause },
     /// Transport failures exhausted the retry budget.
-    Failed { id: String, error: String },
+    Failed { id: Arc<str>, error: String },
 }
 
 #[derive(Debug, Default)]
@@ -812,6 +827,24 @@ pub struct PoolStats {
     /// summary names such servers; without that, one dead backup silently
     /// turns a single 430 into "missing segments".
     pub ever_connected: bool,
+    /// Did this server connect, serve, and then LEAVE while the run still
+    /// had work outstanding - a permanent refusal, a prepaid block or
+    /// quota spent, the cumulative outage budget blown, the
+    /// connect-attempt cap? All four end with the server's last worker
+    /// returning, and until this bit existed all four were SILENT.
+    ///
+    /// `ever_connected` cannot see it: that stays TRUE for a server that
+    /// worked for ten minutes and then walked out. So nothing said the
+    /// quorum had shrunk while `live_mask` (alive NOW) stopped counting
+    /// the leaver, and the survivors' 430s on the segments it alone
+    /// carried read as unanimous. What that cost - a healthy post
+    /// reported gone, the one automatic retry suppressed, and with it the
+    /// indexer dead-report, FailureLink re-grab and duplicate promotion -
+    /// is written up at `LossCauses::left_servers` (audit 20 Aug, A3).
+    ///
+    /// Never true for a server that never connected at all: that is
+    /// `ever_connected == false`, its own clause and its own sentence.
+    pub left_mid_run: bool,
     /// WHY this server's sessions ended, counted where it happens.
     ///
     /// `reconnects` alone says a session died and was redialled; it does
@@ -870,8 +903,11 @@ pub use livestats::*;
 // M11 seek re-prioritization: QueueControl and its impl live in
 // pool/queue.rs (TODO 106 size-gate split); the re-export keeps
 // every `pool::QueueControl` spelling unchanged.
+mod done_bits;
+use done_bits::DoneBits;
+
 mod queue;
-pub use queue::QueueControl;
+pub use queue::{QueueControl, Walker};
 
 /// §129 3g: bare refusals one session remembers having handed out, so a
 /// later proof that the session was desynced can void the passes they
@@ -906,7 +942,10 @@ const SOFT_REARM_MAX: usize = 8192;
 const SOFT_REARM_CAP: u8 = 24;
 
 struct Work {
-    id: String,
+    /// The interned id from [`ArticleReq`] (R9), MOVED in at queue
+    /// construction: a requeue, a hedge dup, a `handed` stash and the
+    /// outcome all hold that same allocation.
+    id: Arc<str>,
     attempts: u8,
     /// M11: promoted to the queue front by a streaming seek. Shed
     /// pipelines re-insert their abandoned items BEHIND the promoted run,
@@ -978,6 +1017,26 @@ struct Work {
     /// identical refusal codes, so `handle_missing` cannot tell the
     /// difference - without buying an article to throw away.
     probe: bool,
+    /// Article age in days from [`ArticleReq`]; 0 = fresh/unknown. Read
+    /// by the M29 oracle when this item's outcome lands. Rides the Work
+    /// (and [`Inflight`], for hedge dups born without a queued original)
+    /// instead of a pool-wide id-keyed map - the map's ~110 B/entry was
+    /// the A2 perf-audit cost, and a dup seeded from the inflight entry
+    /// still charges the TRUE age, never a zero.
+    age_days: u32,
+    /// Expected yEnc part number from [`ArticleReq`]; 0 = undeclared.
+    /// Read by the split-brain part-mismatch gate in
+    /// [`QueueControl::note_decoded`] via the stashed [`Handed`] copy -
+    /// which is rebuilt from whatever Work DELIVERED, so dups must carry
+    /// it too or a dup-delivered wrong-part body would sail through.
+    part: u32,
+    /// C4: this article's completion ordinal - its accepted-request
+    /// index at queue construction, the bit `Shared::done` arbitrates
+    /// on. Rides the Work (and [`Inflight`], so both hedge dup
+    /// constructors seed their fresh Work from the entry) exactly as
+    /// `age_days`/`part` do: a dup-delivered body must claim the SAME
+    /// bit as its original or one article could emit two outcomes.
+    ord: u32,
 }
 
 /// What a worker currently has on the wire, split by kind. The two
@@ -1075,6 +1134,19 @@ struct Inflight {
     /// suspect articles immediately - same server included - instead
     /// of waiting out the full adaptive budget.
     suspect: bool,
+    /// The original's [`Work::age_days`], seeded at registration so a
+    /// hedge dup - built fresh from this entry, no queued Work in hand -
+    /// still carries the true age to the oracle.
+    age_days: u32,
+    /// The original's [`Work::part`], seeded at registration for the
+    /// same reason: a dup-delivered body must still face the
+    /// part-mismatch gate.
+    part: u32,
+    /// The original's [`Work::ord`], seeded at registration so a hedge
+    /// dup claims the original's completion bit - and so the hedge
+    /// scans and the census can ask `done` about an in-flight entry
+    /// without an id lookup.
+    ord: u32,
 }
 
 /// State shared by every worker of one fetch run.
@@ -1285,10 +1357,12 @@ struct Shared {
     /// exit when this hits zero - a queue that looks empty can still
     /// receive requeues from other workers' in-flight failures/430s.
     pending: AtomicUsize,
-    /// Message-ids whose outcome has been emitted.
-    done: std::sync::Mutex<HashSet<String>>,
+    /// Articles whose outcome has been emitted, one bit per
+    /// [`Work::ord`] (C4: the id-keyed set cost ~110 B per completion;
+    /// this is one bit, and the count rides along exactly).
+    done: std::sync::Mutex<DoneBits>,
     /// Articles currently in flight, keyed by message-id.
-    inflight: std::sync::Mutex<HashMap<String, Inflight>>,
+    inflight: std::sync::Mutex<HashMap<Arc<str>, Inflight>>,
     /// Per-server raw byte counters (also the caller-visible stats).
     bytes: Vec<Arc<AtomicU64>>,
     /// Per-server session-end tally by cause, in [`SessionEnds`] field
@@ -1304,19 +1378,11 @@ struct Shared {
     /// Per-server time-to-status EWMA in ms (adaptive timeout path,
     /// TODO 96.1). 0 = unmeasured, which budgets at the clamp ceiling.
     ttfb_ms: Vec<AtomicU64>,
-    /// M29 oracle: article age in days by message-id (only ids with a
-    /// known non-zero age; immutable after build). Lets the outcome
-    /// recorder bucket a hit/430 without threading age through Work.
-    ages: HashMap<String, u32>,
-    /// Expected yEnc part number by message-id (only ids that declared
-    /// one; immutable after build). Same shape as `ages` for the same
-    /// reason: the CRC-retry gate needs it without widening Work.
-    parts: HashMap<String, u32>,
     /// Ids the CRC-retry gate has already steered once. Bounds the
     /// experiment to a single cross-server retry per article - the
     /// second bad copy is delivered as-is and PAR2 owns it, exactly as
     /// with the knob off.
-    crc_retried: std::sync::Mutex<HashSet<String>>,
+    crc_retried: std::sync::Mutex<HashSet<Arc<str>>>,
     /// §129 3g: bare-refusal passes to RE-ARM, keyed by message-id, the
     /// value being the server-group bits to clear from `Work::soft_430`.
     /// Filled when a session shows it was reading responses off by one -
@@ -1324,14 +1390,24 @@ struct Shared {
     /// that stalled with requests outstanding - and drained by the next
     /// bare refusal for that article. Empty on every healthy run, and
     /// the counter beside it keeps the hot path off this lock.
-    soft_rearm: std::sync::Mutex<HashMap<String, u32>>,
+    soft_rearm: std::sync::Mutex<HashMap<Arc<str>, u32>>,
     soft_rearm_n: AtomicUsize,
+    /// Takedown-flavoured refusal evidence by message-id: server-group
+    /// bits whose CHARGED refusal said "removed" rather than "not
+    /// found" (see [`crate::nntp::takedown_flavoured`]). A HINT and
+    /// never a gate - it changes no routing, no unanimity and no
+    /// verdict; a terminal Gone drains its entry to flavour the
+    /// outcome for the failure summary. Empty on every run that never
+    /// sees one, and the counter beside it keeps the terminal path off
+    /// the lock.
+    takedown: std::sync::Mutex<HashMap<Arc<str>, u32>>,
+    takedown_n: AtomicUsize,
     /// M5: servers that burned their WHOLE retry budget on one article,
     /// keyed by message-id, the value being their server bits. Routing
     /// only, never evidence - pool/gates.rs holds the reasoning and
     /// everything that reads it. Empty on every healthy run, and the
     /// counter beside it keeps the queue scan off this lock.
-    spent: std::sync::Mutex<HashMap<String, u32>>,
+    spent: std::sync::Mutex<HashMap<Arc<str>, u32>>,
     spent_n: AtomicUsize,
     /// TODO 114 consumer steer: Done outcomes handed to the consumer
     /// whose `complete_one` is DEFERRED until the consumer's decode
@@ -1342,7 +1418,7 @@ struct Shared {
     /// when the damaged body was the last article on the wire. Bounded
     /// by the outcome channel depth plus the consumers' in-hand
     /// batches. Empty unless `PoolConfig::crc_steer` is on.
-    handed: std::sync::Mutex<HashMap<String, Handed>>,
+    handed: std::sync::Mutex<HashMap<Arc<str>, Handed>>,
     /// TODO 114 consumer steer: requeued-after-claim Work waiting to
     /// re-enter the queue. The verdict thread must NOT take the tokio
     /// queue mutex - it is FIFO-fair and worker-hot, and during a
@@ -1371,7 +1447,7 @@ struct Shared {
     /// blind window, and ~6 s of disk backpressure could outlast the
     /// verdict's grace-plus-votes threshold), and otherwise when the
     /// channel accepts the body.
-    done_ok: std::sync::Mutex<HashSet<String>>,
+    done_ok: std::sync::Mutex<HashSet<Arc<str>>>,
     start: Instant,
     /// Monotonic count of DELIBERATE non-terminal progress. The
     /// caller's deadlock watchdog treats a run as wedged when decoded
@@ -1442,7 +1518,7 @@ struct Shared {
     /// budget, retention seed) so [`QueueControl::requeue`] can resurrect
     /// them exactly as they were - the in-stream PAR2 sniff un-defers a
     /// slot when activation reveals it was set-covered payload after all.
-    cancelled: std::sync::Mutex<HashMap<String, Work>>,
+    cancelled: std::sync::Mutex<HashMap<Arc<str>, Work>>,
     /// Tail duplicates that won their race (emitted the outcome).
     dup_wins: AtomicU64,
     /// The consumer acks decode+write via `note_settled` (see
@@ -1567,6 +1643,10 @@ struct Shared {
     /// connection (fresh dial or warm-pool). Read into
     /// `PoolStats::ever_connected` when the run returns.
     connected: Vec<AtomicBool>,
+    /// Per-server: latched when a server that HAD connected loses its last
+    /// worker while the run still has work pending. Read into
+    /// [`PoolStats::left_mid_run`], which says why it is needed.
+    left_mid_run: Vec<AtomicBool>,
     /// §15e per-SERVER auth state, one slot per server index.
     ///
     /// A refusal to authenticate is a property of the server, not of the
@@ -1623,7 +1703,7 @@ struct Shared {
     /// the whole fleet is fetching exactly the head/tail articles the
     /// first promote names - shedding them delayed the volume headers the
     /// extractor needs to classify, live-caught by the ordering e2e).
-    promoted_ids: std::sync::Mutex<HashSet<String>>,
+    promoted_ids: std::sync::Mutex<HashSet<Arc<str>>>,
     /// Per-server: ms-since-start of the last FRUITLESS full-queue scan
     /// (u64::MAX = never). `next_work`'s scan pops and re-pushes every
     /// item a server can't take - O(queue) under the shared queue lock.
@@ -1635,6 +1715,15 @@ struct Shared {
     /// [`SCAN_RETRY_MS`]; new work only appears via queue mutations, so
     /// the worst case is a one-tick delay picking it up.
     scan_futile: Vec<AtomicU64>,
+    /// N6 endgame idle-spin gate: generation counter over the inflight
+    /// map, bumped ([`Self::bump_inflight_gen`], hedge module) by every
+    /// mutation that can create or advance a `pick_dup` candidate. The
+    /// full rationale sits on the gate itself at the top of `pick_dup`.
+    inflight_gen: AtomicU64,
+    /// Per-server: ms-since-start of the last fruitless idle `pick_dup`
+    /// walk (u64::MAX = never) and the generation that walk snapshotted.
+    dup_futile: Vec<AtomicU64>,
+    dup_futile_gen: Vec<AtomicU64>,
     /// B3 wire-cap: estimated bytes of BODY responses currently owed to
     /// this pool's pipelines, GLOBAL across servers - the budget-exempt
     /// wire-side memory (pooled ~800 KB bodies + per-conn BufReader).
@@ -1901,47 +1990,6 @@ impl Drop for WorkerLife {
     }
 }
 
-/// The fleet shrank: `prev == 1` means the departing worker was its
-/// server's LAST, so from this moment the server contributes nothing to
-/// the run - `live_mask` no longer counts it. That is the single most
-/// throughput-denting thing a pool can do quietly, and until this marker
-/// existed it WAS quiet: each worker bowed out alone (session or connect
-/// exhaustion, an auth yield) and no one said the server itself was gone.
-///
-/// Natural wind-downs are not bow-outs: with no work pending, or the run
-/// aborted or draining, every worker leaves and none of it belongs on
-/// the graph. Fires at most once per server per run by construction -
-/// `alive` only ever crosses 1 -> 0 once, since workers are never
-/// re-spawned after the ramp.
-fn note_server_dark(shared: &Shared, idx: usize, prev: usize) {
-    if prev != 1
-        || shared.pending.load(Ordering::Acquire) == 0
-        || shared.aborted.load(Ordering::Acquire)
-        || shared.draining.load(Ordering::Acquire)
-        // §96.5: a budget bow-out already told its own story ("block
-        // spent") - the connections-kept-failing copy below would be a
-        // lie about a server that was serving fine.
-        || shared.budget_noted[idx].load(Ordering::Relaxed)
-    {
-        return;
-    }
-    let Some(live) = &shared.live else {
-        return;
-    };
-    let others = shared
-        .alive
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| *i != idx && a.load(Ordering::Relaxed) > 0)
-        .count();
-    let detail = match others {
-        0 => "out of the run - its connections kept failing, and no other server is left",
-        1 => "out of the run - its connections kept failing; the remaining server carries on",
-        _ => "out of the run - its connections kept failing; the other servers carry on",
-    };
-    live.note(idx, "retired", detail);
-}
-
 impl Shared {
     /// §96.5: has this server spent its remaining prepaid block on this
     /// run? One relaxed load and a compare - the fast path the top-up
@@ -2062,37 +2110,38 @@ impl Shared {
     fn new(
         reqs: Vec<ArticleReq>,
         servers: &[(ServerConfig, PoolConfig)],
-    ) -> (Arc<Shared>, Vec<String>) {
+    ) -> (Arc<Shared>, Vec<Arc<str>>) {
         let n_servers = servers.len();
         let retentions: Vec<u32> = servers.iter().map(|(s, _)| s.retention_days).collect();
         let all = servers_mask(n_servers);
         let mut queue: VecDeque<Work> = VecDeque::with_capacity(reqs.len());
-        let mut unservable: Vec<String> = Vec::new();
+        let mut unservable: Vec<Arc<str>> = Vec::new();
         // A repeated id charges `pending` per occurrence but `claim_done`
         // credits once - the run would never turn terminal and every worker
         // would idle-loop forever. Malformed NZBs do repeat <segment> ids,
         // and this guards every pool entry point regardless of what the
-        // caller built: each id is requested exactly once.
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut dups = 0usize;
-        let mut ages: HashMap<String, u32> = HashMap::new();
-        let mut parts: HashMap<String, u32> = HashMap::new();
-        for r in reqs {
-            if !seen.insert(r.id.clone()) {
-                dups += 1;
+        // caller built: each id is requested exactly once (the FIRST
+        // occurrence, as ever). A borrowed-id prepass marks the keepers
+        // so the dedup set never clones a String and dies before the
+        // queue is built.
+        let keep: Vec<bool> = {
+            let mut seen: HashSet<&str> = HashSet::with_capacity(reqs.len());
+            reqs.iter().map(|r| seen.insert(&*r.id)).collect()
+        };
+        let dups = keep.iter().filter(|&&k| !k).count();
+        for (r, keep) in reqs.into_iter().zip(keep) {
+            if !keep {
                 continue;
-            }
-            if r.age_days > 0 {
-                ages.insert(r.id.clone(), r.age_days);
-            }
-            if r.part > 0 {
-                parts.insert(r.id.clone(), r.part);
             }
             let seed = retention_mask(&retentions, r.age_days);
             if seed & all == all {
                 unservable.push(r.id);
             } else {
+                // C4: the ordinal is the accepted-request index - the
+                // borrowed-id prepass above already fixed
+                // first-occurrence order, so this is stable per run.
                 queue.push_back(Work {
+                    ord: queue.len() as u32,
                     id: r.id,
                     attempts: 0,
                     promoted: false,
@@ -2105,6 +2154,8 @@ impl Shared {
                     rearms: 0,
                     ladder: false,
                     probe: false,
+                    age_days: r.age_days,
+                    part: r.part,
                 });
             }
         }
@@ -2115,10 +2166,11 @@ impl Shared {
             );
         }
         let pending = AtomicUsize::new(queue.len());
+        let done = std::sync::Mutex::new(DoneBits::new(queue.len()));
         let shared = Arc::new(Shared {
             queue: Mutex::new(queue),
             pending,
-            done: std::sync::Mutex::new(HashSet::new()),
+            done,
             inflight: std::sync::Mutex::new(HashMap::new()),
             bytes: (0..n_servers)
                 .map(|_| Arc::new(AtomicU64::new(0)))
@@ -2128,11 +2180,11 @@ impl Shared {
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
             blocked_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
-            ages,
-            parts,
             crc_retried: std::sync::Mutex::new(HashSet::new()),
             soft_rearm: std::sync::Mutex::new(HashMap::new()),
             soft_rearm_n: AtomicUsize::new(0),
+            takedown: std::sync::Mutex::new(HashMap::new()),
+            takedown_n: AtomicUsize::new(0),
             spent: std::sync::Mutex::new(HashMap::new()),
             spent_n: AtomicUsize::new(0),
             handed: std::sync::Mutex::new(HashMap::new()),
@@ -2185,6 +2237,7 @@ impl Shared {
             levels: servers.iter().map(|(s, _)| s.level).collect(),
             alive: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             connected: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
+            left_mid_run: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             auth: (0..n_servers).map(|_| AuthState::default()).collect(),
             workers_live: AtomicUsize::new(0),
             workers_born: AtomicUsize::new(0),
@@ -2193,6 +2246,9 @@ impl Shared {
             promoted_pending: AtomicUsize::new(0),
             promoted_ids: std::sync::Mutex::new(HashSet::new()),
             scan_futile: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
+            inflight_gen: AtomicU64::new(0),
+            dup_futile: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
+            dup_futile_gen: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             inflight_body_bytes: AtomicU64::new(0),
             srv_rate_val: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             srv_rate_at: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
@@ -2550,8 +2606,11 @@ impl Shared {
             .any(|(i, a)| i != me && a.load(Ordering::Relaxed) > 0)
     }
 
-    /// First-emitter check: true exactly once per id.
-    fn claim_done(&self, id: &str) -> bool {
+    /// First-emitter check: true exactly once per article. `ord` is
+    /// the article's [`Work::ord`] (C4 - the bit arbitrated on); the
+    /// id is still taken for the spent-map cleanup, which stays
+    /// message-id keyed.
+    fn claim_done(&self, id: &str, ord: u32) -> bool {
         // A terminal article has no ladder left to route, so drop its
         // spent bits with it - the map is keyed by message-id and would
         // otherwise carry every rescued article to the end of the run.
@@ -2561,7 +2620,7 @@ impl Shared {
                 self.spent_n.store(m.len(), Ordering::Release);
             }
         }
-        self.done.lock_ok().insert(id.to_string())
+        self.done.lock_ok().claim(ord)
     }
 
     /// §129 3g: a session has just shown it was reading responses off by
@@ -2580,7 +2639,7 @@ impl Shared {
     /// The ledger is capped, and so is this map: the cost of a re-arm is
     /// at most one extra dispatch per article, but an unbounded map on a
     /// 50,000-article job is a leak.
-    fn void_soft_430(&self, ids: &VecDeque<String>, group_bits: u32) {
+    fn void_soft_430(&self, ids: &VecDeque<Arc<str>>, group_bits: u32) {
         if ids.is_empty() {
             return;
         }
@@ -2634,6 +2693,29 @@ impl Shared {
         bits
     }
 
+    /// Record a CHARGED takedown-flavoured refusal for this article
+    /// (see the `takedown` field doc). Same fold discipline as
+    /// `tried_430`: the whole mirror group's bits, because the evidence
+    /// is about the backbone, not the reseller.
+    fn note_takedown(&self, id: &Arc<str>, group_bits: u32) {
+        let mut m = self.takedown.lock_ok();
+        *m.entry(id.clone()).or_insert(0) |= group_bits;
+        self.takedown_n.store(m.len(), Ordering::Release);
+    }
+
+    /// Drain an article's takedown evidence at its terminal verdict.
+    /// Lock-free when nothing was ever flagged, which is every run on
+    /// backbones that never name the removal.
+    fn take_takedown(&self, id: &str) -> u32 {
+        if self.takedown_n.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
+        let mut m = self.takedown.lock_ok();
+        let bits = m.remove(id).unwrap_or(0);
+        self.takedown_n.store(m.len(), Ordering::Release);
+        bits
+    }
+
     /// TODO 114 consumer steer: park a claimed, about-to-be-delivered
     /// body's Work in `handed` so [`QueueControl::note_decoded`] can
     /// requeue it after claim (see the field doc). Always `dup: false`
@@ -2657,6 +2739,9 @@ impl Shared {
                     rearms: w.rearms,
                     ladder: false,
                     probe: false,
+                    age_days: w.age_days,
+                    part: w.part,
+                    ord: w.ord,
                 },
                 server: ctx.idx,
                 group_bits: ctx.group_bits,
@@ -2692,61 +2777,9 @@ impl Shared {
         self.complete_one();
     }
 
-    fn register_inflight(&self, w: &Work, server: usize) {
-        if w.dup {
-            return; // dups are tracked via the original's entry
-        }
-        self.inflight.lock_ok().insert(
-            w.id.clone(),
-            Inflight {
-                server,
-                dispatched: Instant::now(),
-                dups: 0,
-                tried_430: w.tried_430,
-                dup_servers: 0,
-                tried_fail: w.tried_fail,
-                suspect: false,
-                found: 0,
-            },
-        );
-    }
-
-    /// TODO 96.4: a STAT probe came back 223 - this backbone holds the
-    /// article. Recorded on the in-flight entry the probe was racing,
-    /// which is what stops the rest of the fan-out (see `Inflight::found`).
-    /// The entry can already be gone (the original landed while the probe
-    /// was reading); that is a no-op.
-    fn note_found(&self, id: &str, group_bits: u32) {
-        if let Some(inf) = self.inflight.lock_ok().get_mut(id) {
-            inf.found |= group_bits;
-        }
-    }
-
-    fn deregister_inflight(&self, w: &Work) {
-        if !w.dup {
-            self.inflight.lock_ok().remove(&w.id);
-        }
-    }
-
-    /// Done-path deregistration: also feeds the article-time EWMA the
-    /// hedge bound trains on. Failure, requeue and shed paths use plain
-    /// [`Self::deregister_inflight`] - a requeue's age is not a
-    /// completion time.
-    fn deregister_inflight_done(&self, w: &Work) {
-        if w.dup {
-            return; // dups are tracked via the original's entry
-        }
-        if let Some(inf) = self.inflight.lock_ok().remove(&w.id) {
-            let ms = (inf.dispatched.elapsed().as_millis() as u64).max(1);
-            let old = self.art_ms.load(Ordering::Relaxed);
-            let new = if old == 0 { ms } else { old - old / 8 + ms / 8 };
-            self.art_ms.store(new.max(1), Ordering::Relaxed);
-            // M7b.2: the by-owner twin. Charged to the entry's OWNER,
-            // not the completing worker - when a dup wins, the elapsed
-            // time still describes how long the owner held the article.
-            self.note_srv_art(inf.server, ms);
-        }
-    }
+    // The inflight-entry lifecycle (register_inflight / note_found /
+    // deregister_inflight / deregister_inflight_done) lives with the
+    // dup race that reads the map: pool/hedge.rs.
 }
 
 /// Fetch every article in `reqs`, streaming outcomes to `out` as they land.
@@ -2872,6 +2905,7 @@ pub async fn fetch_all_multi_ctl(
             connects: c.load(Ordering::Relaxed),
             reconnects: r.load(Ordering::Relaxed),
             ever_connected: shared.connected[si].load(Ordering::Relaxed),
+            left_mid_run: shared.left_mid_run[si].load(Ordering::Relaxed),
             ends: shared.session_ends(si),
             blocked_ms: shared
                 .blocked_ms
@@ -3072,7 +3106,7 @@ async fn next_work(
     // and waiting for it deadlocks the whole run (the queue rotates the
     // item forever). Collected under the lock, reported after.
     let live = shared.live_mask();
-    let mut unservable: Vec<String> = Vec::new();
+    let mut unservable: Vec<(Arc<str>, u32)> = Vec::new();
     let mut picked: Option<Work> = None;
     // Promoted items this (slow) server steps PAST: they must go back to
     // the queue FRONT in order - a fast server picks from the front, and
@@ -3099,7 +3133,7 @@ async fn next_work(
         for _ in 0..q.len() {
             let Some(mut w) = q.pop_front() else { break };
             if w.tried_430 & live == live {
-                unservable.push(w.id);
+                unservable.push((w.id, w.ord));
                 continue;
             }
             // M5: the fill gate asks for refusals, and a lower-level
@@ -3154,12 +3188,13 @@ async fn next_work(
     if picked.is_none() {
         shared.scan_futile[ctx.idx].store(now_ms, Ordering::Relaxed);
     }
-    for id in unservable {
-        if shared.claim_done(&id) {
+    for (id, ord) in unservable {
+        if shared.claim_done(&id, ord) {
+            let takedown = shared.take_takedown(&id) != 0;
             let _ = out
                 .send(FetchOutcome::Missing {
                     id,
-                    cause: MissingCause::Gone,
+                    cause: MissingCause::Gone { takedown },
                 })
                 .await;
             shared.complete_one();
@@ -3178,6 +3213,11 @@ async fn next_work(
                 true
             }
         };
+        if latched_now {
+            // The latch opens the early fan-out rules for every server:
+            // wake pick_dup scanners gated on an unchanged map (N6).
+            shared.bump_inflight_gen();
+        }
         // Phase marker, once per run at the latch: from here the line
         // tapers naturally as the last in-flight articles land, and
         // without a marker that taper reads as a fault.
@@ -3351,6 +3391,7 @@ pub fn fetch_all_sharded(
             connects: c.load(Ordering::Relaxed),
             reconnects: r.load(Ordering::Relaxed),
             ever_connected: shared.connected[si].load(Ordering::Relaxed),
+            left_mid_run: shared.left_mid_run[si].load(Ordering::Relaxed),
             ends: shared.session_ends(si),
             blocked_ms: shared
                 .blocked_ms
@@ -3368,6 +3409,17 @@ mod event_ring_tests;
 
 #[cfg(test)]
 mod ratelimit_tests;
+
+#[cfg(test)]
+mod dup_meta_tests;
+
+#[cfg(test)]
+mod interning_tests;
+#[cfg(test)]
+mod queue_tests;
+
+#[cfg(test)]
+mod giveup_tests;
 
 #[cfg(test)]
 mod unit_tests;

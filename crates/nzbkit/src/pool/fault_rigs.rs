@@ -672,6 +672,9 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
             .collect()
     };
     let w = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<q0>".into(),
         attempts: 0,
         promoted: false,
@@ -721,10 +724,13 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         .tail_started
         .lock_ok()
         .get_or_insert_with(Instant::now);
+    // The production latch site (next_work) bumps the N6 gen so gated
+    // idle scanners re-walk; latching by hand must do the same.
+    early.bump_inflight_gen();
     let d = early
         .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
         .expect("early fan-out races at the tail latch");
-    assert_eq!(d.id, "<q0>");
+    assert_eq!(&*d.id, "<q0>");
     assert!(d.dup);
 
     // Refetch exemption: an article on its recovery leg (tried_fail
@@ -740,6 +746,9 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         .lock_ok()
         .get_or_insert_with(Instant::now);
     let refetch = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<q0>".into(),
         attempts: 0,
         promoted: false,
@@ -880,6 +889,9 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     // The Done path trains the EWMA (first sample is taken whole).
     shared.art_ms.store(0, Ordering::Relaxed);
     let w0 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<s0>".into(),
         attempts: 0,
         promoted: false,
@@ -912,6 +924,9 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     // it and counts a hedge.
     shared.art_ms.store(400, Ordering::Relaxed);
     let w1 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<s1>".into(),
         attempts: 0,
         promoted: false,
@@ -935,13 +950,16 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     let d = shared
         .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
         .expect("straggler past the adaptive bound should be hedged");
-    assert_eq!(d.id, "<s1>");
+    assert_eq!(&*d.id, "<s1>");
     assert!(d.dup);
     assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
 
     // The issue-rate cap gates stale-only dups.
     shared.hedges_issued.store(1000, Ordering::Relaxed);
     let w2 = Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: "<s2>".into(),
         attempts: 0,
         promoted: false,
@@ -1032,6 +1050,9 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
         )
     };
     let mk_work = |id: &str| Work {
+        age_days: 0,
+        part: 0,
+        ord: 0,
         id: id.into(),
         attempts: 0,
         promoted: false,
@@ -1071,7 +1092,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
     let d = shared
         .pick_suspect_dup(0b1, 0b1, 0, 0)
         .expect("suspect article should be raced immediately");
-    assert_eq!(d.id, "<s0>");
+    assert_eq!(&*d.id, "<s0>");
     assert!(d.dup);
     assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
     assert!(shared.pick_suspect_dup(0b10, 0b10, 0, 0).is_none());
@@ -1497,10 +1518,10 @@ async fn a_desyncing_provider_keeps_its_fence() {
     );
     // And the fence's own job, unchanged: no article the server holds
     // may be declared Missing off a misattributed refusal.
-    let held: Vec<&String> = outcomes
+    let held: Vec<&Arc<str>> = outcomes
         .iter()
         .filter_map(|o| match o {
-            FetchOutcome::Missing { id, .. } if !absent.contains(id) => Some(id),
+            FetchOutcome::Missing { id, .. } if !absent.contains(&**id) => Some(id),
             _ => None,
         })
         .collect();

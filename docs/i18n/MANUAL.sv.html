@@ -378,6 +378,15 @@ Varje rads detaljlåda säger vem som lade till jobbet och har samma knapp
 <b>Hämta .nzb-filen</b> som kön - praktiskt när du vill ladda ner en release igen
 någon annanstans, eller bifoga <code>.nzb</code>-filen till en problemrapport.</p>
 <p>Kortet listar tio nedladdningar som standard och resten är ett klick bort, på knappen ▤. Status, plats och orsaken till ett misslyckande ligger bakom ett klick på själva raden, så att det vanliga fallet - vad som blev klart, hur stort, när - förblir läsbart utan att scrolla. Dra i kortets nederkant för att låta listan scrolla på en höjd du väljer i stället. <b>History rows</b> under Inställningar → Gränssnitt ändrar tian; eftersom det är en egenskap hos daemonen och inte hos din webbläsare gäller det varje enhet som tittar på den här installationen. <b>Colour History names</b> bredvid färgar klara namn gröna och misslyckade röda; avstängt blir namnen neutrala, och den färgade pricken och radens egna detaljer säger fortfarande vilket som är vilket.</p>
+<p>nzbfast behåller historiken för alltid om du inte säger något annat. <b>Rensa
+historiken</b> under Inställningar → System tar bort gamla poster efter två
+oberoende regler: en ålder (<b>Ta bort poster äldre än</b>, räknad från det ögonblick
+nedladdningen blev klar, i minuter, timmar eller dagar) och en längd (<b>Behåll högst
+så här många poster</b>). Är båda satta gäller båda, och 0 stänger av var och en för
+sig. Bara historikposten tas bort - de nedladdade filerna ligger kvar exakt där de
+är. Åldersregeln tar bara färdiga nedladdningar, så en misslyckad väntar tills du
+försöker igen eller själv tar bort den; längdgränsen räknar varje post, oavsett hur
+det gick för den.</p>
 <h3 id="dash-usage">Dataförbrukning</h3>
 <p>Dagliga staplar per provider och Idag / 7-dagars / 30-dagars totaler - nödvändigt för mätade
 konton och blockkonton. Blockkonton visar livstidsförbrukning mot sin storlek.</p>
@@ -498,7 +507,7 @@ vanliga webbadress räcker; en Prowlarr-rad ser ut som
 kom tillbaka, vilket bevisar adressen och nyckeln med ett klick. En sparad nyckel visas
 aldrig igen: rutan säger det, och att lämna den tom behåller nyckeln som redan finns
 där.</p>
-<p><b>Att söka.</b> Öppna <b>🎬 väggen</b> i sidhuvudet och byt till releaselistan.
+<p><b>Att söka.</b> Öppna <b>🎬 väggen</b> i sidhuvudet och välj <b>Releaser</b>.
 Rullgardinen bredvid sökrutan avgör var en sökning tittar: <b>Detta index</b>, alltså
 det den här maskinen själv har skannat, <b>Indexerare</b>, eller <b>Båda</b>. Ditt val
 kommer ihåg. Att fråga dina konton kräver något i rutan, för att bläddra i dem med en
@@ -563,6 +572,15 @@ lokala indexet.</li>
 bläddrare: varje igenkänd film- och TV-release som en posterruta med betyg, år,
 genrer, skådespelare och synopsis - dina newsgroups, bläddringsbara som en katalog.</p>
 <ul>
+<li><b>Vägg</b> och <b>Releaser</b> är två sätt att se samma index, och paret under
+<b>Vy</b> växlar mellan dem. Ditt val kommer ihåg.</li>
+<li><b>Affischtäthet</b> är <b>S</b> / <b>M</b> / <b>L</b> bredvid det paret: litet får
+in fler på skärmen, stort färre.</li>
+<li><b>Förhandsvisning vid hovring</b>, ovanför Releaser-tabellen: vila pekaren på en rad
+för affisch och handling, allt ur ditt eget index.</li>
+<li><b>Gruppera efter titel</b>, reglaget bredvid: en rad per titel med dess releaser
+under. Öppna den med <b>&#9656;</b> eller genom att klicka på raden; kryssrutan på titeln
+väljer de releaser som visas. Gruppering gäller bara <b>Detta index</b>.</li>
 <li><b>Flikar</b> för Filmer / Serier / Övrigt, direktsökning och sju sorteringar:
 <b>För dig</b>, Nyaste posterna, Utgivningsår, Högst betyg, Titel A–Ö, Största och
 Mest postade.</li>
@@ -1148,7 +1166,11 @@ felbedömning kostar lite tid i stället för nedladdningen.</li>
 </ul>
 <p class="dim">Utlåtandet är en förutsägelse från indicier, inte en garanti. För ett
 hårt svar om en enskild NZB räknar <code>nzbfast check</code>
-(<a href="#cli">§15</a>) de faktiska artiklarna.</p>
+(<a href="#cli">§15</a>) de faktiska artiklarna. Båda räknar svar, inte innehåll. En ren kontroll betyder att artiklarna fanns där när
+de efterfrågades, inte att det de innehåller är oskadat: ett litet antal leverantörer
+svarar för borttagna artiklar med skendata i stället för att neka dem, och det visar sig
+först under själva nedladdningen, där artikeln faller på sin egen kontrollsumma och
+hämtas om från en annan server eller repareras.</p>
 <h3 id="memory">Minnesbudget - och vad lite minne kostar</h3>
 <p>Alla motorns cachar delar en budget (standard ¼ av fysiskt RAM, begränsad till
 256 MB–16 GB). Sätt den uttryckligen med <i>Minnesgräns</i> i Inställningar, eller

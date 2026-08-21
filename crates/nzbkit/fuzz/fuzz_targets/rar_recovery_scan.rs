@@ -15,7 +15,7 @@
 //! one that does not shows up as a timeout.
 use libfuzzer_sys::fuzz_target;
 
-use rars::recovery::stream::{scan_inline_recovery_chunks, MemorySource};
+use rars::recovery::stream::{MemorySource, scan_inline_recovery_chunks};
 
 fuzz_target!(|data: &[u8]| {
     // Cap the corpus: these scanners are linear in the input and the point
@@ -52,6 +52,45 @@ fuzz_target!(|data: &[u8]| {
             );
             for (slots, states) in by_group.iter().zip(&scan.group_states) {
                 assert!(slots.is_empty() || !states.is_empty());
+            }
+        }
+    }
+
+    // Legacy (RAR 2/3) protect-record repair: the streaming path sizes its
+    // sector scan, parity accumulators and (compressed NEWSUB) decode from
+    // header fields, and like the scanners above it is reached
+    // AUTOMATICALLY once PAR2 and extraction have failed. Budgeted small so
+    // a repair that ignores its budget shows up as an OOM here.
+    if let Ok(archive) = rars::ArchiveReader::read(data) {
+        if let Some(legacy) = archive.as_rar15_40() {
+            let has_record = legacy.protect_records().next().is_some()
+                || legacy
+                    .new_subs()
+                    .any(|sub| sub.kind == rars::rar15_40::NewSubKind::RecoveryRecord);
+            if has_record {
+                // One fixed temp name per process: libFuzzer execs are serial.
+                let dest =
+                    std::env::temp_dir().join(format!("rars-fuzz-protect-{}", std::process::id()));
+                if let Ok(rebuilt) = legacy.repair_protect_to_path(&dest, 1 << 20) {
+                    let repaired = std::fs::read(&dest).expect("read repaired temp");
+                    // A repair is a copy patched in place - never a resize.
+                    assert_eq!(repaired.len(), data.len());
+                    // Rebuilt sectors are reported in scan order, once each.
+                    assert!(rebuilt.windows(2).all(|w| w[0] < w[1]));
+                    // Re-repair what the repair wrote. No idempotence assert:
+                    // a rebuilt sector can hold header bytes, and headers
+                    // that re-parse differently redefine the record. This
+                    // leg only extends the not-panic/not-OOM property to
+                    // repair-of-repaired inputs.
+                    if !rebuilt.is_empty() {
+                        if let Ok(again) = rars::ArchiveReader::read(&repaired) {
+                            if let Some(legacy) = again.as_rar15_40() {
+                                let _ = legacy.repair_protect_to_path(&dest, 1 << 20);
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&dest);
             }
         }
     }

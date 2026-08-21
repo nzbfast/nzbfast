@@ -377,6 +377,15 @@ Sertarul fiecărui rând spune cine a adăugat jobul și are același buton
 <b>Descarcă fișierul .nzb</b> ca în coadă - util pentru a descărca un release din nou
 în altă parte, sau pentru a atașa fișierul <code>.nzb</code> la un raport de problemă.</p>
 <p>Cardul listează implicit zece descărcări, iar restul sunt la un clic distanță, pe butonul ▤. Starea, locația și motivul pentru care un job a eșuat stau în spatele unui clic pe rândul însuși, astfel încât cazul obișnuit - ce s-a terminat, cât de mare, când - rămâne lizibil fără derulare. Trage în schimb de marginea de jos a cardului ca lista să deruleze la o înălțime aleasă de tine. <b>History rows</b> din Setări → Interfață schimbă acel zece; fiind o proprietate a daemonului și nu a browserului tău, se aplică fiecărui dispozitiv care se uită la această instalare. <b>Colour History names</b>, alături, colorează numele terminate în verde și pe cele eșuate în roșu; dezactivat, numele rămân neutre, iar punctul colorat și detaliile rândului spun în continuare care e care.</p>
+<p>nzbfast păstrează istoricul la nesfârșit, dacă nu spui altceva. <b>Curățarea
+istoricului</b> din Setări → Sistem elimină intrările vechi după două reguli
+independente: o vechime (<b>Elimină intrările mai vechi de</b>, numărată din
+momentul în care descărcarea s-a încheiat, în minute, ore sau zile) și o lungime
+(<b>Păstrează cel mult atâtea intrări</b>). Dacă sunt setate amândouă, se aplică
+amândouă, iar 0 o oprește pe fiecare în parte. Se șterge doar intrarea din istoric -
+fișierele descărcate rămân exact unde sunt. Regula de vechime ia doar descărcările
+finalizate, așa că una eșuată așteaptă să o reîncerci sau să o ștergi tu; limita de
+lungime numără fiecare intrare, indiferent cum s-a încheiat.</p>
 <h3 id="dash-usage">Consum de date</h3>
 <p>Bare zilnice per provider și totaluri Azi / 7 zile / 30 de zile - esențiale pentru conturile contorizate
 și cu bloc. Conturile cu bloc arată utilizarea pe toată durata față de dimensiunea lor.</p>
@@ -500,7 +509,7 @@ intrare și aduce cu ea fiecare indexer din spatele ei.</p>
 înapoi, ceea ce dovedește adresa și cheia dintr-un clic. O cheie salvată nu mai este
 arătată niciodată: căsuța o spune, iar dacă o lași goală păstrezi cheia care este deja
 acolo.</p>
-<p><b>Căutarea.</b> Deschide <b>🎬 peretele</b> din antet și treci la lista de release-uri.
+<p><b>Căutarea.</b> Deschide <b>🎬 peretele</b> din antet și alege <b>Release-uri</b>.
 Meniul de lângă caseta de căutare hotărăște unde se uită o căutare: <b>Acest index</b>,
 adică ce a scanat singură mașina asta, <b>Indexere</b> sau <b>Ambele</b>. Alegerea ta este
 ținută minte. Ca să întrebi conturile trebuie să scrii ceva în casetă, fiindcă răsfoirea
@@ -567,6 +576,17 @@ dincolo de asta se răspunde doar din indexul local.</li>
 browser media: fiecare film și release TV recunoscut ca o placă de poster cu notă, an,
 genuri, distribuție și sinopsis - newsgroup-urile tale, navigabile ca un catalog.</p>
 <ul>
+<li><b>Perete</b> și <b>Release-uri</b> sunt două feluri de a privi același index,
+iar perechea de sub <b>Vizualizare</b> comută între ele. Alegerea ta este ținută
+minte.</li>
+<li><b>Densitatea posterelor</b> este <b>S</b> / <b>M</b> / <b>L</b> lângă acea pereche:
+mic încape mai mult pe ecran, mare mai puțin.</li>
+<li><b>Previzualizare la trecerea cursorului</b>, deasupra tabelului Release-uri: ține
+cursorul pe un rând pentru poster și rezumat, toate din propriul tău index.</li>
+<li><b>Grupează după titlu</b>, comutatorul de alături: un rând per titlu, cu
+release-urile dedesubt. Deschide-l cu <b>&#9656;</b> sau apăsând rândul; caseta de pe
+titlu selectează release-urile afișate. Gruparea este doar pentru <b>Acest
+index</b>.</li>
 <li><b>File</b> pentru Filme / Seriale / Altele, căutare instantanee și șapte
 sortări: <b>Pentru tine</b>, Cele mai noi postări, Anul apariției, Cele mai bine cotate,
 Titlu A–Z, Cele mai mari și Cele mai postate.</li>
@@ -1164,7 +1184,11 @@ așa că o apreciere greșită costă puțin timp în loc de descărcare.</li>
 </ul>
 <p class="dim">Verdictul este o predicție pornind de la indicii, nu o garanție. Pentru
 un răspuns ferm despre un NZB, <code>nzbfast check</code> (<a href="#cli">§15</a>)
-numără articolele reale.</p>
+numără articolele reale. Ambele numără răspunsuri, nu conținut. O verificare curată înseamnă că articolele erau
+acolo când au fost cerute, nu că ceea ce conțin este nevătămat: un număr mic de furnizori
+răspund pentru articolele eliminate cu date false în loc să le refuze, iar asta apare
+abia în timpul descărcării propriu-zise, unde articolul cade la propria sumă de control
+și este luat din nou de pe alt server sau reparat.</p>
 <h3 id="memory">Buget de memorie - și cât costă memoria redusă</h3>
 <p>Toate cache-urile motorului împart un singur buget (implicit ¼ din RAM-ul fizic, limitat la
 256 MB–16 GB). Setează-l explicit cu <i>Limită de memorie</i> în Setări sau cu

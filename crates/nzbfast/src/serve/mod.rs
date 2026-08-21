@@ -749,6 +749,15 @@ mod script;
 // Queue-finished actions (none / script / sleep / shut down).
 mod finish_action;
 
+// The blocking half of a completed job's finalization, lifted out of
+// `job.rs` under the size gate (TODO 106).
+mod job_finalize;
+use job_finalize::FinalizeOutcome;
+
+// "Create report": one download's facts and its own log lines, as
+// shareable text.
+mod report;
+
 mod hooks;
 mod prequeue;
 

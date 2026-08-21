@@ -1148,9 +1148,7 @@ async fn settle_without_set(
             }
         }
         if dir_has_par2(out_dir).unwrap_or(false) {
-            use nzbkit::par2repair::{
-                RepairStatus, covered_names, repair_present_or_renamed_sets, sniffed_packet_files,
-            };
+            use nzbkit::par2repair::{PacketCatalog, RepairStatus};
             let t0 = Instant::now();
             note_activity("repairing");
             // §129: same one-repair-at-a-time permit as the set-repair
@@ -1176,12 +1174,27 @@ async fn settle_without_set(
             // owns a directory where every downloaded byte has
             // already landed; the nested post-pass keeps the
             // name-only gate for the opposite reason.
-            let results = match repair_present_or_renamed_sets(out_dir) {
-                Ok(r) => r,
+            // One validated packet catalog for the whole pass: the
+            // repairs, `covered_names` and the sniffed-volume sweep
+            // below all consult it instead of rescanning the corpus
+            // (B2, 20 Aug perf audit).
+            let mut cat = match PacketCatalog::build(out_dir) {
+                Ok(c) => Some(c),
                 Err(e) => {
+                    println!("PAR2: repair error - {e}");
+                    None
+                }
+            };
+            let results = match cat
+                .as_mut()
+                .map(PacketCatalog::repair_present_or_renamed_sets)
+            {
+                Some(Ok(r)) => r,
+                Some(Err(e)) => {
                     println!("PAR2: repair error - {e}");
                     Vec::new()
                 }
+                None => Vec::new(),
             };
             // Vacuous truth is not success: no set qualifying (no
             // packets, or no set whose files are here) means no
@@ -1250,7 +1263,9 @@ async fn settle_without_set(
                 // covered in the hole scan. The job reached
                 // Completed, and deleted the journal that was
                 // the only record of what was still missing.
-                let named: std::collections::HashSet<String> = covered_names(out_dir)
+                let named: std::collections::HashSet<String> = cat
+                    .as_mut()
+                    .and_then(|c| c.covered_names().ok())
                     .unwrap_or_default()
                     .iter()
                     .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
@@ -1338,7 +1353,11 @@ async fn settle_without_set(
                 // packets speak for, skipped sets included - a
                 // set that never ran still owns its files.
                 if par_cleanup {
-                    for p in sniffed_packet_files(out_dir).unwrap_or_default() {
+                    let sniffed = cat
+                        .as_mut()
+                        .and_then(|c| c.sniffed_packet_files().ok())
+                        .unwrap_or_default();
+                    for p in sniffed {
                         let is_payload = p
                             .file_name()
                             .map(|n| n.to_string_lossy().to_lowercase())
