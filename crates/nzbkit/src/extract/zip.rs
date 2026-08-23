@@ -178,29 +178,28 @@ impl Extractor {
         let size = inner.slots[slot].size;
         // A byte-split part (`name.zip.001`, or bare-numeric
         // `movie.001`): the cut is arbitrary, so only part 1 has a
-        // signature to sniff and the CALLER's declaration (from the NZB
-        // file list) is what identifies the set and its part count -
-        // see `declare_zip_split`. Bare-numeric names are speculative
-        // by nature (RAR numeric volumes share the grammar), which the
-        // part-1 magic gate below already handles: a declared set whose
-        // first part is not a zip forfeits, and anything carrying RAR
-        // or 7z magic classified before this arm was consulted.
+        // signature to sniff and the CALLER's declaration is what
+        // identifies the set and its part count - see
+        // `declare_zip_split`. At depth 0 that caller is `get`, reading
+        // the NZB file list; at depth > 0 it is the PARENT level, which
+        // opens the set as it routes the first sibling and counts it
+        // once the outer archive's entry list has run past the
+        // siblings (§94 D, `zip_split.rs`) - until then the count is
+        // `None` and the part joins on trust. Bare-numeric names are
+        // speculative by nature (RAR numeric volumes share the
+        // grammar), which the part-1 magic gate below already handles:
+        // a declared set whose first part is not a zip forfeits, and
+        // anything carrying RAR or 7z magic classified before this arm
+        // was consulted.
         if let Some((base, idx)) = crate::zip::split_part_name(&inner.slots[slot].name)
             .or_else(|| crate::zip::numeric_split_part_name(&inner.slots[slot].name))
         {
-            // Declarations come from the NZB file list, which exists
-            // only at depth 0 - nothing declares an outer archive's
-            // inner entries - so a NESTED byte-split zip is explicitly
-            // ineligible (the lookup below would refuse it anyway; this
-            // states the scope rather than half-working through it) and
-            // materializes for the disk pass.
-            if self.depth != 0 {
-                return Ok(false);
-            }
-            let Some(&n) = inner.zip_split_decl.get(&base) else {
+            let Some(&decl) = inner.zip_split_decl.get(&base) else {
                 return Ok(false);
             };
-            if idx > n {
+            if let Some(n) = decl
+                && idx > n
+            {
                 return Ok(false);
             }
             if idx == 1 && !data.starts_with(b"PK\x03\x04") {
@@ -228,7 +227,9 @@ impl Extractor {
             if !joined {
                 return Ok(false);
             }
-            self.zip_try_resolve(inner, &ctl, n)?;
+            if let Some(n) = decl {
+                self.zip_try_resolve(inner, &ctl, n)?;
+            }
             if idx == 1 {
                 // Part 1 spawns the worker, like the 7z split: reads
                 // block until the set resolves (`wait_resolved_total`),
@@ -255,6 +256,7 @@ impl Extractor {
         let ctl = Arc::new(SevenZCtl {
             set: Arc::new(SevenZSet::new(size, size)),
             key: String::new(),
+            archive_base: 0,
             low_water: Arc::new(AtomicU64::new(0)),
             tail: Mutex::new(None),
             trim_ok: std::sync::atomic::AtomicBool::new(false),
@@ -1505,10 +1507,11 @@ mod tests {
     /// volume-remediation ladder; at depth > 0 there is no marker, and
     /// `nested_reason` replacing the WHOLE string is the only thing
     /// stopping an entry called `password.txt` from setting
-    /// `enc_fallback` in get.rs - which would leave the materialized
-    /// archive packed and print a lock prompt on a job that should
-    /// complete. Before this lift a nested zip never chased, so no
-    /// nested-zip reason could reach that ladder at all; it can now.
+    /// `enc_fallback` in nzbfast's get/tail.rs - which would leave the
+    /// materialized archive packed and print a lock prompt on a job
+    /// that should complete. Before this lift a nested zip never
+    /// chased, so no nested-zip reason could reach that ladder at all;
+    /// it can now.
     ///
     /// An exact-string assertion on the legitimate case passes whether
     /// or not the barrier protects anything, so this feeds hostile names
@@ -1517,7 +1520,9 @@ mod tests {
     /// after) and asserts no trigger substring survives.
     #[test]
     fn zip_nested_hostile_entry_names_never_reach_the_remediation_ladder() {
-        // Exactly what get.rs substring-keys on.
+        // Exactly what nzbfast's get/tail.rs substring-keys on (three of
+        // the five directly, the other two through
+        // `fallback_needs_disk_unpack`).
         const TRIGGERS: [&str; 5] = [
             "compressed",
             "encrypted",
@@ -1675,7 +1680,12 @@ mod tests {
         let s = (n_arts - 1) * art;
         ex.write(0, "v.rar", outer.len() as u64, s as u64, &outer[s..])
             .unwrap();
-        let rep = ex.finish().unwrap();
+        // Deadline belt: this finish JOINS the demoted zip chase worker,
+        // which used to park forever on the withheld tail once
+        // `release_gates` cleared its §94 B gate (TODO 255). The seal in
+        // `sevenz_finish` is the fix; the deadline just keeps a
+        // regression from wedging the whole sweep with no test name.
+        let rep = finish_within(&ex, 60).unwrap();
         assert!(
             rep.fallbacks
                 .iter()
@@ -1899,43 +1909,6 @@ mod tests {
         // contributes nothing to it either way. Pinned so the next
         // person to add `inner-zip` sees which test to update.
         assert_eq!(shape_of(&ex), ["rar5", "store", "one-pass"]);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A nested `.zip.001` byte split stays explicitly ineligible:
-    /// declarations come from the NZB file list, which exists only at
-    /// depth 0, so the parts materialize byte-exact for the disk pass -
-    /// no chase, no fallback, no half-worked set.
-    #[test]
-    fn zip_nested_split_part_never_attaches() {
-        let a = payload(200_000, 172);
-        let arch = crate::zip::fixtures::zip_of(&[crate::zip::fixtures::Spec::stored("a.bin", &a)]);
-        let parts = split_zip(&arch, 2);
-        let outer = crate::rar::fixtures::rar5_volume(&[
-            (
-                "inner.zip.001",
-                parts[0].len() as u64,
-                &parts[0][..],
-                false,
-                false,
-            ),
-            (
-                "inner.zip.002",
-                parts[1].len() as u64,
-                &parts[1][..],
-                false,
-                false,
-            ),
-        ]);
-        let dir = tmpdir("zip-nested-split");
-        let ex = Arc::new(Extractor::new(&dir, 1, true));
-        ex.anchor();
-        feed(&ex, 0, "v.rar", &outer, 7000, 77);
-        let rep = ex.finish().unwrap();
-        assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-        assert_eq!(std::fs::read(dir.join("inner.zip.001")).unwrap(), parts[0]);
-        assert_eq!(std::fs::read(dir.join("inner.zip.002")).unwrap(), parts[1]);
-        assert!(!dir.join("a.bin").exists(), "a nested split must not chase");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

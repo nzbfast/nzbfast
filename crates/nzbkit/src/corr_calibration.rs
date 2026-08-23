@@ -202,7 +202,7 @@ const N_EXTRA_RELEASES: usize = N_FWDCROWD * FWD_DECOYS + N_TWINX + N_TWINC;
 /// Build the corpus and run the real release-driven walk over it with the
 /// auto tier on. Returns (pairs, decoy release stems, applied names by
 /// stem, suggested names by stem).
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn run_corpus(
     ix: &mut Index,
 ) -> (

@@ -626,7 +626,7 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
     <option value="spots" id="scopeSpots" style="display:none" data-i18n="wall.scope.spots">Spots</option>
   </select>
   <label class="mtog spotonly" style="display:none" data-i18n-title="wall.spot.adult.title"
-    title="Spots are filed by the person who posted them. Roughly a third of them are filed as adult.">
+    title="Spots are filed by the person who posted them. Roughly a third of them are filed as adult. This tick covers this raw Spots list only: whether adult titles appear on the wall itself is the &quot;Hide adult titles&quot; setting under Indexing.">
     <input type="checkbox" id="spotAdult"> <span data-i18n="wall.spot.adult">Include adult</span></label>
   <select id="sort">
     <option value="affinity" data-i18n="wall.sort.affinity">For you</option>
@@ -2583,15 +2583,23 @@ function toggleXsrc(gi){
 // group nests its releases.
 function extSrcRow(s,gi,headTitle){
   const ts=s.age_days==null?0:Math.floor(Date.now()/1e3)-s.age_days*86400;
-  // Its own spelling of the name, whenever that differs from the
-  // headline's. The difference is precisely what the merge folded away,
-  // and showing it is how you check the fold was right.
-  const alt=(s.title||'')&&s.title!==headTitle
-    ?` <span class="dim">${esc(s.title)}</span>`:'';
+  // Its own spelling of the name, ALWAYS. The first cut of this row
+  // printed the name only when it differed from the headline's, on the
+  // reasonable-sounding grounds that repeating one identical string down
+  // every row is noise. But two indexers scraping the same scene pre
+  // agree on the spelling most of the time, so the common case was a
+  // name cell holding nothing but the indexer badge - issue #44.
+  // The difference is still the signal: a spelling the merge folded away
+  // gets the same full-weight .stem a nested release row uses, and one
+  // that matches recedes to .dim instead of vanishing. Either way the
+  // cell is never empty, and the cell is titled because .name ellipses
+  // at 520px.
+  const nm=s.title||headTitle||'';
   return `<tr class="ext sub" data-xsrc="${gi}"${xexp.has(gi)?'':' style="display:none"'}>
     <td class="selcol"></td>
-    <td class="name"><span class="nbadge" data-i18n-skip
-      title="${esc(t('wall.ext.src','Found on your indexer account'))}">${esc(s.indexer||'')}</span>${alt}</td>
+    <td class="name" title="${esc(nm)}"><span class="nbadge" data-i18n-skip
+      title="${esc(t('wall.ext.src','Found on your indexer account'))}">${esc(s.indexer||'')}</span>
+      <span class="${nm===headTitle?'dim':'stem'}">${esc(nm)}</span></td>
     <td></td>
     <td class="mono dim">${age(ts)}</td>
     <td class="mono">${gb(s.size||0)}</td>
@@ -3174,11 +3182,18 @@ async function openPreCand(id){
 }
 async function preAssign(id,pid){
   const j=await api('pre_assign',`&id=${id}&predb_id=${pid}`).catch(()=>({status:false}));
-  if(!j.status){ toast(t('wall.cand.fail','That did not stick - the release may have been named meanwhile.')); return; }
+  // A reason from the daemon beats the generic line: a held index write
+  // mutex (TODO 166) means nothing was stored and pressing again works,
+  // which "the release may have been named meanwhile" would talk the
+  // user out of.
+  if(!j.status){ toast(tErr(j.error)||t('wall.cand.fail','That did not stick - the release may have been named meanwhile.')); return; }
   closeOvl(); browseFetch();
 }
 async function preReject(id){
-  await api('pre_reject',`&id=${id}`).catch(()=>{});
+  // Same rule as preAssign: a rejection that did not land must not close
+  // the sheet as though it had - the row comes straight back otherwise.
+  const j=await api('pre_reject',`&id=${id}`).catch(()=>({status:false}));
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   closeOvl(); browseFetch();
 }
 
@@ -3858,7 +3873,8 @@ async function askIndexers(btn){
   if(!extRows.length) toast(t('wall.ask.empty','Your indexers had nothing for this title'));
 }
 async function unhideKey(k){
-  await api('wall_unhide',`&value=${encodeURIComponent(k)}`);
+  const j=await api('wall_unhide',`&value=${encodeURIComponent(k)}`);
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   wsig=''; wallFetch(true);
   openHidden();
 }
@@ -3915,7 +3931,10 @@ async function acceptSug(){
 }
 async function dismissSug(){
   if(!curSug) return;
-  await api('wall_suggest_no',`&name=${encodeURIComponent(curSug.field)}&value=${encodeURIComponent(curSug.value)}`);
+  const j=await api('wall_suggest_no',`&name=${encodeURIComponent(curSug.field)}&value=${encodeURIComponent(curSug.value)}`);
+  // Clearing the panel against a write that did not happen just brings
+  // the same nudge back on the next poll (TODO 166) - say so instead.
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   curSug=null; renderSuggest(); fetchSuggest();
 }
 // The Hidden & filters panel - reuses the detail-sheet overlay.
@@ -3972,7 +3991,8 @@ async function addRule(){
   wsig=''; wallFetch(true); openHidden();
 }
 async function delRule(id){
-  await api('wall_rule_del',`&value=${id}`);
+  const j=await api('wall_rule_del',`&value=${id}`);
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
   wsig=''; wallFetch(true); openHidden();
 }
 document.getElementById('hidChip').addEventListener('click', ()=>openHidden());

@@ -58,6 +58,38 @@ fn extra_words_keep_events_apart() {
     );
 }
 
+/// An edition word straight after an identity word is the name
+/// continuing, not an edition. Tester Gary's F1TV post of the show
+/// "Paddock Uncut" rendered as "…Paddock [1080p x264]" - the Uncut half
+/// of the show's own name was stripped as if it marked an uncut print.
+#[test]
+fn edition_word_after_identity_stays_in_the_name() {
+    // The raw tail rule.
+    assert_eq!(
+        identity_tail([
+            "Dutch", "Grand", "Prix", "Paddock", "Uncut", "1080p", "AHDTV", "x264"
+        ]),
+        ["Dutch", "Grand", "Prix", "Paddock", "Uncut"]
+    );
+    // Straight after the year (an empty tail so far) or after a language
+    // tag it is still the edition marker it always was.
+    assert!(identity_tail(["Uncut", "1080p"]).is_empty());
+    assert!(identity_tail(["German", "Uncut", "1080p"]).is_empty());
+
+    // End to end on the user's real NZB name.
+    let on = NameStyle {
+        resolution: true,
+        extra_words: true,
+        ..Default::default()
+    };
+    let show = p("Formula1.2026.Dutch.Grand.Prix.Paddock.Uncut.1080p.AHDTV.x264-DARKSPORT");
+    assert_eq!(show.extra, ["Dutch", "Grand", "Prix", "Paddock", "Uncut"]);
+    assert_eq!(
+        movie_name(&show, &on).unwrap(),
+        "Formula1 2026 Dutch Grand Prix Paddock Uncut 1080p"
+    );
+}
+
 /// The option must not reach an ordinary film. It cannot, because a
 /// film that parses cleanly leaves `extra` empty - this pins that.
 #[test]

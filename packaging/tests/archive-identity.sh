@@ -7,8 +7,12 @@
 # uname='root' gname=''` on every member and upload-release-assets.sh
 # refused the batch; auditing the rest afterwards found the .qpkg on the
 # PUBLISHED release carrying `uname='runner'` on every member of both its
-# inner tars, which both of that script's gates skip by name because a
-# .qpkg is a shell script rather than an archive.
+# inner tars, which both of that script's gates skipped by name because a
+# .qpkg is a shell script rather than an archive. Its macOS-metadata gate
+# reaches inside one now (packaging/tests/qpkg-junk-gate.sh); its OWNER
+# gate still cannot, because root:root is the correct ownership for a
+# package format and that loop demands empty name strings. This is what
+# holds the .qpkg to the right rule.
 #
 # What makes this class hard to see, and why every assertion below reads
 # stored HEADERS rather than a listing:
@@ -146,50 +150,21 @@ rpm(f"{work}/clean-1.0.0.x86_64.rpm", "root", "root")
 rpm(f"{work}/leak-1.0.0.x86_64.rpm", "runner", "docker")
 
 
-def qpkg(path, owner):
-    """[installer sh][control tar][data tar.gz][100-byte trailer].
+# The .qpkg fixture builder is shared with packaging/tests/qpkg-junk-gate.sh,
+# which needs the identical shape for the macOS-metadata gate. It used to
+# be a second copy of it here; these scripts are copy-paste descendants of
+# each other and this repo has twice had one rot away from its sibling.
+#
+# Its default data set carries an `nzbfast-*` member on purpose:
+# scan-release-assets.sh refuses a .qpkg whose data archive holds no
+# binary - "it unpacked" is not proof the payload was reached - and step 6
+# runs that scanner for real, so the fixture has to satisfy it or the
+# identity gate is never reached.
+sys.path.insert(0, "packaging/tests")
+from qpkg_fixture import build as build_qpkg          # noqa: E402
 
-    Byte-for-byte the shape packaging/qnap/unpack-qpkg.sh splits, with
-    the two length declarations the installer carries about itself.
-    """
-    ctrl_inner = io.BytesIO()
-    with tarfile.open(fileobj=ctrl_inner, mode="w:gz") as t:
-        t.addfile(member("./qpkg.cfg", *owner), io.BytesIO(payload))
-    ctrl = io.BytesIO()
-    with tarfile.open(fileobj=ctrl, mode="w") as t:
-        ti = tarfile.TarInfo("control.tar.gz")
-        ti.size = len(ctrl_inner.getvalue())
-        ti.uid = ti.gid = 0
-        ti.uname = ti.gname = ""
-        t.addfile(ti, io.BytesIO(ctrl_inner.getvalue()))
-    ctrl = ctrl.getvalue()
-    data = io.BytesIO()
-    with tarfile.open(fileobj=data, mode="w:gz") as t:
-        t.addfile(member("./nzbfast.sh", *owner), io.BytesIO(payload))
-        # scan-release-assets.sh refuses a .qpkg whose data archive holds
-        # no `nzbfast-*` binary - "it unpacked" is not proof the payload
-        # was reached. Step 6 runs that scanner for real, so the fixture
-        # has to satisfy it or the identity gate is never reached.
-        t.addfile(member("./nzbfast-x86_64", *owner), io.BytesIO(payload))
-    data = data.getvalue()
-    kib = (len(data) + 1023) // 1024
-    script = ("#!/bin/sh\n"
-              "script_len=@@LEN@@\n"
-              "offset=$(/usr/bin/expr $script_len + %d)\n"
-              '/bin/dd if="${0}" bs=$offset skip=1 | /bin/cat | '
-              "/bin/dd bs=1024 count=%d of=$_EXTRACT_DIR/data.tar.gz || exit 1\n"
-              % (len(ctrl), kib))
-    # script_len is the script's own length, so the placeholder has to be
-    # replaced by a string of the same width to stay true.
-    n = len(script) - len("@@LEN@@") + len(str(len(script)))
-    for _ in range(4):
-        n = len(script.replace("@@LEN@@", str(n)))
-    script = script.replace("@@LEN@@", str(n)).encode()
-    open(path, "wb").write(script + ctrl + data + b"Q" * 100)
-
-
-qpkg(f"{work}/clean-qnap-beta.qpkg", (0, 0, "root", "root"))
-qpkg(f"{work}/leak-qnap-beta.qpkg", RUNNER)
+build_qpkg(f"{work}/clean-qnap-beta.qpkg", owner=(0, 0, "root", "root"))
+build_qpkg(f"{work}/leak-qnap-beta.qpkg", owner=RUNNER)
 open(f"{work}/notes.txt", "w").write("not an archive\n")
 PY
 [ $? -eq 0 ] || { echo "  FAIL - could not build the fixtures"; exit 1; }
@@ -225,7 +200,7 @@ expect leak_1.0.0_amd64.deb           refuse "refuses a .deb owned by the build 
 expect clean-1.0.0.x86_64.rpm         pass   "a root:root .rpm passes"
 expect leak-1.0.0.x86_64.rpm          refuse "refuses FILEUSERNAME='runner'"
 
-echo "4. .qpkg - the format both upload gates skip by name"
+echo "4. .qpkg - the format the upload script's OWNER gate skips by name"
 expect clean-qnap-beta.qpkg           pass   "a root:root .qpkg passes"
 expect leak-qnap-beta.qpkg            refuse "refuses the leak that SHIPPED in 1.1.3"
 
@@ -235,9 +210,27 @@ expect broken-linux-x64.tar.gz        refuse "refuses an archive it cannot open"
 expect notes.txt                      pass   "ignores a file that is not an archive"
 
 echo "6. the upload gate carries it"
-# upload-release-assets.sh refuses anything without a current scan stamp,
-# and that check runs FIRST - so stamp the fixture, or this passes without
-# ever reaching the identity gate.
+# Two things run BEFORE the identity gate and both have to be satisfied
+# or this step passes on the wrong refusal:
+#   - the release-account check, which is the very first thing the script
+#     does and which no runner and no developer box can satisfy. A `gh`
+#     stub answers it, and refuses every other subcommand, so the upload
+#     line at the end of the script cannot do anything either. Without
+#     this the step reported "did not refuse" while the script had in
+#     fact stopped at `gh login ... is not nzbfast` - which it did on
+#     every run of this test from the day it landed until 23 Aug 2026.
+#   - the scan-stamp check, hence the scan below.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gh" <<'ENDOFGH'
+#!/bin/sh
+case "$*" in
+    "api user --jq .login") echo nzbfast ;;
+    *) echo "STUB gh refused: $*" >&2; exit 1 ;;
+esac
+ENDOFGH
+chmod +x "$WORK/bin/gh"
+PATH="$WORK/bin:$PATH"
+export PATH
 cp "$WORK/leak-qnap-beta.qpkg" "$WORK/nzbfast-0.0.0-qnap-beta.qpkg"
 bash packaging/scan-release-assets.sh "$WORK/nzbfast-0.0.0-qnap-beta.qpkg" >/dev/null 2>&1 \
     || bad "the pattern scanner refused the .qpkg fixture before the identity gate"

@@ -3,8 +3,141 @@
 // module sees the parent's private items (Shared and friends), so the
 // body is untouched; only `attach` widened to pub(super) for the
 // call sites in pool.rs and the sibling test modules.
+//
+// The steer's HANDOFF RECORD followed it here (sweep 8, M2/M8 round):
+// `Handed` and the `stash_handed` that fills it existed only to be
+// read by `note_decoded` below, and pool.rs had three lines of margin
+// under its size-gate entry. Moved whole, bodies untouched apart from
+// the new `spent` member the M8 fix carries; `stash_handed` widened to
+// pub(super) for its one caller in pool/session.rs.
 
 use super::*;
+
+/// Synthesized-numbering latch for the part-identity gate in
+/// [`QueueControl::note_decoded`] (22 Aug 2026, tv4-rot1). An NZB whose
+/// declared segment numbers are not the yEnc parts (a rotated or
+/// synthesized ladder - the obfuscated norm) trips the gate on EVERY
+/// article, and each trip is a full extra BODY that no dup or hedge
+/// tally shows: 2x the payload on the wire, identically on five
+/// releases. The tell that separates it from a split-brain: `first`
+/// holds the part a steered id's first copy carried, and a refetch from
+/// ANOTHER server repeating it is two backbones agreeing that the NZB's
+/// numbers are the lie. One server lying comes back right and the gate
+/// stays armed; two agreeing set `off` for the rest of the run. pcrc32
+/// and the echoed-id check keep guarding either way.
+///
+/// `first` records the part AND the deliverer's backbone (`group_bits`),
+/// because "another server" has to be checked, not assumed: a tail
+/// fan-out dup on the first server's own connection (or a sibling on
+/// its backbone) can win the re-claim after the un-claim and repeat
+/// the same wrong part. That is one backbone talking twice, and it
+/// must not stand the gate down (bug sweep 22 Aug 2026).
+#[derive(Default)]
+pub(super) struct PartLatch {
+    pub(super) first: std::sync::Mutex<HashMap<Arc<str>, (u32, u32)>>,
+    /// Files ([`Work::file`]) whose gate has stood down: two backbones
+    /// agreed that file's numbering is synthesized. Per FILE, not per
+    /// run (F-09): one mislabelled file must not switch off the wrong-
+    /// part check for every other file in the job.
+    pub(super) off: std::sync::Mutex<HashSet<u32>>,
+    /// Part-mismatch steers issued (each one an extra BODY).
+    pub(super) steers: AtomicU64,
+}
+
+impl PartLatch {
+    /// Has this file's gate stood down?
+    pub(super) fn is_off(&self, file: u32) -> bool {
+        self.off.lock_ok().contains(&file)
+    }
+
+    /// Has ANY file's gate stood down (the ledger summary)?
+    pub(super) fn any_off(&self) -> bool {
+        !self.off.lock_ok().is_empty()
+    }
+}
+
+/// TODO 114 consumer steer: one delivered body awaiting the consumer's
+/// decode verdict (see `Shared::handed`). `work` is the rebuilt Work a
+/// bad verdict requeues - always `dup: false`, whatever copy won the
+/// race - and `server`/`group_bits` identify the deliverer so the
+/// steer can exclude its whole backbone.
+pub(super) struct Handed {
+    work: Work,
+    server: usize,
+    group_bits: u32,
+    /// The delivered copy was a DUP dispatch that won the claim. A
+    /// dup's bad copy never owns damage and never spends the steer
+    /// budget (mirror of the pool-side gate's silent dup discard) -
+    /// it is requeued unconditionally, because the copy that should
+    /// own the outcome may already have lost the claim race inside
+    /// the verdict window.
+    dup_copy: bool,
+    /// M8 (sweep 8): the article's `spent` mask as it stood the instant
+    /// BEFORE the provisional `claim_done` that delivered this body.
+    ///
+    /// `claim_done` drops the spent entry - correct for a terminal
+    /// article, wrong for one whose decode verdict may still send it
+    /// back down the ladder. Those bits are the evidence that opens a
+    /// fill tier (`gates::other_can_take`, and `next_work`'s pickup
+    /// gate), so without this copy a bad-body steer asks "can anyone
+    /// else take it?" with the answer already erased and refuses a
+    /// retry a healthy peer could have served. Immutable for the
+    /// verdict's lifetime; the live map is repaired only if the steer
+    /// actually happens.
+    spent: u32,
+}
+
+impl Shared {
+    /// TODO 114 consumer steer: park a claimed, about-to-be-delivered
+    /// body's Work in `handed` so [`QueueControl::note_decoded`] can
+    /// requeue it after claim (see the field doc). Always `dup: false`
+    /// - whichever copy won the race, a steer requeues an original;
+    /// `dup_copy` remembers which kind won so a dup's bad copy can be
+    /// discarded rather than owned.
+    pub(super) fn stash_handed(&self, w: &Work, ctx: ServerCtx, spent: u32) {
+        self.handed.lock_ok().insert(
+            w.id.clone(),
+            Handed {
+                work: Work {
+                    id: w.id.clone(),
+                    attempts: w.attempts,
+                    promoted: w.promoted,
+                    tried_430: w.tried_430,
+                    tried_fail: w.tried_fail,
+                    dup: false,
+                    prebyte_expiries: w.prebyte_expiries,
+                    soft_430: w.soft_430,
+                    fenced: false,
+                    rearms: w.rearms,
+                    ladder: false,
+                    probe: false,
+                    age_days: w.age_days,
+                    part: w.part,
+                    file: w.file,
+                    ord: w.ord,
+                },
+                server: ctx.idx,
+                group_bits: ctx.group_bits,
+                dup_copy: w.dup,
+                spent,
+            },
+        );
+    }
+}
+
+/// Test-only rendezvous INSIDE the steer's publish/un-claim window
+/// (sweep 8, M2). Absent from production builds entirely.
+///
+/// The invariant the M2 fix installs - a steered refetch is never
+/// visible to a draining worker while its old done bit is still set -
+/// is a property of a window, and a window cannot be observed from
+/// outside it. The regression parks the verdict thread here, plays the
+/// worker's adoption against it, and releases; without a barrier the
+/// same test is a race that passes for the wrong reason. Keyed by
+/// message-id so a threaded test runner cannot cross two legs.
+#[cfg(test)]
+pub(super) static STEER_WINDOW: std::sync::Mutex<Option<(Arc<str>, Arc<std::sync::Barrier>)>> =
+    std::sync::Mutex::new(None);
 
 /// §146 census currency (C4): one refusal-walker, named by message-id
 /// AND by its completion ordinal. The pair must travel together from
@@ -70,8 +203,7 @@ impl QueueControl {
     pub fn promote_opts(&self, ids: &[Arc<str>], engage_stream: bool) -> usize {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -165,8 +297,7 @@ impl QueueControl {
     pub fn note_stream_active(&self) {
         if let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         {
@@ -193,8 +324,7 @@ impl QueueControl {
     pub fn any_live(&self, ids: &[Arc<str>]) -> Option<bool> {
         let sh = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)?;
         if ids.is_empty() {
@@ -258,8 +388,7 @@ impl QueueControl {
     pub fn cancel(&self, ids: &HashSet<Arc<str>>) -> Vec<Arc<str>> {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -324,8 +453,7 @@ impl QueueControl {
     pub fn requeue(&self, ids: &[Arc<str>]) -> usize {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -406,21 +534,15 @@ impl QueueControl {
                 released.wait();
             }
         }
-        {
-            let mut done = sh.done.lock_ok();
-            for w in &works {
-                done.clear(w.ord);
-            }
-        }
-        // Undo everything this call has done so far, in reverse:
-        // re-terminal, drop pending (firing finished if ours is the
-        // zeroing sub), re-stash. The caller keeps its accounting.
+        // Undo everything this call has done so far, in reverse: drop
+        // pending (firing finished if ours is the zeroing sub), re-stash.
+        // The caller keeps its accounting. The done bits are NOT touched
+        // here: they are only cleared below, under the queue lock, after
+        // the last refusal point (F-07) - clearing them earlier and
+        // re-claiming on the way out let an in-flight duplicate complete
+        // in the window, take the cleared bit as a fresh completion, and
+        // sub pending once more than this rollback already did.
         let roll_back = |ws: Vec<Work>| {
-            let mut done = sh.done.lock_ok();
-            for w in &ws {
-                done.claim(w.ord);
-            }
-            drop(done);
             sub_pending(ws.len());
             put_back(ws);
         };
@@ -457,6 +579,15 @@ impl QueueControl {
             drop(q);
             roll_back(works);
             return 0;
+        }
+        // Past every refusal: now un-terminal the articles, still under
+        // the queue lock, so a completion can only re-claim a bit whose
+        // work is on its way into the queue (F-07).
+        {
+            let mut done = sh.done.lock_ok();
+            for w in &works {
+                done.clear(w.ord);
+            }
         }
         let n = works.len();
         // Same books as every other reinsert (shed_pipeline, the recheck
@@ -517,7 +648,7 @@ impl QueueControl {
         // otherwise invisible from outside the pool.
         let closed = |why: &str| {
             if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-                eprintln!("[census] closed: {why}");
+                info!(target: "census", "closed: {why}");
             }
         };
         let pending = sh.pending.load(Ordering::Acquire);
@@ -692,8 +823,7 @@ impl QueueControl {
     pub fn note_decoded(&self, id: &str, report: DecodeReport) -> DecodeAck {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -720,6 +850,7 @@ impl QueueControl {
             sh.complete_one();
             DecodeAck::Owned
         };
+        let mut got_part = None;
         let why = match report {
             DecodeReport::Bad { why } => why,
             // The expected part rides the stashed Work (h.work is
@@ -727,7 +858,35 @@ impl QueueControl {
             // a dup-delivered wrong-part body still trips this); 0
             // means the segment declared no part - no gate.
             DecodeReport::Clean { part } => match (h.work.part, part) {
-                (want, Some(got)) if want != 0 && got != want => {
+                (want, Some(got))
+                    if want != 0 && got != want && !sh.part_latch.is_off(h.work.file) =>
+                {
+                    // The refetched copy of an already-steered id
+                    // carrying the SAME undeclared part: a second
+                    // backbone agrees with the first, so the NZB's
+                    // numbering is what is wrong. Stand the gate down
+                    // for the rest of that FILE rather than pay one
+                    // refetch per article (tv4-rot1: 2x payload).
+                    let agreed = matches!(
+                        sh.part_latch.first.lock_ok().get(id),
+                        Some(&(first_group, first_part))
+                            if first_part == got && first_group & h.group_bits == 0
+                    );
+                    if agreed {
+                        if sh.part_latch.off.lock_ok().insert(h.work.file)
+                            && let Some(l) = &sh.live
+                        {
+                            l.note(
+                                    h.server,
+                                    "crc-retry",
+                                    format!(
+                                        "{id}: two servers agree on part {got} where the NZB declared {want} - segment numbers are synthesized, part gate off for this file"
+                                    ),
+                                );
+                        }
+                        return finalize(&sh);
+                    }
+                    got_part = Some(got);
                     "valid body for the wrong article (part mismatch)"
                 }
                 _ => return finalize(&sh),
@@ -747,7 +906,7 @@ impl QueueControl {
             || sh.workers_live.load(Ordering::Acquire) == 0
         {
             if dbg {
-                eprintln!("[crc-steer] {id}: own (run over/draining)");
+                info!(target: "crc-steer", "{id}: own (run over/draining)");
             }
             return finalize(&sh);
         }
@@ -768,13 +927,20 @@ impl QueueControl {
         // most once (`dup_servers`), and the fold above stops the
         // pickers re-racing from this group.
         let charged = !h.dup_copy;
+        // `h.spent` is the pre-claim routing evidence (see the field
+        // doc): the provisional claim that delivered this body already
+        // dropped the live entry, so asking the live map alone here
+        // reads "nobody else can have it" for exactly the fill peers a
+        // spent primary opened the tier for.
         if charged
-            && (!sh.other_can_take(&w, h.server) || !sh.crc_retried.lock_ok().insert(w.id.clone()))
+            && (!sh.other_can_take_with(&w, h.server, h.spent)
+                || !sh.crc_retried.lock_ok().insert(w.id.clone()))
         {
             if dbg {
-                eprintln!(
-                    "[crc-steer] {id}: own (elsewhere={} already={})",
-                    sh.other_can_take(&w, h.server),
+                info!(
+                    target: "crc-steer",
+                    "{id}: own (elsewhere={} already={})",
+                    sh.other_can_take_with(&w, h.server, h.spent),
                     sh.crc_retried.lock_ok().contains(id)
                 );
             }
@@ -787,6 +953,22 @@ impl QueueControl {
         // future claimant is already guaranteed - the drained refetch,
         // or a dup still racing - and `claim_done` arbitrates exactly
         // one, as ever.
+        //
+        // M2 (sweep 8): publication and un-claim must also be atomic
+        // WITH RESPECT TO ADOPTION, which the two separate lock hops
+        // this used to take were not. A worker that drained the inbox
+        // while the old done bit was still set could dispatch the
+        // refetch AND have it come back - from a cached or local
+        // provider, or across any scheduler pause long enough - and
+        // `claim_done` would reject the only good copy as a duplicate
+        // and deregister it. This thread would then clear the bit over
+        // an article that is in no queue, no inbox and no inflight map
+        // while `pending` still counts it: every worker waits forever
+        // and only an outer watchdog ends the job. So the guard below
+        // is HELD across the fleet-live recheck, the spent restore and
+        // the done clear. The worker's drain takes this same mutex
+        // (pool.rs `next_work`) inside its queue-lock hold, so it parks
+        // there until the article is genuinely unowned.
         if let Some(l) = &sh.live {
             l.note(
                 h.server,
@@ -795,9 +977,32 @@ impl QueueControl {
             );
         }
         if dbg {
-            eprintln!("[crc-steer] {id}: steered (from server {})", h.server);
+            info!(target: "crc-steer", "{id}: steered (from server {})", h.server);
         }
-        sh.steer_inbox.lock_ok().push(w);
+        if let Some(got) = got_part {
+            // Keep the FIRST deliverer: a later same-backbone repeat
+            // must not launder itself into the record.
+            sh.part_latch
+                .first
+                .lock_ok()
+                .entry(w.id.clone())
+                .or_insert((h.group_bits, got));
+            sh.part_latch.steers.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut inbox = sh.steer_inbox.lock_ok();
+        inbox.push(w);
+        #[cfg(test)]
+        {
+            let hook = STEER_WINDOW
+                .lock_ok()
+                .as_ref()
+                .filter(|(want, _)| &**want == id)
+                .map(|(_, b)| b.clone());
+            if let Some(b) = hook {
+                b.wait();
+                b.wait();
+            }
+        }
         // Re-ask the fleet-dead question the guard above asked. Nothing
         // between the two takes a lock retirement respects - `retire`
         // drops `alive` and `workers_live` bare, taking no gate - and
@@ -812,17 +1017,24 @@ impl QueueControl {
         // and the consumer owning the body is exactly what the guard
         // above would have done.
         if sh.workers_live.load(Ordering::Acquire) == 0 {
-            sh.steer_inbox.lock_ok().retain(|x| &*x.id != id);
+            inbox.retain(|x| &*x.id != id);
+            drop(inbox);
             if dbg {
-                eprintln!("[crc-steer] {id}: own (fleet died during the steer)");
+                info!(target: "crc-steer", "{id}: own (fleet died during the steer)");
             }
             return finalize(&sh);
         }
+        // M8: hand the ladder back the evidence the provisional claim
+        // took. Ahead of the done clear and under the inbox guard, so
+        // no worker can reach `next_work`'s pickup gate - which reads
+        // the same map - between the two.
+        sh.restore_spent(id, h.spent);
         sh.done.lock_ok().clear(ord);
         // The body the consumer holds is dead weight now; the article
         // stays in any_live's sight through the inbox entry pushed
         // above until a worker drains it into the queue.
         sh.done_ok.lock_ok().remove(id);
+        drop(inbox);
         DecodeAck::Steered
     }
 
@@ -836,8 +1048,7 @@ impl QueueControl {
     pub fn note_settled(&self, id: &str) {
         if let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         {
@@ -852,8 +1063,7 @@ impl QueueControl {
     pub fn dump_state(&self) {
         if let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         {
@@ -872,8 +1082,7 @@ impl QueueControl {
     pub fn abort(&self) -> bool {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -892,8 +1101,7 @@ impl QueueControl {
     pub fn drain(&self) -> bool {
         let Some(sh) = self
             .shared
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
@@ -917,8 +1125,7 @@ impl QueueControl {
         self.drained.load(Ordering::Acquire)
             || self
                 .shared
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade)
                 .is_some_and(|sh| sh.draining.load(Ordering::Acquire))
@@ -929,6 +1136,22 @@ impl QueueControl {
     /// with articles still in flight - the pool's own tail latch - and
     /// None before that moment or once the run is gone. `Some(0)` means
     /// the tail completed; a live tail is `Some(n)` with `n > 0`.
+    /// TODO 208 item 3: the shallowest pipeline depth the endgame taper
+    /// handed out, `usize::MAX` if it never bit (or the run is gone).
+    /// The `[pool]` line carries the same number; this is the handle a
+    /// rig reads it through, and it must be read BEFORE the fetch
+    /// returns - the pool's last strong `Arc` dies with it.
+    pub fn taper_min(&self) -> usize {
+        let sh = {
+            let g = self.shared.lock_ok();
+            match g.as_ref().and_then(|w| w.upgrade()) {
+                Some(sh) => sh,
+                None => return usize::MAX,
+            }
+        };
+        sh.taper_min.load(Ordering::Relaxed)
+    }
+
     pub fn tail_pending(&self) -> Option<usize> {
         let sh = {
             let g = self.shared.lock_ok();
@@ -936,5 +1159,59 @@ impl QueueControl {
         };
         let latched = sh.tail_started.lock_ok().is_some();
         latched.then(|| sh.pending.load(Ordering::Acquire))
+    }
+
+    /// Held-bytes backpressure (TODO 94 item E): park the pending
+    /// articles of these files ([`ArticleReq::file`], the extractor
+    /// slots) behind a shared in-flight allowance of `allow` bytes
+    /// (`Some`), or release them (`None`). The extractor raises it near
+    /// its holds cap for the files of a chased group, refreshes the
+    /// allowance as its holds move, and releases it when the group
+    /// stops chasing; see `pool::park` for what a parked group still
+    /// gets. A no-op with no pool attached, and harmless for a file that
+    /// is not queued.
+    pub fn park_files(&self, files: &[u32], allow: Option<u64>) {
+        let sh = {
+            let g = self.shared.lock_ok();
+            match g.as_ref().and_then(|w| w.upgrade()) {
+                Some(sh) => sh,
+                None => return,
+            }
+        };
+        // Seeding a newly parked file's count from the in-flight map is
+        // one scan of it per first park of that file - rare, and the
+        // only way the allowance can mean what it says.
+        sh.park.set(files, allow, |file| {
+            sh.inflight
+                .lock_ok()
+                .iter()
+                .filter(|(_, i)| i.file == file)
+                .map(|(id, _)| id.clone())
+                .collect()
+        });
+    }
+
+    /// Bytes of BODY responses charged as in flight across the pool
+    /// right now (the B3 wire estimate, `Shared::inflight_body_bytes`):
+    /// what will land whatever the scheduler decides next. The
+    /// extractor's park counts it against its holds cap, since a park
+    /// fired at the cap alone breached it by exactly this much. `None`
+    /// with no pool attached.
+    pub fn wire_inflight_bytes(&self) -> Option<u64> {
+        let sh = {
+            let g = self.shared.lock_ok();
+            g.as_ref()?.upgrade()?
+        };
+        Some(sh.inflight_body_bytes.load(Ordering::Acquire))
+    }
+
+    /// Candidates `next_work` stepped past for a parked file so far
+    /// (diagnostics). `None` with no pool attached.
+    pub fn park_deferrals(&self) -> Option<u64> {
+        let sh = {
+            let g = self.shared.lock_ok();
+            g.as_ref()?.upgrade()?
+        };
+        Some(sh.park.deferred())
     }
 }

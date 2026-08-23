@@ -32,6 +32,13 @@ pub(super) fn restore_runtime_state(
         restore_job_settings(daemon, &saved, settings_path);
         restore_ui_and_index_settings(daemon, &saved);
     }
+    // A12: after BOTH of the above. load_queue has put back every record
+    // that reached disk, and restore_job_settings has loaded the
+    // categories (for §218's inference) and the kept-files notices (which
+    // hold spool files of their own). Before any task spawns: the watch
+    // poller must find a re-adopted job in the queue, by sha, before it
+    // re-reads the user's copy of the same NZB.
+    daemon.recover_orphaned_spool();
 
     if let Some(v) = &speedlimit {
         let bps = parse_size(v)
@@ -594,6 +601,19 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
     // load-bearing third of the three lists.
     if let Some(v) = saved.get("index_search_log").and_then(Value::as_bool) {
         daemon.index_search_log.store(v, Ordering::Relaxed);
+        // TODO 166: the switch's clear is DEFERRED when the index is
+        // busy, so a daemon stopped inside that window would come back
+        // with the rows still there and nothing left to retry - the one
+        // hole an in-process latch cannot cover on its own. "Off" means
+        // the table is empty, so re-assert it at every start: the
+        // searchlog tick picks this up, runs one DELETE on the writer,
+        // and it is a no-op whenever the table already is empty.
+        #[cfg(feature = "indexer")]
+        if !v {
+            daemon
+                .search_log_clear_pending
+                .store(true, Ordering::Relaxed);
+        }
     }
     #[cfg(feature = "indexer")]
     if let Some(v) = saved.get("predb_max_rows").and_then(Value::as_u64) {
@@ -1066,6 +1086,51 @@ pub(super) fn seed_omdb_key(settings_path: &Path) -> Mutex<Option<String>> {
             .get("omdb_key")
             .and_then(Value::as_str)
             .map(str::to_string)
+            .filter(|k| !k.is_empty()),
+    )
+}
+
+/// §193 d: the TMDB key, from the settings row FIRST and the two older
+/// homes after it.
+///
+/// M13: this is the metadata enrichment worker's key, and the
+/// identifier's second source. WITH one they use TMDB; WITHOUT one they
+/// still run, keyless, via TVmaze (tv) + Wikidata/Wikipedia (movies) -
+/// TMDB declines API applications for NZB tooling, so keyless is the
+/// normal path. iTunes used to serve movies; Apple removed that
+/// endpoint. Either way the lookups stay on the worker's thread, never
+/// on the API's.
+///
+/// Unlike its siblings this key predates its own settings row by a long
+/// way: `tmdb_key` in the config file and `TMDB_API_KEY` in the
+/// environment are what the hint on the rename card told people to use,
+/// and both are still honoured. Order is settings.json, then the config
+/// file, then the env - the row the user typed into last wins, and an
+/// install that never opens that row behaves exactly as it did before.
+///
+/// The migration is a READ, not a move: nothing rewrites the config
+/// file, so a key that lives there keeps working even for a daemon
+/// started against a different settings directory. Saving the row writes
+/// settings.json, and settings.json is read first, so the UI value wins
+/// from then on.
+///
+/// One inherited limit, unchanged and worth knowing: `Config::load`
+/// refuses a file with no servers in it, so a `tmdb_key` sitting beside
+/// an empty server list has never been readable from there. The settings
+/// row has no such condition, which is one more reason it is the home
+/// the UI writes to.
+pub(super) fn seed_tmdb_key(settings_path: &Path, config: &Path) -> Mutex<Option<String>> {
+    Mutex::new(
+        load_settings(settings_path)
+            .get("tmdb_key")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                nzbkit::config::Config::load(config)
+                    .ok()
+                    .and_then(|c| c.tmdb_key)
+            })
+            .or_else(|| std::env::var("TMDB_API_KEY").ok())
             .filter(|k| !k.is_empty()),
     )
 }
@@ -1595,6 +1660,8 @@ pub(super) fn spawn_core_tasks(
 
     tasks::spawn_slow_job_watchdog(daemon, config, mem_budget);
     tasks::spawn_live_tuner(daemon, config);
+    // §210: which interface carries the traffic, for the tune hint.
+    super::locallink::spawn(daemon, config);
     super::linkpeak::spawn(daemon);
     // §129 3e: the chronic slow-storage judge. Inert unless a job is
     // downloading (or its own pause is holding).
@@ -1604,22 +1671,6 @@ pub(super) fn spawn_core_tasks(
     // stopped being enough once the age rule could be minutes.
     super::histstore::spawn_retention_sweep(daemon);
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-/// M13: the metadata enrichment worker's key. With a TMDB key (config
-/// tmdb_key or TMDB_API_KEY env) it uses TMDB; WITHOUT one it still runs,
-/// keyless, via TVmaze (tv) + Wikidata/Wikipedia (movies) - TMDB declines
-/// API applications for NZB tooling, so keyless is the normal path. iTunes
-/// used to serve movies; Apple removed that endpoint. Network stays on the
-/// worker's thread - never the API's.
-#[cfg(feature = "indexer")]
-pub(super) fn config_tmdb_key(config: &Path) -> Option<String> {
-    nzbkit::config::Config::load(config)
-        .ok()
-        .and_then(|c| c.tmdb_key)
-        .or_else(|| std::env::var("TMDB_API_KEY").ok())
-        .filter(|k| !k.is_empty())
 }
 
 /// The background lanes that need nothing but the daemon and the config
@@ -1881,6 +1932,7 @@ pub(super) fn boot(config: &Path, settings_path: &Path, opts: ServeOpts) -> Resu
         out_root,
         spool.clone(),
         port,
+        bind.clone(),
         tls_on,
         tls_cert,
         tls_key,
@@ -1954,13 +2006,14 @@ pub(super) fn boot(config: &Path, settings_path: &Path, opts: ServeOpts) -> Resu
 /// in `ServeOpts`, and `group_desc_isc` is passed as a bool because the
 /// destructure in `boot` leaves it un-moved on `opts` (its pattern is
 /// `_`), which is too subtle to re-create here.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_daemon(
     config: PathBuf,
     settings_path: PathBuf,
     out_root: PathBuf,
     spool: PathBuf,
     port: u16,
+    bind: String,
     tls_on: bool,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
@@ -2008,6 +2061,7 @@ fn build_daemon(
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
+        postproc_backlog: Arc::new(AtomicUsize::new(0)),
         finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
@@ -2023,7 +2077,8 @@ fn build_daemon(
         mover_bucket: Mutex::new(mover::PaceState::default()),
         move_pace: Mutex::new("yield".to_string()),
         reserved: Mutex::new(std::collections::HashSet::new()),
-        progress: Arc::new(AtomicU64::new(0)),
+        progress: ProgressCell::default(),
+        drain_dl: Mutex::new(None),
         active_total: AtomicU64::new(0),
         active_dl: Mutex::new(None),
         started_at: Mutex::new(None),
@@ -2038,6 +2093,10 @@ fn build_daemon(
         cfg_path: config.clone(),
         cats: Mutex::new(DEFAULT_CATS.iter().map(|s| s.to_string()).collect()),
         port,
+        // What THIS run's listener bound to. `boot` still owns the
+        // string (Booted returns it for the readiness banner), so this
+        // is a clone rather than a move.
+        bind,
         // A failed mint leaves an EMPTY token, and `launcher_proof` then
         // answers a challenge with sha256(":nonce") - a value any process
         // could compute. Refuse to answer at all instead: the wrappers
@@ -2088,7 +2147,10 @@ fn build_daemon(
         index_pesto: std::sync::atomic::AtomicBool::new(true),
         index_pesto_budget: AtomicU64::new(120),
         index_search_log: std::sync::atomic::AtomicBool::new(true),
+        #[cfg(feature = "indexer")]
         search_log_buf: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "indexer")]
+        search_log_clear_pending: std::sync::atomic::AtomicBool::new(false),
         index_nzbimport: std::sync::atomic::AtomicBool::new(true),
         index_nzbimport_budget: AtomicU64::new(300),
         bench_interval: AtomicU64::new(0),
@@ -2132,7 +2194,7 @@ fn build_daemon(
         #[cfg(feature = "indexer")]
         instant_pending: Mutex::new(std::collections::HashMap::new()),
         instant_hint: Mutex::new(Vec::new()),
-        nzblnk_recent: Mutex::new(std::collections::VecDeque::new()),
+        nzblnk_gate: NzblnkGate::default(),
         smart_folders: Mutex::new(Vec::new()),
         par_cleanup: AtomicBool::new(true),
         postproc_jobs: AtomicU64::new(2),
@@ -2217,8 +2279,6 @@ fn build_daemon(
         predb_corr_auto: seed_predb_corr_auto(&settings_path),
         #[cfg(feature = "indexer")]
         predb_max_rows: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_MAX_ROWS_DEFAULT),
-        #[cfg(not(feature = "indexer"))]
-        predb_max_rows: std::sync::atomic::AtomicU64::new(250_000),
         #[cfg(feature = "indexer")]
         predb_seed_days: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_SEED_DAYS_DEFAULT),
         #[cfg(not(feature = "indexer"))]
@@ -2238,7 +2298,9 @@ fn build_daemon(
         scoreboard_cats: seed_scoreboard_cats(&settings_path),
         scoreboard_key: seed_scoreboard_key(&settings_path),
         scoreboard_calibrate: seed_scoreboard_calibrate(&settings_path),
+        #[cfg(feature = "indexer")]
         scoreboard_running: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "indexer")]
         scoreboard_status: Mutex::new(String::new()),
         // Spots are new, so there is no existing-install case to seed
         // from: nobody has one running today. Straight off until asked.
@@ -2259,12 +2321,8 @@ fn build_daemon(
         index_evict: seed_index_evict(&settings_path),
         #[cfg(feature = "indexer")]
         index_evict_order: seed_index_evict_order(&settings_path),
-        #[cfg(not(feature = "indexer"))]
-        index_evict_order: Mutex::new("ladder".to_string()),
         #[cfg(feature = "indexer")]
         index_evict_kinds: seed_index_evict_kinds(&settings_path),
-        #[cfg(not(feature = "indexer"))]
-        index_evict_kinds: Mutex::new(Vec::new()),
         #[cfg(feature = "indexer")]
         compact_pending: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
@@ -2281,6 +2339,7 @@ fn build_daemon(
         link_peak: linkpeak::LinkPeak::load(spool.join("linkpeak.json")),
         whyslow: whyslow::WhySlow::default(),
         tune_hint: Mutex::new(String::new()),
+        local_link: Mutex::new(None),
         cpu_sample: Mutex::new(None),
         speed_win: Mutex::new(VecDeque::new()),
         usage: Mutex::new(
@@ -2318,10 +2377,6 @@ fn build_daemon(
         watch_recursive: AtomicBool::new(false),
         watch_move_rejected: AtomicBool::new(false),
         watch_failed: Mutex::new(std::collections::HashMap::new()),
-        watch_picked: Mutex::new(std::collections::VecDeque::new()),
-        auto_retried: Mutex::new(std::collections::VecDeque::new()),
-        giveup_tripped: Mutex::new(std::collections::VecDeque::new()),
-        watch_upgraded: Mutex::new(std::collections::VecDeque::new()),
         delete_kept: Mutex::new(std::collections::VecDeque::new()),
         deleted_recent: Mutex::new(std::collections::VecDeque::new()),
         auth_fails: Mutex::new(std::collections::HashMap::new()),
@@ -2356,6 +2411,7 @@ fn build_daemon(
         nzbkey: Mutex::new(nzbkey),
         stream_secret: seed_stream_secret(&settings_path),
         omdb_key: seed_omdb_key(&settings_path),
+        tmdb_key: seed_tmdb_key(&settings_path, &config),
         library_recheck_secs: AtomicU64::new(library_recheck_secs.max(1)),
         #[cfg(feature = "indexer")]
         index_groups: Mutex::new(index_groups),

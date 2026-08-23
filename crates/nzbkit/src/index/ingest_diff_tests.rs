@@ -83,10 +83,10 @@ fn assert_rows_match_recompute(ix: &Index) {
                 &format!(
                     "SELECT COUNT(*), COALESCE(SUM(bytes),0),
                             COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                     ELSE json_array_length(segments) END >= total_parts),0),
+                                     ELSE seg_count(segments) END >= total_parts),0),
                             COALESCE(SUM(LOWER(filename) LIKE '%.par2'),0),
                             COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                              ELSE json_array_length(segments) END),0),
+                                              ELSE seg_count(segments) END),0),
                             COALESCE(SUM(total_parts),0),
                             COALESCE(SUM({}),0)
                        FROM files WHERE release_id=?1",

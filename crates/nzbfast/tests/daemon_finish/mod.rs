@@ -105,7 +105,7 @@ fn set_cfg(port: u16, name: &str, value: &str) {
 }
 
 fn log_of(d: &Daemon) -> String {
-    std::fs::read_to_string(&d.log).unwrap_or_default()
+    d.log()
 }
 
 /// Poll the log until `needle` appears, or give up after ~`secs`.

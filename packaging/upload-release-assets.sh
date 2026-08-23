@@ -87,40 +87,60 @@ fi
 # than the linux tarballs alone - measured 15 Aug, the .spk and both zips
 # are clean today, and this is what keeps the next asset type honest.
 #
-# .qpkg is NOT covered, deliberately. It is a self-extracting shell script
-# rather than an archive, so opening it as one would refuse every upload;
-# splitting it needs packaging/qnap/unpack-qpkg.sh, the way
-# scan-release-assets.sh does. It is also built by qbuild in a container
-# rather than by the Mac's tar, so it is not exposed to this in the first
-# place. Wiring the splitter in is a known gap, not an oversight.
-for f in "$@"; do
-  case "$(basename "$f")" in
-    *.tar.gz|*.tgz|*.zip|*.spk) ;;
-    *) continue ;;
-  esac
-  junk=$(python3 - "$f" <<'PY'
+# .qpkg IS covered, since 23 Aug 2026 - it was the documented hole here
+# until then. It is a self-extracting shell script rather than an archive,
+# so it cannot just be opened: packaging/qnap/unpack-qpkg.sh splits it
+# first, the way packaging/scan-release-assets.sh has always split it, and
+# the two inner archives are what get scanned.
+#
+# The splitter is asked for the PARTS (--parts) rather than for an
+# unpacked tree, and that is the whole trick. bsdtar consumes AppleDouble
+# members on extract exactly as it does on read, so a gate that unpacked
+# the package on this Mac and walked the tree would report every
+# junk-carrying .qpkg clean - the same asymmetry as `tar tzvf` above, one
+# layer further in. python's tarfile over the raw parts reads what the
+# member headers actually store.
+#
+# A .qpkg is built by qbuild in a container rather than by the Mac's tar,
+# so it is barely exposed to this. It is scanned anyway: "not exposed
+# today" is what the .spk and both zips were too, and the 1.1.3 .qpkg
+# still shipped its builder's uid through both of these gates because
+# neither one looked at it.
+junk_in_archive() {   # $1 = an archive; prints junk member names, or UNREADABLE:
+  python3 - "$1" <<'PY'
 import os, sys, tarfile, zipfile
 
 path = sys.argv[1]
 bad = []
 
 
-def flag(names):
-    for n in names:
+def flag(pairs):
+    """(name, where) - the VERDICT is on the name, the report on the where.
+
+    Judging the labelled string instead was a real hole until 23 Aug 2026:
+    a nested member was tested as "package.tgz!._nzbfast", whose basename
+    is the whole string, so junk at the TOP level of an inner archive -
+    the second-top-level-entry case this gate exists for - never matched.
+    Only a nested member sitting in a subdirectory was ever caught.
+    """
+    for n, where in pairs:
         base = os.path.basename(n.rstrip("/"))
         if base.startswith("._") or n.startswith("__MACOSX/") or "/__MACOSX/" in n:
-            bad.append(n)
+            bad.append(where)
 
 
+seen = 0
 try:
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
-            flag(z.namelist())
+            seen = len(z.namelist())
+            flag([(n, n) for n in z.namelist()])
     else:
         # A .spk is a tar of a tar, and a .qpkg embeds one too; the junk can
         # be in either layer, so recurse one level into nested archives.
         with tarfile.open(path) as t:
-            flag([m.name for m in t.getmembers()])
+            seen = len(t.getmembers())
+            flag([(m.name, m.name) for m in t.getmembers()])
             for m in t.getmembers():
                 if not m.isfile() or not m.name.endswith((".tar.gz", ".tgz", ".tar")):
                     continue
@@ -128,35 +148,73 @@ try:
                 if fh is None:
                     continue
                 with tarfile.open(fileobj=fh) as inner:
-                    flag([m.name + "!" + i.name for i in inner.getmembers()])
+                    flag([(i.name, m.name + "!" + i.name)
+                          for i in inner.getmembers()])
 except Exception as e:  # noqa: BLE001 - an unreadable archive must fail loudly
     print(f"UNREADABLE: {e}")
     sys.exit(0)
 
+# "It opened" is not "we looked inside it". A truncated stream can hand
+# tarfile a valid-looking header and nothing else, and an archive with no
+# members trivially carries no junk - which is a CLEAN verdict reached by
+# having seen nothing. No release asset is legitimately empty.
+if not seen:
+    print("UNREADABLE: opened, but the archive holds no members")
+    sys.exit(0)
+
 print("\n".join(bad))
 PY
-)
-  if [ -n "$junk" ]; then
-    case "$junk" in
-      UNREADABLE:*)
-        # Same posture as the linkage gate below: assert the positive. An
-        # archive we cannot open has not been shown to be clean, so it does
-        # not get to pass by failing to match.
-        echo "✗ $(basename "$f"): CANNOT INSPECT - refusing to upload." >&2
-        echo "$junk" | sed 's/^/      /' >&2
+}
+
+for f in "$@"; do
+  qparts=""
+  case "$(basename "$f")" in
+    *.tar.gz|*.tgz|*.zip|*.spk) scan_these=("$f") ;;
+    *.qpkg)
+      qparts=$(mktemp -d)
+      if ! "$(dirname "$0")/qnap/unpack-qpkg.sh" --parts "$f" "$qparts" >/dev/null 2>&1; then
+        echo "✗ $(basename "$f"): CANNOT INSPECT - unpack-qpkg.sh could not" >&2
+        echo "      split it into its script, control and data parts. If QDK" >&2
+        echo "      changed its self-extractor, that script has to change with" >&2
+        echo "      it - see packaging/qnap/qdk-pin.txt." >&2
+        rm -rf "$qparts"
         fail=1
         continue
-        ;;
-    esac
-    echo "✗ $(basename "$f"): macOS metadata inside the archive:" >&2
-    echo "$junk" | head -5 | sed 's/^/      /' >&2
-    echo "    Rebuild with COPYFILE_DISABLE=1 in front of the tar/zip (bsdtar" >&2
-    echo "    also takes --no-mac-metadata, zip takes -X). Do NOT verify the" >&2
-    echo "    rebuild with 'tar tzvf' on a Mac - it hides these. Re-run this" >&2
-    echo "    script, or python3 -c 'import tarfile,sys;[print(m.name) for m" >&2
-    echo "    in tarfile.open(sys.argv[1]).getmembers()]'." >&2
-    fail=1
-  fi
+      fi
+      scan_these=("$qparts/control.tar" "$qparts/data.tar.gz")
+      ;;
+    *) continue ;;
+  esac
+  for a in "${scan_these[@]}"; do
+    # A .qpkg's refusal has to name WHICH of its two inner archives is
+    # dirty; the file name on its own would send the reader to a shell
+    # script and nothing in it.
+    label=$(basename "$f")
+    if [ -n "$qparts" ]; then label="$label!$(basename "$a")"; fi
+    junk=$(junk_in_archive "$a")
+    if [ -n "$junk" ]; then
+      case "$junk" in
+        UNREADABLE:*)
+          # Same posture as the linkage gate below: assert the positive. An
+          # archive we cannot open has not been shown to be clean, so it
+          # does not get to pass by failing to match.
+          echo "✗ $label: CANNOT INSPECT - refusing to upload." >&2
+          echo "$junk" | sed 's/^/      /' >&2
+          fail=1
+          continue
+          ;;
+      esac
+      echo "✗ $label: macOS metadata inside the archive:" >&2
+      echo "$junk" | head -5 | sed 's/^/      /' >&2
+      echo "    Rebuild with COPYFILE_DISABLE=1 in front of the tar/zip (bsdtar" >&2
+      echo "    also takes --no-mac-metadata, zip takes -X). Do NOT verify the" >&2
+      echo "    rebuild with 'tar tzvf' on a Mac - it hides these. Re-run this" >&2
+      echo "    script, or python3 -c 'import tarfile,sys;[print(m.name) for m" >&2
+      echo "    in tarfile.open(sys.argv[1]).getmembers()]'." >&2
+      fail=1
+    fi
+  done
+  if [ -n "$qparts" ]; then rm -rf "$qparts"; fi
 done
 if [ $fail -ne 0 ]; then
   echo "REFUSING to upload: an asset carries macOS resource-fork metadata," >&2
@@ -173,10 +231,13 @@ fi
 # check on the bytes, which is the only one that sees a builder that
 # stopped passing them.
 #
-# .qpkg is excluded for the same reason the gate above excludes it: it is
-# a self-extracting shell script, not an archive, so opening it as one
-# would refuse every release that carries one. Zips are excluded because
-# the format has no uid/gid/uname/gname fields to leak.
+# .qpkg is excluded here, and unlike the junk gate above it is NOT just a
+# splitting problem: this loop demands EMPTY name strings, and root:root
+# is the CORRECT installed ownership for a package format, so a .qpkg run
+# through it would be refused every release. Its owner headers are checked
+# by check-archive-identity.py below, under the ROOT-OK policy that says
+# so. Zips are excluded because the format has no uid/gid/uname/gname
+# fields to leak.
 owner_fail=0
 for f in "$@"; do
   case "$(basename "$f")" in *.tar.gz|*.tgz|*.spk) ;; *) continue ;; esac
@@ -211,13 +272,14 @@ if [ $owner_fail -ne 0 ]; then
   exit 1
 fi
 
-# The two gates above cover .tar.gz/.tgz/.zip/.spk and leave a documented
-# hole: a .qpkg is a self-extracting shell script rather than an archive,
-# so opening it as one would refuse every release that carries one, and
-# .deb/.rpm are not archive types either gate names. Cutting 1.1.3 the
-# .qpkg went out with `uid=1001 gid=1001 uname='runner' gname='runner'`
-# on every member of BOTH its inner tars, through both gates, because
-# neither looks at it.
+# The two gates above cover .tar.gz/.tgz/.zip/.spk, and since 23 Aug 2026
+# the junk one reaches inside a .qpkg as well. What is still not theirs is
+# the .qpkg's OWNER headers - root:root is right for a package format and
+# wrong for a tarball, so it cannot share the strict loop - and .deb/.rpm,
+# which are not archive types either gate opens. Cutting 1.1.3 the .qpkg
+# went out with `uid=1001 gid=1001 uname='runner' gname='runner'` on every
+# member of BOTH its inner tars, through both gates, because neither
+# looked at it at all.
 #
 # check-archive-identity.py is the splitter that closes it: it takes a
 # .qpkg apart the way packaging/qnap/unpack-qpkg.sh documents and reads

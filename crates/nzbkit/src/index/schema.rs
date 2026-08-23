@@ -122,7 +122,17 @@ fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
             filename TEXT NOT NULL,
             total_parts INTEGER NOT NULL,
             bytes INTEGER NOT NULL DEFAULT 0,
-            segments TEXT NOT NULL DEFAULT '[]',
+            -- `nsegs` sits AHEAD of the blob on purpose (§26c A5): a
+            -- row whose segment list overflows its page has every
+            -- column after the blob at the end of an overflow chain,
+            -- and the completeness aggregate reads `nsegs` on every
+            -- chunk of every release. A database created before the
+            -- 22 Aug 2026 layout has them the other way round until
+            -- `segmig` rebuilds it. The blob itself is segcodec's
+            -- compact form; JSON rows from before the migration are
+            -- read by the same readers, see index/segcodec.rs.
+            nsegs INTEGER NOT NULL DEFAULT 0,
+            segments BLOB NOT NULL DEFAULT '[]',
             UNIQUE(release_id, filename));
          CREATE TABLE IF NOT EXISTS marks(
             -- A8 multi-server indexing: article NUMBERS are assigned
@@ -558,13 +568,16 @@ fn additive_migrations(db: &Connection) {
         // = English by scene convention). Filled at ingest and by
         // the junk_v6 re-score pass, queried by language hide rules.
         "ALTER TABLE releases ADD COLUMN langs TEXT NOT NULL DEFAULT ''",
-        // Cached `json_array_length(segments)`. The completeness
-        // aggregate called that twice per file row of a release, on
-        // every chunk that touched it - so a 210-file release with
-        // 13 MB of segments JSON re-parsed all of it just to count
-        // parts. Measured on the live index: 16.3 ms with the JSON
-        // calls, 0.3 ms without. Written alongside `segments`, so
-        // the two cannot drift.
+        // Cached segment count (`json_array_length(segments)` then,
+        // `seg_count(segments)` now). The completeness aggregate called
+        // that twice per file row of a release, on every chunk that
+        // touched it - so a 210-file release with 13 MB of segments
+        // JSON re-parsed all of it just to count parts. Measured on the
+        // live index: 16.3 ms with the JSON calls, 0.3 ms without.
+        // Written alongside `segments`, so the two cannot drift. On a
+        // database from before 22 Aug 2026 this ALTER put the column
+        // behind the blob; the §26c A5 rebuild (segmig.rs) moves it
+        // ahead, and a fresh database is created that way.
         "ALTER TABLE files ADD COLUMN nsegs INTEGER NOT NULL DEFAULT 0",
         // What separates two encodes of the same film once resolution
         // ties: the release name already carries these, and the parser
@@ -699,6 +712,21 @@ fn additive_migrations(db: &Connection) {
         // the incremental path for good.
         "ALTER TABLE releases ADD COLUMN nfiles_complete INTEGER NOT NULL DEFAULT -1",
         "ALTER TABLE releases ADD COLUMN nfiles_exe INTEGER NOT NULL DEFAULT -1",
+        // TODO 5 phase 2c: the Unicode fold of `stem`, for the search
+        // paths that are not FTS - SQLite's `LOWER()` folds ASCII and
+        // nothing else, so `война` never matched `ВОЙНА.И.МИР` down the
+        // LIKE fallback. index/fold.rs holds the expression this
+        // mirrors and why the column is SPARSE ('' = "LOWER() already
+        // folds this row", true of nearly every stem), so a reader must
+        // OR this arm onto the existing expression, never replace it.
+        // Written by `fold_backfill` for existing rows, by
+        // `fold_reconcile` for rows a stem rewrite left disagreeing
+        // with their stem, and by the two production writers
+        // (ingest.rs, spots.rs) for new ones.
+        // Deliberately UNINDEXED: the arm rides inside a query that is
+        // already scanning, and building an index at open is the
+        // whole-table write lock the B1 picker indexes exist to avoid.
+        "ALTER TABLE releases ADD COLUMN stem_fold TEXT NOT NULL DEFAULT ''",
     ] {
         let _ = db.execute(ddl, []);
     }
@@ -1262,8 +1290,168 @@ fn ensure_people(db: &Connection) -> rusqlite::Result<bool> {
     Ok(people_fts.is_ok())
 }
 
+/// TODO 5 phase 2c: fill `releases.stem_fold` for rows written before
+/// the column existed.
+///
+/// Chunked with a kv rowid cursor and time-bounded, the `nsegs_fill`
+/// shape and for the same two reasons: a single UPDATE over the whole
+/// releases table (16.5 M rows on the live index) loses the write lock
+/// to a running scanner and is silently discarded, and an unbounded
+/// loop here blocks daemon startup, since every scan task opens its own
+/// Index. Whatever is left resumes on the next open, and the read side
+/// is correct throughout - an unfilled row is findable exactly as it
+/// was before the column existed.
+///
+/// The `GLOB '*[^ -~]*'` term is what keeps this cheap: it is SQLite's
+/// way of asking "does this stem hold a byte outside printable ASCII",
+/// so the chunk hands Rust only the handful of rows that could possibly
+/// earn a fold instead of marshalling 16.5 M stems across the boundary
+/// to discover they are all ASCII. It is a filter, not a correctness
+/// term - [`fold::stored`] re-decides for itself, and returns '' for
+/// every non-ASCII stem `LOWER()` was already folding correctly.
+///
+/// This generation only ever ADDS a fold, which is all a never-filled
+/// column needs. Clearing a fold that has gone stale is the second
+/// generation's job, in [`fold_reconcile`].
+fn fold_backfill(db: &mut Connection) {
+    fold_pass(db, "fold_v1", "fold_at", "stem GLOB '*[^ -~]*'");
+}
+
+/// TODO 5 phase 2c, corrective generation: reconcile `stem_fold` with
+/// what [`fold::stored`] says the row's stem folds to, on databases
+/// carrying a fold left behind by a stem rewrite.
+///
+/// `Index::split_merge_group` in `maintenance.rs` collapses a split
+/// release's volumes into one row and rewrites `stem` to the common
+/// prefix. Until 886785fd7 (23 Aug 2026) it left `stem_fold` holding
+/// the fold of the stem it had just replaced - so a merged Cyrillic
+/// group keeps a fold ending in the volume suffix the merge removed,
+/// ` 001`. Both non-FTS readers match on that column and so answer for
+/// a stem that no longer exists: [`query::stem_fold_arm`], which is the
+/// whole search path on a build without FTS, and the browse hide rule
+/// that spells the same expression by hand. The FTS arm never saw it -
+/// it tokenizes `stem`.
+///
+/// 886785fd7 stopped new ones being written; it could not repair the
+/// ones already on disk, and [`fold_backfill`] above cannot either. Its
+/// flag is long since stamped on every live index, and even re-armed it
+/// only ever writes a NON-empty fold, so a row whose replacement stem
+/// is ASCII would keep the stale one. Hence a second generation with
+/// its own flag rather than a rearm of the first.
+///
+/// Two things follow from that, both in the prefilter:
+///
+/// * `stem_fold <> ''` is a correctness term here, not just a cost one.
+///   A merge that shortens `ВОЙНА.001` to an ASCII stem leaves a fold
+///   the GLOB above would never look at.
+/// * The sparse rule survives: this writes back exactly what
+///   [`fold::stored`] returns, which is `''` for an ASCII stem and for
+///   any stem `LOWER()` already folds correctly, so a corrected row
+///   costs a record-header byte rather than a second copy of the stem.
+///
+/// There is no `WHERE stem_fold <> fold(stem)` to write instead of the
+/// walk: the fold is Rust, and the daemon's SQLite carries no function
+/// for it.
+fn fold_reconcile(db: &mut Connection) {
+    fold_pass(
+        db,
+        "fold_v2",
+        "fold_v2_at",
+        "(stem GLOB '*[^ -~]*' OR stem_fold <> '')",
+    );
+}
+
+/// The chunked rowid walk both `stem_fold` generations above are: read
+/// the cursor, re-judge every row in the next stride that `prefilter`
+/// admits, write back the ones [`fold::stored`] disagrees with, move
+/// the cursor. `done_key` is stamped when the walk runs off the end of
+/// the table; until then each open resumes where the last one stopped.
+///
+/// A generation is identified by its two kv keys, and nothing else -
+/// the prefilter may be widened for a later one without disturbing an
+/// earlier one's flag.
+fn fold_pass(db: &mut Connection, done_key: &str, at_key: &str, prefilter: &str) {
+    /// Rowids per chunk. Twenty times `nsegs_fill`'s because the
+    /// prefilter turns almost every row into a rejected comparison
+    /// rather than a row read plus an UPDATE.
+    const CHUNK: i64 = 20_000;
+    let done: Option<String> = db
+        .query_row("SELECT v FROM kv WHERE k=?1", [done_key], |r| r.get(0))
+        .ok();
+    if done.as_deref() == Some("1") {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let sel_sql = format!(
+        "SELECT id, stem, stem_fold FROM releases
+          WHERE rowid > ?1 AND rowid <= ?2 AND {prefilter}"
+    );
+    let _ = (|| -> rusqlite::Result<()> {
+        loop {
+            // Immediate, and the cursor read INSIDE it: several scan
+            // connections open the index at once, and a deferred
+            // transaction let two of them read the same cursor and the
+            // slower one write back a stale lower value.
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let cursor: i64 = tx
+                .query_row("SELECT v FROM kv WHERE k=?1", [at_key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            // Advance by rowid, never by "stem_fold = ''": that is the
+            // steady state of nearly every row, so it would re-select
+            // the same chunk forever.
+            let next: Option<i64> = tx.query_row(
+                "SELECT MAX(rowid) FROM
+                   (SELECT rowid FROM releases WHERE rowid > ?1 ORDER BY rowid LIMIT ?2)",
+                [cursor, CHUNK],
+                |r| r.get(0),
+            )?;
+            let Some(next) = next else {
+                tx.execute(
+                    "INSERT INTO kv(k, v) VALUES(?1,'1')
+                     ON CONFLICT(k) DO UPDATE SET v='1'",
+                    [done_key],
+                )?;
+                tx.commit()?;
+                return Ok(());
+            };
+            {
+                let mut sel = tx.prepare(&sel_sql)?;
+                let mut upd = tx.prepare("UPDATE releases SET stem_fold=?2 WHERE id=?1")?;
+                let rows: Vec<(i64, String, String)> = sel
+                    .query_map([cursor, next], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (id, stem, held) in rows {
+                    let f = super::fold::stored(&stem);
+                    // Compared, not written unconditionally: on a
+                    // healthy index every admitted row already agrees,
+                    // so the pass reads and writes nothing.
+                    if f != held {
+                        upd.execute(rusqlite::params![id, f])?;
+                    }
+                }
+            }
+            // Cursor moves with the rows, in the same transaction: a
+            // busy failure rolls back both and the chunk is redone.
+            tx.execute(
+                "INSERT INTO kv(k, v) VALUES(?1, ?2)
+                 ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                rusqlite::params![at_key, next.to_string()],
+            )?;
+            tx.commit()?;
+            if std::time::Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    })();
+}
+
 /// The one-shot, kv-stamped retroactive backfills (completeness rule,
-/// nsegs, M25 kind/res, M28 FTS + title_key/junk, quality_v9).
+/// nsegs, M25 kind/res, M28 FTS + title_key/junk, stem_fold in its two
+/// generations, quality_v9).
 fn retroactive_backfills(db: &mut Connection, fts: bool) {
     // One-time retroactive recompute after the completeness-rule
     // change (nfiles >= 2 → >= 1): existing rows only re-evaluate
@@ -1283,7 +1471,8 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
                 "UPDATE releases SET complete =
                    EXISTS(SELECT 1 FROM files f WHERE f.release_id=releases.id)
                    AND NOT EXISTS(SELECT 1 FROM files f WHERE f.release_id=releases.id
-                                  AND json_array_length(f.segments) < f.total_parts)",
+                                  AND (CASE WHEN f.nsegs > 0 THEN f.nsegs
+                                               ELSE seg_count(f.segments) END) < f.total_parts)",
                 [],
             )?;
             tx.execute(
@@ -1345,7 +1534,7 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
                     return Ok(());
                 };
                 tx.execute(
-                    "UPDATE files SET nsegs = COALESCE(json_array_length(segments), 0)
+                    "UPDATE files SET nsegs = COALESCE(seg_count(segments), 0)
                      WHERE rowid > ?1 AND rowid <= ?2",
                     [cursor, next],
                 )?;
@@ -1364,6 +1553,8 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
             }
         })();
     }
+    fold_backfill(db);
+    fold_reconcile(db);
     // M25 browse view: retroactive fill of the new kind/res/part
     // columns for rows indexed before they existed. Same shape as
     // the complete_rule migration: one transaction, flag stamped
@@ -1376,7 +1567,7 @@ fn retroactive_backfills(db: &mut Connection, fts: bool) {
             let tx = db.unchecked_transaction()?;
             tx.execute(
                 "UPDATE releases SET
-                   have_parts = COALESCE((SELECT SUM(json_array_length(segments))
+                   have_parts = COALESCE((SELECT SUM(seg_count(segments))
                                           FROM files WHERE release_id=releases.id), 0),
                    need_parts = COALESCE((SELECT SUM(total_parts)
                                           FROM files WHERE release_id=releases.id), 0)",
@@ -1682,6 +1873,7 @@ impl Index {
         // silently skip a whole interval (the long-standing
         // scan_loop_populates_index_live "flake").
         db.busy_timeout(std::time::Duration::from_secs(10))?;
+        segcodec::register(&db)?;
         create_base_schema(&db, cache_mib)?;
         additive_migrations(&db);
         rebuild_marks_if_needed(&db);
@@ -1777,6 +1969,7 @@ impl Index {
         // a checkpoint, but "brief" still deserves a timeout rather than
         // an instant "database is locked".
         db.busy_timeout(std::time::Duration::from_secs(10))?;
+        segcodec::register(&db)?;
         // The per-connection tuning half of open()'s pragmas; query_only
         // makes any write that sneaks onto this connection fail loudly
         // instead of contending for the write lock.
@@ -1853,6 +2046,168 @@ fn table_exists(db: &Connection, name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::index::testutil::{entry, teardown};
+
+    /// TODO 5 phase 2c: `releases.stem_fold` on rows that predate the
+    /// column. The chunked `fold_v1` backfill has to reach them, and it
+    /// has to be sparse when it gets there - an ASCII stem earns
+    /// nothing, because `LOWER()` already folds it correctly and a
+    /// second copy of every stem on a 16.5 M-row index is not a rounding
+    /// error.
+    ///
+    /// The `GLOB '*[^ -~]*'` prefilter in that pass is the part worth
+    /// pinning: it is a cost filter, not a correctness term, so a
+    /// non-ASCII row it lets through must still be re-judged by
+    /// `fold::stored` (the accented-lowercase row below is the case that
+    /// passes the GLOB and stores nothing anyway).
+    #[test]
+    fn the_fold_backfill_reaches_rows_written_before_the_column() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-foldbf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        let stems = [
+            "ВОЙНА.И.МИР.S01E01.1080p-GRP",
+            "ΟΔΥΣΣΕΙΑ.2019.1080p-GRP",
+            "Ordinary.Ascii.Release.2019-GRP",
+            "Café.Society.2016.1080p-GRP",
+        ];
+        {
+            let ix = Index::open(&db).unwrap();
+            for stem in stems {
+                ix.db
+                    .execute(
+                        "INSERT INTO releases(stem, poster, grp, first_seen, first_posted)
+                         VALUES(?1, 'p@x', 'alt.binaries.test', 100, 100)",
+                        [stem],
+                    )
+                    .unwrap();
+            }
+            // Exactly the state a database upgraded into this column is
+            // in: the rows are there, the column is empty, and nothing
+            // has stamped the migration.
+            ix.db
+                .execute("DELETE FROM kv WHERE k IN ('fold_v1','fold_at')", [])
+                .unwrap();
+            ix.db
+                .execute("UPDATE releases SET stem_fold=''", [])
+                .unwrap();
+        }
+
+        let ix = Index::open(&db).unwrap();
+        let fold = |stem: &str| -> String {
+            ix.db
+                .query_row(
+                    "SELECT stem_fold FROM releases WHERE stem=?1",
+                    [stem],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(fold(stems[0]), "война и мир s01e01 1080p grp");
+        assert_eq!(fold(stems[1]), "οδυσσεια 2019 1080p grp");
+        assert_eq!(fold(stems[2]), "", "an ASCII stem earned a stored fold");
+        assert_eq!(
+            fold(stems[3]),
+            "",
+            "a stem LOWER() already folds correctly earned one"
+        );
+        // Stamped done, so the next open does no work at all.
+        assert_eq!(
+            ix.db
+                .query_row("SELECT v FROM kv WHERE k='fold_v1'", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "1"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// The corrective generation. `split_merge_group` rewrote `stem`
+    /// without `stem_fold` until 886785fd7, so a database that merged a
+    /// split release before then carries the fold of a stem that no
+    /// longer exists - matched by [`query::stem_fold_arm`] and by the
+    /// browse hide rule, neither of which reads `stem`.
+    ///
+    /// The second row is the one a rearm of `fold_v1` could never have
+    /// repaired: that generation looks only at non-ASCII stems, and the
+    /// merge that stranded the fold left an ASCII one behind.
+    #[test]
+    fn the_fold_reconcile_pass_clears_a_stale_stored_fold() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-foldrec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.db");
+        // (stem, the fold on disk before the pass). The first is a
+        // merged Cyrillic group: its fold still ends in the ` 001` the
+        // merge took off the stem. The second is the case the GLOB
+        // prefilter alone cannot see - the merge left an ASCII stem, so
+        // nothing about the row says "look at me" except the fold
+        // itself. The third and fourth are already correct and must not
+        // be touched.
+        let rows = [
+            ("ВОЙНА.И.МИР.S01E01-GRP", "война и мир s01e01 grp 001"),
+            ("Merged.Ascii.Release-GRP", "мир 001"),
+            ("ΟΔΥΣΣΕΙΑ.2019-GRP", "οδυσσεια 2019 grp"),
+            ("Ordinary.Ascii.Release.2019-GRP", ""),
+        ];
+        {
+            let ix = Index::open(&db).unwrap();
+            for (stem, held) in rows {
+                ix.db
+                    .execute(
+                        "INSERT INTO releases(stem, stem_fold, poster, grp,
+                                              first_seen, first_posted)
+                         VALUES(?1, ?2, 'p@x', 'alt.binaries.test', 100, 100)",
+                        [stem, held],
+                    )
+                    .unwrap();
+            }
+            // The state a live index is in: the first generation ran
+            // long ago and is stamped, and this one has never run.
+            ix.db
+                .execute(
+                    "INSERT INTO kv(k,v) VALUES('fold_v1','1')
+                     ON CONFLICT(k) DO UPDATE SET v='1'",
+                    [],
+                )
+                .unwrap();
+            ix.db
+                .execute("DELETE FROM kv WHERE k IN ('fold_v2','fold_v2_at')", [])
+                .unwrap();
+        }
+
+        let ix = Index::open(&db).unwrap();
+        let fold = |stem: &str| -> String {
+            ix.db
+                .query_row(
+                    "SELECT stem_fold FROM releases WHERE stem=?1",
+                    [stem],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(fold(rows[0].0), "война и мир s01e01 grp");
+        assert_eq!(
+            fold(rows[1].0),
+            "",
+            "an ASCII stem kept a fold from the stem it replaced"
+        );
+        assert_eq!(fold(rows[2].0), "οδυσσεια 2019 grp");
+        assert_eq!(
+            fold(rows[3].0),
+            "",
+            "an ASCII row with nothing stored earned a fold"
+        );
+        // Stamped, and the first generation's flag is untouched.
+        let kv = |k: &str| -> String {
+            ix.db
+                .query_row("SELECT v FROM kv WHERE k=?1", [k], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(kv("fold_v2"), "1");
+        assert_eq!(kv("fold_v1"), "1");
+        teardown(&dir, ix);
+    }
 
     /// The read-only connection behind the daemon's interactive query
     /// endpoints: it reads what the writer commits WITHOUT being

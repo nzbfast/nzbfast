@@ -8,12 +8,19 @@
 //!
 //!   cargo run -q --release -p rars --example bench_rr_detect -- <archive.rar>
 //!   cargo run -q --release -p rars --features parallel --example bench_rr_detect -- <archive.rar>
+//!
+//! Since 23 Aug 2026 it also times `damaged_shards_by_group`, the function
+//! d8a3d9e6a shipped, and pins its output to the strided path's - so this
+//! stops being a record of a prototype and becomes a check on the code that
+//! runs. Without `--features parallel` the shipped row is the serial arm.
 
 use std::path::Path;
 use std::time::Instant;
 
 use rars::recovery::rar5::{self, crc64_update};
-use rars::recovery::stream::{damaged_shards, scan_inline_recovery_chunks, FileSource, RangeSource};
+use rars::recovery::stream::{
+    damaged_shards, damaged_shards_by_group, scan_inline_recovery_chunks, FileSource, RangeSource,
+};
 
 const IO_BUF: usize = 256 * 1024;
 
@@ -52,16 +59,26 @@ fn main() {
     let parallel_crcs = parallel(&source, protected, plan.group_count, &groups, shards);
     let parallel_ms = t.elapsed().as_secs_f64() * 1000.0;
 
+    // (d) what the repair actually calls today. (a)-(c) are the prototype's
+    // own copies of the pass, so they measure the IDEA; this measures the
+    // SHIPPED function, which is the only one a regression can reach.
+    let t = Instant::now();
+    let shipped =
+        damaged_shards_by_group(&source, 0, protected, plan, &groups, &scan.group_states).unwrap();
+    let shipped_ms = t.elapsed().as_secs_f64() * 1000.0;
+
     // Agreement: rebuild the same damaged lists from the sequential CRCs.
     let rebuilt = to_damaged(&sequential_crcs, &scan.group_states, groups.len(), shards);
     assert_eq!(rebuilt, current, "sequential pass disagrees with the strided one");
     assert_eq!(sequential_crcs, parallel_crcs, "parallel pass disagrees");
+    assert_eq!(shipped, current, "damaged_shards_by_group disagrees with the strided one");
     let found: usize = current.iter().map(|g| g.len()).sum();
 
-    println!("strided (today) : {strided:8.1} ms");
+    println!("strided (was)   : {strided:8.1} ms");
     println!("sequential      : {sequential_ms:8.1} ms  ({:.2}x)", strided / sequential_ms);
     println!("parallel        : {parallel_ms:8.1} ms  ({:.2}x)", strided / parallel_ms);
-    println!("{found} damaged shard(s), all three agree");
+    println!("shipped         : {shipped_ms:8.1} ms  ({:.2}x)", strided / shipped_ms);
+    println!("{found} damaged shard(s), all four agree");
 }
 
 /// CRC64 of every (shard, group) slice, indexed `[shard][group]`.

@@ -4,8 +4,9 @@
 //! and grabs ride the same fetch-by-URL path `addurl` uses.
 //!
 //! This module is pure: URL building, XML parsing and budget arithmetic,
-//! no I/O. `serve.rs` owns the HTTP calls (through `ssrf_safe_agent`),
-//! the caps/result caches and the API modes.
+//! no I/O. `serve/fetch.rs` owns the HTTP calls (through
+//! `ssrf_safe_agent`) and `serve/indexers.rs` the caps/result caches
+//! and the API modes.
 //!
 //! Protocol notes that shape the code:
 //! - Errors usually arrive as HTTP 200 with an `<error code=.../>`
@@ -437,8 +438,8 @@ pub fn parse_results(xml: &str) -> Vec<SearchResult> {
 }
 
 /// Days from civil date (Howard Hinnant's algorithm), the inverse of
-/// serve.rs's `civil_from_days`.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+/// `civil_from_days` in serve/disk.rs.
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;

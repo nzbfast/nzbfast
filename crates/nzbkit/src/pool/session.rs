@@ -25,11 +25,6 @@ use super::*;
 #[cfg(test)]
 mod unit_tests;
 
-/// One dial attempt: the `None` arm of `session_loop`'s warm-claim
-/// match, moved verbatim (TODO 113). Owns the connect, the AUTHINFO
-/// refusal taxonomy (permanent vs capacity, §15e / TODO 115) and the
-/// connect backoff ladder; the counters live in `session_loop` and
-/// cross as `&mut` so the ladder state survives across sessions.
 /// Has this server used up [`PoolConfig::outage_budget`]?
 ///
 /// One place, so the pre-dial gate and the park ladder cannot drift.
@@ -53,6 +48,11 @@ pub(super) fn ladder_exhausted(cfg: &PoolConfig, bounces: u32) -> bool {
     cfg.outage_budget.is_some() && bounces >= cfg.cap_probe_bounces
 }
 
+/// One dial attempt: the `None` arm of `session_loop`'s warm-claim
+/// match, moved verbatim (TODO 113). Owns the connect, the AUTHINFO
+/// refusal taxonomy (permanent vs capacity, §15e / TODO 115) and the
+/// connect backoff ladder; the counters live in `session_loop` and
+/// cross as `&mut` so the ladder state survives across sessions.
 pub(super) enum DialStep {
     /// A connected, validated session - proceed to the pipeline.
     Conn(Connection),
@@ -64,7 +64,7 @@ pub(super) enum DialStep {
     Quit,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn dial_session(
     server: &ServerConfig,
     cfg: &PoolConfig,
@@ -499,7 +499,15 @@ pub(super) async fn park_or_probe(
     // the claim and the subscription must still wake this parker.
     let mut sub = shared.auth[ctx.idx].episode.subscribe();
     let entry_gen = sub.borrow().1;
-    if shared.auth[ctx.idx].claim_yield(&shared.alive[ctx.idx]) {
+    // F-22: under a live target only ADMITTED workers can dial, so the
+    // election counts those - a parked ordinal counted as alive once
+    // let the sole admitted worker yield to a fleet that could not probe.
+    let electorate = if cfg.live_target.is_some() {
+        &shared.admitted[ctx.idx]
+    } else {
+        &shared.alive[ctx.idx]
+    };
+    if shared.auth[ctx.idx].claim_yield(electorate) {
         // Park, don't die (issue #16): a ghost-session
         // lease clears in minutes, and a fleet that
         // exited leaves the reopened server to one
@@ -635,6 +643,13 @@ pub(super) struct ReadStep {
     /// The suspicion timer fired and no status line ever arrived: the
     /// peer is mute, so skip the courtesy QUIT (its 500 ms bound would
     /// ride the job's wall - the run is over when this matters).
+    ///
+    /// TODO 202 §17 widened the timer that sets this from the dark
+    /// `ttfb_hedge` to the whole adaptive path, so a dead-air socket at
+    /// run end now skips its QUIT on shipped configurations too. That
+    /// is what the field always meant - it is a fact about the SOCKET,
+    /// not about the hedge - and the read it describes is by
+    /// construction one that has produced nothing for over a second.
     mute_suspect: bool,
     /// TODO 121.1/.2: the adaptive read expired with NO status byte
     /// seen - the pre-byte budget ran out, as opposed to a mid-body
@@ -656,7 +671,7 @@ pub(super) struct ReadStep {
     takedown: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn read_one(
     conn: &mut Connection,
     buf: &mut Vec<u8>,
@@ -678,7 +693,7 @@ pub(super) async fn read_one(
     // Abandoning the read (reconnect, uncharged requeue) frees
     // this conn for promoted work within ~a TLS handshake.
     let mut shed_for_promote = false;
-    // TTFB-suspicion hedge (TODO 115): while this read is still
+    // Pre-byte silence marker (TODO 115): while this read is still
     // pre-byte, a timer at the suspicion bound marks the front
     // article suspect so other workers can dup-race it without
     // waiting out the full adaptive budget. `status_seen` is the
@@ -690,8 +705,17 @@ pub(super) async fn read_one(
     // probe's front article is owned by somebody else entirely - a slow
     // 430 from this backbone would be read as pre-byte silence on a
     // connection that is not even the one being waited on.
-    let ttfb_hedge_armed =
-        cfg.ttfb_hedge && cfg.adaptive_timeout && !inflight.front().is_some_and(|w| w.probe);
+    //
+    // TODO 202 §17: armed on the WHOLE adaptive path, not only under
+    // `ttfb_hedge`. The mark is a fact about the socket - this article
+    // has moved no bytes for longer than the suspicion bound - and two
+    // separate consumers want it. `pick_suspect_dup` (opt-in, still
+    // dark in `shipped()`) races on it; the line-saturation gate's
+    // per-article escape (`Shared::not_using_the_line`) reads it to
+    // tell a STALLED owner from a merely slow one, and that consumer
+    // ships. Gating the fact on the dark hedge left the escape with
+    // nothing to read on every configuration that runs.
+    let prebyte_mark_armed = cfg.adaptive_timeout && !inflight.front().is_some_and(|w| w.probe);
     let status_seen = AtomicBool::new(false);
     let id_echoed = AtomicBool::new(false);
     let takedown = AtomicBool::new(false);
@@ -701,18 +725,18 @@ pub(super) async fn read_one(
     // read on a reactor thread for nothing. (R4 item 4 - which R9's
     // interning would have made a refcount bump rather than an
     // allocation, but a borrow beats a bump, so the borrow stands.)
-    let suspect_front: Option<&str> = if ttfb_hedge_armed {
+    let suspect_front: Option<&str> = if prebyte_mark_armed {
         inflight.front().map(|w| &*w.id)
     } else {
         None
     };
-    let suspect_timer = tokio::time::sleep(if ttfb_hedge_armed {
+    let suspect_timer = tokio::time::sleep(if prebyte_mark_armed {
         shared.ttfb_suspect_after(ctx.idx)
     } else {
         Duration::from_secs(0)
     });
     tokio::pin!(suspect_timer);
-    let mut suspect_armed = ttfb_hedge_armed;
+    let mut suspect_armed = prebyte_mark_armed;
     let mut suspect_fired = false;
     let read = {
         let read_fut = async {
@@ -758,6 +782,18 @@ pub(super) async fn read_one(
                     Err(e) => Ok(Err(e)),
                 };
             }
+            // TODO 208.2 over-read: the line gauge is fed as the body's
+            // chunks land, not when it completes - on both read paths.
+            // `last` is this read's previous-chunk stamp, seeded with
+            // its start: the pipeline is read in order, so that is when
+            // this body's bytes began to flow.
+            let last = AtomicU64::new(shared.start.elapsed().as_millis() as u64);
+            let arrive = |n: u64| shared.note_arrival(n, &last);
+            let arrivals: crate::nntp::Arrivals<'_> = if shared.sat.arrivals {
+                Some(&arrive)
+            } else {
+                None
+            };
             if cfg.adaptive_timeout {
                 // TODO 96.1: two-phase bound. Pre-byte budget
                 // adapts to this server's measured TTFB; once
@@ -770,12 +806,24 @@ pub(super) async fn read_one(
                     shared.ttfb_budget(ctx.idx),
                     inflight.front().map_or(0, |w| w.prebyte_expiries),
                 );
+                // TODO 208.2: share-aware, never under the flat
+                // ADAPTIVE_STALL - see `Shared::stall_bound`. Live
+                // (re-read before every socket wait) so a body that
+                // began before the line trained picks up the trained
+                // bound; `NZBFAST_STALL_LIVE=0` samples it once here.
+                let live_bound = || shared.stall_bound();
+                let stall: crate::nntp::StallBound<'_> = if shared.sat.stall_live {
+                    (&live_bound as &(dyn Fn() -> Duration + Sync)).into()
+                } else {
+                    shared.stall_bound().into()
+                };
                 match conn
                     .read_body_into_two_phase_noting(
                         buf,
                         expected,
                         budget,
-                        ADAPTIVE_STALL,
+                        stall,
+                        arrivals,
                         &status_seen,
                         &id_echoed,
                         &takedown,
@@ -826,7 +874,7 @@ pub(super) async fn read_one(
             } else {
                 tokio::time::timeout(
                     cfg.read_timeout,
-                    conn.read_body_into(buf, expected, &id_echoed, &takedown),
+                    conn.read_body_into(buf, expected, arrivals, &id_echoed, &takedown),
                 )
                 .await
                 .map_err(|_| ())
@@ -868,8 +916,7 @@ pub(super) async fn read_one(
                     let old_enough = inflight.front().is_none_or(|w| {
                         shared
                             .inflight
-                            .lock()
-                            .unwrap()
+                            .lock_ok()
                             .get(&w.id)
                             .is_none_or(|inf| inf.dispatched.elapsed() >= PROMOTE_SHED_MIN_AGE)
                     });
@@ -956,7 +1003,7 @@ pub(super) enum BodyStep {
     Recycle,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn handle_body(
     cfg: &PoolConfig,
     ctx: ServerCtx,
@@ -994,6 +1041,18 @@ pub(super) async fn handle_body(
         o.hit(ctx.idx, w.age_days);
     }
     shared.deregister_inflight_done(&w);
+    // M8 (sweep 8): read the routing evidence BEFORE the claim, because
+    // `claim_done` drops the article's `spent` entry - and under
+    // `crc_steer` the claim is only provisional: a bad-body verdict can
+    // still send this article back down the ladder, and the fill tier
+    // that has to take it is opened by exactly these bits. One atomic
+    // load on every run that never exhausted a retry budget, and not
+    // taken at all when nothing can steer.
+    let spent_ev = if cfg.crc_steer {
+        shared.spent_mask(&w.id)
+    } else {
+        0
+    };
     if shared.claim_done(&w.id, w.ord) {
         *race_losses = 0;
         if w.dup {
@@ -1019,17 +1078,36 @@ pub(super) async fn handle_body(
         shared.done_ok.lock_ok().insert(arrived.clone());
         // TODO 114 consumer steer - see `stash_handed`.
         if cfg.crc_steer {
-            shared.stash_handed(&w, ctx);
+            shared.stash_handed(&w, ctx, spent_ev);
         }
+        // Memory-floor gauge (instrument-first): raw bytes queued in the
+        // fetch->decode channel. Charged by capacity here, released by
+        // capacity in the consumer's drain - capacity cannot change while
+        // the buffer sits in the channel, so the pair is exact.
+        let chan_charge = cfg.channel_gauge.map_or(0, |g| {
+            let n = buf.capacity() as u64;
+            crate::memgauge::add(g, n);
+            n
+        });
         let done = FetchOutcome::Done { id: w.id, raw: buf };
         use tokio::sync::mpsc::error::TrySendError;
         let mut delivered = true;
         match out.try_send(done) {
             Ok(()) => {}
-            Err(TrySendError::Closed(_)) => delivered = false,
+            Err(TrySendError::Closed(_)) => {
+                // Never entered the channel; the outcome (and its
+                // buffer) drops here at teardown.
+                if let Some(g) = cfg.channel_gauge {
+                    crate::memgauge::sub(g, chan_charge);
+                }
+                delivered = false;
+            }
             Err(TrySendError::Full(done)) => {
                 let waited = std::time::Instant::now();
                 delivered = out.send(done).await.is_ok();
+                if !delivered && let Some(g) = cfg.channel_gauge {
+                    crate::memgauge::sub(g, chan_charge);
+                }
                 let ms = waited.elapsed().as_millis() as u64;
                 if let Some(c) = shared.blocked_ms.get(ctx.idx) {
                     c.fetch_add(ms, Ordering::Relaxed);
@@ -1167,7 +1245,7 @@ pub(super) fn handle_probe_hit(
     }
     shared.note_found(&w.id, ctx.group_bits);
     if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-        eprintln!("[stat-probe] {} present on server {}", w.id, ctx.idx);
+        info!(target: "stat-probe", "{} present on server {}", w.id, ctx.idx);
     }
 }
 
@@ -1282,6 +1360,12 @@ pub(super) async fn handle_missing(
     // the inflight entry while this original was reading.
     if let Some(inf) = shared.inflight.lock_ok().remove(&w.id) {
         w.tried_430 |= inf.tried_430;
+    }
+    // The one retirement that removes its own entry instead of going
+    // through `deregister_inflight`: the park's per-group count must
+    // see it too (a dup was never counted).
+    if !w.dup {
+        shared.park.note_left(&w);
     }
     shared.bump_inflight_gen();
     // A miss whose refusal line carried no echoed id is positional
@@ -1470,7 +1554,6 @@ pub(super) async fn claim_flap_keeper(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The two "this worker is finished before it dials" exits at the top of
 /// `session_loop`: every article is terminal, or the user aborted. They
 /// differ only in what becomes of a connection claimed before the ramp
@@ -1520,11 +1603,12 @@ pub(super) async fn done_before_dial(
 /// Returns false when this worker is done and the caller must return.
 pub(super) async fn pre_dial_gates(
     cfg: &PoolConfig,
-    slot: u32,
+    idx: usize,
+    admit: &mut Option<Admitted>,
     session_failures: u32,
     pending_backoff: &mut Option<Duration>,
     finished: &mut tokio::sync::watch::Receiver<bool>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
 ) -> bool {
     // A session that can only ever fail bows out for good, exactly as
     // connect exhaustion does (see `MAX_SESSION_ATTEMPTS`) - this
@@ -1539,15 +1623,20 @@ pub(super) async fn pre_dial_gates(
     if session_failures >= MAX_SESSION_ATTEMPTS {
         return false;
     }
-    // TODO 112 live target: a slot at or above the target parks here,
-    // holding no connection, until the target rises to admit it again or
-    // the run ends. The quit that routed us here has already returned
-    // the session, so a parked worker costs the provider nothing - and
-    // unlike the capacity yield it has NOT retired, so it can come back.
+    // TODO 112 live target: a worker without an admission parks here,
+    // holding no connection, until the target rises or another worker
+    // returns its admission (F-22: admission is a count, so a retiring
+    // worker's place is re-filled), or the run ends. The quit that
+    // routed us here has already returned the session, so a parked
+    // worker costs the provider nothing - and unlike the capacity yield
+    // it has NOT retired, so it can come back.
     if let Some(t) = &cfg.live_target
-        && !wait_for_slot(t, slot, finished, shared).await
+        && admit.is_none()
     {
-        return false;
+        match wait_for_slot(t, idx, finished, shared).await {
+            Some(a) => *admit = Some(a),
+            None => return false,
+        }
     }
     // Session-level pacing (see `session_backoff_delay`). Armed by the
     // fast failure paths - protocol error, failed send, failed flush -
@@ -1737,6 +1826,56 @@ async fn session_stalled_mid_read(
     cause
 }
 
+/// An idle turn at the reuse point: the pipeline is empty and the
+/// queue had nothing for this worker. `None` = the worker is done with
+/// this connection and must return (it has been parked or quit);
+/// `Some(conn)` hands it back to look again shortly. Hoisted out of
+/// `session_loop` whole (size gate) when the hand-over arm joined the
+/// two that were there.
+async fn idle_turn(
+    cfg: &PoolConfig,
+    server: &ServerConfig,
+    ctx: ServerCtx,
+    shared: &Arc<Shared>,
+    conn: Connection,
+) -> Option<Connection> {
+    if shared.pending.load(Ordering::Acquire) == 0 {
+        park_or_quit(cfg, server, conn).await;
+        return None; // truly drained
+    }
+    if shared.draining.load(Ordering::Acquire) {
+        park_or_quit(cfg, server, conn).await;
+        return None; // graceful pause: in-flight done, queue left for resume
+    }
+    // Held-bytes backpressure (TODO 94 item E): the queue is not dry,
+    // it is PARKED behind a chased group's engine, for seconds at a
+    // time. Neither the idle-after-dry note nor a hand-over applies -
+    // the connections are wanted back the moment the holds drain.
+    if shared.park.is_throttling() {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        return Some(conn);
+    }
+    // Cross-job hand-over (`handoff`): idle past queue-dry with nothing
+    // to fetch. Say so once per run, and if the next job's workers are
+    // waiting on this host's lease, give them the socket - the same
+    // reuse point and the same safety argument as the park above, one
+    // job earlier. The permit goes with this worker's return (see
+    // `worker`).
+    shared.note_idle_after_dry(ctx.idx);
+    if shared.want_handoff(ctx.idx) {
+        shared.note_session_end(ctx.idx, 4);
+        park_or_quit(cfg, server, conn).await;
+        return None;
+    }
+    // Idle but articles are still in flight elsewhere and may requeue
+    // (or become dup candidates) - re-check shortly.
+    if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
+        shared.debug_dump_idle();
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    Some(conn)
+}
+
 /// What one window top-up decided.
 enum TopUp {
     /// The window is as full as it is going to get - read responses.
@@ -1869,6 +2008,131 @@ async fn top_up_window(
     TopUp::Filled
 }
 
+/// Should this worker stop topping up its pipeline? Yes when the server
+/// holds more admissions than the live target (TODO 112), and yes when
+/// the prepaid block ran out mid-session (§96.5) - the budget gate at
+/// the top of 'session then turns the redial into a bow-out. A pure
+/// read; `shed_surplus` is the step that gives the admission back,
+/// atomically (F-22), so exactly the surplus sheds and not every
+/// worker that glimpsed the same over-count.
+pub(super) fn surplus_here(
+    cfg: &PoolConfig,
+    idx: usize,
+    shared: &Shared,
+    admit: &Option<Admitted>,
+) -> bool {
+    shared.over_budget(idx)
+        || cfg.live_target.as_ref().is_some_and(|t| {
+            admit.as_ref().is_some_and(|a| !a.released)
+                && shared.admitted[idx].load(Ordering::SeqCst) > t.get()
+        })
+}
+
+/// The consuming half of [`surplus_here`]: the caller has drained its
+/// pipeline and asks whether it is the one to quit.
+pub(super) fn shed_surplus(
+    cfg: &PoolConfig,
+    idx: usize,
+    shared: &Shared,
+    admit: &mut Option<Admitted>,
+) -> bool {
+    if shared.over_budget(idx) {
+        return true;
+    }
+    let Some(t) = cfg.live_target.as_ref() else {
+        return false;
+    };
+    let shed = admit.as_mut().is_some_and(|a| a.try_shed(t.get()));
+    if shed {
+        *admit = None;
+    }
+    shed
+}
+
+/// A parked connection first. `take` has already validated it with
+/// a DATE round-trip, so it is interchangeable with a fresh
+/// connect here and none of the error handling below has to know
+/// the difference. Worth roughly five round-trips, a TLS
+/// handshake, and - the part that actually dominates on a short
+/// job - a TCP congestion window that is already open.
+///
+/// Split out of `session_loop` (TODO 106), body verbatim. The warm arm
+/// yields `DialStep::Conn` and the dial arm is returned as it stands, so the
+/// caller's three-way match is unchanged and every `continue`/`return` it
+/// spells out stays at the call site where the loop label is in scope.
+#[expect(clippy::too_many_arguments)]
+async fn acquire_conn(
+    spare: Option<Connection>,
+    preclaimed: &mut Option<Connection>,
+    server: &ServerConfig,
+    cfg: &PoolConfig,
+    ctx: ServerCtx,
+    shared: &Arc<Shared>,
+    connects: &Arc<AtomicU64>,
+    reconnects: &Arc<AtomicU64>,
+    finished: &mut tokio::sync::watch::Receiver<bool>,
+    connect_failures: &mut u32,
+    flap_bounces: &mut u32,
+    cap_bounces: &mut u32,
+    ever_connected: &mut bool,
+    am_keeper: bool,
+    last_end: &mut Option<usize>,
+) -> DialStep {
+    let warm = match spare.or_else(|| preclaimed.take()) {
+        Some(c) => Some(c),
+        None => match &cfg.warm {
+            // Raced for the same reason as the dial below: the
+            // claim's DATE validation is bounded at 8 s against
+            // EXIT_GRACE's 5 s, so a mute peer here holds the whole
+            // run open exactly as an unanswered SYN used to (§35).
+            Some(w) => tokio::select! {
+                c = w.take(server) => c,
+                _ = run_over(finished, shared) => return DialStep::Quit,
+            },
+            None => None,
+        },
+    };
+    match warm {
+        Some(c) => {
+            // "The outage is over the moment a session is GRANTED,
+            // whatever the reason it started" - and one taken from
+            // the warm pool is granted. Without these two the only
+            // calls that stop the dashboard stamp and bank the
+            // outage budget live on the DIAL path, so a server that
+            // recovers purely through parked connections goes on
+            // accruing downtime for as long as it serves.
+            if let Some(live) = &cfg.live
+                && let Some(sl) = live.servers.get(ctx.idx)
+            {
+                sl.note_up();
+            }
+            shared.auth[ctx.idx].mark_up();
+            *connect_failures = 0;
+            *ever_connected = true;
+            shared.connected[ctx.idx].store(true, Ordering::Relaxed);
+            DialStep::Conn(c)
+        }
+        None => {
+            return dial_session(
+                server,
+                cfg,
+                ctx,
+                shared,
+                connects,
+                reconnects,
+                finished,
+                connect_failures,
+                flap_bounces,
+                cap_bounces,
+                ever_connected,
+                am_keeper,
+                last_end,
+            )
+            .await;
+        }
+    }
+}
+
 pub(super) async fn session_loop(
     server: &ServerConfig,
     cfg: &PoolConfig,
@@ -1877,8 +2141,14 @@ pub(super) async fn session_loop(
     out: mpsc::Sender<FetchOutcome>,
     connects: Arc<AtomicU64>,
     reconnects: Arc<AtomicU64>,
-    // This worker's per-server ordinal, judged against the live target.
-    slot: u32,
+    // This worker's per-server ordinal (diagnostic; admission under the
+    // live target is by count, see `Admitted`).
+    _slot: u32,
+    // The live-target admission `worker` acquired before the warm claim
+    // (None without a live target). Held across sessions, re-acquired
+    // only after a shed, dropped by every `return` so the next parked
+    // worker is promoted in this one's place (F-22).
+    mut admit: Option<Admitted>,
     // A parked connection already claimed (and validated) by `worker`
     // before the ramp; used for the first session instead of dialling.
     mut preclaimed: Option<Connection>,
@@ -1932,7 +2202,8 @@ pub(super) async fn session_loop(
         }
         if !pre_dial_gates(
             cfg,
-            slot,
+            ctx.idx,
+            &mut admit,
             session_failures,
             &mut pending_backoff,
             &mut finished,
@@ -1986,67 +2257,28 @@ pub(super) async fn session_loop(
         // desync, because before it the socket is aligned by
         // construction.
         let mut fence_read_seen = false;
-        // A parked connection first. `take` has already validated it with
-        // a DATE round-trip, so it is interchangeable with a fresh
-        // connect here and none of the error handling below has to know
-        // the difference. Worth roughly five round-trips, a TLS
-        // handshake, and - the part that actually dominates on a short
-        // job - a TCP congestion window that is already open.
-        let warm = match spare.or_else(|| preclaimed.take()) {
-            Some(c) => Some(c),
-            None => match &cfg.warm {
-                // Raced for the same reason as the dial below: the
-                // claim's DATE validation is bounded at 8 s against
-                // EXIT_GRACE's 5 s, so a mute peer here holds the whole
-                // run open exactly as an unanswered SYN used to (§35).
-                Some(w) => tokio::select! {
-                    c = w.take(server) => c,
-                    _ = run_over(&mut finished, &shared) => return,
-                },
-                None => None,
-            },
-        };
-        let mut conn = match warm {
-            Some(c) => {
-                // "The outage is over the moment a session is GRANTED,
-                // whatever the reason it started" - and one taken from
-                // the warm pool is granted. Without these two the only
-                // calls that stop the dashboard stamp and bank the
-                // outage budget live on the DIAL path, so a server that
-                // recovers purely through parked connections goes on
-                // accruing downtime for as long as it serves.
-                if let Some(live) = &cfg.live
-                    && let Some(sl) = live.servers.get(ctx.idx)
-                {
-                    sl.note_up();
-                }
-                shared.auth[ctx.idx].mark_up();
-                connect_failures = 0;
-                ever_connected = true;
-                shared.connected[ctx.idx].store(true, Ordering::Relaxed);
-                c
-            }
-            None => match dial_session(
-                server,
-                cfg,
-                ctx,
-                &shared,
-                &connects,
-                &reconnects,
-                &mut finished,
-                &mut connect_failures,
-                &mut flap_bounces,
-                &mut cap_bounces,
-                &mut ever_connected,
-                am_keeper,
-                &mut last_end,
-            )
-            .await
-            {
-                DialStep::Conn(c) => c,
-                DialStep::Retry => continue 'session,
-                DialStep::Quit => return,
-            },
+        let mut conn = match acquire_conn(
+            spare,
+            &mut preclaimed,
+            server,
+            cfg,
+            ctx,
+            &shared,
+            &connects,
+            &reconnects,
+            &mut finished,
+            &mut connect_failures,
+            &mut flap_bounces,
+            &mut cap_bounces,
+            &mut ever_connected,
+            am_keeper,
+            &mut last_end,
+        )
+        .await
+        {
+            DialStep::Conn(c) => c,
+            DialStep::Retry => continue 'session,
+            DialStep::Quit => return,
         };
 
         // An authenticated session supersedes any earlier refusal note: a
@@ -2084,26 +2316,23 @@ pub(super) async fn session_loop(
             } else {
                 cfg.window
             };
-            // M7b.2 depth steering bounds the TOP-UP only; the shed
-            // below keeps judging against `base_win` (see steer_window).
-            let win = shared.steer_window(ctx.idx, base_win);
-            // TODO 112: this slot has fallen above the live target. Stop
-            // admitting new work; once the pipeline drains, return the
-            // connection and re-park at the session top. In-flight
-            // requests complete normally - nothing is shed - and a
-            // drain takes precedence: a graceful pause must finish (and
-            // journal) what is already in flight before anyone re-parks.
-            let over_target = cfg
-                .live_target
-                .as_ref()
-                .is_some_and(|t| slot as usize >= t.get())
-                // §96.5: a block that ran out mid-session takes the
-                // same drain: stop admitting work, let what is in
-                // flight complete (those bytes are already owed), quit
-                // - and the budget gate at the top of 'session turns
-                // the redial into a permanent bow-out.
-                || shared.over_budget(ctx.idx);
-            if over_target && inflight.is_empty() && !shared.draining.load(Ordering::Acquire) {
+            // M7b.2 depth steering and the TODO 208 item 3 endgame taper both
+            // bound the TOP-UP only; the shed below keeps judging
+            // against `base_win` (see steer_window / tail_window), so
+            // neither can shed a pipeline or drop a connection.
+            let win = shared
+                .steer_window(ctx.idx, base_win)
+                .min(shared.tail_window(base_win));
+            // TODO 112 / §96.5: over the live target or over budget, stop
+            // admitting work; once the pipeline drains, return the
+            // connection and re-park (`shed_surplus`). A drain takes
+            // precedence: a pause must finish what is in flight first.
+            let over_target = surplus_here(cfg, ctx.idx, &shared, &admit);
+            if over_target
+                && inflight.is_empty()
+                && !shared.draining.load(Ordering::Acquire)
+                && shed_surplus(cfg, ctx.idx, &shared, &mut admit)
+            {
                 shared.note_session_end(ctx.idx, 4);
                 last_end = Some(4);
                 conn.quit().await;
@@ -2164,20 +2393,10 @@ pub(super) async fn session_loop(
                 // no unread responses queued on this socket and the next
                 // job can pick it up mid-conversation. Every other exit
                 // from this loop abandons in-flight responses and closes.
-                if shared.pending.load(Ordering::Acquire) == 0 {
-                    park_or_quit(cfg, server, conn).await;
-                    return; // truly drained
+                match idle_turn(cfg, server, ctx, &shared, conn).await {
+                    Some(c) => conn = c,
+                    None => return,
                 }
-                if shared.draining.load(Ordering::Acquire) {
-                    park_or_quit(cfg, server, conn).await;
-                    return; // graceful pause: in-flight done, queue left for resume
-                }
-                // Idle but articles are still in flight elsewhere and may
-                // requeue (or become dup candidates) - re-check shortly.
-                if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-                    shared.debug_dump_idle();
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             }
             if conn.flush().await.is_err() {
@@ -2208,7 +2427,7 @@ pub(super) async fn session_loop(
 
             let mut buf = match &cfg.buf_pool {
                 Some(p) => p.take(),
-                None => Vec::with_capacity(800 * 1024),
+                None => Vec::with_capacity(crate::pool::bufpool::body_buf_bytes()),
             };
             // TODO 96.4: which command the answer below belongs to. A
             // 223 and a 222 are both `Ok(Ok(true))`, and only this says

@@ -308,7 +308,12 @@ yukarıdan aşağıya:</p>
 <h3>Başlık çubuğu</h3>
 <ul>
 <li><b>Hız sınırı</b> menüsü - sabit üst sınırlar, <i>otomatik · LAN'a öncelik</i> (evdeki
-başka biri hatta ihtiyaç duyduğunda geri çekilen, RTT denetimli bir mod) ya da sınırsız.</li>
+başka biri hatta ihtiyaç duyduğunda geri çekilen, RTT denetimli bir mod) ya da sınırsız.
+Hazır değerler yuvarlak hatlar için yuvarlak sayılardır ve 37&nbsp;Mb/s'lik bir gönderim
+hattı bunlardan biri değildir: <b>özel…</b> bunun yerine sayıyı sana sorar ve API'nin
+kabul ettiği her şeyi kabul eder (<code>25M</code>, <code>500K</code> ya da sınırsız
+için 0). Menü sonra yanında hızıyla birlikte <b>(özel)</b> yazar, sen yeniden bir hazır
+değer ya da <i>otomatik</i> seçene kadar.</li>
 <li><b>Şu kadar duraklat…</b> - otomatik sürdürmeyle her şeyi 15&nbsp;dk/30&nbsp;dk/1&nbsp;s/3&nbsp;s
 duraklat ya da açık uçlu bir duraklama için Duraklat düğmesini kullan. Duraklama
 anlıktır: etkin aktarım saniyeler içinde durur ve sonra günlükten devam eder, hiçbir şey
@@ -347,6 +352,7 @@ geldiğini söyleyen bir «ekleyen» satırı (izleme klasörü, bağlı bir uyg
 Bir <b>.nzb dosyasını indir</b> düğmesi işin <code>.nzb</code> dosyasını kaydeder - nzbfast
 kendi kopyasını sakladığından bu her iş için çalışır, orijinal dosya çoktan
 kaybolmuş olsa bile.</li>
+<li><b>"Bu neden yavaş?"</b> Bir iş inerken, ilerleme çubuğunun altındaki satır makine için değil <em>o</em> iş için bir karar taşır: <i>sınır sağlayıcılarınız</i>, <i>bu makine işlemci sınırında</i>, <i>depolama yetişemiyor</i> gibi. Üzerine tıkla, satır kanıtlarla açılır: hattının neyi kaldırdığı, sağlayıcıların ne teslim ettiği, şu anda ne geldiği ve kısıtlanmış bir sağlayıcının bakar bakmaz görüldüğü sunucu başına tablo. Tam hızda giden bir iş burada hiçbir şey söylemez, kararı hâlâ oluşan bir iş de söylemez.</li>
 <li>Rozetler özel durumları gösterir: <i>ertelendi (yavaş)</i>, <i>ön yükleniyor</i>,
 <i>duraklatıldı</i> (bkz. <a href="#performance">Performans araçları</a>).</li>
 <li>Bir iniş grafiği kuyruk boyunca kalan toplam GB'ı izler.</li>
@@ -376,7 +382,7 @@ ve iş yerinde biter. Doğrulama sağlığı şeridi, indirme başına bozuk PAR
 yükselen bir kuyruk makalelerin hasarlı geldiği anlamına gelir.
 Her satırın çekmecesi işi kimin eklediğini söyler ve kuyruktakiyle aynı
 <b>.nzb dosyasını indir</b> düğmesini taşır - bir sürümü başka bir yerde yeniden indirmek
-ya da <code>.nzb</code> dosyasını bir sorun bildirimine eklemek için kullanışlı.</p>
+ya da <code>.nzb</code> dosyasını bir sorun bildirimine eklemek için kullanışlı. Yanında <b>Rapor oluştur</b> var; genellikle eklenecek daha iyi şey odur: bkz. <a href="#troubleshooting">Sorun giderme</a>.</p>
 <p>Kart varsayılan olarak on indirme listeler, gerisi ▤ düğmesiyle bir tık uzaktadır. Durum, konum ve bir işin neden başarısız olduğu satırın kendisine tıklamanın arkasındadır; böylece yaygın durum - ne bitti, ne kadar büyük, ne zaman - kaydırmadan okunabilir kalır. Bunun yerine kartın alt kenarını sürükleyerek listeyi seçtiğiniz bir yükseklikte kaydırabilirsiniz. Ayarlar → Arayüz altındaki <b>History rows</b> bu onu değiştirir; tarayıcınızın değil daemon'un bir özelliği olduğundan, bu kuruluma bakan her cihaz için geçerlidir. Yanındaki <b>Colour History names</b> biten adları yeşile, başarısız olanları kırmızıya boyar; kapatıldığında adlar sade kalır ve renkli nokta ile satırın kendi ayrıntıları hangisinin hangisi olduğunu yine söyler.</p>
 <p>nzbfast, aksini söylemediğiniz sürece geçmişi sonsuza dek saklar. Ayarlar → Sistem
 altındaki <b>Geçmiş temizliği</b>, eski kayıtları birbirinden bağımsız iki kurala
@@ -397,9 +403,10 @@ anlatılan üç kendini ölçme aracı.</p>
 <h3 id="dash-layout">Paneli düzenleme</h3>
 <p>Panel düzenlemesi sizin elinizde. Nerede karşınıza çıkarsa çıksın aynı adı taşıyan dört
 işlem: bir kartı <b>Taşı</b>, <b>Sıkıştır</b>, <b>Yeniden boyutlandır</b> ya da
-<b>Gizle</b>. Her seçimi, o seçimi yaptığınız tarayıcı hatırlar, böylece her aygıt kendi
-düzenini korur; Ayarlar → Arayüz içindeki <b>Düzeni sıfırla</b> ise her kartı, boyutu ve
-sütunu geldiği hâline döndürür.</p>
+<b>Gizle</b>. Her seçimi, o seçimi yaptığınız tarayıcı profili hatırlar: kartlarınızın
+sırası ve gizlediğiniz kartlar o profildeki her pencere genişliğinde geçerlidir, kart ve
+grafik boyutları ise yalnızca masaüstüne özeldir. Ayarlar → Arayüz içindeki <b>Düzeni
+sıfırla</b> ise her kartı, boyutu ve sütunu geldiği hâline döndürür.</p>
 <p><b>Düzeni özelleştir</b>, işin rehberli kapısıdır ve bir kartın neler yapabildiğini
 görmenin en hızlı yoludur. İlk kartın hemen üstündeki soluk bağlantıdan ya da Ayarlar →
 Arayüz içinden açın; orada <b>Panel düzeni</b> satırının ilk düğmesidir. Açıkken yeniden
@@ -420,13 +427,14 @@ bir sekme durağıdır: odağı ona verin, yukarı ve aşağı ok tuşları kart
 rakamlar, daha az yer. Geçmiş kartında ise en yeni on indirme ile geçmişinizin kalanı
 arasında geçiş yapar. Ayarlar → Arayüz içindeki <b>Sıkışık mod</b> bunu tüm panele bir
 kerede uygular.</li>
-<li><b>Yeniden boyutlandır.</b> İçinde bir liste ya da grafik olan kartın alt kenarında bir
-çubuk bulunur: istediğiniz yüksekliğe sürükleyin. Çubuk, siz kartı işaret edene kadar
+<li><b>Yeniden boyutlandır.</b> Fareniz ya da dokunmatik yüzeyiniz varsa, içinde bir liste
+ya da grafik olan kartın alt kenarında bir çubuk bulunur: istediğiniz yüksekliğe
+sürükleyin. Dokunmatik ekrana bu çubuk çizilmez. Çubuk, siz kartı işaret edene kadar
 soluktur; sonra tam genişlikte ince bir çizgi olarak, arka köşesinde tırtıklarla çizilir.
-Klavye odağını da alır: yukarı ve aşağı ok tuşları yüksekliği ayarlar, Shift daha büyük adım
-attırır. Hangi kartlarda çubuk olduğu, kartlar kendi listelerini kazandıkça ve kaybettikçe
-değişir; buradaki bir listeye değil, çubuğun kendisine bakın. <b>Düzeni özelleştir</b>
-kipinde çubuğu olmayan kartlar bunu kendileri söyler.</li>
+Klavye odağını da alır: yukarı ve aşağı ok tuşları yüksekliği ayarlar, Shift daha büyük
+adım attırır. Hangi kartlarda çubuk olduğu, kartlar kendi listelerini kazandıkça ve
+kaybettikçe değişir; buradaki bir listeye değil, çubuğun kendisine bakın. <b>Düzeni
+özelleştir</b> kipinde çubuğu olmayan kartlar bunu kendileri söyler.</li>
 <li><b>Gizle.</b> Başlık satırındaki son düğme o kartı gizler. Gizlenen kartlar panelin
 altındaki <b>Gizli</b> şeridinde toplanır; birini geri getirmek için oradaki adına
 tıklayın.</li>
@@ -462,12 +470,14 @@ varken sol ve sağ ok tuşları onu taşır, Shift ile bir ok ise boyutlandırı
 <tr><th>Yöntem</th><th>Nasıl</th></tr>
 <tr><td><b>Sürükle &amp; bırak</b></td><td>Bir ya da daha fazla <code>.nzb</code> dosyasını panelin herhangi bir yerine bırak.</td></tr>
 <tr><td><b>İzleme klasörü</b></td><td>Ayarlar'da bir klasör belirle; içine kaydedilen her <code>.nzb</code>
-5 saniye içinde alınır ve çöp kutusuna taşınır; açık bir panel her alışı adıyla duyurur
+indiği anda alınır ve çöp kutusuna taşınır; açık bir panel her alışı adıyla duyurur
 («…, Downloads klasöründen alındı»), böylece klasörden ayrılan bir dosya asla bir
 gizem olmaz. Dosyalarını saklamayı mı tercih ediyorsun? <b>Alındıktan sonra .nzb
 dosyalarını sakla</b> ayarını aç (bkz. <a href="#settings">§9</a>). Dizinleyici
 sitelerinden tek tıkla yakalamalar için tarayıcının indirme dizinini buna
-yönlendir.</td></tr>
+yönlendir. Alt klasörlerin, NZB olmadığı anlaşılan dosyaların ve bir ağ paylaşımındaki
+klasörün ihtiyaç duyduğu yeniden denetleme aralığının her birinin kendi anahtarı vardır;
+bkz. <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Bir URL'den</b></td><td>Bir NZB bağlantısı yapıştır (API <code>mode=addurl</code> ya da bağlı herhangi bir uygulama üzerinden).</td></tr>
 <tr><td><b>nzblnk: bağlantıları</b></td><td>Bir <code>nzblnk:</code> bağlantısını panonun herhangi bir yerine yapıştırın ya da içine sürükleyin. macOS DMG'sinden veya Windows kurulumundan kurduysanız bir board üzerinde doğrudan tıklayabilirsiniz de. Aşağıdaki <a href="#nzblnk">nzblnk bağlantıları</a> bölümüne bakın.</td></tr>
 <tr><td><b>Dizine göz at</b></td><td>Göz at kartındaki tam bir sürüme tıkla.</td></tr>
@@ -578,10 +588,26 @@ ekrana daha çok afiş sığdırır, büyük daha az.</li>
 üzerinde tut, afiş ve özet gelsin - hepsi kendi dizininden.</li>
 <li><b>Başlığa göre grupla</b>, yanındaki anahtar: başlık başına bir satır, sürümleri
 altında. <b>&#9656;</b> ile veya satıra tıklayarak aç; başlıktaki kutu gösterilen
-sürümleri seçer. Gruplama yalnızca <b>Bu dizin</b> için geçerlidir.</li>
+sürümleri seçer. Gruplama yalnızca <b>Bu dizin</b> için geçerlidir; <b>Indexer'lar</b>
+ya da <b>İkisi de</b> seçersen tablo yeniden düzleşir ve bunu söyler.</li>
+<li><b>Bir başlığın her sürümü</b>, kartını açtığında listelenir: çözünürlük, kodek,
+ses biçimi ve dinamik aralık (Dolby Vision, HDR10) sürüm adından okunur, yanında
+boyut, yaş ve her parçanın sağlayıcında hâlâ durup durmadığı. Ayarlar → Düzenleme →
+Dizinleme altında <b>Tercih edilen sürüm</b>'ü ayarla, eşleşenler <b>en iyi
+eşleşme</b> işaretiyle ve eşleşen etiketler vurgulanmış olarak yukarı çıkar. Hiçbir
+şey gizlenmez: sürüm adları bu etiketleri sürekli atlar, bu yüzden bir tercih yalnızca
+sırayı değiştirir. İzleme listesinin hangi kodlamaya yükselteceğine de o karar
+verir.</li>
 <li>Filmler / Diziler / Diğer için <b>sekmeler</b>, anında arama ve yedi sıralama:
-<b>Sana özel</b>, En yeni gönderiler, Çıkış yılı, En yüksek puanlı, Başlık A–Z,
-En büyük ve En çok gönderilen.</li>
+<b>Sana özel</b>, En yeni gönderiler, Çıkış tarihi, En yüksek puanlı, Başlık A–Z, En
+büyük ve En çok gönderilen. Sıralamanın yanındaki <b>↓</b> düğmesi onu ters çevirir,
+böylece her biri diğer yönde de çalışır (en eski, en küçük, en düşük, Z–A).</li>
+<li><b>Çıkış tarihi</b>, özgün çıkış ya da ilk yayın tarihidir; meta veri
+sağlayıcısının bir tarih verdiği yerde güne kadar kesindir: «bu hafta gerçekten ne
+çıktı» sorusunu yanıtlar, En yeni gönderiler bunu yapamaz (o yükleme tarihidir ve otuz
+yıllık bir filmin yeniden gönderimi orada en üste düşer). Bu sıralama var olmadan önce
+zenginleştirilmiş başlıklar, ya da sağlayıcısında tarih bulunmayanlar, meta verilerini
+yenileyene kadar yılına geri döner.</li>
 <li><b>Yalnızca eşleşenler</b> varsayılan olarak açıktır, tanımlanmamış çöpü gizler; bir
 "+N eşleşmemiş" çipi onu ortaya çıkarır.</li>
 <li>Ayrıntı sayfası için bir kutucuğa tıkla: özet, IMDb puanı ve oyları, oyuncular -
@@ -756,7 +782,7 @@ yener).</p>
 <h3>Hız &amp; zamanlama <span class="pill live">canlı</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Ayar</th><th>Ne yapar</th></tr>
-<tr><td>Hız sınırı</td><td>Bayt/sn cinsinden üst sınır (<code>50M</code>, <code>1G</code>, 0 = sınırsız). Uzak uygulamalar yüzde gönderebilir - doğru çevrilsinler diye <i>Hat hızı</i>'nı ayarla.</td></tr>
+<tr><td>Hız sınırı</td><td>Bayt/sn cinsinden üst sınır (<code>50M</code>, <code>1G</code>, 0 = sınırsız). Uzak uygulamalar yüzde gönderebilir - doğru çevrilsinler diye <i>Hat hızı</i>'nı ayarla. Başlıktaki <b>özel…</b> girdisi aynı sınırı Ayarlar'ı açmadan belirler.</td></tr>
 <tr><td>Otomatik hız</td><td>Diğer ev trafiğine öncelik veren ve hat sessiz olduğunda yeniden genişleyen, RTT denetimli üst sınır.</td></tr>
 <tr><td>Yavaş indirmeleri otomatik ertele</td><td>Diğerleri beklerken tek bir yavaş sunucuda takılan bir iş kuyruğun sonuna taşınır (ilerleme korunur). Bkz. <a href="#performance">§13</a>.</td></tr>
 <tr><td>Boştaki sunucularda ön yükleme</td><td>Etkin işe yararsız sunucular bir sonraki kuyruktakini başlatır. Bkz. <a href="#performance">§13</a>.</td></tr>
@@ -800,6 +826,18 @@ otomatik açılacağıdır: içinde bir 7z, onun içinde başka bir RAR bulunan 
 Usenet'te olağandır ve nzbfast zinciri ikinci bir geçiş olmadan izler. Sınırda en
 derindeki arşiv olduğu yerde bırakılır, daha fazla açılmaz, ve indirme yine de
 tamamlanır. Yalnızca alışılmadık derinlikteki sürümler için yükseltin.</p>
+<p><b>Biten indirmelerin izinleri</b> (gelişmiş bir ayar) bir umask; Docker'ın ve kurulum kılavuzlarının
+kullandığı sayının aynısı: <code>002</code> klasörlere 775, dosyalara 664
+verir, <code>022</code> ise 755 ve 644 verir. Boş olması varsayılandır ve hiçbir
+şeyi değiştirmez. Sonarr veya Radarr aynı gruptaki başka bir kullanıcı olarak
+çalışıp buraya düşenleri okuyamıyor ya da içe aktaramıyorsa
+ayarlayın; systemd kurulumunda genellikle aktaramazlar, çünkü birim API anahtarını
+korumak için servisin yazdığı her şeyi yalnızca sahibine okunur tutar. İzinler,
+biten bir iş yer değiştirmeyi bıraktığında işin klasörüne,
+içindeki her şeye ve o klasörle indirme klasörü arasındaki klasörlere
+uygulanır; çünkü yeniden adlandırarak içe aktarmak, adlandırmanın
+yapıldığı klasörde yazma izni gerektirir. Böyle bir kavramı olmayan
+Windows'ta yok sayılır.</p>
 
 <h3>Otomatik yeniden adlandırma &amp; temizlik <span class="pill live">live</span></h3>
 <p><b>Biten indirmeleri yeniden adlandır</b> (öntanımlı olarak açık), klasöre ve ana
@@ -856,6 +894,27 @@ hatırlanır ve yeniden kuyruğa alınmaz; yeniden indirmek için dosyayı tekra
 Hangisini seçersen seç, her işin çekmecesinde bir <b>.nzb dosyasını indir</b> düğmesi
 vardır; böylece herhangi bir işin <code>.nzb</code> dosyasının bir kopyası hiçbir
 zaman bir tıktan uzakta değildir.</p>
+<p><b>Alt klasörleri de tara</b> (varsayılan olarak kapalı) izleme klasörünün
+içindeki klasörlerden de dosya alır ve ilk alt klasörün adı indirmenin kategorisi olur:
+<code>watch/tv</code> içine bırakılan bir dosya tv kategorisine katılır. Yakalamaları
+panele dokunmadan sıralamanın en hızlı yolu budur - tarayıcının bir yer imini
+<code>watch/tv</code> klasörüne, bir başkasını <code>watch/movies</code> klasörüne
+yönlendir, dosyalama daha girişte bitmiş olsun. <code>rejected</code> adlı bir klasör
+tek istisnadır ve ona her zaman dokunulmaz.</p>
+<p><b>Kullanılamayan dosyaları bir kenara al</b> (varsayılan olarak kapalı) kullanılabilir
+bir NZB olmayan her şeyi izleme klasörünün içindeki <code>rejected</code> klasörüne
+taşır ve yanına neyin yanlış olduğunu söyleyen küçük bir metin dosyası bırakır.
+Tarayıcının kaydettiği bir klasör için açık tutmaya değer: oraya bir oturum açma sayfası
+ya da bir hata sayfası <code>.nzb</code> adıyla düşebilir. Kapalıyken dosya koyduğun
+yerde kalır ve gerekçe bunun yerine kuyruğun üstünde gösterilir. Yalnızca eksik görünen
+bir dosya her iki durumda da yerinde bırakılır, çünkü hâlâ geliyor olabilir.</p>
+<p><b>Klasörü şu sıklıkta yeniden denetle</b> (gelişmiş bir ayar) bir güvenlik ağıdır,
+başka bir şey değil; yani alışları hızlandıran düğme bu değildir. Bu makineye bırakılan
+bir dosya indiği anda fark edilir, çünkü sistem haber verir; bu aralık yalnızca sistemin
+haber veremediği klasörleri kapsar, ki pratikte bu başka bir bilgisayardan yazılan bir
+ağ paylaşımı demektir. Saniye olarak, 1 ile 3600 arası, varsayılan 5. Bir paylaşımdan
+gelen alışlar geç geliyorsa düşür, yavaş bir hatta yeniden denetlemeler trafiğe
+değmiyorsa yükselt.</p>
 
 <h3 id="set-indexers">Indexer'larda ara <span class="pill live">canlı</span></h3>
 <p>NZB indexer sitelerindeki hesapların, her biri bir satır; böylece duvardaki bir arama
@@ -995,7 +1054,12 @@ söyler.</p>
 <h3>Yaşam döngüsü olayları ve imzalı webhook'lar</h3>
 <p>Her iş kilometre taşı sürümlü bir olaydır: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, artı
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(otomatik bir yeniden deneme başarısız bir indirmeyi yeniden kuyruğa aldı) ve
+<code>job.delete_kept</code> (bir silme kaydı kaldırdı ama dosyalarını
+kaldıramadı), artı <code>watch.picked</code> (izlenen klasörden bir .nzb alındı),
+<code>watchlist.upgraded</code> (izleme listesi yükseltmesi tamamlandı ve yerini
+bıraktığı kopya kaldırıldı),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> ve <code>quota.reached</code>. Her biri bir
 <code>schema_version</code> (şu an 1; yeni anahtarlar sürüm artmadan gelebilir -
@@ -1047,6 +1111,12 @@ yönlendirmesinin hepsi *arr'ların beklediği gibi davranır.</p>
 <li>nzbfast, izlenen gruplarının kendi dizininden <code>caps</code>, <code>search</code>,
 <code>tvsearch</code> ve <code>movie</code> sorgularını sunar ve
 <code>/getnzb/&lt;id&gt;</code> NZB'yi geri verir.</li>
+<li>Aramalar ada göre ya da id'ye göre olabilir: diziler TVDB, IMDb ya da TVmaze id'si
+alır, filmler IMDb ya da TMDB id'si, ve uygulama hangisi olduğunu
+<code>caps</code>'ten okur. TVDB id'leri ancak dizin onları topladıktan sonra sunulur,
+bu da arka planda kendiliğinden olur. Elimizde hiçbir şey olmayan bir id boş sonuçla
+yanıtlanır, hiç çözemediğimiz bir id ise adıyla reddedilir: ikisi de asla alakasız
+sürümlerden oluşan bir listeyle yanıtlanmaz.</li>
 </ol>
 <div class="note"><b>Önce dahili dizinleyiciyi açın</b> (Ayarlar → Dizinleme). Varsayılan
 olarak kapalıdır ve kapalı olduğu sürece bu cephe her sorguya boş sonuç yerine
@@ -1070,7 +1140,13 @@ seç:</p>
 <tr><td>Parola</td><td><b>API anahtarın</b></td></tr>
 </table></div>
 <p>Bu uygulamaların kullandığı tam JSON-RPC yüzeyi sunulur: durum, yeniden
-sıralama/duraklat/sil ile kuyruk, geçmiş, NZB ekle, hız sınırı, duraklat/sürdür, günlük.</p>
+sıralama/yeniden adlandırma/duraklat/sil ile kuyruk, geçmiş, NZB ekle (dosya ya da
+URL), hız sınırı, duraklat/sürdür, günlük. Kimlik bilgileri adreste de taşınabilir,
+NZBGet'in kendi <code>http://user:apikey@host:6789/</code> biçimiyle, ki LunaSea bunu
+gönderir.</p>
+<p><b>nzb360 kullanıcıları:</b> nzbfast'i <b>SABnzbd</b> sunucusu olarak ekle (sonraki
+bölüm). nzb360 gerçek NZBGet ile XML-RPC üzerinden konuşur, nzbfast bunu sunmaz,
+dolayısıyla NZBGet kipi bağlanamaz.</p>
 <h3>SABnzbd konuşan uygulamalar</h3>
 <div class="tblwrap"><table>
 <tr><th>Uygulamadaki alan</th><th>Değer</th></tr>
@@ -1362,7 +1438,7 @@ orası.</td></tr>
 <h2 id="troubleshooting">18 · Sorun giderme</h2>
 <div class="tblwrap"><table>
 <tr><th>Belirti</th><th>Denetle</th></tr>
-<tr><td>Yavaş indirmeler</td><td><b>Sistem kıyaslaması</b>'nı çalıştır - darboğazı açıkça adlandırır. Ağsa: <b>Bağlantı ayarı</b>'nı çalıştır, sunucu başına bağlantı sayılarını denetle ve sağlayıcılarının hepsinin tek bir backbone olmadığını doğrula (<b>Sunucu çeşitliliği</b>).</td></tr>
+<tr><td>Yavaş indirmeler</td><td>Önce indirmenin kendisine sor: çalışırken ilerleme çubuğunun altındaki satır <i>bu</i> işi tutan katmanı adlandırır ve o karara tıklamak satırı kanıtlarıyla açar (bkz. <a href="#dash-queue">Kuyruk</a>). <b>Sistem kıyaslaması</b>'nı çalıştır - darboğazı açıkça adlandırır. Ağsa: <b>Bağlantı ayarı</b>'nı çalıştır, sunucu başına bağlantı sayılarını denetle ve sağlayıcılarının hepsinin tek bir backbone olmadığını doğrula (<b>Sunucu çeşitliliği</b>).</td></tr>
 <tr><td>Yalnızca çok büyük işlerde yavaş<br>(NAS ya da az RAM'li makine)</td><td>Beklenen ve ölçülebilir: aç bir bellek bütçesi önbellekleri diske döker ve ~87 GB'ı geçince %20–40 maliyet getirir. Rakamlar ve ne kadar RAM verileceği için <a href="#memory">Bellek bütçesi</a>'ne bak. Daha küçük işler etkilenmez.</td></tr>
 <tr><td>İndirme "makaleler eksik" ile başarısız</td><td>Gönderi süresi dolmuş ya da sağlayıcılarından kaldırılmış. Farklı bir backbone'daki ikinci bir sağlayıcı bunların çoğunu kurtarır. <code>nzbfast check</code> bunu indirmeden önce tahmin eder. Duvar da erişilebilirlik noktasıyla (<a href="#oracle">§13</a>) muhtemelen
 gitmiş olanları önceden işaretler. Bu biçimdeki ilk başarısızlık, bir bekleme sonrası
@@ -1380,7 +1456,7 @@ kendiliğinden düzelir.</td></tr>
 <tr><td>Arka plan süreci başlamıyor: port kullanımda</td><td>Başka bir örnek çalışıyor - ya da <code>--port</code>'u değiştir.</td></tr>
 <tr><td>Günlükler nerede?</td><td>Paneldeki Günlük kartı ya da <code>serve</code>'ü başlattığın terminal/günlük dosyası.</td></tr>
 </table></div>
-<div class="note"><b>Hâlâ takıldın mı?</b>Günlük kartı genellikle suçluyu adlandırır - bir
+<div class="note"><b>Hâlâ takıldın mı?</b>Tek bir indirmeyle ilgili sorun için <b>Rapor oluştur</b> kullan: iş çalışırken kuyruktaki çekmecesinde, sonrasında geçmiş çekmecesinde bulunur. O tek indirmeyle ilgili her şeyi kopyalar; günlük satırları da tüm servisin değil yalnızca o işin kendi satırlarıdır. Kullanıcı adları, parolalar ve API anahtarları hiç okunmaz, ev klasörün ise <code>~</code> olarak yazılır. Günlük kartı genellikle suçluyu adlandırır - bir
 sorun bildirirken kuyruğunu, <code>nzbfast --version</code>'ınla birlikte ekle.</div>
 
 <hr>

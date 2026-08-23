@@ -320,7 +320,12 @@ tempo reale, una volta al secondo. Le schede, dall'alto in basso:</p>
 <ul>
 <li>Menu <b>Limite di velocità</b> - tetti fissi, <i>auto · cede alla LAN</i> (una
 modalità governata dall'RTT che si fa da parte quando qualcun altro in casa ha
-bisogno della linea), o nessun limite.</li>
+bisogno della linea), o nessun limite.
+I valori preimpostati sono numeri tondi per linee tonde, e un uplink da 37&nbsp;Mb/s non
+è uno di questi: <b>personalizzato…</b> ti chiede la cifra e accetta tutto ciò che
+accetta l'API (<code>25M</code>, <code>500K</code>, o 0 per nessun limite). Il menu
+mostra poi <b>(personalizzato)</b> con la velocità accanto, finché non scegli di nuovo
+un valore preimpostato o <i>auto</i>.</li>
 <li><b>Pausa per…</b> - metti tutto in pausa per 15&nbsp;min/30&nbsp;min/1&nbsp;h/3&nbsp;h con
 ripresa automatica, oppure usa il pulsante Pausa per una pausa a tempo
 indeterminato. La pausa è immediata: il trasferimento attivo si ferma in pochi
@@ -363,6 +368,7 @@ file, conteggi dei blocchi di verifica, quanto ha contribuito ciascun server a
 ti salva il file <code>.nzb</code> del job - nzbfast ne conserva una copia propria,
 quindi funziona per ogni job, anche quando il file originale non c'è più da
 tempo.</li>
+<li><b>"Perché è lento?"</b> Mentre un lavoro scarica, la riga sotto la sua barra di avanzamento porta un verdetto su <em>quel</em> lavoro, non sulla macchina: <i>i tuoi provider sono il limite</i>, <i>questa macchina è al limite della CPU</i>, <i>lo storage non sta al passo</i>, e così via. Cliccalo e la riga si apre sulle prove: cosa può fare la tua linea, cosa hanno consegnato i provider, cosa sta arrivando ora, e una tabella per server dove un provider limitato si vede a colpo d'occhio. Un lavoro a piena velocità non dice nulla qui, e nemmeno uno il cui verdetto si sta ancora formando.</li>
 <li>I badge segnalano gli stati speciali: <i>rinviato (lento)</i>, <i>prefetch in corso</i>,
 <i>in pausa</i> (vedi <a href="#performance">Strumenti per le prestazioni</a>).</li>
 <li>Un grafico burn-down traccia i GB totali rimanenti nell'intera coda.</li>
@@ -395,7 +401,7 @@ crescita indica articoli che arrivano danneggiati.
 Il pannello di ogni riga dice chi ha aggiunto il job e ha lo stesso pulsante
 <b>Scarica il .nzb</b> della coda - comodo per scaricare di nuovo una release da
 un'altra parte, o per allegare il <code>.nzb</code> a una segnalazione di
-problema.</p>
+problema. Accanto c'è <b>Crea rapporto</b>, che di solito è la cosa migliore da allegare: vedi <a href="#troubleshooting">Risoluzione dei problemi</a>.</p>
 <p>La scheda elenca dieci download per impostazione predefinita e il resto è a un clic, sul pulsante ▤. Stato, posizione e il motivo di un fallimento stanno dietro un clic sulla riga stessa, così il caso comune - cosa è finito, quanto grande, quando - resta leggibile senza scorrere. Trascina invece il bordo inferiore della scheda per far scorrere l'elenco a un'altezza scelta da te. <b>History rows</b> in Impostazioni → Interfaccia cambia quel dieci; essendo una proprietà del daemon e non del tuo browser, vale per ogni dispositivo che guarda questa installazione. <b>Colour History names</b>, lì accanto, tinge di verde i nomi completati e di rosso quelli falliti; disattivandolo i nomi restano neutri, e il pallino colorato e i dettagli della riga continuano a dire qual è quale.</p>
 <p>nzbfast conserva lo storico per sempre, salvo diversa indicazione. <b>Pulizia dello
 storico</b> in Impostazioni → Sistema rimuove le vecchie voci secondo due regole
@@ -417,9 +423,11 @@ complessivo rispetto alla loro dimensione.</p>
 <h3 id="dash-layout">Organizzare la dashboard</h3>
 <p>La dashboard è vostra da organizzare. Quattro operazioni, chiamate allo stesso modo
 ovunque le incontriate: <b>Sposta</b> una scheda, <b>Compatta</b>, <b>Ridimensiona</b> o
-<b>Nascondi</b>. Ogni scelta è ricordata dal browser in cui l'avete fatta, così ogni
-dispositivo mantiene la propria disposizione, e <b>Reimposta layout</b> in Impostazioni →
-Interfaccia riporta ogni scheda, dimensione e colonna com'erano alla consegna.</p>
+<b>Nascondi</b>. Ogni scelta è ricordata dal profilo del browser in cui l'avete fatta:
+l'ordine delle vostre schede e quelle che avete nascosto valgono a ogni larghezza di
+finestra in quel profilo, mentre le dimensioni di schede e grafici restano solo per il
+desktop. <b>Reimposta layout</b> in Impostazioni → Interfaccia riporta ogni scheda,
+dimensione e colonna com'erano alla consegna.</p>
 <p><b>Personalizza layout</b> è la via guidata, e il modo più rapido di vedere che cosa sa
 fare una scheda. Apritela dal link discreto appena sopra la prima scheda, oppure da
 Impostazioni → Interfaccia, dove è il primo pulsante della riga <b>Layout della
@@ -444,12 +452,13 @@ scheda: stesse cifre, meno spazio. Sullo Storico alterna fra i dieci download pi
 il resto del vostro storico. <b>Modalità compatta</b> in Impostazioni → Interfaccia fa
 tutta la dashboard in una volta.</li>
 <li><b>Ridimensiona.</b> Una scheda che contiene un elenco o un grafico porta una barra
-lungo il bordo inferiore: trascinatela fino all'altezza voluta. La barra è tenue finché non
-puntate la scheda, poi si disegna come un filo a tutta larghezza con delle scanalature
-nell'angolo finale; prende anche il fuoco da tastiera, dove i tasti freccia su e giù
-regolano l'altezza e Maiusc fa un passo più grande. Quali schede ne abbiano una cambia man
-mano che le schede acquistano e perdono elenchi propri: prendete la barra come risposta,
-non un elenco qui. In <b>Personalizza layout</b> le schede che non ce l'hanno lo dicono da
+lungo il bordo inferiore dove avete un mouse o un trackpad: trascinatela fino all'altezza
+voluta. Uno schermo touch non ne riceve una. La barra è tenue finché non puntate la
+scheda, poi si disegna come un filo a tutta larghezza con delle scanalature nell'angolo
+finale; prende anche il fuoco da tastiera, dove i tasti freccia su e giù regolano
+l'altezza e Maiusc fa un passo più grande. Quali schede ne abbiano una cambia man mano che
+le schede acquistano e perdono elenchi propri: prendete la barra come risposta, non un
+elenco qui. In <b>Personalizza layout</b> le schede che non ce l'hanno lo dicono da
 sé.</li>
 <li><b>Nascondi.</b> L'ultimo pulsante della riga del titolo nasconde quella scheda. Le
 schede nascoste si raccolgono in una barra <b>Nascoste</b> ai piedi della dashboard;
@@ -489,12 +498,14 @@ sinistra e destra la spostano, e Maiusc con una freccia la ridimensiona.</p>
 <tr><th>Metodo</th><th>Come</th></tr>
 <tr><td><b>Trascina e rilascia</b></td><td>Trascina uno o più file <code>.nzb</code> ovunque sulla dashboard.</td></tr>
 <tr><td><b>Cartella monitorata</b></td><td>Imposta una cartella nelle Impostazioni; ogni
-<code>.nzb</code> salvato lì dentro viene raccolto entro 5 secondi e spostato nel
+<code>.nzb</code> salvato lì dentro viene raccolto appena arriva e spostato nel
 Cestino, e una dashboard aperta annuncia ogni prelievo per nome ("… prelevato da
 Downloads"), così un file che lascia la cartella non è mai un mistero. Preferisci
 conservare i tuoi file? Attiva <b>Conserva i .nzb dopo il prelievo</b> (vedi
 <a href="#settings">§9</a>). Punta lì la cartella di download del browser per
-prelievi a un clic dai siti indexer.</td></tr>
+prelievi a un clic dai siti indexer. Le sottocartelle, i file che si rivelano non essere NZB e l'intervallo di
+ricontrollo di cui ha bisogno una cartella su una condivisione di rete hanno ciascuno
+il proprio interruttore; vedi <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Da un URL</b></td><td>Incolla un link NZB (API <code>mode=addurl</code>, o tramite qualsiasi app collegata).</td></tr>
 <tr><td><b>Link nzblnk:</b></td><td>Incolla un link <code>nzblnk:</code> ovunque sulla dashboard, oppure trascinalo dentro. Se hai installato dal DMG macOS o dall'installer Windows puoi anche cliccarne uno direttamente su un board. Vedi <a href="#nzblnk">i link nzblnk</a> più sotto.</td></tr>
 <tr><td><b>Sfoglia indice</b></td><td>Clicca una release completa nella scheda Sfoglia.</td></tr>
@@ -607,11 +618,28 @@ piccolo ne mette di più sullo schermo, grande di meno.</li>
 <li><b>Anteprime al passaggio</b>, sopra la tabella Release: posa il puntatore su una
 riga per poster e trama, presi dal tuo stesso indice.</li>
 <li><b>Raggruppa per titolo</b>, l'interruttore accanto: una riga per titolo, con le
-sue release sotto. Aprila con <b>&#9656;</b> o cliccando la riga; la casella sul titolo
-seleziona le release mostrate. Il raggruppamento vale solo per <b>Questo indice</b>.</li>
+sue release sotto. Aprila con <b>&#9656;</b> o cliccando la riga; la casella sul
+titolo seleziona le release mostrate. Il raggruppamento vale solo per <b>Questo
+indice</b>; scegli <b>Indexer</b> o <b>Entrambi</b> e la tabella torna piatta, e lo
+dice.</li>
+<li><b>Ogni release di un titolo</b> è elencata quando apri la sua scheda, con
+risoluzione, codec, formato audio e gamma dinamica (Dolby Vision, HDR10) letti dal
+nome della release, più dimensione, età e se ogni parte è ancora sul tuo provider.
+Imposta <b>Versione preferita</b> in Impostazioni → Organizzazione → Indicizzazione e
+quelle che corrispondono salgono in cima, con un segno <b>corrispondenza migliore</b>
+e i tag coincidenti evidenziati. Non si nasconde nulla: i nomi delle release omettono
+di continuo questi tag, quindi una preferenza cambia solo l'ordine. Decide anche a
+quale codifica passa la watchlist.</li>
 <li><b>Schede</b> Film / Serie TV / Altro, ricerca istantanea e sette ordinamenti:
-<b>Per te</b>, Post più recenti, Anno di uscita, Più votati, Titolo A–Z, Più grandi e
-I più postati.</li>
+<b>Per te</b>, Post più recenti, Data di uscita, Più votati, Titolo A–Z, Più grandi e
+I più postati. Il pulsante <b>↓</b> accanto all'ordinamento lo inverte, così ognuno
+funziona anche al contrario (i più vecchi, i più piccoli, i meno votati, Z–A).</li>
+<li><b>Data di uscita</b> è l'uscita originale o la prima messa in onda, al giorno
+dove il fornitore di metadati ce ne ha data una: risponde a «cosa è uscito davvero
+questa settimana», cosa che Post più recenti non può fare (quella è la data di
+caricamento, e il ripost di un film di trent'anni finisce in cima). I titoli
+arricchiti prima che esistesse, o il cui fornitore non aveva una data, ripiegano sul
+loro anno finché non ne aggiorni i metadati.</li>
 <li><b>Solo abbinati</b> è attivo di default e nasconde la robaccia non
 identificata; un chip "+N non abbinati" la rivela.</li>
 <li>Clicca un riquadro per la scheda di dettaglio: trama, voto IMDb e numero di
@@ -794,7 +822,7 @@ dell'interfaccia battono le opzioni da riga di comando).</p>
 <h3>Velocità e pianificazione <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Impostazione</th><th>Cosa fa</th></tr>
-<tr><td>Limite di velocità</td><td>Tetto in byte/sec (<code>50M</code>, <code>1G</code>, 0 = illimitato). Le app remote possono inviare percentuali - imposta la <i>Velocità della linea</i> perché vengano tradotte correttamente.</td></tr>
+<tr><td>Limite di velocità</td><td>Tetto in byte/sec (<code>50M</code>, <code>1G</code>, 0 = illimitato). Le app remote possono inviare percentuali - imposta la <i>Velocità della linea</i> perché vengano tradotte correttamente. La voce <b>personalizzato…</b> nell'intestazione imposta lo stesso tetto senza aprire le Impostazioni.</td></tr>
 <tr><td>Velocità automatica</td><td>Tetto governato dall'RTT che cede il passo al resto del traffico di casa e si riespande quando la linea è tranquilla.</td></tr>
 <tr><td>Rinvio automatico dei download lenti</td><td>Un job bloccato su un server lento mentre altri attendono viene spostato in fondo alla coda (avanzamento conservato). Vedi <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch sui server inattivi</td><td>I server inutili al job attivo avviano il prossimo in coda. Vedi <a href="#performance">§13</a>.</td></tr>
@@ -842,6 +870,15 @@ archivio-dentro-archivio vengono estratti automaticamente: un set RAR che contie
 seconda passata. Al limite l'archivio più profondo viene semplicemente lasciato dov'è,
 non estratto oltre, e il download si completa lo stesso. Alzala solo per release
 insolitamente profonde.</p>
+<p><b>Permessi dei download completati</b> (un'impostazione avanzata) è una umask, lo stesso numero usato da Docker e dalle
+guide di installazione: <code>002</code> dà 775 alle cartelle e 664 ai file, <code>022</code> dà 755 e
+644. Vuota è il valore predefinito e non cambia nulla. Impostala se Sonarr o Radarr girano come un altro
+utente dello stesso gruppo e non riescono a leggere o importare quello che arriva qui: su un'installazione
+systemd di solito non ci riescono, perché l'unit tiene tutto ciò che il demone scrive leggibile solo al
+proprietario per proteggere la chiave API. I permessi vengono applicati quando un job completato ha smesso di
+spostarsi, sulla sua cartella, su tutto quello che contiene e sulle cartelle fra essa e la cartella dei
+download, perché importare rinominando richiede il permesso di scrittura sulla cartella da cui si rinomina.
+Ignorata su Windows, che non ha questo concetto.</p>
 
 <h3>Rinomina automatica e pulizia <span class="pill live">live</span></h3>
 <p><b>Rinomina i download completati</b> (attiva per impostazione predefinita) dà alla
@@ -901,6 +938,29 @@ viene ricordato, anche dopo un riavvio, e non viene riaccodato; salvalo di nuovo
 per scaricarlo ancora. Qualunque cosa tu scelga, il pannello di ogni job ha un
 pulsante <b>Scarica il .nzb</b>, quindi una copia del <code>.nzb</code> di
 qualsiasi job non è mai a più di un clic di distanza.</p>
+<p><b>Analizza anche le sottocartelle</b> (disattivato per impostazione predefinita)
+raccoglie anche i file dalle cartelle dentro la cartella monitorata, e il nome della
+prima sottocartella diventa la categoria del download: un file lasciato in
+<code>watch/tv</code> entra nella categoria tv. È il modo più rapido di smistare i
+prelievi senza toccare la dashboard - punta un segnalibro del browser su
+<code>watch/tv</code> e un altro su <code>watch/movies</code>, e l'archiviazione è già
+fatta all'ingresso. Una cartella chiamata <code>rejected</code> è l'unica eccezione e
+viene sempre lasciata stare.</p>
+<p><b>Metti da parte i file inutilizzabili</b> (disattivato per impostazione
+predefinita) sposta tutto ciò che non è un NZB utilizzabile in una cartella
+<code>rejected</code> dentro la cartella monitorata, con accanto un piccolo file di
+testo che dice cosa non andava. Vale la pena tenerlo attivo per una cartella in cui
+salva il browser, dove una pagina di login o di errore può arrivare con un nome
+<code>.nzb</code>. Disattivato, il file resta dove l'hai messo e il motivo compare
+invece sopra la coda. Un file che sembra soltanto incompleto viene lasciato al suo
+posto in entrambi i casi, perché potrebbe essere ancora in arrivo.</p>
+<p><b>Ricontrolla la cartella ogni</b> (un'impostazione avanzata) è una rete di
+sicurezza e nulla di più, quindi non è la manopola che rende rapidi i prelievi. Un file
+lasciato su questa macchina viene notato nel momento in cui arriva, perché lo dice il
+sistema; questo intervallo copre solo le cartelle di cui il sistema non può dire nulla,
+in pratica una condivisione di rete scritta da un altro computer. In secondi, da 1 a
+3600, predefinito 5. Abbassalo se i prelievi da una condivisione sembrano tardivi,
+alzalo se i ricontrolli non valgono il traffico su un collegamento lento.</p>
 
 <h3 id="set-indexers">Cerca sugli indexer <span class="pill live">live</span></h3>
 <p>I tuoi account sui siti indexer NZB, una riga ciascuno, così una ricerca sulla
@@ -1044,7 +1104,13 @@ l'aggiunta procede intatta e il log dice perché.</p>
 <h3>Eventi del ciclo di vita e webhook firmati</h3>
 <p>Ogni traguardo di un job è un evento versionato: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, più
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(un nuovo tentativo automatico ha rimesso in coda un download fallito) e
+<code>job.delete_kept</code> (un'eliminazione ha rimosso il record ma non è
+riuscita a rimuoverne i file), più <code>watch.picked</code> (un .nzb è stato
+prelevato dalla cartella sorvegliata), <code>watchlist.upgraded</code> (un
+aggiornamento della watchlist è andato a buon fine e la copia superata è stata
+rimossa),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> e <code>quota.reached</code>. Ciascuno porta uno
 <code>schema_version</code> (attualmente 1; nuove chiavi possono comparire senza incremento -
@@ -1097,6 +1163,12 @@ categoria si comportano tutti come i vari *arr si aspettano.</p>
 <li>nzbfast serve le query <code>caps</code>, <code>search</code>, <code>tvsearch</code> e
 <code>movie</code> dal proprio indice dei tuoi gruppi osservati, e
 <code>/getnzb/&lt;id&gt;</code> restituisce l'NZB.</li>
+<li>Le ricerche possono essere per nome o per id: le serie accettano un id TVDB, IMDb
+o TVmaze, i film un id IMDb o TMDB, e l'app legge quale da <code>caps</code>. Gli id
+TVDB vengono offerti solo una volta che l'indice li ha raccolti, cosa che avviene da
+sola in background. Un id per cui non abbiamo nulla riceve un risultato vuoto, e un id
+che non riusciamo a risolvere viene rifiutato per nome: né l'uno né l'altro riceve mai
+un elenco di release senza attinenza.</li>
 </ol>
 <div class="note"><b>Accendi prima l'indicizzatore integrato</b> (Impostazioni →
 Indicizzazione). È spento per impostazione predefinita, e finché lo è questa facciata
@@ -1121,8 +1193,13 @@ app supporta:</p>
 <tr><td>Password</td><td>la tua <b>chiave API</b></td></tr>
 </table></div>
 <p>Viene servita l'intera superficie JSON-RPC usata da queste app: stato, coda con
-riordino/pausa/eliminazione, storico, aggiunta di NZB, limite di velocità,
-pausa/ripresa, log.</p>
+riordino/rinomina/pausa/eliminazione, storico, aggiunta di NZB (file o URL), limite di
+velocità, pausa/ripresa, log. Le credenziali possono anche viaggiare nell'URL, la
+forma <code>http://user:apikey@host:6789/</code> di NZBGet, che è quella che manda
+LunaSea.</p>
+<p><b>Utenti di nzb360:</b> aggiungi nzbfast come server <b>SABnzbd</b> (sezione
+successiva). nzb360 parla con un vero NZBGet via XML-RPC, che nzbfast non serve,
+quindi la sua modalità NZBGet non riesce a collegarsi.</p>
 <h3>App che parlano SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Campo nell'app</th><th>Valore</th></tr>
@@ -1428,7 +1505,7 @@ l'installazione e indicata nel log di App Center; anche il file
 <h2 id="troubleshooting">18 · Risoluzione dei problemi</h2>
 <div class="tblwrap"><table>
 <tr><th>Sintomo</th><th>Da controllare</th></tr>
-<tr><td>Download lenti</td><td>Esegui il <b>Benchmark di sistema</b> - nomina il collo di bottiglia senza giri di parole. Se è la rete: esegui <b>Ottimizzazione connessioni</b>, controlla le connessioni per server e verifica che i tuoi provider non siano tutti sullo stesso backbone (<b>Diversità dei server</b>).</td></tr>
+<tr><td>Download lenti</td><td>Chiedi prima al download stesso: mentre gira, la riga sotto la sua barra di avanzamento nomina lo strato che sta frenando <i>questo</i> lavoro, e un clic su quel verdetto apre la riga sulle prove (vedi <a href="#dash-queue">Coda</a>). Esegui il <b>Benchmark di sistema</b> - nomina il collo di bottiglia senza giri di parole. Se è la rete: esegui <b>Ottimizzazione connessioni</b>, controlla le connessioni per server e verifica che i tuoi provider non siano tutti sullo stesso backbone (<b>Diversità dei server</b>).</td></tr>
 <tr><td>Lento solo sui job molto grandi<br>(NAS o macchina con poca RAM)</td><td>Atteso, e misurabile: un budget di memoria affamato riversa le cache su disco e costa il 20–40% oltre ~87 GB. Vedi <a href="#memory">Budget di memoria</a> per le cifre e per quanta RAM dargli. I job più piccoli non ne risentono.</td></tr>
 <tr><td>Il download fallisce con "articles missing"</td><td>Il post è scaduto o è stato rimosso presso i tuoi provider. Un secondo provider su un backbone diverso salva la maggior parte di questi casi. <code>nzbfast check</code> lo predice prima di scaricare. E il muro segnala in anticipo quelle probabilmente sparite con il suo punto
 di disponibilità (<a href="#oracle">§13</a>). Un primo fallimento di questa forma si
@@ -1446,7 +1523,7 @@ aspetto e si risolve da sé.</td></tr>
 <tr><td>Il daemon non parte: porta occupata</td><td>C'è un'altra istanza in esecuzione - oppure cambia <code>--port</code>.</td></tr>
 <tr><td>Dove sono i log?</td><td>Nella scheda Log della dashboard, o nel terminale/file di log con cui hai lanciato <code>serve</code>.</td></tr>
 </table></div>
-<div class="note"><b>Ancora bloccato?</b>La scheda Log di solito nomina il colpevole -
+<div class="note"><b>Ancora bloccato?</b>Per un problema su un singolo download, usa <b>Crea rapporto</b>: si trova nel cassetto di quel lavoro in coda mentre gira, e poi nel suo cassetto della cronologia. Copia tutto su quel solo download, comprese solo le sue righe di log invece di quelle dell'intero servizio. Nomi utente, password e chiavi API non vengono mai letti, e la tua cartella personale è scritta come <code>~</code>. La scheda Log di solito nomina il colpevole -
 includine la parte finale quando segnali un problema, insieme al tuo
 <code>nzbfast --version</code>.</div>
 

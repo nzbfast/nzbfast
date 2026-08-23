@@ -97,17 +97,18 @@ fn allocs() -> (u64, u64) {
     )
 }
 
-/// Process CPU (user, system). `getrusage` rather than a thread clock:
+/// Process CPU (user, system). Process-wide rather than a thread clock:
 /// the chain spans reactor threads and decode threads and the point is
 /// the total the machine pays.
+///
+/// Via `nzbkit::mem` rather than a local `libc::getrusage`, which does
+/// not exist on Windows - and `--all-targets` compiles this test target
+/// there, so the local version held `windows-clippy` red. `mem` keeps
+/// the user/system split this rig medians on, out of GetProcessTimes on
+/// Windows.
 fn cpu() -> (Duration, Duration) {
-    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: `ru` is a valid, fully-initialised rusage.
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
-    let d = |t: libc::timeval| {
-        Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
-    };
-    (d(ru.ru_utime), d(ru.ru_stime))
+    let (user, sys) = nzbkit::mem::cpu_user_sys_secs().unwrap_or((0.0, 0.0));
+    (Duration::from_secs_f64(user), Duration::from_secs_f64(sys))
 }
 
 // ---------------------------------------------------------------- corpus
@@ -138,6 +139,7 @@ fn corpus() -> (HashMap<String, Vec<u8>>, Vec<ArticleReq>) {
             id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
+            file: u32::MAX,
         })
         .collect();
     (articles, reqs)

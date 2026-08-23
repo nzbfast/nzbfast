@@ -1,7 +1,7 @@
-//! Update-manifest signing tool. The daemon verifies `latest.json` against
-//! an ed25519 public key baked into the binary (see UPDATE_PUBKEY_HEX in
-//! serve.rs); this tool holds the *private* half, which never lives in the
-//! repo or on a build server - it stays offline with the release manager.
+//! Update-manifest signing tool. The daemon verifies `latest.json` against an
+//! ed25519 public key baked into the binary (see UPDATE_PUBKEY_HEX in
+//! serve/update.rs); this tool holds the *private* half, which never lives in
+//! the repo or on a build server - it stays offline with the release manager.
 //!
 //!   keygen [out.hex]                -> fresh keypair. With a path, the PRIVATE
 //!                                      key is written there (0600) and only the
@@ -45,7 +45,7 @@ fn load_priv(path: Option<&String>) -> Result<SigningKey, String> {
 
 fn keygen(out: Option<&String>) -> i32 {
     let mut seed = [0u8; 32];
-    if let Err(e) = getrandom::getrandom(&mut seed) {
+    if let Err(e) = getrandom::fill(&mut seed) {
         eprintln!("getrandom failed: {e}");
         return 1;
     }

@@ -498,6 +498,36 @@ mod tests {
                 "{client} points at {icon}, which is not in the icon sprite"
             );
         }
+        // ...and the glyphs written straight into the markup, which the
+        // two tables above cannot see. §202 put an `i-help` on the queue
+        // row's whyslow verdict; a typo there is the same empty box, and
+        // nothing would have caught it.
+        // The wall belongs to the indexer stack, so `WALL_HTML` is gated
+        // with it and has to be PUSHED rather than listed: as a plain
+        // array this did not compile at all under
+        // `--no-default-features`, and nothing noticed because
+        // `slim-check` has no `--all-targets` and so has never built the
+        // slim test targets. Same shape as
+        // `every_shell_substitution_is_a_key_field` in webasset.rs.
+        #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
+        let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
+        #[cfg(feature = "indexer")]
+        pages.push(("wall", super::WALL_HTML));
+        for (name, page) in pages {
+            for at in page.match_indices("<use href=\"#") {
+                let rest = &page[at.0 + "<use href=\"#".len()..];
+                let icon = &rest[..rest.find('"').expect("unterminated use href")];
+                // `href="#${ic}"` is a template hole filled from one of
+                // the tables above, which this same test already checks.
+                if icon.contains('$') {
+                    continue;
+                }
+                assert!(
+                    TOKENS.contains(&format!("<g id=\"{icon}\">")),
+                    "{name} references {icon}, which is not in the icon sprite"
+                );
+            }
+        }
         let named = table("API_CLIENT_NAMES");
         assert!(named.len() >= 10, "API_CLIENT_NAMES looks unparsed");
         for (client, _) in &named {
@@ -575,5 +605,31 @@ mod tests {
         for k in ["MB:", "GB:", "TB:", "MiB:", "GiB:", "TiB:"] {
             assert!(en.contains(k), "UNIT_EN is missing {k}");
         }
+    }
+
+    /// Raising the queue page size actually refetches the queue.
+    ///
+    /// `qShowMore` zeroes `dashQRev` and calls `tick()`, but `tick()`
+    /// returns early on its `ticking` guard while a poll is in flight,
+    /// and that poll's answer overwrites `dashQRev` - so the next poll
+    /// sent a live revision with the bigger limit, the daemon answered
+    /// "unchanged" with `queue=null`, and the click did nothing. The
+    /// window the cached queue was fetched FOR is the durable fact, the
+    /// same way `histAppliedWin` guards history.
+    #[test]
+    fn the_queue_poll_sends_rev_zero_when_its_window_moved() {
+        assert!(
+            DASHBOARD_HTML.contains("const qrevSent=(qwin===qAppliedWin)?dashQRev:0;"),
+            "the queue revision must be gated on the window it was adopted for"
+        );
+        assert!(
+            DASHBOARD_HTML.contains("queue_rev=${qrevSent}")
+                && !DASHBOARD_HTML.contains("queue_rev=${dashQRev}"),
+            "the poll must send the gated revision, not the raw one"
+        );
+        assert!(
+            DASHBOARD_HTML.contains("if(r.queue){ lastQFull=r.queue; qAppliedWin=qwin; }"),
+            "adopting a queue payload must record the window it answered"
+        );
     }
 }

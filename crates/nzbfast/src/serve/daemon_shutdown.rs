@@ -515,7 +515,10 @@ pub(in crate::serve) fn timed_pause(d: &Arc<Daemon>, mins: u64, graceful: bool) 
         );
     }
     if mins > 0 {
-        arm_pause_timer(d, std::time::Duration::from_secs(mins * 60));
+        // Saturating: `mins` arrives from the API as a caller-chosen
+        // u64, and the product need not fit. The clamp inside
+        // `arm_pause_timer` takes it from there.
+        arm_pause_timer(d, std::time::Duration::from_secs(mins.saturating_mul(60)));
     }
     persist_pause(d);
 }
@@ -527,6 +530,14 @@ pub(in crate::serve) fn timed_pause(d: &Arc<Daemon>, mins: u64, graceful: bool) 
 /// take a Duration - a pause with 90 seconds to go does not round to a
 /// whole number of minutes.
 pub(in crate::serve) fn arm_pause_timer(d: &Arc<Daemon>, dur: std::time::Duration) {
+    // Clamp at the choke point. `Instant::now() + dur` PANICS on
+    // overflow, and the remote-app arms (`scheduleresume` takes a bare
+    // u64 of seconds off the wire) reach here with anything a caller
+    // cares to send - which killed an HTTP worker thread for the life
+    // of the process, since that pool has no catch_unwind. A pause
+    // longer than a year is indistinguishable from a pause with no
+    // timer, so capping it loses nothing a user can observe.
+    let dur = dur.min(std::time::Duration::from_secs(365 * 24 * 3600));
     let my_gen;
     {
         let mut until = d.pause_until.lock_ok();
@@ -858,6 +869,39 @@ mod shutdown_sidecar_tests {
         );
 
         *d.sidecar.lock_ok() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pause_timer_clamp_tests {
+    use super::*;
+
+    /// `scheduleresume` takes its seconds as a bare u64 straight off the
+    /// wire, and `Instant::now() + dur` panics on overflow - so a
+    /// remote app (or anything pointed at the API) could kill an HTTP
+    /// worker thread outright, permanently, since that pool runs with
+    /// no catch_unwind. The clamp lives in `arm_pause_timer` so every
+    /// caller inherits it; the pause must still be ARMED, not dropped.
+    #[test]
+    fn an_absurd_pause_length_clamps_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-pauseclamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        arm_pause_timer(&d, std::time::Duration::from_secs(u64::MAX));
+        assert!(
+            d.pause_until.lock_ok().is_some(),
+            "a clamped pause is still a pause"
+        );
+
+        // The minutes path multiplies before it gets here, so it has to
+        // saturate too or it panics one step earlier in debug builds.
+        timed_pause(&d, u64::MAX, false);
+        assert!(d.paused.load(Ordering::Relaxed), "still paused");
+        assert!(d.pause_until.lock_ok().is_some(), "timer armed");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

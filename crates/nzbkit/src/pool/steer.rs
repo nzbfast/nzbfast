@@ -63,6 +63,28 @@ fn steer_arm() -> f64 {
     })
 }
 
+/// How often [`Shared::note_art_gauges`] may put an article-time sample
+/// in the log, in ms. 0 turns the line off entirely (the `RaceLive`
+/// mirror still updates - that costs two relaxed stores and is what the
+/// daemon's diagnostics read).
+///
+/// 5 s by default. The gauge is an EWMA over a ~5-sample half-life, so
+/// it settles in COMPLETIONS rather than in seconds: on a fleet
+/// finishing a hundred articles a second there is nothing a faster
+/// sample could show, and on one finishing four an hour there is
+/// nothing to sample. 5 s puts a dozen readings inside a 60 s bench
+/// leg, which is enough to separate the run from the drain - the whole
+/// point of reading it mid-run.
+fn art_gauge_ms() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("NZBFAST_ART_GAUGE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000)
+    })
+}
+
 /// Depth-steering disarm threshold (hysteresis - a boundary server must
 /// not flap): unclamp when the ratio recovers above this.
 fn steer_disarm() -> f64 {
@@ -83,6 +105,22 @@ fn steer_floor() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("NZBFAST_STEER_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&w| w >= 1)
+            .unwrap_or(1)
+    })
+}
+
+/// TODO 208 item 3: the depth the endgame taper walks down to. 1 is the design
+/// value - one article in service per connection is the shallowest
+/// pipeline that still keeps every socket busy - and 2 is the
+/// conservative rung (a queued successor hides the round trip outright).
+/// Env-tunable so the payout round can price 1 against 2 on one binary.
+fn tail_window_min() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("NZBFAST_TAIL_WINDOW_MIN")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&w| w >= 1)
@@ -153,6 +191,28 @@ pub struct RaceLive {
     pub dup_bytes_lost: AtomicU64,
     /// Latched true once the hygiene cap stopped speculative arming.
     pub dup_capped: AtomicBool,
+    /// The fleet-wide dispatch-to-done EWMA in ms, AS OF NOW - the
+    /// mid-run value of the same gauge the `[pool]` line prints once at
+    /// the end. The two are not the same reading and must not be
+    /// compared as if they were: the end-of-run print is taken while
+    /// the in-flight set drains, so it tracks the DRAIN duration
+    /// (measured 0.84-1.57x of it across 17 legs, and 8.1x apart on two
+    /// reps of one job - research/NOTE-2026-08-21-art-ms-semantics.md
+    /// §10). This is the value hedging actually consults while the job
+    /// runs. 0 = untrained.
+    pub art_ms: AtomicU64,
+    /// What [`Shared::hedge_stale_bound`] computes from it right now,
+    /// in ms - the age past which the stale arm of `pick_dup` races an
+    /// article. Mirrored rather than recomputed by readers so the clamp
+    /// lives in exactly one place.
+    pub hedge_bound_ms: AtomicU64,
+    /// The §202 gauge's trained line peak in B/s, as of the last
+    /// completion (`Saturation::peak_bps`; 0 until it trains). What
+    /// the share-aware stall bound divides, the saturation gate
+    /// compares against and the §208.1 cap is sized from - so the one
+    /// reading a rig needs to pin an over-read of the line (TODO
+    /// 208.2) without parsing the `[pool]` line out of a log.
+    pub line_peak_bps: AtomicU64,
 }
 
 /// §5.7: the per-server block-account mask, computed at pool build.
@@ -205,6 +265,25 @@ impl Shared {
         };
         let folded = ewma_decay(val.load(Ordering::Relaxed), dt).saturating_add(n);
         val.store(folded, Ordering::Relaxed);
+        // TODO 202: the fleet-wide twin - fed here per body on the A/B
+        // arm, per arriving chunk (`note_arrival`) when shipped, which
+        // is the 208.2 over-read fix; this path then only carries the
+        // tail latch across to it.
+        let tail = self.tail_started.lock_ok().is_some();
+        if self.sat.arrivals {
+            self.sat.note_body_tail(tail);
+        } else {
+            self.sat.note_bytes(now, n, tail);
+        }
+        // TODO 208 item 1: the line-aware shed rides the same fold.
+        self.line_cap_tick(now);
+        // TODO 208.2: the mean delivered body, for the share-aware
+        // stall bound. Same 1/8 fold as `art_ms`; a load/store race
+        // drops one sample, which moves nothing.
+        let old = self.body_bytes_ewma.load(Ordering::Relaxed);
+        let folded_bytes = if old == 0 { n } else { old - old / 8 + n / 8 };
+        self.body_bytes_ewma
+            .store(folded_bytes.max(1), Ordering::Relaxed);
         // Published mirror for the tuner and the dashboard: the rate as
         // of this fold, and a wall-clock stamp so a reader can tell a
         // fresh number from one going stale on a server that stopped
@@ -278,6 +357,104 @@ impl Shared {
         self.srv_art_ms
             .get(si)
             .map_or(0, |s| s.load(Ordering::Relaxed))
+    }
+
+    /// Publish the article-time gauges: mirror the fleet EWMA and the
+    /// staleness bound it produces into [`RaceLive`], and emit a
+    /// rate-limited sample of both to the log.
+    ///
+    /// Why this exists. `hedge_stale_bound()` is a threshold computed
+    /// from `art_ms` on every idle picker walk, and until this method
+    /// there was no way to read either one WHILE a job ran: the
+    /// `[pool]` line prints `art` once, at the end, where it reads the
+    /// drain rather than the run (§10 of the art_ms note), and
+    /// `srv_art_ms` was mirrored into `ServerLive` and read by nothing
+    /// anywhere. Every value banked to date is therefore a drain
+    /// sample, so nobody could say whether the bound sits clamped at
+    /// its 8 s ceiling (inert - every in-flight article always "stale")
+    /// or somewhere under it (a threshold that still discriminates).
+    /// That question has to be settled before the constant is tuned.
+    ///
+    /// Called from the Done-path deregistration, right after the fold,
+    /// so the sample is always the value a picker on the next walk
+    /// would see. The mirror is unconditional (two relaxed stores); the
+    /// log line is gated to one per [`art_gauge_ms`] so a fleet
+    /// completing a hundred articles a second cannot turn its own log
+    /// into telemetry.
+    ///
+    /// `debug`, not `info`: it is a rig instrument, off under the
+    /// default filter and turned on with
+    /// `NZBFAST_LOG=info,pool=debug`. The counts travel with it because
+    /// a bare EWMA cannot be placed in the run - `in flight` falling
+    /// with `pending` already at zero IS the drain, and a sample taken
+    /// there is the very reading §10 warns against quoting.
+    pub(super) fn note_art_gauges(&self) {
+        let art = self.art_ms.load(Ordering::Relaxed);
+        let bound = self.hedge_stale_bound().as_millis() as u64;
+        if let Some(l) = &self.live {
+            l.race.art_ms.store(art, Ordering::Relaxed);
+            l.race.hedge_bound_ms.store(bound, Ordering::Relaxed);
+            l.race
+                .line_peak_bps
+                .store(self.sat.peak_bps(), Ordering::Relaxed);
+        }
+        // Everything past this point exists to build ONE log line, so
+        // skip it whole when nothing is listening. This runs on the
+        // completion path of a fleet that can finish a hundred articles
+        // a second, and under the default `info` filter - which is
+        // every shipped run - the mirror above is the entire cost.
+        if !tracing::enabled!(target: "pool", tracing::Level::DEBUG) {
+            return;
+        }
+        let every = art_gauge_ms();
+        if every == 0 {
+            return;
+        }
+        // `art_note_at` doubles as the have-I-ever-emitted flag, so the
+        // stamp must never be the 0 sentinel: a first completion inside
+        // the run's opening millisecond would otherwise leave the gate
+        // open and log every completion until the clock moved on.
+        let now = (self.start.elapsed().as_millis() as u64).max(1);
+        let last = self.art_note_at.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < every {
+            return;
+        }
+        // Whoever wins the swap emits; a loser has nothing to say that
+        // the winner did not already say for this window.
+        if self
+            .art_note_at
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let clamp = match bound {
+            b if b == HEDGE_STALE_MAX.as_millis() as u64 => " (ceiling)",
+            b if b == TAIL_FANOUT_MIN_AGE.as_millis() as u64 => " (floor)",
+            _ => "",
+        };
+        let per_server = (0..self.srv_art_ms.len())
+            .map(|si| {
+                let host = self
+                    .live
+                    .as_ref()
+                    .and_then(|l| l.servers.get(si))
+                    .map_or_else(|| format!("s{si}"), |s| s.host.clone());
+                match self.srv_art(si) {
+                    0 => format!("{host} untrained"),
+                    ms => format!("{host} {ms} ms"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        debug!(
+            target: "pool",
+            "art gauge at {:.1}s · art {art} ms · stale bound {bound} ms{clamp} · \
+             in flight {} · pending {} · {per_server}",
+            now as f64 / 1000.0,
+            self.inflight.lock_ok().len(),
+            self.pending.load(Ordering::Relaxed),
+        );
     }
 
     /// The per-OWNER staleness bound (design 5.1): 3x the owner's own
@@ -419,8 +596,9 @@ impl Shared {
             && !l.race.dup_capped.swap(true, Ordering::Relaxed)
             && std::env::var_os("NZBFAST_POOL_DEBUG").is_some()
         {
-            eprintln!(
-                "[race-cap] dup spend reached {} B (cap {cap} B) at {:?} - speculative pickers off",
+            info!(
+                target: "race-cap",
+                "dup spend reached {} B (cap {cap} B) at {:?} - speculative pickers off",
                 self.dup_bytes_lost.load(Ordering::Relaxed),
                 self.start.elapsed()
             );
@@ -528,8 +706,9 @@ impl Shared {
         if clamped != was {
             flag.store(clamped, Ordering::Relaxed);
             if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-                eprintln!(
-                    "[steer-depth] server {si} {} at {:?}",
+                info!(
+                    target: "steer-depth",
+                    "server {si} {} at {:?}",
                     if clamped { "clamped" } else { "restored" },
                     self.start.elapsed()
                 );
@@ -545,6 +724,75 @@ impl Shared {
         } else {
             base
         }
+    }
+
+    /// TODO 208 item 3 endgame depth taper: the top-up bound implied by how
+    /// much work the RUN has left, so the fleet reaches queue-dry
+    /// holding about one article per connection instead of `window`.
+    ///
+    /// **Why the tail is worth attacking at all.** The stretch between
+    /// queue-dry and drained is the in-flight set emptying, and its
+    /// size is `conns x window` articles - measured directly on every
+    /// banked 1 GbE bench leg as 1.13-1.62 GB of payload still to arrive at
+    /// queue-dry, invariant across a 6.8x change in job size, a 4x
+    /// change in line speed and both connection profiles, because
+    /// `360 x 4` never changed. That is 16 s at 1 Gbps and 65 s at
+    /// 250 Mbit. It is NOT dead time: on legs with the TODO 202
+    /// saturation gate armed the drain delivers its payload FASTER than
+    /// the run's pre-dry rate, so there is no line-idle slack in it at
+    /// all. (On older legs there appears to be - 15-19 s at 250 Mbit -
+    /// but that is duplicate bodies on the wire, which the decoded-byte
+    /// gauge cannot see, and §202 removed them.)
+    ///
+    /// So this is a ROBUSTNESS bound, not a throughput one, and it is
+    /// off by default. The tail is the window in which a wedged
+    /// connection or an uncapped speculative rule can cost the wall -
+    /// work parked behind a slow session cannot be handed to a fast one
+    /// that has gone idle, and racing it is what the tail fan-out
+    /// spends duplicate bytes on. A fleet that arrives at queue-dry one
+    /// article deep has a quarter of that window and needs none of
+    /// those dups.
+    ///
+    /// **The rule.** `pending / (2 x live workers)`, clamped to
+    /// `[tail_window_min(), base]`. `pending` is queued + in flight, so
+    /// with every connection at depth `d` it reads
+    /// `(queued/live + d) / 2` - a contraction whose fixed point is
+    /// exactly `queued / live`, the depth at which the work still to be
+    /// handed out is one article per connection. It converges from
+    /// above, one rung per step, and it is vacuous until `queued` falls
+    /// below `base x live` (1,440 articles on the bench fleet, the last
+    /// ~13 s at 1 Gbps and ~1 s at 10 GbE), so the steady state - where
+    /// deep pipelining earns the 10 GbE margins - is untouched by
+    /// construction.
+    ///
+    /// Two atomics both already read on this path and no queue lock:
+    /// deriving the queue depth from `pending - inflight` was the
+    /// obvious alternative and is worse, because `inflight` counts
+    /// speculative dups, which are concentrated in exactly this phase.
+    ///
+    /// **Cost.** At depth 1 a connection pays one round trip between a
+    /// completion and its next BODY. An article serves in 3.1 s at
+    /// 1 Gbps and 0.31 s at 10 GbE against ~20 ms of RTT, so the
+    /// exposure is 0.6% and 6% of the tapered stretch respectively -
+    /// and at 10 GbE that stretch is ~1 s of a 33 s leg.
+    ///
+    /// TOP-UP only, exactly like [`Shared::steer_window`]: the caller
+    /// keeps judging its shed against `base_win`, so a taper step never
+    /// sheds a pipeline or drops a connection.
+    pub(super) fn tail_window(&self, base: usize) -> usize {
+        if !self.tail_taper {
+            return base;
+        }
+        let live = self.workers_live.load(Ordering::Relaxed).max(1);
+        let left = self.pending.load(Ordering::Acquire);
+        let win = base.min(left / (2 * live)).max(tail_window_min().min(base));
+        // Evidence for the leg, not a control input. Guarded on
+        // `win < base` so the steady state - where the taper is vacuous
+        // by construction - never touches the atomic at all.
+        if win < base && win < self.taper_min.load(Ordering::Relaxed) {
+            self.taper_min.fetch_min(win, Ordering::Relaxed);
+        }
+        win
     }
 }
 
@@ -580,6 +828,95 @@ mod tests {
 
     fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
         ids.iter().map(|id| ArticleReq::fresh(*id)).collect()
+    }
+
+    /// A `Shared` armed for the TODO 208 item 3 taper, with `n` articles
+    /// queued so `pending` starts there.
+    fn tapered_shared(n: usize) -> Arc<Shared> {
+        let cfg = PoolConfig {
+            tail_taper: true,
+            ..PoolConfig::default()
+        };
+        let ids: Vec<ArticleReq> = (0..n)
+            .map(|i| ArticleReq::fresh(format!("<t{i}@x>")))
+            .collect();
+        Shared::new(ids, &[(server("a"), cfg)]).0
+    }
+
+    /// The taper is vacuous until the queue falls under `base x live`,
+    /// and then walks one rung per step down to the floor. Driven by
+    /// hand over `pending`, so it asserts the RULE, not a schedule.
+    ///
+    /// The fleet here is the bench fleet: 360 workers at window 4, so
+    /// the in-flight set at queue-dry is the 1,440 articles measured on
+    /// every banked 1 GbE bench leg.
+    #[test]
+    fn the_tail_taper_is_inert_until_the_queue_runs_low_then_walks_to_one() {
+        let live = 360usize;
+        let base = 4usize;
+        let sh = tapered_shared(8_000);
+        sh.workers_live.store(live, Ordering::Relaxed);
+
+        // Mid-run: thousands queued, full pipelining, untouched.
+        for left in [8_000, 5_000, base * live * 2] {
+            sh.pending.store(left, Ordering::Release);
+            assert_eq!(sh.tail_window(base), base, "tapered mid-run at {left} left");
+        }
+
+        // The trigger: `pending / (2 x live)` reaches `base` at exactly
+        // `queued = base x live`, i.e. the last in-flight set's worth.
+        sh.pending.store(2 * base * live, Ordering::Release);
+        assert_eq!(sh.tail_window(base), base, "tapered one article early");
+        sh.pending.store(2 * base * live - 1, Ordering::Release);
+        assert_eq!(sh.tail_window(base), base - 1, "no taper at the trigger");
+
+        // Each rung: with every connection at depth d, pending reads
+        // `queued + live x d`, so the rule returns `(queued/live + d)/2`
+        // - a contraction on d whose fixed point is `queued / live`.
+        for (queued, depth, want) in [
+            (3 * live, 4, 3),
+            (3 * live, 3, 3), // fixed point: stays
+            (2 * live, 3, 2),
+            (2 * live, 2, 2), // fixed point
+            (live, 2, 1),
+            (live, 1, 1),     // fixed point
+            (live / 2, 1, 1), // fewer queued than connections
+            (0, 1, 1),        // queue dry: the floor keeps work moving
+        ] {
+            sh.pending.store(queued + live * depth, Ordering::Release);
+            assert_eq!(
+                sh.tail_window(base),
+                want,
+                "queued {queued} at depth {depth} should top up to {want}"
+            );
+        }
+    }
+
+    /// Disarmed, the rule is the identity at every queue depth - a
+    /// shipped run behaves exactly as it does today.
+    #[test]
+    fn the_tail_taper_is_the_identity_while_disarmed() {
+        let sh = two_server_shared();
+        sh.workers_live.store(64, Ordering::Relaxed);
+        for left in [0, 1, 64, 512, 100_000] {
+            sh.pending.store(left, Ordering::Release);
+            assert_eq!(sh.tail_window(4), 4, "disarmed taper moved at {left}");
+        }
+    }
+
+    /// The floor never exceeds the caller's own window: a run dialled
+    /// `--window 1` must not be tapered UP to 2 by the env knob, and a
+    /// fleet whose head-count has not registered yet (live 0) must not
+    /// divide by zero.
+    #[test]
+    fn the_tail_taper_never_raises_the_callers_window_or_divides_by_zero() {
+        let sh = tapered_shared(10);
+        sh.workers_live.store(0, Ordering::Relaxed);
+        sh.pending.store(10, Ordering::Release);
+        assert_eq!(sh.tail_window(1), 1);
+        assert_eq!(sh.tail_window(4), 4, "10 left over a 1-worker floor");
+        sh.pending.store(0, Ordering::Release);
+        assert_eq!(sh.tail_window(1), 1, "floor raised a window-1 run");
     }
 
     fn two_server_shared() -> Arc<Shared> {
@@ -656,6 +993,96 @@ mod tests {
         // Same 1/8 fold as the global art_ms: 800 - 100 + 200 = 900.
         assert_eq!(sh.srv_art(0), 900);
         assert_eq!(sh.srv_art(1), 0, "other servers stay untrained");
+    }
+
+    /// A hedging fleet with the live view attached - what `shipped()`
+    /// builds and what the gauge mirror needs a destination for.
+    fn hedging_shared_with_live() -> Arc<Shared> {
+        let mut servers = vec![
+            (
+                server("a"),
+                PoolConfig {
+                    hedge: true,
+                    ..PoolConfig::default()
+                },
+            ),
+            (
+                server("b"),
+                PoolConfig {
+                    hedge: true,
+                    ..PoolConfig::default()
+                },
+            ),
+        ];
+        let live = LiveStats::for_servers(&servers);
+        for (_, cfg) in servers.iter_mut() {
+            cfg.live = Some(live.clone());
+        }
+        Shared::new(fresh(&["<a@x>"]), &servers).0
+    }
+
+    /// The mid-run pair the note asked for: the fleet EWMA as it stands
+    /// NOW, and the staleness bound derived from it, both readable off
+    /// `LiveStats` while the job runs. Before this the EWMA was
+    /// observable only in the end-of-run `[pool]` line - a drain
+    /// reading - and the bound was observable nowhere at all.
+    #[test]
+    fn the_art_gauges_publish_the_ewma_and_the_bound_it_produces() {
+        let sh = hedging_shared_with_live();
+        let live = sh.live.clone().expect("live view attached");
+        // Untrained: the bound falls back to the flat ceiling, which is
+        // what `hedge_stale_bound` answers with a zero EWMA.
+        sh.note_art_gauges();
+        assert_eq!(live.race.art_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            live.race.hedge_bound_ms.load(Ordering::Relaxed),
+            HEDGE_STALE_MAX.as_millis() as u64,
+        );
+        // 1,000 ms of article time is 3,000 ms of bound - inside the
+        // clamp, so this is the regime where the bound still says
+        // something about an article's age.
+        sh.art_ms.store(1_000, Ordering::Relaxed);
+        sh.note_art_gauges();
+        assert_eq!(live.race.art_ms.load(Ordering::Relaxed), 1_000);
+        assert_eq!(live.race.hedge_bound_ms.load(Ordering::Relaxed), 3_000);
+        // Past 2,667 ms of article time, 3x overshoots the 8 s ceiling
+        // and the bound pins there. That is the state the whole
+        // question is about: pinned, every in-flight article reads
+        // stale, and the threshold has stopped discriminating.
+        sh.art_ms.store(5_000, Ordering::Relaxed);
+        sh.note_art_gauges();
+        assert_eq!(live.race.art_ms.load(Ordering::Relaxed), 5_000);
+        assert_eq!(
+            live.race.hedge_bound_ms.load(Ordering::Relaxed),
+            HEDGE_STALE_MAX.as_millis() as u64,
+        );
+    }
+
+    /// The mirror is unconditional; only the LOG line is rate-limited.
+    /// A test that asserted through the rate limiter would be asserting
+    /// on a wall clock, and the mirror is the half the daemon reads.
+    #[test]
+    fn the_gauge_mirror_ignores_the_log_rate_limit() {
+        let sh = hedging_shared_with_live();
+        let live = sh.live.clone().expect("live view attached");
+        for ms in [400u64, 900, 1_500] {
+            sh.art_ms.store(ms, Ordering::Relaxed);
+            sh.note_art_gauges();
+            assert_eq!(live.race.art_ms.load(Ordering::Relaxed), ms);
+        }
+        // Three calls inside one window; at most one of them logged,
+        // and the published value is still the last one folded.
+        assert_eq!(live.race.hedge_bound_ms.load(Ordering::Relaxed), 4_500);
+    }
+
+    /// A pool with no live view (the bare CLI paths) must not panic or
+    /// pay for a destination it does not have.
+    #[test]
+    fn the_art_gauges_are_inert_without_a_live_view() {
+        let sh = two_server_shared();
+        assert!(sh.live.is_none());
+        sh.art_ms.store(1_234, Ordering::Relaxed);
+        sh.note_art_gauges();
     }
 
     #[test]
@@ -768,6 +1195,7 @@ mod tests {
             Inflight {
                 age_days: 0,
                 part: 0,
+                file: u32::MAX,
                 ord: 0,
                 server,
                 dispatched: Instant::now() - age,
@@ -836,6 +1264,7 @@ mod tests {
             Inflight {
                 age_days: 0,
                 part: 0,
+                file: u32::MAX,
                 ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
@@ -877,6 +1306,7 @@ mod tests {
             Inflight {
                 age_days: 0,
                 part: 0,
+                file: u32::MAX,
                 ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
@@ -922,6 +1352,7 @@ mod tests {
             Inflight {
                 age_days: 0,
                 part: 0,
+                file: u32::MAX,
                 ord: 0,
                 server: 1,
                 dispatched: Instant::now(),
@@ -1012,6 +1443,7 @@ mod tests {
         let w = Work {
             age_days: 0,
             part: 0,
+            file: u32::MAX,
             ord: 0,
             id: "<a@x>".into(),
             attempts: 0,

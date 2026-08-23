@@ -27,7 +27,7 @@
 
 use rusqlite::OptionalExtension;
 
-use super::Index;
+use super::{Index, SegList};
 use crate::pesto::PestoDesc;
 
 /// Attempts after which a tiny sidecar row, or a set's link hunt, is
@@ -124,7 +124,7 @@ pub(super) fn pesto_backfill(db: &mut rusqlite::Connection) {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            let rows: Vec<(i64, i64, String)> = {
+            let rows: Vec<(i64, i64, SegList)> = {
                 let mut sel = tx.prepare_cached(
                     "SELECT rowid, release_id, segments FROM files
                       WHERE rowid > ?1 ORDER BY rowid LIMIT 2000",
@@ -150,10 +150,9 @@ pub(super) fn pesto_backfill(db: &mut rusqlite::Connection) {
                      WHERE id=?1",
                 )?;
                 for (_, rid, segs) in &rows {
-                    let parsed: Vec<(u32, String, u64)> =
-                        serde_json::from_str(segs).unwrap_or_default();
+                    let parsed = &segs.0;
                     let mut fold: Option<(i64, i64, i64)> = None;
-                    for (_, id, _) in &parsed {
+                    for (_, id, _) in parsed {
                         if let Some(p) = crate::pesto::parse_msgid(id) {
                             let (c, k) = (p.counter as i64, p.clock.min(i64::MAX as u64) as i64);
                             fold = Some(match fold {

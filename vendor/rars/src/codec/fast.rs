@@ -48,62 +48,13 @@ fn match_length_scalar(
     length
 }
 
-pub(crate) fn next_x86_opcode(
-    data: &[u8],
-    start: usize,
-    end_exclusive: usize,
-    cmp_mask: u8,
-) -> Option<usize> {
-    let end = end_exclusive.min(data.len());
-    if start >= end {
-        return None;
-    }
-
-    next_x86_opcode_impl(data, start, end, cmp_mask)
-}
-
-#[cfg(feature = "fast")]
-fn next_x86_opcode_impl(
-    data: &[u8],
-    start: usize,
-    end_exclusive: usize,
-    cmp_mask: u8,
-) -> Option<usize> {
-    let mask = Simd::<u8, LANES>::splat(cmp_mask);
-    let needle = Simd::<u8, LANES>::splat(0xe8);
-    let mut pos = start;
-    while pos + LANES <= end_exclusive {
-        let bytes = Simd::<u8, LANES>::from_slice(&data[pos..pos + LANES]);
-        if let Some(lane) = (bytes & mask).simd_eq(needle).first_set() {
-            return Some(pos + lane);
-        }
-        pos += LANES;
-    }
-
-    next_x86_opcode_scalar(data, pos, end_exclusive, cmp_mask)
-}
-
-#[cfg(not(feature = "fast"))]
-fn next_x86_opcode_impl(
-    data: &[u8],
-    start: usize,
-    end_exclusive: usize,
-    cmp_mask: u8,
-) -> Option<usize> {
-    next_x86_opcode_scalar(data, start, end_exclusive, cmp_mask)
-}
-
-fn next_x86_opcode_scalar(
-    data: &[u8],
-    start: usize,
-    end_exclusive: usize,
-    cmp_mask: u8,
-) -> Option<usize> {
-    data[start..end_exclusive]
-        .iter()
-        .position(|&byte| byte & cmp_mask == 0xe8)
-        .map(|offset| start + offset)
-}
+// The x86 E8/E8E9 opcode scan has ONE definition, in `crate::fast`, and
+// every caller in this module tree reaches it through here. It lived as a
+// byte-identical second copy in this file until the two were collapsed;
+// `match_length` below is what actually belongs to `codec::fast`.
+// (nzbfast-local change, 23 Aug 2026 - re-apply on the next rars re-sync,
+// see vendor/rars/VENDORING.md.)
+pub(crate) use crate::fast::next_x86_opcode;
 
 #[cfg(test)]
 mod tests {
@@ -146,32 +97,5 @@ mod tests {
             match_length(&input, pos, 32, 64),
             reference_match_length(&input, pos, 32, 64)
         );
-    }
-
-    #[test]
-    fn x86_opcode_scan_matches_scalar_for_e8_and_e8e9() {
-        let mut data = vec![0x41u8; 96];
-        for pos in [0, 31, 32, 33, 63, 64, 91] {
-            data[pos] = 0xe8;
-        }
-        data[47] = 0xe9;
-
-        for &include_e9 in &[false, true] {
-            let cmp_mask = if include_e9 { 0xfe } else { 0xff };
-            let mut pos = 0usize;
-            let mut found = Vec::new();
-            while let Some(next) = next_x86_opcode(&data, pos, data.len() - 4, cmp_mask) {
-                found.push(next);
-                pos = next + 1;
-            }
-
-            let expected: Vec<_> = data
-                .iter()
-                .take(data.len() - 4)
-                .enumerate()
-                .filter_map(|(pos, &byte)| (byte & cmp_mask == 0xe8).then_some(pos))
-                .collect();
-            assert_eq!(found, expected);
-        }
     }
 }

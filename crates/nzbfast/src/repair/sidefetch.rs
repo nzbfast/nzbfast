@@ -8,6 +8,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{info, warn};
 
 /// A sticky cancel handle for one owner's recovery-volume side-fetches.
 ///
@@ -108,8 +109,9 @@ pub(crate) async fn fetch_volumes(
     let mut ids: Vec<nzbkit::pool::ArticleReq> = Vec::new();
     let mut id_to_file: std::collections::HashMap<Arc<str>, usize> =
         std::collections::HashMap::new();
+    let mut omitted = 0u32;
     for &fi in file_indexes {
-        volume_reqs(nzb, fi, &mut ids, &mut id_to_file);
+        omitted = omitted.saturating_add(volume_reqs(nzb, fi, &mut ids, &mut id_to_file));
     }
     fetch_volume_articles(
         servers,
@@ -121,7 +123,7 @@ pub(crate) async fn fetch_volumes(
         cancel,
     )
     .await
-    .map(|(failures, _paths)| failures)
+    .map(|(failures, _paths)| failures.total().saturating_add(omitted) as usize)
 }
 
 /// One volume's `ArticleReq`s and id → file-index entries, appended to
@@ -132,22 +134,60 @@ pub(crate) async fn fetch_volumes(
 /// prefetch, which builds a rung's requests only AT RUNG SELECTION
 /// (C5) - so it interns at its own birth site rather than borrowing
 /// the plan's.
+///
+/// Returns how many of this file's declared segments were NOT requested
+/// because an earlier file already owned the message id. That count is
+/// the only trace such a segment leaves anywhere, so a caller that
+/// judges a volume complete has to add it to the article failures the
+/// fetch reports (Codex F-02).
 pub(crate) fn volume_reqs(
     nzb: &Nzb,
     fi: usize,
     ids: &mut Vec<nzbkit::pool::ArticleReq>,
     id_to_file: &mut std::collections::HashMap<Arc<str>, usize>,
-) {
+) -> u32 {
     let age_days = nzb_age_days(nzb.files[fi].date);
+    let mut omitted = 0u32;
     for seg in &nzb.files[fi].segments {
         let b: Arc<str> = format!("<{}>", seg.message_id).into();
-        id_to_file.insert(b.clone(), fi);
+        // Sweep 8, L3: FIRST owner wins, and a later claim on the same
+        // message-id is simply not requested.
+        //
+        // This map used to be last-owner-wins while the pool's own
+        // request dedup keeps the FIRST request - two rules pointing
+        // opposite ways across the same id. A malformed or hostile
+        // recovery set that repeats an id across volumes therefore had
+        // the one delivered body routed to the LATER file index while
+        // the writer for that index was created from the FIRST body's
+        // yEnc name, so the later volume's genuinely unique articles
+        // landed in a file named after the earlier one. Two damaged
+        // recovery volumes out of one duplicate.
+        //
+        // Matching the pool's rule makes the duplicate simply MISSING
+        // for the later volume, which is honest: that volume comes back
+        // short, is not credited with slices it does not have, and the
+        // repair asks for another one.
+        if let std::collections::hash_map::Entry::Vacant(slot) = id_to_file.entry(b.clone()) {
+            slot.insert(fi);
+        } else {
+            // Codex F-02 (23 Aug 2026): the skip has to be COUNTED, not
+            // just taken. Nothing downstream can see it otherwise - no
+            // request goes out, so no `Missing`/`Failed` outcome comes
+            // back, so `VolumeFailures::for_file(fi)` stays 0 and the
+            // dropped-volume refetch reads this short volume as whole
+            // and renames a sparse file over the demoted copy that
+            // holds every byte the trim kept.
+            omitted = omitted.saturating_add(1);
+            continue;
+        }
         ids.push(nzbkit::pool::ArticleReq {
             id: b,
             age_days,
             part: seg.number,
+            file: u32::MAX,
         });
     }
+    omitted
 }
 
 /// Reservation ceiling for a recovery-volume side-fetch, the same bound
@@ -189,6 +229,10 @@ pub(crate) fn side_pool_servers(
             // of the download, so they must not move the dashboard's
             // per-server gauges either.
             pc.live = None;
+            // And they must not charge the fetch->decode channel gauge:
+            // this consumer never releases it, so a cloned Some would
+            // leak the gauge upward for every side-fetched article.
+            pc.channel_gauge = None;
             // TODO 114: the steer seam defers each Done's completion
             // until the consumer's note_decoded verdict - and the
             // side-fetch consumer (consume_volume_articles) never
@@ -209,13 +253,54 @@ pub(crate) fn side_pool_servers(
 
 /// Inner driver for recovery-volume side-fetches: downloads the given
 /// article set on its own small pool and assembles the volume file(s)
-/// in `out_dir`. Returns (article failures, paths written) - the
+/// in `out_dir`. Returns ([`VolumeFailures`], paths written) - the
 /// failure count is how a caller tells a COMPLETE volume from a
 /// partial one, and only a complete volume may ever enter a whole-file
 /// exclusion list (a partial one must stay fetchable for its missing
-/// articles).
-#[allow(clippy::too_many_arguments)]
+/// articles). A caller holding more than one volume asks per file
+/// index rather than reading the total, or one short volume condemns
+/// every whole one beside it.
 pub(crate) async fn fetch_volume_articles(
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    ids: Vec<nzbkit::pool::ArticleReq>,
+    id_to_file: std::collections::HashMap<Arc<str>, usize>,
+    out_dir: &Path,
+    buf_pool: &Arc<nzbkit::pool::BufPool>,
+    prealloc_cap: u64,
+    cancel: Option<&SideCancel>,
+) -> Result<(VolumeFailures, Vec<PathBuf>)> {
+    fetch_volume_articles_with(
+        servers,
+        ids,
+        id_to_file,
+        out_dir,
+        buf_pool,
+        prealloc_cap,
+        cancel,
+        VolumeOpen::Fresh,
+    )
+    .await
+}
+
+/// How the side-fetch consumer opens each volume it writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VolumeOpen {
+    /// Truncate: the volume is fetched from nothing (recovery volumes,
+    /// the speculative prefetch).
+    Fresh,
+    /// Never truncate: the file already holds good bytes at their
+    /// final offsets and this fetch only fills what is missing. The
+    /// dropped-volume refetch (`get/dropped.rs`) writes over a volume
+    /// the demote materialized minus its dropped ranges; a truncating
+    /// open there turned one failed article into a hole where the
+    /// bytes had been correct, with no retry behind it (bug sweep
+    /// 22 Aug 2026).
+    Additive,
+}
+
+/// [`fetch_volume_articles`] with the open mode chosen by the caller.
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn fetch_volume_articles_with(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     ids: Vec<nzbkit::pool::ArticleReq>,
     id_to_file: std::collections::HashMap<Arc<str>, usize>,
@@ -231,7 +316,8 @@ pub(crate) async fn fetch_volume_articles(
     // repair fetches used to outlive the job the user deleted. See
     // [`SideCancel`]. None = uncancellable, which is only the CLI.
     cancel: Option<&SideCancel>,
-) -> Result<(usize, Vec<PathBuf>)> {
+    open: VolumeOpen,
+) -> Result<(VolumeFailures, Vec<PathBuf>)> {
     use nzbkit::pool::{FetchOutcome, fetch_all_multi_ctl};
     // Refuse outright rather than fetch and discard: a cancelled owner
     // may still have a ladder of volumes queued behind this one, and
@@ -257,6 +343,9 @@ pub(crate) async fn fetch_volume_articles(
             let mut pc = pc.clone();
             pc.crc_steer = false;
             pc.arrival_ack = false;
+            // Same contract as the seam strips above: this consumer
+            // never releases the channel gauge, so it must not charge it.
+            pc.channel_gauge = None;
             (sc.clone(), pc)
         })
         .collect();
@@ -268,7 +357,7 @@ pub(crate) async fn fetch_volume_articles(
     let out_dir2 = out_dir.to_path_buf();
     let pool2 = buf_pool.clone();
     let consumer = tokio::spawn(async move {
-        consume_volume_articles(rx, id_to_file, out_dir2, pool2, prealloc_cap).await
+        consume_volume_articles(rx, id_to_file, out_dir2, pool2, prealloc_cap, open).await
     });
     let t0 = Instant::now();
     let stats = match cancel {
@@ -279,6 +368,7 @@ pub(crate) async fn fetch_volume_articles(
         None => fetch_all_multi_ctl(servers, ids, tx, None).await,
     };
     let (failures, paths) = consumer.await?;
+    let failed = failures.total();
     // An aborted run's unresolved articles emit NO outcome, so `failures`
     // can read 0 over a volume that is actually short - the H2
     // false-shortfall shape. Never hand that back as a clean result: a
@@ -289,21 +379,76 @@ pub(crate) async fn fetch_volume_articles(
         anyhow::bail!("recovery fetch cancelled after {:.2?}", t0.elapsed());
     }
     let raw: u64 = stats.iter().map(|s| s.bytes).sum();
-    println!(
-        "  fetched {:.1} MB of recovery data in {:.2?}{}",
+    info!(
+        target: "repair",
+        "fetched {:.1} MB of recovery data in {:.2?}{}",
         raw as f64 / 1e6,
         t0.elapsed(),
-        if failures > 0 {
-            format!(" ({failures} article failures)")
+        if failed > 0 {
+            format!(" ({failed} article failures)")
         } else {
             String::new()
         }
     );
-    Ok((failures as usize, paths))
+    Ok((failures, paths))
+}
+
+/// Article failures from one side-fetch, attributed to the volume each
+/// one belongs to.
+///
+/// A fetch-wide total cannot say WHICH volume came back short, and a
+/// caller that installs per file then has to assume the worst: the
+/// dropped-volume refetch (`get/dropped.rs`) discarded EVERY renamed
+/// install whenever any article anywhere in the fetch failed, so one
+/// lost article of volume A threw away a complete volume B (Codex F-05,
+/// 22 Aug 2026).
+///
+/// Every arm that knows the file index charges it. An outcome whose id
+/// resolves to no file index cannot be charged to anyone, so it is
+/// counted apart and taints EVERY file: nothing here can say which
+/// volume lost it, and calling a whole volume short costs a refetch
+/// while calling a short one whole destroys good bytes.
+#[derive(Debug, Default)]
+pub(crate) struct VolumeFailures {
+    per_file: std::collections::HashMap<usize, u32>,
+    unattributed: u32,
+}
+
+impl VolumeFailures {
+    /// One failure that belongs to file index `fi`.
+    fn charge(&mut self, fi: usize) {
+        let n = self.per_file.entry(fi).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+
+    /// One failure no file index could be found for.
+    fn charge_unattributed(&mut self) {
+        self.unattributed = self.unattributed.saturating_add(1);
+    }
+
+    /// Every failure in the fetch, however it was attributed - what a
+    /// caller that only wants "did this fetch land whole" reads.
+    pub(crate) fn total(&self) -> u32 {
+        self.per_file
+            .values()
+            .copied()
+            .sum::<u32>()
+            .saturating_add(self.unattributed)
+    }
+
+    /// Failures that may have cost `fi` bytes: its own, plus every
+    /// unattributable one.
+    pub(crate) fn for_file(&self, fi: usize) -> u32 {
+        self.per_file
+            .get(&fi)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(self.unattributed)
+    }
 }
 
 /// Decode side-fetched articles onto their volume files. Returns
-/// (article failures, paths actually written) - split out of
+/// ([`VolumeFailures`], paths actually written) - split out of
 /// [`fetch_volume_articles`] so the writer-failure path is reachable from
 /// a test without a server.
 ///
@@ -320,7 +465,8 @@ pub(crate) async fn consume_volume_articles(
     out_dir: PathBuf,
     buf_pool: Arc<nzbkit::pool::BufPool>,
     prealloc_cap: u64,
-) -> (u32, Vec<PathBuf>) {
+    open: VolumeOpen,
+) -> (VolumeFailures, Vec<PathBuf>) {
     use nzbkit::disk::{FileWriter, sanitize_filename};
     use nzbkit::pool::FetchOutcome;
     use std::collections::hash_map::Entry;
@@ -332,7 +478,7 @@ pub(crate) async fn consume_volume_articles(
     // full disk that would be thousands of failing opens - and so the
     // failure is reported once.
     let mut unwritable: HashSet<usize> = HashSet::new();
-    let mut failures = 0u32;
+    let mut failures = VolumeFailures::default();
     while let Some(outcome) = rx.recv().await {
         match outcome {
             FetchOutcome::Done { id, raw } => {
@@ -351,12 +497,24 @@ pub(crate) async fn consume_volume_articles(
                                 // real fallocate, so it reserves only up
                                 // to the ceiling. `size` itself stays
                                 // unclamped (the writer reports it).
-                                match FileWriter::create_capped(&path, dec.file_size, prealloc_cap)
-                                {
+                                let made = match open {
+                                    VolumeOpen::Fresh => FileWriter::create_capped(
+                                        &path,
+                                        dec.file_size,
+                                        prealloc_cap,
+                                    ),
+                                    VolumeOpen::Additive => FileWriter::create_resume_capped(
+                                        &path,
+                                        dec.file_size,
+                                        prealloc_cap,
+                                    ),
+                                };
+                                match made {
                                     Ok(f) => Some(&slot.insert((path, Arc::new(f))).1),
                                     Err(e) => {
-                                        println!(
-                                            "  ⚠ cannot write recovery volume {} ({e}) - skipping it",
+                                        warn!(
+                                            target: "repair",
+                                            "cannot write recovery volume {} ({e}) - skipping it",
                                             path.display()
                                         );
                                         unwritable.insert(fi);
@@ -367,14 +525,24 @@ pub(crate) async fn consume_volume_articles(
                         };
                         match w {
                             Some(w) if w.write_at(dec.offset(), &dec.data).is_ok() => {}
-                            _ => failures += 1,
+                            _ => failures.charge(fi),
                         }
                     }
-                    _ => failures += 1,
+                    _ => failures.charge(fi),
                 }
                 buf_pool.give(raw);
             }
-            _ => failures += 1,
+            // Both remaining variants carry the id, so a terminal
+            // article failure lands on its own volume. Matched by name
+            // rather than `_` so a new outcome variant has to be
+            // attributed here by hand instead of silently tainting the
+            // whole fetch.
+            FetchOutcome::Missing { id, .. } | FetchOutcome::Failed { id, .. } => {
+                match id_to_file.get(&*id) {
+                    Some(&fi) => failures.charge(fi),
+                    None => failures.charge_unattributed(),
+                }
+            }
         }
     }
     (failures, writers.into_values().map(|(p, _)| p).collect())
@@ -401,7 +569,11 @@ mod recovery_volume_tests {
     }
 
     /// Drive the real consumer over `arts` = (file index, article body).
-    async fn consume(dir: &Path, arts: Vec<(usize, Vec<u8>)>, cap: u64) -> (u32, Vec<PathBuf>) {
+    async fn consume(
+        dir: &Path,
+        arts: Vec<(usize, Vec<u8>)>,
+        cap: u64,
+    ) -> (VolumeFailures, Vec<PathBuf>) {
         let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(16);
         let mut id_to_file = HashMap::new();
         for (n, (fi, body)) in arts.into_iter().enumerate() {
@@ -419,6 +591,7 @@ mod recovery_volume_tests {
             dir.to_path_buf(),
             BufPool::new(4),
             cap,
+            VolumeOpen::Fresh,
         ))
         .await
         .expect("the recovery-volume consumer task must not panic")
@@ -443,7 +616,7 @@ mod recovery_volume_tests {
         )
         .await;
 
-        assert_eq!(failures, 0);
+        assert_eq!(failures.total(), 0);
         assert_eq!(paths.len(), 1);
         let len = std::fs::metadata(&paths[0]).unwrap().len();
         assert_eq!(
@@ -476,7 +649,7 @@ mod recovery_volume_tests {
             POSTED,
         )
         .await;
-        assert_eq!(failures, 0);
+        assert_eq!(failures.total(), 0);
         assert_eq!(
             std::fs::metadata(&paths[0]).unwrap().len(),
             SIZE,
@@ -518,6 +691,50 @@ mod recovery_volume_tests {
         assert_eq!(volume_prealloc_cap(&nzb), 16 << 20);
     }
 
+    /// Bug sweep 22 Aug 2026: the dropped-volume refetch writes over a
+    /// file the demote already materialized minus its dropped ranges.
+    /// An `Additive` open keeps the bytes already on disk; the `Fresh`
+    /// open is the truncating one, and a fetch that then loses an
+    /// article would leave a hole where the bytes had been correct.
+    #[tokio::test]
+    async fn an_additive_open_keeps_the_bytes_already_on_disk() {
+        for (mode, expect_kept) in [(VolumeOpen::Additive, true), (VolumeOpen::Fresh, false)] {
+            let dir = temp_dir(if expect_kept { "additive" } else { "fresh" });
+            let path = dir.join("vol.rar");
+            // 2 KB already on disk at offsets 0..2048 (the good prefix),
+            // the refetch delivers only part 2 (a single-part article at
+            // offset 0 of size 512 stands in for "some other range").
+            std::fs::write(&path, vec![0xAAu8; 2048]).unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(4);
+            let mut id_to_file = HashMap::new();
+            let id: Arc<str> = "<p@test>".into();
+            id_to_file.insert(id.clone(), 0usize);
+            tx.send(FetchOutcome::Done {
+                id,
+                raw: article("vol.rar", 2048, &vec![0xBBu8; 512]),
+            })
+            .await
+            .unwrap();
+            drop(tx);
+            let (failures, _) = consume_volume_articles(
+                rx,
+                id_to_file,
+                dir.clone(),
+                BufPool::new(4),
+                u64::MAX,
+                mode,
+            )
+            .await;
+            assert_eq!(failures.total(), 0);
+            let got = std::fs::read(&path).unwrap();
+            assert_eq!(got.len(), 2048, "{mode:?}");
+            assert!(got[..512].iter().all(|&b| b == 0xBB), "{mode:?}");
+            let tail_kept = got[512..].iter().all(|&b| b == 0xAA);
+            assert_eq!(tail_kept, expect_kept, "{mode:?}: tail bytes");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// Codex H3: the posted `bytes=` total is as poster-controlled as
     /// the yEnc `size=`, so "min(size, posted)" was the attacker picking
     /// both sides - one tiny article declaring two 100 GB numbers became
@@ -549,6 +766,241 @@ mod recovery_volume_tests {
         assert_eq!(volume_prealloc_cap(&nzb2), 1_500_000);
     }
 
+    /// Sweep 8, L3: a message-id repeated across recovery volumes stays
+    /// with its FIRST owner, and the later volume simply comes back
+    /// short.
+    ///
+    /// The routing map was last-owner-wins while the pool's own request
+    /// dedup keeps the FIRST request - two rules pointing opposite ways
+    /// across the same id. A malformed or hostile recovery set that
+    /// repeats one therefore had the single delivered body routed to the
+    /// LATER file index, while the writer for that index was created
+    /// from the FIRST body's yEnc name; the later volume's genuinely
+    /// unique articles then landed inside a file named after the earlier
+    /// one, damaging both.
+    #[tokio::test]
+    async fn a_duplicate_id_across_volumes_stays_with_its_first_owner() {
+        let xml = br#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject="set.vol000+01.par2 yEnc (1/2)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="4000" number="1">shared@test</segment>
+   <segment bytes="4000" number="2">uniq-a@test</segment>
+  </segments>
+ </file>
+ <file subject="set.vol001+02.par2 yEnc (1/2)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="4000" number="1">shared@test</segment>
+   <segment bytes="4000" number="2">uniq-b@test</segment>
+  </segments>
+ </file>
+</nzb>"#;
+        let nzb = nzbkit::nzb::Nzb::parse(xml).unwrap();
+        let mut ids = Vec::new();
+        let mut id_to_file: HashMap<Arc<str>, usize> = HashMap::new();
+        let omitted_0 = volume_reqs(&nzb, 0, &mut ids, &mut id_to_file);
+        let omitted_1 = volume_reqs(&nzb, 1, &mut ids, &mut id_to_file);
+        assert_eq!(omitted_0, 0, "the first owner skips nothing");
+        assert_eq!(
+            omitted_1, 1,
+            "the segment the second volume lost to the first owner must be \
+             COUNTED - it is never requested, so no Missing outcome comes back \
+             and the failure map alone reads this volume as whole (Codex F-02)"
+        );
+
+        assert_eq!(
+            id_to_file.get("<shared@test>"),
+            Some(&0),
+            "the first volume that named the id keeps it - the same rule the \
+             pool's request dedup already follows"
+        );
+        assert_eq!(id_to_file.get("<uniq-a@test>"), Some(&0));
+        assert_eq!(id_to_file.get("<uniq-b@test>"), Some(&1));
+        let requested: Vec<&str> = ids.iter().map(|r| &*r.id).collect();
+        assert_eq!(
+            requested,
+            ["<shared@test>", "<uniq-a@test>", "<uniq-b@test>"],
+            "the duplicate is requested ONCE, so the second volume is short by \
+             one article rather than being handed the first volume's body"
+        );
+
+        // And through the consumer: each volume writes its own file,
+        // named from its own body. The second is incomplete, which is
+        // the honest outcome - it is not credited with a slice it never
+        // received.
+        let dir = temp_dir("dupid");
+        let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(8);
+        for (id, name, byte) in [
+            ("<shared@test>", "set.vol000+01.par2", 0x11u8),
+            ("<uniq-a@test>", "set.vol000+01.par2", 0x11),
+            ("<uniq-b@test>", "set.vol001+02.par2", 0x22),
+        ] {
+            tx.send(FetchOutcome::Done {
+                id: id.into(),
+                raw: article(name, 4096, &vec![byte; 512]),
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        let (failures, mut paths) = consume_volume_articles(
+            rx,
+            id_to_file,
+            dir.clone(),
+            BufPool::new(4),
+            u64::MAX,
+            VolumeOpen::Fresh,
+        )
+        .await;
+        paths.sort();
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["set.vol000+01.par2", "set.vol001+02.par2"],
+            "no mixed writer: the second volume is named from its OWN body"
+        );
+        assert!(
+            std::fs::read(dir.join("set.vol001+02.par2"))
+                .unwrap()
+                .contains(&0x22),
+            "and it holds its own bytes, not the first volume's"
+        );
+        // Codex F-02: the consumer charges only outcomes it receives,
+        // and an article that was never requested produces none - so
+        // the omitted count is the ONLY thing that makes the second
+        // volume's shortfall visible to a caller that installs per file.
+        assert_eq!(
+            failures.for_file(1),
+            0,
+            "an unrequested article cannot come back as a failure"
+        );
+        assert!(
+            failures.for_file(1).saturating_add(omitted_1) > 0,
+            "the skipped duplicate must make the later volume incomplete"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Codex F-05 (22 Aug 2026): the consumer kept ONE fetch-wide
+    /// failure count, so a caller installing per volume could not tell a
+    /// volume that came back short from a whole one in the same fetch.
+    /// The dropped-volume refetch therefore discarded EVERY renamed
+    /// install as soon as any article anywhere failed, throwing away
+    /// good bytes the demote had kept. A failed article is charged to
+    /// its own file: A short by one, B clean.
+    #[tokio::test]
+    async fn a_failed_article_is_charged_to_its_own_volume() {
+        let dir = temp_dir("attribute");
+        let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(8);
+        let mut id_to_file: HashMap<Arc<str>, usize> = HashMap::new();
+        for (id, fi) in [
+            ("<a-ok@test>", 0usize),
+            ("<a-bad@test>", 0),
+            ("<b-ok@test>", 1),
+        ] {
+            id_to_file.insert(id.into(), fi);
+        }
+        tx.send(FetchOutcome::Done {
+            id: "<a-ok@test>".into(),
+            raw: article("set.vol000+01.par2", 1024, &[0x11u8; 512]),
+        })
+        .await
+        .unwrap();
+        tx.send(FetchOutcome::Failed {
+            id: "<a-bad@test>".into(),
+            error: "transport gave up".into(),
+        })
+        .await
+        .unwrap();
+        tx.send(FetchOutcome::Done {
+            id: "<b-ok@test>".into(),
+            raw: article("set.vol001+02.par2", 512, &[0x22u8; 512]),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let (failures, mut paths) = consume_volume_articles(
+            rx,
+            id_to_file,
+            dir.clone(),
+            BufPool::new(4),
+            u64::MAX,
+            VolumeOpen::Fresh,
+        )
+        .await;
+
+        assert_eq!(failures.total(), 1, "one article failed in the whole fetch");
+        assert_eq!(
+            failures.for_file(0),
+            1,
+            "and it belongs to the volume that lost it"
+        );
+        assert_eq!(
+            failures.for_file(1),
+            0,
+            "the complete volume beside it must not inherit the other's failure -              a caller reading this as short throws away good bytes"
+        );
+        paths.sort();
+        assert_eq!(paths.len(), 2, "both volumes opened a writer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An outcome whose id is in no file's request set cannot be charged
+    /// to anyone, and guessing is the destructive direction: a caller
+    /// told a short volume is whole renames a sparse file over good
+    /// bytes. So an unattributable failure taints EVERY file, at the
+    /// cost of one refetch.
+    #[tokio::test]
+    async fn an_unattributable_failure_taints_every_volume() {
+        let dir = temp_dir("attribute-unknown");
+        let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(4);
+        let mut id_to_file: HashMap<Arc<str>, usize> = HashMap::new();
+        id_to_file.insert("<known@test>".into(), 0usize);
+        tx.send(FetchOutcome::Done {
+            id: "<known@test>".into(),
+            raw: article("set.vol000+01.par2", 512, &[0x33u8; 512]),
+        })
+        .await
+        .unwrap();
+        tx.send(FetchOutcome::Missing {
+            id: "<stranger@test>".into(),
+            cause: nzbkit::pool::MissingCause::Gone { takedown: false },
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let (failures, paths) = consume_volume_articles(
+            rx,
+            id_to_file,
+            dir.clone(),
+            BufPool::new(4),
+            u64::MAX,
+            VolumeOpen::Fresh,
+        )
+        .await;
+
+        assert_eq!(failures.total(), 1);
+        assert_eq!(
+            failures.for_file(0),
+            1,
+            "the file that did land is still reported short"
+        );
+        assert_eq!(
+            failures.for_file(7),
+            1,
+            "and so is a file the fetch never even wrote"
+        );
+        assert_eq!(paths.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// BUG (LOW): the writer was created with `.expect("create recovery
     /// volume")` inside the consumer task, so a volume that could not be
     /// opened - a name that sanitises to something unopenable, a full or
@@ -578,8 +1030,14 @@ mod recovery_volume_tests {
         .await;
 
         assert_eq!(
-            failures, 2,
+            failures.for_file(0),
+            2,
             "both articles of the dead volume count as failures"
+        );
+        assert_eq!(
+            failures.for_file(1),
+            0,
+            "and none of them lands on the healthy volume beside it"
         );
         assert_eq!(
             paths.len(),

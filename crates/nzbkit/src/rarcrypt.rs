@@ -31,8 +31,9 @@ use crate::sync::MutexExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::array::Array;
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use hmac::digest::KeyInit as MacKeyInit;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -42,7 +43,7 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
-type Block = GenericArray<u8, aes::cipher::consts::U16>;
+type Block = Array<u8, aes::cipher::consts::U16>;
 
 /// An AES key of whichever width the archive's format uses. Both are
 /// driven in CBC with a 16-byte block, so everything above this type -
@@ -80,7 +81,7 @@ pub struct EntryKeys {
 /// View a 16-aligned byte buffer as AES blocks - the batched
 /// `{en,de}crypt_blocks_mut` APIs let the backend pipeline several
 /// blocks per call (4x on soft AES, ~1.2x on hardware; measured).
-/// GenericArray<u8, U16> is layout-identical to [u8; 16] (align 1), so
+/// Array<u8, U16> is layout-identical to [u8; 16] (align 1), so
 /// the cast is sound for any len % 16 == 0 slice.
 fn as_blocks(data: &mut [u8]) -> &mut [Block] {
     debug_assert_eq!(data.len() % 16, 0);
@@ -117,7 +118,8 @@ impl Rar5Keys {
 /// `count`, `count+16`, and `count+32` iterations.
 fn pbkdf2_chain(password: &[u8], salt: &[u8; 16], lg2_count: u8) -> Rar5Keys {
     let count: u64 = 1u64 << lg2_count.min(MAX_KDF_LG2);
-    let prf = HmacSha256::new_from_slice(password).expect("hmac accepts any key length");
+    let prf =
+        <HmacSha256 as MacKeyInit>::new_from_slice(password).expect("hmac accepts any key length");
     // U1 = HMAC(pw, salt || INT_BE(1))
     let mut mac = prf.clone();
     mac.update(salt);
@@ -362,7 +364,7 @@ pub fn check_rejects(psw_check: &[u8; 8], stored: &[u8; 12]) -> bool {
 /// (well-formed) check value at all - see [`Rar5Keys::hash_key`].
 pub fn mac_crc32_with_key(hash_key: &[u8; 32], crc: u32) -> u32 {
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(hash_key).expect("HMAC accepts any key length");
+        <HmacSha256 as MacKeyInit>::new_from_slice(hash_key).expect("HMAC accepts any key length");
     mac.update(&crc.to_le_bytes());
     let digest = mac.finalize().into_bytes();
     digest.chunks_exact(4).fold(0u32, |acc, c| {
@@ -413,8 +415,8 @@ impl CbcStream {
     /// Decrypt `data` in place (len % 16 == 0).
     pub fn decrypt(&mut self, data: &mut [u8]) {
         match &mut self.dec {
-            CbcDec::A256(d) => d.decrypt_blocks_mut(as_blocks(data)),
-            CbcDec::A128(d) => d.decrypt_blocks_mut(as_blocks(data)),
+            CbcDec::A256(d) => d.decrypt_blocks(as_blocks(data)),
+            CbcDec::A128(d) => d.decrypt_blocks(as_blocks(data)),
         }
     }
 }
@@ -449,8 +451,8 @@ impl CbcEncStream {
 
     pub fn encrypt(&mut self, data: &mut [u8]) {
         match &mut self.enc {
-            CbcEnc::A256(e) => e.encrypt_blocks_mut(as_blocks(data)),
-            CbcEnc::A128(e) => e.encrypt_blocks_mut(as_blocks(data)),
+            CbcEnc::A256(e) => e.encrypt_blocks(as_blocks(data)),
+            CbcEnc::A128(e) => e.encrypt_blocks(as_blocks(data)),
         }
     }
 }
@@ -556,7 +558,7 @@ mod tests {
     fn mac_crc32_matches_the_reference_fold() {
         let keys = derive_keys("pw", &[7u8; 16], 12).unwrap();
         for crc in [0u32, 1, 0xdead_beef, u32::MAX] {
-            let mut mac = <HmacSha256 as Mac>::new_from_slice(&keys.hash_key).unwrap();
+            let mut mac = <HmacSha256 as MacKeyInit>::new_from_slice(&keys.hash_key).unwrap();
             mac.update(&crc.to_le_bytes());
             let d = mac.finalize().into_bytes();
             let want = d

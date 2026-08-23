@@ -55,6 +55,15 @@
 # is the honest query, and `gh run list` alone is not. There are more
 # job names now, and the sharded ones carry a matrix suffix -
 # `windows-unit (1)` through `windows-unit (4)`.
+#
+# That query is necessary and it is not sufficient, which is the half
+# this file got wrong for three weeks. Reading per job tells you the
+# truth; on 22 Aug 2026 the truth was that `check` reached a verdict on
+# main 3 times in 20. The note below `permissions:` has the measurement
+# and what was done about it. Add `\(.steps|length)` to that query when
+# you are asking WHY a job is cancelled: a job with zero step
+# conclusions never started, and no amount of reading it per job will
+# make it a verdict.
 name: ci
 on:
   push:
@@ -90,6 +99,161 @@ permissions:
 # does not mention `matrix.shard` every shard of a run lands in ONE
 # group and they SERIALISE - which would undo this whole file. The
 # shard groups below all carry the shard number.
+#
+# ---------------------------------------------------------------------
+# WHAT THE 2 AUG CHANGE DID NOT FIX (measured 22 Aug 2026)
+#
+# Everything above is still true and the block is still deliberately
+# absent. It was also not enough, and the note as it stood said the
+# residual fix was to "read verdicts per job", full stop. Measured per
+# job, on this config, over the last 20 COMPLETED runs on main:
+#
+#   check          success  3 / 20     ~10.1 min
+#   windows-build  success  2 / 20     ~14.4 min
+#   windows-clippy success  5 / 20     ~6.0 min
+#   windows-arm64  success  6 / 20     ~5.7 min
+#   slim-check     success  6 / 11     ~2.4 min
+#
+# Every one of the 17 cancelled `check` jobs has ZERO step conclusions.
+# They were not killed part-way through: they never started.
+#
+# THE MECHANISM IS NOT cancel-in-progress. `false` is doing exactly what
+# it says - no RUNNING job is ever killed on main. What it does not do
+# is buy a queue. GitHub Actions holds at most ONE pending entry per
+# concurrency group, so with a job already running, the next push pends
+# and the push after that CANCELS THE PENDING ONE to take its place.
+# main takes a push every ~2.5 min here and `check` runs ~10 min, so
+# roughly three commits are cancelled while pending for every one that
+# gets a slot. The three that succeeded ran back to back with no gap
+# (17:38:25-17:49:22, 17:49:25-17:59:21, 17:59:23-18:09:39): the runner
+# was never idle, so this is not capacity and no amount of waiting
+# improves it.
+#
+# Read the table again as a law rather than a list. The verdict rate is
+# about the push cadence over the job's duration, capped at 1 - it has
+# nothing to do with what the job checks or which group it is in. Which
+# means the only lever that works for a given gate is to make the JOB
+# SHORTER THAN THE CADENCE, and the control for that was already in the
+# repo: over the same 20 pushes, every job in size-gate.yml - same main,
+# same hour, same per-job concurrency, 7-20 seconds each - reached a
+# verdict 20 times out of 20.
+#
+# So the four cheap ones were carved out into jobs of their own (see
+# the section at the top of `jobs:`): fmt, the download page version
+# gate, the i18n catalogue gate and cargo deny. Those four plus clippy
+# were the whole set with no other verdict path anywhere in the repo -
+# the build-free gates that stay in `check` are already covered on
+# every branch by size-gate.yml, which is why they were left alone.
+#
+# WHAT IS STILL UNFIXED, deliberately. clippy stays in `check` and so
+# still carries that job's rate, and windows-build/clippy/arm64 keep
+# theirs. Those are build-bound: there is no version of them that fits
+# in 2.5 minutes, so splitting them further just spreads the same
+# cancellation over more job names. clippy in particular must stay in
+# `check` - it compiles the dependency graph to rlib/rmeta exactly as
+# the archive build then needs it, and moving it out makes something
+# pay for that twice.
+#
+# ---------------------------------------------------------------------
+# WHAT THAT RESIDUAL ACTUALLY COSTS (measured 22 Aug 2026, same day,
+# with tools/ci-verdict-rate.py --tips --cost)
+#
+# The note above ended by naming "a merge queue or a debounced or
+# scheduled build on main" as the shape that fixes this. Before costing
+# either, the residual was re-measured over the 36 completed runs on
+# main between 16:30 and 21:05 UTC, mean push cadence 3.8 min. The
+# per-commit rates had barely moved:
+#
+#   check           12 / 36    ~9.8 min    linux-tests   same 12 / 36
+#   windows-build    8 / 36   ~14.9 min    windows-unit  same  8 / 36
+#   windows-clippy  18 / 36    ~6.5 min
+#   windows-arm64   19 / 36    ~5.6 min
+#   slim-check      31 / 36    ~2.4 min
+#   the four carved-out gates    34-36 / 36, all under a minute
+#
+# What HAD been missed is what the one pending entry contains. It is
+# always the NEWEST push, because each new push replaces it, so when a
+# slot frees the job that starts is main's tip and not some arbitrary
+# older commit. Measured against the push ordinal at each job's start:
+# 223 of 227 entry-point job runs started on what was the tip at that
+# instant, the four exceptions one push behind by seconds. (The jobs
+# behind a `needs:` read further behind, because they start after their
+# parent finishes - they are testing that parent's archive and inherit
+# its anchoring, not a staler commit.)
+#
+# That changes what a cancelled job costs. main is fast-forward only,
+# so a tip contains every commit pushed before it and a green on the
+# tip is a green on all of their content. The cancelled ones do not
+# cost COVERAGE, they cost ATTRIBUTION: the blame window on a RED one,
+# which is whatever landed since the last verdict. So the honest metric
+# is not the per-commit rate at all, it is the interval between
+# consecutive verdicts, i.e. how stale the newest verified tip gets:
+#
+#                     median    p90    max     blame window
+#   check               9.8    10.7   15.7     ~3 commits
+#   windows-build      15.1    15.5   16.8     ~4 commits
+#   windows-clippy      6.8    13.2   16.1
+#   windows-arm64       5.8    11.9   16.4
+#
+# Each of those is about one job duration, which is the floor: one
+# runner slot cannot verify a tip faster than the job takes to run, and
+# the successful runs sit back to back with no idle gap. The per-commit
+# rate is the same fact divided by the cadence.
+#
+# ---------------------------------------------------------------------
+# THE THREE CADENCE OPTIONS, COSTED 22 Aug 2026, ALL DECLINED
+#
+# 1. MERGE QUEUE (`merge_group`). Not compatible with this repo as it
+#    works, before cost enters into it. A merge queue only ever
+#    processes PULL REQUESTS, and requiring one means requiring those;
+#    sessions fast-forward main directly and the note above says that
+#    is not changing. Keep the convention and a direct push does not
+#    enter the queue at all, so `push` fires exactly as it does now and
+#    nothing moves. Drop the convention and what the queue buys is
+#    batching - its "minimum pull requests to merge" plus wait timeout
+#    IS a debouncer, and a good one - but the information a batch green
+#    carries is the information a tip-anchored green already carries,
+#    and the price is that every session waits a full windows-build
+#    behind its queue position before its work is on main for the next
+#    session to merge. Wrong trade for a dozen sessions merging
+#    origin/main continuously.
+#
+# 2. DEBOUNCED OR SCHEDULED BUILD. This config already IS the debounce,
+#    and a better one than `schedule:` can be. Cron quantises to five
+#    minutes at best, is documented as delayed or dropped under load,
+#    and fires whether or not the tip moved; the pending slot starts
+#    the instant a runner frees (median wait before start, measured:
+#    check 2.8 min, windows-build 4.4 min) and only ever on a tip that
+#    HAS moved. Same cost, same rate, worse latency, and it would need
+#    a "has the tip changed" guard that the pending slot gives free.
+#    The nearby variant - keep `push` but check out `origin/main`
+#    instead of the trigger sha - was rejected for a different reason:
+#    the commit status still lands on the trigger sha, so it would put
+#    a green tick on a commit that was never built. That is the exact
+#    family of defect the rest of this note exists to prevent.
+#
+# 3. BUY SLOTS (drop the per-job `concurrency` on the build-bound legs
+#    so nothing is ever cancelled). The only option that does raise the
+#    per-commit rate, and it is the one with a price rather than an
+#    objection. Cancelled-while-pending jobs cost ZERO runner minutes,
+#    so today's bill is only what actually ran: 1,125 billed minutes
+#    over that 150-minute window. Every leg on every push, with the
+#    shards behind them, is ~3,200 - 2.8x, and the increment is mostly
+#    Windows at the 2x rate. Over that day's 206 pushes it is roughly
+#    150 US dollars a day of extra list-price runner time, to buy
+#    attribution that the blame windows above already hold to 3-4
+#    commits. Declined on price, not on principle. If a blame window
+#    ever costs real debugging time this is the lever, and the cheap
+#    partial version is to drop the group on `check` alone - though
+#    "cheap" is relative, because linux-tests rides behind it: check
+#    124 -> 360 min over that window and linux-tests 226 -> 720.
+#
+# So: unchanged. What changed is the metric - watch the VERDICT
+# INTERVAL, not the per-commit rate. Re-measure both rather than
+# believing this paragraph:
+#
+#   tools/ci-verdict-rate.py --limit 40 --tips --cost
+# ---------------------------------------------------------------------
 env:
   # Both legs, one value, and that is deliberate. CLAUDE.md's disk note
   # is explicit that a per-directory setting must be UNIFORM or the
@@ -127,12 +291,39 @@ env:
   #
   # THE RULE, which is the load-bearing half: this flag moves every
   # fingerprint in the cached archive, so the cache-key suffix bump to
-  # `-v3` below rides in the SAME COMMIT. Land one without the other and
+  # `-v4` below rides in the SAME COMMIT. Land one without the other and
   # CI restores an archive built under the old flag, rebuilds cold under
   # the new one, and never replaces it - cold forever, silently, behind
   # a green cache-hit line. Bump the suffix again for any future change
   # that moves rustc's fingerprint inputs (profile flags, RUSTFLAGS,
   # toolchain pin) without moving Cargo.lock.
+  #
+  # `-v3` became `-v4` on 23 Aug 2026 for the `[profile.dev.package.rars]`
+  # / `[profile.test.package.rars]` opt-level override added to the
+  # workspace Cargo.toml, whose measurements are in the long note there.
+  # That override moves a fingerprint without moving Cargo.lock, so the
+  # rule above applies verbatim and the bump rides with it.
+  #
+  # WHY THIS ONE IS CHEAPER THAN THE `-v3` BUMP WAS, which is worth
+  # knowing before the next reader assumes symmetry. `-v3` moved
+  # `profile.test.debug`, i.e. every one of the ~54 test executables in
+  # the archive. This one moves ONE crate's rlib - rars - plus the
+  # workspace crates that link it, and those recompile on every run
+  # anyway: git checkout stamps their sources newer than any cached
+  # artifact, which is why a WARM windows-build still logs six
+  # `Compiling` lines. So the cost of an unbumped key here would have
+  # been ~3.4s per run, not a cold archive - the bump is rule
+  # compliance, not rescue.
+  #
+  # AND WHY THE OTHER FIVE CACHED WORKFLOWS ARE DELIBERATELY NOT BUMPED
+  # (nightly `-v2`, nightly-soak, nightly-armv7, coverage `-v2`,
+  # fuzz-smoke `-v2`, pr-check `-v2`). Same reasoning, opposite verdict
+  # on price: each of them would pay one full cold dependency build to
+  # reclaim that same ~3.4s per run, and none of them is on the release
+  # critical path. The staleness is bounded and self-correcting - cargo
+  # fingerprinting is what decides a rebuild, so a stale key here is a
+  # performance question and never a correctness one. If one of those
+  # workflows ever starts caring, bump it then.
   #
   # Workflow-level, not job-level, and that is load-bearing too: clippy
   # `--all-targets` builds the test targets as well, so a job that
@@ -165,7 +356,437 @@ env:
 
 jobs:
   # ===================================================================
-  # LINUX: gates + lint + the one build, then four shards.
+  # THE CHEAP GATES, one job each.
+  #
+  # Carved out of `check` on 22 Aug 2026. Nothing here is new: every
+  # `run:` line below ran as a step of `check` and is byte-identical to
+  # what it ran there. What changed is only what it waits behind. A
+  # two-second answer was queued behind a toolchain install, a
+  # dependency cache restore, clippy and a workspace build, so on this
+  # main it was usually never delivered at all - the arithmetic and the
+  # measurement are in the long note above `env:`.
+  #
+  # MOVED, not copied, and that is the one place this departs from
+  # size-gate.yml. That file deliberately keeps a second copy of the
+  # build-free gates, because the duplicate buys something `check`
+  # cannot: a verdict on every BRANCH push, where ci-private triggers on
+  # main alone. Here the trigger is the same file's own trigger, so a
+  # second copy would buy nothing and cost a second place for the two to
+  # disagree about what passes.
+  #
+  # The guards are gone with the move, and that is not a softening. In
+  # `check` every gate step carries `!cancelled()` plus a precondition
+  # so that a red gate cannot skip the gates after it (the note above
+  # the lock gate has the three incidents that rule came from). A job
+  # holding ONE gate has nothing after it to skip, and a job cannot skip
+  # a job - which is the same sentence that note already ends on, now
+  # doing the work structurally instead of by convention.
+  #
+  # THE BUDGET FOR ANYTHING ADDED HERE IS THE PUSH CADENCE, ~2.5 min
+  # measured. Past that a job starts losing verdicts exactly the way
+  # `check` does, and this is not theory: `slim-check` below is 2.4 min
+  # and already reaches a verdict only 6 times in 11.
+  #
+  # What these four actually cost, wall clock on the runner, from the
+  # first run that had them (32590969278, 91a4b31a, 22 Aug 2026):
+  #
+  #   site-version-gate   9 s
+  #   i18n-gate          12 s
+  #   fmt                39 s   (10 s of it the toolchain install)
+  #   deny               39 s   (26 s of it `cargo deny` itself)
+  #
+  # On that same commit `check` and `windows-build` were still sitting
+  # pending with zero steps, which is the whole point of the split.
+  # `deny` is the one to watch as it grows: it fetches the advisory
+  # database on every run, and that is deliberately not cached, because
+  # a cached advisory database is a security gate that cannot see
+  # today's advisory.
+  # ===================================================================
+  fmt:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-fmt-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--profile minimal` plus the one component, rather than `check`'s
+      # rustfmt,clippy pair: this job never lints.
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: fmt
+        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray --check
+  site-version-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-site-version-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The download page is version-pinned: every button is
+      # `releases/latest/download/nzbfast-<VERSION>-*`, so the instant a new
+      # release becomes `latest` every filename from the old one 404s - all
+      # six buttons, all sixteen locales, at once, with no grace period.
+      # bump-version.sh rewrites those pages, but for v1.1.3 they were left
+      # unstaged while Cargo.toml was committed, and the site went live
+      # naming 1.1.2. This is what makes that state red at the commit that
+      # creates it rather than on release day. `--selftest` first, same
+      # reason as the overflow gate, which is still in `check`.
+      - name: download page version gate
+        run: tools/check-site-version.sh --selftest && tools/check-site-version.sh --tree
+  flatpak-pin-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-flatpak-pin-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Flatpak manifest pins a release by `url` + `sha256`, the
+      # metainfo carries a <release> per version and the README names the
+      # bundle - three files, one version, and bump-version.sh touches
+      # none of them (the sha256 cannot exist before the public tag does).
+      # The pin sat on v1.1.2 through four releases (TODO 180, 8878e92c0).
+      # This is the OFFLINE half: the three agree with each other and the
+      # pin is not ahead of Cargo.toml. A pin BEHIND Cargo.toml passes here
+      # on purpose - it is the normal state between the bump commit and
+      # publish-release step 4d, whose `--live` mode is the other half.
+      - name: flatpak pin gate
+        run: python3 tools/flatpak-pin-gate.py --selftest && python3 tools/flatpak-pin-gate.py
+  i18n-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-i18n-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      # `fetch-depth` stays at the default: the gate's first half is a
+      # `git diff` of the working tree against HEAD, which needs the
+      # checkout to be a git repository but never needs its history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # TODO 201 (Codex review finding L11). `web/i18n/check.py` was a
+      # hand-run script and nothing turned red when it regressed, which
+      # is exactly how it regressed: v1.2.1 SHIPPED with all 27
+      # catalogues each missing 39-51 keys (the diag.*, rep.*,
+      # hist.divnudge.*, queue.act.* and set.srv.samebb.* families), so
+      # every non-English dashboard rendered those sentences in English.
+      # A read-only review found it weeks after the keys landed.
+      #
+      # Two halves, because the debt arrives two ways. extract.js
+      # regenerates the English reference from dashboard.html/wall.html:
+      # if it MOVES, somebody added a UI string without re-running it and
+      # the reference has been quietly stale ever since - the keys are
+      # not "missing" from any catalogue because nothing knows they
+      # exist. check.py then holds the 27 catalogues to that reference:
+      # key parity, per-locale plural categories, placeholder and markup
+      # parity, and the house copy bans. Both halves are the standing
+      # rule already written in web/i18n/README.md; this is the rule
+      # enforced instead of remembered. Cheap: no build, no toolchain,
+      # about a second. Since 22 Aug 2026 check.py also holds KEY ORDER
+      # (localeCompare for the catalogues, code-point for the reference,
+      # reproduced in python - see the comment at the top of check.py):
+      # db463185d appended keys unsorted to all 27 files and stayed green
+      # for a day, until the next proper re-serialisation moved them and
+      # dumped 54 lines of churn into an unrelated diff. And since 23
+      # Aug 2026 it holds PARSED-INPUT PLACEHOLDERS: a placeholder on an
+      # input the daemon parses is a worked example of a grammar, and 20
+      # of the 27 catalogues had localized `sched.days.ph` into day
+      # tokens `parse_days` rejects, so on those locales the scheduler's
+      # days box could not be filled in from the hint the UI gives (TODO
+      # 259). Two halves there too: MUST_STAY_ENGLISH pins keys by hand,
+      # and a shape scan finds the ones nobody thought to pin - it reads
+      # dashboard.html/wall.html to learn which keys are bound to a
+      # placeholder, so this step must keep running from the repo root.
+      # `--selftest` first, the convention every other gate follows.
+      - name: i18n catalogue gate
+        run: |
+          node web/i18n/extract.js
+          git diff --exit-code web/i18n/en.reference.json || {
+            echo "::error::en.reference.json is stale: a UI string landed without 'node web/i18n/extract.js'. Regenerate it and translate the new keys into all 27 catalogues."
+            exit 1
+          }
+          python3 web/i18n/check.py --selftest && python3 web/i18n/check.py
+      # The other half of the same debt, and the same argument one file
+      # over. check.py above holds the 27 dashboard catalogues; this holds
+      # the 15 translated MANUALS to docs/MANUAL.html - an 18-tag census
+      # whole-file and per section, identical id sets, byte-identical
+      # `<code>`. TODO 201 wired check.py here on the reasoning that a
+      # hand-run script is one nobody runs, and then left its sibling
+      # hand-run: no CI job has ever executed manual-check.py. It went the
+      # predicted way. On 23 Aug 2026 it was red on ALL 15 locales with
+      # one identical drift - docs/MANUAL.html's lifecycle-events
+      # sentence had gained four `<code>` refs (job.retried,
+      # job.delete_kept, watch.picked, watchlist.upgraded) and no
+      # translation followed - and nothing turned red when that landed;
+      # somebody ran the script by hand and found it (fixed in
+      # cf138f226). A SEPARATE step rather than another line appended to
+      # the one above, so a manual drift and a catalogue drift are told
+      # apart in the log without reading it - the reader needs to know
+      # which of docs/ and web/ to go and translate. Same job, because
+      # both are the same second of runner time and the same failure to
+      # look. Also its own job in size-gate.yml, which is where the
+      # verdict actually reaches the author who caused it: this file
+      # triggers on push to main alone.
+      - name: manual parity gate
+        run: python3 web/i18n/manual-check.py --selftest && python3 web/i18n/manual-check.py
+      # The third of the three, and the one with the most riding on it.
+      # check.py holds the 27 dashboard catalogues, manual-check.py holds
+      # the 15 translated manuals, and this holds the 150 localized SITE
+      # pages to their English bases - id sets, a tag census,
+      # byte-identical `<code>`, lang attribute, picker and hreflang. Same
+      # story as the step above: it was the last script in web/i18n/ that
+      # no CI job ran, `grep -rn site-check .github/workflows/` had no
+      # hits, and the argument TODO 201 made for check.py had never been
+      # carried across to it either.
+      #
+      # What makes this one different from its two siblings is its second
+      # dimension. Those pages are PUBLISHED, and this script also greps
+      # the ones that cite a measurement for names that must not appear in
+      # them, so a hit here is a disclosure rather than a typo - and a
+      # disclosure that reverting the commit does not take back. That arm
+      # fires on nothing today, which is exactly what a broken one looks
+      # like, so `--selftest` is doing real work in the line below rather
+      # than following the house convention: it drives every ban entry at
+      # a sample of its own and pins both word anchors. A third SEPARATE
+      # step for the same reason the second one is separate - three kinds
+      # of drift, told apart in the log without reading it, because the
+      # reader needs to know whether to go and translate web/, docs/ or
+      # website/. Also its own job in size-gate.yml, which is where the
+      # verdict reaches the author who caused it: this file triggers on
+      # push to main alone.
+      - name: site parity gate
+        run: python3 web/i18n/site-check.py --selftest && python3 web/i18n/site-check.py
+      # A fourth step, and a different question from the three above.
+      # Those three ask whether translated content matches its English
+      # source. This one asks whether GENERATED content matches its
+      # generator: site-crosslink.py rewrites the cross-page links on the
+      # 150 localized pages so a visitor stays in-language, its output
+      # is committed, and nothing verified the two still agree. That is
+      # the bench2j gate's story - a generated file whose parent moved -
+      # and that gate exists because its subject rotted twice, once in a
+      # direction that made the documented remedy destructive. Here the
+      # miniature version is a hand-patched href: the next regeneration
+      # undoes it and says nothing. `--check` writes nothing and exits 1
+      # on the first page that differs.
+      #
+      # THE `--selftest` IN FRONT WAS ADDED 23 Aug 2026, and this comment
+      # used to argue at length that it was deliberately absent: the
+      # script is run against its own committed output, a fixed point
+      # with no judgement to get wrong. That is true of the OUTPUT and
+      # incomplete about the PATTERN. A regex that matches nothing
+      # rewrites nothing, so the file equals itself, `--check` reports
+      # every page current, and the trailing leak scan - which shares one
+      # pattern with the rewrite - finds nothing to report either.
+      # Measured that day: breaking that pattern's `href="` literal left
+      # BOTH arms dead and this step still green at exit 0. The healthy
+      # state here is genuinely zero matches, on all 150 pages, so
+      # nothing about the real tree can tell a converged site from a dead
+      # pattern; the selftest settles it from the other end, driving the
+      # transform and the leak scan over synthetic pages with known
+      # English hrefs. Its sibling generator web/i18n/nav-regen.py has
+      # the same exposure and a different fix - every arm there replaces
+      # a block that is always present, so it counts substitutions - and
+      # is gated in the step below.
+      - name: cross-link staleness gate
+        run: python3 web/i18n/site-crosslink.py --selftest && python3 web/i18n/site-crosslink.py --check
+      # A fifth step, and the OTHER half of the question the fourth asks.
+      # web/i18n/ holds two generators beside its three parity checkers,
+      # and this is the second one: nav-regen.py writes the language
+      # picker and the hreflang alternates on the 64 pages of the four
+      # core bases, and the switcher on the 16 manual pages. It grew
+      # `--check` on the same day as the step above and was deliberately
+      # left unwired for a day, because measuring it found the rot it was
+      # meant to catch. One of its three arms was DEAD: `web_picker` wrote
+      # a `<span class="langsw">` of uppercase locale codes and the regex
+      # that placed it looked for one, while every website page has
+      # carried a `<select class="langsw">` of native language names with
+      # a `selected` option for some time. It had matched nothing, on all
+      # 64 pages, for however long the markup has been a select, so wiring
+      # it then would have reported every picker current while checking no
+      # picker at all - the rubber stamp this gate family keeps growing to
+      # refuse. `web_picker(base, lang)` now emits the select, `selected`
+      # and all, byte-identical to what those pages carry, and a census of
+      # all 160 pickers on the site found that no page had actually
+      # drifted while the arm was inert - luck, not a reason, since
+      # nothing had checked. A SEPARATE step for the same reason the three
+      # above are separate: a picker drift, a cross-link drift and a
+      # translation drift send the reader to different files. No
+      # `--selftest` in front, deliberately and for the same reason as the
+      # step above - the script is run against its own committed output, a
+      # fixed point with no judgement to get wrong. Also its own job in
+      # size-gate.yml, which is where the verdict reaches the author who
+      # caused it: this file triggers on push to main alone.
+      - name: nav staleness gate
+        run: python3 web/i18n/nav-regen.py --check
+  deny:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-deny-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # cargo-deny shells out to `cargo metadata`, so this job needs a
+      # toolchain even though it compiles nothing.
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Advisory / license / source gate against deny.toml. Prebuilt
+      # binary pinned by tag and checked by SHA256 rather than trusted
+      # (same pattern as the par2 fetch in pr-check.yml); a cargo
+      # install would cost minutes of compile per push. nightly.yml runs
+      # the same check on a schedule to catch advisories published
+      # against an unchanged tree.
+      - name: install cargo-deny
+        run: |
+          ver="0.20.2"
+          # Same retry rationale as `check`'s cargo-nextest install;
+          # this is the step that lost run 31619042403 to `curl: (56) Connection
+          # died`.
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/cargo-deny-${ver}-x86_64-unknown-linux-musl.tar.gz"
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          sudo mv "cargo-deny-${ver}-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/
+          rm -rf cargo-deny.tar.gz "cargo-deny-${ver}-x86_64-unknown-linux-musl"
+      - name: cargo deny
+        # The gate this job lost for four days in the 7-10 Aug outage,
+        # for being last in `check`. It has its own job now because
+        # that is the same failure wearing different clothes: a gate at
+        # the end of a job that does not finish is also no verdict.
+        #
+        # --locked, same reason as clippy and the archive over in
+        # `check`: an advisory
+        # and license verdict against a graph cargo re-resolved on the
+        # fly does not describe what we ship. Note the POSITION - it
+        # goes before the subcommand. cargo-deny puts its manifest flags
+        # on the top-level parser and does not mark them global, so
+        # `cargo deny check --locked` is an unknown-argument error and
+        # would redden this step outright. Verified against the 0.20.2
+        # tag pinned in the install step above.
+        run: cargo deny --locked check
+  # -------------------------------------------------------------------
+  # THE LAST KNOWN WINDOWS VERDICT. Not a gate on this commit - a gate on
+  # the branch, recomputed on every push.
+  #
+  # Everything above `env:` says the cancellation regime on main is
+  # arithmetic and is staying. Re-measured 23 Aug 2026 over 60
+  # consecutive runs on main (16:52-19:40Z): windows-build reached a
+  # verdict 10 times, ~17% of commits, and all 10 were green on all four
+  # windows-unit shards. A verdict landed every 13-20 min, median ~15,
+  # which is exactly the leg's own duration - the queue is at its
+  # theoretical ceiling and there is nothing to tune.
+  #
+  # What that regime costs is not coverage, it is VISIBILITY. A red run
+  # is buried under about ten cancelled runs inside fifteen minutes, and
+  # a cancelled run does not read as a red run - it reads as nothing at
+  # all, so main's tip shows grey rather than red. Twice now that has
+  # cost real work: on 21 Aug windows-build was red on main long enough
+  # for a fresh lane to branch off the red (1af79f81b), and on 23 Aug
+  # windows-clippy and windows-arm64 were red for about an hour
+  # (ca523cf0e 18:28Z to the fix 804be72b9 at ~19:25Z), found only
+  # because a human went looking.
+  #
+  # `suites-ran` at the bottom of this file cannot report either. It
+  # fires only on parent `failure` AND child `skipped`, deliberately,
+  # because `cancelled -> skipped` was 328 of 400 job rows and firing on
+  # it would red every superseded push. And it does not look at
+  # windows-clippy or windows-arm64 at all: those two are LEAF jobs, no
+  # `needs:` anywhere names them, so nothing aggregates them.
+  #
+  # So this job asks a different question. For each of the four Windows
+  # jobs it walks main's runs newest-first and reports the first REAL
+  # conclusion it finds, stepping over `cancelled` and `skipped` because
+  # those carry no verdict about the code, and it is red while any of
+  # those four answers is a failure.
+  #
+  # THE PROPERTY THAT MAKES IT WORK IS STICKINESS. The answer is about
+  # main, not about the run computing it, so while Windows is red EVERY
+  # later push is red too, and the red is on the tip rather than ten
+  # pushes back. It also clears itself: the first push after Windows
+  # goes green reports green, with no human action and nothing to reset.
+  #
+  # WHERE THE RED ACTUALLY SHOWS, and it is not where you would guess.
+  # The COMMIT STATUS ROLLUP on main's tip goes FAILURE - that is the
+  # icon on the repo home, on the commits list and beside the sha, and
+  # it is what a lane about to branch is looking at. The WORKFLOW RUN
+  # ROW in the Actions list does NOT: GitHub gives `cancelled`
+  # precedence over `failure` at run level, so a run holding a red
+  # windows-verdict and any cancelled job at all still reports
+  # `cancelled`, and on this main there is nearly always a cancelled
+  # job. Verified 23 Aug 2026 on run 32655056916 (4abf45ec): jobs
+  # 13 success / 1 failure / 2 cancelled / 4 skipped, run conclusion
+  # `cancelled`, commit rollup FAILURE. The corollary is a trap worth
+  # knowing: filtering the Actions list to failed runs HIDES these.
+  # Read the commit status, or read the job row inside the run.
+  #
+  # IT DOES NOT WEAKEN `suites-ran` AND IT NEVER FIRES ON `cancelled`.
+  # Those were the two ways to get this wrong and both are pinned by
+  # `--selftest` cases 1 and 2.
+  #
+  # WHY HERE AND NOT size-gate.yml. That file exists to give BRANCH
+  # pushes a verdict, and the 21 Aug incident was a lane branching off a
+  # red main, so it is a real candidate. Against it: the subject of this
+  # check is main's state, which is this file's subject and nobody
+  # else's, and a red here turns main's TIP red, which is what the two
+  # incidents above actually needed. Putting it on every branch push
+  # would instead red the run of whichever lane pushed next, for
+  # something they did not cause and usually cannot fix, which is how a
+  # gate gets muted. The branching lane is served by running
+  # `tools/windows-verdict.py` by hand, which is the same script this
+  # step runs and needs no checkout of anything else.
+  #
+  # COST: one API call for the run list plus one per run walked, six
+  # wide, stopping as soon as all four jobs have an answer. Measured on
+  # the runner in the first run that had it (32665973254, b1532aa66,
+  # 23 Aug 2026): 6 s for the step, selftest included, and 10 s for the
+  # whole job. That is in the same band as `i18n-gate` above and well
+  # inside the ~2.5 min push cadence this section names as the budget,
+  # so it reaches a verdict on essentially every push - which is what
+  # stickiness needs to be worth anything.
+  # -------------------------------------------------------------------
+  windows-verdict:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The only job in this file that reads the Actions API. `contents:
+    # read` at the workflow level does not cover it, and a job-level
+    # block REPLACES the workflow one rather than adding to it, so
+    # `contents: read` is repeated here on purpose.
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: ci-windows-verdict-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--selftest` first, the house convention, and here it is the
+      # whole gate rather than decoration. This script's entire value is
+      # one judgement - which rows carry a verdict and which are weather
+      # - and BOTH ways of getting it wrong are invisible. Count
+      # `cancelled` as a verdict and it reports a red main permanently;
+      # stop at the first row it sees and it reports a green one forever.
+      # Neither looks like a broken script. The eleven frozen-JSON cases
+      # drive both directions plus the shard fold.
+      - name: windows verdict
+        env:
+          # The script resolves the repo from GITHUB_REPOSITORY, which
+          # Actions sets, so the private repo's name is never written
+          # into a file that ships to the public tree.
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/windows-verdict.py --selftest && python3 tools/windows-verdict.py
+
+  # ===================================================================
+  # LINUX: the build-free gates + clippy + the one build, then four
+  # shards. The gates that do NOT need this job's toolchain or its
+  # cache left on 22 Aug 2026 - see the section at the top of `jobs:`.
   # ===================================================================
   check:
     if: github.repository != 'nzbfast/nzbfast'
@@ -175,7 +796,9 @@ jobs:
     # cold, 22m28s warm), of which the unit-test step alone was 18-20.
     # The tests are gone from this job - they run in `linux-tests`
     # below, four ways, off the archive this job produces - so what is
-    # left is the gates, clippy, cargo deny and one build.
+    # left is the build-free gates, clippy and one build. cargo deny
+    # and fmt left with the cheap-gate split; they cost this job
+    # nothing they were not already paying elsewhere.
     #
     # The cap stays at 30. TODO 116 is explicit that raising it only
     # hides the growth (2556 -> 3224 tests inside one hour of main
@@ -191,7 +814,7 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     outputs:
       # The REAL precondition for the shard jobs, and it is not the job's
-      # own conclusion. This job also runs clippy, cargo deny and five
+      # own conclusion. This job also runs clippy and six build-free
       # gates; if any of those is red the job is red, but the archive is
       # still built and still valid, and the suites must still report.
       # `needs: check` alone would let a one-line clippy error skip 5,175
@@ -319,7 +942,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v3-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # CARGO_INCREMENTAL above stops us WRITING incremental state; this
       # evicts what a cache written before that flag existed hands us.
       # Deleting them costs nothing - nothing downstream reads them -
@@ -336,7 +959,10 @@ jobs:
       #
       # Until TODO 116.4 these gate steps carried zero `if:` between
       # them, so a red `fmt` skipped the lock gate, the size gate, the
-      # overflow gate, clippy, the whole unit suite AND cargo deny: one
+      # overflow gate, clippy, the whole unit suite AND cargo deny (fmt
+      # and deny are jobs of their own since 22 Aug 2026, so that exact
+      # chain cannot re-form here - the incident is what the rule is
+      # for, not the step list): one
       # line of output standing in for six unknown verdicts, which reads
       # exactly like "one small thing is broken". That shape has now cost
       # three separate multi-day incidents - the 7-10 Aug outage here (an
@@ -365,25 +991,100 @@ jobs:
       # and the ARM64 check are separate JOBS now, and a job cannot skip
       # a job. The guards below still matter within this job, but the
       # cross-job half of that failure mode is gone by construction.
-      - name: fmt
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray --check
       # TODO 102b. Two manual sweeps failed to keep new code off
       # `.lock().unwrap()`, so this is a gate rather than a third sweep.
       # CI-only on purpose: it walks the working tree, and several Claude
       # sessions share one checkout, so running it as a pre-commit hook would
       # refuse your commit for another session's in-flight line.
+      # `--selftest` first, same reason as the doc and overflow gates
+      # below, and earned here: this gate matched one line at a time
+      # until 22 Aug 2026, so every rustfmt-wrapped chain was invisible
+      # to it and it reported a green 0 over 81 production sites for
+      # nineteen days. The selftest pins the wrapped shape so a future
+      # tidy-up cannot narrow the pattern back without going red.
       - name: lock gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: tools/lock-gate.py
+        run: tools/lock-gate.py --selftest && tools/lock-gate.py
+      # The same family and the same reason: a convention that only lived
+      # in a commit message. 012549847 held all 87 `#[allow(...)]` in the
+      # two src trees to "does this lint actually fire here?" - 59 became
+      # `#[expect(...)]`, which rustc reports as unfulfilled the day it
+      # stops being true, 10 were DELETED as dead, and 18 stayed `#[allow]`
+      # because the lint fires only in some configuration this box is not
+      # (a platform, the ffi crate root, cfg(test)), each carrying a
+      # `// Not #[expect]: ...` note naming it. Within HOURS three new bare
+      # `#[allow]`s landed from other lanes with no note and no evidence the
+      # lint fires. All three turned out to be real, so nothing was lost -
+      # but nothing had checked, which is the whole argument for a gate.
+      # Baselined by the NOTE, not by a line list: main takes a push every
+      # ~90 seconds and these files move, so a frozen file:line list would
+      # be wrong within the hour. `#[cfg_attr(<cfg>, allow(..))]` is out of
+      # scope on purpose - the cfg predicate IS the justification.
+      # clippy's own `allow_attributes` was measured and rejected; the
+      # script's docstring has the numbers.
+      # `--selftest` first, same reason as the doc, ref and overflow gates:
+      # this one exempts two shapes by NOT matching them, so a slipped
+      # anchor turns it into a gate that passes everything. The selftest
+      # asserts the exempt fixtures are exempt and the noted ones are
+      # actually seen and judged, which fail in opposite directions.
+      - name: lint waiver gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/waiver-gate.py --selftest && tools/waiver-gate.py
+      # The size gate below hoists items between files and orders to hold
+      # its ceilings, and a hoist leaves the doc comment behind - above
+      # whatever now follows it. Rust never notices (`///` is `#[doc]`, and
+      # attribute order is free), so the block reads as documentation of a
+      # function it does not describe. Four were live on 22 Aug 2026, one
+      # stranded since daemon.rs was split on 8 Aug, and 6538d2693 had just
+      # unscrambled three more by hand above `maintenance_slice`. This is
+      # the mechanical half of that review. `--selftest` first, same reason
+      # as the overflow gate below: the fingerprint is narrow enough that a
+      # refactor could quietly turn it into a no-op that passes everything.
+      # A second arm landed 22 Aug for the commoner shape the attribute
+      # fingerprint cannot see - two doc blocks that simply ABUT. It has no
+      # exact fingerprint, so it is BASELINED against a swept tree and fires
+      # only on new hits; the selftest covers both the scanner and the
+      # baseline, because they fail in opposite directions.
+      - name: doc gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/doc-gate.py --selftest && tools/doc-gate.py
+      # The same family, and the same rule about not deleting the comment:
+      # a comment that promises the reader a symbol ("see `foo`", "`foo`
+      # below") and names one that does not exist. Usually a rename that
+      # moved the code and left the pointer; sometimes, as in the case that
+      # motivated this, a name copied out of a design note that only ever
+      # proposed it. settle.rs carried "see `set_proven_on_disk` below" for
+      # weeks and no such symbol has ever existed in this tree - the only
+      # other hit for the name in the whole repo is the 31 Jul handoff the
+      # phantom came from. Fixed by hand in 51ba5fd45. A second arm catches
+      # the same defect wearing a path: `serve.rs` was still being cited a
+      # year after serve.rs became serve/. `--selftest` first, same reason
+      # as the doc and overflow gates: the fingerprint is narrow on purpose,
+      # so a refactor could quietly make it match nothing.
+      #
+      # Private repo only, like the doc gate above and the overflow gate
+      # below: `packaging/PUBLIC_MANIFEST` ships exactly two of tools/
+      # (lock-gate, size-gate) and pr-check.yml runs those two. Nothing
+      # here needs the public repo to have it. Since 22 Aug 2026 every
+      # build-free gate also runs on every branch push in size-gate.yml,
+      # behind the same repository guard - see that file for why.
+      - name: ref gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/ref-gate.py --selftest && tools/ref-gate.py
       # TODO 106. serve() regrew 1,819 -> 2,234 within days of TODO 43
       # splitting it, so the splits get a ratchet before they get redone.
       # Baselines live in the script; each entry is deleted as its target
       # is split, and the gate refuses stale entries so the list only
       # shrinks.
+      # `--selftest` first, same reason as the doc, ref and overflow
+      # gates. This gate carried the SAME brace-less `#[cfg(test)]` hole
+      # the lock gate did: an item that opens no block ran on to the next
+      # `{` and masked the production function after it as test code,
+      # which exempts it from the ceiling outright. 58 files scored a
+      # wrong mask and `Daemon::enqueue` sat at 575 lines behind it.
       - name: size gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: tools/size-gate.py
+        run: tools/size-gate.py --selftest && tools/size-gate.py
       # TODO 88. Horizontal overflow on the site bit three times in two days
       # (8058b393, 6b2274a6, 3195f9da) and every one was found by hand, days
       # later. Static on purpose - a headless browser would gate ubuntu's font
@@ -394,18 +1095,192 @@ jobs:
       - name: overflow gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/overflow-gate.py --selftest && tools/overflow-gate.py
-      # The download page is version-pinned: every button is
-      # `releases/latest/download/nzbfast-<VERSION>-*`, so the instant a new
-      # release becomes `latest` every filename from the old one 404s - all
-      # six buttons, all sixteen locales, at once, with no grace period.
-      # bump-version.sh rewrites those pages, but for v1.1.3 they were left
-      # unstaged while Cargo.toml was committed, and the site went live
-      # naming 1.1.2. This is what makes that state red at the commit that
-      # creates it rather than on release day. `--selftest` first, same
-      # reason as the overflow gate above.
-      - name: download page version gate
+      # One of the bench drivers is a GENERATED fork of another, and
+      # nothing checked it was current - the file's own header said so.
+      # It rotted twice, both times found by hand. Before 21 Aug 2026 the
+      # deployed fork was two whole guards behind its parent: no
+      # connection-census guard, so the two tokens saying how many
+      # sockets a leg actually held were absent from every leg of the
+      # three round classes due to run next (359 of 360 looked exactly
+      # like 360), plus a byte-unit bug that put the client-bytes column
+      # 4.86% high in those same rounds. On 22 Aug it went stale the
+      # OTHER way: a device-selection hook was hand-added to the fork for
+      # a round whose output sat on a dedicated sparse image, the
+      # generator did not know it, and so the remedy the file prints -
+      # regenerate - would have DELETED the live hook (b77636cf). The
+      # only thing that ever looked was the rig library's selftest, run
+      # on the bench box after a rig deploy: long after the push.
+      #
+      # The generator's own `--check` and nothing else, and not on cost
+      # grounds: that selftest is zsh and evals the parent driver's
+      # report(), which reaches for `du -g`, `iostat -Id` and a macOS
+      # data volume, with `stat -f %z` and `md5 -q` elsewhere in the rig
+      # library. BSD and macOS all the way down - there is nothing on a
+      # linux runner for it to test. This half is stdlib python over two
+      # text files: no build, no zsh, no toolchain, 0.03 s measured, the
+      # same shape as the gates above. It is a wrapper rather than the
+      # generator's own path because that path is private vocabulary and
+      # this file ships to the public repo verbatim; the script says so
+      # at length, and inlining it re-breaks the leak check.
+      - name: bench driver generator gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: tools/check-site-version.sh --selftest && tools/check-site-version.sh --tree
+        run: tools/bench2j-gate.py
+      # A `LEG` line in a round log is a space-separated key=value record
+      # whose WARN= is MULTI-VALUED: the driver's report() adds one on
+      # every shaped leg (and on a contaminated unshaped one) and guard 7
+      # adds WARN=conn_capped:<host>:<n> once PER CAPPED HOST, so a shaped
+      # leg that bounced off two provider caps carries THREE on one line,
+      # legitimately. No emitter-side change can reduce that: conn_capped
+      # is shipped and banked, and c208parse.py findalls for it by name.
+      # So the rule lives on the reader side - find, never dict - and six
+      # readers carry it as a comment on the line where they build their
+      # dict (8550b934). Nothing enforced it for a SEVENTH, and these
+      # scripts are standalone copy-paste descendants of each other with
+      # three different regex spellings of the same construct, so the next
+      # one will be a copy of one of the six: fine if it copies the
+      # comment, silently wrong if it does not, and the field it drops is
+      # the one that exists to stop a shaped gbytes being published.
+      #
+      # `--selftest` first, same reason as the doc, ref and overflow
+      # gates: the fingerprint is narrow on purpose - a collapse to a
+      # dict, of a regex with a group on each side of a literal `=`, in a
+      # file that anchors on a LEG line - so a refactor could quietly turn
+      # it into a no-op. Private repo only, like the four above.
+      - name: LEG-line WARN gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/leg-warn-gate.py --selftest && tools/leg-warn-gate.py
+      # The integration suites shell out to the external par2 binary to
+      # build recovery sets, and it is not on every box (a bench box has
+      # none), so every par2-dependent test is meant to open with the
+      # hand-copied `if !have_par2() { ...; return; }` guard. Seventeen
+      # copies in e2e.rs and nothing enforcing it: on 22 Aug 2026
+      # lean_verify_catches_corruption_at_the_block_layer turned out to be
+      # the one add_par2() caller that had never copied it, and failed on
+      # that box while the other 124 passed (fixed by hand in 11291b5e).
+      # The guard is copied from the test above yours, so the next new
+      # test does the same. Transitive on purpose: a test reaching par2
+      # through a fixture helper two calls away needs the guard as much.
+      # `--selftest` first, same reason as the five above. Private repo
+      # only, like them.
+      - name: par2 guard gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/par2-gate.py --selftest && tools/par2-gate.py
+      # The lab notebook cites the driver a round rode by content sha, then
+      # relates it to somewhere the reader can check - "byte-identical to
+      # origin/main", "taken from origin/main". The sha is durable; the
+      # relation is true only at the instant it is typed, and on a repo
+      # taking a push every ~90 seconds it decays the same afternoon while
+      # still reading as authoritative. Three such clauses were found stale
+      # in ONE day on 22 Aug 2026 (9f300291, 70f4685e, 8c99468c), one of
+      # them having shipped stale 29 minutes after publication, and two
+      # more the pass after. The convention was already written down in the
+      # bench-report skill before two of the five were authored, which is
+      # the argument for a gate rather than a sixth reminder.
+      #
+      # A TEXT gate: it never runs git and never resolves a sha. Re-hashing
+      # on origin/main was rejected - it needs a fetch to mean anything, it
+      # would redden entries nobody touched, and its verdict would change
+      # while the file did not. The rule it holds is the durable half: a
+      # claim about a moving ref must carry the instant it was true.
+      # Measured 8 hits / 8 real across four snapshots of the file before
+      # shipping; the script's docstring has the numbers and the
+      # doc-gate rejected arm they are held against. `--selftest` first,
+      # same reason as the five gates above. Private repo only, like them.
+      - name: provenance gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/provenance-gate.py --selftest && tools/provenance-gate.py
+      # Every LEG driver's report() prints a contamination warning when the
+      # NIC's byte counter runs further above the client's own count than
+      # this box's framing tax explains, and the excess is what stops a
+      # contaminated leg's byte column being published. That threshold is
+      # PER-NIC - one box's measured tax plus headroom - and it was a
+      # literal 108 in four hand-maintained copy-paste sibling drivers
+      # until 22 Aug 2026, with no way to configure it even on a box whose
+      # tax had already been measured (TODO 247 is that live on a second
+      # box). 4a302c24f moved all four onto a variable the rig library
+      # DERIVES from the same measured baseline guard 8 runs on.
+      #
+      # It also added a scanner for the rule to the rig library's selftest
+      # - which is run on the bench box after a rig deploy, long after the
+      # push, and is the exact position the generated-driver check above
+      # sat in while its subject rotted twice. These drivers are
+      # standalone copy-paste descendants of each other with no shared
+      # module, so the NEXT one is a copy of one of them: fine if it
+      # copies the derived form, silently wrong if it copies a literal.
+      # And silently wrong here means a warning that either fires on every
+      # healthy leg until people stop reading it or never fires on a
+      # contaminated one - the one defect shape a round log cannot show
+      # you, because always-there reads as noise and never-there reads as
+      # a clean round.
+      #
+      # Scope is the EMIT, not a list of the four: a list is a gate that
+      # cannot see the fifth, and the fifth is the point. `--selftest`
+      # first, same reason as the gates above - the fingerprint is narrow
+      # (the guard above the emit, the literal range starting past the
+      # scale factor every copy carries) so a refactor could quietly turn
+      # it into a no-op. A wrapper under tools/ rather than the tree's own
+      # path, and private repo only, for the same reason as the generator
+      # gate above: that path is private vocabulary and this file ships to
+      # the public repo verbatim.
+      - name: iface threshold gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/iface-excess-gate.py --selftest && tools/iface-excess-gate.py
+      # `libc::getrusage` and friends do not exist on Windows, and between
+      # 21 and 23 Aug 2026 that one trio held windows-build AND
+      # windows-clippy red on main for two days across four fix commits in
+      # two lanes (4b885f95a, 6f19167b9, 8a59adbaf), each round finding the
+      # next site only from the previous round's CI log. Nothing enforced
+      # it and vigilance cannot: every gate above is HOST-target, so a
+      # session on a mac or a linux box runs all of them, sees green,
+      # pushes and reddens Windows. The only local way to see it is a
+      # cross-target check, which costs a full dependency build.
+      #
+      # Two properties of this file made those two days worse than they
+      # look. windows-build stops at the first failing target, so it names
+      # one site per round; and windows-unit is needs:-gated on it, so
+      # while the build is broken the Windows TEST SUITE reads `skipped`
+      # rather than red - Windows had no coverage at all for two days and
+      # only one job looked wrong. The note above windows-unit says to
+      # confirm all four shards reached success before claiming Windows
+      # coverage, and this gate is the half that stops the build breaking
+      # in the first place.
+      #
+      # Scoped by measurement, like the doc and ref gates: all 162 libc::
+      # sites in the tree already sit inside a cfg that excludes Windows,
+      # so refusing the WHOLE of libc (rather than a list of names someone
+      # has already been burned by) costs nothing and needs no baseline.
+      # `--selftest` first, and earned: the exemption logic IS the gate,
+      # and a variant that over-exempts still prints a green line. Two of
+      # its cases re-run a rejected exemption rule to assert it really does
+      # still break. Private repo only, like the gates above.
+      - name: windows portability gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/win-portability-gate.py --selftest && tools/win-portability-gate.py
+      # `crates/nzbfast/tests/harness/mod.rs` is the one daemon launcher
+      # ~thirty test binaries share, and it carries a file-wide
+      # `#![allow(dead_code)]` because it HAS to: each binary uses a
+      # subset of it, so an item this one does not call is code for the
+      # binary next door, and without the allow the clippy step below
+      # reddens on the first suite that never reads a log. The cost is
+      # that a genuinely dead helper - one whose last caller went with a
+      # deleted suite - is invisible in the file every daemon suite
+      # depends on. TODO §242 item 2 named that the day the lift landed;
+      # this is it.
+      #
+      # A name grep, not a resolver, and narrow on purpose: an associated
+      # item is looked for as a CALL (`.name(` / `::name(`) rather than as
+      # a bare word, which is the difference between a gate and a rubber
+      # stamp - `.text(` has 2 hits in that tree where the word `text` has
+      # 62. The corpus is the whole test tree minus the item's OWN
+      # definition, harness included, so a type only ever handed out by
+      # inference (`Daemon::stop` -> `DaemonLog`) is not called dead.
+      # `--selftest` first, and here it is the whole gate: the needle
+      # shapes are all that stand between this and passing everything, so
+      # the selftest pins that a bare-word needle matches a fixture the
+      # call-shaped one does not. Private repo only, like the gates above.
+      - name: harness dead-item gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/harness-gate.py --selftest && tools/harness-gate.py
       - name: clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # No escapes: every warning blocks. The categories still allowed
@@ -426,6 +1301,35 @@ jobs:
         # as the test build needs it, so the build below reuses that work
         # rather than paying for it twice in two jobs.
         #
+        # `-p nzbfast-ffi` is here for LINT SCOPE too, and this step and
+        # the windows-gated clippy step are now the ONLY two things in
+        # this file that compile that crate, since the archive step
+        # below went back to default members (TODO 270 follow-on).
+        # It is not just about the ffi crate's own 30 lines: nzbfast-ffi
+        # is what turns nzbfast's `ffi` feature on, and that feature has
+        # exactly ONE site in the whole workspace -
+        # `crates/nzbfast/src/lib.rs:21`'s `#![cfg(feature = "ffi")]`.
+        # Without it that crate root compiles to nothing, so the two
+        # `#![expect(...)]` waivers it carries are never judged and the
+        # iOS staticlib's root is never linted at all.
+        #
+        # Measured 23 Aug 2026, cold, on an 18-core M-series box:
+        # 27.7 s -> 34.9 s wall, 106 s -> 122 s of CPU. Clippy is
+        # check-mode and links nothing, so this buys the whole ffi root
+        # for none of the 637 MB staticlib and 384 MB rlib the archive
+        # build used to emit for it.
+        #
+        # And it is STRICTLY stronger than what `--workspace` on the
+        # archive gave. Proved by probe on 23 Aug 2026 with a
+        # deliberately unfulfilled `#![expect(unused_parens)]` injected
+        # into that crate root: the old clippy line (no nzbfast-ffi)
+        # exits 0 and never sees it; `cargo nextest archive --workspace`
+        # sees it but only as a WARNING, because nothing sets
+        # `-D warnings` on the archive build, so it exits 0 too; this
+        # line fails it with `error: this lint expectation is
+        # unfulfilled`. The protection everyone assumed the archive flag
+        # was providing was an unread line in a build log.
+        #
         # --locked, and it is load-bearing for this whole job, not a
         # habit: without it cargo will happily RE-RESOLVE a manifest edit
         # whose Cargo.lock was never staged, so the gate goes green
@@ -442,7 +1346,7 @@ jobs:
         # Consequence to expect: re-running an OLD commit whose lock
         # predates a manifest edit now fails where it used to pass. That
         # is the flag doing its job, not a regression.
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
       # Prebuilt binary pinned by version and checked by SHA256 rather
       # than trusted, same pattern (and rationale) as the cargo-deny
       # step below.
@@ -465,20 +1369,73 @@ jobs:
           rm cargo-nextest.tar.gz
       # THE ONE BUILD. Everything the shards run comes out of here.
       #
-      # `--workspace` with no exclusions and no `--features`, and both
-      # halves are deliberate:
+      # DEFAULT MEMBERS, no exclusions and no `--features`, and every
+      # part of that is deliberate:
       #
-      #   `--workspace` is the direction that matters - a test target
-      #   added tomorrow is archived and run automatically, and the only
-      #   names anyone maintains are the few that must NOT be. It
-      #   replaced three steps naming `-p nzbkit --lib`, `-p nzbfast
-      #   --bin nzbfast` and two integration targets; everything else was
-      #   reachable only through pr-check.yml, which triggers on
+      #   NO PACKAGE SELECTION AT ALL is the direction that matters - a
+      #   test target added tomorrow is archived and run automatically,
+      #   and the only names anyone maintains are the few that must NOT
+      #   be. It replaced three steps naming `-p nzbkit --lib`, `-p
+      #   nzbfast --bin nzbfast` and two integration targets; everything
+      #   else was reachable only through pr-check.yml, which triggers on
       #   `pull_request` while this repo pushes straight to main. 27
       #   integration targets plus vendor/rars (728 tests, the RAR
       #   engine, under active work), vendor/tiny_http and nzbtray were
       #   covered by a workflow nobody fires. That is how a conn_tuner
       #   assertion stayed red for a day with main green.
+      #
+      #   NOT `--workspace`, and it said `--workspace` here from the day
+      #   this step was written until 23 Aug 2026. `--workspace`
+      #   OVERRIDES the `default-members` line in the root Cargo.toml,
+      #   and that line exists for one reason, which its own comment
+      #   states: it holds crates/nzbfast-ffi out, because that crate
+      #   turns nzbfast's `ffi` feature on and feature unification then
+      #   compiles the whole nzbfast module tree a SECOND time, as the
+      #   lib target. So the manifest documented a protection this step
+      #   was quietly cancelling. Auto-enrolment is untouched by the fix:
+      #   the only package default-members drops is the one the manifest
+      #   already names, and a crate added tomorrow is a default member
+      #   unless somebody edits that line.
+      #
+      #   What the duplicate bought, measured 23 Aug 2026 on this tree:
+      #   NOTHING on the test side. `feature = "ffi"` has exactly one
+      #   site in the workspace (`crates/nzbfast/src/lib.rs:21`), so the
+      #   lib root and the bin root compile byte-identical module files
+      #   under a byte-identical feature set for every dependency -
+      #   confirmed by adding `--workspace` to a warm default-members
+      #   target, which recompiles nzbfast and nzbfast-ffi and NOTHING
+      #   else. The lib suite's 1,774 tests were a strict SUBSET of the
+      #   bin suite's 1,776 (the two extra are the CLI-arg tests a lib
+      #   root has no CLI for), 1,774 of 1,774 shared, zero unique.
+      #
+      #   What it cost, same measurement, cold, 18-core M-series box,
+      #   re-taken on the tree this commit lands on (so it is after the
+      #   rars opt-level override in Cargo.toml, which moves the test
+      #   legs a long way but not the flag's delta):
+      #
+      #     archive build     50.9 s -> 64.7 s wall, 381 s -> 455 s CPU
+      #     archive artifact   159 MB -> 244 MB   (x5 downloads a push)
+      #     cached target/    3.30 GB -> 5.53 GB
+      #     full nextest run   4,701 -> 6,464 tests, 75.8 s -> 90.9 s
+      #
+      #   The single largest file in the whole target directory was
+      #   `libnzbfast_ffi.a` at 637 MB - the iOS staticlib, which no CI
+      #   job links - with the ffi lib rlib at 384 MB behind it. That is
+      #   2.23 GB of cached target on the job that has died of ENOSPC
+      #   four times (see the CARGO_INCREMENTAL note above).
+      #
+      #   WHAT DROPPING IT LOST, and where each piece went. The ffi crate
+      #   root and the nzbfast lib root stop being COMPILED here; both
+      #   are now compiled and `-D warnings` linted by the clippy step
+      #   above, which gained `-p nzbfast-ffi` in the same commit and is
+      #   strictly stricter than this step ever was (that step's comment
+      #   has the probe). The two ffi integration tests (`cycle`,
+      #   `reclaim`, 24.4 s and 32.5 s - the two slowest tests in the
+      #   whole non-heavy set, and by a distance now that the rars
+      #   override has taken the nzbkit fixtures down) move to
+      #   nightly.yml's `long-suites`,
+      #   beside the seven heavy targets, for the same reason those are
+      #   there. nightly's armv7-cross job still runs them under qemu.
       #
       #   No `--features heavy-tests`, so cargo never BUILDS the seven
       #   heavy targets (TODO 116b) and they never enter the archive.
@@ -501,7 +1458,7 @@ jobs:
       - name: build test archive
         id: archive
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.nextest.outcome == 'success' }}
-        run: cargo nextest archive --locked --workspace --archive-file nextest-archive.tar.zst
+        run: cargo nextest archive --locked --archive-file nextest-archive.tar.zst
       # `always()`, and immediately after the build - see the restore
       # note above. A failed suite must not cost the next run its
       # dependency artifacts.
@@ -511,7 +1468,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v3-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # compression-level 0: the archive is already zstd, and re-zipping
       # 250 MB of incompressible data costs a minute and saves nothing.
       # retention 1 day - nothing outside this run ever reads it.
@@ -522,41 +1479,6 @@ jobs:
           path: nextest-archive.tar.zst
           retention-days: 1
           compression-level: 0
-      # Advisory / license / source gate against deny.toml. Prebuilt
-      # binary pinned by tag and checked by SHA256 rather than trusted
-      # (same pattern as the par2 fetch in pr-check.yml); a cargo
-      # install would cost minutes of compile per push. nightly.yml runs
-      # the same check on a schedule to catch advisories published
-      # against an unchanged tree.
-      - name: install cargo-deny
-        id: deny
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          ver="0.20.2"
-          # Same retry rationale as the cargo-nextest step above; this is
-          # the step that lost run 31619042403 to `curl: (56) Connection
-          # died`.
-          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
-            --connect-timeout 20 -o cargo-deny.tar.gz \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/cargo-deny-${ver}-x86_64-unknown-linux-musl.tar.gz"
-          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny.tar.gz" | sha256sum -c -
-          tar -xzf cargo-deny.tar.gz
-          sudo mv "cargo-deny-${ver}-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/
-          rm -rf cargo-deny.tar.gz "cargo-deny-${ver}-x86_64-unknown-linux-musl"
-      - name: cargo deny
-        # The gate this job lost for four days in the 7-10 Aug outage,
-        # for being last in the file.
-        #
-        # --locked, same reason as clippy and the archive: an advisory
-        # and license verdict against a graph cargo re-resolved on the
-        # fly does not describe what we ship. Note the POSITION - it
-        # goes before the subcommand. cargo-deny puts its manifest flags
-        # on the top-level parser and does not mark them global, so
-        # `cargo deny check --locked` is an unknown-argument error and
-        # would redden this step outright. Verified against the 0.20.2
-        # tag pinned in the install step above.
-        if: ${{ !cancelled() && steps.deny.outcome == 'success' }}
-        run: cargo deny --locked check
 
   # The Linux suite, four ways, off `check`'s archive. This job compiles
   # NOTHING: no toolchain step, no cache, no target/ - `cargo-nextest`
@@ -586,7 +1508,10 @@ jobs:
   # nothing is run twice.
   linux-tests:
     # `!cancelled()` plus a REAL precondition, the TODO 116.4 form. NOT
-    # `needs: check` on its own - see the `archive` output above.
+    # `needs: check` on its own - see the `archive` output above. When
+    # that precondition is not met these four rows read `skipped`, and
+    # `suites-ran` at the foot of this file is what tells the two
+    # reasons for that apart.
     if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.check.outputs.archive == 'success' }}
     needs: check
     runs-on: ubuntu-latest
@@ -682,6 +1607,248 @@ jobs:
             --workspace-remap "$GITHUB_WORKSPACE" \
             --partition count:${{ matrix.shard }}/4 \
             -E "$NT_EXCLUDE"
+  # ===================================================================
+  # THE ONE-PROCESS UNIT SUITE. The same binaries `linux-tests` runs,
+  # run the OTHER way: one process per test BINARY instead of one per
+  # TEST.
+  #
+  # Every test job in this repo runs under nextest, and nextest gives
+  # every test its own process. That is what makes the shards fast and
+  # their failures attributable, and it is also a blind spot with a
+  # hard edge: a test that leaves process-global state behind - a
+  # `static` OnceLock/Mutex/Atomic, an env var, a cached global - can
+  # never be observed by the test that then reads it, because the two
+  # never share a process. Verified with a two-test probe crate on 23
+  # Aug 2026: test A stores 7 into a `static AtomicU64`, test B asserts
+  # it reads 0. That pair FAILS under `cargo test` and PASSES under
+  # `cargo nextest run`.
+  #
+  # Not theoretical here. 84ae50bd7 landed two tests of the same
+  # per-service property in different modules of the nzbfast bin.
+  # `crate::ratelimit`'s cooldown table is a process-global
+  # `OnceLock<Mutex<HashMap<..>>>`; one test ended by penalising a
+  # provider for the clamped maximum of an hour, and a test over in
+  # `crate::wall` read exactly that provider as its "an unrelated
+  # service is untouched" control. main was red on `cargo test -p
+  # nzbfast --bin nzbfast` for a full day and NO CI JOB SAID SO. The
+  # collision itself is fixed (a29a8e4cc made the buckets disjoint
+  # across the binary); this job is the half that was still missing.
+  # The class is live in both first-party crates - 79 statics with
+  # interior mutability in crates/nzbfast/src, 88 in crates/nzbkit/src.
+  #
+  # COMPILES NOTHING, exactly like `linux-tests`: it runs the archived
+  # binaries directly, so it costs a checkout, a download and the run.
+  # Two cheaper-looking spellings were measured and are BOTH wrong
+  # here:
+  #
+  #   `cargo test -p nzbfast --bin nzbfast` - the line CLAUDE.md
+  #   documents, and the right one to type by hand - resolves FEWER
+  #   features than `--workspace` does (nzbfast-ffi is a workspace
+  #   member and turns nzbfast's `ffi` feature on; tokio and rusqlite
+  #   unify wider). Measured on a target/ warm from the archive build:
+  #   it recompiles five crates, 33 s, and writes a SECOND full
+  #   artifact set beside the first - on the runner whose `check` job
+  #   has died of ENOSPC four times.
+  #
+  #   `cargo test --workspace --lib --bins` does reuse the archive's
+  #   artifacts exactly (measured: zero `Compiling` lines) - but it
+  #   needs a toolchain and that warm target/, which only `check` has.
+  #   Putting the run in `check` buys the same coverage at the cost of
+  #   the one job whose verdict interval the note above `env:` spends a
+  #   page measuring, so it stays out here where it is free.
+  #
+  # WHICH BINARIES: every `lib`/`bin` unit binary whose package lives
+  # under `crates/`, selected from nextest's own binary list rather
+  # than named in this file. That auto-enrols a crate added tomorrow,
+  # for the same reason the archive step takes no package selection,
+  # and it leaves the vendored crates out - their unit tests are
+  # upstream's and this job is about OUR globals. Today it selects four
+  # binaries and 3,596 tests: nzbkit 1,803, the nzbfast bin root 1,776,
+  # nzbtray 17, and the nzbfast lib root 0.
+  #
+  # It selected FIVE and about 5,370 until 23 Aug 2026. Both numbers
+  # fell for the same reason and neither is a coverage loss. The fifth
+  # binary was nzbfast-ffi's own (empty) lib root, which is no longer
+  # archived at all. The 1,774 tests were the nzbfast LIB root - the
+  # ffi root over the same module tree - which the note here used to
+  # call "a near-duplicate second sample rather than new coverage",
+  # kept only because excluding it would have meant maintaining a name.
+  # That was too generous by exactly one word: it was an EXACT
+  # duplicate. `feature = "ffi"` has one site in the workspace, so the
+  # two roots compile the same module files under the same resolved
+  # features, and its 1,774 tests were a strict SUBSET of the bin
+  # root's 1,776. Nothing is named here to exclude it, then or now -
+  # the archive step dropped `--workspace`, the `ffi` feature went off
+  # with it, and that root now compiles to an empty binary the selector
+  # still picks up and nextest still runs, in 0 s. See the long note at
+  # the archive step for what else that flag was costing.
+  #
+  # WHAT IT COSTS, measured on the runner in the first run that had it
+  # (32660095310), which was BEFORE that change - so read the nzbfast
+  # lib row as the saving, not as a current cost:
+  #
+  #   nzbfast lib       57.9 s   -> now 0 s, the root is empty
+  #   nzbfast-ffi lib      0 s   -> no longer archived
+  #   nzbfast bin       56.9 s        nzbtray bin   0 s (17 tests)
+  #   nzbkit lib       731.0 s
+  #   fixed overhead    ~45 s (checkout, nextest, artifact, extract)
+  #   ---------------------------------------------------------------
+  #   job             14m55s, less the 57.9 s on the first row
+  #
+  # nzbkit is 82% of that and it is CPU-BOUND, so no flag recovers it.
+  # Swept locally on an 18-thread box: 4 threads 164 s, 16 threads
+  # 97 s, 32 threads 116 s (oversubscribed). The runner has 4 vCPUs, so
+  # it is already at the bottom of that curve and raising
+  # `--test-threads` past the core count buys nothing; the 4.5x between
+  # 164 s there and 731 s here is core speed, not scheduling. And the
+  # one thing that WOULD parallelise it - sharding - is the property
+  # this job exists to remove, so it is not available by construction.
+  #
+  # It is kept anyway, and that is a decision rather than an oversight.
+  # nzbkit's globals are mostly runtime KNOBS (`disk::ON`,
+  # `pacing::ON`, `mem::OVERRIDE`, `bufpool::OVERRIDE`, `steer::V`), so
+  # a test that flips one and does not put it back does not fail
+  # anything - it silently changes the configuration every later test
+  # in that binary measures against. That is a worse failure than the
+  # ratelimit one above and nothing else in this repo can see it.
+  # If the bill ever does matter, the lever is to move THIS job (not
+  # its selection) to nightly.yml and leave the ~2 min of nzbfast
+  # binaries per push, which is where the known incident was.
+  #
+  # `timeout-minutes: 30`, not 20, and for the reason `check`'s cap
+  # note gives one way round: 14m55s under a 20 minute cap is 5
+  # minutes of headroom against a suite that grew 2,556 -> 3,224 tests
+  # inside one hour of main activity on 5 Aug. 30 matches `check`.
+  #
+  # DEFAULT THREAD COUNT, not `--test-threads=1`. Serial is stricter -
+  # it is the sequential shape of this class, A finishes and THEN B
+  # reads - and it is what a human should reach for when chasing one
+  # down. It is also about 3x the wall clock (measured on the nzbfast
+  # bin root: 96.7 s serial against 33.3 s parallel), and the PARALLEL
+  # run is what caught the incident above. If a leak is ever found that
+  # the parallel run missed, the flag is the lever, not the job.
+  #
+  # DELIBERATELY NOT in `suites-ran` at the foot of this file: this job
+  # skips on exactly the condition `linux-tests` skips on (`check`'s
+  # archive), so the Linux row there already reports the silence.
+  # ===================================================================
+  unit-one-process:
+    # Same form and same reason as `linux-tests` above: the REAL
+    # precondition is the archive, not `check`'s conclusion.
+    if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.check.outputs.archive == 'success' }}
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ci-unit-one-process-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      # The checkout is not decoration, for the reasons the note above
+      # `linux-tests` gives (fixture-backed tests read files from the
+      # tree) and for one more of this job's own: `nextest list`
+      # refuses a `--workspace-remap` directory with no workspace root
+      # manifest in it, and refuses it AFTER extracting, so a missing
+      # checkout would fail the step rather than quietly list nothing.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: install cargo-nextest
+        run: |
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-archive-linux
+      # The same guard `linux-tests` carries, and it is load-bearing
+      # twice over here. Read the long note above that step for the
+      # `env!("CARGO_BIN_EXE_*")` half; the half specific to this job is
+      # that the `binary-path` nextest reports is the path the binary
+      # was BUILT at, not the path it was just extracted to. Those are
+      # the same string only because every runner of an OS gets the same
+      # workspace, which is the assumption this step refuses to leave
+      # implicit.
+      - name: assert this runner's workspace matches the build's
+        shell: bash
+        env:
+          WANT: ${{ needs.check.outputs.workspace }}
+          GOT: ${{ github.workspace }}
+        run: |
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::this runner's workspace is '$GOT' but the archive was built in '$WANT'."
+            echo "::error::The archived binaries' paths and their baked CARGO_BIN_EXE_* would both be wrong."
+            exit 1
+          fi
+          echo "workspace matches the build job: $GOT"
+      # Extracting to the workspace root is what puts every binary back
+      # exactly where it was built - the archive stores its members at
+      # relative `target/debug/...`. `list` rather than `run`: all this
+      # invocation is asked for is the extraction and the binary
+      # inventory. Nothing here needs cargo or rustup on PATH (verified
+      # with both removed), same as the shards.
+      - name: extract the archive and inventory its binaries
+        run: |
+          cargo-nextest nextest list \
+            --archive-file nextest-archive.tar.zst \
+            --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --list-type binaries-only --message-format json > unit-binaries.json
+      # Fixed text reading a file, no `${{ }}` interpolation - the same
+      # rule every scripted step in this file follows.
+      - name: select the first-party unit binaries
+        run: |
+          python3 - <<'PY' > unit-binaries.tsv
+          import json
+          inventory = json.load(open("unit-binaries.json"))["rust-binaries"]
+          for binary_id, binary in sorted(inventory.items()):
+              # `lib`/`bin` are the unit-test binaries; `test` is an
+              # integration target, which gets no process-global
+              # exposure the shards do not already give it.
+              if binary.get("kind") not in ("lib", "bin"):
+                  continue
+              # First-party only. A package id is a path URL, so this
+              # asks where the crate lives rather than what it is
+              # called: `crates/` is ours, `vendor/` is upstream's.
+              if "/crates/" not in binary.get("package-id", ""):
+                  continue
+              print(binary_id, binary["binary-path"], sep="\t")
+          PY
+          cat unit-binaries.tsv
+      - name: run each first-party unit binary in ONE process
+        shell: bash
+        run: |
+          # A job that selected nothing and exited 0 would be a green
+          # tick over zero coverage, which is the failure mode the whole
+          # note above this job exists to remove. Refuse it.
+          if [ ! -s unit-binaries.tsv ]; then
+            echo "::error::no first-party unit binary was selected out of the archive."
+            echo "::error::Either the archive is not what it was, or the selection above stopped matching."
+            exit 1
+          fi
+          rc=0
+          while IFS=$'\t' read -r id path; do
+            if [ ! -x "$path" ]; then
+              echo "::error::$id: '$path' is not executable on this runner."
+              rc=1
+              continue
+            fi
+            echo "::group::$id"
+            if "$path"; then
+              echo "$id: ok"
+            else
+              rc=1
+              # The id stays OUT of `title=`: a binary id contains
+              # `::` (`nzbfast::bin/nzbfast`), and GitHub ends the
+              # annotation's properties at the first `::` it finds, so
+              # an id in the title truncates it and swallows the
+              # message. In the message body a `::` is just text.
+              echo "::error title=A unit binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken: one test in it is leaving process-global state that another one reads. Reproduce with 'cargo test' - never nextest - on that target, and narrow it with '-- --test-threads=1'. libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' finds the polluter itself, in minutes."
+            fi
+            echo "::endgroup::"
+          done < unit-binaries.tsv
+          exit "$rc"
 
   # ===================================================================
   # WINDOWS. The same fast unit suites, on every push.
@@ -771,17 +1938,18 @@ jobs:
           py=python3; command -v $py >/dev/null 2>&1 || py=python
           echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
       # runner.os is in the key, so this cannot collide with the Linux
-      # job's cache. The `-v3` suffix rides with the
-      # CARGO_PROFILE_TEST_DEBUG change at the top of this file, in this
-      # same commit, for the reason spelled out there: that flag moves
-      # every fingerprint in the archive this key would otherwise hit.
+      # job's cache. The `-v4` suffix rides with the rars opt-level
+      # override in the workspace Cargo.toml (and, before it, the
+      # CARGO_PROFILE_TEST_DEBUG change at the top of this file), in that
+      # same commit, for the reason spelled out there: both move
+      # fingerprints in the archive this key would otherwise hit.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: cache
         with:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v3-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       # The Linux twin of this step carries the reasoning. pwsh, and
       # -ErrorAction SilentlyContinue, because Remove-Item throws on a
       # missing path where `rm -rf` does not, and a cold cache is
@@ -828,24 +1996,28 @@ jobs:
           Remove-Item cargo-nextest.zip
           "C:\nextest" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       # The Windows half of "build once". Identical expression to the
-      # Linux archive step - same `--workspace`, same absent
+      # Linux archive step - same absent package selection, same absent
       # heavy-tests feature - because the two legs must archive the same
-      # test set or one of them is quietly narrower. That includes
-      # --locked: the two legs must build the COMMITTED dependency graph
-      # or one of them is testing a resolution the repo does not
-      # contain, and this leg banks its artifacts under a cache key
-      # derived from that same committed lock.
+      # test set or one of them is quietly narrower. Both legs dropped
+      # `--workspace` on 23 Aug 2026 and they must drop it TOGETHER: the
+      # long note at the Linux step has the measurements, and the reason
+      # to keep the two expressions character-identical is that a
+      # divergence here is invisible until a test exists on one OS only.
+      # That includes --locked: the two legs must build the COMMITTED
+      # dependency graph or one of them is testing a resolution the repo
+      # does not contain, and this leg banks its artifacts under a cache
+      # key derived from that same committed lock.
       - name: build test archive
         id: archive
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.nextest.outcome == 'success' }}
-        run: cargo nextest archive --locked --workspace --archive-file nextest-archive.tar.zst
+        run: cargo nextest archive --locked --archive-file nextest-archive.tar.zst
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ always() && steps.cache.outputs.cache-hit != 'true' && steps.archive.outcome != 'skipped' }}
         with:
           path: |
             ~/.cargo/registry
             target
-          key: ci-private-v3-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+          key: ci-private-v4-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() && steps.archive.outcome == 'success' }}
         with:
@@ -861,7 +2033,11 @@ jobs:
   # `windows-unit (1)` .. `windows-unit (4)`; a filter on the prefix
   # still finds them. Confirm ALL FOUR reached success before claiming
   # Windows coverage - `skipped` and `failure` mean opposite things and
-  # the first one reads at a glance like Windows is fine.
+  # the first one reads at a glance like Windows is fine. That
+  # confirmation is no longer only yours to remember: `suites-ran` at
+  # the foot of this file turns the build-died case into a red row of
+  # its own, and its note carries the census of what `skipped` means
+  # here.
   #
   # Compiles nothing, same as linux-tests: no toolchain, no cache, no
   # target/. NZBFAST_LAN_TESTS is deliberately NOT set - it opens an
@@ -1053,8 +2229,19 @@ jobs:
       # nothing, so here it buys only the assertion - which is the half
       # that matters on a lane whose whole job is to lint cfg(windows)
       # code nobody else compiles.
+      #
+      # `-p nzbfast-ffi` for the reason the Linux clippy step gives at
+      # length: since the archive step stopped taking `--workspace`,
+      # the two clippy gates are the only things in this file that
+      # compile that crate and the `ffi` crate root behind it. It is
+      # here as well as on Linux because the archive step used to build
+      # it on BOTH legs, so leaving it off here would be a real drop in
+      # what Windows compiles rather than a move. Verified clean 23 Aug
+      # 2026 against x86_64-pc-windows-gnu from the mac box (brew
+      # mingw-w64 required, per the recipe in 012549847): 35.8 s ->
+      # 44.5 s wall, 127 s -> 149 s CPU, zero new findings.
       - name: clippy (windows-gated code)
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --locked --all-targets --no-deps --keep-going --features nzbkit/heavy-tests,nzbfast/heavy-tests -- -D warnings
 
   # The ARM64 gate. `cargo clippy --target` runs in check mode - it
   # never links - so an x64 runner covers aarch64-pc-windows-msvc with
@@ -1120,3 +2307,227 @@ jobs:
         run: |
           rustup target add aarch64-pc-windows-msvc
           cargo clippy --target aarch64-pc-windows-msvc --locked -p nzbfast -p nzbtray --no-deps -- -D warnings
+
+  # The SLIM build - `--no-default-features`, which drops `indexer` and
+  # with it the index/Spotnet/wall/enrichment stack. It is a shipped
+  # configuration (phones, small boxes; see the feature's own note in
+  # crates/nzbfast/Cargo.toml) and until this job nothing in CI compiled
+  # it: `check`, the shards, windows-* and nightly all build with default
+  # features, so `#[cfg(feature = "indexer")]` is only ever evaluated in
+  # its true arm.
+  #
+  # Measured 22 Aug 2026: it did not compile, and had not for long enough
+  # that nobody could say when it broke. Three E0599s of one shape - an
+  # ungated `Daemon` method calling gated ones (`db_maintenance_ok`, from
+  # the sweep-8 L12 work). That is the whole failure mode this guards:
+  # nothing about the slim build is subtle, it is just never looked at,
+  # and the compiler finds it in one pass the moment anything does.
+  #
+  # `--all-targets`, added 22 Aug 2026, and the reason it is here rather
+  # than in a job of its own is a MEASUREMENT that contradicts the guess
+  # that kept it out. The job shipped without it, so the slim TEST
+  # targets had never been built anywhere by anyone, and that hole cost
+  # a real breakage the same day: two E0425s on `WALL_HTML`, which is
+  # gated with the indexer stack in serve/assets.rs and was named by two
+  # UNGATED `#[cfg(test)]` sites, broken for an unknown length of time
+  # and fixed in c013e1878. The guess was that `--all-targets` roughly
+  # DOUBLES the job, which given the budget below would have made it a
+  # bad trade - a gate cancelled while pending more often can buy less
+  # than it costs. Four cold-to-cold runs on the dev Mac say otherwise:
+  #
+  #   quiet box   plain 21.6s / 20.7s     --all-targets 29.8s / 28.4s
+  #   loaded box  plain 68.1s             --all-targets 63.0s
+  #
+  # So +38% on a quiet box and INSIDE THE NOISE on a loaded one, not
+  # +100%: `--no-default-features` drops the six `required-features =
+  # ["heavy-tests"]` targets, and what is left (the bin's own cfg(test)
+  # build, the non-heavy integration tests, two examples) is 13.9s and
+  # 8 MB layered onto a warm slim tree, against ~250 dependency crates
+  # that both configurations pay for identically and that dominate a
+  # cold run. Expect roughly 2m03s -> 2m30s on the runner, not 4m.
+  #
+  # Two alternatives were declined on that number. Putting the slim
+  # `--all-targets` build in nightly.yml would find the breakage up to a
+  # day and ~200 commits later, and nightly is where the time-MEASURING
+  # suites live - this is a compile check that costs seconds. Giving it
+  # its own job would pay the whole cold dependency graph (~2 min, 275
+  # MB, no cache by design) a SECOND time to save eight seconds on the
+  # first; that is the carve-out reasoning above `jobs:` run backwards,
+  # because there the cheap half was seconds waiting behind minutes and
+  # here both halves are one two-minute graph.
+  #
+  # What it costs by this file's own law: the honest metric is the
+  # VERDICT INTERVAL, not the per-commit rate (see the long note above
+  # `env:`). main is fast-forward only and the single pending slot
+  # always holds the tip, so a cancelled run costs attribution, not
+  # coverage. This moves slim-check's interval by about 30 seconds and
+  # its blame window by well under a commit at the measured cadence.
+  #
+  # `cargo check`, not clippy, and no `-D warnings` - but NOT any longer
+  # for the reason this comment used to give. That reason was that the
+  # slim config is not warning-clean: about a dozen items are dead
+  # without `indexer` (the search-log constants, the scoreboard
+  # accessors, several Daemon fields) and silencing them would mean a
+  # dozen more cfgs on code the default build compiles. Re-measured 22
+  # Aug 2026 with `--all-targets` in hand and that is NO LONGER TRUE:
+  # the slim build emits zero warnings from `nzbfast`, in the plain
+  # command and this one alike, and `cargo clippy -p nzbfast
+  # --no-default-features --locked --all-targets --no-deps -- -D
+  # warnings` PASSES on this tree. (The three warnings you will still
+  # see are rustc's, from the vendored `rars` lib, which `--no-deps`
+  # does not silence because they are not clippy lints; they are
+  # identical under the plain command and are nobody's change.) So the
+  # standing follow-up - make the slim build warning-clean so this step
+  # can be tightened - has no work left in it, and the three
+  # `unused_mut` the gated-push idiom emits under `--all-targets` are
+  # silenced at the `let` rather than left for it.
+  #
+  # The tightening was still declined, on the same measurement that
+  # bought `--all-targets`, run the other way: cold on the same quiet
+  # box, `cargo check --all-targets` is 29.8s and the clippy line above
+  # is 82.7s. THAT is the doubling-and-more the `--all-targets` guess
+  # wrongly feared, and it buys little here - `check` already lints the
+  # default config with `-D warnings`, so the increment is slim-only
+  # lints, against a compile check that is the entire reason this job
+  # exists. Revisit if the cadence ever slackens; the precondition is
+  # met and it is one line.
+  #
+  # Cheap enough not to need any of the machinery above it. Cold on an
+  # M-series Mac: 274 MB of check-mode artifacts for the plain command
+  # (53s on the day the job landed, 21s on a quiet box - the spread is
+  # how many other sessions are building, and it is wider than the
+  # `--all-targets` delta), 276 MB for this one, most of the graph being
+  # dependencies that the default build shares. On the runner, the first
+  # real run of the plain command (32589275605, green): 2m03s for the
+  # job, 1m44s of it the cargo step, entirely cold. So no cache is
+  # restored - a different feature set is a different artifact tree, the
+  # same reason windows-arm64 does not restore one - and no disk reclaim
+  # is needed.
+  #
+  # `--locked`, as at every other cargo gate in this file.
+  slim-check:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-slim-check-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: check --no-default-features --all-targets (indexer off)
+        run: cargo check -p nzbfast --no-default-features --locked --all-targets
+
+  # ===================================================================
+  # DID THE TEST SHARDS ACTUALLY RUN? One row that answers it.
+  #
+  # `linux-tests` and `windows-unit` are gated on their build job's
+  # `archive` output, so when that build dies all four shards resolve
+  # to `skipped` - a grey dash on the summary next to one red X. That
+  # reads like a job with nothing to do, not like test coverage that
+  # did not happen. Between 21 and 23 Aug 2026 `windows-build` was red
+  # on main and the Windows suite ran ZERO tests for two days; only the
+  # build job looked wrong. The note above `windows-unit` answered that
+  # with an instruction to a human - "confirm all four reached success"
+  # - which is exactly the shape every gate in this repo replaced.
+  #
+  # THE HARD PART is that `skipped` has two causes that look identical
+  # on the summary and mean opposite things. Either the parent FAILED,
+  # so coverage silently did not happen, or the parent was CANCELLED
+  # because the next push displaced it while pending - which the long
+  # note above `env:` measures as the fate of most runs on this branch.
+  # Counted over the 400 runs on main of 21-23 Aug 2026, by job
+  # conclusion:
+  #
+  #   windows-build -> windows-unit      check -> linux-tests
+  #     328  cancelled -> skipped          313  cancelled -> skipped
+  #      41  success   -> success           70  success   -> success
+  #      20  failure   -> skipped           15  success   -> cancelled
+  #       9  success   -> failure
+  #
+  # A detector that fires on `skipped` alone therefore fires on 348 of
+  # 400 pushes and is pure noise. One that also requires the parent to
+  # have FAILED fires on 20, and each of those 20 is a commit that got
+  # no Windows coverage at all. `needs.<job>.result` is the field that
+  # separates the two, because `outputs.archive` is empty for both.
+  #
+  # THE PARENT'S RESULT ALONE IS NOT ENOUGH EITHER, and this is the
+  # half that reads backwards: `check` is red whenever clippy or one of
+  # its gates is red, and the archive it published is still good, so
+  # the shards DO run and there is nothing to report. Both halves are
+  # load-bearing - the parent failed AND the shards were skipped.
+  #
+  # MEASURED, not reasoned, on probe run 32643713906 - a throwaway
+  # branch, deleted after, the method TODO 116.4b used. Four parents,
+  # a matrix child each, gated character for character as the two jobs
+  # above:
+  #
+  #   parent red at a LATE step, archive good  -> child success
+  #   parent red AT the archive step           -> child skipped
+  #   parent success                           -> child success
+  #   parent cancelled by a superseding push   -> child skipped
+  #
+  # reading `needs.<parent>.result` failure / failure / success /
+  # cancelled in that order. A matrix child with one red leg and one
+  # green aggregated to `failure`, so a shard set that ran and failed
+  # can never be misread as one that never ran.
+  #
+  # TWO THINGS ABOUT `!cancelled()` THAT WERE WORTH MEASURING. On that
+  # same run a job was cancelled by its own concurrency group and this
+  # guard still ran, with `cancelled()` FALSE - per-job cancellation is
+  # not workflow cancellation, so a guard cannot inherit its silence
+  # from `!cancelled()` and has to stay quiet by its own expression.
+  # Then on run 32643756850 the whole run was cancelled through the
+  # API: the `!cancelled()` guard came out `cancelled` and reported
+  # nothing, while an `always()` twin beside it reported anyway. That
+  # is why this is `!cancelled()` and not `always()` - the same reading
+  # TODO 116.4a took, now with a run behind it.
+  #
+  # WHAT IT COSTS, honestly: one ubuntu job per push, a few seconds of
+  # runner time, and nothing at all while it waits on `needs:`. It is
+  # deliberately given NO concurrency group. The arithmetic above
+  # `env:` is that a grouped job loses its pending slot to the next
+  # push, and a guard displaced exactly when a build is slow and red is
+  # worse than no guard at all.
+  #
+  # THE FALSE POSITIVE, equally honestly: on a genuine build break this
+  # is a SECOND red row for one cause. That is the trade, and the
+  # second row is the one that says the suites did not run - which the
+  # first row does not say and never did.
+  #
+  # THE FALSE NEGATIVE is deliberate: when the shards themselves are
+  # displaced while pending (15 of 400 above) coverage also did not
+  # happen, and this stays quiet. That is the push-cadence problem the
+  # three costed options above `env:` decline to buy, not a broken
+  # build, and firing on it would drown the case this exists for.
+  # ===================================================================
+  suites-ran:
+    if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' }}
+    needs: [check, linux-tests, windows-build, windows-unit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Job results arrive through `env:` rather than inline `${{ }}`,
+      # so the script is fixed text and the expressions are data. Same
+      # rule as every other scripted step in this repo.
+      - name: were the test shards run?
+        shell: bash
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          LINUX_RESULT: ${{ needs.linux-tests.result }}
+          WBUILD_RESULT: ${{ needs.windows-build.result }}
+          WUNIT_RESULT: ${{ needs.windows-unit.result }}
+        run: |
+          rc=0
+          lane() {
+            printf '%-8s %-14s %-9s   shards %s\n' "$1" "$2" "$3" "$4"
+            if [ "$4" = skipped ] && [ "$3" = failure ]; then
+              echo "::error title=$1 tests never ran::$2 failed, so the four $1 shards were skipped. This commit has NO $1 test coverage - the red $2 row is not the whole story."
+              rc=1
+            fi
+          }
+          echo "lane     build job      result      test shards"
+          lane Linux   check         "$CHECK_RESULT"  "$LINUX_RESULT"
+          lane Windows windows-build "$WBUILD_RESULT" "$WUNIT_RESULT"
+          exit "$rc"

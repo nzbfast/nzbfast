@@ -57,8 +57,10 @@ data class ProbeResult(
 /**
  * Playback contract v1 (`mode=playback`): per-file readiness for one
  * job. `reason` is a closed token set - live, disk, pending,
- * not_fetched, not_started, no_media, failed, unknown - so the UI can
- * branch on it without reading prose.
+ * not_fetched, not_started, moving, no_media, failed, unknown - so the
+ * UI can branch on it without reading prose. `moving` is a wait (the
+ * payload is being relocated to its final folder), `no_media` is final;
+ * both carry ready=false, which is what the rows below branch on.
  */
 data class Playback(
     val ready: Boolean,

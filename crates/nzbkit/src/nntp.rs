@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::config::ServerConfig;
+use tracing::{info, warn};
 
 pub mod resolve;
 pub use resolve::{Resolve, ResolveFuture, SystemResolver, install_resolver, resolver_installed};
@@ -903,15 +904,23 @@ fn tls_provider(aes_accelerated: bool, pin_fast_suite: bool) -> rustls::crypto::
 
 /// The socket, buffered exactly once.
 ///
-/// TLS deliberately gets NO `BufReader`. rustls already holds decrypted
-/// plaintext and `tokio_rustls::TlsStream` hands it out as a borrowed
-/// chunk through `AsyncBufRead`, so a `BufReader` on top re-copies every
-/// byte for nothing. It cannot even amortise syscalls: rustls stops
-/// reading the socket the moment one record's plaintext is available
-/// (`wants_read()` is false while `received_plaintext` is non-empty, and
-/// its limit is 16 KB), so a 256 KB `BufReader` over TLS still delivers
-/// ~16 KB per call - it was pure copy cost. Plain TCP and the
-/// DEFLATE-wrapped stream buffer nothing themselves, so those keep ours.
+/// TLS deliberately gets NO `BufReader` on its PLAINTEXT side. rustls
+/// already holds decrypted plaintext and `tokio_rustls::TlsStream` hands
+/// it out as a borrowed chunk through `AsyncBufRead`, so a `BufReader`
+/// on top re-copies every byte for nothing. It cannot even amortise
+/// syscalls: rustls stops reading the socket the moment one record's
+/// plaintext is available (`wants_read()` is false while
+/// `received_plaintext` is non-empty, and its limit is 16 KB), so a
+/// 256 KB `BufReader` over TLS still delivers ~16 KB per call - it was
+/// pure copy cost. Plain TCP and the DEFLATE-wrapped stream buffer
+/// nothing themselves, so those keep ours.
+///
+/// The CIPHERTEXT side is the opposite case and does get one - see
+/// [`TLS_WIRE_READ_BUF`]. That same `wants_read()` rule means rustls
+/// reads the socket one record at a time (measured 16,133 bytes per
+/// `read()` on the loopback rig, TODO 70C), and a `BufReader` UNDER the
+/// `TlsStream` turns those into one read per buffer-full without
+/// touching the plaintext path.
 ///
 /// One stream, not a `tokio::io::split` pair: `send_body` and
 /// `read_body_into` are never in flight at the same time (NNTP
@@ -919,7 +928,7 @@ fn tls_provider(aes_accelerated: bool, pin_fast_suite: bool) -> rustls::crypto::
 /// bought nothing and cost the `AsyncBufRead` impl - `ReadHalf` does not
 /// forward it.
 enum Wire {
-    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
+    Tls(Box<tokio_rustls::client::TlsStream<tlswire::TlsSocket>>),
     Buffered(BufReader<Box<dyn Transport>>),
 }
 
@@ -1052,6 +1061,11 @@ pub struct Connection {
     /// file the previous range's rows as the next range's answer. Once
     /// set, `exec` refuses with `Closed` so the caller reconnects.
     desynced: bool,
+    /// Liveness counter for the OVER body read: every chunk taken off
+    /// the wire is added to it as it lands (see
+    /// [`Connection::note_over_progress`]). `None` for every caller that
+    /// does not ask, which is all of them but the header scan.
+    over_progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Hard bound on the whole connect sequence (DNS + TCP + TLS handshake +
@@ -1120,6 +1134,11 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 // `read_multiline_*` / `RateFloor` / `body_rate_floor` spelling.
 mod multiline;
 pub(crate) use multiline::*;
+
+// The userspace TLS socket - the ciphertext read buffer and the rung
+// that builds it (TODO 70C) - is a child module for the same reason.
+mod tlswire;
+use tlswire::userspace_tls;
 
 /// Resolve `host` (prefer IPv4 - providers count simultaneous source
 /// IPs, and macOS can otherwise spread connections across IPv4 +
@@ -1456,7 +1475,7 @@ fn tls_roots() -> rustls::RootCertStore {
     };
     use rustls::pki_types::pem::PemObject;
     match rustls::pki_types::CertificateDer::pem_file_iter(&p) {
-        Err(e) => eprintln!("NZBFAST_EXTRA_CA {p:?}: {e}"),
+        Err(e) => warn!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {e}"),
         Ok(it) => {
             let mut added = 0usize;
             for c in it {
@@ -1465,10 +1484,10 @@ fn tls_roots() -> rustls::RootCertStore {
                     .and_then(|c| roots.add(c).map_err(|e| e.to_string()))
                 {
                     Ok(()) => added += 1,
-                    Err(e) => eprintln!("NZBFAST_EXTRA_CA {p:?}: {e}"),
+                    Err(e) => warn!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {e}"),
                 }
             }
-            eprintln!("NZBFAST_EXTRA_CA {p:?}: {added} extra trust anchor(s)");
+            info!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {added} extra trust anchor(s)");
         }
     }
     roots
@@ -1583,7 +1602,7 @@ mod ktls_offload {
     /// point of the opt-in: an old kernel just downloads in userspace.
     pub(super) fn disable(why: &dyn std::fmt::Display) {
         if !OFF.swap(true, Ordering::Relaxed) {
-            eprintln!("kTLS: kernel declined the handoff ({why}); TLS stays in userspace");
+            info!(target: "ktls", "kernel declined the handoff ({why}); TLS stays in userspace");
         }
     }
 
@@ -1616,7 +1635,7 @@ mod ktls_offload {
                 // looks identical from the outside.
                 static LOGGED: AtomicBool = AtomicBool::new(false);
                 if !LOGGED.swap(true, Ordering::Relaxed) {
-                    eprintln!("kTLS: kernel TLS active - record crypto moved into the kernel");
+                    info!(target: "ktls", "kernel TLS active - record crypto moved into the kernel");
                 }
                 // Whatever rustls decrypted before the handoff (the NNTP
                 // greeting usually arrives in the same flight) rides
@@ -1866,17 +1885,6 @@ pub fn shared_tls_client_config() -> Arc<rustls::ClientConfig> {
     tls_client_config(false)
 }
 
-/// The plain userspace rung: rustls owns the record layer, as it has
-/// on every platform since the beginning.
-async fn userspace_tls(
-    name: rustls::pki_types::ServerName<'static>,
-    tcp: tokio::net::TcpStream,
-    pin_fast_suite: bool,
-) -> std::io::Result<Wire> {
-    let connector = tokio_rustls::TlsConnector::from(tls_client_config(pin_fast_suite));
-    Ok(Wire::Tls(Box::new(connector.connect(name, tcp).await?)))
-}
-
 /// One rung of the handshake ladder. `Ok(None)` means "the kernel
 /// refused kTLS, the socket is spent, dial again" - it cannot happen
 /// when kTLS is not compiled in.
@@ -1997,7 +2005,8 @@ impl Connection {
                         // everything; a genuine fault surfaces from the
                         // retry with its own error.
                         mark_tls_full_host(&server.host);
-                        eprintln!(
+                        warn!(
+                            target: "tls",
                             "{}: TLS handshake failed on the pinned cipher suite ({e}); \
                              retrying with the full cipher list",
                             server.host
@@ -2028,6 +2037,7 @@ impl Connection {
             over_supported: None,
             header_gzip: false,
             desynced: false,
+            over_progress: None,
         };
 
         let greeting = conn.read_status().await?;
@@ -2237,12 +2247,23 @@ where
 pub(crate) async fn read_gzip_multiline_generic<R>(
     reader: &mut R,
     out: &mut Vec<u8>,
+    arrivals: Arrivals<'_>,
 ) -> Result<(), NntpError>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let start = out.len();
+    // Every `consume` below is bytes off the WIRE, which is what a
+    // liveness watcher wants - the decompressed total says nothing about
+    // whether the socket is still moving. The header and trailer reads
+    // are not credited: they are a couple of dozen bytes and the body
+    // loop is where a slow stream actually spends its time.
+    let arrived = |n: usize| {
+        if let Some(f) = arrivals {
+            f(n as u64);
+        }
+    };
     // Sniff the framing from the first byte: 0x1f = gzip, 0x78 = zlib,
     // anything else = raw deflate (all three seen in the wild for this
     // extension - it predates any spec). flate2's Decompress does zlib
@@ -2319,11 +2340,13 @@ where
             out.extend_from_slice(&tmp[..out_made]);
             if out.len() - start > MAX_MULTILINE_BYTES {
                 reader.consume(consumed);
+                arrived(consumed);
                 return Err(NntpError::TooLarge(MAX_MULTILINE_BYTES));
             }
             match status {
                 flate2::Status::StreamEnd => {
                     reader.consume(consumed);
+                    arrived(consumed);
                     break 'stream;
                 }
                 // Needs more input than this chunk holds (or made no
@@ -2334,6 +2357,7 @@ where
             }
         }
         reader.consume(consumed);
+        arrived(consumed);
     }
     if gzip {
         // RFC 1952 trailer: CRC32 + ISIZE (mod 2^32). Verify BOTH. The
@@ -2483,6 +2507,9 @@ impl Connection {
             over_supported: self.over_supported,
             header_gzip: false,
             desynced: self.desynced,
+            // The COMPRESS upgrade is a new transport around the same
+            // socket, so a watcher installed before it keeps watching.
+            over_progress: self.over_progress,
         })
     }
 
@@ -2572,6 +2599,20 @@ impl Connection {
 
     /// OVER (falling back to XOVER) for an article-number range in the
     /// currently selected group.
+    /// Watch this connection's OVER body reads: every chunk taken off
+    /// the wire is added to `counter` as it lands.
+    ///
+    /// For a caller whose own deadline is coarser than one OVER - the
+    /// header scan collects WHOLE CHUNKS off a channel, and a 100k-row
+    /// range on a slow link is minutes of perfectly healthy transfer
+    /// that delivers nothing until it is finished - this is the
+    /// difference between a no-progress deadline and a whole-chunk one.
+    /// Relaxed both ways: the reader only ever needs to know the number
+    /// MOVED, never what it is.
+    pub fn note_over_progress(&mut self, counter: Arc<std::sync::atomic::AtomicU64>) {
+        self.over_progress = Some(counter);
+    }
+
     pub async fn over(&mut self, from: u64, to: u64) -> Result<Vec<OverEntry>, NntpError> {
         let mut st = if self.over_supported == Some(false) {
             // Known XOVER-only server: don't burn a round-trip on a
@@ -2622,10 +2663,34 @@ impl Connection {
             });
         }
         let mut raw = Vec::new();
+        // Credit the wire as it arrives, so a caller watching a whole
+        // chunk can tell a slow OVER from a dead one. The two arms are
+        // otherwise byte for byte what `read_multiline_into` and the
+        // sink-less gzip read did: same bound, same ceiling, no floor.
+        let watched = self.over_progress.is_some();
+        let counter = self.over_progress.clone();
+        // A plain local closure, not a boxed one: `Arrivals` is a
+        // `&dyn Fn(u64) + Sync` and a Box of that is NOT Send, which is
+        // enough to make this whole future unspawnable - and the scan
+        // fan-out spawns it.
+        let bump = move |n: u64| {
+            if let Some(c) = &counter {
+                c.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let arrivals: Arrivals<'_> = if watched { Some(&bump) } else { None };
         let body = if self.header_gzip {
-            read_gzip_multiline_generic(&mut self.wire, &mut raw).await
+            read_gzip_multiline_generic(&mut self.wire, &mut raw, arrivals).await
         } else {
-            self.read_multiline_into(&mut raw).await
+            read_multiline_paced_noting(
+                &mut self.wire,
+                &mut raw,
+                STREAM_IDLE_TIMEOUT,
+                MAX_MULTILINE_BYTES,
+                None,
+                arrivals,
+            )
+            .await
         };
         if let Err(e) = body {
             // The body read died partway - a CRC/length mismatch or an
@@ -2669,8 +2734,8 @@ impl Connection {
         self.send_unflushed("DATE").await
     }
 
-    /// Read the answer to a [`send_fence`]. Anything a BODY could have
-    /// answered means the stream is off by one and this slot holds
+    /// Read the answer to a [`Self::send_fence`]. Anything a BODY could
+    /// have answered means the stream is off by one and this slot holds
     /// somebody else's response; anything else - 111, or an error from
     /// a server that does not implement DATE - is the fence's own
     /// answer, and alignment holds through it.
@@ -2730,6 +2795,7 @@ impl Connection {
         &mut self,
         out: &mut Vec<u8>,
         expected: Option<&str>,
+        arrivals: Arrivals<'_>,
         id_echoed: &std::sync::atomic::AtomicBool,
         takedown: &std::sync::atomic::AtomicBool,
     ) -> Result<bool, NntpError> {
@@ -2746,7 +2812,17 @@ impl Connection {
         );
         match st.code {
             222 => {
-                self.read_multiline_into(out).await?;
+                // `arrivals` sees the body's chunks as they land (the
+                // flat path's twin of the two-phase read's sink).
+                read_multiline_paced_noting(
+                    &mut self.wire,
+                    out,
+                    STREAM_IDLE_TIMEOUT,
+                    MAX_MULTILINE_BYTES,
+                    None,
+                    arrivals,
+                )
+                .await?;
                 Ok(true)
             }
             423 | 430 | 451 => {
@@ -2763,7 +2839,7 @@ impl Connection {
         }
     }
 
-    /// [`read_body_into`] decomposed into the two phases a flat
+    /// [`Self::read_body_into`] decomposed into the two phases a flat
     /// whole-response timeout conflates:
     ///
     /// - **pre-byte** (`first_byte`): dispatch to status line. This is
@@ -2783,12 +2859,12 @@ impl Connection {
     /// measured time-to-status alongside the hit/miss so the caller can
     /// feed its EWMA (measured for misses too: a 430 is a healthy,
     /// timed response).
-    pub async fn read_body_into_two_phase(
+    pub async fn read_body_into_two_phase<'a>(
         &mut self,
         out: &mut Vec<u8>,
         expected: Option<&str>,
         first_byte: std::time::Duration,
-        stall: std::time::Duration,
+        stall: impl Into<StallBound<'a>>,
     ) -> Result<(bool, std::time::Duration), NntpError> {
         let status_seen = std::sync::atomic::AtomicBool::new(false);
         let id_echoed = std::sync::atomic::AtomicBool::new(false);
@@ -2798,6 +2874,7 @@ impl Connection {
             expected,
             first_byte,
             stall,
+            None,
             &status_seen,
             &id_echoed,
             &takedown,
@@ -2805,17 +2882,21 @@ impl Connection {
         .await
     }
 
-    /// [`read_body_into_two_phase`], additionally flipping `status_seen`
-    /// the moment the status line lands - so a caller racing this read
-    /// against a suspicion timer (the TODO 115 TTFB hedge) can tell "still
-    /// in pre-byte silence" from "bytes are flowing, just slowly" without
-    /// waiting for the read to finish.
-    pub async fn read_body_into_two_phase_noting(
+    /// [`Self::read_body_into_two_phase`], additionally flipping
+    /// `status_seen` the moment the status line lands - so a caller
+    /// racing this read against a suspicion timer (the TODO 115 TTFB
+    /// hedge) can tell "still in pre-byte silence" from "bytes are
+    /// flowing, just slowly" without waiting for the read to finish.
+    /// `arrivals` sees every 222 body chunk as it lands (see
+    /// [`Arrivals`]); the status line and a refusal never reach it.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn read_body_into_two_phase_noting<'a>(
         &mut self,
         out: &mut Vec<u8>,
         expected: Option<&str>,
         first_byte: std::time::Duration,
-        stall: std::time::Duration,
+        stall: impl Into<StallBound<'a>>,
+        arrivals: Arrivals<'_>,
         status_seen: &std::sync::atomic::AtomicBool,
         id_echoed: &std::sync::atomic::AtomicBool,
         takedown: &std::sync::atomic::AtomicBool,
@@ -2840,12 +2921,13 @@ impl Connection {
                 // the one place a dribbling peer can hold a slot for a
                 // whole run (scans and probes have their own budgets,
                 // and the flat path is whole-response capped).
-                read_multiline_paced_max(
+                read_multiline_paced_noting(
                     &mut self.wire,
                     out,
                     stall,
                     MAX_MULTILINE_BYTES,
                     body_rate_floor(),
+                    arrivals,
                 )
                 .await?;
                 Ok((true, ttfb))
@@ -2905,10 +2987,10 @@ impl Connection {
         stat_verdict(st)
     }
 
-    /// TODO 96.4: [`read_stat`] for the PIPELINED path - the same
+    /// TODO 96.4: [`Self::read_stat`] for the PIPELINED path - the same
     /// command and the same verdict alphabet ([`stat_verdict`], shared
     /// with the serial reader above), read with the attribution and
-    /// alignment discipline [`read_body_into`] applies to a BODY's.
+    /// alignment discipline [`Self::read_body_into`] applies to a BODY's.
     ///
     /// That discipline is the whole reason this exists rather than the
     /// pool calling `read_stat`: on a pipelined socket a response is
@@ -2957,7 +3039,7 @@ impl Connection {
         let id_echoed = std::sync::atomic::AtomicBool::new(false);
         let takedown = std::sync::atomic::AtomicBool::new(false);
         Ok(self
-            .read_body_into(&mut raw, None, &id_echoed, &takedown)
+            .read_body_into(&mut raw, None, None, &id_echoed, &takedown)
             .await?
             .then_some(raw))
     }
@@ -3199,160 +3281,11 @@ mod capped_read_tests {
     }
 }
 
+// OVER/XOVER capability, fallback and body-path tests - a child module
+// (the `unit_tests` pattern below) so nntp.rs stays inside its
+// size-gate entry.
 #[cfg(test)]
-mod over_tests {
-    use super::Connection;
-    use crate::mock::{Chaos, MockServer, OverRow};
-    use std::collections::HashMap;
-
-    fn rows() -> Vec<OverRow> {
-        (1..=5)
-            .map(|n| OverRow {
-                number: n,
-                subject: format!("post {n}"),
-                from: "a@b".into(),
-                message_id: format!("<m{n}@x>"),
-                bytes: 1000,
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn xover_only_server_latches_after_first_rejection() {
-        let srv = MockServer::start_full(
-            HashMap::new(),
-            HashMap::new(),
-            rows(),
-            Chaos {
-                xover_only: true,
-                ..Default::default()
-            },
-        )
-        .await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        conn.group("mock.group").await.expect("group");
-        let es = conn.over(1, 5).await.expect("over via xover fallback");
-        assert_eq!(es.len(), 5);
-        assert_eq!(
-            conn.over_supported,
-            Some(false),
-            "unknown-command rejection must latch the XOVER-only path"
-        );
-        // Second call goes straight to XOVER (no doomed OVER round-trip)
-        // and still returns rows.
-        let es = conn.over(2, 4).await.expect("second over");
-        assert_eq!(es.len(), 3);
-        conn.quit().await;
-    }
-
-    #[tokio::test]
-    async fn gzip_headers_roundtrip_and_fallback() {
-        // Server accepts XFEATURE: compressed responses parse to the
-        // same entries the plain path produces, repeatedly.
-        let srv = MockServer::start_full(
-            HashMap::new(),
-            HashMap::new(),
-            rows(),
-            Chaos {
-                gzip_headers: true,
-                ..Default::default()
-            },
-        )
-        .await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        conn.group("mock.group").await.expect("group");
-        assert!(conn.enable_header_gzip().await, "290 must enable");
-        let es = conn.over(1, 5).await.expect("compressed over");
-        assert_eq!(es.len(), 5);
-        assert_eq!(es[0].subject, "post 1");
-        assert_eq!(es[4].message_id, "<m5@x>");
-        let es = conn.over(2, 3).await.expect("second compressed over");
-        assert_eq!(es.len(), 2);
-        conn.quit().await;
-
-        // Server that rejects the feature: enable returns false and the
-        // plain path still works untouched.
-        let srv =
-            MockServer::start_full(HashMap::new(), HashMap::new(), rows(), Chaos::default()).await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        conn.group("mock.group").await.expect("group");
-        assert!(!conn.enable_header_gzip().await, "no 290 = stay plain");
-        let es = conn.over(1, 5).await.expect("plain over");
-        assert_eq!(es.len(), 5);
-        conn.quit().await;
-    }
-
-    #[tokio::test]
-    async fn over_capable_server_latches_supported() {
-        let srv =
-            MockServer::start_full(HashMap::new(), HashMap::new(), rows(), Chaos::default()).await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        conn.group("mock.group").await.expect("group");
-        let es = conn.over(1, 5).await.expect("over");
-        assert_eq!(es.len(), 5);
-        assert_eq!(conn.over_supported, Some(true));
-        conn.quit().await;
-    }
-
-    #[tokio::test]
-    async fn empty_range_reads_as_no_articles_not_a_failed_pass() {
-        // A resuming scan asks for everything above its high-water mark.
-        // When nothing new has arrived, that range is valid and empty and
-        // the server answers 423. Reading that as a failure stalled the
-        // whole pass: the caller bailed out, never advanced its mark, and
-        // asked for the identical empty range on every retry, forever.
-        let srv =
-            MockServer::start_full(HashMap::new(), HashMap::new(), rows(), Chaos::default()).await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        let g = conn.group("mock.group").await.expect("group");
-        let es = conn
-            .over(g.high + 1, g.high + 1000)
-            .await
-            .expect("an empty range is not a failure");
-        assert!(es.is_empty(), "an empty range yields no rows");
-        // And the session survives it - nothing was left half-read on the
-        // wire, so the next chunk of the same pass still returns its rows.
-        let es = conn.over(1, 5).await.expect("over after an empty range");
-        assert_eq!(es.len(), 5);
-        conn.quit().await;
-    }
-
-    #[tokio::test]
-    async fn a_rejected_over_is_still_an_error() {
-        // The empty-range arm stays narrow: 411 no-such-group (like every
-        // 5xx) means we learned NOTHING about the range, so it must not
-        // read as "nothing here" and let a caller skip past those articles.
-        let srv = MockServer::start_full(
-            HashMap::new(),
-            HashMap::new(),
-            rows(),
-            Chaos {
-                over_rejected: true,
-                ..Default::default()
-            },
-        )
-        .await;
-        let (mut conn, _) = Connection::connect(&srv.server_config())
-            .await
-            .expect("connect");
-        conn.group("mock.group").await.expect("group");
-        assert!(
-            conn.over(1, 5).await.is_err(),
-            "411 must not be mistaken for an empty range"
-        );
-        conn.quit().await;
-    }
-}
+mod over_tests;
 
 // Compression negotiation and BODY/STAT read-path tests - a child
 // module (the `unit_tests` pattern below) so nntp.rs stays inside its

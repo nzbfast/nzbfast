@@ -79,6 +79,7 @@ fn a_hold_is_not_published_against_an_original_deleted_during_admission() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
         };
 
         // The original, and the control: a second copy added with
@@ -123,6 +124,7 @@ fn a_hold_is_not_published_against_an_original_deleted_during_admission() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
         });
 
         // The collision is chosen and the job has not published.
@@ -190,6 +192,7 @@ fn dupe_action_discard_and_fail_change_what_a_duplicate_becomes() {
                 "test",
                 allow,
             )
+            .map(|e| e.nzo_id)
         };
         // A name with a derivable identity (SxxEyy) so dupe_key exists.
         add("one", "Show.S01E02.1080p.nzb", false).unwrap();
@@ -251,6 +254,7 @@ fn dupe_scope_exact_lets_a_different_release_of_the_same_episode_through() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
         };
         *d.dupe_scope.lock_ok() = "exact".into();
         add("one", "Show.S01E02.1080p.WEB-DL.x264-Poke.nzb").unwrap();
@@ -296,6 +300,7 @@ fn an_exact_mode_failure_does_not_release_another_releases_hold() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
             .unwrap()
         };
         *d.dupe_scope.lock_ok() = "exact".into();
@@ -368,6 +373,7 @@ fn exact_identity_keeps_non_ascii_titles_apart() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
             .unwrap()
         };
         *d.dupe_scope.lock_ok() = "exact".into();

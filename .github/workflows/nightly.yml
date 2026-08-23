@@ -203,6 +203,292 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test queue_soak
+      # The FFI contract on the host, moved here from the push path on
+      # 23 Aug 2026. ci-private's archive step used to take
+      # `--workspace`, which is the only thing that pulls in
+      # crates/nzbfast-ffi, and these two tests came along for the ride
+      # - but the ride cost the push path 1,774 duplicate nzbfast tests,
+      # 2.23 GB of cached target/ and a 637 MB iOS staticlib no CI job
+      # links, because `--workspace` overrides the `default-members`
+      # line that exists to keep the `ffi` feature off. The long note at
+      # that step has the measurements.
+      #
+      # These two are worth keeping SOMEWHERE and this is the right
+      # somewhere: at 24.4 s and 32.5 s they were the two slowest tests
+      # in the whole non-heavy set, they start and stop a real in-process
+      # daemon and bind a real port, and they are the host rehearsal for
+      # an acceptance the iOS Simulator harness re-proves on-target
+      # (research/SPIKE-IOS-STATICLIB-2026-08-05.md). The clippy gates in
+      # ci-private still COMPILE and `-D warnings` lint this crate on
+      # every push, so a build break in it is still same-day; what moved
+      # here is only the running.
+      #
+      # `-p nzbfast-ffi` and nothing else, so this step and this step
+      # alone pays for the ffi feature unification - the four suites
+      # above build `-p nzbfast`, whose feature set this does not touch.
+      # armv7-cross below reaches these two as well, under qemu on a
+      # cross target; that is a second sample, not this one.
+      - name: ffi contract on the host
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+        run: cargo nextest run --profile ci -p nzbfast-ffi --locked
+
+  # ===================================================================
+  # ONE PROCESS PER TARGET, SERIAL. TODO 270 items 2, 3 and 4.
+  #
+  # Every other test job in this repo runs under nextest, which gives
+  # EVERY TEST ITS OWN PROCESS. That is what makes the shards fast and
+  # their failures attributable, and it is a hole with a hard edge: a
+  # test that leaves process-global state behind - a static
+  # OnceLock/Mutex/Atomic, an env var, a cached global - can never be
+  # observed by the test that then reads it, because the two never share
+  # a process. The incident is 84ae50bd7 (a wall test and a ratelimit
+  # test on opposite ends of one process-global cooldown table; main red
+  # for a day with every CI job green), and 79 statics with interior
+  # mutability in crates/nzbfast/src and 88 in crates/nzbkit/src say the
+  # class is live in both.
+  #
+  # ci-private's `unit-one-process` closes that for the LINUX UNIT
+  # binaries, on every push. These two jobs close the rest of it, and
+  # the rest of it is where the questions actually are: the very first
+  # hand-run of `e2e` in this shape, on 23 Aug 2026, went red in a way
+  # no CI job in this repo could have seen (TODO 272). Measurement later
+  # the same day put that particular victim down to a low-rate flake in
+  # isolation rather than to pollution - and the point stands either
+  # way, because until that run happened NOTHING anywhere ran these
+  # targets in one process, so neither answer was available at all.
+  #
+  # WHY NIGHTLY AND NOT PER PUSH. Serial is the expensive direction:
+  # measured on the nzbfast bin root, same binary and same box, 96.7 s
+  # serial against 33.3 s parallel. `unit-one-process` costs 14m55s on a
+  # runner while running PARALLEL inside each binary, so the serial
+  # shape over a bigger target set is an hour-scale job. That is a
+  # nightly, and a nightly is the right cadence for it anyway: this
+  # class arrives with a commit that lands a static, and the push path
+  # already has the parallel one-process run that caught 84ae50bd7.
+  #
+  # WHY SERIAL AT ALL, given the push job is parallel: A-then-B is the
+  # literal shape of this class, and only the serial run puts the tests
+  # in a defined order (libtest sorts the filtered set by name, so
+  # `--test-threads=1` runs alphabetically). It is also what makes a red
+  # run tractable - tools/pollution-bisect.py names the POLLUTER rather
+  # than the victim, and it searches on exactly that ordering.
+  #
+  # A red run here names the BINARY. libtest reports the failing
+  # assertion, which is the victim; the polluter is not in the output.
+  # Every step below points at the bisect tool, which is the whole
+  # remedy: it takes minutes and prints the guilty test.
+  one-process-light:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    # `--tests` over both crates is 31 targets and ~3,851 tests, about
+    # thirteen minutes on the dev box (measured 23 Aug 2026). The runner
+    # ratio this workflow's sibling job measured for nzbkit is ~6x for
+    # CPU-bound parallel work and less for serial, so budget under an
+    # hour and allow for a bad night.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: test deps (par2 for repair fixtures)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # Same restore/save split and same reason as long-suites above: the
+      # combined actions/cache does not save when the job FAILED, so one
+      # red night would leave the next night cold as well.
+      # RESTORE ONLY, no matching save, and that is deliberate. long-suites
+      # (and windows-daemon on the Windows side) already save this key, so
+      # the ~600 dependency crates arrive warm; a save here would race two
+      # other jobs for the same key with a DIFFERENT artifact set behind
+      # it, and whichever landed first would decide what every job
+      # restores tomorrow. The test binaries this job links are its own
+      # and are not worth that.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      # TWO invocations, and each one matches a run step below exactly.
+      # `-p nzbfast -p nzbkit` in one command resolves features over the
+      # union of the two packages, which is NOT what `-p nzbkit` alone
+      # resolves - so a single combined build would compile one set of
+      # artifacts and the run steps would then quietly compile a second.
+      # That is the trap the note above `unit-one-process` in
+      # ci-private.yml measured at 33 s and a duplicate artifact set.
+      - name: build
+        id: build
+        run: |
+          cargo test --locked -p nzbfast --tests --no-run
+          cargo test --locked -p nzbkit --tests --no-run
+      # `--tests` is every target with `test = true`, so this reaches the
+      # LIB and BIN unit binaries as well as the integration ones -
+      # which is the point of running it here rather than leaving the
+      # unit binaries to the push job. That job runs them PARALLEL; this
+      # is the serial run TODO 270 called the lever, and nightly is where
+      # its price is affordable. The heavy targets are NOT in `--tests`:
+      # required-features (TODO 116b) keeps them out without
+      # `--features heavy-tests`, and the job below is theirs.
+      #
+      # Which means the split between the two crates here is lopsided,
+      # and worth knowing before reading a red run. All six of the
+      # nzbfast test targets that are a bare `tests/*.rs` are
+      # heavy-gated, so its step is three binaries - the lib root, the
+      # bin root, and the one directory-shaped target,
+      # `tests/integration/main.rs`, which is where its ~30 non-heavy
+      # integration modules live. nzbkit's step is its lib root plus the
+      # ~27 targets that are not `conn_tuner`.
+      #
+      # `--no-fail-fast`, and it is not decoration: without it cargo stops
+      # at the FIRST test binary that fails, so one red target would hide
+      # every target after it in the same crate - and hiding the rest is
+      # the exact failure mode every suite step in long-suites is split
+      # up to avoid. One step per crate on top of that, so a red nzbfast
+      # cannot skip nzbkit either.
+      - name: nzbfast - lib and bin roots, one process each, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --tests --no-fail-fast -- --test-threads=1
+      - name: nzbkit - every non-heavy target, one process each, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbkit --tests --no-fail-fast -- --test-threads=1
+      # Gated on the BUILD having succeeded, or a compile error would
+      # print an annotation about cross-test pollution, which is a
+      # confident answer to a question nobody asked.
+      - name: how to read a red run
+        if: ${{ failure() && steps.build.outcome == 'success' }}
+        run: |
+          echo "::error title=A target failed with its tests sharing one process::If the nextest suites are green on this same commit then no individual test is broken: one test in that binary is leaving process-global state that a later one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p <crate> --test <target> <the failing test>' names it in minutes."
+
+  one-process-heavy:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    # daemon alone is 519 s serial on the dev box (129 passed, 0 failed,
+    # 9 ignored) and e2e is 306-327 s over three runs (148 passed, 1
+    # ignored), all measured 23 Aug 2026 on a box under a load average
+    # around 20, so on a runner this job is the hour-plus one. It is
+    # also the one carrying the targets nothing had ever run this way.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: test deps (par2 for repair fixtures)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # RESTORE ONLY, no matching save, and that is deliberate. long-suites
+      # (and windows-daemon on the Windows side) already save this key, so
+      # the ~600 dependency crates arrive warm; a save here would race two
+      # other jobs for the same key with a DIFFERENT artifact set behind
+      # it, and whichever landed first would decide what every job
+      # restores tomorrow. The test binaries this job links are its own
+      # and are not worth that.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      # One invocation per package, each matching its run steps below -
+      # see the note on the same step in one-process-light above for why
+      # a combined `-p nzbfast -p nzbkit` would build a set of artifacts
+      # nothing then runs. The targets are named here rather than swept
+      # with `--tests` for the smaller reason that a sweep would also
+      # link this crate's lib, bin and `integration` test binaries,
+      # which are one-process-light's job and not this one's.
+      - name: build
+        id: build
+        run: |
+          cargo test --locked -p nzbfast --features heavy-tests --no-run \
+            --test daemon --test e2e --test index_size_cap \
+            --test http_wedge --test queue_soak
+          cargo test --locked -p nzbkit --features heavy-tests --no-run --test conn_tuner
+      # Named one at a time rather than swept, for the reason long-suites
+      # gives about its own list: a target added to crates/*/tests/
+      # tomorrow must inherit "runs on push" from ci-private's
+      # --workspace, never "runs nightly, maybe" from a pattern here, and
+      # an exception should be a decision. It is also the only way to get
+      # one step per target, which is what stops a red one hiding the
+      # rest.
+      #
+      # SIX of the seven heavy targets, and the missing one is
+      # arithmetic rather than an oversight: `leak_soak` contains
+      # exactly ONE test. A binary with one test cannot have a test
+      # pollute another test, so a one-process run of it is bit-for-bit
+      # the run nextest already does nightly, at the same multi-hour
+      # price. If it ever grows a second test, it belongs here.
+      - name: daemon - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --features heavy-tests --test daemon -- --test-threads=1
+      - name: e2e - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --features heavy-tests --test e2e -- --test-threads=1
+      - name: index_size_cap - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --features heavy-tests --test index_size_cap -- --test-threads=1
+      - name: http_wedge - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --features heavy-tests --test http_wedge -- --test-threads=1
+      - name: queue_soak - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbfast --features heavy-tests --test queue_soak -- --test-threads=1
+      - name: conn_tuner - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbkit --features heavy-tests --test conn_tuner -- --test-threads=1
+      # Gated on the BUILD having succeeded, or a compile error would
+      # print an annotation about cross-test pollution, which is a
+      # confident answer to a question nobody asked.
+      - name: how to read a red run
+        if: ${{ failure() && steps.build.outcome == 'success' }}
+        run: |
+          echo "::error title=A heavy target failed with its tests sharing one process::If the nextest run of the same target is green on this commit then no individual test is broken: one test in it is leaving process-global state that a later one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p nzbfast --features heavy-tests --test <target> <the failing test>' names it in minutes."
 
   # Windows leg for the PRIVATE repo. The test suite had NEVER run on
   # Windows until a Windows-on-ARM build probe added the public-repo
@@ -322,12 +608,112 @@ jobs:
       # all-interfaces listener, which on Windows raises the Defender
       # Firewall dialog, and a hosted runner has nobody to click it
       # (same rationale as pr-check.yml's Windows job). NZBFAST_REQUIRE_PAR2
-      # is not set either, since no par2 is installed on this runner and
-      # the daemon suite does not create recovery sets.
+      # is not set either, since no par2 is installed on this runner. One
+      # test in the suite DOES create a recovery set since 23 Aug 2026 -
+      # daemon_bomb's post-repair route (TODO 222), which needs the
+      # external par2 both as a fixture creator and as the repairer on
+      # the materialize path - and it skips itself without one. The Linux
+      # leg above installs par2 and sets the variable, so that route is
+      # covered there; if it is ever wanted on Windows too, the cure is a
+      # par2 install here plus the variable, never dropping the guard.
       - name: daemon suite
         env:
           NZBFAST_NO_ENRICH: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test daemon
+
+  # ===================================================================
+  # THE SAME HOLE, ON WINDOWS. TODO 270 item 1.
+  #
+  # `windows-unit` in ci-private.yml is four nextest shards off
+  # `windows-build`'s archive, so every Windows unit test runs in its
+  # own process and a Windows-ONLY process global is exactly as
+  # invisible there as the Linux ones were before `unit-one-process`
+  # landed. There are Windows-only arms in nzbkit::mem and nzbkit::disk,
+  # and nzbtray is a Windows binary with no Linux counterpart at all -
+  # so this is not a theoretical port of a Linux concern, it is the only
+  # job anywhere that can see the class in code the Linux jobs never
+  # compile.
+  #
+  # NIGHTLY, AND THAT IS THE DECISION rather than the default. Per-push
+  # was priced and refused: `unit-one-process` costs 14m55s of Linux
+  # runner, Windows runners bill at 2x on a private repo, and this leg
+  # would sit on top of a `windows-build` plus four shards that already
+  # run on every push. ~30 billed minutes per push to re-run tests that
+  # just ran, for a class that arrives with a commit landing a static,
+  # is the wrong trade; a night's delay on a class this rare is not.
+  #
+  # PARALLEL INSIDE EACH BINARY, unlike the two Linux jobs above, and
+  # for the same cost reason: serial is ~3x (96.7 s against 33.3 s,
+  # measured on the nzbfast bin root) and 3x of a 2x-billed runner is
+  # not worth buying twice. Parallel one-process is the shape that
+  # caught 84ae50bd7, so it is not a token run.
+  #
+  # No archive to ride here - `windows-build`'s belongs to ci-private's
+  # run - so this builds its own, and `--workspace` is chosen to match
+  # what that archive resolves rather than the narrower `-p nzbfast
+  # --bin nzbfast`, which resolves FEWER features and would test a
+  # configuration nothing ships. The two vendored crates are excluded
+  # the way `unit-one-process` excludes them: first-party only.
+  #
+  # nzbfast-ffi is excluded too, and here that is a saving rather than a
+  # rule. It is not a default member precisely because it turns on
+  # nzbfast's `ffi` feature, so including it compiles the whole nzbfast
+  # module tree a SECOND time - and its lib root is that same module
+  # tree, which makes its test binary a near-duplicate sample rather
+  # than new coverage. `unit-one-process` keeps it only because it
+  # selects out of an archive and dropping it would mean maintaining a
+  # name; this job is already naming exclusions, so it pays nothing to
+  # drop it, and what is left is the configuration that ships.
+  windows-one-process:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No toolchain step and no par2, for the reasons windows-daemon
+      # above gives: rust-toolchain.toml pins the version and rustup
+      # installs it on the first cargo call, and no target here needs
+      # par2 as a fixture creator.
+      - name: dependency cache key
+        id: depkey
+        shell: bash
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # RESTORE ONLY, no matching save, and that is deliberate. long-suites
+      # (and windows-daemon on the Windows side) already save this key, so
+      # the ~600 dependency crates arrive warm; a save here would race two
+      # other jobs for the same key with a DIFFERENT artifact set behind
+      # it, and whichever landed first would decide what every job
+      # restores tomorrow. The test binaries this job links are its own
+      # and are not worth that.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      - name: build
+        id: build
+        run: cargo test --locked --workspace --exclude rars --exclude tiny_http --exclude nzbfast-ffi --lib --bins --no-run
+      # NZBFAST_LAN_TESTS is deliberately NOT set: it opens an
+      # all-interfaces listener, which on Windows raises the Defender
+      # Firewall dialog and a hosted runner has nobody to click it. Same
+      # rationale as windows-daemon above.
+      - name: every first-party unit binary, one process each
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+        run: cargo test --locked --workspace --exclude rars --exclude tiny_http --exclude nzbfast-ffi --lib --bins --no-fail-fast
+      # Gated on the BUILD having succeeded, or a compile error would
+      # print an annotation about cross-test pollution, which is a
+      # confident answer to a question nobody asked.
+      - name: how to read a red run
+        if: ${{ failure() && steps.build.outcome == 'success' }}
+        run: |
+          echo "::error title=A Windows unit binary failed with its tests sharing one process::If windows-unit is green on this same commit then no individual test is broken: one test in that binary is leaving process-global state that another one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p <crate> <the failing test>' names it in minutes, and needs a Windows box to do it on."
 
   # TODO 82: the long-run soak. One daemon, a mixed queue (store RAR5,
   # compressed RAR5, 7z, PAR2 repair, password) driven round and round
@@ -734,6 +1120,21 @@ jobs:
           # the qemu box as well. Excluded HERE rather than loosened in
           # the test, which is worth having on real silicon - a bound
           # widened to survive an emulator would assert nothing anywhere.
+          #
+          # `--workspace` here is the LAST one left in either workflow
+          # file, and it is deliberate. ci-private's two archive steps
+          # and CLAUDE.md's sweep all dropped it on 23 Aug 2026 because
+          # it overrides `default-members`, turns nzbfast's `ffi`
+          # feature on and compiles the whole module tree a second time
+          # as the lib target (measurements at ci-private's archive
+          # step). Here that is worth paying for: this is the only place
+          # in CI that builds crates/nzbfast-ffi for a 32-bit or a
+          # non-x86 architecture, which is the shape the iOS staticlib
+          # actually ships in, and a nightly can afford the emulator.
+          # If this job ever needs its wall clock back, `not
+          # binary_id(nzbfast)` drops the duplicated lib-root suite
+          # while keeping the ffi build and its two tests - do that
+          # before dropping the flag.
           cargo nextest run --profile qemu --workspace --no-fail-fast \
             --target armv7-unknown-linux-musleabihf \
             -E 'not binary(conn_tuner) and not binary(index_size_cap) and

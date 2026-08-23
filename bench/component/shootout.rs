@@ -269,8 +269,13 @@ fn tool_cmd(
 ) -> Option<Command> {
     let mut c = Command::new(bin);
     match tool {
-        // The product path: same options object the daemon builds.
-        "ours" => {
+        // The product path: same options object the daemon builds. Any name
+        // starting `ours` takes this argv, so one interleaved round can race
+        // two of OUR OWN builds against each other and against the rivals -
+        // `--tools ours,ours-aug14,unrar` with a `--tool-bin` for each. Two
+        // separate races cannot answer an old-vs-new question on a shared box:
+        // the second one runs under whatever load the first did not.
+        t if t.starts_with("ours") => {
             c.arg(voldir).arg(out);
             if encrypted {
                 c.arg(password);

@@ -21,8 +21,22 @@ pub(super) struct FrontierBuffer {
     /// verified-block watermark - the chase decode consumes nothing the
     /// PAR2 set has not vouched for, so a repair can never rewrite
     /// consumed bytes. None = ungated (no set, unclaimed slot, feature
-    /// off): behavior is exactly the pre-gate code.
-    gate: Option<(std::sync::Arc<crate::live::VerifyGate>, usize)>,
+    /// off): behavior is exactly the pre-gate code. A root buffer's gate
+    /// is its slot's [`crate::live::VerifyGate`] cell; a routed child's
+    /// translates through the parent's routing map (row 27).
+    gate: Option<Arc<dyn crate::live::ChaseGate>>,
+    /// The gate was RELEASED: the download is over and every repair has
+    /// run, so nothing can rewrite these bytes any more and a reader
+    /// still parked on the watermark would wait forever (a slot whose
+    /// Bad block no repair could fix never advances). Set by the finish
+    /// paths before they join the worker. Sticky.
+    gate_released: std::sync::atomic::AtomicBool,
+    /// The last limit the gate answered. Watermarks only advance (a
+    /// release is an advance to MAX), so a read that ends below this
+    /// needs no fresh answer - which matters for a routed child, whose
+    /// answer is a walk of the parent's routing map under the parent's
+    /// lock, asked once per engine read otherwise.
+    gate_cache: std::sync::atomic::AtomicU64,
     /// The chain's holds scratch, when this buffer may page cold spans
     /// out of RAM ([`Self::page_cold`] - the terminally-stalled-chase
     /// spill). None (the 7z/zip chases, tests): nothing ever pages and
@@ -68,9 +82,21 @@ pub(super) struct FrontierState {
     /// `stored`, in the same pass - that walk was already being paid for.
     pending_max_len: usize,
     /// A rewrite arrived whose bytes DIFFERED from what was already
-    /// retained for that range. Sticky, and never cleared: see
-    /// [`FrontierBuffer::write_span`].
+    /// retained for a range the decode had ALREADY READ (below
+    /// `served`). Sticky, and never cleared: see
+    /// [`FrontierBuffer::write_span`]. A differing rewrite of bytes the
+    /// decode has not reached yet is not a conflict - the corrected copy
+    /// simply replaces the stale one and the decode reads it first.
     pub(super) conflict: bool,
+    /// Lowest offset any differing rewrite has landed on, served or not.
+    /// What [`FrontierBuffer::rewritten`] reports; sticky.
+    pub(super) rewritten_low: Option<u64>,
+    /// One past the highest volume offset the DECODE has read through
+    /// the two blocking readers. Materialization, peeks and paging are
+    /// not reads of the decode and do not move it. The line a rewrite
+    /// is judged against: below it the decoded output may already
+    /// depend on the stale bytes.
+    pub(super) served: u64,
     pub(super) abort: Option<String>,
     /// §156.1: an article of THIS volume got a terminal verdict (430
     /// everywhere, out of retention, dead transport) - the volume holds
@@ -79,9 +105,58 @@ pub(super) struct FrontierState {
     /// the coverage (`frontier() == total`). What
     /// [`FrontierBuffer::terminally_wedged`] stands on.
     pub(super) lost: bool,
+    /// TODO 94 B / row 26: a mapped repair is patching this volume's
+    /// holes right now, so the decode must not advance a single byte
+    /// until every rebuilt block has landed. Blocking reads park on
+    /// `arrived` while it is set, exactly as they park at a hole; the
+    /// abort check runs FIRST, so a pause can never outlive a
+    /// cancelled job. Cleared by the repair's own guard on every exit
+    /// path - see [`Extractor::pause_chase_reads`].
+    ///
+    /// Why a pause and not an ordering rule: rebuilt blocks land one
+    /// call at a time, and the first one to fill a hole releases the
+    /// engine into every byte behind it - including ranges a later
+    /// call is still going to rewrite. The pause makes the whole
+    /// patch atomic against the decode, which is what lets the
+    /// `conflict` tripwire below be read ONCE, afterwards, as the
+    /// verdict for the set.
+    pub(super) paused: bool,
+    /// Set once at finish, when no more bytes will ever be routed here
+    /// (the download is over). A read that blocks on a HOLE past this
+    /// point can never be served, so it errors instead of parking
+    /// forever - the demote materializes whatever did arrive. Unlike
+    /// [`Self::abort`] this leaves present bytes readable, so a buffer
+    /// that IS complete still serves its worker to a clean finish and
+    /// keeps one-pass: only a genuinely missing byte turns into the
+    /// error. The 7z/zip chase reader seeks its footer far ahead of the
+    /// arrival frontier, so a `release_gates` that unblocks the §94 B
+    /// gate could otherwise drop it straight onto the unbounded
+    /// hole-wait below with nothing left to wake it (TODO 255).
+    pub(super) sealed: bool,
+    /// Bytes at the FRONT of `data` that a drop-behind trim has planned
+    /// to spill and is writing out with no lock held (TODO 37 item 1).
+    /// They are still in RAM, but the holds budget has already been
+    /// credited for them, so [`Self::retained`] excludes them; `base`
+    /// does not move until [`FrontierBuffer::trim_commit`] proves the
+    /// bytes landed, so every read below `base` is still a read of bytes
+    /// that are really on disk. Non-zero means a trim is in flight, and
+    /// a second plan declines until it settles.
+    pub(super) trim_pending: usize,
+    /// Count of DIFFERING rewrites ever reconciled into this buffer,
+    /// wherever they landed: the in-flight trim's tripwire (see
+    /// [`FrontierBuffer::trim_chunk`]). `rewritten_low` cannot serve -
+    /// it is a minimum, so a second rewrite above the first leaves it
+    /// unchanged.
+    pub(super) rewrite_seq: u64,
 }
 
 impl FrontierState {
+    /// Retained RAM bytes as the holds budget counts them: `stored`
+    /// minus the prefix an in-flight trim has already been credited for.
+    pub(super) fn retained(&self) -> usize {
+        self.stored.saturating_sub(self.trim_pending)
+    }
+
     /// One past the last byte of the contiguous RAM run, in VOLUME
     /// offsets - where `data` ends. Appends, folds and the drop-behind
     /// trim all work on this edge.
@@ -201,6 +276,50 @@ impl std::fmt::Debug for FrontierBuffer {
     }
 }
 
+impl FrontierState {
+    /// Append to the contiguous run WITHOUT the `Vec` growth overshoot.
+    ///
+    /// `data` used to grow through a bare `extend_from_slice`, whose
+    /// reserve doubles: capacity is the doubling ladder of the FIRST
+    /// span the buffer ever accepted, so a container landing just past
+    /// a rung allocates the whole next one. Measured (the
+    /// nested-container-buffer rig): a ~140 MiB container fed through a
+    /// parent chase's 64 KiB copy buffer sat on the 65_536 x 2^k ladder
+    /// and took a 256 MiB allocation, and the TODO 209 note's
+    /// unexplained "512 MiB largest single alloc" is that same rung for
+    /// its ~273 MiB container. The holds budget charges `stored` - the
+    /// bytes - so every byte of that overshoot was spent outside the
+    /// budget that is supposed to bound this buffer.
+    ///
+    /// The declared container size is the fix: the run can never exceed
+    /// `total - base`, so the doubling TARGET is clamped there. Growth
+    /// stays geometric (amortized O(n) copying, unchanged), the
+    /// reservation is only ever made SMALLER than the bare `Vec` would
+    /// have made it, and nothing is ever reserved on the strength of a
+    /// declaration alone - so a container declaring a huge size cannot
+    /// turn this into a preallocation bomb.
+    fn append_run(&mut self, bytes: &[u8]) {
+        let want = self.data.len() + bytes.len();
+        if self.data.capacity() < want {
+            // What this run can ever hold. `total` is the declared
+            // container size and `base` is what the drop-behind trim has
+            // already spilled; a declaration that does not cover what
+            // has actually arrived floors at `want`, which also makes
+            // the `clamp` below well-ordered. `try_from` rather than
+            // `as`: a bare cast truncates a >4 GiB container on 32-bit
+            // (armv7), and a ceiling that lands under `want` would turn
+            // every span into its own exact reservation - the one shape
+            // that costs O(n^2) memmove.
+            let ceiling = usize::try_from(self.total.saturating_sub(self.base))
+                .unwrap_or(usize::MAX)
+                .max(want);
+            let target = self.data.capacity().saturating_mul(2).clamp(want, ceiling);
+            self.data.reserve_exact(target - self.data.len());
+        }
+        self.data.extend_from_slice(bytes);
+    }
+}
+
 impl FrontierBuffer {
     /// Ungated construction. Production callers all attach the §94 B
     /// watermark gate via [`Self::new_gated`], so this survives for the
@@ -215,7 +334,7 @@ impl FrontierBuffer {
     /// optional weak extractor handle for the reader-side pager wake.
     pub(super) fn new_gated(
         total: u64,
-        gate: Option<(std::sync::Arc<crate::live::VerifyGate>, usize)>,
+        gate: Option<Arc<dyn crate::live::ChaseGate>>,
         scratch: Option<Arc<HoldsScratch>>,
         pager: Option<Weak<Extractor>>,
     ) -> FrontierBuffer {
@@ -226,15 +345,41 @@ impl FrontierBuffer {
             }),
             arrived: Condvar::new(),
             gate,
+            gate_released: std::sync::atomic::AtomicBool::new(false),
+            gate_cache: std::sync::atomic::AtomicU64::new(0),
             scratch,
             pager,
         }
+    }
+
+    /// Stop withholding bytes from the decode: see `gate_released`.
+    /// Wakes a parked reader through the frontier condvar, so the
+    /// release lands within one bounded gate wait at most.
+    pub(super) fn release_gate(&self) {
+        self.gate_released
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.arrived.notify_all();
     }
 
     /// §156.1: sticky terminal-loss mark - an article of this volume
     /// will never arrive from the wire. See [`FrontierState::lost`].
     pub(super) fn mark_lost(&self) {
         self.state.lock_ok().lost = true;
+    }
+
+    /// Finish seal: no more bytes will ever be routed here, so a reader
+    /// blocked on a hole must stop waiting (see [`FrontierState::sealed`]
+    /// and TODO 255). Sets the flag UNDER the state lock and then wakes
+    /// every parked reader, the same lock discipline `abort` keeps, so a
+    /// reader that checked `sealed` and is about to park cannot miss the
+    /// wake. Present bytes stay readable, so a complete buffer's worker
+    /// still runs to a clean finish.
+    pub(super) fn seal(&self) {
+        {
+            let mut st = self.state.lock_ok();
+            st.sealed = true;
+        }
+        self.arrived.notify_all();
     }
 
     /// §156.1 wedge test: does this volume hold an unfillable hole its
@@ -250,18 +395,54 @@ impl FrontierBuffer {
     /// The §94 B serving limit: bytes at or past this offset are not yet
     /// PAR2-vouched and must not reach the decode. Ungated = MAX.
     fn gate_limit(&self) -> u64 {
+        if self
+            .gate_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return u64::MAX;
+        }
         match &self.gate {
-            Some((g, slot)) => g.watermark(*slot),
+            Some(g) => g.watermark(),
             None => u64::MAX,
         }
+    }
+
+    /// [`Self::gate_limit`] for the two blocking readers, which hold the
+    /// state lock across their loop: a routed child's gate walks the
+    /// PARENT's routing lock, and the parent can hold that lock while
+    /// calling into the child, whose writes take this state lock - so
+    /// asking with the lock held is a parent -> child -> frontier ->
+    /// parent cycle (found by the row 27 test hanging). Ungated or
+    /// released buffers answer without giving the lock up at all, and
+    /// so does a gated one whose last answer already clears `offset`;
+    /// otherwise it drops the lock for the ask and hands back a fresh
+    /// guard - the caller's loop re-runs every check against the new
+    /// state.
+    fn gate_limit_unlocked<'a>(
+        &'a self,
+        st: std::sync::MutexGuard<'a, FrontierState>,
+        offset: u64,
+    ) -> (u64, std::sync::MutexGuard<'a, FrontierState>, bool) {
+        use std::sync::atomic::Ordering;
+        if self.gate.is_none() || self.gate_released.load(Ordering::Acquire) {
+            return (u64::MAX, st, false);
+        }
+        let cached = self.gate_cache.load(Ordering::Acquire);
+        if offset < cached {
+            return (cached, st, false);
+        }
+        drop(st);
+        let lim = self.gate_limit();
+        self.gate_cache.fetch_max(lim, Ordering::AcqRel);
+        (lim, self.state.lock_ok(), true)
     }
 
     /// Park briefly for a watermark advance past `offset`. Bounded so a
     /// gate-blocked reader still observes buffer abort/demote (which
     /// notify [`Self::arrived`], not the gate) on its next loop pass.
     fn gate_wait(&self, offset: u64) {
-        if let Some((g, slot)) = &self.gate {
-            g.wait_past(*slot, offset, std::time::Duration::from_millis(100));
+        if let Some(g) = &self.gate {
+            g.wait_past(offset, std::time::Duration::from_millis(100));
         }
     }
 
@@ -277,46 +458,59 @@ impl FrontierBuffer {
     /// the frontier, which is precisely the range the chase engine has
     /// already decoded, so the corrected bytes went nowhere and nothing
     /// noticed. Now any differing rewrite OVERWRITES the retained copy
-    /// (so a demotion materializes the corrected volume, exactly) and
+    /// (so a demotion materializes the corrected volume, exactly) and,
+    /// when it lands on bytes the decode has already READ (`served`),
     /// sets the sticky `conflict` flag, which makes the caller forfeit
     /// the chase. That is the same outcome depth 0 reaches by accident:
     /// `patch_volume_span` refuses a repair on a chased slot, so the
     /// volume demotes to materialized and the disk pass re-extracts it.
     ///
+    /// A differing rewrite of bytes the decode has NOT reached is no
+    /// conflict at all (row 27, 22 Aug 2026): the stale copy was never
+    /// consumed, the corrected one is what the decode will read, and
+    /// forfeiting would pay the materialize-and-re-extract ending for
+    /// nothing. Under the §94 B gate that is every repair, by
+    /// construction - the decode never passes an unverified block.
+    ///
     /// Deliberately NOT `abort()`: the retained bytes have to stay
-    /// readable for [`Self::take_spans`] to materialize them.
+    /// readable for [`Self::pop_span`] to materialize them.
     pub(super) fn write_span(&self, offset: u64, bytes: &[u8]) -> usize {
         let mut st = self.state.lock_ok();
         if st.abort.is_some() {
-            return st.stored;
+            return st.retained();
         }
         let end = (offset + bytes.len() as u64).min(st.total);
         if end <= offset {
-            return st.stored;
+            return st.retained();
         }
         let bytes = &bytes[..(end - offset) as usize];
         let base = st.base;
         let frontier = st.frontier_ram();
         let mut accepted = false;
         let mut differed = false;
+        // Lowest offset this delivery changed a retained byte at.
+        let mut diff_low = u64::MAX;
         // Whatever we already retain for this range, the newest delivery
         // wins. Checked against the frontier AND the parked spans: the 7z
         // chase peeks at arbitrary offsets, so a parked span can have been
         // read too, and a rewrite of one is no safer to discard.
         //
         // The sub-range below `base` is not ours to reconcile - it is on
-        // disk, not in `data`. `below_base()` reports it and the caller
-        // fixes the file and forfeits; here it is simply skipped, which
-        // is why the clip is to `base` and not to `offset`.
+        // disk, not in `data`. The caller spots it for itself (the
+        // `offset < base` arm of `patch_volume_span`), overwrites what
+        // the trim spilled and forces the forfeit through
+        // [`Self::mark_conflict`]; here it is simply skipped, which is
+        // why the clip is to `base` and not to `offset`.
         if offset < frontier && end > base {
             let a = offset.max(base);
             let n = (frontier.min(end) - a) as usize;
             let di = (a - base) as usize;
             let si = (a - offset) as usize;
             let dst = &mut st.data[di..di + n];
-            if *dst != bytes[si..si + n] {
+            if let Some(first) = dst.iter().zip(&bytes[si..si + n]).position(|(d, b)| d != b) {
                 dst.copy_from_slice(&bytes[si..si + n]);
                 differed = true;
+                diff_low = diff_low.min(a + first as u64);
             }
         }
         // Paged spans reconcile too - a delivery overlapping one is
@@ -355,10 +549,12 @@ impl FrontierBuffer {
                 let Some(sc) = self.scratch.as_ref() else {
                     debug_assert!(false, "paged span with no scratch");
                     differed = true;
+                    diff_low = diff_low.min(a);
                     continue;
                 };
                 if sc.read(po + (a - s), &mut have).is_err() {
                     differed = true;
+                    diff_low = diff_low.min(a);
                     continue;
                 }
                 let src = &bytes[(a - offset) as usize..(b - offset) as usize];
@@ -371,12 +567,14 @@ impl FrontierBuffer {
                 let mut whole = vec![0u8; len];
                 if sc.read(po, &mut whole).is_err() {
                     differed = true;
+                    diff_low = diff_low.min(a);
                     continue;
                 }
                 whole[(a - s) as usize..(b - s) as usize].copy_from_slice(src);
                 st.paged.remove(&s);
                 st.paged_bytes -= len;
                 sc.release(len);
+                diff_low = diff_low.min(a);
                 match st.pending.get_mut(&s) {
                     // A longer same-start park subsumes the region; the
                     // corrected bytes overwrite its copy so every
@@ -431,9 +629,10 @@ impl FrontierBuffer {
                 }
                 let src = &bytes[(a - offset) as usize..(b - offset) as usize];
                 let dst = &mut v[(a - s) as usize..(b - s) as usize];
-                if *dst != *src {
+                if let Some(first) = dst.iter().zip(src).position(|(d, b)| d != b) {
                     dst.copy_from_slice(src);
                     differed = true;
+                    diff_low = diff_low.min(a + first as u64);
                 }
             }
         }
@@ -452,9 +651,7 @@ impl FrontierBuffer {
                         .unwrap_or(end)
                 };
                 if stop > frontier {
-                    st.data.extend_from_slice(
-                        &bytes[(frontier - offset) as usize..(stop - offset) as usize],
-                    );
+                    st.append_run(&bytes[(frontier - offset) as usize..(stop - offset) as usize]);
                     accepted = true;
                 }
                 if end > stop {
@@ -487,7 +684,7 @@ impl FrontierBuffer {
                 let v = st.pending.remove(&s).unwrap();
                 let ve = s + v.len() as u64;
                 if ve > f {
-                    st.data.extend_from_slice(&v[(f - s) as usize..]);
+                    st.append_run(&v[(f - s) as usize..]);
                 }
             }
         } else {
@@ -511,9 +708,16 @@ impl FrontierBuffer {
                 accepted = true;
             }
         }
-        st.conflict |= differed;
+        if differed {
+            st.rewrite_seq += 1;
+            st.rewritten_low = Some(st.rewritten_low.map_or(diff_low, |r| r.min(diff_low)));
+            // Below `served` the decode may already have built output
+            // on the stale copy; at or past it, the corrected copy is
+            // simply what it reads next.
+            st.conflict |= diff_low < st.served;
+        }
         st.resync_retained();
-        let stored = st.stored;
+        let stored = st.retained();
         drop(st);
         if accepted {
             self.arrived.notify_all();
@@ -523,7 +727,7 @@ impl FrontierBuffer {
 
     /// Fail the buffer: every blocked (and future) read errors with
     /// `reason`. Cancel path; retained bytes stay readable via
-    /// [`Self::take_spans`] for demotion.
+    /// [`Self::pop_span`] for demotion.
     pub(super) fn abort(&self, reason: &str) {
         let mut st = self.state.lock_ok();
         if st.abort.is_none() {
@@ -534,12 +738,40 @@ impl FrontierBuffer {
     }
 
     /// Did a rewrite land whose bytes differed from what was already
-    /// retained? Sticky. The retained record now holds the CORRECTED
-    /// bytes, but anything the chase decoded before the rewrite came
-    /// from the stale copy, so the caller must forfeit the chase and
-    /// materialize instead. See [`Self::write_span`].
+    /// retained, on a range the decode had ALREADY READ? Sticky. The
+    /// retained record now holds the CORRECTED bytes, but what the chase
+    /// decoded before the rewrite came from the stale copy, so the
+    /// caller must forfeit the chase and materialize instead. See
+    /// [`Self::write_span`].
     pub(super) fn conflicted(&self) -> bool {
         self.state.lock_ok().conflict
+    }
+
+    /// Did ANY differing rewrite land, read or not? The lowest offset
+    /// one did, sticky. Weaker than [`Self::conflicted`]: a rewrite
+    /// ahead of the decode is no conflict, but it is still the mark of
+    /// a repair having touched this volume, which is what the seed-time
+    /// checks in `try_attach_chase` and `try_attach_sevenz` want - at
+    /// seed nothing has been READ, so the served-aware `conflicted`
+    /// cannot see a repair that landed before the chase attached.
+    ///
+    /// Those two are the only readers, and the post-forfeit resume
+    /// ledger is deliberately NOT one: `drop_resume_ledger` throws the
+    /// whole ledger away on any repair span reaching the job, at any
+    /// depth, without asking which bytes moved. Its own comment rejects
+    /// the per-buffer version of that question as the clever reading
+    /// that risks the payload, so do not wire this into it.
+    pub(super) fn rewritten(&self) -> Option<u64> {
+        self.state.lock_ok().rewritten_low
+    }
+
+    /// One past the highest offset the decode has read. Test-only: the
+    /// rewrite judgement reads `st.served` under the lock it already
+    /// holds, so this accessor exists for the tests and for
+    /// `testutil::child_chase_served`.
+    #[cfg(test)]
+    pub(super) fn served(&self) -> u64 {
+        self.state.lock_ok().served
     }
 
     /// Force the forfeit from outside: used when a span lands below the
@@ -547,6 +779,17 @@ impl FrontierBuffer {
     /// because those bytes are on disk rather than in `data`.
     pub(super) fn mark_conflict(&self) {
         self.state.lock_ok().conflict = true;
+    }
+
+    /// Hold the decode still while a mapped repair patches this volume
+    /// - see [`FrontierState::paused`]. Idempotent; the resume half
+    /// notifies, because a reader parked on the pause is parked on
+    /// `arrived` and nothing else will wake it.
+    pub(super) fn set_paused(&self, paused: bool) {
+        self.state.lock_ok().paused = paused;
+        if !paused {
+            self.arrived.notify_all();
+        }
     }
 
     /// Frontier progress (bytes contiguous from 0, trimmed prefix
@@ -739,16 +982,23 @@ impl FrontierBuffer {
         self.state.lock_ok().base
     }
 
+    /// The RAM frontier edge (where `data` ends), in volume offsets:
+    /// the cut a trim would take at a watermark past it.
+    pub(super) fn frontier_ram_edge(&self) -> u64 {
+        self.state.lock_ok().frontier_ram()
+    }
+
     /// Bytes currently held in RAM - what the holds budget is charged
     /// for. Re-read after a trim to give the budget its bytes back.
     pub(super) fn stored(&self) -> usize {
-        self.state.lock_ok().stored
+        self.state.lock_ok().retained()
     }
 
-    /// One past the last contiguous byte, in volume offsets.
-    #[cfg(test)]
+    /// One past the last contiguous byte, in volume offsets: what has
+    /// ARRIVED in order, trimmed bytes included. The drop-or-spill
+    /// decision measures the engine against it.
     pub(super) fn frontier(&self) -> u64 {
-        self.state.lock().unwrap().frontier()
+        self.state.lock_ok().frontier()
     }
 
     /// Drop-behind: release the frontier bytes below `watermark` and hand
@@ -763,7 +1013,7 @@ impl FrontierBuffer {
     /// are untouched by construction: they all sit ABOVE the frontier.
     ///
     /// Nothing is trimmed while a conflict is pending - that buffer is
-    /// about to demote and `take_spans` is the only thing left to run.
+    /// about to demote and `pop_span` is the only thing left to run.
     ///
     /// `min_release` is what makes this affordable. The release is a
     /// `Vec::drain` from the front, so it memmoves whatever is still
@@ -773,7 +1023,8 @@ impl FrontierBuffer {
     /// where the live window IS the cap - by declining, which demotes.
     pub(super) fn trim_to(&self, watermark: u64, min_release: u64) -> Option<(u64, Vec<u8>)> {
         let mut st = self.state.lock_ok();
-        if st.conflict || st.abort.is_some() {
+        // A spill in flight owns the front of `data` until it settles.
+        if st.conflict || st.abort.is_some() || st.trim_pending != 0 {
             return None;
         }
         // The RAM frontier, deliberately: only `data` leaves through a
@@ -785,10 +1036,119 @@ impl FrontierBuffer {
         }
         let n = (cut - st.base) as usize;
         let out = st.data.drain(..n).collect::<Vec<u8>>();
+        // Give the drained capacity back. A Vec keeps its high-water
+        // allocation across a drain, so every volume's buffer stayed at
+        // its largest for the life of the chase - invisible while a
+        // breach forfeited the chase and freed them all, and 3.3 GB of
+        // "unattributed" footprint on an 8 x 500 MB set once TODO 94 E
+        // kept the chase alive to the end. One more copy of what
+        // remains, beside the memmove the drain already paid, and
+        // bounded by the same min_release spacing.
+        if st.data.capacity() > st.data.len() * 2 + (1 << 20) {
+            st.data.shrink_to_fit();
+        }
         let at = st.base;
         st.base = cut;
         st.resync_retained();
         Some((at, out))
+    }
+
+    /// The off-lock half of the drop-behind trim, phase 1 of three
+    /// (TODO 37, 23 Aug 2026). Same cut as [`Self::trim_to`] - and the
+    /// same refusals - but NOTHING leaves RAM here: the prefix is only
+    /// marked `trim_pending`, which credits the holds budget for it
+    /// (see [`FrontierState::retained`]) while `base` stays put. The
+    /// caller then copies it out in bounded chunks with
+    /// [`Self::trim_chunk`], writes each with no lock held, and ends
+    /// with [`Self::trim_commit`] - or [`Self::trim_abandon`] if a
+    /// write failed, which leaves every byte exactly where it was. The
+    /// third element is the rewrite sequence the chunk and commit
+    /// re-check.
+    ///
+    /// Why not `trim_to` and write afterwards: `trim_to` moves `base`,
+    /// and from that instant every read below it (the verifier's
+    /// `covered`, a `read_at` straddling the split) is answered from
+    /// the slot's file - which would not have the bytes yet. And the
+    /// old shape drained RAM BEFORE the write could fail, so an ENOSPC
+    /// in the spill left a hole with the bytes in neither place (the
+    /// `(low)` items under TODO 37's open list). Declines while a trim
+    /// is already in flight: one prefix at a time keeps `base == at`
+    /// a sufficient commit proof.
+    pub(super) fn trim_plan(&self, watermark: u64, min_release: u64) -> Option<(u64, usize, u64)> {
+        let mut st = self.state.lock_ok();
+        if st.conflict || st.abort.is_some() || st.trim_pending != 0 {
+            return None;
+        }
+        let cut = watermark.min(st.frontier_ram());
+        if cut < st.base + min_release.max(1) {
+            return None;
+        }
+        let n = (cut - st.base) as usize;
+        st.trim_pending = n;
+        Some((st.base, n, st.rewrite_seq))
+    }
+
+    /// Phase 2: a copy of `[at + done, at + done + max)` of the planned
+    /// prefix, or None if the buffer has moved on (a demote popped the
+    /// run, an abort, a conflict, or a differing rewrite landed inside
+    /// the prefix since the plan) - in which case the caller abandons.
+    /// `seq_before` (from [`Self::rewrite_seq`] at plan time) is the
+    /// rewrite tripwire: a rewrite below `served` sets `conflict`
+    /// anyway, and one above it is legal, but a copy taken before it
+    /// would put the STALE bytes on disk under `base`.
+    pub(super) fn trim_chunk(
+        &self,
+        at: u64,
+        done: usize,
+        max: usize,
+        seq_before: u64,
+    ) -> Option<Vec<u8>> {
+        let st = self.state.lock_ok();
+        let n = st.trim_pending;
+        if !Self::trim_consistent(&st, at, n, seq_before) || done >= n {
+            return None;
+        }
+        let end = (done + max).min(n);
+        Some(st.data[done..end].to_vec())
+    }
+
+    /// Phase 3: the bytes are on disk - drain them and move `base`,
+    /// exactly what `trim_to` did in one step. Returns the bytes that
+    /// left RAM, or None (and nothing moves) if the buffer has changed
+    /// under the spill, in which case the bytes written are a harmless
+    /// duplicate of what RAM still holds and a later trim re-spills
+    /// them. Clears the pending mark either way.
+    pub(super) fn trim_commit(&self, at: u64, seq_before: u64) -> Option<usize> {
+        let mut st = self.state.lock_ok();
+        let n = std::mem::take(&mut st.trim_pending);
+        if n == 0 || !Self::trim_consistent(&st, at, n, seq_before) {
+            st.resync_retained();
+            return None;
+        }
+        st.data.drain(..n);
+        st.base = at + n as u64;
+        st.resync_retained();
+        Some(n)
+    }
+
+    /// A spill write failed: forget the plan. The prefix never left
+    /// RAM, so the holds budget is simply re-charged for it by the
+    /// caller (the `stored()` it re-reads grows back by the plan).
+    pub(super) fn trim_abandon(&self) {
+        let mut st = self.state.lock_ok();
+        st.trim_pending = 0;
+        st.resync_retained();
+    }
+
+    /// Whether a planned prefix `[at, at+n)` is still exactly the bytes
+    /// the plan saw: same `base`, the run still holds it, no abort or
+    /// conflict, and no differing rewrite since the plan.
+    fn trim_consistent(st: &FrontierState, at: u64, n: usize, seq_before: u64) -> bool {
+        st.base == at
+            && st.data.len() >= n
+            && !st.conflict
+            && st.abort.is_none()
+            && st.rewrite_seq == seq_before
     }
 
     /// Proactive spill for a chase stalled behind terminally-missing
@@ -1034,15 +1394,31 @@ impl FrontierBuffer {
             if let Some(reason) = &st.abort {
                 return Err(io::Error::other(format!("chase source aborted: {reason}")));
             }
+            // A repair is rewriting this volume's holes: serve nothing
+            // until it is done (`FrontierState::paused`). Checked after
+            // abort so a cancelled job always wins, and before the
+            // end-of-volume `Ok(0)` so a paused reader cannot slip out
+            // through the tail either. A finish seal overrides it: the
+            // repair pass is over, so an unresumed pause must not strand
+            // the reader (TODO 255) - fall through to serve or error.
+            if st.paused && !st.sealed {
+                st = self.arrived.wait(st).unwrap();
+                continue;
+            }
             if offset >= st.total {
                 return Ok(0);
             }
             // Behind the trim point: those bytes went to disk and the
             // engine promised never to come back for them. A read here
-            // means the promise broke (BCJ2 is the only shape that
-            // would, and it is refused a trim up front), so fail loudly
-            // - the chase forfeits and the archive materializes, which
-            // is cheap because most of it is already written.
+            // means the promise broke, so fail loudly - the chase
+            // forfeits and the archive materializes, which is cheap
+            // because most of it is already written. Two shapes have
+            // come back: BCJ2, which is refused a trim up front, and
+            // the RAR5 deferred header walk (§250, 23 Aug 2026), which
+            // re-walked from the signature after the chase had trimmed
+            // the volume and met this guard at offset 8 on every leg -
+            // fixed in rars by resuming the walk at its stop offset,
+            // which sits at or above any watermark the engine published.
             if offset < st.base {
                 return Err(io::Error::other(format!(
                     "chase source read {offset} behind the trim point {}",
@@ -1053,7 +1429,36 @@ impl FrontierBuffer {
             // the decode. Blocked-by-gate is a different wait from
             // blocked-by-arrival: the bytes are here, the vouching is
             // not - park on the gate (bounded) and re-run every check.
-            let lim = self.gate_limit();
+            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset);
+            st = guard;
+            // The gate read RELEASED the state lock, so the checks
+            // above were made against a state that may have moved
+            // since. Re-run the two that end the read - and `abort`
+            // is not tidiness, it is the deadlock: an abort landing
+            // in that window sets the flag and notifies `arrived`
+            // BEFORE this reader is on it, so falling through to the
+            // wait below parks forever on a buffer nothing will ever
+            // notify again. The chase worker then sleeps for the life
+            // of the process and finish()'s join never returns (seen
+            // 23 Aug 2026 as an intermittent wedge of
+            // `zip_nested_budget_demote_materializes_byte_exact`,
+            // which nextest's retry passed in 28 ms and reported as a
+            // flake). Re-checked HERE rather than by looping: a
+            // `continue` would re-enter the gate read with the cache
+            // still at or below `offset` and spin instead of parking
+            // on the gate. `paused` needs no re-check - its own wait
+            // is on the same `arrived`, which `set_paused` notifies.
+            if relocked {
+                if let Some(reason) = &st.abort {
+                    return Err(io::Error::other(format!("chase source aborted: {reason}")));
+                }
+                if offset < st.base {
+                    return Err(io::Error::other(format!(
+                        "chase source read {offset} behind the trim point {}",
+                        st.base
+                    )));
+                }
+            }
             if offset >= lim {
                 drop(st);
                 self.gate_wait(offset);
@@ -1068,12 +1473,14 @@ impl FrontierBuffer {
                     .min(st.data.len() - start)
                     .min((lim - offset) as usize);
                 buf[..take].copy_from_slice(&st.data[start..start + take]);
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if let Some((s, v)) = st.pending_at(offset) {
                 let a = (offset - s) as usize;
                 let take = buf.len().min(v.len() - a).min((lim - offset) as usize);
                 buf[..take].copy_from_slice(&v[a..a + take]);
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if let Some((s, po, len)) = st.paged_at(offset) {
@@ -1086,7 +1493,20 @@ impl FrontierBuffer {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("paged span with no scratch"))?;
                 sc.read(po + (offset - s), &mut buf[..take])?;
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
+            }
+            // Sealed and still a hole: the download is over, these bytes
+            // are never coming, and the 7z/zip reader that seeks its
+            // footer ahead of the frontier would otherwise park here
+            // forever once `release_gates` cleared the gate above it
+            // (TODO 255). Checked only after every serve path so a buffer
+            // that IS complete answers the read and keeps one-pass; only
+            // a genuinely missing byte becomes the error that demotes.
+            if st.sealed {
+                return Err(io::Error::other(format!(
+                    "chase source sealed at offset {offset}: bytes never arrived"
+                )));
             }
             st = self.arrived.wait(st).unwrap();
         }
@@ -1125,11 +1545,19 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             if let Some(reason) = &st.abort {
                 return Err(io::Error::other(format!("chase source aborted: {reason}")));
             }
-            // The RAR chase never trims (the rars reader's access
-            // pattern has not been measured the way the 7z one has), so
-            // `base` is always 0 here - but read it rather than assume
-            // it, so the day that changes this fails instead of serving
-            // the wrong bytes.
+            // Same repair pause as `read_covered_blocking`.
+            if st.paused {
+                st = self.arrived.wait(st).unwrap();
+                continue;
+            }
+            // Behind the trim point, the RAR twin of the guard in
+            // `read_covered_blocking`: the §92 drop-behind trims a RAR
+            // volume to the engine's own watermark, and the rars driver
+            // promises strictly-forward packed reads past it. The one
+            // RAR read that broke the promise was the deferred header
+            // walk re-starting at the signature (§250); it now resumes
+            // at its stop offset, so a hit here is a new shape - fail
+            // loudly rather than serve the wrong bytes.
             if offset < st.base {
                 return Err(io::Error::other(format!(
                     "chase source read {offset} behind the trim point {}",
@@ -1138,7 +1566,21 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             }
             // §94 B: same gate as `read_covered_blocking` - the decode
             // may only consume PAR2-vouched bytes.
-            let lim = self.gate_limit();
+            let (lim, guard, relocked) = self.gate_limit_unlocked(st, offset);
+            st = guard;
+            // Same released-lock window, same lost wakeup, as
+            // `read_covered_blocking` above.
+            if relocked {
+                if let Some(reason) = &st.abort {
+                    return Err(io::Error::other(format!("chase source aborted: {reason}")));
+                }
+                if offset < st.base {
+                    return Err(io::Error::other(format!(
+                        "chase source read {offset} behind the trim point {}",
+                        st.base
+                    )));
+                }
+            }
             if offset >= lim && offset < st.total {
                 drop(st);
                 self.gate_wait(offset);
@@ -1153,6 +1595,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
                     .min(st.data.len() - start)
                     .min((lim - offset) as usize);
                 buf[..take].copy_from_slice(&st.data[start..start + take]);
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if offset >= st.total {
@@ -1175,12 +1618,14 @@ impl rars::BlockingRangeSource for FrontierBuffer {
                     .as_ref()
                     .ok_or_else(|| io::Error::other("paged span with no scratch"))?;
                 sc.read(po + (offset - s), &mut buf[..take])?;
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if let Some((s, v)) = st.pending_at(offset) {
                 let a = (offset - s) as usize;
                 let take = buf.len().min(v.len() - a).min((lim - offset) as usize);
                 buf[..take].copy_from_slice(&v[a..a + take]);
+                st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             // §156.1: parking at a hole in a volume marked `lost` IS the
@@ -1227,6 +1672,53 @@ mod tests {
             .zip(want[at..].iter())
             .position(|(a, b)| a != b)
             .map(|i| off + i as u64)
+    }
+
+    /// The repair pause holds BOTH blocking readers still even over
+    /// bytes that are fully retained, and releases them again - the
+    /// property the row-26 in-place chase repair stands on, because it
+    /// is what makes a multi-block patch atomic against the decode.
+    ///
+    /// Teeth in the negative direction too: the same reads are proved
+    /// to succeed on the same buffer once the pause lifts, so a pause
+    /// that silently never engaged would fail the first half rather
+    /// than pass both.
+    #[test]
+    fn a_paused_buffer_serves_neither_reader_until_it_resumes() {
+        let buf = Arc::new(FrontierBuffer::new(1000));
+        buf.write_span(0, &pat(0, 1000));
+        buf.set_paused(true);
+        for (what, ran) in [("forward", false), ("random-access", true)] {
+            let b = Arc::clone(&buf);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut out = [0u8; 16];
+                let r = if ran {
+                    b.read_covered_blocking(0, &mut out)
+                } else {
+                    rars::BlockingRangeSource::read_at(&*b, 0, &mut out)
+                };
+                let _ = tx.send(r.map(|n| n > 0));
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err(),
+                "the {what} reader served bytes while the buffer was paused"
+            );
+        }
+        buf.set_paused(false);
+        let mut out = [0u8; 16];
+        assert_eq!(
+            within(&buf, "the resumed forward read", |b| {
+                let mut o = [0u8; 16];
+                let n = rars::BlockingRangeSource::read_at(b, 0, &mut o).unwrap();
+                (n, o)
+            })
+            .0,
+            16
+        );
+        assert_eq!(buf.read_covered_blocking(0, &mut out).unwrap(), 16);
+        assert_eq!(out, pat(0, 16)[..]);
     }
 
     /// Run a read on a worker and FAIL rather than hang if it is still
@@ -1361,6 +1853,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// TODO 37 med2, the shape the lane that found §156.2 reported
+    /// first: a PLAIN buffer - no scratch, nothing paged, `base == 0` -
+    /// which is what every RAR chase volume is. Two parks overlap with
+    /// the SHORTER one keyed higher, with no paging needed to set it
+    /// up: an arrival can simply land inside a span that is already
+    /// parked (a PAR2-rebuilt block inside a parked article, a routing
+    /// duplicate that was clipped). `range(..=pos).next_back()` finds
+    /// the short park and stops short of the long one, so `peek`
+    /// reported a hole and `read_covered_blocking` parked on bytes it
+    /// was holding, on a range `intervals` reported covered. Pinned
+    /// separately from the paging test above so the RAR chase shape
+    /// cannot regress behind a fix scoped to the scratch path.
+    #[test]
+    fn plain_overlapping_parks_serve_the_covering_span() {
+        use rars::BlockingRangeSource as _;
+        let buf = Arc::new(FrontierBuffer::new(100_000));
+        buf.write_span(0, &pat(0, 10_000));
+        buf.write_span(25_000, &pat(25_000, 40_000)); // [25_000, 65_000)
+        buf.write_span(30_000, &pat(30_000, 15_000)); // [30_000, 45_000)
+        {
+            let st = buf.state.lock().unwrap();
+            assert_eq!(st.base, 0, "the RAR chase shape: nothing trimmed");
+            assert!(st.paged.is_empty(), "nothing paged either");
+            assert_eq!(st.pending.len(), 2, "two OVERLAPPING parks");
+        }
+        // `intervals` walks every park and has always reported the
+        // range covered; the resolvers must agree with it.
+        assert_eq!(buf.intervals(25_000, 40_000), vec![(25_000, 65_000)]);
+        let mut got = vec![0u8; 20_000];
+        buf.peek(45_000, &mut got)
+            .expect("peek must serve the covering park, not the shadowing one");
+        assert_eq!(first_diff(45_000, &got, &pat(0, 65_000)), None);
+        let n = within(&buf, "read_covered_blocking", |b| {
+            let mut out = vec![0u8; 20_000];
+            let n = b.read_covered_blocking(45_000, &mut out).unwrap();
+            assert_eq!(first_diff(45_000, &out[..n], &pat(0, 65_000)), None);
+            n
+        });
+        assert_eq!(n, 20_000, "the covering park must be served whole");
+        // The forward reader parks at the real hole [10_000, 25_000),
+        // not at the shadowed edge: fill it and the run completes.
+        buf.write_span(10_000, &pat(10_000, 15_000));
+        assert_eq!(buf.frontier(), 65_000);
+        let n = within(&buf, "read_at", |b| {
+            let mut out = vec![0u8; 20_000];
+            b.read_at(45_000, &mut out).unwrap()
+        });
+        assert_eq!(n, 20_000);
+    }
+
     /// §156.2's sibling at the WRITE site: `write_span` reconciled a
     /// delivery against the parked spans starting from
     /// `pending.range(..=offset).next_back()` - the greatest start at or
@@ -1415,9 +1957,10 @@ mod tests {
         // started at the 55_000 park, which does not reach 60_000, and
         // never looked down at the long park that does.
         buf.write_span(60_000, &[0xEE; 3_000]);
-        assert!(
-            buf.conflicted(),
-            "a differing rewrite of the hidden long park must flag the conflict"
+        assert_eq!(
+            buf.rewritten(),
+            Some(60_000),
+            "a differing rewrite of the hidden long park must be seen"
         );
 
         // Every retained copy of the rewritten range has to agree now -
@@ -1468,7 +2011,11 @@ mod tests {
         buf.write_span(10_000, &pat(10_000, 40_000)); // [10_000, 50_000)
         buf.write_span(30_000, &pat(30_000, 1_000)); // [30_000, 31_000)
         buf.write_span(35_000, &[0xEE; 2_000]); // the repair rewrite
-        assert!(buf.conflicted(), "the rewrite differs from the long park");
+        assert_eq!(
+            buf.rewritten(),
+            Some(35_000),
+            "the rewrite differs from the long park"
+        );
         buf.write_span(0, &pat(0, 10_000)); // fills the hole; the parks fold
         assert_eq!(buf.state.lock().unwrap().frontier_ram(), 50_000);
         let mut want = pat(0, 50_000);
@@ -1483,6 +2030,49 @@ mod tests {
         for (off, bytes) in buf.take_spans() {
             assert_eq!(first_diff(off, &bytes, &want), None, "the span at {off}");
         }
+    }
+
+    /// The contiguous run never over-reserves past the container.
+    ///
+    /// `data` grew through a bare `extend_from_slice`, whose reserve
+    /// DOUBLES, so its capacity was the doubling ladder of the first
+    /// span the buffer ever saw and a container landing just past a rung
+    /// took the whole next one - measured at 1.83x the container
+    /// (a ~140 MiB container on the 64 KiB child ladder allocated
+    /// 256 MiB), all of it outside the holds budget, which charges the
+    /// BYTES. The declared total is the ceiling the clamp stands on.
+    ///
+    /// Fed in the shape that hurts most: a first span far smaller than
+    /// the total, so the doubling ladder starts low and every rung
+    /// above it overshoots.
+    #[test]
+    fn the_contiguous_run_never_reserves_past_the_declared_total() {
+        const TOTAL: usize = 300_000;
+        let buf = FrontierBuffer::new(TOTAL as u64);
+        let mut off = 0usize;
+        while off < TOTAL {
+            let n = 7_000.min(TOTAL - off);
+            buf.write_span(off as u64, &pat(off, n));
+            off += n;
+            let st = buf.state.lock().unwrap();
+            assert!(
+                st.data.capacity() <= TOTAL,
+                "capacity {} ran past the declared total {TOTAL} at offset {off}",
+                st.data.capacity()
+            );
+        }
+        assert_eq!(buf.frontier(), TOTAL as u64);
+        // Growth is still geometric, not one reservation per span: a
+        // per-span exact reserve would be O(n^2) memmove. 7_000 doubling
+        // to the 300_000 ceiling is 6 growth steps, so the capacity must
+        // have landed well above one span.
+        assert!(
+            buf.state.lock().unwrap().data.capacity() >= TOTAL,
+            "the final run should hold the whole container"
+        );
+        let mut got = vec![0u8; TOTAL];
+        buf.peek(0, &mut got).unwrap();
+        assert_eq!(first_diff(0, &got, &pat(0, TOTAL)), None);
     }
 
     /// The stalled-chase cold spill end to end at the buffer level:
@@ -1628,7 +2218,11 @@ mod tests {
         assert!(!buf.conflicted());
         assert_eq!(buf.stored(), 0);
         buf.write_span(12_000, &[9u8; 1_000]);
-        assert!(buf.conflicted(), "a differing rewrite must not be dropped");
+        assert_eq!(
+            buf.rewritten(),
+            Some(12_000),
+            "a differing rewrite must not be dropped"
+        );
         let mut want = vec![3u8; 10_000];
         want[2_000..3_000].fill(9);
         let mut got = vec![0u8; 10_000];
@@ -1700,7 +2294,15 @@ mod tests {
     fn gated_reads_clamp_at_the_verified_watermark() {
         let gate = crate::live::VerifyGate::new(1);
         gate.engage(0);
-        let buf = FrontierBuffer::new_gated(30, Some((gate.clone(), 0)), None, None);
+        let buf = FrontierBuffer::new_gated(
+            30,
+            Some(Arc::new(crate::live::SlotGate {
+                gate: gate.clone(),
+                slot: 0,
+            })),
+            None,
+            None,
+        );
         buf.write_span(0, &[7u8; 30]);
         // Watermark 10: a 16-byte read at 0 serves exactly 10.
         gate.advance(0, 10);
@@ -1720,7 +2322,15 @@ mod tests {
         // An aborted buffer must not strand a gate-blocked reader.
         let gate2 = crate::live::VerifyGate::new(1);
         gate2.engage(0);
-        let b4 = std::sync::Arc::new(FrontierBuffer::new_gated(30, Some((gate2, 0)), None, None));
+        let b4 = std::sync::Arc::new(FrontierBuffer::new_gated(
+            30,
+            Some(Arc::new(crate::live::SlotGate {
+                gate: gate2,
+                slot: 0,
+            })),
+            None,
+            None,
+        ));
         b4.write_span(0, &[1u8; 30]);
         let b5 = b4.clone();
         let t = std::thread::spawn(move || {
@@ -1792,41 +2402,58 @@ mod tests {
     /// A mapped repair whose bytes DIFFER from an earlier delivery used to
     /// vanish silently whenever it landed at or behind the frontier - the
     /// exact range the chase engine has already decoded. Pin both halves
-    /// of the fix: the conflict is visible to the caller, and the retained
+    /// of the fix: the conflict is visible to the caller once the decode
+    /// has READ the range (and only then - row 27), and the retained
     /// record ends up holding the CORRECTED bytes, because a demotion
     /// materializes the volume straight out of it.
     #[test]
     fn frontier_buffer_flags_a_differing_rewrite() {
         use rars::BlockingRangeSource as _;
-        // Wholly behind the frontier.
+        // Wholly behind the frontier, and wholly READ.
         let buf = FrontierBuffer::new(30);
         buf.write_span(0, &[1u8; 10]);
         buf.write_span(10, &[2u8; 10]);
         assert_eq!(buf.known_len(), 20);
+        let mut read = [0u8; 20];
+        assert_eq!(buf.read_at(0, &mut read).unwrap(), 20);
+        assert_eq!(buf.served(), 20);
         assert!(!buf.conflicted());
         buf.write_span(0, &[7u8; 5]);
         assert!(buf.conflicted(), "a differing rewrite must not be dropped");
+        assert_eq!(buf.rewritten(), Some(0));
         let mut got = [0u8; 10];
         buf.peek(0, &mut got).unwrap();
         assert_eq!(&got, &[7, 7, 7, 7, 7, 1, 1, 1, 1, 1], "repair must win");
 
         // Straddling the frontier: the overlap is reconciled, the tail is
-        // appended, and the frontier still advances.
+        // appended, and the frontier still advances. Nothing read yet,
+        // so this is a rewrite and not a conflict; reading past it
+        // afterwards serves the corrected copy and flags nothing.
         let buf = FrontierBuffer::new(30);
         buf.write_span(0, &[1u8; 10]);
         buf.write_span(5, &[8u8; 10]);
-        assert!(buf.conflicted());
+        assert!(!buf.conflicted(), "unread bytes cannot conflict");
+        assert_eq!(buf.rewritten(), Some(5), "but the rewrite is on record");
         assert_eq!(buf.known_len(), 15);
+        let mut read = [0u8; 15];
+        assert_eq!(buf.read_at(0, &mut read).unwrap(), 15);
+        assert!(
+            !buf.conflicted(),
+            "reading a corrected range is not a conflict"
+        );
         let mut got = [0u8; 15];
         buf.peek(0, &mut got).unwrap();
         assert_eq!(&got[..5], &[1u8; 5]);
         assert_eq!(&got[5..], &[8u8; 10]);
 
-        // Parked, not yet folded. The 7z chase peeks at arbitrary offsets,
-        // so a parked span can have been read too.
+        // Parked, not yet folded. The 7z chase reads at arbitrary
+        // offsets, so a parked span can have been read too - and a read
+        // one counts.
         let buf = FrontierBuffer::new(30);
         buf.write_span(20, &[3u8; 10]);
         assert_eq!(buf.known_len(), 0);
+        let mut read = [0u8; 10];
+        assert_eq!(buf.read_covered_blocking(20, &mut read).unwrap(), 10);
         assert!(!buf.conflicted());
         buf.write_span(22, &[4u8; 4]);
         assert!(buf.conflicted(), "a parked rewrite must not be dropped");
@@ -1846,6 +2473,42 @@ mod tests {
                 assert_eq!(*b, covering.1[at], "copies disagree at {}", s + i as u64);
             }
         }
+    }
+
+    /// Row 27: the served line is what a rewrite is judged against. A
+    /// differing rewrite AHEAD of what the decode has read replaces the
+    /// stale copy and flags no conflict - the decode then reads the
+    /// corrected bytes; the same rewrite one byte into the read range
+    /// is a conflict. `served` only moves on the decode's readers:
+    /// peeks, pops and materialization leave it alone.
+    #[test]
+    fn differing_rewrite_conflicts_only_below_the_served_line() {
+        use rars::BlockingRangeSource as _;
+        let buf = FrontierBuffer::new(100);
+        buf.write_span(0, &[1u8; 100]);
+        let mut peek = [0u8; 50];
+        buf.peek(0, &mut peek).unwrap();
+        assert_eq!(buf.served(), 0, "a peek is not a decode read");
+        let mut read = [0u8; 40];
+        assert_eq!(buf.read_at(0, &mut read).unwrap(), 40);
+        assert_eq!(buf.served(), 40);
+        // Ahead of the line: corrected, not conflicted.
+        buf.write_span(40, &[9u8; 10]);
+        assert!(!buf.conflicted());
+        assert_eq!(buf.rewritten(), Some(40));
+        let mut got = [0u8; 10];
+        assert_eq!(buf.read_at(40, &mut got).unwrap(), 10);
+        assert_eq!(got, [9u8; 10], "the decode reads the corrected copy");
+        assert!(!buf.conflicted());
+        // Identical bytes over read range: a duplicate, never a rewrite.
+        buf.write_span(0, &[1u8; 40]);
+        assert!(!buf.conflicted());
+        // One byte into the read range: conflict, sticky.
+        let mut one_in = [1u8; 11];
+        one_in[0] = 5;
+        buf.write_span(49, &one_in);
+        assert!(buf.conflicted(), "a rewrite of a read byte must conflict");
+        assert_eq!(buf.rewritten(), Some(40), "lowest rewrite offset is sticky");
     }
 
     /// The blocking random-access read the 7z adapter stands on: parked

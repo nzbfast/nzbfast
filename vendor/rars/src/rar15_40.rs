@@ -78,6 +78,10 @@ pub struct Archive {
     pub main: MainHeader,
     pub blocks: Vec<Block>,
     source: ArchiveSource,
+    /// Archive-relative offset of the first block the header walk did
+    /// not read, when [`Self::parse_stream_incremental`] stopped at the
+    /// arrival frontier; `None` for a fully enumerated archive.
+    pending_from: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +274,9 @@ pub struct ExtractedEntryMeta {
     pub attr: u32,
     pub host_os: u8,
     pub is_directory: bool,
+    /// The member's declared unpacked size (every fragment of a split
+    /// member repeats the total).
+    pub unpacked_size: u64,
 }
 
 impl FileHeader {
@@ -505,6 +512,7 @@ impl FileHeader {
             attr: self.attr,
             host_os: self.host_os,
             is_directory: self.is_directory(),
+            unpacked_size: self.unp_size,
         }
     }
 
@@ -1013,6 +1021,7 @@ impl Archive {
             main,
             blocks,
             source: ArchiveSource::Memory(input),
+            pending_from: None,
         })
     }
 
@@ -1051,7 +1060,99 @@ impl Archive {
             source: source.clone(),
             len: expected_len,
         };
-        Self::parse_walk(&mut walk, 0, source, options.password)
+        Self::parse_walk(&mut walk, 0, source, options.password, None)
+    }
+
+    /// [`Self::parse_stream`] that does not wait for the volume's tail.
+    ///
+    /// The RAR4 twin of `rar50::Archive::parse_stream_incremental`, for
+    /// the same reason (nzbkit TODO 220): the eager walk's last read is
+    /// the end block at the volume TAIL, so a caller holding the volume
+    /// under a retention cap could not start decoding it until all of
+    /// it had arrived, and a volume larger than the cap breached the cap
+    /// with nothing to release. This walk stops where the arrived bytes
+    /// stop (`BlockingRangeSource::known_len`) and reports the archive
+    /// [`Self::is_partially_enumerated`]; [`Self::enumerate_rest`]
+    /// finishes it, blocking, and must run before `files()` is read as
+    /// the whole volume. The volume-sequence driver does exactly that.
+    pub fn parse_stream_incremental(
+        source: std::sync::Arc<dyn crate::source::BlockingRangeSource>,
+        expected_len: u64,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        let archive_len = usize::try_from(expected_len).map_err(|_| {
+            Error::InvalidHeader("RAR 1.5 archive size overflows host address size")
+        })?;
+        let frontier = source.clone();
+        let source = ArchiveSource::Stream {
+            source,
+            len: archive_len,
+        };
+        let signature = source.read_range(0..RAR15_SIGNATURE.len())?;
+        if signature != *RAR15_SIGNATURE {
+            return Err(Error::UnsupportedSignature);
+        }
+        let mut walk = SourceWalk {
+            source: source.clone(),
+            len: expected_len,
+        };
+        // Clamped to the declared length: a source reporting more
+        // arrived than the volume holds must not lift the stop above
+        // the walk's own bound.
+        let arrived = move || frontier.known_len().min(expected_len) as usize;
+        Self::parse_walk(&mut walk, 0, source, options.password, Some(&arrived))
+    }
+
+    /// Has the header walk stopped short of the archive's end because
+    /// the bytes it would have to read had not arrived? See
+    /// [`Self::parse_stream_incremental`]; false for every other parse.
+    pub fn is_partially_enumerated(&self) -> bool {
+        self.pending_from.is_some()
+    }
+
+    /// Finish a walk [`Self::parse_stream_incremental`] stopped early,
+    /// BLOCKING on the bytes it needs. A no-op on any other archive.
+    ///
+    /// RESUMES at the stop offset, keeping the main header and every
+    /// block already parsed - NOT a re-walk from the signature, which is
+    /// what the first cut of the RAR5 twin did and what nzbkit TODO 250
+    /// measured costing a chase 1.0x of payload: by the time the deferred
+    /// walk runs the caller has released the volume's prefix (that is the
+    /// point of deferring it), so a read at the signature lands behind
+    /// the trim point and the chase fails. The stop offset itself is safe to
+    /// read: it is where the last enumerated member's packed data ENDS,
+    /// which is exactly the engine's consumption watermark, and a trim
+    /// releases only bytes below that. The already-enumerated prefix is
+    /// untouched by construction, so the `(volume, file_index)` pairs a
+    /// caller holds keep pointing at the same entries.
+    pub fn enumerate_rest(&mut self, password: Option<&[u8]>) -> Result<()> {
+        let Some(pos) = self.pending_from else {
+            return Ok(());
+        };
+        let len = match &self.source {
+            ArchiveSource::Stream { len, .. } => *len as u64,
+            // Unreachable: only the stream-source parse stops early.
+            _ => return Ok(()),
+        };
+        let mut walk = SourceWalk {
+            source: self.source.clone(),
+            len,
+        };
+        let pending_from = walk_blocks(
+            &mut walk,
+            self.sfx_offset,
+            &self.main,
+            pos,
+            &mut self.blocks,
+            password,
+            None,
+        )?;
+        debug_assert!(
+            pending_from.is_none(),
+            "an unbounded walk cannot stop short"
+        );
+        self.pending_from = None;
+        Ok(())
     }
 
     fn parse_seekable(
@@ -1065,14 +1166,19 @@ impl Archive {
             file,
             len: file_len,
         };
-        Self::parse_walk(&mut walk, sfx_offset, source, password)
+        Self::parse_walk(&mut walk, sfx_offset, source, password, None)
     }
 
+    /// `arrived`, when given, is how many bytes of the source are
+    /// readable without blocking; the walk stops before the first block
+    /// header at or past it (after reading at least one block) and
+    /// records where in `pending_from`.
     fn parse_walk(
         file: &mut impl WalkSource,
         sfx_offset: usize,
         source: ArchiveSource,
         password: Option<&[u8]>,
+        arrived: Option<&dyn Fn() -> usize>,
     ) -> Result<Self> {
         let file_len = file.source_len();
         let marker = read_block_header_at(file, file_len, sfx_offset, 0)?;
@@ -1089,88 +1195,17 @@ impl Archive {
             main_block.head_size as usize,
         )?;
         let main = parse_main_header(&main_header, &relative_block(&main_block))?;
-        let mut pos = main_block.offset + main_block.head_size as usize;
+        let pos = main_block.offset + main_block.head_size as usize;
         let mut blocks = Vec::new();
-        let mut encrypted_header_ciphers = EncryptedHeaderCipherCache::default();
-
-        while (sfx_offset + pos) as u64 + 7 <= file_len {
-            let (block, header, total) = if main.has_encrypted_headers() {
-                let password = password.ok_or(Error::NeedPassword)?;
-                let encrypted = read_encrypted_header_at(
-                    file,
-                    file_len,
-                    sfx_offset,
-                    pos,
-                    password,
-                    &mut encrypted_header_ciphers,
-                )?;
-                (encrypted.block, encrypted.header, encrypted.total_size)
-            } else {
-                let block = read_block_header_at(file, file_len, sfx_offset, pos)?;
-                let total = block_total_size(&block)?;
-                let header = file.read_at(sfx_offset + pos, block.head_size as usize)?;
-                (block, header, total)
-            };
-            match block.head_type {
-                FILE_HEAD => {
-                    let mut file_header =
-                        parse_file_like_header(&header, relative_block(&block), 0)?;
-                    let total = file_block_total_size(&block, total, file_header.pack_size)?;
-                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    file_header.block.offset = block.offset;
-                    file_header.packed_range =
-                        packed_range(sfx_offset, block.offset, total, file_header.pack_size)?;
-                    blocks.push(Block::File(file_header));
-                    pos = next;
-                }
-                NEWSUB_HEAD => {
-                    let mut file_header =
-                        parse_file_like_header(&header, relative_block(&block), 0)?;
-                    let total = file_block_total_size(&block, total, file_header.pack_size)?;
-                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    file_header.block.offset = block.offset;
-                    file_header.packed_range =
-                        packed_range(sfx_offset, block.offset, total, file_header.pack_size)?;
-                    let kind = classify_new_sub(&file_header.name);
-                    blocks.push(Block::NewSub(NewSubHeader {
-                        file: file_header,
-                        kind,
-                    }));
-                    pos = next;
-                }
-                COMM_HEAD => {
-                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    let mut comment = parse_comment_header(&header, relative_block(&block))?;
-                    comment.block.offset = block.offset;
-                    comment.packed_range =
-                        sfx_offset + block.offset + 13..sfx_offset + block.offset + total;
-                    blocks.push(Block::Comment(comment));
-                    pos = next;
-                }
-                PROTECT_HEAD => {
-                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    let protect = parse_protect_header(&header, &block, sfx_offset, total)?;
-                    blocks.push(Block::Protect(protect));
-                    pos = next;
-                }
-                ENDARC_HEAD => {
-                    let _next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    blocks.push(Block::End(block));
-                    break;
-                }
-                _ => {
-                    let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
-                    blocks.push(Block::Unknown(block));
-                    pos = next;
-                }
-            }
-        }
+        let pending_from =
+            walk_blocks(file, sfx_offset, &main, pos, &mut blocks, password, arrived)?;
 
         Ok(Self {
             sfx_offset,
             main,
             blocks,
             source,
+            pending_from,
         })
     }
 
@@ -1270,12 +1305,8 @@ impl Archive {
             ArchiveSource::File(path) => crate::recovery::stream::clone_prefill(path, dest)?,
             _ => false,
         };
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create(true)
-            .truncate(false)
-            .open(dest)?;
+        // O_NOFOLLOW - see `Rar50Archive::repair_recovery_to_path`.
+        let mut out = crate::recovery::stream::open_repair_dest(dest)?;
         if !prefilled {
             out.set_len(0)?;
         }
@@ -2487,6 +2518,106 @@ fn decrypt_encrypted_header_at(
         header,
         total_size,
     })
+}
+
+/// The block walk shared by every parse: the archive's header chain from
+/// `pos` (relative to `sfx_offset`) forward, APPENDED to `blocks`.
+/// `arrived`, when given, is how many bytes of the source are readable
+/// without blocking; the walk stops before the first block header at or
+/// past it (after reading at least one block) and returns that offset.
+/// `None` back means the walk reached the END record or the file's end.
+/// Only the incremental streaming walk ever stops short;
+/// [`Archive::enumerate_rest`] calls back in here at that offset to
+/// finish, which is why `blocks` is appended to rather than built.
+fn walk_blocks(
+    file: &mut impl WalkSource,
+    sfx_offset: usize,
+    main: &MainHeader,
+    mut pos: usize,
+    blocks: &mut Vec<Block>,
+    password: Option<&[u8]>,
+    arrived: Option<&dyn Fn() -> usize>,
+) -> Result<Option<usize>> {
+    let file_len = file.source_len();
+    let mut encrypted_header_ciphers = EncryptedHeaderCipherCache::default();
+    let mut pending_from = None;
+
+    while (sfx_offset + pos) as u64 + 7 <= file_len {
+        if !blocks.is_empty() && arrived.is_some_and(|arrived| sfx_offset + pos >= arrived()) {
+            pending_from = Some(pos);
+            break;
+        }
+        let (block, header, total) = if main.has_encrypted_headers() {
+            let password = password.ok_or(Error::NeedPassword)?;
+            let encrypted = read_encrypted_header_at(
+                file,
+                file_len,
+                sfx_offset,
+                pos,
+                password,
+                &mut encrypted_header_ciphers,
+            )?;
+            (encrypted.block, encrypted.header, encrypted.total_size)
+        } else {
+            let block = read_block_header_at(file, file_len, sfx_offset, pos)?;
+            let total = block_total_size(&block)?;
+            let header = file.read_at(sfx_offset + pos, block.head_size as usize)?;
+            (block, header, total)
+        };
+        match block.head_type {
+            FILE_HEAD => {
+                let mut file_header = parse_file_like_header(&header, relative_block(&block), 0)?;
+                let total = file_block_total_size(&block, total, file_header.pack_size)?;
+                let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                file_header.block.offset = block.offset;
+                file_header.packed_range =
+                    packed_range(sfx_offset, block.offset, total, file_header.pack_size)?;
+                blocks.push(Block::File(file_header));
+                pos = next;
+            }
+            NEWSUB_HEAD => {
+                let mut file_header = parse_file_like_header(&header, relative_block(&block), 0)?;
+                let total = file_block_total_size(&block, total, file_header.pack_size)?;
+                let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                file_header.block.offset = block.offset;
+                file_header.packed_range =
+                    packed_range(sfx_offset, block.offset, total, file_header.pack_size)?;
+                let kind = classify_new_sub(&file_header.name);
+                blocks.push(Block::NewSub(NewSubHeader {
+                    file: file_header,
+                    kind,
+                }));
+                pos = next;
+            }
+            COMM_HEAD => {
+                let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                let mut comment = parse_comment_header(&header, relative_block(&block))?;
+                comment.block.offset = block.offset;
+                comment.packed_range =
+                    sfx_offset + block.offset + 13..sfx_offset + block.offset + total;
+                blocks.push(Block::Comment(comment));
+                pos = next;
+            }
+            PROTECT_HEAD => {
+                let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                let protect = parse_protect_header(&header, &block, sfx_offset, total)?;
+                blocks.push(Block::Protect(protect));
+                pos = next;
+            }
+            ENDARC_HEAD => {
+                let _next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                blocks.push(Block::End(block));
+                break;
+            }
+            _ => {
+                let next = checked_file_block_next(sfx_offset, &block, total, file_len)?;
+                blocks.push(Block::Unknown(block));
+                pos = next;
+            }
+        }
+    }
+
+    Ok(pending_from)
 }
 
 /// Positioned header reads for the block walk, over whichever backing the

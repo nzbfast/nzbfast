@@ -139,12 +139,54 @@ jobs:
           mkdir -p corpus/rar_extract corpus/par2_parse corpus/mkv_parse corpus/zip_parse
           mkdir -p corpus/rar_map corpus/rar_recovery_scan corpus/sevenz_name_probe
           mkdir -p corpus/sevenz_disk_gate
+          # Every .rar in the rars fixture tree, at ANY depth, into a
+          # flat corpus dir under a path-qualified name.
+          #
+          # The three call sites below used to share a `rar*/*.rar`
+          # glob, which is ONE level deep and therefore reached 54 of
+          # the tree's 141 archives: everything under rar15_40/rar300/,
+          # rar15_40/encrypted/, rar50/wild/ and eleven more subdirs was
+          # invisible to all three targets. TODO 16k measured the cost
+          # on this tree and left it alone as another target's business;
+          # this is that look. Measured at INITED on this tree, in the
+          # shape CI actually assembles (committed seeds/ replayed on
+          # top): rar_extract 2,685 -> 5,722 edges (ft 5,519 -> 14,764),
+          # rar_name_probe 450 -> 553 (ft 931 -> 1,261), and
+          # rar_recovery_scan - whose committed seeds already carry its
+          # gated entry points, so it has the least to gain - 2,417 ->
+          # 2,538 (ft 4,275 -> 4,933). The archive sweep alone, without
+          # those seeds, is 1,601 -> 2,243 there.
+          #
+          # The name is path-qualified rather than the basename because
+          # a libFuzzer corpus dir is FLAT: `solid.rar`, `stored.rar`
+          # and `with_comment.rar` each exist in more than one fixture
+          # subdir, so a plain `find -exec cp` silently lands 138 of the
+          # 141 and the three it drops are exactly the ones a
+          # depth-widening was for.
+          seed_rars() {
+            find ../../../vendor/rars/tests/fixtures -name '*.rar' -type f \
+            | while read -r f; do
+                cp "$f" "$1/$(printf '%s' "${f##*fixtures/}" | tr / _)" \
+                  2>/dev/null || true
+              done
+          }
           # rar_name_probe takes a bare volume head - no selector byte,
           # unlike rar_map - so real .rar files seed it verbatim.
+          #
+          # testdata is path-qualified for the same flat-dir reason as
+          # seed_rars, and it is not hypothetical here: FIVE of the
+          # thirteen names exist in BOTH testdata/rar4 and
+          # testdata/rar5 (enc-hdrs, enc-store, enc-vols.part1..3), so
+          # the plain `cp` landed 8 of 13 and the five it dropped were
+          # the ENCRYPTED-header ones - the shape whose verdict writes
+          # this target's terminal `header_encrypted` classification.
           mkdir -p corpus/rar_name_probe
-          cp ../testdata/rar4/*.rar ../testdata/rar5/*.rar \
-             ../../../vendor/rars/tests/fixtures/rar*/*.rar \
-             corpus/rar_name_probe/ 2>/dev/null || true
+          for f in ../testdata/rar4/*.rar ../testdata/rar5/*.rar; do
+            [ -f "$f" ] || continue
+            cp "$f" "corpus/rar_name_probe/$(printf '%s' "${f#../testdata/}" | tr / _)" \
+              2>/dev/null || true
+          done
+          seed_rars corpus/rar_name_probe
           # sevenz seeds include a header-bomb container (a kEncodedHeader
           # declaring 512 MiB decoded from 16 pack bytes) - the probe's
           # declared-size gate must keep rejecting it within the low rss
@@ -153,13 +195,21 @@ jobs:
           # The disk-gate target takes whole containers; the same seeds
           # cover it (it also self-seals raw windows, like the probe).
           cp ../tests/fixtures/sevenz/* corpus/sevenz_disk_gate/ 2>/dev/null || true
-          cp ../../../vendor/rars/tests/fixtures/rar*/*.rar corpus/rar_extract/ 2>/dev/null || true
+          seed_rars corpus/rar_extract
           cp ../tests/fixtures/par2/*.par2 corpus/par2_parse/ 2>/dev/null || true
           cp ../tests/fixtures/mkv/*.mkv corpus/mkv_parse/ 2>/dev/null || true
           cp ../tests/fixtures/zip/*.zip corpus/zip_parse/ 2>/dev/null || true
-          cp ../../../vendor/rars/tests/fixtures/rar*/*.rar corpus/rar_recovery_scan/ 2>/dev/null || true
-          # Committed repros (seeds/README.md): corpus/ is gitignored, so a
-          # crash CI found would be lost with its artifact. Replay them all.
+          # rar_recovery_scan's own gated entry points are seeded from
+          # seeds/ below - everything it parses sits behind a CRC64, a
+          # REV header or a volume signature - but the archive sweep is
+          # free coverage for the RAR5 leg on top of that, and it now
+          # actually reaches rar15_40/rar300/, where all three legacy
+          # protect-record fixtures live.
+          seed_rars corpus/rar_recovery_scan
+          # Committed seeds (seeds/README.md): corpus/ is gitignored, so a
+          # crash CI found would be lost with its artifact, and a target
+          # whose gates no mutator guesses would start cold every run.
+          # Both live there; replay them all.
           for d in seeds/*/; do
             t=$(basename "$d")
             mkdir -p "corpus/$t"

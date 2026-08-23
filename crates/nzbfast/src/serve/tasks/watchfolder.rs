@@ -56,7 +56,7 @@ pub(crate) fn watch_fail_id(path: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(path.as_os_str().as_encoded_bytes());
-    format!("{:x}", h.finalize())[..16].to_string()
+    hex::encode(h.finalize())[..16].to_string()
 }
 
 /// Which of the six [`watchfail`] states a listed file is in, as a token
@@ -450,8 +450,7 @@ pub(in crate::serve) fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                                 continue;
                             }
                             if d.watch_failed
-                                .lock()
-                                .unwrap()
+                                .lock_ok()
                                 .get(&p)
                                 .is_some_and(|(t, l, _, _)| (*t, *l) == sig)
                             {
@@ -572,16 +571,30 @@ pub(in crate::serve) fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                                 if !category.is_empty() {
                                     folder = format!("{folder}/{category}");
                                 }
+                                // §129 1b(b): the pickup goes on the
+                                // lifecycle ring, which is
+                                // sequence-cursored - it used to ride a
+                                // bounded `watch_picked` array on the
+                                // queue payload that the page diffed
+                                // against a seen-set of its own, and
+                                // that payload is only re-sent when the
+                                // queue revision moves.
+                                //
+                                // A pickup DOES move it (enqueue is
+                                // what raised this), so unlike the
+                                // give-up trip the old transport was
+                                // not late - it was just a second
+                                // mechanism for a moment the ring
+                                // already knew how to carry.
                                 let note_pickup = || {
                                     info!(
                                         target: "watch",
                                         "picked up {name} from {folder} - queued"
                                     );
-                                    let mut wp = d.watch_picked.lock_ok();
-                                    wp.push_back((name.clone(), folder.clone(), unix_now()));
-                                    while wp.len() > 8 {
-                                        wp.pop_front();
-                                    }
+                                    d.life_emit(
+                                        "watch.picked",
+                                        serde_json::json!({"name": name, "folder": folder}),
+                                    );
                                 };
                                 match d.enqueue(
                                     &bytes, &name, &category, -100, None, None, "watch", false,
@@ -589,18 +602,24 @@ pub(in crate::serve) fn spawn_watch_folder(daemon: &Arc<Daemon>) {
                                     // Delete the user's file only once the
                                     // queue record is DURABLE.
                                     //
-                                    // `enqueue` persists best-effort and
-                                    // returns Ok either way, and this deleted
-                                    // on Ok - so ENOSPC or EIO on queue.json
-                                    // plus a later crash lost both the record
-                                    // and the source, with nothing left to
-                                    // recover from. The job is live in memory
-                                    // regardless, so on a failed commit we
-                                    // keep their .nzb and record the failure:
-                                    // that stops the next scan re-enqueueing a
-                                    // duplicate, and leaves the file to be
-                                    // picked up if the daemon does restart.
-                                    Ok(_) if d.save_queue() => {
+                                    // `enqueue` used to persist best-effort
+                                    // and return Ok either way, and this
+                                    // deleted on Ok - so ENOSPC or EIO on
+                                    // queue.json plus a later crash lost both
+                                    // the record and the source, with nothing
+                                    // left to recover from. It now says
+                                    // whether its own save landed (A12), so
+                                    // the second `save_queue` that used to
+                                    // sit in this guard is gone. The job is
+                                    // live in memory regardless, so on a
+                                    // failed commit we keep their .nzb and
+                                    // record the failure: that stops the next
+                                    // scan re-enqueueing a duplicate, and
+                                    // leaves the file for the restart - where
+                                    // `recover_orphaned_spool` re-adopts the
+                                    // spool copy first and this poller then
+                                    // finds the file ALREADY_QUEUED by sha.
+                                    Ok(Enqueued { durable: true, .. }) => {
                                         note_pickup();
                                         // Keep-mode: the user wants the file
                                         // (collectors, sharing it for a bug

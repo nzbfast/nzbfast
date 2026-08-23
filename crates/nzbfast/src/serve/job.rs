@@ -12,6 +12,35 @@ pub enum JobState {
     Failed,
 }
 
+/// TODO 207: the verdict a finished download carries into history.
+///
+/// The LONGEST-HELD layer of the run, not the last one: a job that was
+/// provider-bound for eleven minutes and spent its final seconds on the
+/// disk was a provider problem, and the last verdict before it left the
+/// wire says the opposite. The two seconds counts travel with it for
+/// the same reason every live verdict travels with its numbers - "for
+/// 640s of 900s" carries its own weight, where a bare layer token
+/// invites the reader to assume the whole run.
+///
+/// The samples behind it are NOT persisted and cannot be: they come
+/// from a process-global ring that means nothing after a restart. This
+/// is the conclusion drawn from them, which does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WhyVerdict {
+    /// The layer token, exactly as `whyslow::Layer::token` spells it -
+    /// never `unknown`, which is the absence of a verdict and is stored
+    /// as the absence of this whole record.
+    pub layer: String,
+    /// The verdict's detail (a hostname, or the `missing` case), empty
+    /// when the layer carries none.
+    pub detail: String,
+    /// Seconds the layer above was the published verdict.
+    pub held_secs: u64,
+    /// Seconds this job was observed at all, so the claim above can be
+    /// read as the fraction of the run it actually is.
+    pub total_secs: u64,
+}
+
 pub struct Job {
     pub nzo_id: String,
     pub name: String,
@@ -88,6 +117,17 @@ pub struct Job {
     /// Recording it is what makes the next such report answerable from
     /// a history row instead of from a `sample` of the process.
     pub postproc_secs: f64,
+    /// TODO 207: the shortfall verdict this run earned, or None for a
+    /// job nothing ever judged.
+    ///
+    /// PERSISTED, unlike the log marks below, and the difference is the
+    /// same rule read from the other end: a mark indexes a
+    /// process-global ring that a restart re-creates from zero, so it
+    /// cannot mean anything in another process - while a verdict is a
+    /// statement ABOUT this download that stays true however many
+    /// restarts later it is read. See `whyslow::WhySlow::capture` for
+    /// when it is taken and `whyslow::verdict_json` for the wire form.
+    pub whyslow: Option<WhyVerdict>,
     /// The captured-output cursors bracketing this run, for
     /// `mode=report`. Both 0 = nothing to slice.
     ///
@@ -248,7 +288,7 @@ pub struct Job {
     /// watchlist upgrade then deleted both the copy it superseded and the
     /// replacement it had just filed beside it, and the slot still
     /// recorded the new release as owned, so it was never re-grabbed.
-    /// See [`delete_suffix`].
+    /// See [`delete_tail`].
     pub filed_suffix: Option<String>,
     /// The episode-title segment TV filing appended to this job's episode
     /// base (" - Children"), when `rename_episode_titles` was on and the
@@ -543,6 +583,23 @@ pub struct Job {
     pub cleaned_trash: bool,
 }
 
+impl Job {
+    /// Fields that describe ONE network attempt and must not outlive it.
+    /// Every path that sends a job back through the queue (retry, demote,
+    /// pause requeue, disk-full requeue) calls this, because `whyslow`
+    /// is stamped at network-drain on EVERY exit including the aborts,
+    /// and `postproc_secs` is only written at the tail a parked retry
+    /// never reaches (bug sweep 22 Aug 2026, F-16/F-17). `fail_message`
+    /// is deliberately not here: the retry and demote paths own it.
+    pub(in crate::serve) fn clear_attempt_verdicts(&mut self) {
+        self.whyslow = None;
+        self.fail_detail.clear();
+        self.finished_at = None;
+        self.finished_unix = None;
+        self.postproc_secs = 0.0;
+    }
+}
+
 /// What [`Daemon::finalize_names`] needs to know about the job it is
 /// filing. A struct rather than more positional parameters because the
 /// list had reached four same-typed strings and bools, and a caller
@@ -660,7 +717,7 @@ impl Drop for IndexJobGuard {
 /// inside either one hands the record to a live download. Stamping
 /// `Completed` then leaves a QUEUED row terminal - `pick_job` never
 /// picks it, and only a second retry clears it (sweep 3, H2).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn settle_locked_failure(
     d: &Arc<Daemon>,
     job: &Arc<Mutex<Job>>,
@@ -694,13 +751,41 @@ async fn settle_locked_failure(
         .chain(d.read_unpack_passwords_for(site, &poster))
         .collect();
     let unlock_dir = out.to_path_buf();
-    let winner = tokio::task::spawn_blocking(move || {
-        cands
-            .into_iter()
-            .find(|pw| crate::smart::unlock(&unlock_dir, pw))
+    // The same stand-down the completed path takes (`job_finalize`): a
+    // refusal that named itself is about the DISK, so every candidate
+    // below it would meet the same one, and none of them has been
+    // tested against the archive. See [`crate::smart::unlock`].
+    let (winner, refused) = tokio::task::spawn_blocking(move || {
+        let mut refused: Option<String> = None;
+        let mut winner: Option<String> = None;
+        for pw in cands {
+            match crate::smart::unlock(&unlock_dir, &pw) {
+                Ok(()) => {
+                    winner = Some(pw);
+                    break;
+                }
+                Err(None) => {}
+                Err(Some(why)) => {
+                    refused = Some(why);
+                    break;
+                }
+            }
+        }
+        (winner, refused)
     })
     .await
-    .unwrap_or(None);
+    .unwrap_or((None, None));
+    if let Some(why) = refused {
+        // This job has ALREADY failed - the probe runs over a local,
+        // hint-less failure - and its own message is very likely this
+        // same verdict, raised by the ladder that failed it. What must
+        // not happen is the `password_required` below: the archive is
+        // locked, but nothing here established that a password is what
+        // it is missing, and raising the 🔑 sends the user to buy a key
+        // for a door that is not the one shut.
+        warn!(target: "unlock", "{name:?}: the unlock was refused - {why}");
+        return false;
+    }
     match winner {
         Some(pw) => {
             info!(
@@ -952,6 +1037,7 @@ pub(super) async fn finalize_completed_gen(
         let nzb3 = nzb2.clone();
         let FinalizeOutcome {
             needs_pw,
+            unlock_refused,
             pw_used,
             blocked_by,
             moved,
@@ -1004,6 +1090,19 @@ pub(super) async fn finalize_completed_gen(
                     j.password = g.take().map(|(_, pw)| pw);
                     probe_pw = j.password.clone();
                 }
+            }
+            // The unlock ladder refused for a reason of its own -
+            // today a bomb verdict, which is the disk and not the
+            // password. It is written like the sentence below and not
+            // over it: `needs_pw` is false on this path, so the two
+            // never both have something to say. Guarded on an empty
+            // message for the same reason every other writer here is -
+            // a failure the download itself already recorded outranks
+            // anything post-processing has to add.
+            if let Some(why) = unlock_refused
+                && j.fail_message.is_empty()
+            {
+                j.fail_message = why;
             }
             // In "never ask" mode the locked outcome is not presented
             // as a failure: the still-packed note (blocked_by above)
@@ -1114,9 +1213,6 @@ pub(super) async fn finalize_completed_gen(
 /// coming) or "history" (already downloaded), which is the difference
 /// between "you are about to queue this twice" and "you already have
 /// this, do you want to play that copy instead".
-// Slim builds still detect the collision (enqueue checks is_some()) but the
-// only field readers live in the gated index API.
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub(crate) struct DupeCollision {
     pub where_: &'static str,
     pub name: String,
@@ -1203,6 +1299,73 @@ pub(crate) fn is_held_alternative(g: &Job) -> bool {
     g.paused && g.priority == DUPE_PRIORITY
 }
 
+/// Rename a spool copy out of the shape `recover_orphaned_spool`
+/// adopts, returning the new path.
+///
+/// The matcher takes only `SABnzbd_nzo_nzbfast*.nzb`, so the suffix is
+/// enough to make a file unadoptable. A copy under any other name was
+/// never adoptable, so it is left alone rather than renamed for nothing
+/// (`None`), as is one whose rename is refused - that one is warned
+/// about, because it stays adoptable.
+pub(crate) fn mask_spool_path(nzb: &Path, suffix: &str) -> Option<PathBuf> {
+    let adoptable = nzb
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f.starts_with("SABnzbd_nzo_nzbfast") && f.ends_with(".nzb"));
+    if !adoptable {
+        return None;
+    }
+    let mut masked = nzb.to_path_buf().into_os_string();
+    masked.push(suffix);
+    let masked = PathBuf::from(masked);
+    match std::fs::rename(nzb, &masked) {
+        Ok(()) => Some(masked),
+        Err(e) => {
+            warn!(
+                target: "queue",
+                "{}: could not set the deleted job's spool copy aside: {e}",
+                nzb.display()
+            );
+            None
+        }
+    }
+}
+
+/// Remove a deleted record's spool copy - and if the unlink is REFUSED,
+/// rename it out of the shape `recover_orphaned_spool` adopts.
+///
+/// The record is gone durably by the time this runs, so a survivor
+/// under the adoptable name is re-enqueued as "recovered" at the next
+/// start: the release the user (or an *arr) deliberately cancelled
+/// downloads again, un-held, because the delete's own
+/// `note_releases_deleted` mark clears the duplicate hold. The unlink
+/// is refused rarely and only from outside - a Windows sharing
+/// violation from an AV or indexer holding the just-written file, a
+/// macOS `uchg` flag, a spool directory that lost write permission -
+/// which is exactly why swallowing the error was invisible for as long
+/// as it was.
+pub(crate) fn drop_spool(nzb: &Path) {
+    match std::fs::remove_file(nzb) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            // A read-only spool DIRECTORY refuses the rename for the
+            // same reason it refused the unlink, so there is a third
+            // resort: emptying the file needs write permission on the
+            // file alone. An empty spool copy holds no articles and
+            // `recover_orphaned_spool` skips it, which is the property
+            // this is for.
+            let set_aside =
+                mask_spool_path(nzb, ".deleted").is_some() || std::fs::write(nzb, b"").is_ok();
+            warn!(
+                target: "queue",
+                "{}: the deleted job's spool copy could not be removed: {e} (set aside: {set_aside})",
+                nzb.display()
+            );
+        }
+    }
+}
+
 /// Hold a deleted record's spooled NZB back for a kept-files notice, or
 /// throw it away now.
 ///
@@ -1241,7 +1404,7 @@ pub(crate) fn hold_or_drop_spool(
             .or_default()
             .push(nzb.to_path_buf());
     } else {
-        let _ = std::fs::remove_file(nzb);
+        drop_spool(nzb);
     }
 }
 
@@ -1275,7 +1438,7 @@ pub(crate) fn note_kept_files(
     // it now, so it goes - every copy, not just one per directory.
     for (_, nzbs) in held.drain() {
         for nzb in nzbs {
-            let _ = std::fs::remove_file(nzb);
+            drop_spool(&nzb);
         }
     }
 }
@@ -1354,59 +1517,6 @@ pub(super) fn demote_requeues(demote: bool, tombstone: bool, failed: bool) -> bo
     demote && !tombstone && failed
 }
 
-/// Why a job failed, as far as the two policies that care are concerned:
-/// the auto-retry cooldown (`park`) and the dead-post report
-/// (`report_failure`). One classifier so they cannot drift apart - they
-/// already had, and a disk-full run was both auto-retried onto the same
-/// full disk AND reported to the indexer as a dead post.
-///
-/// Derived from `fail_message` rather than stored on the job: the
-/// terminal failure arrives here as an `anyhow` message from the download
-/// pipeline, so a field would be this same match written one layer
-/// earlier plus a second thing to keep in step with the sentence.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum FailKind {
-    /// Articles were missing from every server that has the post.
-    MissingArticles,
-    /// Every lost segment was a TRANSPORT failure - timeouts, resets,
-    /// nonstandard responses, retry budgets exhausted - and no server
-    /// ever said 430. Says nothing about the post's health, so it must
-    /// NOT be reported to an indexer as a dead post (a flaky provider
-    /// under load used to file takedown reports for perfectly healthy
-    /// releases). Retrying can absolutely fix it.
-    Transport,
-    /// The bytes arrived but PAR2 could not make them whole.
-    Unrepairable,
-    /// Pre-flight sampling said the post is already beyond repair.
-    PreflightImpossible,
-    /// A library entry's post has since been taken down.
-    Gone,
-    /// Anything on THIS machine: disk full, permissions, a write error,
-    /// no usable servers, a bad config, an unpack that fell over. Says
-    /// nothing about the post.
-    Local,
-}
-
-impl FailKind {
-    /// Is the post itself unavailable? Only these are worth telling an
-    /// indexer about - the report marks a release dead for everyone else
-    /// using it, and under `regrab` it spends a re-download too.
-    pub(super) fn post_unavailable(self) -> bool {
-        !matches!(self, FailKind::Local | FailKind::Transport)
-    }
-
-    /// Might simply waiting fix it? Propagation fills missing articles in
-    /// all the time, and a repair can succeed once the last volumes land.
-    /// A local fault will not fix itself, and retrying it immediately
-    /// just runs the same job into the same full disk.
-    pub(crate) fn transient(self) -> bool {
-        matches!(
-            self,
-            FailKind::MissingArticles | FailKind::Unrepairable | FailKind::Transport
-        )
-    }
-}
-
 /// A finished job as NZBGet's own `(Status, ParStatus, UnpackStatus)`.
 ///
 /// Everything that was not Completed used to report `FAILURE/PAR` with
@@ -1467,23 +1577,21 @@ pub(crate) fn shape_unpacks_on_disk(shape: &str) -> bool {
 /// Usenet are near-incompressible media - and it sits beside the parts,
 /// hence the second copy.
 ///
-/// An ENCRYPTED set needs a THIRD. The finish decrypt does not work in
-/// place: it writes the plaintext into a temp file beside the ciphertext
-/// and renames it over the top, so both exist at the peak
-/// (`extract::crypto::create_decrypt_temp` + `decrypt_pass`). Counting
-/// only twice told a user with a 15.6 GB disk that a 13.85 GB encrypted
-/// job needed ~12 GB freed when the true figure was past 25, so they
-/// would have freed what we asked and failed at 96% a second time.
+/// An ENCRYPTED set used to need a THIRD, because the finish decrypt did
+/// not work in place: it wrote the plaintext into a temp beside the
+/// ciphertext and renamed it over the top, so both existed at the peak.
+/// Counting only twice told a user with a 15.6 GB disk that a 13.85 GB
+/// encrypted job needed ~12 GB freed when the true figure was past 25,
+/// so they would have freed what we asked and failed at 96% a second
+/// time. TODO 27 phase 3 deleted that pass - an encrypted set decrypts
+/// as its bytes arrive, and one that cannot simply demotes to volumes +
+/// payload like any other - so the third copy went with it. Forecasting
+/// it anyway would now name a figure a third too high, which is the
+/// same defect pointing the other way.
 pub(crate) fn unpack_space_needed(to_fetch: u64, total_bytes: u64, shape: &str) -> u64 {
     let mut needed = to_fetch.saturating_add(total_bytes);
     let has = |want: &str| shape.split_whitespace().any(|t| t == want);
-    // An encrypted set's finish decrypt writes the plaintext into a temp
-    // BESIDE the ciphertext before renaming, so it peaks one payload
-    // higher than it looks.
-    if has("encrypted") {
-        needed = needed.saturating_add(total_bytes);
-    }
-    // So does a NESTED one, and for the same kind of reason: the outer
+    // A NESTED set peaks one payload higher than it looks: the outer
     // volumes stay on disk (the nested pass deliberately keeps what it
     // cannot prove spent), level 0's output IS the inner archive, and
     // level 1's output is the real payload - three copies at the peak
@@ -1561,360 +1669,6 @@ pub(super) fn move_retry_delay(base: u64, attempts: u32) -> u64 {
     base.checked_shl(steps)
         .unwrap_or(MOVE_RETRY_MAX_SECS)
         .min(MOVE_RETRY_MAX_SECS.max(base))
-}
-
-/// Did this failure message come from a full disk? One matcher for the
-/// NZBGet SPACE verdict and the retry guidance, because each platform
-/// spells it differently: Unix ENOSPC says "No space left on device",
-/// Windows error 112 says "There is not enough space on the disk" - and
-/// the Windows form was invisible to a check that only knew the Unix
-/// words, so a tester's disk-full unpack reported as a generic unpack
-/// failure. Takes the message in any case; lowercases internally.
-///
-/// The numeric forms are there because the OS spells the words in the
-/// system language, but always appends "(os error N)" - and they are
-/// gated to the platform whose number that is, because the daemon
-/// classifies failures it produced itself: 112 is ERROR_DISK_FULL on
-/// Windows but EHOSTDOWN on Unix, and an unguarded match would have
-/// called a dead-host transport failure a full disk.
-pub(crate) fn disk_full_failure(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("no space left")
-        || m.contains("not enough space")
-        || m.contains("disk full")
-        // The pipeline's own mid-download verdict (see drain_network in
-        // get/workers.rs): classified at the write by error KIND, so the
-        // quoted OS text may be in any language or carry an odd code.
-        || m.contains("out of disk space")
-        // With the closing paren, so "os error 28" cannot match
-        // "os error 280" - std's io::Error always prints "(os error N)".
-        || (cfg!(windows) && m.contains("os error 112)"))
-        || (cfg!(unix) && m.contains("os error 28)"))
-}
-
-/// Did the DOWNLOAD itself halt on storage exhaustion (the fast-halt
-/// verdict from get/workers.rs), as opposed to a disk that filled at
-/// the unpack? Keyed on the message OPENING like every `fail_kind`
-/// clause - appended detail never moves it. The two want different
-/// guidance (the unpack case re-runs only the unpack; this one resumes
-/// the fetch from the journal) and different daemon handling: with the
-/// min-free guard armed, this job goes back to the queue and the guard
-/// holds it until space frees, exactly like the pick-time hold.
-pub(crate) fn disk_full_mid_download(msg: &str) -> bool {
-    msg.starts_with("out of disk space")
-}
-
-/// The classifier as a wire token, for history_json. The dashboard
-/// composes a per-kind "what to do next" line in the user's language -
-/// which needs the KIND, not the raw English diagnostic it was derived
-/// from. Tokens, not sentences, same contract as `ArchiveShape`.
-pub(crate) fn fail_kind_token(k: FailKind) -> &'static str {
-    match k {
-        FailKind::MissingArticles => "missing",
-        FailKind::Transport => "transport",
-        FailKind::Unrepairable => "unrepairable",
-        FailKind::PreflightImpossible => "preflight",
-        FailKind::Gone => "gone",
-        FailKind::Local => "local",
-    }
-}
-
-/// Tokens for the auto-retry's own reason - what the cooldown is WAITING
-/// for, which is also what decided its length (see `SHORT_RETRY_SECS`).
-pub(crate) const RETRY_WHY_TRANSPORT: &str = "transport";
-pub(crate) const RETRY_WHY_PROPAGATION: &str = "propagation";
-
-/// A sub-cause INSIDE the failure message, as a token, for the one action
-/// the drawer offers beside the reason.
-///
-/// `fail_kind` answers "whose fault, and is it worth retrying"; this
-/// answers "which button". Two failures can share a kind and need
-/// opposite next moves: `MissingArticles` because a `retention_days`
-/// setting excluded the segments is a settings row away from fixed, while
-/// `MissingArticles` on a post carrying no PAR2 at all is only ever
-/// answered by another release. Derived from the message like `fail_kind`
-/// (and for the same reason - the sentence is what the pipeline hands
-/// up), keyed on clauses `incomplete_reason` writes verbatim.
-///
-/// Empty means "no specific remedy": the kind's own action stands.
-pub(crate) fn fail_hint(msg: &str) -> &'static str {
-    if msg.starts_with("no usable servers") {
-        // Nothing was even attempted: every configured server is out of
-        // the pool. The message names them; the button opens the card.
-        "servers"
-    } else if msg.contains("configured retention") {
-        "retention"
-    } else if msg.contains("no PAR2 recovery data") {
-        "nopar2"
-    } else if msg.starts_with("the articles did not decode") {
-        // The server's own copies are damaged - nothing on this machine
-        // is wrong. Both of the clauses below land in `Local` (they are
-        // neither missing articles nor a repair verdict), whose default
-        // move is "show the folder"; the folder answers neither of them.
-        "corrupt"
-    } else if msg.starts_with("post size header disagrees") {
-        // The poster's headers promise bytes that were never posted, so
-        // asking again returns the same short post. Another release is
-        // the only answer, exactly as for a takedown.
-        "shortpost"
-    } else if msg.contains("well past the minutes-to-hours") {
-        // Last of the arms on purpose: this one is about the post's AGE,
-        // not its shape, so anything more specific above (no parity at
-        // all, a retention setting, a decode fault) is the better answer
-        // and keeps it. It exists so the two surfaces that promise
-        // "posts often finish propagating within the hour" can stop
-        // saying that about a post days old - `incomplete_reason` writes
-        // the clause, this names it, and the drawer picks the copy.
-        "stale"
-    } else {
-        ""
-    }
-}
-
-/// The ONE thing worth offering a failed job, as a token.
-///
-/// Generalizes the disk-full drawer row, which is the only failure the
-/// dashboard ever gave a next move: everything else got the same generic
-/// Retry, including the two kinds the classifier itself says a retry
-/// cannot fix. Decided here rather than in the page because it is the
-/// same classification `fail_kind` and `fail_hint` already do - and
-/// because a rule ("a takedown is answered by another release, never by
-/// asking again") deserves a test, which a template literal does not get.
-///
-/// Tokens: `password` (unlock), `space` (the live free-space block),
-/// `servers`/`retention` (a settings row), `search` (find another
-/// release), `path` (show the folder), `retry` (ask again).
-pub(crate) fn fail_action(
-    kind: FailKind,
-    hint: &str,
-    msg: &str,
-    password_required: bool,
-) -> &'static str {
-    // Both of these outrank the kind: a locked archive and a full disk
-    // are `Local`, and "show the folder" answers neither of them.
-    // Password first is deliberate and pinned by
-    // `each_failure_gets_the_action_that_can_help` - the unlock is the
-    // one of the two that can be completed from the page. What must not
-    // happen is a job being FLAGGED locked because it failed on a full
-    // disk, and that is gated where the flag is raised (see the
-    // `locked_probe` in `finalize_completed`), not here.
-    if password_required {
-        return "password";
-    }
-    if disk_full_failure(msg) {
-        return "space";
-    }
-    // A sub-cause the message named beats the kind's default - see
-    // `fail_hint` for why two MissingArticles can want opposite moves.
-    match hint {
-        "servers" => return "servers",
-        "retention" => return "retention",
-        "nopar2" | "shortpost" => return "search",
-        // Damaged copies on the server: a re-fetch (and, with more than
-        // one provider, a different one) is the whole remedy.
-        "corrupt" => return "retry",
-        _ => {}
-    }
-    match kind {
-        // The post is the problem and asking again cannot change it.
-        FailKind::Gone | FailKind::PreflightImpossible | FailKind::Unrepairable => "search",
-        // Something on this machine: the folder is where the evidence is.
-        FailKind::Local => "path",
-        // Waiting, or the link settling, genuinely fixes these.
-        FailKind::MissingArticles | FailKind::Transport => "retry",
-    }
-}
-
-pub(crate) fn fail_kind(msg: &str) -> FailKind {
-    if msg.starts_with("download incomplete") {
-        FailKind::MissingArticles
-    } else if msg.starts_with("download failed on connection errors") {
-        FailKind::Transport
-    } else if msg.contains("repair could not complete") {
-        FailKind::Unrepairable
-    } else if msg.starts_with("pre-flight: articles missing beyond repair") {
-        FailKind::PreflightImpossible
-    } else if msg == "content no longer retrievable" || msg.starts_with("post is gone") {
-        // A download that proved every article absent on every backbone
-        // that answered. Deliberately NOT MissingArticles: that is
-        // transient, and an automatic retry against a post nothing
-        // carries only spends the same minutes proving it again.
-        FailKind::Gone
-    } else {
-        FailKind::Local
-    }
-}
-
-/// What a finished job still owes the outside world. `None` means
-/// nothing at all; `Some(failing)` says whether a failure report is due
-/// on top of the script and the notifications.
-///
-/// A tombstoned job was DELETED by the user while it ran. The delete
-/// aborts the pipeline, which surfaces as an `Err` and files the job
-/// Failed, so without this every cancellation ran the pp-script, sent a
-/// "Failed" notification, and - worst - reported a perfectly healthy post
-/// to the indexer as dead and (under `regrab`) started an unattended
-/// multi-GB re-download of the very title the user had just cancelled.
-/// A tombstoned job is dropped rather than filed; it owes nobody
-/// anything. The success race is covered too: if the fetch happened to
-/// return `Ok` just before the abort landed, the job is still deleted.
-pub(super) fn post_job_duties(
-    state: JobState,
-    tombstone: bool,
-    failure_mode: &str,
-) -> Option<bool> {
-    if tombstone {
-        return None;
-    }
-    Some(failure_mode != "off" && state == JobState::Failed)
-}
-
-/// Could waiting plausibly have changed the answer? The age half of
-/// `auto_retry_eligible`, which `transient()` alone cannot see.
-///
-/// `FailKind::MissingArticles` is transient at ANY age, and it is
-/// transient for one reason: a release grabbed minutes after its pre
-/// 430s on every server until the backbones fill in, which is
-/// indistinguishable from a dead post except by the calendar. So the
-/// retry ran against posts a week old too, spent a second full download
-/// (~150 s and 1.9 GB on the 15 Aug case) proving the same 1965 segments
-/// absent, and labelled the wait "propagation" for a post whose
-/// propagation finished six days earlier.
-///
-/// [`crate::diag::GONE_MIN_AGE_DAYS`] is where this project already
-/// draws that line, and this is the third caller to use it rather than a
-/// fourth opinion about how long propagation takes.
-///
-/// Deliberately narrow in both directions:
-///
-/// * only the missing-articles class is gated. `Transport` is a fault on
-///   THIS machine's link and says nothing whatever about the post, so it
-///   retries at any age; `Unrepairable` is a repair verdict, whose retry
-///   re-fetches gaps and can pull more recovery volumes.
-/// * an unknown age retries, and so does a loss the census leaves
-///   AMBIGUOUS - segments lost to transport errors or to a server that
-///   never connected are ours to fix, not the post's, and a
-///   journal-resume retry heals them. The cost of a wrong suppression is
-///   a final failure; a wrong retry costs one duplicate download.
-///
-/// Suppressing here and not at the label in `daemon_park` is the point:
-/// relabelling the cooldown would leave the second download running.
-/// Note the reach - `post_job_plan` shares this predicate, so a
-/// suppressed retry ALSO makes the failure final, which is what sends
-/// the report, the FailureLink re-grab and the M14f duplicate promotion.
-/// That is correct for a post this old: nothing is coming, and a held
-/// alternative is the only thing that can still deliver the release.
-fn retry_may_still_help(msg: &str) -> bool {
-    if fail_kind(msg) != FailKind::MissingArticles {
-        return true;
-    }
-    !crate::diag::missing_articles_proven_stale(msg)
-}
-
-/// Will `park` arm an M32 automatic retry for this job? `secs` is the
-/// configured cooldown (0 = the feature is off).
-///
-/// A free function so both callers - `park`, which arms it, and
-/// `post_job_plan`, which has to know the answer BEFORE park runs -
-/// share one predicate, and so it can be tested without a whole Daemon.
-pub(super) fn auto_retry_eligible(j: &Job, secs: u64) -> bool {
-    secs > 0
-        && j.state == JobState::Failed
-        && !j.tombstone
-        // A watchdog demotion goes back to the queue instead of history;
-        // park returns before the retry block for it.
-        && !j.demote
-        && fail_kind(&j.fail_message).transient()
-        && retry_may_still_help(&j.fail_message)
-        // ONE automatic retry. The retry itself bumps `retries` and
-        // clears the stamp, so a second failure lands here ineligible -
-        // and that is the failure that reports, re-grabs and promotes.
-        && j.retries == 0
-        && !j.library
-        && !j.password_required
-        && j.auto_retry_at.is_none()
-}
-
-/// What `run_post_job_hooks` owes: `None` for nothing, `Some(failing)`
-/// where `failing` also means "and this failure is final".
-///
-/// The failure report, the re-grab it can pull in, and the promotion of a
-/// held M14f duplicate all treat a failure as the end of the story. Fired
-/// on a failure the daemon has already decided to retry itself, they put
-/// three grabs of one title on the user's block account for one transient
-/// gap - and tell the indexer a live release is dead over a gap that
-/// propagation is expected to fill.
-///
-/// Answered here, synchronously, rather than by reading `auto_retry_at`
-/// from inside the spawned hooks: `park` arms that stamp AFTER the hooks
-/// are spawned, so the field-read version is a race that merely looks
-/// safe while pp-scripts and notifications stay slow.
-pub(super) fn post_job_plan(j: &Job, failure_mode: &str, auto_retry_secs: u64) -> Option<bool> {
-    let failing = post_job_duties(j.state, j.tombstone, failure_mode)?;
-    Some(failing && !auto_retry_eligible(j, auto_retry_secs))
-}
-
-/// Carry stored notification tokens onto an incoming list.
-///
-/// `get_config` never hands a token back - it is the Plex token /
-/// Jellyfin API key / Kodi `user:password` - and the dashboard rebuilds
-/// the whole list from the DOM and replaces it wholesale. So a blank
-/// token means KEEP, and without this the first Apply after a page load
-/// would wipe every credential the user had stored.
-///
-/// Matched on (kind, url, name), never on position: rows get reordered
-/// and deleted between the load and the save, and an index match would
-/// hand one target's credential to another. Failing that, on (kind,
-/// name) alone when exactly one UNCLAIMED stored target answers to it -
-/// correcting a typo'd host or port is the commonest edit there is, and
-/// it must not silently throw the token away. Genuine ambiguity carries
-/// nothing forward: being asked for the token again is better than
-/// sending one server's credential to a different one.
-///
-/// "Unclaimed" is what stops the fallback stealing: a stored target that
-/// some incoming row already matches exactly is that row's, so a second
-/// row sharing only its name is a DIFFERENT server and must not inherit
-/// its credential. Without that filter, adding a second same-kind target
-/// under an existing target's name copied the first one's token onto it.
-pub(super) fn merge_notify_tokens(
-    list: &mut [crate::notify::Target],
-    old: &[crate::notify::Target],
-) {
-    // Computed up front, over the whole incoming list, so the answer does
-    // not depend on the order the rows happen to arrive in.
-    let claimed: Vec<bool> = old
-        .iter()
-        .map(|p| {
-            list.iter()
-                .any(|t| t.kind == p.kind && t.url == p.url && t.name == p.name)
-        })
-        .collect();
-    for t in list
-        .iter_mut()
-        .filter(|t| t.token.is_empty() || t.secret.is_empty())
-    {
-        let exact = old
-            .iter()
-            .find(|p| p.kind == t.kind && p.url == t.url && p.name == t.name);
-        let prev = exact.or_else(|| {
-            let mut by_name = old
-                .iter()
-                .enumerate()
-                .filter(|(i, p)| !claimed[*i] && p.kind == t.kind && p.name == t.name)
-                .map(|(_, p)| p);
-            by_name.next().filter(|_| by_name.next().is_none())
-        });
-        if let Some(prev) = prev {
-            // §129 4a: the webhook signing secret is a credential with
-            // the token's exact lifecycle - blank on save means KEEP.
-            if t.token.is_empty() {
-                t.token = prev.token.clone();
-            }
-            if t.secret.is_empty() {
-                t.secret = prev.secret.clone();
-            }
-        }
-    }
 }
 
 /// Is this path a TV-filing `Season NN` folder - i.e. a SHARED library
@@ -2190,214 +1944,6 @@ pub(super) fn file_count(dir: &std::path::Path) -> usize {
         .sum()
 }
 
-/// Series/movie identity from a release name (SAB "smart dedupe" model):
-/// `Show.Name.S01E02.1080p.WEB` → `show name/s1e2`,
-/// `Movie.Title.2026.2160p` → `movie title/2026`. Quality/group noise is
-/// exactly what must NOT distinguish duplicates, so only the title before
-/// the marker, the marker itself, and (for a year marker) whatever
-/// identity follows it go into the key.
-/// "head/<date> <identity tail>" for a dated post: everything before the
-/// date names the competition or show, everything identity-bearing after
-/// it names the event of that day. The group tag is trimmed off the tail
-/// (it is noise, and on some posts it is the last token), matching the
-/// movie-year arm below.
-pub(super) fn dated_key(
-    tokens: &[&str],
-    date_at: usize,
-    tail_from: usize,
-    date: &str,
-    raw_name: &str,
-) -> String {
-    let group = nzbkit::release::group_of(raw_name).map(str::to_ascii_lowercase);
-    let mut tail = nzbkit::release::identity_tail(tokens[tail_from..].iter().copied());
-    if tail.last().is_some_and(|l| Some(*l) == group.as_deref()) && tokens.last() == tail.last() {
-        tail.pop();
-    }
-    let head = tokens[..date_at].join(" ");
-    if tail.is_empty() {
-        format!("{head}/{date}")
-    } else {
-        format!("{head}/{date} {}", tail.join(" "))
-    }
-}
-
-/// The "exact" duplicate identity: the whole release name, flattened the
-/// same way `dupe_key` flattens it. `Show.Name.S01E02.x264-Grp` and
-/// `Show Name S01E02 x264-Grp` still meet, but a different release of
-/// the same episode does not - which is the point of
-/// `dupe_scope = "exact"`: a quality upgrade an *arr chose is not a
-/// duplicate, a re-send of the same release is.
-pub(super) fn exact_dupe_key(name: &str) -> String {
-    flatten_name(name)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Reduce a release name to its bare letter/digit sequence, lowercased,
-/// with every separator and decoration collapsed to a single space.
-///
-/// Unicode-aware, and that is the whole point: an ASCII-only filter
-/// erased every non-Latin letter, so `電影甲.2024.1080p.WEB-DL.x264-GRP`
-/// and `電影乙.2024.1080p.WEB-DL.x264-GRP` reduced to the SAME key and
-/// collided as duplicates, while an all-CJK name reduced to the empty
-/// string - an identity so unspecific that the exact-duplicate check
-/// has to refuse it, so a genuine re-send of that release was admitted
-/// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
-/// they always did; `to_lowercase` differs from `to_ascii_lowercase`
-/// only on characters the old filter was deleting anyway.
-pub(crate) fn flatten_name(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect()
-}
-
-pub(super) fn dupe_key(name: &str) -> Option<String> {
-    // Full non-alphanumeric flattening (not just ./_/-): friendly-named
-    // posts write "Title (2026)" and the parenthesized year token never
-    // matched the scene form's bare "2026", so the same film in two
-    // naming styles didn't dedupe (and the wall's have-badge missed).
-    let flat = flatten_name(name);
-    let tokens: Vec<&str> = flat.split_whitespace().collect();
-    // Episode marker wins over a year token (`Show.2026.S01E02` is an
-    // episode, not a movie from 2026).
-    for (i, t) in tokens.iter().enumerate() {
-        // SxxEyy (also SxxEyyEzz double episodes - key on the first ep).
-        if let Some(rest) = t.strip_prefix('s') {
-            let mut it = rest.splitn(2, 'e');
-            if let (Some(s), Some(e)) = (it.next(), it.next()) {
-                let e_first: String = e.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) && !e_first.is_empty() {
-                    let (s, e): (u32, u32) = (s.parse().ok()?, e_first.parse().ok()?);
-                    return Some(format!("{}/s{s}e{e}", tokens[..i].join(" ")));
-                }
-            }
-        }
-    }
-    for (i, t) in tokens.iter().enumerate() {
-        // NxNN alternate episode form (3x07 ≡ S03E07) - same constraints
-        // as the wall parser (1-2 digit season, 2-3 digit episode, so
-        // "4x4" truck titles don't match). Without this the dupe check
-        // was skipped and a 3x07 alt of an owned S03E07 fully downloaded.
-        if let Some((s, e)) = t.split_once('x')
-            && !s.is_empty()
-            && s.len() <= 2
-            && s.bytes().all(|c| c.is_ascii_digit())
-            && (2..=3).contains(&e.len())
-            && e.bytes().all(|c| c.is_ascii_digit())
-        {
-            let (s, e): (u32, u32) = (s.parse().ok()?, e.parse().ok()?);
-            return Some(format!("{}/s{s}e{e}", tokens[..i].join(" ")));
-        }
-    }
-    // Daily-date episodes, both conventions normalized to yyyymmdd so a
-    // dotted post dedupes against a compact one. Must outrank the movie-
-    // year arm: it keyed every "Show.2026.07.21" episode to `show/2026`,
-    // so all of a year's daily episodes after the first were held as
-    // paused duplicates of episode one.
-    //
-    // The date alone is not the identity, for the same reason a season
-    // year alone was not: a matchday holds five fixtures and a fight
-    // card holds prelims and a main card. Keyed on `epl/20260822`,
-    // "Arsenal.vs.Spurs" and "Liverpool.vs.Everton" were one release -
-    // the second admitted PAUSED at priority -3 and never promoted
-    // (park only frees a held duplicate when the first FAILS), and
-    // adopted by the watchlist as a slot it already owned. So the
-    // identity tail after the date counts, exactly as it does after a
-    // year, and by the same rules: it stops at the first piece of hard
-    // furniture, so two encodes of one event still share a key.
-    let d2 = |s: &str, max: u32| {
-        s.len() == 2
-            && s.bytes().all(|c| c.is_ascii_digit())
-            && s.parse::<u32>().is_ok_and(|v| (1..=max).contains(&v))
-    };
-    for (i, t) in tokens.iter().enumerate() {
-        if i == 0 || !t.bytes().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        // Dotted: year token + MM + DD tokens ("2026 07 21" after
-        // separator flattening).
-        if t.len() == 4
-            && (t.starts_with("19") || t.starts_with("20"))
-            && tokens.get(i + 1).is_some_and(|m| d2(m, 12))
-            && tokens.get(i + 2).is_some_and(|d| d2(d, 31))
-        {
-            let date = format!("{t}{}{}", tokens[i + 1], tokens[i + 2]);
-            return Some(dated_key(&tokens, i, i + 3, &date, name));
-        }
-        // Compact: YYMMDD / YYYYMMDD ("At.Midnight.150615…").
-        if t.len() == 6 || t.len() == 8 {
-            let (y, md) = t.split_at(t.len() - 4);
-            let (mth, day) = md.split_at(2);
-            if d2(mth, 12) && d2(day, 31) {
-                let year = if y.len() == 2 {
-                    format!("20{y}")
-                } else {
-                    y.to_string()
-                };
-                return Some(dated_key(
-                    &tokens,
-                    i,
-                    i + 1,
-                    &format!("{year}{mth}{day}"),
-                    name,
-                ));
-            }
-        }
-    }
-    // Release group: taken from the RAW name, because the flattening
-    // above dissolved the hyphen that marks it. A group tag is pure
-    // noise, so it must never end up in the identity tail below.
-    let group = nzbkit::release::group_of(name).map(str::to_ascii_lowercase);
-    for (i, t) in tokens.iter().enumerate() {
-        // Movie year 1900–2099, not in first position (that's a title).
-        if i > 0
-            && t.len() == 4
-            && (t.starts_with("19") || t.starts_with("20"))
-            && t.chars().all(|c| c.is_ascii_digit())
-        {
-            // A year is not always a release date. Event posts use it as
-            // the SEASON and put their identity after it - the round, the
-            // country, the session ("Formula1.2026.Round11.Hungary.Pre-
-            // Qualifying.Show.F1TV.WEB-DL.1080p.H264.English-MWR"). Keyed
-            // on title+year alone, every session of every round of the
-            // year collapsed onto "formula1/2026" and each one after the
-            // first was held as a paused duplicate at priority -3. Same
-            // bug the daily-date arm above exists to prevent, one shape
-            // over.
-            //
-            // The tail stops at the first piece of hard furniture, so an
-            // ordinary film - whose year is followed straight by quality
-            // tags - keys exactly as it always did, and two encodes of
-            // one release still share a key: resolution, source, codec,
-            // edition and group can never reach the tail.
-            let mut tail = nzbkit::release::identity_tail(tokens[i + 1..].iter().copied());
-            if tail.last().is_some_and(|l| Some(*l) == group.as_deref())
-                && tokens.last() == tail.last()
-            {
-                tail.pop();
-            }
-            let head = tokens[..i].join(" ");
-            return Some(if tail.is_empty() {
-                format!("{head}/{t}")
-            } else {
-                format!("{head}/{t} {}", tail.join(" "))
-            });
-        }
-    }
-    None
-}
-
-/// PROPER/REPACK releases deliberately replace an earlier post - never
-/// hold them as duplicates. ("REAL" is excluded: too many titles contain
-/// the word; scene REALs virtually always also carry PROPER.)
-pub(super) fn is_proper(name: &str) -> bool {
-    let flat = name.to_ascii_lowercase().replace(['.', '_', '-'], " ");
-    flat.split_whitespace()
-        .any(|t| matches!(t, "proper" | "repack" | "rerip"))
-}
-
 /// Split the two persisted record arrays into the queue and the history
 /// the daemon comes back with. Returns `(queue, history)` in file order.
 ///
@@ -2548,257 +2094,12 @@ pub(super) fn claim_extra_slot(
 /// after a restart from the persisted queue rather than from memory.
 pub(super) fn nzb_sha(bytes: &[u8]) -> String {
     use sha2::Digest as _;
-    format!("{:x}", sha2::Sha256::digest(bytes))
+    hex::encode(sha2::Sha256::digest(bytes))
 }
 
 /// The suffix `publish_over_previous` parks a superseded download under
 /// while it swaps the new one into place.
 pub(super) const REPLACED_SUFFIX: &str = ".nzbfast-replaced-";
-
-/// Finish, or undo, a replace that a crash caught between its two renames.
-///
-/// `publish_over_previous` renames the canonical directory aside, then
-/// renames the new payload onto it, and only then removes the aside. It
-/// rolls back on a reported error, but a power cut or a kill between the
-/// two renames left NO canonical directory at all: the previous
-/// completed job's history record pointed at a path that no longer
-/// existed, its bytes sat under a pid-suffixed name nothing would ever
-/// look at again, and the new payload stayed in its `.2` collision
-/// directory. Dashboard "open folder", delete-with-files and any *arr
-/// import against that job all hit a missing directory, silently. The
-/// aside name appeared in exactly one place in the whole tree - where it
-/// is built - so nothing swept, restored or even reported these.
-///
-/// Only the unambiguous case is repaired: the canonical path is GONE, so
-/// the aside is the only copy and belongs back. When both exist the
-/// likely story is that the second rename landed and only the cleanup
-/// was lost, but "likely" is not enough to delete a directory full of a
-/// user's media, so that one is reported and left alone.
-pub(super) fn recover_interrupted_publishes(out_root: &std::path::Path) {
-    // Job directories live at out_root/<name> or out_root/<cat>/<name>,
-    // so one level down is enough; this is startup, not a deep walk.
-    let mut dirs = vec![out_root.to_path_buf()];
-    if let Ok(rd) = std::fs::read_dir(out_root) {
-        for e in rd.flatten() {
-            if e.path().is_dir() {
-                dirs.push(e.path());
-            }
-        }
-    }
-    for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let aside = e.path();
-            let Some(name) = aside.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            // Match the way the aside is BUILT: `<canonical>` + suffix +
-            // the parking process's pid, and nothing after it. A plain
-            // `find` accepted any name merely containing the suffix, so a
-            // user's own "Movie.nzbfast-replaced-Final" would be renamed
-            // to "Movie" over their heads - and, worse, the last
-            // occurrence is the one we split at, so a canonical name that
-            // itself ends in the suffix still resolves correctly.
-            let Some((stem, tail)) = name.rsplit_once(REPLACED_SUFFIX) else {
-                continue;
-            };
-            if stem.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
-            }
-            if !aside.is_dir() {
-                continue;
-            }
-            let canon = dir.join(stem);
-            if canon.symlink_metadata().is_ok() {
-                info!(
-                    target: "replace",
-                    "{} and {} both exist - an interrupted replace left a spare \
-                     copy. Nothing is lost; delete whichever you do not want.",
-                    canon.display(),
-                    aside.display()
-                );
-                continue;
-            }
-            match std::fs::rename(&aside, &canon) {
-                Ok(()) => info!(
-                    target: "replace",
-                    "restored {} from {} - a replace was interrupted before the \
-                     new download took its place",
-                    canon.display(),
-                    aside.display()
-                ),
-                Err(err) => warn!(
-                    target: "replace",
-                    "could not restore {} from {}: {err} (the download is intact \
-                     under the second name)",
-                    canon.display(),
-                    aside.display()
-                ),
-            }
-        }
-    }
-}
-
-/// Who already holds a candidate output directory.
-pub(crate) enum DirClaim {
-    Free,
-    /// Another job is still working in it.
-    Active,
-    /// A completed job's payload is still there.
-    Payload,
-}
-
-/// Pick a new job's output directory, and the canonical directory it must
-/// publish over on success (`Job::replaces`).
-///
-/// Two DIFFERENT NZBs whose names sanitize to the same stem and carry no
-/// dupe_key (no SxxEyy/year marker - e.g. software or music posts) are not
-/// caught by the M14f duplicate hold, so they would share one out_dir.
-/// Their pipelines deliberately overlap (A's tail repairs/extracts while
-/// B's net leg runs), so B's journal + volume writers truncate the files A
-/// is still reading → both corrupt. A colliding job gets its own directory.
-///
-/// A COMPLETED job's payload claims its directory too. Treating it as
-/// inert meant a re-add reused the folder and the very first decoded span
-/// truncated the previous, good result - which was then gone for nothing
-/// if the replacement failed on missing articles, a password or ENOSPC.
-/// The re-add downloads under its own name and takes over the canonical
-/// directory only once it has verified. A FAILED job's leftovers are junk
-/// and are still reused in place, so retrying a flaky post does not climb
-/// .2, .3, .4.
-pub(crate) fn choose_out_dir(
-    base: &std::path::Path,
-    dir_stem: &str,
-    claim: &dyn Fn(&std::path::Path) -> DirClaim,
-) -> (PathBuf, Option<PathBuf>) {
-    let mut candidate = base.to_path_buf();
-    let mut replaces = None;
-    let mut n = 1u32;
-    loop {
-        match claim(&candidate) {
-            DirClaim::Free => return (candidate, replaces),
-            // Only the canonical directory is ever replaced; a numbered
-            // sibling left by some earlier collision is left alone.
-            DirClaim::Payload if candidate == base => replaces = Some(base.to_path_buf()),
-            _ => {}
-        }
-        n += 1;
-        candidate = base.with_file_name(format!("{dir_stem}.{n}"));
-    }
-}
-
-/// Where a re-queued job that had been TV-filed must download instead.
-///
-/// Its `out_dir` is the SHARED `Show/Season NN` library folder, so
-/// re-queueing it as-is aims the journal, the volume writers and every
-/// later "delete this job's files" at a directory belonging to the whole
-/// season. This picks the ordinary private directory the job would get on
-/// a fresh add - collision rules and all, so it cannot land on another
-/// job's folder either.
-pub(crate) fn refile_out_dir(
-    out_root: &std::path::Path,
-    category: &str,
-    name: &str,
-    claim: &dyn Fn(&std::path::Path) -> DirClaim,
-) -> (PathBuf, Option<PathBuf>) {
-    let dir_stem = nzbkit::disk::sanitize_filename(name.trim_end_matches(".nzb"));
-    let base = if category.is_empty() {
-        out_root.join(&dir_stem)
-    } else {
-        out_root
-            .join(nzbkit::disk::sanitize_filename(category))
-            .join(&dir_stem)
-    };
-    choose_out_dir(&base, &dir_stem, claim)
-}
-
-/// Take over the canonical output directory from the completed job this
-/// one replaces (see `Job::replaces`). Called once the job has finished
-/// successfully and before any renaming or relocation, so everything
-/// downstream sees the final location.
-///
-/// The previous result is moved aside first and only deleted once the new
-/// payload is in place; if the move in fails, the old result goes straight
-/// back and this job keeps its own directory. A re-add that never
-/// finishes therefore costs the user nothing - which is the whole point,
-/// since reusing the folder used to truncate the good payload with the
-/// replacement's first decoded span.
-///
-/// Returns the directory the job now lives in, or `None` when nothing
-/// moved.
-pub(crate) fn publish_over_previous(
-    out_dir: &std::path::Path,
-    canon: &std::path::Path,
-) -> Option<PathBuf> {
-    if out_dir == canon || !out_dir.exists() {
-        return None;
-    }
-    // Same constant `recover_interrupted_publishes` scans for at startup:
-    // a crash between the two renames below leaves this directory as the
-    // only copy of the superseded download, and the sweep puts it back.
-    let aside = canon.with_file_name(format!(
-        "{}{REPLACED_SUFFIX}{}",
-        canon.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let parked = canon.symlink_metadata().is_ok();
-    if parked && let Err(e) = std::fs::rename(canon, &aside) {
-        warn!(
-            target: "replace",
-            "could not move {} aside: {e} - keeping the new download in {}",
-            canon.display(),
-            out_dir.display()
-        );
-        return None;
-    }
-    match std::fs::rename(out_dir, canon) {
-        Ok(()) => {
-            if parked && let Err(e) = std::fs::remove_dir_all(&aside) {
-                warn!(
-                    target: "replace",
-                    "previous result left behind in {}: {e}",
-                    aside.display()
-                );
-            }
-            info!(target: "replace", "{} → {}", out_dir.display(), canon.display());
-            Some(canon.to_path_buf())
-        }
-        Err(e) => {
-            warn!(
-                target: "replace",
-                "{} → {}: {e} - keeping the new download where it is",
-                out_dir.display(),
-                canon.display()
-            );
-            if parked {
-                let _ = std::fs::rename(&aside, canon);
-            }
-            None
-        }
-    }
-}
-
-/// Are these two paths the same directory on disk?
-///
-/// A byte compare is not enough: a case variant on APFS or NTFS, a
-/// symlinked parent, or a "." component all name the same place while
-/// comparing unequal - and a move destination that aliases the download
-/// folder makes move_tree merge a directory with itself and rename every
-/// file in it to "name (2).ext".
-///
-/// canonicalize only works on paths that exist, so a missing path falls
-/// back to the byte compare. That is the safe direction here: the caller
-/// has just created the destination, and the check is a guard rail, not
-/// a security boundary.
-pub(super) fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
-    a == b
-        || match (a.canonicalize(), b.canonicalize()) {
-            (Ok(x), Ok(y)) => x == y,
-            _ => false,
-        }
-}
 
 /// What both reference clients mean by "MB" in their APIs.
 ///
@@ -2834,6 +2135,44 @@ pub(super) fn unix_now() -> i64 {
 mod job_wire;
 pub(super) use job_wire::{job_from_json, job_json};
 
+// How a job fails and what happens next, moved out bodily (TODO 106) and
+// re-exported so every caller still names `job::fail_kind` and friends.
+#[path = "job_fail.rs"]
+mod job_fail;
+pub(crate) use job_fail::{
+    FailKind, RETRY_WHY_PROPAGATION, RETRY_WHY_TRANSPORT, disk_full_failure,
+    disk_full_mid_download, fail_action, fail_hint, fail_kind, fail_kind_token,
+};
+pub(super) use job_fail::{auto_retry_eligible, merge_notify_tokens, post_job_plan};
+// `post_job_duties` has no production caller outside `job_fail` itself - it is
+// the inner half of `post_job_plan` - but `serve::tests_grabs` pins its
+// three-way policy by name through `serve`'s glob of this module.
+#[cfg(test)]
+pub(super) use job_fail::post_job_duties;
+
+// The duplicate-detection keys, moved out bodily (TODO 106) and re-exported:
+// `serve` reaches them through its own glob of this module, and
+// `crate::serve::job::flatten_name` is spelled out in newznab.rs.
+#[path = "job_dupe.rs"]
+mod job_dupe;
+// Indexer-only: the one caller outside this module is `newznab::release_ident`,
+// which is itself `#[cfg(feature = "indexer")]`. The function is reached
+// unqualified through `serve`'s glob either way.
+#[cfg(feature = "indexer")]
+pub(crate) use job_dupe::flatten_name;
+pub(super) use job_dupe::{dupe_key, exact_dupe_key, is_proper};
+// Same shape: `dated_key` is only called by `dupe_key` beside it, and by the
+// dated-post cases in `job_tests`.
+#[cfg(test)]
+pub(super) use job_dupe::dated_key;
+
+// Where a finished job's files land, moved out bodily (TODO 106) and
+// re-exported so daemon_persist / settings_setters / the api keep their paths.
+#[path = "job_publish.rs"]
+mod job_publish;
+pub(crate) use job_publish::{DirClaim, choose_out_dir, publish_over_previous, refile_out_dir};
+pub(super) use job_publish::{recover_interrupted_publishes, same_dir};
+
 #[cfg(test)]
 #[path = "job_tests.rs"]
 mod job_tests;
@@ -2841,3 +2180,24 @@ mod job_tests;
 #[cfg(all(test, unix))]
 #[path = "job_finalize_marker_tests.rs"]
 mod job_finalize_marker_tests;
+
+/// What `Daemon::enqueue` hands back: the job's id, and whether the
+/// record that names it reached disk (TODO 16g / A12).
+///
+/// `enqueue` used to return the bare id and persist best-effort, so every
+/// caller was told the job was durable when it may not have been - and
+/// the watch poller deleted the user's .nzb on that word. The job is live
+/// in memory either way; `durable: false` means the write of queue.json
+/// (or of history.jsonl, for the arms that file straight to history)
+/// failed, and a restart before the next successful save will not find
+/// the record. `enqueue` logs that itself, once, so a caller with nothing
+/// of its own to protect may ignore the flag: the spooled .nzb it wrote
+/// survives, and `Daemon::recover_orphaned_spool` re-adopts it at the next
+/// start under the SAME id. A caller that DESTROYS its source on success
+/// (the watch folder deleting the user's file) must check the flag and
+/// keep the source when it is false.
+#[derive(Debug, Clone)]
+pub(super) struct Enqueued {
+    pub nzo_id: String,
+    pub durable: bool,
+}

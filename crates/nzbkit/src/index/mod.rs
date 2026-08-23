@@ -27,6 +27,7 @@ mod cards;
 mod claims;
 mod encrypted;
 mod evict;
+mod fold;
 mod ingest;
 #[cfg(test)]
 mod ingest_diff_tests;
@@ -44,6 +45,8 @@ mod retry;
 mod schema;
 mod scoreboard;
 mod searchlog;
+pub mod segcodec;
+mod segmig;
 mod session;
 mod spots;
 mod summaries;
@@ -65,6 +68,8 @@ pub use query::{FilenameFallback, filename_fallback_stats, reset_filename_fallba
 pub use schema::WAL_SIZE_LIMIT;
 pub use scoreboard::*;
 pub use searchlog::*;
+pub use segcodec::{Seg, SegList, SegRaw};
+pub use segmig::*;
 pub use session::{SessionLink, SessionSibling, TitleSibling};
 pub use spots::*;
 pub use titles::*;
@@ -113,9 +118,10 @@ pub struct Index {
     /// failed with a stale statement even after re-preparing, plus the
     /// injector that gives that path a deterministic test. See `retry`.
     retry: retry::SchemaRetry,
-    /// Set when THIS connection just ran a piece of runtime DDL (today:
-    /// the named-feed partial index, built lazily on first feed
-    /// activity). Drained via [`Self::take_schema_ddl`] so the daemon
+    /// Set when THIS connection just ran a piece of runtime DDL (the
+    /// named-feed partial index, built lazily on first feed activity,
+    /// and the §26c A5 `files` rebuild's staging triggers, swap and
+    /// drop). Drained via [`Self::take_schema_ddl`] so the daemon
     /// can retire its pooled read-only connections exactly when the
     /// schema actually changed, instead of flushing them after every
     /// scan pass. A Cell because one of the creation sites
@@ -574,7 +580,7 @@ impl Index {
             .db
             .prepare_cached(
                 "SELECT COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                          ELSE COALESCE(json_array_length(segments), 0) END), 0)
+                          ELSE COALESCE(seg_count(segments), 0) END), 0)
                    FROM files WHERE release_id=?1",
             )?
             .query_row([release_id], |r| r.get(0))?;
@@ -602,8 +608,7 @@ impl Index {
             if out.len() >= max {
                 break;
             }
-            let s: String = row.get(0)?;
-            let parsed: Vec<(u32, String, u64)> = serde_json::from_str(&s).unwrap_or_default();
+            let parsed = row.get::<_, SegList>(0)?.0;
             while out.len() < max && (at as usize) < base + parsed.len() {
                 let id = &parsed[(at as usize).saturating_sub(base)].1;
                 out.push(if id.starts_with('<') {

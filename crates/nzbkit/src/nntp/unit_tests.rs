@@ -27,7 +27,7 @@ fn deflate(payload: &[u8]) -> Vec<u8> {
 async fn read_compressed(wire: &[u8]) -> Result<Vec<u8>, NntpError> {
     let mut r = tokio::io::BufReader::new(wire);
     let mut out = Vec::new();
-    read_gzip_multiline_generic(&mut r, &mut out).await?;
+    read_gzip_multiline_generic(&mut r, &mut out, None).await?;
     Ok(out)
 }
 
@@ -687,6 +687,100 @@ mod quit_tests {
         );
     }
 
+    /// TODO 208.2 warm-up: a LIVE stall bound is consulted during the
+    /// silence, so evidence that arrives after a connection has gone
+    /// quiet still reaches the wait. One 12 s gap; the bound reads 8 s
+    /// when the silence starts and 20 s from 3 s in. A fixed 8 s bound
+    /// kills the read at 8 s; the live one lets the body land.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_stall_bound_read_during_the_silence_saves_the_body() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let bound_ms = std::sync::Arc::new(AtomicU64::new(8_000));
+        let raise = {
+            let b = bound_ms.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                b.store(20_000, Ordering::Relaxed);
+            }
+        };
+        let mk = || Dribble {
+            chunks: [vec![b'x'; 1024], b"\r\n.\r\n".to_vec()].into(),
+            cur: Vec::new(),
+            pos: 0,
+            gap: std::time::Duration::from_secs(12),
+            sleep: None,
+        };
+        // Fixed: the 12 s silence outlasts 8 s and the read is torn down.
+        let mut out = Vec::new();
+        let err = super::read_multiline_paced_max(
+            &mut mk(),
+            &mut out,
+            std::time::Duration::from_secs(8),
+            super::MAX_MULTILINE_BYTES,
+            None,
+        )
+        .await
+        .expect_err("a fixed 8 s bound must kill a 12 s silence");
+        assert!(matches!(err, super::NntpError::Timeout), "got {err:?}");
+        // Live: the same silence, the same 8 s at its start - and the
+        // bound that has grown to 20 s by the time the 8 s would have
+        // fired is the one that judges it.
+        let live = {
+            let b = bound_ms.clone();
+            move || std::time::Duration::from_millis(b.load(Ordering::Relaxed))
+        };
+        let live: &(dyn Fn() -> std::time::Duration + Sync) = &live;
+        let mut out = Vec::new();
+        let mut reader = mk();
+        let t0 = tokio::time::Instant::now();
+        let (r, ()) = tokio::join!(
+            super::read_multiline_paced_max(
+                &mut reader,
+                &mut out,
+                live,
+                super::MAX_MULTILINE_BYTES,
+                None,
+            ),
+            raise
+        );
+        r.expect("the live bound must carry the body through the gap");
+        assert_eq!(out.len(), 1024 + 2, "the whole body landed: {}", out.len());
+        let took = t0.elapsed();
+        assert!(
+            took >= std::time::Duration::from_secs(24),
+            "two 12 s gaps (one per chunk) are the floor: {took:?}"
+        );
+        // And a live bound that SHRINKS under a silence still fires at
+        // the figure it reads, not at the one it started with.
+        bound_ms.store(30_000, Ordering::Relaxed);
+        let shrink = {
+            let b = bound_ms.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                b.store(5_000, Ordering::Relaxed);
+            }
+        };
+        let mut out = Vec::new();
+        let mut reader = mk();
+        let t0 = tokio::time::Instant::now();
+        let (r, ()) = tokio::join!(
+            super::read_multiline_paced_max(
+                &mut reader,
+                &mut out,
+                live,
+                super::MAX_MULTILINE_BYTES,
+                None,
+            ),
+            shrink
+        );
+        assert!(matches!(r, Err(super::NntpError::Timeout)), "got {r:?}");
+        let took = t0.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(7),
+            "a bound cut to 5 s fired at {took:?}, not within a slice of 5 s"
+        );
+    }
+
     /// The A6 contract, half two: a dribble UNDER the floor is torn
     /// down even though every gap resets the idle deadline. This is the
     /// shape the floor exists for - one small chunk every 7 s survives
@@ -873,7 +967,7 @@ mod quit_tests {
         let (client, _server) = mute_after(&[0x1f, 0x8b, 0x08]); // gzip header, cut short
         let mut reader = tokio::io::BufReader::new(client);
         let mut out = Vec::new();
-        let err = super::read_gzip_multiline_generic(&mut reader, &mut out)
+        let err = super::read_gzip_multiline_generic(&mut reader, &mut out, None)
             .await
             .expect_err("a mute peer must not read successfully");
         assert!(
@@ -942,6 +1036,76 @@ mod quit_tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// TODO 208.2 over-read: the `Arrivals` sink sees every byte the
+    /// paced read takes off the wire, as it is consumed - payload,
+    /// terminator and a straddled terminator alike - and nothing the
+    /// read leaves for the next response. Every buffer capacity from 1
+    /// to 16 walks the terminator across every chunk boundary, so all
+    /// three consume sites report.
+    #[tokio::test]
+    async fn the_arrivals_sink_sees_exactly_the_wire_bytes_consumed() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::io::{AsyncReadExt, BufReader};
+        let cases: &[(&[u8], u64)] = &[
+            (b"hello\r\nworld\r\n.\r\nNEXT", 17),
+            (b".\r\nNEXT", 3),
+            (b"bare\nlf lines\n.\nNEXT", 16),
+            (b"x.\r\n.y\r\n.\r\n", 11),
+        ];
+        for (wire, want) in cases {
+            for cap in 1..=16usize {
+                let seen = AtomicU64::new(0);
+                let calls = AtomicU64::new(0);
+                let sink = |n: u64| {
+                    seen.fetch_add(n, Ordering::Relaxed);
+                    calls.fetch_add(1, Ordering::Relaxed);
+                };
+                let mut r = BufReader::with_capacity(cap, *wire);
+                let mut out = Vec::new();
+                super::read_multiline_paced_noting(
+                    &mut r,
+                    &mut out,
+                    std::time::Duration::from_secs(5),
+                    super::MAX_MULTILINE_BYTES,
+                    None,
+                    Some(&sink),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("cap {cap} on {wire:?}: {e:?}"));
+                let mut rest = Vec::new();
+                r.read_to_end(&mut rest).await.unwrap();
+                assert_eq!(
+                    seen.load(Ordering::Relaxed),
+                    *want,
+                    "cap {cap}, wire {wire:?}: sink total"
+                );
+                assert_eq!(
+                    seen.load(Ordering::Relaxed) + rest.len() as u64,
+                    wire.len() as u64,
+                    "cap {cap}, wire {wire:?}: consumed plus left over is the wire"
+                );
+                assert!(
+                    calls.load(Ordering::Relaxed) >= (*want).div_ceil(cap as u64),
+                    "cap {cap}: the sink is called per chunk, not once at the end"
+                );
+            }
+        }
+        // No sink: the same read, nothing to report to.
+        let mut r = BufReader::with_capacity(3, &b"a\r\n.\r\n"[..]);
+        let mut out = Vec::new();
+        super::read_multiline_paced_noting(
+            &mut r,
+            &mut out,
+            std::time::Duration::from_secs(5),
+            super::MAX_MULTILINE_BYTES,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, b"a\r\n");
     }
 
     /// M32: Connection::connect rides a SOCKS5 proxy when the server

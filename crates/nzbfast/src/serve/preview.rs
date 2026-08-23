@@ -78,8 +78,22 @@ const SEEK_WAIT: Duration = Duration::from_secs(3);
 /// caller above it has a fragment half-built and a client to inform.
 pub(super) struct LiveSource {
     w: Arc<nzbkit::disk::FileWriter>,
-    f: std::fs::File,
-    crypt: Option<nzbkit::extract::StreamCrypt>,
+    /// Behind a lock because it is REPLACED mid-response: an external
+    /// par2 repair rewrites its target onto a new inode, so the handle
+    /// has to follow it (sweep 8, M5b - see `lease` below). Uncontended
+    /// on the read path, which is one reader at a time by construction.
+    f: std::sync::RwLock<std::fs::File>,
+    /// Custody of the backing file for this source's whole life (sweep
+    /// 8, M4). It does the half a lease is for on every platform, which is letting an external
+    /// repair SEE the handle and drain it, and `read_at_wait` polls
+    /// `revoked` before each read and inside its wait loop so the body
+    /// ends and the handle drops within one poll - without that the
+    /// source sat on the inode for up to the body ceiling and par2cmdline
+    /// 0.8.1 reported its target missing (Codex F-08, 22 Aug 2026). It
+    /// also polls `needs_reopen`: par2cmdline does not repair in place, and a
+    /// source that kept reading through the old handle would remux the
+    /// damaged bytes over a span the repair had already fixed.
+    lease: Option<nzbkit::disk::ReadLease>,
     seek: Option<Arc<crate::SeekCtl>>,
     name: String,
     readers: Arc<AtomicUsize>,
@@ -88,8 +102,38 @@ pub(super) struct LiveSource {
 }
 
 impl LiveSource {
+    /// The external repair wants this file's inode and our handle is in
+    /// its way (sweep 8, M4): end the response so the handle drops, the
+    /// player reopens against the repaired file. Always `None` off
+    /// Windows, the mirror of `LiveRangeReader::revoked`.
+    fn revoked(&self) -> Option<std::io::Error> {
+        self.lease.as_ref().filter(|l| l.revoked()).map(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the file is being repaired - reopen the preview",
+            )
+        })
+    }
+
     fn newest_alive(&self) -> bool {
         self.alive.lock_ok().iter().next_back() == Some(&self.my_gen)
+    }
+
+    /// The extractor has disowned the file under this source - the
+    /// remux half of `LiveRangeReader::abandoned`, and the same
+    /// mechanism: a demoted volume set abandons the extracted media
+    /// file, the coverage frontier freezes, and nothing revokes or
+    /// re-binds because par2 never wanted this inode. See
+    /// [`FileWriter::abandon`].
+    ///
+    /// [`FileWriter::abandon`]: nzbkit::disk::FileWriter::abandon
+    fn abandoned(&self) -> Option<std::io::Error> {
+        self.w.is_abandoned().then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the file was rebuilt for repair - reopen the stream",
+            )
+        })
     }
 
     /// Ask the download for `off` and, while it is cold, the file tail
@@ -111,16 +155,10 @@ impl Source for LiveSource {
         if len == 0 {
             return true;
         }
-        match &self.crypt {
-            // Encrypted-store outputs are ciphertext on disk, so a
-            // plaintext range needs the CBC blocks under it (and the IV
-            // block before them) to have landed, not just its own span.
-            Some(c) => {
-                let (lo, clen) = c.covered_bounds(off, len);
-                self.w.covered(lo, clen)
-            }
-            None => self.w.covered(off, len),
-        }
+        // No ciphertext-block widening since TODO 27 phase 3: an
+        // encrypted store output holds plaintext while it downloads, so
+        // a range needs only its own span to have landed.
+        self.w.covered(off, len)
     }
 
     fn size(&self) -> u64 {
@@ -143,6 +181,18 @@ impl Source for LiveSource {
                 "past end of file",
             ));
         }
+        // Two distinct ways this handle stops being worth waiting on,
+        // landed in parallel and both live: par2 wants the inode back
+        // (`revoked`), and the extractor disowned the output
+        // (`abandoned` - sweep 8 M4, defect 3, see `FileWriter::abandon`).
+        // For the second, `WouldBlock` would be a lie: the frontier is
+        // frozen, so `PreviewBody` would spin its 3 s pulls until the
+        // 300 s body ceiling on a file that is already unlinked. A hard
+        // error stops the remux at once, which is the same answer
+        // `LiveRangeReader` gives the range path.
+        if let Some(e) = self.revoked().or_else(|| self.abandoned()) {
+            return Err(e);
+        }
         if !self.covered(off, len) {
             self.promote(off);
             let deadline = Instant::now() + wait;
@@ -153,6 +203,9 @@ impl Source for LiveSource {
                 }
                 std::thread::sleep(Duration::from_millis(50));
                 waited += 50;
+                if let Some(e) = self.revoked().or_else(|| self.abandoned()) {
+                    return Err(e);
+                }
                 // The first promotion is best-effort (a bounded
                 // try_lock) and a fetch run may have re-attached since.
                 if waited.is_multiple_of(2_000) {
@@ -160,10 +213,32 @@ impl Source for LiveSource {
                 }
             }
         }
-        match &self.crypt {
-            Some(c) => c.decrypt_range(&self.f, off, buf),
-            None => nzbkit::disk::read_exact_at(&self.f, buf, off),
+        // An external repair that finished while this source was open
+        // left our handle on the orphaned inode - follow it before the
+        // read, exactly as `LiveRangeReader::rebind` does.
+        if let Some(l) = &self.lease
+            && l.needs_reopen()
+        {
+            match self.w.reopen_read(l) {
+                Ok(f) => {
+                    *self.f.write_ok() = f;
+                    info!(
+                        target: "preview",
+                        "{}: reopened at {off} - an external repair rewrote the file",
+                        self.name
+                    );
+                }
+                // The same call as `LiveRangeReader::rebind`: a remux
+                // half-way through a fragment is no better off dead.
+                Err(e) => warn!(
+                    target: "preview",
+                    "{}: still on the pre-repair file - could not reopen: {e}",
+                    self.name
+                ),
+            }
         }
+        let f = self.f.read_ok();
+        nzbkit::disk::read_exact_at(&f, buf, off)
     }
 }
 
@@ -321,7 +396,7 @@ pub(super) fn preview_media_request(
     // away and the answer moved to disk, so the on-disk path below is
     // the right one - returning 410 there was the phase-1 bug that the
     // daemon suite caught on its first run.
-    if let Some((name, w, f, crypt)) = open_live_media(&d, &id) {
+    if let Some((name, w, f, lease)) = open_live_media(&d, &id) {
         let covered = w.contiguous_from_start();
         let pct = if w.size > 0 {
             covered as f64 * 100.0 / w.size as f64
@@ -336,8 +411,8 @@ pub(super) fn preview_media_request(
         d.hub.stream_readers.fetch_add(1, Ordering::Relaxed);
         let src = LiveSource {
             w: w.clone(),
-            f,
-            crypt,
+            f: std::sync::RwLock::new(f),
+            lease,
             seek: d.hub.seek.lock_ok().clone(),
             name: name.clone(),
             readers: d.hub.stream_readers.clone(),
@@ -366,7 +441,32 @@ pub(super) fn preview_media_request(
         return;
     };
     let Some(path) = finished_media_path(&d, &job) else {
-        let _ = req.respond(err_resp(404, "no playable file on disk", ""));
+        // Nothing under the name the record carries. Ask - after the
+        // pick and never before it, for the reason `payload_in_flight`
+        // gives - whether the payload is simply in flight to its final
+        // folder, because the mover rewrites that name LAST. `/stream`
+        // and `/preview/probe` answer this state 503; so does this, the
+        // third door onto the same record. The destination is derivable
+        // and deliberately NOT served: what sits there mid-move is a
+        // half-copied file under the payload's own name, and a player
+        // handed one plays the head and then hits a wall it cannot tell
+        // from a corrupt release. The 404 wording stays for a file that
+        // really has gone.
+        let _ = if payload_in_flight(&d, &job) {
+            req.respond(
+                err_resp(
+                    503,
+                    "the files are being moved right now - try again when it settles",
+                    "",
+                )
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"5"[..])
+                        .expect("static header"),
+                ),
+            )
+        } else {
+            req.respond(err_resp(404, "no playable file on disk", ""))
+        };
         return;
     };
     let name = path
@@ -399,7 +499,6 @@ pub(super) fn preview_media_request(
 /// once a chunked response has started there is no status code left to
 /// send, and a player that has already been handed a `200` reads a
 /// truncated body as a broken file rather than as "come back later".
-#[allow(clippy::too_many_arguments)]
 fn serve_remux(
     req: tiny_http::Request,
     src: Box<dyn Source>,
@@ -565,8 +664,8 @@ mod tests {
     fn live_source(w: &Arc<nzbkit::disk::FileWriter>) -> LiveSource {
         LiveSource {
             w: w.clone(),
-            f: std::fs::File::open(&w.path).unwrap(),
-            crypt: None,
+            f: std::sync::RwLock::new(std::fs::File::open(&w.path).unwrap()),
+            lease: None,
             seek: None,
             name: "movie.mkv".into(),
             readers: Arc::new(AtomicUsize::new(1)),
@@ -575,6 +674,279 @@ mod tests {
                 1u64,
             ]))),
         }
+    }
+
+    /// The other thing nothing else drives: `LiveSource::abandoned`
+    /// (sweep 8 M4, defect 3). A demoted volume set UNLINKS the
+    /// extracted output before par2 runs, so the coverage frontier the
+    /// remux is waiting on freezes for ever - and no lease is revoked
+    /// and no generation moves, because par2 never wanted this inode.
+    ///
+    /// `WouldBlock` would be a lie in that state: it is the answer that
+    /// sends `PreviewBody` straight back for another 3 s pull, so the
+    /// remux would grind to the 300 s body ceiling on a file that is
+    /// already gone. This asserts the difference between the two
+    /// answers, which is the whole point of the check.
+    ///
+    /// The `/stream` half is covered on a real daemon and a real par2
+    /// by `tests/integration/stream_repair.rs` leg 2; nothing there
+    /// touches the remux path, hence this.
+    #[test]
+    fn a_live_source_gives_up_on_an_output_the_extractor_abandoned() {
+        let dir = scratch("liveabandon");
+        let path = dir.join("movie.mkv");
+        let bytes = testmux::mkv_remux_fixture();
+        // Declared longer than what lands, so the tail is a genuine
+        // uncovered span the source has to wait on.
+        let w = Arc::new(nzbkit::disk::FileWriter::create(&path, bytes.len() as u64 + 64).unwrap());
+        w.write_at(0, &bytes).unwrap();
+        let src = live_source(&w);
+        let tail = bytes.len() as u64;
+        let mut buf = [0u8; 4];
+
+        // Before: an uncovered span times out as WouldBlock, and
+        // `PreviewBody` reads that as "come back in a moment".
+        assert_eq!(
+            src.read_at_wait(tail, &mut buf, Duration::from_millis(60))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        // The demote: writer disowned, file unlinked.
+        w.abandon();
+        std::fs::remove_file(&path).unwrap();
+
+        // After: a hard error, and it must not spend the wait first -
+        // waiting is the one thing that cannot help now.
+        let t0 = Instant::now();
+        assert_eq!(
+            src.read_at_wait(tail, &mut buf, Duration::from_secs(30))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ConnectionAborted
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(1),
+            "the source sat out its wait on an abandoned output: {:?}",
+            t0.elapsed()
+        );
+
+        // And a COVERED read is refused too. The interval map still
+        // says those bytes are good, and on Unix the fd would even
+        // serve them off the unlinked inode - but they belong to a file
+        // the job has disowned, over a name the post-repair re-extract
+        // is about to rewrite.
+        assert!(src.covered(0, 4), "the head really is still covered");
+        assert_eq!(
+            src.read_at_wait(0, &mut buf, Duration::ZERO)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ConnectionAborted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The remuxer's source has the same duty as
+    /// `LiveRangeReader::rebind`, and nothing else drives it: after an
+    /// EXTERNAL par2 repair the handle it opened with is the file par2
+    /// renamed ASIDE, so a source that read on through it would remux
+    /// the damaged bytes over a span the repair had already fixed
+    /// (sweep 8, M5b).
+    ///
+    /// The `/stream` legs in `tests/integration/stream_repair.rs` prove
+    /// the reader half on a real daemon and a real par2; they never touch
+    /// the remux path, which is why this one is written out here instead.
+    /// The folder move is not decoration: `current_path` tracks only
+    /// the FILE's publish rename, so postproc renaming the job folder
+    /// is what makes a by-name reopen hopeless and a captured handle
+    /// the only answer (see `disk::ReadCustody`). Windows has no
+    /// captured handle - its readers are revoked before the child runs
+    /// - so it keeps the by-name path and skips the move.
+    #[test]
+    fn a_live_source_follows_an_external_repair_onto_its_new_inode() {
+        let dir = scratch("liverepair");
+        let job = dir.join("Some.Release.2026");
+        std::fs::create_dir_all(&job).unwrap();
+        let path = job.join("movie.mkv");
+        let damaged = testmux::mkv_remux_fixture();
+        let w = Arc::new(nzbkit::disk::FileWriter::create(&path, damaged.len() as u64).unwrap());
+        w.write_at(0, &damaged).unwrap();
+
+        // The remux session, holding its lease for the whole response.
+        let (f, lease) = w.open_read().unwrap();
+        let src = LiveSource {
+            w: w.clone(),
+            f: std::sync::RwLock::new(f),
+            lease: Some(lease),
+            seek: None,
+            name: "movie.mkv".into(),
+            readers: Arc::new(AtomicUsize::new(1)),
+            my_gen: 1,
+            alive: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+                1u64,
+            ]))),
+        };
+        let mut buf = [0u8; 4];
+        src.read_at_wait(8, &mut buf, Duration::ZERO).unwrap();
+        assert_eq!(&buf, &damaged[8..12]);
+
+        // par2cmdline, to the letter: the damaged target renamed aside,
+        // the repaired data written to a NEW inode.
+        let mut repaired = damaged.clone();
+        repaired[8..12].copy_from_slice(b"OKAY");
+        w.park_for_repair().unwrap();
+        std::fs::rename(&path, job.join("movie.mkv.1")).unwrap();
+        std::fs::write(&path, &repaired).unwrap();
+        w.unpark().unwrap();
+        #[cfg(not(windows))]
+        std::fs::rename(&job, dir.join("Some Release 2026")).unwrap();
+
+        src.read_at_wait(8, &mut buf, Duration::ZERO).unwrap();
+        assert_eq!(
+            &buf, b"OKAY",
+            "the source is still reading the inode par2 renamed away"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The half of the same check that
+    /// `a_live_source_gives_up_on_an_output_the_extractor_abandoned`
+    /// cannot reach: a source ALREADY PARKED on a hole when the demote
+    /// lands. That test sets the flag between reads, so the poll at the
+    /// top of `read_at_wait` answers it and the one inside the wait
+    /// loop never runs - back the loop poll out and it still passes.
+    ///
+    /// The parked case is the live one. `PreviewBody` pulls with a 15 s
+    /// budget, so the demote almost always arrives while a read is
+    /// sitting in that loop; with no poll there the read spends its
+    /// whole budget and hands back `WouldBlock`, which sends the body
+    /// round again until the 300 s ceiling. That is the measured
+    /// symptom of defect 3 on the `/stream` twin - a player hung five
+    /// minutes on a job that repaired fine.
+    #[test]
+    fn a_live_source_parked_on_a_hole_ends_when_the_output_is_abandoned() {
+        let dir = scratch("liveabandonparked");
+        let path = dir.join("movie.mkv");
+        let data = testmux::mkv_remux_fixture();
+        let w = Arc::new(nzbkit::disk::FileWriter::create(&path, data.len() as u64).unwrap());
+        w.write_at(0, &data[..4_096]).unwrap();
+        let src = live_source(&w);
+
+        // The demote lands while the read below is already waiting.
+        // Nothing else can end it: the frontier never moves again.
+        let abandoner = {
+            let w = w.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                w.abandon();
+            })
+        };
+        let t0 = Instant::now();
+        let mut cold = [0u8; 16];
+        let e = src
+            .read_at_wait(20_000, &mut cold, Duration::from_secs(10))
+            .unwrap_err();
+        abandoner.join().unwrap();
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionAborted,
+            "a parked read never noticed the abandon: {e}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the read sat on the frozen frontier for {:?}",
+            t0.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The revoke twin of the abandon pair above, and Windows-only by
+    /// construction: `ReadLease::revoked` is `cfg!(windows) &&
+    /// repairing`, so a Unix run of this could only ever assert the
+    /// false branch (Codex F-08, TODO 246). An external par2 wants the
+    /// inode and our handle is in its way; without the `revoked` polls
+    /// the source sat on it for up to the body ceiling and par2cmdline
+    /// 0.8.1 reported its target missing.
+    ///
+    /// Both poll sites in `read_at_wait` are exercised, in the order
+    /// that separates them: the revoke lands while a read is PARKED on
+    /// a hole, so only the poll inside the wait loop can end it (the
+    /// top-of-read one already ran); then a COVERED read is refused by
+    /// the top-of-read poll alone, since a covered read never enters
+    /// the loop. `park_for_repair`'s Windows drain blocks its thread
+    /// until our lease drops, which is why it runs on a helper and the
+    /// join sits after `drop(src)`.
+    #[cfg(windows)]
+    #[test]
+    fn a_live_source_parked_on_a_hole_ends_when_par2_revokes_the_lease() {
+        let dir = scratch("liverevoked");
+        let path = dir.join("movie.mkv");
+        let data = testmux::mkv_remux_fixture();
+        let w = Arc::new(nzbkit::disk::FileWriter::create(&path, data.len() as u64).unwrap());
+        w.write_at(0, &data[..4_096]).unwrap();
+
+        // The remux session, holding its lease as the live path does.
+        let (f, lease) = w.open_read().unwrap();
+        let src = LiveSource {
+            w: w.clone(),
+            f: std::sync::RwLock::new(f),
+            lease: Some(lease),
+            seek: None,
+            name: "movie.mkv".into(),
+            readers: Arc::new(AtomicUsize::new(1)),
+            my_gen: 1,
+            alive: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+                1u64,
+            ]))),
+        };
+
+        // par2 claims the file while the read below is parked on the
+        // hole. On Windows this arms `revoked` at once and then waits
+        // for the reader handle to close, so it cannot run inline.
+        let repairer = {
+            let w = w.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                w.park_for_repair().unwrap();
+            })
+        };
+        let t0 = Instant::now();
+        let mut cold = [0u8; 16];
+        let e = src
+            .read_at_wait(20_000, &mut cold, Duration::from_secs(10))
+            .unwrap_err();
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionAborted,
+            "a parked read never noticed the revoke: {e}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "the source held the inode against a repair for {:?}",
+            t0.elapsed()
+        );
+
+        // And a COVERED read is refused too, by the poll at the top of
+        // `read_at_wait`: the bytes are on disk and the handle could
+        // serve them, but every read the source answers is time spent
+        // holding the inode the repair is waiting to own.
+        assert!(src.covered(0, 4), "the head really is still covered");
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            src.read_at_wait(0, &mut buf, Duration::ZERO)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ConnectionAborted
+        );
+
+        // Dropping the source is what lets the repair in: the lease and
+        // the handle go together, and the drain in `park_for_repair`
+        // returns.
+        drop(src);
+        repairer.join().unwrap();
+        w.unpark().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The live source waits for a hole and then gives up; it does not

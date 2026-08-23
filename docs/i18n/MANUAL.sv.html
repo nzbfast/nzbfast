@@ -309,7 +309,12 @@ sekunden. Korten, uppifrån och ner:</p>
 <h3>Rubrikrad</h3>
 <ul>
 <li><b>Hastighetsgräns</b>-meny - fasta tak, <i>auto · ge plats åt LAN</i> (ett RTT-styrt
-läge som backar när någon annan i huset behöver linjen) eller obegränsat.</li>
+läge som backar när någon annan i huset behöver linjen) eller obegränsat.
+Förvalen är runda tal för runda linjer, och en upplänk på 37&nbsp;Mb/s är inget av dem:
+<b>anpassad…</b> frågar dig i stället efter siffran och tar allt som API:t tar
+(<code>25M</code>, <code>500K</code>, eller 0 för ingen gräns). Menyn står sedan på
+<b>(anpassad)</b> med hastigheten bredvid, tills du väljer ett förval eller
+<i>auto</i> igen.</li>
 <li><b>Pausa i…</b> - pausa allt i 15&nbsp;min/30&nbsp;min/1&nbsp;h/3&nbsp;h med
 automatisk återupptagning, eller använd Pausa-knappen för en öppen paus. Paus är
 omedelbar: den aktiva överföringen stoppar inom sekunder och återupptas senare från
@@ -348,6 +353,7 @@ som säger var jobbet kom ifrån (bevakningsmapp, en ansluten app, API:et…).
 Knappen <b>Hämta .nzb-filen</b> sparar jobbets <code>.nzb</code>-fil - nzbfast
 behåller en egen kopia, så det fungerar för varje jobb, även när originalfilen
 sedan länge är borta.</li>
+<li><b>"Varför är det långsamt?"</b> Medan ett jobb laddar ner bär raden under förloppsindikatorn ett utlåtande om <em>det</em> jobbet, inte om maskinen: <i>dina leverantörer är gränsen</i>, <i>den här maskinen är vid sin CPU-gräns</i>, <i>lagringen hinner inte med</i>, och så vidare. Klicka på det så öppnas raden på underlaget: vad din lina klarar, vad leverantörerna levererade, vad som kommer in nu, och en tabell per server där en strypt leverantör syns direkt. Ett jobb i full fart säger ingenting här, och inte heller ett vars utlåtande fortfarande formas.</li>
 <li>Märken visar specialtillstånd: <i>uppskjuten (långsam)</i>, <i>prefetchar</i>,
 <i>pausad</i> (se <a href="#performance">Prestandaverktyg</a>).</li>
 <li>Ett nedräkningsdiagram spårar totalt GB kvar i hela kön.</li>
@@ -376,7 +382,7 @@ lösenordet så blir jobbet klart på plats. Verifieringshälsoremsan diagramlä
 block per nedladdning - en stigande svans betyder att artiklar kommer in skadade.
 Varje rads detaljlåda säger vem som lade till jobbet och har samma knapp
 <b>Hämta .nzb-filen</b> som kön - praktiskt när du vill ladda ner en release igen
-någon annanstans, eller bifoga <code>.nzb</code>-filen till en problemrapport.</p>
+någon annanstans, eller bifoga <code>.nzb</code>-filen till en problemrapport. Bredvid finns <b>Skapa rapport</b>, som oftast är det bättre att bifoga: se <a href="#troubleshooting">Felsökning</a>.</p>
 <p>Kortet listar tio nedladdningar som standard och resten är ett klick bort, på knappen ▤. Status, plats och orsaken till ett misslyckande ligger bakom ett klick på själva raden, så att det vanliga fallet - vad som blev klart, hur stort, när - förblir läsbart utan att scrolla. Dra i kortets nederkant för att låta listan scrolla på en höjd du väljer i stället. <b>History rows</b> under Inställningar → Gränssnitt ändrar tian; eftersom det är en egenskap hos daemonen och inte hos din webbläsare gäller det varje enhet som tittar på den här installationen. <b>Colour History names</b> bredvid färgar klara namn gröna och misslyckade röda; avstängt blir namnen neutrala, och den färgade pricken och radens egna detaljer säger fortfarande vilket som är vilket.</p>
 <p>nzbfast behåller historiken för alltid om du inte säger något annat. <b>Rensa
 historiken</b> under Inställningar → System tar bort gamla poster efter två
@@ -396,10 +402,11 @@ konton och blockkonton. Blockkonton visar livstidsförbrukning mot sin storlek.<
 
 <h3 id="dash-layout">Ordna instrumentpanelen</h3>
 <p>Instrumentpanelen är din att ordna. Fyra åtgärder, med samma namn var du än möter dem:
-<b>Flytta</b> ett kort, <b>Komprimera</b> det, <b>Ändra storlek</b> på det eller <b>Dölj</b>
-det. Varje val minns den webbläsare du gjorde det i, så varje enhet behåller sin egen
-ordning, och <b>Återställ layout</b> under Inställningar → Gränssnitt ställer varje kort,
-storlek och kolumn tillbaka som de levererades.</p>
+<b>Flytta</b> ett kort, <b>Komprimera</b> det, <b>Ändra storlek</b> på det eller
+<b>Dölj</b> det. Varje val minns den webbläsarprofil du gjorde det i: ordningen på dina
+kort och de du har dolt gäller vid varje fönsterbredd i den profilen, medan kort- och
+diagramstorlekar är förbehållna skrivbordet. <b>Återställ layout</b> under Inställningar →
+Gränssnitt ställer varje kort, storlek och kolumn tillbaka som de levererades.</p>
 <p><b>Anpassa layout</b> är den guidade vägen in, och det snabbaste sättet att se vad ett
 kort kan. Öppna det från den diskreta länken strax ovanför det första kortet, eller från
 Inställningar → Gränssnitt, där det är den första knappen i raden <b>Instrumentpanelens
@@ -422,12 +429,12 @@ mindre plats. På Historik växlar den mellan de tio senaste nedladdningarna och
 din historik. <b>Kompakt läge</b> under Inställningar → Gränssnitt gör hela
 instrumentpanelen på en gång.</li>
 <li><b>Ändra storlek.</b> Ett kort som rymmer en lista eller ett diagram bär en list längs
-sin underkant: dra den till den höjd du vill ha. Listen är svag tills du pekar på kortet,
-då den ritas som en hårfin linje i full bredd med räfflor i bakre hörnet; den tar även
-tangentbordsfokus, där piltangenterna upp och ner sätter höjden och Skift tar ett större
-steg. Vilka kort som har en ändras allteftersom kort får och tappar egna listor: ta listen
-som svar i stället för någon uppräkning här. I <b>Anpassa layout</b> säger korten utan list
-det själva.</li>
+sin underkant där du har mus eller styrplatta: dra den till den höjd du vill ha. En
+pekskärm får ingen. Listen är svag tills du pekar på kortet, då den ritas som en hårfin
+linje i full bredd med räfflor i bakre hörnet; den tar även tangentbordsfokus, där
+piltangenterna upp och ner sätter höjden och Skift tar ett större steg. Vilka kort som har
+en ändras allteftersom kort får och tappar egna listor: ta listen som svar i stället för
+någon uppräkning här. I <b>Anpassa layout</b> säger korten utan list det själva.</li>
 <li><b>Dölj.</b> Den sista knappen i titelraden döljer kortet. Dolda kort samlas i en rad
 <b>Dolda</b> längst ner på instrumentpanelen; klicka på ett namn där för att ta tillbaka
 ett.</li>
@@ -465,11 +472,13 @@ bredderna. Med en rubrik i fokus flyttar vänster- och högerpilen den, och Skif
 <tr><th>Metod</th><th>Så här</th></tr>
 <tr><td><b>Dra &amp; släpp</b></td><td>Släpp en eller flera <code>.nzb</code>-filer var som helst på instrumentpanelen.</td></tr>
 <tr><td><b>Bevakningsmapp</b></td><td>Ange en mapp i Inställningar; varje <code>.nzb</code> som sparas i den
-plockas upp inom 5 sekunder och flyttas till papperskorgen, och en öppen instrumentpanel
+plockas upp så snart den landar och flyttas till papperskorgen, och en öppen instrumentpanel
 meddelar varje upphämtning med namn ("… hämtad från Hämtningar"), så en fil som lämnar
 mappen är aldrig ett mysterium. Vill du hellre behålla dina filer? Slå på <b>Behåll
 .nzb-filer efter upphämtning</b> (se <a href="#settings">§9</a>). Rikta din webbläsares nedladdnings-
-mapp mot den för grabbar med ett klick från indexersidor.</td></tr>
+mapp mot den för grabbar med ett klick från indexersidor. Undermappar, filer som visar sig inte vara NZB och det omkontrollintervall en
+mapp på en nätverksutdelning behöver har vart och ett sitt eget reglage; se
+<a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Från en URL</b></td><td>Klistra in en NZB-länk (API <code>mode=addurl</code>, eller via valfri ansluten app).</td></tr>
 <tr><td><b>nzblnk:-länkar</b></td><td>Klistra in en <code>nzblnk:</code>-länk var som helst på panelen, eller dra in den. Har du installerat från macOS-DMG:en eller Windows-installeraren kan du också klicka på en direkt på ett board. Se <a href="#nzblnk">nzblnk-länkar</a> nedan.</td></tr>
 <tr><td><b>Bläddra i indexet</b></td><td>Klicka på valfri komplett release i Bläddra-kortet.</td></tr>
@@ -579,11 +588,27 @@ in fler på skärmen, stort färre.</li>
 <li><b>Förhandsvisning vid hovring</b>, ovanför Releaser-tabellen: vila pekaren på en rad
 för affisch och handling, allt ur ditt eget index.</li>
 <li><b>Gruppera efter titel</b>, reglaget bredvid: en rad per titel med dess releaser
-under. Öppna den med <b>&#9656;</b> eller genom att klicka på raden; kryssrutan på titeln
-väljer de releaser som visas. Gruppering gäller bara <b>Detta index</b>.</li>
+under. Öppna den med <b>&#9656;</b> eller genom att klicka på raden; kryssrutan på
+titeln väljer de releaser som visas. Gruppering gäller bara <b>Detta index</b>; väljer
+du <b>Indexerare</b> eller <b>Båda</b> blir tabellen platt igen, och säger det.</li>
+<li><b>Varje release av en titel</b> listas när du öppnar dess kort, med upplösning,
+codec, ljudformat och dynamiskt omfång (Dolby Vision, HDR10) utläst ur releasenamnet,
+plus storlek, ålder och om varje del finns kvar hos din leverantör. Ställ in
+<b>Föredragen version</b> under Inställningar → Ordning → Indexering, så flyter de som
+matchar upp överst, med en <b>bästa träff</b>-markering och de matchande taggarna
+markerade. Inget döljs: releasenamn utelämnar de här taggarna hela tiden, så en
+preferens ändrar bara ordningen. Den avgör också vilken kodning bevakningen
+uppgraderar till.</li>
 <li><b>Flikar</b> för Filmer / Serier / Övrigt, direktsökning och sju sorteringar:
-<b>För dig</b>, Nyaste posterna, Utgivningsår, Högst betyg, Titel A–Ö, Största och
-Mest postade.</li>
+<b>För dig</b>, Nyaste posterna, Utgivningsdatum, Högst betyg, Titel A–Ö, Största och
+Mest postade. Knappen <b>↓</b> bredvid sorteringen vänder på den, så var och en går
+också åt andra hållet (äldsta, minsta, lägsta, Ö–A).</li>
+<li><b>Utgivningsdatum</b> är den ursprungliga utgivningen eller premiärsändningen, på
+dagen där metadataleverantören gav oss ett: det svarar på ”vad kom faktiskt ut den här
+veckan”, vilket Nyaste posterna inte kan (det är uppladdningsdatum, och en ompostning
+av en trettio år gammal film hamnar överst där). Titlar som berikades innan detta
+fanns, eller vars leverantör saknade datum, faller tillbaka på sitt år tills du
+uppdaterar deras metadata.</li>
 <li><b>Endast matchade</b> är på som standard och döljer oidentifierat skräp; ett "+N omatchade"-
 märke visar det.</li>
 <li>Klicka på en ruta för detaljbladet: synopsis, IMDb-betyg och röster, skådespelare -
@@ -755,7 +780,7 @@ gränssnittet slår flaggor på kommandoraden).</p>
 <h3>Hastighet &amp; schemaläggning <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Inställning</th><th>Vad den gör</th></tr>
-<tr><td>Hastighetsgräns</td><td>Tak i byte/sek (<code>50M</code>, <code>1G</code>, 0 = obegränsat). Fjärrappar kan skicka procenttal - sätt <i>Linjehastighet</i> så att de översätts korrekt.</td></tr>
+<tr><td>Hastighetsgräns</td><td>Tak i byte/sek (<code>50M</code>, <code>1G</code>, 0 = obegränsat). Fjärrappar kan skicka procenttal - sätt <i>Linjehastighet</i> så att de översätts korrekt. Posten <b>anpassad…</b> i rubrikraden sätter samma tak utan att öppna Inställningar.</td></tr>
 <tr><td>Auto-hastighet</td><td>RTT-styrt tak som ger plats åt annan hushållstrafik och breder ut sig igen när linjen är tyst.</td></tr>
 <tr><td>Skjut upp långsamma nedladdningar automatiskt</td><td>Ett jobb som fastnat på en långsam server medan andra väntar flyttas sist i kön (förloppet behålls). Se <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch på lediga servrar</td><td>Servrar som är onyttiga för det aktiva jobbet startar nästa köade. Se <a href="#performance">§13</a>.</td></tr>
@@ -800,6 +825,15 @@ som packas upp automatiskt: en RAR-uppsättning som innehåller en 7z som inneh�
 ännu en RAR är normalt på Usenet, och nzbfast följer kedjan utan en andra omgång. Vid
 gränsen lämnas det djupaste arkivet helt enkelt kvar, inte vidare uppackat, och
 nedladdningen blir ändå färdig. Höj bara för ovanligt djupa releaser.</p>
+<p><b>Rättigheter på färdiga nedladdningar</b> (en avancerad inställning) är en umask, samma tal som Docker och
+installationsguiderna använder: <code>002</code> ger mappar 775 och filer 664, <code>022</code> ger 755 och
+644. Tomt är standard och ändrar ingenting. Ställ in den när Sonarr eller Radarr kör som
+en annan användare i samma grupp och inte kan läsa eller importera det som hamnar här: på en
+systemd-installation kan de oftast inte det, eftersom enheten håller allt tjänsten skriver läsbart
+bara för ägaren för att skydda API-nyckeln. Rättigheterna sätts när ett färdigt
+jobb har slutat flyttas, på jobbets mapp, allt i den och mapparna mellan den och nedladdningsmappen,
+eftersom import genom omdöpning kräver skrivrätt på mappen som något döps om ur.
+Ignoreras på Windows, som inte har detta.</p>
 
 <h3>Auto-namnbyte &amp; städning <span class="pill live">live</span></h3>
 <p><b>Byt namn på färdiga nedladdningar</b> (på som standard) ger mappen och
@@ -855,6 +889,27 @@ en nedladdning strular. En kvarlämnad fil kommer nzbfast ihåg, även över oms
 köar den inte igen; spara om den för att ladda ner den på nytt. Oavsett vilket har varje
 jobbs detaljlåda en knapp <b>Hämta .nzb-filen</b>, så en kopia av vilket jobbs
 <code>.nzb</code> som helst är aldrig mer än ett klick bort.</p>
+<p><b>Genomsök även undermappar</b> (av som standard) plockar även upp filer ur
+mappar inuti bevakningsmappen, och namnet på den första undermappen blir nedladdningens
+kategori: en fil som läggs i <code>watch/tv</code> hamnar i kategorin tv. Det är det
+snabbaste sättet att sortera grabbar utan att röra instrumentpanelen - peka ett
+webbläsarbokmärke mot <code>watch/tv</code> och ett annat mot
+<code>watch/movies</code>, så är sorteringen gjord redan på vägen in. En mapp som heter
+<code>rejected</code> är det enda undantaget och lämnas alltid i fred.</p>
+<p><b>Lägg oanvändbara filer åt sidan</b> (av som standard) flyttar allt som inte är en
+användbar NZB till en mapp <code>rejected</code> inuti bevakningsmappen, med en liten
+textfil bredvid som säger vad som var fel. Värt att slå på för en mapp som din
+webbläsare sparar i, dit en inloggningssida eller en felsida kan komma under ett
+<code>.nzb</code>-namn. Av ligger filen kvar där du lade den och skälet visas ovanför
+kön i stället. En fil som bara ser ofullständig ut lämnas kvar i båda fallen, eftersom
+den kan vara på väg in ännu.</p>
+<p><b>Titta i mappen igen var</b> (en avancerad inställning) är ett skyddsnät och inget
+mer, så det är inte ratten som gör upphämtningarna snabba. En fil som läggs på den här
+maskinen märks i samma stund som den landar, för systemet säger till; det här
+intervallet täcker bara de mappar som systemet inte kan rapportera om, vilket i
+praktiken betyder en nätverksutdelning som skrivs från en annan dator. I sekunder, 1
+till 3600, standard 5. Sänk det om upphämtningar från en utdelning känns sena, höj det
+om omkontrollerna inte är värda trafiken på en långsam länk.</p>
 
 <h3 id="set-indexers">Sök på indexerare <span class="pill live">live</span></h3>
 <p>Dina konton hos NZB-indexerarsajter, en rad var, så att en sökning på väggen kan fråga
@@ -994,7 +1049,12 @@ utlåtande fortsätter tillägget orört och loggen säger varför.</p>
 <h3>Livscykelhändelser och signerade webhookar</h3>
 <p>Varje jobbmilstolpe är en versionerad händelse: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, plus
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(ett automatiskt nytt försök har köat om en misslyckad nedladdning) och
+<code>job.delete_kept</code> (en radering tog bort posten men kunde inte ta bort
+dess filer), plus <code>watch.picked</code> (en .nzb hämtades ur bevakningsmappen),
+<code>watchlist.upgraded</code> (en uppgradering från bevakningslistan landade och
+den ersatta kopian togs bort),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> och <code>quota.reached</code>. Var och en bär
 <code>schema_version</code> (för närvarande 1; nya nycklar kan dyka upp utan höjning -
@@ -1047,6 +1107,12 @@ beter sig alla som *arr-verktygen förväntar sig.</p>
 <li>nzbfast serverar <code>caps</code>-, <code>search</code>-, <code>tvsearch</code>- och
 <code>movie</code>-frågor från sitt eget index över dina bevakade grupper, och
 <code>/getnzb/&lt;id&gt;</code> lämnar tillbaka NZB:en.</li>
+<li>Sökningar kan gå på namn eller på id: serier tar ett TVDB-, IMDb- eller TVmaze-id,
+filmer ett IMDb- eller TMDB-id, och appen läser vilket ur <code>caps</code>. TVDB-id:n
+erbjuds först när indexet har samlat in dem, vilket sker av sig självt i bakgrunden.
+Ett id vi inte har något för svarar med ett tomt resultat, och ett id vi inte alls kan
+slå upp avvisas vid namn: ingetdera får någonsin en lista med orelaterade
+releaser.</li>
 </ol>
 <div class="note"><b>Slå på den inbyggda indexeraren först</b> (Inställningar →
 Indexering). Den är avstängd som standard, och så länge den är det svarar den här
@@ -1069,7 +1135,12 @@ mobil-/surfplatteapp fungerar. Välj det protokoll din app stödjer:</p>
 <tr><td>Lösenord</td><td>din <b>API-nyckel</b></td></tr>
 </table></div>
 <p>Hela JSON-RPC-ytan som dessa appar använder serveras: status, kö med
-omordning/paus/radering, historik, add-NZB, hastighetsgräns, paus/återuppta, logg.</p>
+omordning/namnbyte/paus/radering, historik, add-NZB (fil eller URL), hastighetsgräns,
+paus/återuppta, logg. Uppgifterna får också ligga i adressen, NZBGets egen form
+<code>http://user:apikey@host:6789/</code>, som är den LunaSea skickar.</p>
+<p><b>nzb360-användare:</b> lägg till nzbfast som <b>SABnzbd</b>-server (nästa
+avsnitt). nzb360 pratar med riktig NZBGet över XML-RPC, som nzbfast inte serverar, så
+dess NZBGet-läge kan inte ansluta.</p>
 <h3>Appar som talar SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Fält i appen</th><th>Värde</th></tr>
@@ -1364,7 +1435,7 @@ dit <code>--config</code> / <code>$NZBFAST_CONFIG</code> pekar.</td></tr>
 <h2 id="troubleshooting">18 · Felsökning</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Kontrollera</th></tr>
-<tr><td>Långsamma nedladdningar</td><td>Kör <b>Systembenchmark</b> - den namnger flaskhalsen rakt av. Om det är nätverket: kör <b>Anslutningstrimning</b>, kontrollera antalet anslutningar per server och bekräfta att dina providers inte alla är en och samma backbone (<b>Serverdiversitet</b>).</td></tr>
+<tr><td>Långsamma nedladdningar</td><td>Fråga nedladdningen själv först: medan den kör namnger raden under förloppsindikatorn det lager som håller tillbaka <i>det här</i> jobbet, och ett klick på utlåtandet öppnar raden på underlaget (se <a href="#dash-queue">Kö</a>). Kör <b>Systembenchmark</b> - den namnger flaskhalsen rakt av. Om det är nätverket: kör <b>Anslutningstrimning</b>, kontrollera antalet anslutningar per server och bekräfta att dina providers inte alla är en och samma backbone (<b>Serverdiversitet</b>).</td></tr>
 <tr><td>Långsam bara på mycket stora jobb<br>(NAS eller maskin med lite RAM)</td><td>Förväntat, och mätbart: en svält minnesbudget spiller cachar till disk och kostar 20–40 % förbi ~87 GB. Se <a href="#memory">Minnesbudget</a> för siffrorna och hur mycket RAM du ska ge den. Mindre jobb påverkas inte.</td></tr>
 <tr><td>Nedladdning misslyckas "articles missing"</td><td>Inlägget har gått ut eller togs ner på dina providers. En andra provider på en annan backbone räddar de flesta av dessa. <code>nzbfast check</code> förutsäger detta innan nedladdning. Och väggen märker ut de sannolikt borttagna i förväg med sin
 tillgänglighetsprick (<a href="#oracle">§13</a>). Ett första misslyckande av den här
@@ -1382,7 +1453,7 @@ propagationsfördröjning ser likadan ut och löser sig själv.</td></tr>
 <tr><td>Daemonen vill inte starta: porten upptagen</td><td>En annan instans körs - eller ändra <code>--port</code>.</td></tr>
 <tr><td>Var finns loggarna?</td><td>Logg-kortet på instrumentpanelen, eller terminalen/loggfilen du startade <code>serve</code> med.</td></tr>
 </table></div>
-<div class="note"><b>Fortfarande fast?</b>Logg-kortet namnger oftast boven -
+<div class="note"><b>Fortfarande fast?</b>För ett problem med en enskild nedladdning, använd <b>Skapa rapport</b>: den finns i det jobbets låda i kön medan det kör, och sedan i dess historiklåda. Den kopierar allt om just den nedladdningen, inklusive bara dess egna loggrader i stället för hela tjänstens. Användarnamn, lösenord och API-nycklar läses aldrig, och din hemmapp skrivs som <code>~</code>. Logg-kortet namnger oftast boven -
 inkludera dess svans när du rapporterar ett problem, tillsammans med din
 <code>nzbfast --version</code>.</div>
 

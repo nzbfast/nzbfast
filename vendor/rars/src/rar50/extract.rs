@@ -260,6 +260,7 @@ impl FileHeader {
             attr: self.attributes,
             host_os: self.host_os,
             is_directory: self.is_directory(),
+            unpacked_size: self.unpacked_size,
         }
     }
 
@@ -792,8 +793,16 @@ fn pipe_stored_chunks<E>(
         }
     }
 
+    // A pooled buffer keeps its full `STORED_PIPE_BUF` length for its whole
+    // life and the fill level rides beside it, so recycling one costs
+    // nothing. It used to be truncated to the read count, cleared on the way
+    // back to the pool, and grown again with `resize(STORED_PIPE_BUF, 0)`
+    // before the next read - which memset the whole 1 MiB on EVERY round
+    // trip, not just after a short read, for bytes `read` was about to
+    // overwrite. (nzbfast-local change, 22 Aug 2026 - re-apply on the next
+    // rars re-sync, see vendor/rars/VENDORING.md.)
     let (data_tx, data_rx) =
-        std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(STORED_POOL + 1);
+        std::sync::mpsc::sync_channel::<std::io::Result<(Vec<u8>, usize)>>(STORED_POOL + 1);
     let (digest_tx, digest_rx) = std::sync::mpsc::channel::<(Vec<u8>, usize)>();
     let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     for _ in 0..STORED_POOL {
@@ -807,12 +816,11 @@ fn pipe_stored_chunks<E>(
                 let Ok(mut buf) = pool_rx.recv() else {
                     return;
                 };
-                buf.resize(STORED_PIPE_BUF, 0);
+                debug_assert_eq!(buf.len(), STORED_PIPE_BUF);
                 match reader.read(&mut buf) {
                     Ok(0) => return,
                     Ok(count) => {
-                        buf.truncate(count);
-                        if data_tx.send(Ok(buf)).is_err() {
+                        if data_tx.send(Ok((buf, count))).is_err() {
                             return;
                         }
                     }
@@ -833,8 +841,6 @@ fn pipe_stored_chunks<E>(
                 if let Some((_, hasher)) = &mut hash {
                     hasher.update(chunk);
                 }
-                let mut buf = buf;
-                buf.clear();
                 let _ = pool_tx.send(buf);
             }
             // The pool sender drops with the digester, which is what wakes
@@ -843,16 +849,22 @@ fn pipe_stored_chunks<E>(
         });
 
         for received in data_rx {
-            let buf = match received {
-                Ok(buf) => buf,
+            let (buf, count) = match received {
+                Ok(chunk) => chunk,
                 Err(error) => {
                     outcome = Err(read_error(error));
                     break;
                 }
             };
-            match consume(&buf) {
+            match consume(&buf[..count]) {
                 Ok(content_len) => {
-                    let _ = digest_tx.send((buf, content_len));
+                    // `consume` reports how many LEADING bytes of the chunk
+                    // are file content, so it can never exceed the fill
+                    // level. That used to fall out of the truncate; the
+                    // pooled buffer now stays longer than the fill level, so
+                    // the bound is stated here instead.
+                    debug_assert!(content_len <= count);
+                    let _ = digest_tx.send((buf, content_len.min(count)));
                 }
                 Err(error) => {
                     outcome = Err(error);
@@ -1491,6 +1503,16 @@ where
     if volumes.is_empty() {
         return Err(Error::InvalidHeader("RAR 5 volume set is empty"));
     }
+    // This walk visits every entry of every volume and has no way to
+    // finish a header walk that stopped at an arrival frontier, so a
+    // partially enumerated volume here would silently skip members. Only
+    // `extract_volume_sequence_to_with_progress` knows how to complete
+    // one; anything else must be handed whole archives.
+    if volumes.iter().any(|a| a.is_partially_enumerated()) {
+        return Err(Error::InvalidHeader(
+            "RAR 5 volume set has a partially enumerated volume",
+        ));
+    }
 
     // Non-solid sets with several small compressed members decode them on a
     // worker pool (members are independent; unrar streams sequentially and
@@ -1749,72 +1771,93 @@ where
         // chain can grow it.
         let mut chase_at: Option<usize> = None;
         {
-            let archive = &volumes[volume_index];
-            for (file_index, file) in archive.files().enumerate().skip(start_at) {
-                match split.advance(file.is_split_before(), file.is_split_after()) {
-                    SplitVolumeStep::Regular => {
-                        if file.redirection.is_some() {
-                            continue;
-                        }
-                        let meta = file.metadata();
-                        let mut writer = open(&meta)?;
-                        if !meta.is_directory {
-                            session.write_file_to(archive, file, &mut writer)?;
-                        }
-                    }
-                    SplitVolumeStep::Start => {
-                        validate_split_fragment(file, password)?;
-                        // `advance` leaves the state untouched for Start
-                        // (only `begin` arms it), so breaking out here is
-                        // clean - the chain owns the member from now on.
-                        if incremental_split_worthwhile(file, &session) {
-                            chase_at = Some(file_index);
-                            break;
-                        }
-                        split.begin(PendingSplitRefs::new(file, volume_index, file_index));
-                    }
-                    SplitVolumeStep::Continue(current) => {
-                        validate_split_continuation_refs(current, file, password)?;
-                        current.append(volume_index, file_index)?;
-                    }
-                    SplitVolumeStep::Finish(mut completed) => {
-                        validate_split_continuation_refs(&completed, file, password)?;
-                        completed.append(volume_index, file_index)?;
-                        // The splits that land here are the ones the
-                        // incremental path declined - stored members and
-                        // small ones. Stored fragments still stream
-                        // forward exactly once, so they release their
-                        // volumes as the chain advances (a 400-volume
-                        // stored film must not pin the whole set in the
-                        // caller's retention window); `write_to` keeps
-                        // the watermark off any path that could re-read.
-                        let reported = &mut reported;
-                        let consumed = &consumed;
-                        let mut spent = move |spent_volume: usize| {
-                            while *reported <= spent_volume {
-                                consumed(*reported, u64::MAX);
-                                *reported += 1;
+            // Wrapped in a resume loop, because running off the end of a
+            // volume parsed by `Archive::parse_stream_incremental` does
+            // NOT mean the volume is walked out - it means the header
+            // walk stopped at the arrival frontier and has to be finished
+            // before that can be said. Deferring it to the bottom of this
+            // loop is the point: by then the split member has decoded and
+            // the caller has released its bytes, so the wait the eager
+            // parse used to pay up front costs no retention here.
+            let mut resume_at = start_at;
+            'walk: loop {
+                let archive = &volumes[volume_index];
+                for (file_index, file) in archive.files().enumerate().skip(resume_at) {
+                    resume_at = file_index + 1;
+                    match split.advance(file.is_split_before(), file.is_split_after()) {
+                        SplitVolumeStep::Regular => {
+                            if file.redirection.is_some() {
+                                continue;
                             }
-                        };
-                        completed.write_to(
-                            &volumes,
-                            file,
-                            &mut session,
-                            &mut open,
-                            Some(&mut spent),
-                        )?;
-                    }
-                    SplitVolumeStep::MissingFirst => {
-                        return Err(Error::InvalidHeader(
-                            "RAR 5 split entry is missing its first part",
-                        ));
-                    }
-                    SplitVolumeStep::Interrupted => {
-                        return Err(Error::InvalidHeader(
-                            "RAR 5 split entry is interrupted by a regular entry",
-                        ));
+                            let meta = file.metadata();
+                            let mut writer = open(&meta)?;
+                            if !meta.is_directory {
+                                session.write_file_to(archive, file, &mut writer)?;
+                            }
+                        }
+                        SplitVolumeStep::Start => {
+                            validate_split_fragment(file, password)?;
+                            // `advance` leaves the state untouched for Start
+                            // (only `begin` arms it), so breaking out here is
+                            // clean - the chain owns the member from now on.
+                            if incremental_split_worthwhile(file, &session) {
+                                chase_at = Some(file_index);
+                                // The volume is left here and never walked
+                                // again, and needs no completion: this entry
+                                // is flagged SPLIT_AFTER, and by the format
+                                // nothing can follow a member that continues
+                                // into the next volume but the END record.
+                                break 'walk;
+                            }
+                            split.begin(PendingSplitRefs::new(file, volume_index, file_index));
+                        }
+                        SplitVolumeStep::Continue(current) => {
+                            validate_split_continuation_refs(current, file, password)?;
+                            current.append(volume_index, file_index)?;
+                        }
+                        SplitVolumeStep::Finish(mut completed) => {
+                            validate_split_continuation_refs(&completed, file, password)?;
+                            completed.append(volume_index, file_index)?;
+                            // The splits that land here are the ones the
+                            // incremental path declined - stored members and
+                            // small ones. Stored fragments still stream
+                            // forward exactly once, so they release their
+                            // volumes as the chain advances (a 400-volume
+                            // stored film must not pin the whole set in the
+                            // caller's retention window); `write_to` keeps
+                            // the watermark off any path that could re-read.
+                            let reported = &mut reported;
+                            let consumed = &consumed;
+                            let mut spent = move |spent_volume: usize| {
+                                while *reported <= spent_volume {
+                                    consumed(*reported, u64::MAX);
+                                    *reported += 1;
+                                }
+                            };
+                            completed.write_to(
+                                &volumes,
+                                file,
+                                &mut session,
+                                &mut open,
+                                Some(&mut spent),
+                            )?;
+                        }
+                        SplitVolumeStep::MissingFirst => {
+                            return Err(Error::InvalidHeader(
+                                "RAR 5 split entry is missing its first part",
+                            ));
+                        }
+                        SplitVolumeStep::Interrupted => {
+                            return Err(Error::InvalidHeader(
+                                "RAR 5 split entry is interrupted by a regular entry",
+                            ));
+                        }
                     }
                 }
+                if !volumes[volume_index].is_partially_enumerated() {
+                    break 'walk;
+                }
+                volumes[volume_index].enumerate_rest(password)?;
             }
         }
 
@@ -1898,6 +1941,7 @@ where
         attr: pending.attr,
         host_os: pending.host_os,
         is_directory: false,
+        unpacked_size: first.unpacked_size,
     };
     let mut writer = open(&meta)?;
 
@@ -1921,17 +1965,35 @@ where
     );
 
     let flat_limit = session.member_flat_limit(&first);
-    // Always hash. The expected value is the LAST fragment's, and the
+    // The expected value is the LAST fragment's, and this decode must
+    // decide whether to hash before it has read that fragment - the
     // fragments do not agree on whether a hash record even EXISTS: the
     // rars writer puts one only on the finish fragment, WinRAR stamps
     // every earlier one with the digest of that fragment's own PACKED
-    // bytes (checked per fragment by the chain below). Seeding off the
-    // first fragment would leave a set with nothing to check against. A
-    // malformed record on the first fragment still errors here, exactly
-    // as the whole-set walk errors on it.
-    let seed = match streaming_hash_verifier(&first)? {
-        Some(seed) => Some(seed),
-        None => Some(([0u8; 32], blake2sp::Hasher::new())),
+    // bytes (checked per fragment by the chain below).
+    //
+    // `Unconditional` therefore hashes regardless and drops the digest
+    // below when the finish fragment carries nothing to check it against.
+    // That is the safe answer and the default, and on `rar`'s DEFAULT set
+    // - CRC32 only, no hash record anywhere, which is what a posted set
+    // normally is - it is a whole-payload BLAKE2sp nobody ever reads:
+    // measured at +4.22 G instructions per GB unpacked and +5.83 G paced
+    // against ~42 G for the decode, and it is the whole reason the
+    // volumes-on-disk walk (which HOLDS the finish fragment and so never
+    // hashes an unstamped set) costs less per GB than this path.
+    // `FirstFragment` takes the first fragment's header as the set's
+    // answer - exact for every WinRAR 7.21 and rar 7.23 set measured
+    // here, not for a rars-written one, see [`crate::Rar50SplitHashSeeding`].
+    //
+    // A malformed record on the first fragment still errors here under
+    // either setting, exactly as the whole-set walk errors on it.
+    let first_seed = streaming_hash_verifier(&first)?;
+    let seed = match (first_seed, options.rar50_split_hash_seeding) {
+        (Some(seed), _) => Some(seed),
+        (None, crate::Rar50SplitHashSeeding::Unconditional) => {
+            Some(([0u8; 32], blake2sp::Hasher::new()))
+        }
+        (None, crate::Rar50SplitHashSeeding::FirstFragment) => None,
     };
     let mut counting = CountingWriter {
         inner: &mut *writer,
@@ -1974,7 +2036,14 @@ where
                 .ok_or(Error::InvalidHeader("RAR 5 split entry is missing"))?;
             // The expected digests are the LAST fragment's; whatever the
             // earlier headers carry is not the file's. A set with no hash
-            // record at all simply has nothing to check here.
+            // record at all simply has nothing to check here - and so does
+            // one whose finish fragment records a digest the seeding above
+            // declined to compute (a rars-written set under
+            // `FirstFragment`), which is why that setting is opt-in: the
+            // member is then verified by its CRC32 alone. Nothing can be
+            // recovered at this point, the payload having already gone to
+            // the writer, so this must not become an error - it would fail
+            // an archive that is intact.
             let hash = match (hash, streaming_hash_verifier(final_file)?) {
                 (Some((_, hasher)), Some((expected, _))) => Some((expected, hasher)),
                 _ => None,
@@ -2225,6 +2294,22 @@ where
                 return Err(Error::InvalidHeader("RAR 5 split entry is incomplete"));
             };
             self.volumes.push(archive);
+            // An EMPTY volume is skipped, exactly as the whole-set walk
+            // skips one - but a volume parsed by
+            // `Archive::parse_stream_incremental` can read as empty while
+            // it is merely still arriving, and skipping THAT would drop a
+            // fragment of the member being decoded. So an archive with no
+            // entries has to be pressed for the truth first - one header
+            // at a time (`enumerate_next`), never the whole walk: that
+            // would block on the volume's END record, i.e. on the whole
+            // volume arriving, which is the pin the incremental parse
+            // exists to avoid.
+            let password = self.password;
+            while self.volumes[volume_index].files().next().is_none()
+                && self.volumes[volume_index].is_partially_enumerated()
+            {
+                self.volumes[volume_index].enumerate_next(password)?;
+            }
             let archive = &self.volumes[volume_index];
             let Some(file) = archive.files().next() else {
                 continue;
@@ -3408,6 +3493,7 @@ impl PendingSplitRefs {
             attr: self.attr,
             host_os: self.host_os,
             is_directory: false,
+            unpacked_size: final_file.unpacked_size,
         };
         let mut writer = open(&meta)?;
         // A fragment digest mismatch reaches the decode paths below as the
@@ -4144,6 +4230,350 @@ mod tests {
         assert!(short_hash.split_fragment_packed_digests().is_none());
     }
 
+    /// The two real fixture sets the split-hash-seeding tests drive, and
+    /// the shapes they carry (asserted in
+    /// `rar50_split_hash_seeding_reads_the_first_fragment`): the WinRAR
+    /// `-htb` set stamps a BLAKE2sp record on EVERY fragment and carries
+    /// no CRC32 at all, while rar 7.23's DEFAULT set carries CRC32
+    /// everywhere and no BLAKE2sp anywhere - which is what a posted set
+    /// normally is, and so the set that was paying a whole-payload
+    /// BLAKE2sp nothing could ever check.
+    const HTB_SPLIT_SET: [&str; 3] = [
+        "multivol.part1.rar",
+        "multivol.part2.rar",
+        "multivol.part3.rar",
+    ];
+    /// rar's `-p` set: BLAKE2sp records throughout, the finish
+    /// fragment's MAC-keyed and the earlier ones not.
+    const ENCRYPTED_SPLIT_SET: [&str; 3] = [
+        "encrypted_multivol.part1.rar",
+        "encrypted_multivol.part2.rar",
+        "encrypted_multivol.part3.rar",
+    ];
+    const CRC32_SPLIT_SET: [&str; 5] = [
+        "crc32_multivol.part01.rar",
+        "crc32_multivol.part02.rar",
+        "crc32_multivol.part03.rar",
+        "crc32_multivol.part04.rar",
+        "crc32_multivol.part05.rar",
+    ];
+
+    fn split_fixture_set(names: &[&str]) -> Vec<Archive> {
+        names
+            .iter()
+            .map(|name| {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/rar50")
+                    .join(name);
+                let bytes = std::fs::read(&path).expect("fixture is readable");
+                Archive::parse(&bytes).expect("fixture parses")
+            })
+            .collect()
+    }
+
+    /// Edit one volume's split-member header. The seeding decision is made
+    /// from header records, and no single writer produces every
+    /// combination of them, so the disagreement shapes are built by
+    /// editing parsed headers rather than by finding a fixture.
+    fn edit_split_header(archive: &mut Archive, edit: impl FnOnce(&mut FileHeader)) {
+        for block in &mut archive.blocks {
+            if let Block::File(file) = block {
+                edit(file);
+                return;
+            }
+        }
+        panic!("volume carries no file header");
+    }
+
+    fn split_header(archive: &Archive) -> &FileHeader {
+        archive.files().next().expect("volume carries a file header")
+    }
+
+    fn corrupt_blake2sp(file: &mut FileHeader) {
+        file.hash
+            .as_mut()
+            .expect("header carries a BLAKE2sp record")
+            .data[0] ^= 0xff;
+    }
+
+    fn seeding_options<'a>(
+        seeding: crate::Rar50SplitHashSeeding,
+    ) -> crate::ArchiveReadOptions<'a> {
+        seeding_options_with_password(seeding, None)
+    }
+
+    fn seeding_options_with_password(
+        seeding: crate::Rar50SplitHashSeeding,
+        password: Option<&[u8]>,
+    ) -> crate::ArchiveReadOptions<'_> {
+        crate::ArchiveReadOptions::with_optional_password(password)
+            .with_rar50_split_hash_seeding(seeding)
+    }
+
+    /// Run a parsed volume set through `extract_volume_sequence_to_with_progress`
+    /// - the only caller of `incremental_split_decode` - and return the
+    /// single split member's bytes.
+    fn sequence_split_member(
+        archives: Vec<Archive>,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Vec<u8>> {
+        struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut archives: Vec<Option<Archive>> = archives.into_iter().map(Some).collect();
+        let out = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&out);
+        extract_volume_sequence_to_with_progress(
+            |index| Ok(archives.get_mut(index).and_then(Option::take)),
+            options,
+            |_meta| Ok(Box::new(SharedWriter(Rc::clone(&sink))) as Box<dyn Write>),
+            |_, _| {},
+        )?;
+        let bytes = out.borrow().clone();
+        Ok(bytes)
+    }
+
+    /// The extractor labels a verification failure with the entry it
+    /// happened on; the tests below care about the failure itself.
+    fn at_entry_source(error: Error) -> Error {
+        match error {
+            Error::AtEntry { source, .. } => *source,
+            other => other,
+        }
+    }
+
+    fn both_seedings() -> [crate::Rar50SplitHashSeeding; 2] {
+        [
+            crate::Rar50SplitHashSeeding::Unconditional,
+            crate::Rar50SplitHashSeeding::FirstFragment,
+        ]
+    }
+
+    /// What the seeding reads, and that reading it changes no output.
+    ///
+    /// The shape assertions are the load-bearing half: `FirstFragment` is
+    /// exact only because both measured writers make the FIRST fragment
+    /// and the FINISH fragment agree about whether a BLAKE2sp record
+    /// exists. If a fixture ever stops matching this, the seeding's
+    /// premise has stopped holding, not the test.
+    #[test]
+    fn rar50_split_hash_seeding_reads_the_first_fragment() {
+        let htb = split_fixture_set(&HTB_SPLIT_SET);
+        for (index, archive) in htb.iter().enumerate() {
+            let file = split_header(archive);
+            assert!(
+                file.hash.is_some(),
+                "the -htb set stamps every fragment, including {index}"
+            );
+            assert!(file.data_crc32.is_none(), "-htb replaces the CRC32");
+        }
+        let crc32 = split_fixture_set(&CRC32_SPLIT_SET);
+        for (index, archive) in crc32.iter().enumerate() {
+            let file = split_header(archive);
+            assert!(
+                file.hash.is_none(),
+                "the default set records no BLAKE2sp on fragment {index}"
+            );
+            assert!(file.data_crc32.is_some(), "the default set records CRC32");
+        }
+
+        // Both sets must genuinely reach the growing-chain decode, or
+        // these tests measure the whole-set walk instead.
+        for archive in [&htb[0], &crc32[0]] {
+            let file = split_header(archive);
+            assert!(!file.is_stored(), "fixture member must be compressed");
+            assert!(
+                file.should_stream_decode(BUFFERED_DECODE_LIMIT),
+                "fixture member must take the streaming path"
+            );
+        }
+
+        // The encrypted set rides along because that is where the hash
+        // record's MAC keying lives: its non-final fragments carry a
+        // PLAIN ciphertext digest and only the finish fragment is keyed,
+        // so the seeding still reads a record on the first fragment.
+        let sets: [(&[&str], Option<&[u8]>); 3] = [
+            (&HTB_SPLIT_SET[..], None),
+            (&CRC32_SPLIT_SET[..], None),
+            (&ENCRYPTED_SPLIT_SET[..], Some(b"password")),
+        ];
+        for (names, password) in sets {
+            let mut bytes = Vec::new();
+            for seeding in both_seedings() {
+                bytes.push(
+                    sequence_split_member(
+                        split_fixture_set(names),
+                        seeding_options_with_password(seeding, password),
+                    )
+                    .expect("intact set extracts"),
+                );
+            }
+            assert!(!bytes[0].is_empty());
+            assert_eq!(bytes[0], bytes[1], "seeding must not change output bytes");
+        }
+    }
+
+    /// A `-htb` set keeps its BLAKE2sp verification byte for byte: its
+    /// first fragment carries a record, so `FirstFragment` seeds the
+    /// hasher exactly as `Unconditional` does.
+    #[test]
+    fn rar50_split_hash_seeding_keeps_htb_verification() {
+        for seeding in both_seedings() {
+            let mut set = split_fixture_set(&HTB_SPLIT_SET);
+            let last = set.len() - 1;
+            edit_split_header(&mut set[last], corrupt_blake2sp);
+            let error = at_entry_source(
+                sequence_split_member(set, seeding_options(seeding))
+                    .expect_err("a wrong expected digest must fail"),
+            );
+            assert!(
+                matches!(error, Error::HashMismatch { hash_type: 0 }),
+                "{seeding:?}: {error:?}"
+            );
+        }
+    }
+
+    /// An unstamped set is still verified - by the CRC32 the finish
+    /// fragment carries, which is the only whole-member record it has.
+    #[test]
+    fn rar50_split_hash_seeding_leaves_crc32_verification_alone() {
+        for seeding in both_seedings() {
+            let mut set = split_fixture_set(&CRC32_SPLIT_SET);
+            let last = set.len() - 1;
+            edit_split_header(&mut set[last], |file| {
+                file.data_crc32 = Some(file.data_crc32.expect("finish fragment has a CRC32") ^ 1);
+            });
+            let error = at_entry_source(
+                sequence_split_member(set, seeding_options(seeding))
+                    .expect_err("a wrong expected CRC32 must fail"),
+            );
+            assert!(
+                matches!(error, Error::Crc32Mismatch { .. }),
+                "{seeding:?}: {error:?}"
+            );
+        }
+    }
+
+    /// The case the seeding comment is written for: fragments that
+    /// DISAGREE about whether a hash record exists.
+    ///
+    /// Shape one is the rars writer's - a record on the finish fragment
+    /// only - and it is the whole reason `Unconditional` is the default
+    /// and has to stay it: the decode has no way to learn about that
+    /// record before it has streamed the payload past. `FirstFragment`
+    /// declines the digest on such a set and the member is left to its
+    /// CRC32, which is the trade that setting names.
+    ///
+    /// Shape two - records on the earlier fragments but none on the
+    /// finish - has never had a whole-member digest to check under either
+    /// setting (the expected value is the LAST fragment's), and the
+    /// per-fragment packed digests those earlier records really are still
+    /// fire, so damage is still caught and still localized to its volume.
+    #[test]
+    fn rar50_split_hash_seeding_on_fragments_that_disagree() {
+        let payload = sequence_split_member(
+            split_fixture_set(&CRC32_SPLIT_SET),
+            seeding_options(crate::Rar50SplitHashSeeding::Unconditional),
+        )
+        .expect("intact set extracts");
+        let digest = blake2sp::hash(&payload);
+
+        // Shape one: a BLAKE2sp on the FINISH fragment and nowhere else.
+        let finish_only = |expected: [u8; 32]| {
+            let mut set = split_fixture_set(&CRC32_SPLIT_SET);
+            let last = set.len() - 1;
+            edit_split_header(&mut set[last], |file| {
+                file.hash = Some(FileHash {
+                    hash_type: 0,
+                    data: expected.to_vec(),
+                });
+            });
+            set
+        };
+        let mut wrong = digest;
+        wrong[0] ^= 0xff;
+
+        for seeding in both_seedings() {
+            assert_eq!(
+                sequence_split_member(finish_only(digest), seeding_options(seeding))
+                    .expect("a correct finish digest extracts"),
+                payload,
+                "{seeding:?}"
+            );
+        }
+        let error = at_entry_source(
+            sequence_split_member(
+                finish_only(wrong),
+                seeding_options(crate::Rar50SplitHashSeeding::Unconditional),
+            )
+            .expect_err("the default seeding checks a finish-only record"),
+        );
+        assert!(
+            matches!(error, Error::HashMismatch { hash_type: 0 }),
+            "{error:?}"
+        );
+        assert_eq!(
+            sequence_split_member(
+                finish_only(wrong),
+                seeding_options(crate::Rar50SplitHashSeeding::FirstFragment),
+            )
+            .expect("FirstFragment never computed the digest, so it cannot fail on it"),
+            payload,
+        );
+        // ...and that member is still covered, by its CRC32.
+        let mut crc_broken = finish_only(digest);
+        let last = crc_broken.len() - 1;
+        edit_split_header(&mut crc_broken[last], |file| {
+            file.data_crc32 = Some(file.data_crc32.expect("finish fragment has a CRC32") ^ 1);
+        });
+        let error = at_entry_source(
+            sequence_split_member(
+                crc_broken,
+                seeding_options(crate::Rar50SplitHashSeeding::FirstFragment),
+            )
+            .expect_err("the CRC32 still guards a set whose BLAKE2sp was declined"),
+        );
+        assert!(
+            matches!(error, Error::Crc32Mismatch { .. }),
+            "{error:?}"
+        );
+
+        // Shape two: records on the earlier fragments, none on the finish.
+        for seeding in both_seedings() {
+            let mut set = split_fixture_set(&HTB_SPLIT_SET);
+            let last = set.len() - 1;
+            edit_split_header(&mut set[last], |file| file.hash = None);
+            let bytes = sequence_split_member(set, seeding_options(seeding))
+                .expect("no finish record means nothing to check");
+            assert!(!bytes.is_empty(), "{seeding:?}");
+
+            // The earlier records are per-fragment packed digests, and
+            // they still fail the set at the volume that is damaged.
+            let mut set = split_fixture_set(&HTB_SPLIT_SET);
+            let last = set.len() - 1;
+            edit_split_header(&mut set[last], |file| file.hash = None);
+            edit_split_header(&mut set[0], corrupt_blake2sp);
+            let error = at_entry_source(
+                sequence_split_member(set, seeding_options(seeding))
+                    .expect_err("a wrong per-fragment digest must fail"),
+            );
+            assert!(
+                matches!(error, Error::SplitFragmentHashMismatch { volume: 0 }),
+                "{seeding:?}: {error:?}"
+            );
+        }
+    }
+
     /// After a fragment digest mismatch the incremental chain must keep
     /// erroring on every later read, exactly as the whole-set walk's
     /// fragment readers do: the mismatch surfaces with `at` unadvanced
@@ -4487,6 +4917,43 @@ mod tests {
             .expect("stored pipeline deadlocked on early writer failure");
         let error = outcome.expect_err("writer failure must surface");
         assert!(error.contains("sink failed"), "unexpected error: {error}");
+    }
+
+    // A reader that hands back far less than it was asked for is what a
+    // socket-backed stored member looks like, and it is the shape the fill
+    // level is carried for: the pooled buffer stays longer than its
+    // contents, so nothing but `count` may reach the consumer or the
+    // digest. The schedule includes a 1-byte read on purpose - the shorter
+    // the read, the more of the previous round is still sitting there.
+    // (nzbfast-local change, 22 Aug 2026 - re-apply on the next rars
+    // re-sync, see vendor/rars/VENDORING.md.)
+    #[test]
+    fn stored_pipeline_delivers_exactly_the_bytes_each_short_read_returned() {
+        let content: Vec<u8> = (0..3_000_003u32).map(|index| (index % 251) as u8).collect();
+        let mut reader = ShortReader {
+            data: content.clone(),
+            pos: 0,
+            sizes: vec![1 << 20, 7, 300_000, 1, 999_999],
+            next: 0,
+        };
+        let mut seen: Vec<u8> = Vec::with_capacity(content.len());
+
+        let (crc, hash) = pipe_stored_chunks(
+            &mut reader,
+            content.len() as u64,
+            |error: std::io::Error| error,
+            Crc32::new(),
+            None,
+            |chunk: &[u8]| {
+                seen.extend_from_slice(chunk);
+                Ok::<usize, std::io::Error>(chunk.len())
+            },
+        )
+        .expect("stored pipeline");
+
+        assert!(hash.is_none());
+        assert_eq!(seen, content);
+        assert_eq!(crc.finish(), crc32(&content));
     }
 
     #[test]
@@ -5006,6 +5473,7 @@ mod tests {
                 crypto: None,
             })],
             source: ArchiveSource::Memory(source),
+            pending: None,
         }
     }
 
@@ -5059,6 +5527,7 @@ mod tests {
             },
             blocks,
             source: ArchiveSource::Memory(bytes),
+            pending: None,
         }
     }
 

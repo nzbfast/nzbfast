@@ -33,11 +33,13 @@ fn seed_masks_and_unservable_split() {
             id: "<old@x>".into(),
             age_days: 30,
             part: 0,
+            file: u32::MAX,
         },
         ArticleReq {
             id: "<ancient@x>".into(),
             age_days: 400,
             part: 0,
+            file: u32::MAX,
         },
     ];
     // Both servers limited: 10-day and 90-day.
@@ -106,6 +108,7 @@ async fn retention_excluded_articles_report_cause_retention() {
         id: "<ancient@x>".into(),
         age_days: 400,
         part: 0,
+        file: u32::MAX,
     });
 
     let cfg = PoolConfig {
@@ -196,11 +199,13 @@ fn shared_new_dedupes_repeated_ids() {
             id: "<ancient@x>".into(),
             age_days: 400,
             part: 0,
+            file: u32::MAX,
         },
         ArticleReq {
             id: "<ancient@x>".into(),
             age_days: 400,
             part: 0,
+            file: u32::MAX,
         }, // unservable repeat - must not report Missing twice
     ];
     let srv = (
@@ -355,6 +360,7 @@ async fn futile_scan_throttles_before_retrying() {
     shared.queue.lock().await.push_front(Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<fresh>".into(),
         attempts: 0,
@@ -428,6 +434,7 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
     let lad = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<e0>".into(),
         attempts: 0,
@@ -495,6 +502,7 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
     let lad2 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<n0>".into(),
         attempts: 0,
@@ -566,6 +574,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let w = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<h0>".into(),
         attempts: 0,
@@ -637,6 +646,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let w2 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<h1>".into(),
         attempts: 0,
@@ -688,6 +698,7 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
     let w3 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<n0>".into(),
         attempts: 0,
@@ -789,6 +800,7 @@ async fn a_futile_idle_dup_scan_gates_until_the_map_moves_or_the_window_ends() {
         Inflight {
             age_days: 0,
             part: 0,
+            file: u32::MAX,
             ord: 0,
             server: 0,
             dispatched: Instant::now() - Duration::from_secs(1),
@@ -826,6 +838,7 @@ async fn a_futile_idle_dup_scan_gates_until_the_map_moves_or_the_window_ends() {
         Inflight {
             age_days: 0,
             part: 0,
+            file: u32::MAX,
             ord: 0,
             server: 0,
             dispatched: Instant::now(),
@@ -909,6 +922,7 @@ async fn a_server_with_more_connections_is_not_mistaken_for_a_faster_one() {
     let w = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<r0>".into(),
         attempts: 0,
@@ -998,6 +1012,7 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
     let w = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<f0>".into(),
         attempts: 0,
@@ -1451,6 +1466,7 @@ async fn shed_pipeline_requeues_behind_promoted_run_uncharged() {
     inflight.push_back(Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<a5>".into(),
         attempts: 0,
@@ -2519,10 +2535,10 @@ async fn session_backoff_clears_once_the_server_works_again() {
 /// BODYs, every worker gone on connect exhaustion). A metronome caps
 /// each jump at a millisecond, so every I/O wait is re-polled ~1 ms of
 /// virtual time at a time while the long backoffs still cost nothing.
-struct Metronome(tokio::task::JoinHandle<()>);
+pub(super) struct Metronome(tokio::task::JoinHandle<()>);
 
 impl Metronome {
-    fn start() -> Metronome {
+    pub(super) fn start() -> Metronome {
         Metronome(tokio::spawn(async {
             loop {
                 tokio::time::sleep(Duration::from_millis(1)).await;

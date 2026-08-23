@@ -511,6 +511,35 @@ fn m_server_test(
     })
 }
 
+/// The url a `feed_test` / `feed_preview` body is actually asking about.
+///
+/// TODO §20c: the RSS editor's url box holds the MASKED url for a saved
+/// feed, so a Test on a row the user did not retype would otherwise
+/// fetch `https://indexer/rss?apikey=***` and report the feed as broken.
+/// The body carries the feed's `id` alongside, and an unchanged url
+/// against a known id resolves to the stored one - the same merge
+/// `set_feeds` does, and for the same reason. A url the user DID type
+/// is used verbatim, which is what makes Test useful before a save.
+fn feed_body_url(d: &Arc<Daemon>, body: &Value) -> String {
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if !id.is_empty()
+        && let Some(f) = d.feeds.lock_ok().iter().find(|f| f.id == id)
+        && crate::rss::url_is_unchanged(url, &f.url)
+    {
+        return f.url.clone();
+    }
+    url.to_string()
+}
+
 fn m_feed_test(
     d: &Arc<Daemon>,
     req: &mut tiny_http::Request,
@@ -531,12 +560,7 @@ fn m_feed_test(
             // reason to reach for the socket.
             let raw = api_body.take().unwrap_or_default();
             let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
-            let url = body
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let url = feed_body_url(d, &body);
             if url.is_empty() {
                 json!({"status": false, "error": "no url"})
             } else {
@@ -594,12 +618,7 @@ fn m_feed_preview(
         } else {
             let raw = api_body.take().unwrap_or_default();
             let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
-            let url = body
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let url = feed_body_url(d, &body);
             let rules: Vec<String> = body
                 .get("rules")
                 .and_then(Value::as_array)
@@ -693,12 +712,7 @@ fn m_indexer_test(
         match cfg {
             Ok(mut cfg) if !cfg.url.trim().is_empty() => {
                 if cfg.apikey.is_empty()
-                    && let Some(saved) = d
-                        .indexers
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|i| i.name == cfg.name)
+                    && let Some(saved) = d.indexers.lock_ok().iter().find(|i| i.name == cfg.name)
                 {
                     cfg.apikey = saved.apikey.clone();
                 }
@@ -737,8 +751,7 @@ fn m_indexer_test(
                         // for the full 24 h TTL, even if the
                         // user cancelled the edit.
                         d.indexer_rt
-                            .lock()
-                            .unwrap()
+                            .lock_ok()
                             .caps
                             .insert(cfg.identity(), (Instant::now(), Some(caps)));
                         out
@@ -1182,58 +1195,127 @@ fn m_connladder(
     })
 }
 
+/// Which servers the diversity sweep may dial, and which it is skipping.
+///
+/// Split out of [`m_diversity`] so the policy in its doc comment is a
+/// thing that can be tested, rather than three lines buried in a request
+/// handler where nothing would ever exercise them. Returns the pool and
+/// the switched-off hosts, in config order.
+///
+/// The skipped list comes back on an OPT-IN run too. It is not dead
+/// there: the page labels those rows "switched off" instead of dropping
+/// the note, so the report never shows a provider without saying whether
+/// it is one the user is actually downloading from.
+fn diversity_pool(
+    servers: &[nzbkit::config::ServerConfig],
+    include_off: bool,
+) -> (Vec<nzbkit::config::ServerConfig>, Vec<String>) {
+    let off = servers
+        .iter()
+        .filter(|s| !s.enabled)
+        .map(|s| s.host.clone())
+        .collect();
+    let pool = if include_off {
+        servers.to_vec()
+    } else {
+        servers.iter().filter(|s| s.enabled).cloned().collect()
+    };
+    (pool, off)
+}
+
+/// The Server diversity card's Analyze button: STAT one shared article
+/// sample on each provider and report whose gaps line up.
+///
+/// ENABLED SERVERS ONLY unless `value=1` says otherwise, and that is a
+/// decision rather than a detail. Everywhere else in the tree the switch
+/// means "do not touch this account" - a discipline a whole incident was
+/// spent establishing on 23 Aug 2026, when a machine was found holding
+/// live sockets to a provider marked `"enabled": false` while another
+/// machine was using that same shared account. A flag whose meaning
+/// depends on which code path reads it is not a flag, so this path reads
+/// it the same way every other one does.
+///
+/// The opt-in exists because "should I turn this account back on?" is a
+/// real question and filtering alone kills it. It is the shape the
+/// connection ladder already uses for the neighbouring card: the
+/// automatic lane never spends on an account it should not, the manual
+/// button stays open, and it says what it will do before it does it (see
+/// `may_spend_on_measurement`, and `ladder.blockconfirm` in the
+/// dashboard). The skipped hosts ride back on the report so the page can
+/// name them and offer the opt-in instead of quietly showing fewer rows,
+/// which would be the same defect one layer up.
 fn m_diversity(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
-    _params: &std::collections::HashMap<String, String>,
+    params: &std::collections::HashMap<String, String>,
     ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
-        // Infrastructure-overlap detector across all servers.
+        // Infrastructure-overlap detector across the download pool.
         match nzbkit::config::Config::load(ctx.cfg_path) {
             Ok(c) => {
-                let grp = PROBE_GROUP;
-                // Sample ids spanning ages, discovered from the
-                // first server. Both phases hard-capped so a dead
-                // server can't wedge the API thread (see sysbench).
-                let cap = std::time::Duration::from_secs(120);
-                let t_sample = Instant::now();
-                let sample = tokio::runtime::Handle::current().block_on(async {
-                    tokio::time::timeout(cap, sample_ids_for_diversity(&c.servers, grp))
-                        .await
-                        .unwrap_or_else(|_| Err("diversity sample timed out".into()))
-                });
-                match sample {
-                    Ok(ids) => {
-                        info!(
-                            target: "diversity",
-                            "sampled {} ids in {:.1}s",
-                            ids.len(),
-                            t_sample.elapsed().as_secs_f64()
-                        );
-                        let rep = tokio::runtime::Handle::current().block_on(async {
-                            tokio::time::timeout(
-                                cap,
-                                nzbkit::sysbench::diversity(&c.servers, &ids, grp),
-                            )
+                let include_off = params.get("value").is_some_and(|v| v == "1");
+                let (pool, off) = diversity_pool(&c.servers, include_off);
+                if pool.is_empty() {
+                    // Not an `error`: with every server switched off the
+                    // page has something useful to offer (the opt-in), and
+                    // red text with no next step is not it.
+                    json!({"status": false, "servers_off": off,
+                           "nothing_enabled": true})
+                } else {
+                    let grp = PROBE_GROUP;
+                    // Sample ids spanning ages, discovered from the first
+                    // ENABLED server that answers (see
+                    // `sample_ids_for_diversity`). Both phases hard-capped
+                    // so a dead server can't wedge the API thread (see
+                    // sysbench).
+                    let cap = std::time::Duration::from_secs(120);
+                    let t_sample = Instant::now();
+                    let sample = tokio::runtime::Handle::current().block_on(async {
+                        tokio::time::timeout(cap, sample_ids_for_diversity(&pool, grp))
                             .await
-                        });
-                        match rep {
-                            Ok(rep) => {
-                                d.add_usage(
-                                    &rep.servers
-                                        .iter()
-                                        .map(|p| (p.host.clone(), p.bytes))
-                                        .collect::<Vec<_>>(),
-                                );
-                                serde_json::to_value(&rep).unwrap_or(json!({"status": false}))
+                            .unwrap_or_else(|_| Err("diversity sample timed out".into()))
+                    });
+                    match sample {
+                        Ok(ids) => {
+                            info!(
+                                target: "diversity",
+                                "sampled {} ids in {:.1}s from {} server(s){}",
+                                ids.len(),
+                                t_sample.elapsed().as_secs_f64(),
+                                pool.len(),
+                                if include_off { ", switched-off included" } else { "" }
+                            );
+                            let rep = tokio::runtime::Handle::current().block_on(async {
+                                tokio::time::timeout(
+                                    cap,
+                                    nzbkit::sysbench::diversity(&pool, &ids, grp),
+                                )
+                                .await
+                            });
+                            match rep {
+                                Ok(rep) => {
+                                    d.add_usage(
+                                        &rep.servers
+                                            .iter()
+                                            .map(|p| (p.host.clone(), p.bytes))
+                                            .collect::<Vec<_>>(),
+                                    );
+                                    let mut v = serde_json::to_value(&rep)
+                                        .unwrap_or(json!({"status": false}));
+                                    if let Some(o) = v.as_object_mut() {
+                                        o.insert("servers_off".into(), json!(off));
+                                        o.insert("included_off".into(), json!(include_off));
+                                    }
+                                    v
+                                }
+                                Err(_) => json!({"status": false,
+                                                "error": "diversity sweep timed out"}),
                             }
-                            Err(_) => json!({"status": false,
-                                            "error": "diversity sweep timed out"}),
                         }
+                        Err(e) => json!({"status": false, "error": e}),
                     }
-                    Err(e) => json!({"status": false, "error": e}),
                 }
             }
             Err(e) => json!({"status": false, "error": e.to_string()}),
@@ -1348,6 +1430,70 @@ fn refusal_kind(e: &nzbkit::nntp::NntpError) -> Option<&'static str> {
 mod tests {
     use super::*;
     use nzbkit::nntp::{AuthRefusal, NntpError};
+
+    fn cfg(host: &str, enabled: bool) -> nzbkit::config::ServerConfig {
+        serde_json::from_value(serde_json::json!({ "host": host, "enabled": enabled })).unwrap()
+    }
+
+    /// The 23 Aug 2026 switch discipline, at the one path that was left
+    /// out of the sweep that established it. Everywhere else `enabled`
+    /// means "do not touch this account"; a card that read it as "do not
+    /// download from it, but do dial it" would make the flag mean
+    /// different things on different code paths, which is the same as it
+    /// meaning nothing.
+    #[test]
+    fn analyze_dials_the_download_pool_and_names_what_it_skipped() {
+        let all = [
+            cfg("off.example.net", false),
+            cfg("on.example.net", true),
+            cfg("also-on.example.net", true),
+        ];
+        let (pool, off) = diversity_pool(&all, false);
+        assert_eq!(
+            pool.iter().map(|s| s.host.as_str()).collect::<Vec<_>>(),
+            ["on.example.net", "also-on.example.net"],
+            "a switched-off account must not be dialled by an Analyze click"
+        );
+        assert_eq!(
+            off,
+            ["off.example.net"],
+            "and the page has to be able to say which ones it skipped, or \
+             the report quietly shows fewer providers than the user has"
+        );
+    }
+
+    /// The opt-in is the half that keeps "is this account worth turning
+    /// back on?" answerable. It restores CONFIG ORDER rather than
+    /// appending the switched-off ones, because the report is read as a
+    /// list of the user's servers.
+    #[test]
+    fn the_opt_in_restores_every_configured_server_in_config_order() {
+        let all = [cfg("off.example.net", false), cfg("on.example.net", true)];
+        let (pool, off) = diversity_pool(&all, true);
+        assert_eq!(
+            pool.iter().map(|s| s.host.as_str()).collect::<Vec<_>>(),
+            ["off.example.net", "on.example.net"]
+        );
+        assert_eq!(
+            off,
+            ["off.example.net"],
+            "still reported on an opt-in run - the page marks those rows \
+             switched off rather than dropping the note"
+        );
+    }
+
+    /// An all-disabled config has an empty pool by default, and that is
+    /// what puts the page on the opt-in branch instead of an error. The
+    /// distinction matters: `m_diversity` answers `nothing_enabled` here
+    /// rather than `error`, because there is a useful next step to offer
+    /// and red text with no next step is not one.
+    #[test]
+    fn every_server_switched_off_leaves_an_empty_pool_not_a_partial_one() {
+        let all = [cfg("a.example.net", false), cfg("b.example.net", false)];
+        assert!(diversity_pool(&all, false).0.is_empty());
+        assert_eq!(diversity_pool(&all, false).1.len(), 2);
+        assert_eq!(diversity_pool(&all, true).0.len(), 2);
+    }
 
     /// The mapping the dashboard's remedy text hangs off. Capacity and
     /// permanent are opposite advice - "lower your connections" versus

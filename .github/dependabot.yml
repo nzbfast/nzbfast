@@ -18,28 +18,6 @@ updates:
         patterns:
           - "*"
     open-pull-requests-limit: 3
-    # HELD (11 Aug 2026): the RustCrypto digest-0.11/cipher-0.5 major
-    # wave. It breaks zipcrypt.rs (BlockEncrypt trait renames) and
-    # cannot land while rsa 0.9 still sits on digest 0.10 - the tree
-    # would compile two crypto stacks. Port all of these together once
-    # rsa catches up, then delete this block.
-    ignore:
-      - dependency-name: aes
-        versions: [">=0.9"]
-      - dependency-name: cbc
-        versions: [">=0.2"]
-      - dependency-name: hmac
-        versions: [">=0.13"]
-      - dependency-name: sha1
-        versions: [">=0.11"]
-      - dependency-name: sha2
-        versions: [">=0.11"]
-      - dependency-name: ed25519-dalek
-        versions: [">=3"]
-      - dependency-name: getrandom
-        versions: [">=0.3"]
-      - dependency-name: rand
-        versions: [">=0.9"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

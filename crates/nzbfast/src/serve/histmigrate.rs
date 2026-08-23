@@ -17,7 +17,9 @@
 //!  * [`nzbkit::mediaprobe::MediaFacts::width`] now keeps the raw frame
 //!    size beside the label it reduces to, so the NEXT such fix is
 //!    arithmetic over two stored integers - no disk, and it reaches a
-//!    row whose payload was deleted years ago;
+//!    row whose payload was deleted years ago. Since 23 Aug the audio,
+//!    codec and HDR labels carry their own inputs the same way, so a
+//!    fix in one of those families starts where this one had to finish;
 //!  * this pass fixes the rows written before that, the only way they
 //!    can be fixed: by reading the file again, where the file is still
 //!    there.
@@ -289,6 +291,17 @@ pub(super) fn rederive_row(d: &Daemon, job: &Arc<Mutex<Job>>) -> RowOutcome {
 
     // Arm 2: the inputs are on the row. No file needed, so this arm
     // works on a deleted download exactly as well as on a kept one.
+    //
+    // The gate is the frame size and deliberately not the whole input
+    // set, which grew on 23 Aug (§188) to the codec ids, channel count
+    // and colour tags. A row written in the days between carries the
+    // frame size and none of the rest, and takes this arm forever -
+    // its LABELS stay re-derivable, which is what the pass is for, and
+    // sending it to the disk instead would cost a second full walk and
+    // then report every deleted payload among those rows as `kept`,
+    // which is a sentence to the user about labels that are in fact
+    // perfectly current. Filling those rows wants an outcome of its
+    // own, not a widened gate.
     if facts.width.is_some() {
         if !nzbkit::mediaprobe::facts::rederive_res(&mut facts, &name) {
             return RowOutcome::Unchanged;
@@ -318,19 +331,19 @@ pub(super) fn rederive_row(d: &Daemon, job: &Arc<Mutex<Job>>) -> RowOutcome {
         return RowOutcome::Gone;
     }
     // Did anything the USER can see change, or did the row merely gain
-    // the frame size it was missing? The two must not be conflated: the
+    // the raw inputs it was missing? The two must not be conflated: the
     // notice counts corrections, and a row whose label was right all
     // along being tallied as "corrected" would overstate the number to
-    // the one person in a position to check it. Compared with the raw
-    // inputs masked out, because those are exactly what old rows lack
-    // and every one of them would otherwise read as a difference.
-    let mut visible = fresh.clone();
-    visible.width = facts.width;
-    visible.height = facts.height;
-    if visible == facts {
+    // the one person in a position to check it. The comparison masks
+    // the raw inputs out, because those are exactly what an old row
+    // lacks and every one of them would otherwise read as a difference
+    // - `same_labels` owns that split so this stays right as the set of
+    // inputs grows (it grew on 23 Aug, from the frame size to the codec
+    // ids, channel count and colour tags).
+    if fresh.same_labels(&facts) {
         // Worth writing even so - the row never needs the disk again -
         // but not worth telling the user about.
-        if fresh.width == facts.width {
+        if fresh.same_raw_inputs(&facts) {
             return RowOutcome::Unchanged;
         }
         job.lock_ok().media = Some(fresh);

@@ -1,8 +1,8 @@
 //! Preallocated offset writer (PLAN M1 / 1d).
 //!
 //! One output file per NZB file, preallocated to its yEnc-declared size
-//! (real extents on Linux, sparse elsewhere - see `preallocate`); every
-//! decoded article `pwrite`s at its final offset. No temp
+//! (real extents on Linux, sparse elsewhere - see `preallocate_capped`);
+//! every decoded article `pwrite`s at its final offset. No temp
 //! files, no assembly pass: a direct-write design with no reassembly
 //! step. `write_at` takes `&self` - decoded articles from
 //! multiple consumer tasks write concurrently.
@@ -11,7 +11,8 @@ use crate::sync::{MutexExt, RwLockExt};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Raise the open-file soft limit toward the hard limit, returning the
 /// effective value.
@@ -36,6 +37,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // conversion that makes this compile at all where it is i64 (the BSDs).
 // Without this the lint is a build error on the platforms we gate on and
 // removing the cast is a build error on the platform we ship to.
+// Not #[expect]: the casts live inside cfg(unix), so on Windows there
+// is nothing to fire on and the expectation goes unfulfilled.
 #[allow(clippy::unnecessary_cast)]
 pub fn raise_fd_limit() -> u64 {
     #[cfg(unix)]
@@ -251,6 +254,8 @@ fn drop_cache_auto_for(ram: Option<u64>, cgroup_limit: Option<u64>) -> bool {
 /// The m1 stride sweep read the same within noise from 16 to 64 MB
 /// (2/68, 3/68, 4/68 samples below 80% of peak), so the choice is not
 /// delicate.
+// Not #[expect]: live on macOS, which takes the arm below. Linux uses
+// the 0 arm and Windows has no arm at all, so it is dead on both.
 #[allow(dead_code)]
 const WRITE_PACE_STRIDE_DEFAULT: u64 = 32 << 20;
 
@@ -287,6 +292,8 @@ fn write_pace_stride() -> u64 {
 /// The `NZBFAST_WRITE_PACE_MB` mapping, split out so it is testable
 /// without mutating process env (same seam as [`storage_override`]).
 /// None = unset/unparsable, defer to the process default.
+// Not #[expect]: live on macOS and Linux via write_pace_stride, which
+// is cfg'd out on Windows - dead there, so the waiver is Windows's.
 #[allow(dead_code)]
 fn parse_pace_mb(raw: Option<&str>) -> Option<u64> {
     raw?.trim()
@@ -552,6 +559,36 @@ pub fn decoders_for_storage(storage: Storage, cores: usize, decoders: usize) -> 
     }
 }
 
+/// The verdict BOTH bomb guards raise - [`WriteBudget::charge`] on the
+/// in-stream path and nzbfast's `BombGuardWriter` on the disk one.
+///
+/// One constant because the text is a CONTRACT, not a message: the
+/// extraction ladder reads it back off a demote reason (an in-stream
+/// group fallback carries "chase failed: {e}") and off an anyhow error
+/// string, and stops there rather than handing the same archive to the
+/// next rung. Two hand-copied literals would have drifted the first time
+/// either was reworded, and the failure mode is silent - the ladder
+/// simply runs on.
+pub const BOMB_VERDICT: &str =
+    "extraction exceeded available disk space (possible decompression bomb)";
+
+/// Does this failure text carry [`BOMB_VERDICT`]?
+///
+/// Matched on the distinctive tail rather than the whole sentence: both
+/// call sites wrap it (`chase failed: …`, `parsing volumes: …`,
+/// anyhow's `{e}` chains), and no other diagnostic in the tree says
+/// "decompression bomb".
+///
+/// The answer is load-bearing on the KEEP side. A set refused here must
+/// not be retried by an unpacker that carries no budget of its own: the
+/// external `unrar` subprocess has none, so on 22 Aug 2026 a 2 GB
+/// zeros RAR5 refused twice - once in-stream, once by the disk guard -
+/// still filled a 730 MB volume on the third rung, and the job then
+/// blamed the archive ("encrypted or damaged?").
+pub fn bomb_verdict(text: &str) -> bool {
+    text.contains("decompression bomb")
+}
+
 /// A job-wide cap on the DISTINCT extracted bytes an extraction chain may
 /// write, shared by every [`FileWriter`] that carries it.
 ///
@@ -600,14 +637,18 @@ impl WriteBudget {
     /// Charge `n` newly-covered bytes; Err once the running total crosses
     /// the limit. Saturating so a pathological total can't wrap back under
     /// the cap.
+    ///
+    /// An UNLIMITED budget is accumulated too, rather than short-circuited:
+    /// [`FileWriter`] tallies what it handed over so [`Self::release`] can
+    /// hand it back, and a fast path here would make that tally disagree
+    /// with `written` on any chain whose limit is set after the first
+    /// write. `used()` is then honest on an unlimited budget as well,
+    /// which is what `extract_budget_used` reports.
     fn charge(&self, n: u64) -> io::Result<()> {
         if n == 0 {
             return Ok(());
         }
         let limit = self.limit.load(Ordering::Relaxed);
-        if limit == u64::MAX {
-            return Ok(());
-        }
         let total = self
             .written
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
@@ -615,14 +656,223 @@ impl WriteBudget {
             })
             .unwrap_or(0)
             .saturating_add(n);
-        if total > limit {
-            return Err(io::Error::other(
-                "extraction exceeded available disk space (possible decompression bomb)",
-            ));
+        if limit != u64::MAX && total > limit {
+            // StorageFull, not `other`: the budget IS a space budget, and
+            // the consumer's halt (`note_storage_exhausted_halt`) is
+            // keyed on `storage_exhausted`. As a plain `other` this error
+            // classified as an ordinary per-article decode/write failure,
+            // so the fetch kept running at line rate and every remaining
+            // article was downloaded, written, and counted as an error -
+            // 134 of them on the 22 Aug 2026 class E floor leg, i.e. the
+            // guard let through exactly the gigabytes it exists to stop,
+            // then failed the job on a counter instead of a cause.
+            // Classified, it aborts the pool on the first trip and
+            // `drain_network` reports one out-of-space verdict with this
+            // message appended, keeping the journal for the resume.
+            //
+            // The disk-path twin of this guard (`BombGuardWriter` in
+            // nzbfast's rarfix.rs) raises the same message as a plain
+            // `other` on purpose: it runs after the download, so it has no
+            // fetch to halt and its error aborts the extraction directly.
+            return Err(io::Error::new(io::ErrorKind::StorageFull, BOMB_VERDICT));
         }
         Ok(())
     }
+
+    /// Give `n` charged bytes back: the file that paid for them has been
+    /// UNLINKED, so they are not on the volume any more and must not go
+    /// on counting against a budget that stands for free space.
+    ///
+    /// The one caller is [`FileWriter::abandon`], which every path that
+    /// disowns-and-deletes an output goes through (`drop_slot_file`,
+    /// `abandon_slot`, `delete_group_out_files`). It exists for the
+    /// drop-behind trim (TODO 37 med1): at depth > 0 a chased archive's
+    /// spilled prefix is charged like any other extraction output -
+    /// correctly, since it really does occupy the volume beside the
+    /// payload - but a chase that SUCCEEDS then deletes that prefix, and
+    /// with no credit the next container in the same job started against
+    /// a budget already spent on bytes nothing holds. Several nested
+    /// archives in one job could refuse a legitimate extract as a bomb.
+    ///
+    /// Saturating, and deliberately never touches `limit`: the budget is
+    /// a high-water allowance, not a reservation, and clamping at zero
+    /// means an over-refund (a writer whose charge landed on an unlimited
+    /// budget) can only ever be conservative.
+    pub fn release(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let _ = self
+            .written
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
+                Some(w.saturating_sub(n))
+            });
+    }
 }
+
+/// Custody of a live output file while an external tool owns it
+/// (sweep 8, M4).
+///
+/// `park` closes the writer's OWN handles, which is all par2cmdline
+/// needed until /stream existed. A live range response owns a SEPARATE
+/// `std::fs::File` on the same inode for its whole lifetime, and
+/// par2cmdline 0.8.1 opens its targets with share mode 0: on Windows one
+/// reading player therefore makes the external repair's open fail and it
+/// reports a repairable file as missing ("Repair is not possible").
+///
+/// The VERSION qualifier is load-bearing and is measured, on x86-64
+/// Windows 11 with a reader handle held across `par2 repair`: 0.8.1
+/// fails the repair outright ("Repair Failed.", exit 5), 1.2.0 and 1.3.0
+/// both repair fine. So this custody exists for the par2 a Windows user
+/// may well have installed, not for the one they probably do - which is
+/// the right way round, but it also means a test run against a current
+/// par2 passes whether or not any of this works. The full matrix and
+/// that warning live in `nzbfast`'s
+/// `tests/integration/stream_repair.rs` header.
+///
+/// So reader admission and repair share one gate. Entering repair marks
+/// the file `repairing`, which
+///
+/// - refuses (after a bounded wait) every NEW by-path reader open on
+///   every platform - a fresh handle landing while the child rewrites
+///   the bytes is nobody's idea of a good read, and
+/// - on Windows ONLY, revokes the leases already outstanding and waits
+///   for their handles to close. Unix does not enforce sharing, so
+///   there an existing response survives the repair and goes on to
+///   serve the repaired bytes (which is exactly what M5's coverage
+///   publication licenses). Killing those responses on Unix would be a
+///   regression traded for nothing.
+///
+/// The response survives; its FD does not. Leaving repair moves the
+/// custody generation on, and that is what tells a surviving reader to
+/// reopen: par2cmdline renames the damaged target aside and writes its
+/// repaired output to a NEW inode, so the fd the response opened with is
+/// a file nothing will ever write to again - see
+/// [`ReadLease::needs_reopen`] (sweep 8, M5b).
+pub struct ReadCustody {
+    st: std::sync::Mutex<CustodyState>,
+    cv: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct CustodyState {
+    /// An external tool owns this file right now.
+    repairing: bool,
+    /// Outstanding [`ReadLease`]s - by-path reader handles on the inode.
+    readers: usize,
+    /// How many external repairs have COMPLETED on this file. A reader
+    /// handle belongs to the generation it was opened in and stops
+    /// being the file the moment that number moves - see
+    /// [`ReadLease::needs_reopen`].
+    generation: u64,
+    /// The file as the external repair left it, captured by [`unpark`]
+    /// in the same breath as the generation bump. Readers that survived
+    /// the repair clone THIS rather than re-opening by name.
+    ///
+    /// Because by name loses a race it cannot win: postproc renames the
+    /// job's whole FOLDER a moment after the repair, `current_path`
+    /// tracks only the file's own publish rename, and a reader whose
+    /// next read landed after that rename got ENOENT (measured 22 Aug
+    /// 2026 - the reopen failed and the response was left on the
+    /// damaged inode, which is the whole bug). `unpark` opens the path
+    /// at the one instant it is certainly right, so the handle it got
+    /// is the answer for every reader after it.
+    ///
+    /// Cleared by [`claim_for_repair`], because the NEXT repair's
+    /// target is a different file and, on Windows, a handle we still
+    /// hold is exactly what parking exists to release. Deliberately
+    /// survives a plain [`park`]: that one is the end-of-job handle
+    /// release, and an in-flight response still owed its rebind must
+    /// not be handed a stale path because postproc got there first.
+    ///
+    /// `None` on Windows, always: every surviving reader is revoked
+    /// there, so this would never be read and would only be one more
+    /// handle in an external tool's way.
+    ///
+    /// [`unpark`]: FileWriter::unpark
+    /// [`park`]: FileWriter::park
+    /// [`claim_for_repair`]: FileWriter::claim_for_repair
+    repaired: Option<File>,
+    /// Test seam (F-21): parks ONE admitted reader at the door it opens
+    /// through - under the custody lock, exactly where the descriptor's
+    /// ordering against a later `repairing = true` is decided. Consumed
+    /// by its single trip. Two-stage shape as `drain_send_barrier`.
+    #[cfg(test)]
+    open_barrier: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+}
+
+/// A live reader's claim on an output file's inode. Held for the whole
+/// life of the `std::fs::File` it was issued with; dropping it is what
+/// tells a waiting [`FileWriter::park`] the handle is gone.
+pub struct ReadLease {
+    custody: Arc<ReadCustody>,
+    /// The custody generation this handle's inode belongs to. Compared
+    /// against [`CustodyState::generation`] by [`needs_reopen`]; moved
+    /// forward by [`FileWriter::reopen_read`] and by nothing else.
+    ///
+    /// [`needs_reopen`]: ReadLease::needs_reopen
+    seen: AtomicU64,
+}
+
+impl ReadLease {
+    /// The file has been handed to an external repair and this reader's
+    /// handle is in its way. Windows only - see [`ReadCustody`]. Callers
+    /// poll it wherever they would otherwise block, and end the response
+    /// rather than hold the inode.
+    pub fn revoked(&self) -> bool {
+        cfg!(windows) && self.custody.st.lock_ok().repairing
+    }
+
+    /// An external repair has finished and this handle is on the wrong
+    /// inode (sweep 8, M5b). Poll it exactly where [`revoked`] is
+    /// polled, and reopen through [`FileWriter::reopen_read`].
+    ///
+    /// par2cmdline does NOT repair a damaged target in place: it renames
+    /// it to `<name>.1` and writes the repaired data to a NEW inode. The
+    /// writer survives that because [`unpark`] reopens by
+    /// [`current_path`], but a live reader holds its own `File` for the
+    /// whole response and that `File` is still the damaged one. M5 then
+    /// publishes the repaired coverage, so the reader stops waiting and
+    /// serves the stale bytes - the exact hole the repair filled, read
+    /// off the orphaned inode (measured 22 Aug 2026 on macOS with a
+    /// 16 MB `.mkv` in its own par2 set: two distinct inodes, and the
+    /// player was served the zero-filled hole over the repaired span).
+    /// Windows never showed it because the lease is revoked there and
+    /// the response ends.
+    ///
+    /// False while a repair is IN PROGRESS - reopening then would just
+    /// pick up whichever inode par2 happens to have in place - so a
+    /// caller polling this can only ever land on the settled file.
+    ///
+    /// [`revoked`]: ReadLease::revoked
+    /// [`unpark`]: FileWriter::unpark
+    /// [`current_path`]: FileWriter::current_path
+    pub fn needs_reopen(&self) -> bool {
+        let g = self.custody.st.lock_ok();
+        !g.repairing && g.generation != self.seen.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ReadLease {
+    fn drop(&mut self) {
+        let mut g = self.custody.st.lock_ok();
+        g.readers = g.readers.saturating_sub(1);
+        drop(g);
+        self.custody.cv.notify_all();
+    }
+}
+
+/// How long a fresh reader open waits for an external repair to finish
+/// before giving up. Long enough for the ordinary case (par2cmdline on
+/// a repairable set is seconds), short enough that a player is told
+/// something rather than hanging.
+const REPAIR_ADMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long `park` waits for revoked Windows readers to close. Bounded:
+/// a reader wedged in the kernel must not turn a repair into a hang,
+/// and proceeding anyway is exactly the pre-lease behaviour.
+#[cfg(windows)]
+const REPAIR_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct FileWriter {
     /// `None` while PARKED - the handle is closed but the writer (and every
@@ -655,6 +905,11 @@ pub struct FileWriter {
     /// Job-wide extracted-byte budget (see [`WriteBudget`]); None = the
     /// writer is not an extraction output and is not charged.
     budget: Option<std::sync::Arc<WriteBudget>>,
+    /// What this writer has charged to `budget` so far, so
+    /// [`FileWriter::abandon`] can release exactly that much when the
+    /// file is unlinked. Distinct from `covered`, which counts spans
+    /// published without a charge too (`note_repaired`).
+    charged: AtomicU64,
     /// Written spans, sorted + merged - lets the streaming server ask
     /// "are bytes [off, off+len) really on disk yet?". Out-of-order
     /// arrival keeps this list tiny (≈ number of gaps, not writes).
@@ -665,6 +920,8 @@ pub struct FileWriter {
     /// (the daemon) - the pacer stands down while drop-behind is
     /// active precisely so this one watermark has one consumer.
     /// Dead on Windows.
+    // Not #[expect]: read on macOS and Linux, so the expectation would be
+    // unfulfilled on both; the waiver is Windows's alone.
     #[allow(dead_code)]
     drop_next: AtomicU64,
     /// Windows write lanes (line-rate campaign): std's `seek_write`
@@ -683,6 +940,75 @@ pub struct FileWriter {
     /// Round-robin cursor over `aux` + the primary handle.
     #[cfg(windows)]
     next_lane: AtomicU64,
+    /// Live-reader / external-repair custody of this file's inode - see
+    /// [`ReadCustody`].
+    custody: Arc<ReadCustody>,
+    /// The extractor has DISOWNED this output - see [`abandon`].
+    ///
+    /// [`abandon`]: FileWriter::abandon
+    abandoned: AtomicBool,
+    /// Rolling checksum of the file's contiguous prefix - `None` unless
+    /// armed with [`FileWriter::with_prefix_hash`]. See [`PrefixHash`].
+    prefix: Option<std::sync::Mutex<PrefixHash>>,
+}
+
+/// Rolling CRC32 of a writer's contiguous prefix, the quantity TODO 217
+/// records beside the resume ledger's mark so a disk pass can PROVE the
+/// kept bytes match what a from-zero extract would have written.
+///
+/// It advances only on a write landing exactly at the current hashed
+/// end, which for the chase's member sinks is every write (the sink
+/// decodes sequentially). Anything else degrades it, in one of two
+/// distinct ways:
+///
+/// - a write LANDING AHEAD of the hashed end freezes it: the bytes in
+///   the gap were never seen in order, so the hash stops and the
+///   recorded mark is the CHECKSUMMED length - which can be shorter
+///   than `contiguous_from_start`, and shipping the larger of the two
+///   is precisely the bug §217's hard-parts list warns about;
+/// - a write LANDING BELOW the hashed end poisons it outright: bytes
+///   already folded into the hash were rewritten, so the value
+///   describes nothing on disk any more and no mark may be recorded.
+struct PrefixHash {
+    hasher: crc32fast::Hasher,
+    /// Bytes hashed so far - the checksummed contiguous prefix.
+    len: u64,
+    /// A write landed past the hashed end; the hash can never advance
+    /// again but still describes `[0, len)`.
+    frozen: bool,
+    /// A write landed inside the hashed prefix (or an external tool took
+    /// the file): the hash describes nothing. Terminal.
+    poisoned: bool,
+}
+
+impl PrefixHash {
+    fn new() -> PrefixHash {
+        PrefixHash {
+            hasher: crc32fast::Hasher::new(),
+            len: 0,
+            frozen: false,
+            poisoned: false,
+        }
+    }
+
+    fn observe(&mut self, offset: u64, data: &[u8]) {
+        if self.poisoned || data.is_empty() {
+            return;
+        }
+        if offset < self.len {
+            self.poisoned = true;
+            return;
+        }
+        if self.frozen {
+            return;
+        }
+        if offset == self.len {
+            self.hasher.update(data);
+            self.len += data.len() as u64;
+        } else {
+            self.frozen = true;
+        }
+    }
 }
 
 /// Reserve `size` bytes for `file`, really allocating blocks where the
@@ -775,7 +1101,7 @@ fn preallocate_capped(file: &File, size: u64, cap: u64) -> io::Result<()> {
 
 impl FileWriter {
     /// Create (truncating any existing file) and preallocate to `size` -
-    /// really allocated on Linux, sparse elsewhere (see `preallocate`).
+    /// really allocated on Linux, sparse elsewhere (see `preallocate_capped`).
     pub fn create(path: &Path, size: u64) -> io::Result<FileWriter> {
         Self::create_capped(path, size, u64::MAX)
     }
@@ -802,12 +1128,19 @@ impl FileWriter {
             written: AtomicU64::new(0),
             covered: AtomicU64::new(0),
             budget: None,
+            charged: AtomicU64::new(0),
             intervals: std::sync::Mutex::new(Vec::new()),
             drop_next: AtomicU64::new(16 << 20),
             #[cfg(windows)]
             aux: std::sync::RwLock::new(open_aux_handles(path)),
             #[cfg(windows)]
             next_lane: AtomicU64::new(0),
+            custody: Arc::new(ReadCustody {
+                st: std::sync::Mutex::new(CustodyState::default()),
+                cv: std::sync::Condvar::new(),
+            }),
+            abandoned: AtomicBool::new(false),
+            prefix: None,
         })
     }
 
@@ -847,12 +1180,19 @@ impl FileWriter {
             written: AtomicU64::new(0),
             covered: AtomicU64::new(0),
             budget: None,
+            charged: AtomicU64::new(0),
             intervals: std::sync::Mutex::new(Vec::new()),
             drop_next: AtomicU64::new(16 << 20),
             #[cfg(windows)]
             aux: std::sync::RwLock::new(open_aux_handles(path)),
             #[cfg(windows)]
             next_lane: AtomicU64::new(0),
+            custody: Arc::new(ReadCustody {
+                st: std::sync::Mutex::new(CustodyState::default()),
+                cv: std::sync::Condvar::new(),
+            }),
+            abandoned: AtomicBool::new(false),
+            prefix: None,
         })
     }
 
@@ -864,8 +1204,41 @@ impl FileWriter {
         self
     }
 
+    /// Arm the rolling prefix checksum (see [`PrefixHash`]). Builder-style
+    /// like [`FileWriter::with_budget`], and armed on the same writers:
+    /// the extraction outputs a chase forfeit may hand to the resume
+    /// ledger. Never armed on level-0 downloads - the per-byte download
+    /// path pays nothing for a ledger it can never appear in.
+    pub fn with_prefix_hash(mut self) -> FileWriter {
+        self.prefix = Some(std::sync::Mutex::new(PrefixHash::new()));
+        self
+    }
+
+    /// The checksummed contiguous prefix: its length and its CRC32.
+    ///
+    /// `None` when the hash was never armed or has been poisoned - a
+    /// caller about to record a resume mark must then record nothing,
+    /// because nothing about the file can be proven later. The length is
+    /// at most [`FileWriter::contiguous_from_start`], and the resume
+    /// ledger records THIS length, never the larger one: bytes past the
+    /// hashed end may be contiguous on disk, but no later pass could
+    /// tell them from a stale copy.
+    pub fn prefix_hash(&self) -> Option<(u64, u32)> {
+        let g = self.prefix.as_ref()?.lock_ok();
+        if g.poisoned {
+            return None;
+        }
+        Some((g.len, g.hasher.clone().finalize()))
+    }
+
     pub fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
         self.write_lane(data, offset)?;
+        // After the pwrite, so a hashed byte is always a byte on disk;
+        // concurrent in-order writers still observe in a disk-consistent
+        // order because each span is durable before it is folded in.
+        if let Some(ph) = &self.prefix {
+            ph.lock_ok().observe(offset, data);
+        }
         let fresh = self.note_written(offset, data.len() as u64);
         self.maybe_drop_cache();
         self.maybe_pace_writeback();
@@ -874,6 +1247,10 @@ impl FileWriter {
         // `BombGuardWriter` - the point is to stop the NEXT gigabyte, and
         // the error aborts the job the same way a genuine ENOSPC does.
         if let Some(b) = &self.budget {
+            // Tallied BEFORE the verdict: a write that trips the guard is
+            // on disk and charged like any other, so a demote that then
+            // unlinks this file must get those bytes back too.
+            self.charged.fetch_add(fresh, Ordering::Relaxed);
             b.charge(fresh)?;
         }
         Ok(())
@@ -1257,6 +1634,29 @@ impl FileWriter {
         Ok(())
     }
 
+    /// [`park`] plus exclusive custody for the external tool that is
+    /// about to own the file (sweep 8, M4). Paired with [`unpark`],
+    /// which hands the file back.
+    ///
+    /// The plain [`park`] is the end-of-job handle release
+    /// (`postproc`'s cleanup), which never unparks and must therefore
+    /// never claim custody: doing so would lock every later reader out
+    /// of a finished job's outputs for good.
+    ///
+    /// [`park`]: FileWriter::park
+    /// [`unpark`]: FileWriter::unpark
+    pub fn park_for_repair(&self) -> io::Result<()> {
+        // An external tool is about to own the bytes, and whatever it
+        // writes never comes through `write_at` - so the prefix hash can
+        // no longer claim to describe the file. Belt: the resume
+        // ledger's own repair guards stand it down on this path anyway.
+        if let Some(ph) = &self.prefix {
+            ph.lock_ok().poisoned = true;
+        }
+        self.claim_for_repair();
+        self.park()
+    }
+
     /// Where the file lives RIGHT NOW: the publish target once
     /// [`note_renamed`] has been called, the creation path before that.
     ///
@@ -1291,6 +1691,10 @@ impl FileWriter {
     ///
     /// [`park`]: FileWriter::park
     pub fn unpark(&self) -> io::Result<()> {
+        // Before the reopen, not after: readers admitted from here on
+        // are reading the repaired file, and one that has to wait for
+        // our own handle is waiting on nothing.
+        let after_repair = self.release_after_repair();
         let mut g = self.file.write_ok();
         if g.is_some() {
             return Ok(());
@@ -1298,6 +1702,12 @@ impl FileWriter {
         let path = self.current_path();
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
         apply_cache_policy(&file);
+        // The readers that kept their handles through the repair are
+        // holding an inode par2 renamed aside; this is where they are
+        // told, and handed the one we just proved openable.
+        if after_repair {
+            self.publish_repaired_handle(&file);
+        }
         *g = Some(file);
         #[cfg(windows)]
         {
@@ -1324,13 +1734,26 @@ impl FileWriter {
             return 0;
         }
         self.written.fetch_add(len, Ordering::Relaxed);
+        let fresh = self.merge_span(offset, len);
+        self.covered.fetch_add(fresh, Ordering::Relaxed);
+        fresh
+    }
+
+    /// Merge `[offset, offset+len)` into the coverage map, returning the
+    /// bytes that were not already in it. Split out of `note_written` so
+    /// [`note_repaired`](FileWriter::note_repaired) can publish spans an
+    /// external tool wrote without charging them to `written`.
+    fn merge_span(&self, offset: u64, len: u64) -> u64 {
+        if len == 0 {
+            return 0;
+        }
         let (s, e) = (offset, offset + len);
         let mut iv = self.intervals.lock_ok();
         // First interval that could touch/overlap on the left (its end
         // reaches `s`), and first that starts beyond `e` (can't touch).
         let lo = iv.partition_point(|&(_, fe)| fe < s);
         let hi = iv.partition_point(|&(fs, _)| fs <= e);
-        let fresh = if lo < hi {
+        if lo < hi {
             // Merge the overlapping/adjacent run [lo, hi) into one span.
             // The run's spans are disjoint, so the newly-covered count is
             // the merged length minus what the run already held.
@@ -1343,9 +1766,7 @@ impl FileWriter {
         } else {
             iv.insert(lo, (s, e));
             len
-        };
-        self.covered.fetch_add(fresh, Ordering::Relaxed);
-        fresh
+        }
     }
 
     /// True when every byte of [off, off+len) has been written.
@@ -1381,6 +1802,313 @@ impl FileWriter {
     /// Bytes written so far (not necessarily contiguous).
     pub fn written(&self) -> u64 {
         self.written.load(Ordering::Relaxed)
+    }
+
+    /// Count `n` bytes a PRIOR run left in this file as written, without
+    /// claiming coverage of any range. A crash-resume opens an output
+    /// that already holds bytes, and the extractor's in-stream decrypt
+    /// gate reads this counter as "this output holds ciphertext" (rule 2
+    /// of `instream_decrypt_allowed`): a resumed writer that started at
+    /// zero let the gate latch plaintext-once over them (TODO 158 item
+    /// 2). Coverage stays empty on purpose - the resume replays or
+    /// refetches every one of those bytes, and `covered` must keep
+    /// answering for THIS run's writes alone.
+    pub fn seed_written(&self, n: u64) {
+        self.written.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Open this file for READING at its current path, taking a custody
+    /// lease for the handle's whole life (sweep 8, M4).
+    ///
+    /// Every by-path live reader goes through here: the lease is what
+    /// makes an external repair able to see, and on Windows revoke, the
+    /// handles standing in its way. Waits out an in-progress repair
+    /// (bounded by [`REPAIR_ADMIT_WAIT`]) rather than failing
+    /// immediately - par2cmdline on a repairable set is seconds, and a
+    /// player that seeks into one should get its bytes, not a 410.
+    ///
+    /// The extractor has DISOWNED this output: the file has been
+    /// unlinked and no byte will ever be written through this writer
+    /// again. Sticky, and set by every path that takes a writer out of
+    /// the extractor and removes its file - `abandon_slot`,
+    /// `delete_group_out_files`, `drop_slot_file`.
+    ///
+    /// This is NOT custody and it is not a repair signal. Custody says
+    /// "an external tool wants this inode for a moment"; this says the
+    /// file is gone. The distinction matters because the two arrive by
+    /// completely different routes, and the shape that motivated this
+    /// gets only the second one (sweep 8 M4, defect 3, measured 22 Aug
+    /// 2026): a damaged MULTI-VOLUME set demotes to "materializing
+    /// volumes for repair" BEFORE the repair runs, and that demote
+    /// abandons the extracted media file - `fallback_group` drains the
+    /// group's routed members and `abandon_slot` takes the child slot's
+    /// writer and unlinks it. By the time
+    /// [`Extractor::park_outputs_for_repair`] walks the tree, the media
+    /// writer is no longer in any slot, so it is claimed by nothing;
+    /// par2's targets are the VOLUMES and the file the player is
+    /// holding is not even on disk. Nothing revokes, nothing bumps a
+    /// generation, and a live `/stream` response parked on that
+    /// writer's frontier waits for a frontier that will never move
+    /// again - five minutes, on a job that repaired fine.
+    ///
+    /// So the live readers poll this exactly where they poll
+    /// [`ReadLease::revoked`], and on EVERY platform: sharing has
+    /// nothing to do with it. A reader that keeps going here would be
+    /// serving an unlinked inode the job has already disowned, over a
+    /// name the post-repair re-extract is about to rewrite - the same
+    /// class of stale-bytes answer [`ReadLease::needs_reopen`] exists to
+    /// prevent, and with no repaired handle to rebind onto.
+    ///
+    /// Releasing the extraction budget is part of the same statement:
+    /// the bytes this writer charged are gone from the volume with the
+    /// file (see [`WriteBudget::release`]). The swap makes the refund
+    /// once-only, so the sticky flag stays idempotent. A write racing
+    /// this refund re-charges bytes that no longer exist, which is the
+    /// conservative direction and cannot outlive the job.
+    ///
+    /// [`Extractor::park_outputs_for_repair`]: crate::extract::Extractor::park_outputs_for_repair
+    pub fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+        if let Some(b) = &self.budget {
+            b.release(self.charged.swap(0, Ordering::Relaxed));
+        }
+    }
+
+    /// Has [`abandon`] been called? Cheap enough for a per-read poll.
+    ///
+    /// [`abandon`]: FileWriter::abandon
+    pub fn is_abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
+    }
+
+    /// Opens [`current_path`], never `path`: a verified-name publish
+    /// renames the file under the live writer, and the creation name is
+    /// ENOENT from that moment (sweep 8, M6).
+    ///
+    /// [`current_path`]: FileWriter::current_path
+    /// [`park`]: FileWriter::park
+    pub fn open_read(&self) -> io::Result<(File, ReadLease)> {
+        self.open_read_admit(REPAIR_ADMIT_WAIT)
+    }
+
+    /// [`open_read`] that does NOT wait out a repair: refuses at once
+    /// with `ResourceBusy` while an external tool owns the file.
+    ///
+    /// The 30 s admit wait is sized for a `/stream` range request, where
+    /// a player that seeks into a repairable set should get its bytes.
+    /// The probe paths (`/preview/probe`, the SAB playback listing, the
+    /// background prober) answered instantly before they were routed
+    /// through the custody gate, and every one of them has a "not yet"
+    /// answer to give - so they take this one and keep their callers'
+    /// threads (bug sweep 22 Aug 2026).
+    ///
+    /// [`open_read`]: FileWriter::open_read
+    pub fn try_open_read(&self) -> io::Result<(File, ReadLease)> {
+        self.open_read_admit(std::time::Duration::ZERO)
+    }
+
+    fn open_read_admit(&self, admit: std::time::Duration) -> io::Result<(File, ReadLease)> {
+        {
+            let mut g = self.custody.st.lock_ok();
+            let deadline = std::time::Instant::now() + admit;
+            while g.repairing {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ResourceBusy,
+                        format!(
+                            "{} is being repaired by an external tool",
+                            self.current_path().display()
+                        ),
+                    ));
+                }
+                g = self
+                    .custody
+                    .cv
+                    .wait_timeout(g, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            // Opened UNDER the gate, so the descriptor is ordered before
+            // any later `repairing = true`. Unix repair does not drain
+            // readers, so an open after the unlock could land on the
+            // inode a child was mid-rewrite of (Codex F-21, 22 Aug 2026).
+            // A failed open leaves `readers` untouched - no lease exists
+            // to undo it.
+            #[cfg(test)]
+            if let Some((entered, released)) = g.open_barrier.take() {
+                entered.wait();
+                released.wait();
+            }
+            let f = File::open(self.current_path())?;
+            g.readers += 1;
+            let generation = g.generation;
+            drop(g);
+            Ok((
+                f,
+                ReadLease {
+                    seen: AtomicU64::new(generation),
+                    custody: self.custody.clone(),
+                },
+            ))
+        }
+    }
+
+    /// Re-open a live reader's handle at the file's CURRENT path, on the
+    /// lease it already holds (sweep 8, M5b).
+    ///
+    /// The companion to [`ReadLease::needs_reopen`], which says when this
+    /// is needed and why: an external repair that rewrites the target
+    /// onto a new inode leaves every live reader's `File` pointing at
+    /// the damaged one. This is a re-open, not a second admission - the
+    /// lease and its slot in `readers` are the ones already granted, so
+    /// there is no waiting on custody and nothing for a concurrent
+    /// [`park_for_repair`] to drain twice.
+    ///
+    /// Clones the handle [`unpark`] captured rather than opening
+    /// `current_path` again - see `CustodyState::repaired` for the race
+    /// that costs. The by-path open is the fallback for the one
+    /// case that has no captured handle: a Windows reader, which is
+    /// revoked long before it could get here.
+    ///
+    /// The generation is adopted whatever happens, including a failed
+    /// open: a caller that could not be given the repaired file has
+    /// nothing to gain from being asked again every read, and the
+    /// failure is the same stale handle it already had.
+    ///
+    /// [`unpark`]: FileWriter::unpark
+    /// [`park_for_repair`]: FileWriter::park_for_repair
+    pub fn reopen_read(&self, lease: &ReadLease) -> io::Result<File> {
+        debug_assert!(
+            Arc::ptr_eq(&lease.custody, &self.custody),
+            "a lease may only be reopened against the writer that issued it"
+        );
+        let (generation, repaired) = {
+            let g = self.custody.st.lock_ok();
+            (g.generation, g.repaired.as_ref().map(File::try_clone))
+        };
+        lease.seen.store(generation, Ordering::Relaxed);
+        match repaired {
+            Some(f) => f,
+            None => File::open(self.current_path()),
+        }
+    }
+
+    /// Take exclusive custody for an external tool - see [`ReadCustody`].
+    fn claim_for_repair(&self) {
+        let mut g = self.custody.st.lock_ok();
+        g.repairing = true;
+        // The last repair's handle is not this file any more, and it is
+        // one of the handles `park` is about to be asked to have let go.
+        g.repaired = None;
+        drop(g);
+        // Wakes readers blocked in `open_read` (they will now bail) and,
+        // on Windows, arms `ReadLease::revoked` for the live ones.
+        self.custody.cv.notify_all();
+        #[cfg(windows)]
+        {
+            let deadline = std::time::Instant::now() + REPAIR_DRAIN_WAIT;
+            let mut g = self.custody.st.lock_ok();
+            while g.readers > 0 {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                g = self
+                    .custody
+                    .cv
+                    .wait_timeout(g, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        }
+    }
+
+    /// Hand the file back to live readers after an external tool.
+    /// Reports whether there was really a repair to hand back - `unpark`
+    /// is also called on paths that never claimed custody, and the
+    /// reader rebind below must not fire for those.
+    fn release_after_repair(&self) -> bool {
+        let mut g = self.custody.st.lock_ok();
+        let was_repairing = std::mem::take(&mut g.repairing);
+        drop(g);
+        self.custody.cv.notify_all();
+        was_repairing
+    }
+
+    /// Publish the file an external repair left behind, and with it the
+    /// generation bump that tells every reader still holding a handle
+    /// from before to come and get it (see [`ReadLease::needs_reopen`]).
+    ///
+    /// Called from [`unpark`] with the handle it has just opened, which
+    /// is the last moment anything in this process can be sure which
+    /// inode the repaired bytes are on.
+    ///
+    /// [`unpark`]: FileWriter::unpark
+    fn publish_repaired_handle(&self, repaired: &File) {
+        // Windows readers were revoked and their responses ended before
+        // the child ever ran - nothing there to hand anything to, and a
+        // spare handle on a finished job's output is a liability.
+        let keep = (!cfg!(windows))
+            .then(|| repaired.try_clone().ok())
+            .flatten();
+        let mut g = self.custody.st.lock_ok();
+        g.repaired = keep;
+        g.generation += 1;
+        drop(g);
+        self.custody.cv.notify_all();
+    }
+
+    /// True while an external tool owns this file. Test/diagnostic
+    /// window onto [`ReadCustody`].
+    pub fn under_repair(&self) -> bool {
+        self.custody.st.lock_ok().repairing
+    }
+
+    /// Publish coverage for bytes an EXTERNAL tool wrote (sweep 8, M5).
+    ///
+    /// `unpark` deliberately preserves the interval map, on the reading
+    /// that repair fills bytes in and never unwrites them. True for the
+    /// bytes we wrote - and silent about the ones we did NOT: external
+    /// par2 fills the sparse ranges that were missing, outside the
+    /// writer, so a live reader whose coverage map still calls them
+    /// holes goes on waiting for them or zero-filling over correct data
+    /// that is already on disk. Callers publish here only against the
+    /// same verification that licenses the repair as successful.
+    ///
+    /// Charges `covered` but NOT `written`: `written` counts physical
+    /// writes through this handle, and inflating it with an external
+    /// tool's output would misreport the job's disk rate.
+    pub fn note_repaired(&self, offset: u64, len: u64) {
+        let fresh = self.merge_span(offset, len);
+        self.covered.fetch_add(fresh, Ordering::Relaxed);
+    }
+
+    /// §94 A in-place replay: publish `[offset, offset+len)` as covered
+    /// WITHOUT writing it, because the bytes are already there - the
+    /// caller has checked that this run's derived placement is the very
+    /// (file, offset) the resume journal recorded the bytes at, so a
+    /// pwrite here would copy the range onto itself. Everything a write
+    /// would have done to the bookkeeping still happens: the coverage
+    /// map (a live reader must not call the range a hole), and the
+    /// extraction bomb budget, charged exactly as the write would have
+    /// charged it (fresh bytes only) so a resumed job cannot extract
+    /// past the ceiling a cold one is held to. `written` is left alone
+    /// for the same reason as [`note_repaired`](FileWriter::note_repaired):
+    /// it counts physical writes through this handle.
+    pub fn note_covered(&self, offset: u64, len: u64) -> io::Result<()> {
+        let fresh = self.merge_span(offset, len);
+        self.covered.fetch_add(fresh, Ordering::Relaxed);
+        if let Some(b) = &self.budget {
+            // Tallied here exactly as `write_at` tallies it, and BEFORE
+            // the verdict: a replayed range that is charged but not
+            // recorded in `charged` is a charge `abandon` can never
+            // refund, so the next container in the job is refused with
+            // BOMB_VERDICT over bytes that are no longer on the volume.
+            self.charged.fetch_add(fresh, Ordering::Relaxed);
+            b.charge(fresh)?;
+        }
+        Ok(())
     }
 
     /// A PARKED writer syncs nothing and reports success: [`park`] synced it
@@ -1589,710 +2317,7 @@ mod case_probe_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// C1: the RAM-aware drop-behind default. The threshold itself is a
-    /// measured crossover (see the main.rs call site); what these rows
-    /// pin is the SHAPE - tighter-of-two source selection, the boundary
-    /// landing on "2 GiB is on, above is off", and a failed probe
-    /// reading as a big box rather than a small one.
-    #[test]
-    fn drop_cache_auto_is_memory_tiered() {
-        let g = 1u64 << 30;
-        // Small boxes: on. Roomy boxes: off.
-        assert!(drop_cache_auto_for(Some(g), None));
-        assert!(drop_cache_auto_for(Some(2 * g), None)); // boundary: on
-        assert!(!drop_cache_auto_for(Some(2 * g + 1), None));
-        assert!(!drop_cache_auto_for(Some(32 * g), None));
-        // A 1 GB docker limit on a 32 GB host is a small box (the
-        // cgroup, not the metal, is where reclaim pressure lives).
-        assert!(drop_cache_auto_for(Some(32 * g), Some(g)));
-        // A roomy limit does not shrink a roomy host into the slow arm.
-        assert!(!drop_cache_auto_for(Some(32 * g), Some(16 * g)));
-        // cgroup-only reading (host RAM probe failed): the limit decides.
-        assert!(drop_cache_auto_for(None, Some(g)));
-        // Both probes failed: not small - keep the big-box default.
-        assert!(!drop_cache_auto_for(None, None));
-    }
-
-    /// The pacer's watermark step: the stride rule as measured on 6 Aug,
-    /// plus the completion rule that closes the small-file blind spot
-    /// (see `pace_step`). Each row is one write_at's view of the world.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn pace_step_strides_and_flushes_small_files_once() {
-        const MB: u64 = 1 << 20;
-        const PARKED: u64 = u64::MAX;
-        // (written, covered, due, size, stride); covered == written in
-        // the duplicate-free rows.
-        // Big file mid-write: crossing the watermark advances it a stride.
-        assert_eq!(
-            pace_step(16 * MB, 16 * MB, 16 * MB, 500 * MB, 32 * MB),
-            Some(48 * MB)
-        );
-        // Below the watermark, not complete: nothing fires.
-        assert_eq!(
-            pace_step(15 * MB, 15 * MB, 16 * MB, 500 * MB, 32 * MB),
-            None
-        );
-        // The blind spot: an 8 MB file never reaches the 16 MB watermark,
-        // so completion is its ONE flush - and it parks the watermark.
-        assert_eq!(
-            pace_step(8 * MB, 8 * MB, 16 * MB, 8 * MB, 32 * MB),
-            Some(PARKED)
-        );
-        // Parked stays parked: a duplicate article after completion (or
-        // any later write) must not flush again.
-        assert_eq!(pace_step(9 * MB, 8 * MB, PARKED, 8 * MB, 32 * MB), None);
-        // A stride crossing that IS the completion parks in one step
-        // rather than scheduling a watermark nothing will ever cross.
-        assert_eq!(
-            pace_step(48 * MB, 48 * MB, 48 * MB, 48 * MB, 32 * MB),
-            Some(PARKED)
-        );
-        // Codex 7 Aug M3: duplicate/repair spans push `written` past
-        // `size` while unique coverage still has a gap - the watermark
-        // must KEEP STRIDING (never park), or the genuine tail writes
-        // unpaced and the burst the pacer exists to prevent comes back
-        // on exactly the jobs with rewrites.
-        assert_eq!(
-            pace_step(80 * MB, 72 * MB, 80 * MB, 80 * MB, 32 * MB),
-            Some(112 * MB),
-            "aggregate traffic reaching size is not completion"
-        );
-        assert_eq!(
-            pace_step(90 * MB, 79 * MB, 112 * MB, 80 * MB, 32 * MB),
-            None
-        );
-        // ...and the park lands when unique coverage really completes.
-        assert_eq!(
-            pace_step(96 * MB, 80 * MB, 112 * MB, 80 * MB, 32 * MB),
-            Some(PARKED)
-        );
-        // Unknown size (0): no completion rule, the stride still paces.
-        assert_eq!(pace_step(8 * MB, 8 * MB, 16 * MB, 0, 32 * MB), None);
-        assert_eq!(
-            pace_step(16 * MB, 16 * MB, 16 * MB, 0, 32 * MB),
-            Some(48 * MB)
-        );
-        // A saturated stride (parse_pace_mb turns an absurd env value
-        // into u64::MAX) must not overflow the next watermark - it
-        // parks, it does not wrap into a per-write flush storm.
-        assert_eq!(
-            pace_step(16 * MB, 16 * MB, 16 * MB, 0, PARKED),
-            Some(PARKED)
-        );
-        assert_eq!(
-            pace_step(16 * MB, 16 * MB, 16 * MB, 0, PARKED - 16 * MB),
-            Some(PARKED)
-        );
-    }
-
-    /// Fault-injecting writer for the disk-full halt rig: forwards to a
-    /// real [`FileWriter`] until `budget` bytes have been accepted, then
-    /// every write fails with `StorageFull` - the shape of a volume that
-    /// filled mid-download.
-    struct FaultWriter {
-        inner: FileWriter,
-        budget: AtomicU64,
-    }
-
-    impl FaultWriter {
-        fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
-            let left = self.budget.load(Ordering::Relaxed);
-            if (data.len() as u64) > left {
-                return Err(io::Error::new(
-                    io::ErrorKind::StorageFull,
-                    "No space left on device (injected)",
-                ));
-            }
-            self.budget.fetch_sub(data.len() as u64, Ordering::Relaxed);
-            self.inner.write_at(offset, data)
-        }
-    }
-
-    /// The rig itself: writes land until the injected volume fills, the
-    /// failure carries `StorageFull`, and `storage_exhausted` classifies
-    /// it - which is exactly the signal the decode consumers halt on.
-    #[test]
-    fn fault_writer_storage_full_after_n_bytes_classifies() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-faultw-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fills.bin");
-        let w = FaultWriter {
-            inner: FileWriter::create(&path, 16).unwrap(),
-            budget: AtomicU64::new(8),
-        };
-        w.write_at(0, b"abcd").unwrap();
-        w.write_at(4, b"efgh").unwrap();
-        let e = w.write_at(8, b"ijkl").unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::StorageFull, "{e}");
-        assert!(storage_exhausted(&e), "{e}");
-        // What landed before the fill is intact - the journal's resume
-        // contract rests on that.
-        assert_eq!(&std::fs::read(&path).unwrap()[..8], b"abcdefgh");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn storage_exhausted_kinds_and_raw_codes() {
-        for kind in [
-            io::ErrorKind::StorageFull,
-            io::ErrorKind::QuotaExceeded,
-            io::ErrorKind::ReadOnlyFilesystem,
-            io::ErrorKind::WriteZero,
-        ] {
-            assert!(storage_exhausted(&io::Error::new(kind, "x")), "{kind:?}");
-        }
-        assert!(!storage_exhausted(&io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "x"
-        )));
-        assert!(!storage_exhausted(&io::Error::other("x")));
-        #[cfg(unix)]
-        {
-            // ENOSPC and EROFS classify; 112 is EHOSTDOWN here, NOT
-            // Windows' ERROR_DISK_FULL - the platform trap this gate
-            // exists for.
-            assert!(storage_exhausted(&io::Error::from_raw_os_error(28)));
-            assert!(storage_exhausted(&io::Error::from_raw_os_error(30)));
-            assert!(!storage_exhausted(&io::Error::from_raw_os_error(112)));
-        }
-        #[cfg(windows)]
-        {
-            assert!(storage_exhausted(&io::Error::from_raw_os_error(112)));
-            assert!(storage_exhausted(&io::Error::from_raw_os_error(39)));
-            assert!(!storage_exhausted(&io::Error::from_raw_os_error(28)));
-        }
-    }
-
-    /// A parked writer keeps its bytes and its identity, refuses writes while
-    /// it is parked, and comes back usable. The refusal is the point: a write
-    /// that landed while an external par2 owned the file would be overwritten
-    /// by the repair without a word.
-    #[test]
-    fn park_refuses_writes_then_unpark_restores_the_writer() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-park-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("payload.bin");
-        let w = FileWriter::create(&path, 8).unwrap();
-        w.write_at(0, b"abcd").unwrap();
-
-        w.park().unwrap();
-        let e = w.write_at(4, b"efgh").unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::NotConnected, "{e}");
-        let mut buf = [0u8; 4];
-        assert_eq!(
-            w.read_at(&mut buf, 0).unwrap_err().kind(),
-            io::ErrorKind::NotConnected
-        );
-        // Parked syncs are a no-op, not a failure: park() already synced, so
-        // erroring here would fail a job whose bytes are all safely on disk.
-        w.sync().unwrap();
-        // The bytes written before parking reached disk, and the file itself
-        // is untouched - that is what the external tool repairs against.
-        assert_eq!(&std::fs::read(&path).unwrap()[..4], b"abcd");
-
-        w.unpark().unwrap();
-        w.unpark().unwrap(); // idempotent - error paths may double-unpark
-        w.write_at(4, b"efgh").unwrap();
-        w.read_at(&mut buf, 4).unwrap();
-        assert_eq!(&buf, b"efgh");
-        assert_eq!(&std::fs::read(&path).unwrap()[..8], b"abcdefgh");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The soak 11 Aug shape (sab3287-stall): PAR2 deobfuscation renames the
-    /// file on disk while the writer's handle is open, then the external-par2
-    /// fallback parks and unparks. Without `note_renamed`, unpark reopens the
-    /// CREATION path, gets ENOENT, and the whole job dies with "reopening our
-    /// output handles after the external par2" - on the success path too,
-    /// throwing away a completed repair.
-    #[test]
-    fn unpark_follows_a_published_rename() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-repark-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let obfuscated = dir.join("cb124762578234ca");
-        let real = dir.join("yay.part04.rar");
-        let w = FileWriter::create(&obfuscated, 8).unwrap();
-        w.write_at(0, b"abcd").unwrap();
-
-        // The publish: on-disk rename under the live handle.
-        std::fs::rename(&obfuscated, &real).unwrap();
-        w.note_renamed(real.clone());
-        assert_eq!(w.current_path(), real);
-
-        w.park().unwrap();
-        w.unpark().unwrap();
-        w.write_at(4, b"efgh").unwrap();
-        assert_eq!(&std::fs::read(&real).unwrap()[..8], b"abcdefgh");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The whole point on Windows: while parked, an EXCLUSIVE open of the file
-    /// succeeds. That is exactly what par2cmdline does, and a handle we still
-    /// held made it report the target missing and decline to repair.
-    #[cfg(windows)]
-    #[test]
-    fn a_parked_file_can_be_opened_exclusively() {
-        use std::os::windows::fs::OpenOptionsExt;
-        // share mode 0 - what par2cmdline asks for.
-        let exclusive = |p: &Path| OpenOptions::new().read(true).share_mode(0).open(p);
-
-        let dir = std::env::temp_dir().join(format!("nzbfast-excl-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("payload.bin");
-        let w = FileWriter::create(&path, 4).unwrap();
-        w.write_at(0, b"abcd").unwrap();
-
-        assert!(exclusive(&path).is_err(), "a live writer must block par2");
-        w.park().unwrap();
-        drop(exclusive(&path).expect("a parked writer must let par2 in"));
-        w.unpark().unwrap();
-        assert!(exclusive(&path).is_err(), "unpark must retake the handle");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The probe must never answer `Rotational` for something it could not
-    /// identify - an unknown answer clamps nothing, a wrong "spinning"
-    /// answer would throttle an SSD, a RAID array or an SMB share.
-    #[test]
-    fn storage_probe_never_guesses_rotational() {
-        assert_eq!(
-            detect_storage(Path::new("/nonexistent-nzbfast-probe")),
-            Storage::Unknown
-        );
-        let here = detect_storage(Path::new("."));
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(here, Storage::Unknown, "only Linux exposes the flag");
-        #[cfg(target_os = "linux")]
-        assert!(
-            matches!(
-                here,
-                Storage::Solid | Storage::Unknown | Storage::Rotational
-            ),
-            "{here:?}"
-        );
-    }
-
-    /// The pacing-stride mapping: MB in, bytes out, 0 = explicitly off,
-    /// unset/garbage = defer to the process default. Through the pure
-    /// seam so the suite never mutates shared process env.
-    #[test]
-    fn pace_stride_parses_mb_zero_and_garbage() {
-        assert_eq!(parse_pace_mb(Some("32")), Some(32 << 20));
-        assert_eq!(parse_pace_mb(Some(" 8 ")), Some(8 << 20));
-        assert_eq!(parse_pace_mb(Some("0")), Some(0), "0 is OFF, not unset");
-        assert_eq!(parse_pace_mb(Some("lots")), None);
-        assert_eq!(parse_pace_mb(Some("")), None);
-        assert_eq!(parse_pace_mb(None), None);
-        // Absurd values saturate instead of wrapping back under the cap.
-        assert_eq!(parse_pace_mb(Some("18446744073709551615")), Some(u64::MAX));
-    }
-
-    /// The operator override names a profile in both directions, so a
-    /// misdetected array or a network mount can be corrected. Anything
-    /// else - unset, `auto`, a typo - defers to the probe.
-    #[test]
-    fn storage_override_maps_both_directions_and_defers_otherwise() {
-        assert_eq!(
-            storage_override(Some("rotational")),
-            Some(Storage::Rotational)
-        );
-        assert_eq!(storage_override(Some("hdd")), Some(Storage::Rotational));
-        assert_eq!(storage_override(Some("ssd")), Some(Storage::Solid));
-        assert_eq!(storage_override(Some("solid")), Some(Storage::Solid));
-        assert_eq!(storage_override(Some("auto")), None);
-        assert_eq!(storage_override(Some("SSD")), None, "match is exact");
-        assert_eq!(storage_override(None), None);
-    }
-
-    /// The clamp fires only for a spinning disk on a NAS-class box. Every
-    /// other combination must pass the caller's choice through untouched -
-    /// throttling a big box, an SSD, or storage we failed to identify would
-    /// cost real throughput (1 decoder is a third of 4 on fast hardware).
-    #[test]
-    fn rotational_clamp_only_bites_nas_class_boxes() {
-        assert_eq!(decoders_for_storage(Storage::Rotational, 4, 4), 1);
-        assert_eq!(decoders_for_storage(Storage::Rotational, 2, 8), 1);
-        // Big box: a rotational device here is usually a wide array.
-        assert_eq!(decoders_for_storage(Storage::Rotational, 8, 4), 4);
-        assert_eq!(decoders_for_storage(Storage::Rotational, 32, 4), 4);
-        // Never clamp on anything we did not positively identify as spinning.
-        assert_eq!(decoders_for_storage(Storage::Unknown, 2, 4), 4);
-        assert_eq!(decoders_for_storage(Storage::Solid, 2, 4), 4);
-        // Already serial, or explicitly asked for one: nothing to say.
-        assert_eq!(decoders_for_storage(Storage::Rotational, 2, 1), 1);
-    }
-
-    /// The spill path needs room for one writer per volume; the stock macOS
-    /// 256 is not enough for a 431-volume job.
-    ///
-    /// Unix only, because the limit it is about is. Windows has no
-    /// RLIMIT_NOFILE: `std::fs::File` there is a Win32 HANDLE from
-    /// `CreateFileW`, and handles are bounded by kernel memory (millions),
-    /// not by a per-process soft cap anyone can raise. The CRT's own
-    /// 512-descriptor table is a different thing that Rust does not use. So
-    /// there is nothing to raise and `raise_fd_limit` reports 0 - which this
-    /// test asserted was "too low for the spill path", the reading that made
-    /// it fail the first time the suite ran on Windows.
-    #[cfg(unix)]
-    #[test]
-    fn fd_limit_is_raised_above_the_stock_soft_cap() {
-        let got = raise_fd_limit();
-        assert!(got >= 1024, "fd limit {got} too low for the spill path");
-        // Idempotent: a second call must not lower what we already have.
-        assert!(raise_fd_limit() >= got);
-    }
-
-    /// The other half of the contract above: on Windows the call must be a
-    /// harmless no-op rather than something that reports a limit the caller
-    /// might then size the spill path against.
-    #[cfg(windows)]
-    #[test]
-    fn fd_limit_is_a_no_op_where_there_is_no_such_limit() {
-        assert_eq!(
-            raise_fd_limit(),
-            0,
-            "nothing to raise on Windows - say so, don't invent one"
-        );
-    }
-
-    /// Whichever branch `preallocate` takes (raw fallocate where the
-    /// Linux fs supports it, plain set_len on macOS/tmpfs/zfs), the
-    /// observable contract is the same: the file spans `size` at create
-    /// and resume, and writes land at their offsets.
-    #[test]
-    fn preallocation_yields_correct_length_on_both_paths() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-prealloc-{}", std::process::id()));
-        let path = dir.join("out.bin");
-
-        let w = FileWriter::create(&path, 300_000).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 300_000);
-        w.write_at(299_990, &[7u8; 10]).unwrap();
-        w.sync().unwrap();
-        drop(w);
-
-        // Resume must keep the earlier bytes and still span `size`.
-        let w = FileWriter::create_resume(&path, 300_000).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 300_000);
-        let mut tail = [0u8; 10];
-        w.read_at(&mut tail, 299_990).unwrap();
-        assert_eq!(tail, [7u8; 10]);
-        drop(w);
-
-        // Zero-size files skip fallocate (EINVAL on len 0) but must
-        // still truncate.
-        let w = FileWriter::create(&path, 0).unwrap();
-        drop(w);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// BUG (HIGH): the in-stream extractor preallocated an
-    /// attacker-declared size. An inner file's `unpacked_size` is a RAR
-    /// header vint the poster controls, and on Linux `preallocate` is a
-    /// real `fallocate` - so a few-hundred-KB post declaring terabytes
-    /// genuinely reserved the victim's free space until the finish-time
-    /// gates demoted the set. The ceiling bounds the RESERVATION.
-    #[test]
-    fn a_declared_size_past_the_ceiling_reserves_only_the_ceiling() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-cap-{}", std::process::id()));
-        let path = dir.join("bomb.bin");
-        const HUGE: u64 = 8 << 40; // 8 TiB "declared"
-        const POSTED: u64 = 1 << 20; // what the NZB actually posted
-
-        let w = FileWriter::create_capped(&path, HUGE, POSTED).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            POSTED,
-            "an attacker-declared size must not reserve past the posted ceiling"
-        );
-        // CRITICAL: `size` itself is NOT clamped - create_resume's stale
-        // truncation and the reported extracted size both read it.
-        assert_eq!(w.size, HUGE);
-        // And the cap is a reservation bound, not a write bound: writing
-        // past it extends the file normally.
-        w.write_at(POSTED + 4096, &[9u8; 8]).unwrap();
-        let mut got = [0u8; 8];
-        w.read_at(&mut got, POSTED + 4096).unwrap();
-        assert_eq!(got, [9u8; 8]);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), POSTED + 4104);
-        drop(w);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// THE test that matters: a wrong fix here silently de-optimises
-    /// every real download. A legitimate file that fits under the posted
-    /// ceiling must still be reserved IN FULL, on both create paths.
-    #[test]
-    fn a_legitimate_size_under_the_ceiling_still_preallocates_in_full() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-cap-ok-{}", std::process::id()));
-        let path = dir.join("movie.bin");
-        const SIZE: u64 = 4_000_000;
-        const POSTED: u64 = 64_000_000;
-
-        let w = FileWriter::create_capped(&path, SIZE, POSTED).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            SIZE,
-            "a legitimate file under the ceiling must be preallocated in full"
-        );
-        assert_eq!(w.size, SIZE);
-        drop(w);
-
-        let w = FileWriter::create_resume_capped(&path, SIZE, POSTED).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), SIZE);
-        drop(w);
-
-        // Exactly at the ceiling is legitimate too (STORE unpacks 1:1, and
-        // the posted count carries yEnc overhead on top).
-        let w = FileWriter::create_capped(&path, POSTED, POSTED).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), POSTED);
-        drop(w);
-
-        // No ceiling set = byte-for-byte the old behaviour.
-        let w = FileWriter::create_capped(&path, SIZE, u64::MAX).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), SIZE);
-        drop(w);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The ceiling must never cost a resumed job its bytes: on the resume
-    /// path it may not shrink the file below what is already there, and
-    /// the stale-longer-file trim (down to `size`, which only ever frees
-    /// space) still has to happen.
-    #[test]
-    fn the_ceiling_never_shrinks_a_resumed_file() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-cap-res-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("out.bin");
-
-        // 400 KB already on disk, a 1 KB ceiling, 8 TB declared: the
-        // existing bytes stay.
-        std::fs::write(&path, vec![0xAAu8; 400_000]).unwrap();
-        let w = FileWriter::create_resume_capped(&path, 8 << 40, 1024).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 400_000);
-        let mut head = [0u8; 4];
-        w.read_at(&mut head, 0).unwrap();
-        assert_eq!(head, [0xAA; 4]);
-        drop(w);
-
-        // Stale file LONGER than `size`: still trimmed to exactly `size`
-        // even under a smaller ceiling - that shrinks, so it reserves
-        // nothing.
-        std::fs::write(&path, vec![0xAAu8; 500_000]).unwrap();
-        let w = FileWriter::create_resume_capped(&path, 300_000, 1024).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 300_000);
-        drop(w);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// BUG (MEDIUM): the decompression-bomb guard was installed only on
-    /// the disk and post-pass sinks, so it covered the fallback and not
-    /// the default in-stream path. The budget now rides the FileWriter,
-    /// and is SHARED - a bomb split over many inner files gets one
-    /// allowance, not one each.
-    #[test]
-    fn the_extract_budget_is_shared_and_charges_only_new_bytes() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-budget-{}", std::process::id()));
-        let budget = std::sync::Arc::new(WriteBudget::new(1000));
-
-        let a = FileWriter::create(&dir.join("a.bin"), 4096)
-            .unwrap()
-            .with_budget(budget.clone());
-        let b = FileWriter::create(&dir.join("b.bin"), 4096)
-            .unwrap()
-            .with_budget(budget.clone());
-
-        a.write_at(0, &[1u8; 600]).unwrap();
-        assert_eq!(budget.used(), 600);
-        // A repair span REWRITING bytes already counted must not be
-        // charged twice - otherwise a healing job trips its own guard.
-        a.write_at(0, &[2u8; 600]).unwrap();
-        a.write_at(100, &[3u8; 200]).unwrap();
-        assert_eq!(budget.used(), 600, "rewrites must not be charged");
-        // Partial overlap charges only the new tail.
-        a.write_at(500, &[4u8; 200]).unwrap();
-        assert_eq!(budget.used(), 700);
-
-        // The SECOND file draws on the same allowance and trips it.
-        let e = b.write_at(0, &[5u8; 400]).unwrap_err();
-        assert!(
-            e.to_string().contains("decompression bomb"),
-            "unexpected error: {e}"
-        );
-
-        // A writer with no budget is never charged (plain download slots).
-        let c = FileWriter::create(&dir.join("c.bin"), 4096).unwrap();
-        c.write_at(0, &[6u8; 100_000]).unwrap();
-        drop((a, b, c));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A stale file LONGER than `size` at the resume path must be shrunk
-    /// to exactly `size` - fallocate never shrinks, so this pins the
-    /// unconditional set_len that precedes it (trailing garbage past
-    /// `size` would otherwise ship to the user for unparred files).
-    #[test]
-    fn create_resume_truncates_stale_longer_file() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-resume-trunc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("out.bin");
-
-        std::fs::write(&path, vec![0xAAu8; 500_000]).unwrap();
-        let w = FileWriter::create_resume(&path, 300_000).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 300_000);
-        // Bytes inside [0, size) survive the resume.
-        let mut head = [0u8; 10];
-        w.read_at(&mut head, 0).unwrap();
-        assert_eq!(head, [0xAAu8; 10]);
-        drop(w);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn out_of_order_writes_assemble_correctly() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-disk-test-{}", std::process::id()));
-        let path = dir.join("out.bin");
-        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-
-        let w = FileWriter::create(&path, data.len() as u64).unwrap();
-        // Write the second half first, then the first.
-        w.write_at(60_000, &data[60_000..]).unwrap();
-        w.write_at(0, &data[..60_000]).unwrap();
-        assert_eq!(w.written(), data.len() as u64);
-        w.sync().unwrap();
-
-        assert_eq!(std::fs::read(&path).unwrap(), data);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// note_written keeps `intervals` sorted, disjoint, and adjacency-
-    /// merged. Fuzz it against a brute-force byte-set oracle across
-    /// overlapping, adjacent, gap-filling and out-of-order spans.
-    #[test]
-    fn note_written_merges_like_a_byte_set() {
-        let path = std::env::temp_dir().join(format!("nzbfast-iv-{}.bin", std::process::id()));
-        let w = FileWriter::create(&path, 512).unwrap();
-        let mut oracle = vec![false; 512];
-        // A deterministic LCG picks spans; includes adjacency (b==c) and
-        // full overlaps.
-        let mut state = 0x1234_5678u64;
-        let mut rng = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            (state >> 33) as usize
-        };
-        for _ in 0..2000 {
-            let a = rng() % 500;
-            let l = 1 + rng() % 40;
-            let b = (a + l).min(512);
-            w.note_written(a as u64, (b - a) as u64);
-            for x in a..b {
-                oracle[x] = true;
-            }
-            // Coverage must exactly match the oracle for a few probes.
-            for _ in 0..4 {
-                let qa = rng() % 500;
-                let ql = 1 + rng() % 30;
-                let qb = (qa + ql).min(512);
-                let want = oracle[qa..qb].iter().all(|&c| c);
-                assert_eq!(
-                    w.covered(qa as u64, (qb - qa) as u64),
-                    want,
-                    "covered({qa},{qb}) disagrees with oracle"
-                );
-            }
-        }
-        // The interval list must be sorted, disjoint and non-adjacent.
-        let iv = w.intervals.lock().unwrap();
-        for pair in iv.windows(2) {
-            assert!(pair[0].1 < pair[1].0, "not disjoint/sorted: {iv:?}");
-        }
-        for &(s, e) in iv.iter() {
-            assert!(s < e, "empty interval {iv:?}");
-        }
-        drop(iv);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn sanitize() {
-        assert_eq!(sanitize_filename("a/b\\c.rar"), "a_b_c.rar");
-        assert_eq!(sanitize_filename("  ..hidden  "), "hidden");
-        assert_eq!(sanitize_filename(""), "unnamed");
-        // Traversal neutralisation (bug sweep: category/stem build the
-        // download path). The result must be a single component - no
-        // separators survive, so `join` can never escape the base.
-        for s in ["../../../../tmp/pwned", "/tmp/abs", "..\\..\\win", "a/../b"] {
-            let out = sanitize_filename(s);
-            assert!(
-                !out.contains('/') && !out.contains('\\'),
-                "{s:?} -> {out:?}"
-            );
-            assert!(!out.starts_with('.'), "{s:?} -> {out:?}");
-        }
-        // Dots separated by spaces. The trim chain is not a fixed point:
-        // stripping the outer dots exposes whitespace, and trimming THAT
-        // exposes interior dots, so these used to come out as ".." and "." -
-        // a component that escapes its parent, with `remove_dir_all` on the
-        // delete-with-files path pointed at it. No separator is involved, so
-        // the loop above never caught them.
-        for s in [". .. .", ".. .. ..", ". . .", " .. ", "...", ". ."] {
-            assert_eq!(sanitize_filename(s), "unnamed", "{s:?} escaped");
-        }
-        // ...and the same names as an on-disk path component stay contained.
-        for s in [". .. .", ". . ."] {
-            let joined = std::path::Path::new("/srv/dl").join(sanitize_filename(s));
-            assert_eq!(joined, std::path::Path::new("/srv/dl/unnamed"), "{s:?}");
-        }
-        // A drive prefix is a separator too, on Windows. `Path::join` DISCARDS
-        // the base when the joined name carries a prefix, so "C:evil.dll" wrote
-        // outside the download dir entirely (into the cwd on C: - for the
-        // installed app, the directory holding nzbfast.exe, i.e. first in the
-        // DLL search order). "x.mkv:s" is the NTFS alternate-data-stream half:
-        // the bytes go into the stream and the visible file is left 0 bytes.
-        // Asserted through the `_for` seam so this holds on Unix CI too.
-        for s in ["C:evil.dll", "payload.mkv:hidden", "\\\\?\\C:\\x", "C:/x"] {
-            let out = sanitize_filename_for(s, true);
-            assert!(!out.contains(':'), "{s:?} -> {out:?}");
-            assert!(
-                std::path::Path::new(&out).components().count() == 1,
-                "not a single component: {s:?} -> {out:?}"
-            );
-        }
-        // Unix keeps ':' - it is legal there and common in release names.
-        assert_eq!(
-            sanitize_filename_for("Movie: The Sequel.mkv", false),
-            "Movie: The Sequel.mkv"
-        );
-        // Control characters (incl. embedded NUL/newline/tab) are replaced.
-        let ctl = sanitize_filename("ev\u{7}il\nname\t.mkv");
-        assert!(
-            !ctl.chars().any(|c| c.is_control()),
-            "control char survived: {ctl:?}"
-        );
-        // Trailing dot/space that Windows would strip.
-        assert_eq!(sanitize_filename("evil. "), "evil");
-        // Windows reserved device names get a prefix so File::create can't
-        // open a device; real names with those as a substring are untouched.
-        assert_eq!(sanitize_filename("CON"), "_CON");
-        assert_eq!(sanitize_filename("con.txt"), "_con.txt");
-        assert_eq!(sanitize_filename("COM1"), "_COM1");
-        assert_eq!(sanitize_filename("LPT9.dat"), "_LPT9.dat");
-        assert_eq!(sanitize_filename("COM0"), "COM0"); // not a real device
-        assert_eq!(sanitize_filename("console.log"), "console.log"); // substring only
-        assert_eq!(sanitize_filename("company"), "company");
-        // Unicode superscript device names that Windows folds to COM1/LPT1.
-        assert_eq!(sanitize_filename("COM\u{B9}"), "_COM\u{B9}");
-        assert_eq!(sanitize_filename("LPT\u{B2}.dat"), "_LPT\u{B2}.dat");
-        // Trailing-$ console/clock device handles.
-        assert_eq!(sanitize_filename("CLOCK$"), "_CLOCK$");
-        assert_eq!(sanitize_filename("CONIN$"), "_CONIN$");
-        assert_eq!(sanitize_filename("CONOUT$"), "_CONOUT$");
-    }
-}
+mod tests;
 
 /// Mark one of our own bookkeeping files or dirs as hidden.
 ///

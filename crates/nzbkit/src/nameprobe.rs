@@ -97,16 +97,91 @@ const SEVENZ_ID_COPY: [u8; 1] = [0x00];
 const SEVENZ_ID_AES: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
 
 /// Floor under which a CONTENT block's declared decoder memory (LZMA
-/// dictionaries plus PPMd model sizes, summed per block) is always
-/// accepted. 64 MiB is the dictionary 7-Zip's Ultra preset declares
-/// regardless of how small the data is, so every preset-made archive
-/// passes on the floor alone. This is deliberately NOT
-/// [`SEVENZ_DICT_MAX`] reused: that cap is for metadata headers, whose
-/// decoded output is bounded at [`SEVENZ_END_MAX`] anyway - content has
-/// no such output bound, and users legitimately select dictionaries far
-/// past 64 MiB, so past the floor the declaration is judged against the
-/// packed bytes actually present instead of refused outright.
+/// dictionaries plus PPMd model sizes) is always accepted. 64 MiB is
+/// the dictionary 7-Zip's Ultra preset declares regardless of how small
+/// the data is. It bounds the largest SINGLE coder window a block may
+/// declare for free; a block's SUMMED cost is held to this plus
+/// [`SEVENZ_CONTENT_FILTER_ALLOWANCE`], because a preset-made archive is
+/// not always one coder. This is deliberately NOT [`SEVENZ_DICT_MAX`]
+/// reused: that cap is for metadata headers, whose decoded output is
+/// bounded at [`SEVENZ_END_MAX`] anyway - content has no such output
+/// bound, and users legitimately select dictionaries far past 64 MiB, so
+/// past the floor the declaration is judged against the packed bytes
+/// actually present instead of refused outright.
 pub const SEVENZ_CONTENT_COST_FLOOR: u64 = 64 << 20;
+
+/// How much declared decoder memory a MULTI-coder content block may add
+/// on top of [`SEVENZ_CONTENT_COST_FLOOR`] for free (TODO 268).
+///
+/// 7-Zip picks BCJ2 automatically for executable content at `-mx7` and
+/// above, and BCJ2 is FOUR coders in one block - `BCJ2 LZMA2:26
+/// LZMA:20:lc0:lp2 LZMA:20:lc0:lp2` - whose windows a BCJ2 decode really
+/// does hold at once. Summing them is right; judging that sum against a
+/// floor calibrated for ONE dictionary was not. 64 + 1 + 1 = 66 MiB
+/// cleared the floor by 2 MiB, fell through to the packed-bytes rule,
+/// and a well-compressed installer lost there. Measured 23 Aug 2026 on a
+/// Windows media-server corpus: four of the nine genuine 7-Zip
+/// self-extractors in it extracted ZERO files, Microsoft's own Edge
+/// update packages among them, ten days after the same corpus extracted
+/// two of them fine.
+///
+/// 8 MiB is four times what the shape needs. The two auxiliary literal
+/// coders are 1 MiB each and stay there: measured with 7-Zip 26.02 at
+/// `-mf=BCJ2` on inputs from 4 KiB to 605 MB, the auxiliary dictionaries
+/// track the input size up to 1 MiB and then stop, while the main LZMA2
+/// dictionary keeps growing with `-md`.
+///
+/// The allowance is FLAT rather than per-coder, and the floor still
+/// bounds the largest single window, so a chain may declare 72 MiB for
+/// free no matter how many coders it lists. That is the deliberate
+/// answer to the security question: a block whose coders are
+/// individually modest and JOINTLY large - eight 32 MiB dictionaries -
+/// is still held to its packed bytes, because a decode of it would hold
+/// all eight windows at once. Only the auxiliary-filter shape is
+/// forgiven, and only up to a fixed size.
+pub const SEVENZ_CONTENT_FILTER_ALLOWANCE: u64 = 8 << 20;
+
+/// How far past its own packed bytes a CONTENT block's declared decoder
+/// memory may reach before it is refused (TODO 269).
+///
+/// The rule the packed-bytes anchor started as - `cost <=
+/// next_power_of_two(pack)` - is one doubling of slack, and one
+/// doubling is not enough, because the two quantities it compares are
+/// not measured against the same stream. A dictionary is sized to the
+/// UNPACKED data; the pack bytes are what is left after compressing it.
+/// For anything that compresses at all, the packed side systematically
+/// understates the window the writer honestly chose, and the shortfall
+/// IS the compression ratio.
+///
+/// Measured 23 Aug 2026 on the same Windows corpus as TODO 268, in
+/// Microsoft's Edge and Copilot update packages (four of them on one
+/// box): one block, chain `BCJ2 LZMA:27 LZMA:22 LZMA:22`, so 128 + 4 +
+/// 4 = 136 MiB declared against 43,902,179 packed bytes - which round up
+/// to 64 MiB. 136 > 64, refused, zero files extracted, out of a 3.6:1
+/// compression ratio that is entirely ordinary for a 150 MB browser
+/// payload.
+///
+/// **The security question this answers is "what is the largest honest
+/// compression ratio?", and the answer taken here is 4:1.** A writer
+/// never gains from a dictionary larger than the stream it is
+/// compressing, so an honest `cost` is at most
+/// `next_power_of_two(unpack)`, and `unpack` is `pack * ratio`. Working
+/// in powers of two, `next_power_of_two(unpack) <= 4 *
+/// next_power_of_two(pack)` holds for every ratio up to 4:1 whatever the
+/// alignment, and up to 8:1 when the alignment is favourable. Real
+/// writers also cap the dictionary well below the stream size (`-md`),
+/// which is why the measured file clears it with room to spare: 136 MiB
+/// against the 256 MiB this allows.
+///
+/// What it costs on the other side is linear and nothing else. The
+/// asymmetry the guard is built on is untouched: an attacker still buys
+/// allocation only by posting real pack bytes, now at 8 bytes of window
+/// per byte posted rather than 2. The checked-in bomb - 384 MiB out of
+/// 16 packed bytes - is refused by six orders of magnitude either way,
+/// and a block that is individually modest and jointly large is still
+/// held to the same arithmetic. This is a strict widening of the old
+/// rule, so nothing that passed before can start failing.
+pub const SEVENZ_CONTENT_PACK_SLACK: u64 = 4;
 
 /// Named refusals [`sevenz_disk_declared_bomb`] can return; callers put
 /// them verbatim into job failure detail. All four mean "the file's own
@@ -329,6 +404,13 @@ struct BlockDecl {
     dict_size: u64,
     /// Summed PPMd props-declared memSizes.
     ppmd_mem: u64,
+    /// The largest SINGLE coder window declared on this chain (an
+    /// LZMA/LZMA2 dictionary or a PPMd memSize). The sums above say what
+    /// a decode holds at once; this says whether any ONE allocation is
+    /// out of scale, which is what stops
+    /// [`SEVENZ_CONTENT_FILTER_ALLOWANCE`] being spent on a single
+    /// oversized dictionary instead of on the filter coders it is for.
+    max_coder: u64,
     /// How many pack streams this block consumes (blocks take them from
     /// the kPackInfo list in order).
     packed: u64,
@@ -414,6 +496,7 @@ fn streams_info_declared(s: &mut Scan) -> Option<StreamsDecl> {
         let mut total_out = 0u64;
         let mut ppmd_mem = 0u64;
         let mut dict_size = 0u64;
+        let mut max_coder = 0u64;
         let mut first_coder = ScannedCoder::Other;
         let mut has_aes = false;
         for coder_idx in 0..num_coders {
@@ -456,6 +539,7 @@ fn streams_info_declared(s: &mut Scan) -> Option<StreamsDecl> {
                     let p = &s.b[props_at..];
                     let mem = u32::from_le_bytes([p[1], p[2], p[3], p[4]]);
                     ppmd_mem = ppmd_mem.saturating_add(mem as u64);
+                    max_coder = max_coder.max(mem as u64);
                 }
                 // LZMA1 props: lclppb byte, then the 32-bit dictionary
                 // size the LZ decoder allocates whole. Same shape as
@@ -464,6 +548,7 @@ fn streams_info_declared(s: &mut Scan) -> Option<StreamsDecl> {
                     let p = &s.b[props_at..];
                     let dict = u32::from_le_bytes([p[1], p[2], p[3], p[4]]);
                     dict_size = dict_size.saturating_add(dict as u64);
+                    max_coder = max_coder.max(dict as u64);
                     kind = ScannedCoder::Lzma1 { props: p[0], dict };
                 }
                 // LZMA2 props: ONE byte, and the dictionary it names
@@ -482,6 +567,7 @@ fn streams_info_declared(s: &mut Scan) -> Option<StreamsDecl> {
                         ((2 | (p as u64 & 1)) << (p / 2 + 11)) as u32
                     };
                     dict_size = dict_size.saturating_add(dict as u64);
+                    max_coder = max_coder.max(dict as u64);
                     kind = ScannedCoder::Lzma2 { dict };
                 }
             }
@@ -513,6 +599,7 @@ fn streams_info_declared(s: &mut Scan) -> Option<StreamsDecl> {
         blocks.push(BlockDecl {
             dict_size,
             ppmd_mem,
+            max_coder,
             packed,
             coder_count: num_coders,
             first_coder,
@@ -648,6 +735,87 @@ const GAP_SENTINEL: &str = "outside the fetched tail";
 /// place it directly before the end header, so a normal trailing fetch
 /// covers it); an AES-encrypted header reports [`ProbeError::EncryptedHeader`].
 pub fn sevenz_tail_names(head: &[u8], tail: &[u8]) -> Result<Vec<SevenzEntryInfo>, ProbeError> {
+    let (archive, _) = sevenz_tail_archive(head, tail)?;
+    let entries: Vec<SevenzEntryInfo> = archive
+        .files
+        .iter()
+        .map(|e| SevenzEntryInfo {
+            name: e.name.clone(),
+            size: e.size,
+            has_stream: e.has_stream,
+        })
+        .collect();
+    if entries.is_empty() {
+        return Err(ProbeError::NoEntries);
+    }
+    Ok(entries)
+}
+
+/// One coder on a 7z block's chain, as the end header declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SevenzCoderInfo {
+    /// The 7z method id bytes (`0x21` = LZMA2, `03 01 01` = LZMA, ...).
+    pub id: Vec<u8>,
+    /// sevenz-rust2's name for the id, or `None` when it is one the
+    /// library does not know (and so one the extractor cannot decode).
+    pub name: Option<&'static str>,
+}
+
+/// One block (7z "folder") of the archive: its coder chain and sizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SevenzBlockInfo {
+    /// Coders in declaration order; more than one is a chain (a BCJ or
+    /// Delta filter ahead of LZMA2, or AES wrapped around anything).
+    pub coders: Vec<SevenzCoderInfo>,
+    /// Container bytes this block's pack streams occupy.
+    pub packed: u64,
+    /// Bytes the block decodes to.
+    pub unpacked: u64,
+}
+
+/// The archive's block map, read from the same end header as
+/// [`sevenz_tail_names`]: total container size plus one entry per block.
+/// This is the census reader for "which compression method do posted 7z
+/// sets actually use" - the extractor's own parse, not a re-implementation.
+pub fn sevenz_tail_blocks(
+    head: &[u8],
+    tail: &[u8],
+) -> Result<(u64, Vec<SevenzBlockInfo>), ProbeError> {
+    let (archive, total) = sevenz_tail_archive(head, tail)?;
+    let pack_sizes = archive.pack_sizes();
+    let firsts = archive.stream_map.block_first_pack_stream_index();
+    let blocks = archive
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let lo = firsts.get(i).copied().unwrap_or(0);
+            let hi = firsts.get(i + 1).copied().unwrap_or(pack_sizes.len());
+            SevenzBlockInfo {
+                coders: b
+                    .coders
+                    .iter()
+                    .map(|c| SevenzCoderInfo {
+                        id: c.encoder_method_id().to_vec(),
+                        name: sevenz_rust2::EncoderMethod::by_id(c.encoder_method_id())
+                            .map(|m| m.name()),
+                    })
+                    .collect(),
+                packed: pack_sizes.get(lo..hi).map(|s| s.iter().sum()).unwrap_or(0),
+                unpacked: b.get_unpack_size(),
+            }
+        })
+        .collect();
+    Ok((total, blocks))
+}
+
+/// Shared parse behind the two tail probes: verify the window, anchor
+/// the sparse view, and hand back sevenz-rust2's archive with the total
+/// container size.
+fn sevenz_tail_archive(
+    head: &[u8],
+    tail: &[u8],
+) -> Result<(sevenz_rust2::Archive, u64), ProbeError> {
     let start = sevenz_start(head).ok_or(ProbeError::BadStart)?;
     let window = locate_end_header(&start, tail)?;
     // Decompression-bomb gate: a packed header's pack stream sits in
@@ -685,19 +853,7 @@ pub fn sevenz_tail_names(head: &[u8], tail: &[u8]) -> Result<Vec<SevenzEntryInfo
             e if e.to_string().contains(GAP_SENTINEL) => ProbeError::HeaderUnreachable,
             e => ProbeError::Parse(e.to_string()),
         })?;
-    let entries: Vec<SevenzEntryInfo> = archive
-        .files
-        .iter()
-        .map(|e| SevenzEntryInfo {
-            name: e.name.clone(),
-            size: e.size,
-            has_stream: e.has_stream,
-        })
-        .collect();
-    if entries.is_empty() {
-        return Err(ProbeError::NoEntries);
-    }
-    Ok(entries)
+    Ok((archive, total))
 }
 
 /// The one inner filename worth applying: largest real entry, sanitized.
@@ -891,16 +1047,68 @@ pub fn sevenz_needs_password(path: &std::path::Path) -> bool {
     )
 }
 
+/// Does this 7-Zip container carry ANY encrypted coder - header or
+/// content - as read straight off the parsed metadata, with nothing
+/// decoded?
+///
+/// A 7z block lists the coders its data passes through, and AES-256-SHA256
+/// is method id `06F10701`; a container none of whose blocks names that
+/// coder cannot be encrypted, and proving it costs one end-header parse.
+/// The point is what the caller can then SKIP: the daemon's 7z password
+/// lane settles "no key needed" by opening the container and decoding its
+/// first entry to the checksum (bounded at 64 MiB), which on a plain
+/// archive is a full LZMA decode whose only finding is that there was
+/// nothing to decrypt - and the real extraction decodes those same bytes
+/// again moments later.
+///
+/// NOT interchangeable with [`sevenz_needs_password`], and this is the
+/// whole reason the decode probe existed. That one keys on
+/// `Error::PasswordRequired` / `MaybeBadPassword` from `Archive::read`,
+/// so it answers only for HEADER-encrypted (`-mhe`) archives: a
+/// data-encrypted container written with plaintext headers parses
+/// cleanly with no password at all and comes back false there, while
+/// its blocks plainly name the AES coder and are read as encrypted
+/// here.
+///
+/// Fails CLOSED, unlike its neighbour: true is "encrypted, or this is
+/// not a container we can prove otherwise about", so every unreadable,
+/// refused or header-encrypted shape answers true and the caller's
+/// existing path runs unchanged. Only a clean parse showing no AES
+/// coder anywhere answers false, and only that answer is load-bearing.
+///
+/// Bomb-gated like [`sevenz_needs_password`]: [`sevenz_disk_header_bomb`]
+/// runs through the same reader before `Archive::read` is allowed to
+/// decode a packed end header, and a refusal is one of the true
+/// answers. Reader-generic because a split `.7z.NNN` set is judged
+/// where it lies, through the caller's joining reader. Leaves the
+/// cursor wherever the reads ended.
+pub fn sevenz_is_encrypted(f: &mut (impl Read + Seek)) -> bool {
+    if f.seek(io::SeekFrom::Start(0)).is_err() {
+        return true;
+    }
+    if sevenz_disk_header_bomb(f) || f.seek(io::SeekFrom::Start(0)).is_err() {
+        return true;
+    }
+    let Ok(archive) = sevenz_rust2::Archive::read(f, &sevenz_rust2::Password::default()) else {
+        return true; // header-encrypted, malformed, or otherwise unproven
+    };
+    archive.blocks.iter().any(|b| {
+        b.coders
+            .iter()
+            .any(|c| c.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256)
+    })
+}
+
 /// The Read+Seek half of the bomb gate: read the declared end-header
 /// geometry out of `f` and answer whether the caller must refuse the
 /// container before the library allocates on the declaration's say-so.
 /// Shared by every entry point that hands sevenz-rust2 a whole
-/// container: [`sevenz_needs_password`] here, the chase worker's
-/// blocking set view (`extract::sevenz`), and the daemon's disk-side
-/// 7z probes and extractor - which is why it is `pub`. True means
-/// refuse: the start header declares an end header past
-/// [`SEVENZ_END_MAX`] (which `Archive::read` buffers whole), or the
-/// window is a `kEncodedHeader` whose declared decode cost
+/// container: [`sevenz_needs_password`] and [`sevenz_is_encrypted`]
+/// here, the chase worker's blocking set view (`extract::sevenz`), and
+/// the daemon's disk-side 7z probes and extractor - which is why it is
+/// `pub`. True means refuse: the start header declares an end header
+/// past [`SEVENZ_END_MAX`] (which `Archive::read` buffers whole), or
+/// the window is a `kEncodedHeader` whose declared decode cost
 /// [`encoded_header_bomb`] rejects, or the start header is the zeroed
 /// shape that would send `Archive::read` into its end-header recovery
 /// scan (see the body). False means the geometry gave no reason to
@@ -1017,8 +1225,9 @@ fn header_content_decl(header: &[u8]) -> Option<StreamsDecl> {
 
 /// The CONTENT half of the declared-size verdict: true when any block
 /// declares decoder memory (LZMA dictionaries plus PPMd model sizes)
-/// past [`SEVENZ_CONTENT_COST_FLOOR`] that its own packed bytes do not
-/// justify.
+/// past what [`SEVENZ_CONTENT_COST_FLOOR`] and
+/// [`SEVENZ_CONTENT_FILTER_ALLOWANCE`] pass for free, and past what its
+/// own packed bytes justify.
 ///
 /// The asymmetry this keys on: a bomb is a tiny posted file whose
 /// declarations buy a huge allocation, while a real archive's memory
@@ -1027,15 +1236,26 @@ fn header_content_decl(header: &[u8]) -> Option<StreamsDecl> {
 /// the window is allocated before a single output byte could call the
 /// bluff. Packed bytes can: the pack region must actually fit inside
 /// the file, so declarations past the floor are held to the packed
-/// bytes genuinely present (rounded up to the next power of two for
-/// slack). A 384 MiB dictionary then requires posting hundreds of MB
-/// of real pack data - at which point it is just a big archive, which
-/// passes on its own weight. What this refuses beyond bombs: an
-/// archive whose USER-chosen dictionary exceeds both 64 MiB and
-/// anything its packed size justifies (a past-Ultra dictionary on
-/// highly compressible data). That corner is accepted: the refusal is
-/// a named job failure, not a crash, and every preset-made archive
-/// sits under the floor.
+/// bytes genuinely present, rounded up to the next power of two and
+/// then multiplied by [`SEVENZ_CONTENT_PACK_SLACK`] - which is where
+/// the compression ratio the writer achieved is paid for, since the
+/// dictionary is sized to the unpacked stream and the pack bytes are
+/// what is left after compressing it. A 384 MiB dictionary then
+/// requires posting tens of MB of real pack data - at which point it
+/// is just a big archive, which passes on its own weight. What this
+/// refuses beyond bombs: an archive whose dictionary exceeds 64 MiB,
+/// exceeds eight times its own packed bytes, AND was sized to the full
+/// unpacked stream rather than capped by a `-md` setting - i.e. a
+/// past-Ultra dictionary on data that compressed better than 4:1.
+/// That corner is accepted: the refusal is a named job failure, not a
+/// crash.
+///
+/// The free pass is in two parts because a block is not always one
+/// coder. No single coder window may exceed the floor - that is the
+/// part a bomb cannot get around, and for a one-coder block it is the
+/// whole rule, unchanged. On top of it a chain may sum to
+/// [`SEVENZ_CONTENT_FILTER_ALLOWANCE`] more, which buys the auxiliary
+/// coders of a BCJ2 chain and nothing on the scale of a bomb.
 fn content_declared_bomb(decl: &StreamsDecl, file_len: u64) -> bool {
     let total_pack = decl
         .pack_sizes
@@ -1057,10 +1277,15 @@ fn content_declared_bomb(decl: &StreamsDecl, file_len: u64) -> bool {
             .fold(0u64, |a, &s| a.saturating_add(s));
         next_pack = next_pack.saturating_add(b.packed as usize);
         let cost = b.dict_size.saturating_add(b.ppmd_mem);
-        if cost <= SEVENZ_CONTENT_COST_FLOOR {
+        let free = SEVENZ_CONTENT_COST_FLOOR.saturating_add(SEVENZ_CONTENT_FILTER_ALLOWANCE);
+        if b.max_coder <= SEVENZ_CONTENT_COST_FLOOR && cost <= free {
             continue;
         }
-        if !pack_region_real || cost > pack.checked_next_power_of_two().unwrap_or(u64::MAX) {
+        let allowed = pack
+            .checked_next_power_of_two()
+            .unwrap_or(u64::MAX)
+            .saturating_mul(SEVENZ_CONTENT_PACK_SLACK);
+        if !pack_region_real || cost > allowed {
             return true;
         }
     }
@@ -1599,6 +1824,42 @@ mod tests {
         content_header_full(props, declared_pack, declared_unpack, &[], &[])
     }
 
+    /// [`content_header`] with a CHAIN of LZMA2 coders in one block -
+    /// the shape a filter chain has, and the shape the per-block floor
+    /// was never calibrated for. Each coder takes one stream in and
+    /// puts one out, so the folder carries `props.len() - 1` bind pairs
+    /// and exactly one pack stream, and `kCodersUnpackSize` carries one
+    /// size per coder.
+    fn content_header_chain(props: &[u8], declared_pack: u64, declared_unpack: u64) -> Vec<u8> {
+        let mut h = vec![K_HEADER, K_MAIN_STREAMS_INFO, K_PACK_INFO];
+        write_num(&mut h, 0); // pack_pos
+        write_num(&mut h, 1); // one pack stream
+        h.push(K_SIZE);
+        write_num(&mut h, declared_pack);
+        h.push(K_END);
+        h.extend_from_slice(&[K_UNPACK_INFO, K_FOLDER]);
+        write_num(&mut h, 1); // one block
+        h.push(0); // stored inline, not external
+        write_num(&mut h, props.len() as u64);
+        for &p in props {
+            h.extend_from_slice(&[0x21, 0x21]); // 1-byte id + props attr; LZMA2
+            write_num(&mut h, 1); // props length
+            h.push(p);
+        }
+        for i in 1..props.len() as u64 {
+            write_num(&mut h, i); // in index
+            write_num(&mut h, i - 1); // out index
+        }
+        h.push(K_CODERS_UNPACK_SIZE);
+        for _ in props {
+            write_num(&mut h, declared_unpack);
+        }
+        h.push(K_END); // unpack info
+        h.push(K_END); // streams info
+        h.push(K_END); // header
+        h
+    }
+
     /// Seal pack bytes + a stored end header into an on-disk container.
     fn seal_disk(pack: &[u8], header: &[u8]) -> Vec<u8> {
         let mut f = Vec::new();
@@ -1741,6 +2002,122 @@ mod tests {
         let file = seal_disk(&[0xAB; 16], &content_header(28, 16, 100));
         let mut f = std::io::Cursor::new(file);
         assert_eq!(sevenz_disk_declared_bomb(&mut f), None);
+    }
+
+    #[test]
+    fn stock_bcj2_ultra_archive_of_an_executable_extracts() {
+        // 7-Zip picks BCJ2 automatically for executable content at -mx7
+        // and above, and BCJ2 is FOUR coders in ONE block. Stock
+        // output, no crafted bytes - 7-Zip 26.02 on macOS:
+        //
+        //   head -c 4096 <any x86 binary> > f.exe
+        //   head -c 67104768 /dev/zero >> f.exe
+        //   7zz a -t7z -mx9 -md=64m -mf=BCJ2 bcj2-ultra-exe.7z f.exe
+        //
+        // (-mf=BCJ2 forces on an arm64 Mac what content analysis picks
+        // by itself for a real PE; `7zz l -slt` then says `BCJ2
+        // LZMA2:26 LZMA:20:lc0:lp2 LZMA:20:lc0:lp2`, i.e. 64 + 1 + 1
+        // MiB out of 10,801 bytes on disk.) Summed against a floor
+        // calibrated for one dictionary, 66 MiB cleared 64 MiB by two,
+        // fell through to the packed-bytes rule and lost: TODO 268, and
+        // four of nine real self-extractors on a real box.
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sevenz");
+        let arc = std::fs::read(format!("{dir}/bcj2-ultra-exe.7z")).unwrap();
+        let mut f = std::io::Cursor::new(arc.clone());
+        assert_eq!(
+            sevenz_disk_declared_bomb(&mut f),
+            None,
+            "7-Zip's own Ultra preset on an executable must not be refused"
+        );
+        // And all the way through the library, which is the claim that
+        // matters: the gate is the only thing between a caller and this
+        // decode.
+        let mut r = sevenz_rust2::ArchiveReader::new(
+            std::io::Cursor::new(arc),
+            sevenz_rust2::Password::empty(),
+        )
+        .expect("stock 7-Zip output must parse");
+        let mut out = 0u64;
+        r.for_each_entries(|_, rd| {
+            out += std::io::copy(rd, &mut std::io::sink())?;
+            Ok(true)
+        })
+        .expect("stock 7-Zip output must extract");
+        assert_eq!(out, 64 << 20, "the whole payload must come back");
+    }
+
+    #[test]
+    fn a_filter_chain_gets_the_allowance_and_a_bomb_cannot_spend_it() {
+        // Same arithmetic as the fixture above, hand-built so the rule
+        // is stated rather than inferred: props 28 = 64 MiB, props 16 =
+        // 1 MiB. 64 + 1 + 1 out of 16 packed bytes passes.
+        let pass = seal_disk(&[0xAB; 16], &content_header_chain(&[28, 16, 16], 16, 100));
+        let mut f = std::io::Cursor::new(pass);
+        assert_eq!(sevenz_disk_declared_bomb(&mut f), None);
+        // Individually modest, JOINTLY large: four 64 MiB dictionaries
+        // in one block is 256 MiB a decode would hold at once, and 16
+        // packed bytes justify none of it. This is the side of the line
+        // the flat allowance is chosen for - it must still refuse.
+        let joint = seal_disk(
+            &[0xAB; 16],
+            &content_header_chain(&[28, 28, 28, 28], 16, 100),
+        );
+        let mut f = std::io::Cursor::new(joint);
+        assert_eq!(
+            sevenz_disk_declared_bomb(&mut f),
+            Some(SEVENZ_REFUSE_CONTENT),
+            "eight-figure decoder memory is not a filter chain"
+        );
+        // And the allowance is not spendable on ONE oversized window:
+        // props 29 = 96 MiB, past the floor by itself, paired with a
+        // second coder small enough to keep the sum modest.
+        let single = seal_disk(&[0xAB; 16], &content_header_chain(&[29, 16], 16, 100));
+        let mut f = std::io::Cursor::new(single);
+        assert_eq!(
+            sevenz_disk_declared_bomb(&mut f),
+            Some(SEVENZ_REFUSE_CONTENT),
+            "a second coder must not launder a past-floor dictionary"
+        );
+    }
+
+    #[test]
+    fn a_well_compressed_vendor_chain_passes_on_the_pack_slack() {
+        // TODO 269, measured on a Windows 11 box out of TODO 268's own
+        // verification run: Microsoft's Copilot/Edge update packages
+        // carve to a 7z whose single block is `BCJ2 LZMA:27 LZMA:22
+        // LZMA:22` - 128 + 4 + 4 = 136 MiB declared against 43,902,179
+        // packed bytes, which round up to only 64 MiB. Four of them on
+        // one box extracted ZERO files. The main coder alone is 128
+        // MiB, so no floor can reach this; the ratio is what was wrong,
+        // because a dictionary is sized to the UNPACKED stream and this
+        // content compresses 3.6:1.
+        //
+        // Synthetic rather than the real 44 MB archive, but the same
+        // arithmetic: LZMA2 props 30 = 128 MiB, props 20 = 4 MiB.
+        const PACK: usize = 43_902_179;
+        let pack = vec![0u8; PACK];
+        let hdr = content_header_chain(&[30, 20, 20], PACK as u64, 157_716_330);
+        let file = seal_disk(&pack, &hdr);
+        let mut f = std::io::Cursor::new(file);
+        assert_eq!(
+            sevenz_disk_declared_bomb(&mut f),
+            None,
+            "a vendor packer's 136 MiB window over 44 MB of real pack bytes must pass"
+        );
+        // And the slack is bounded, which is the whole security claim:
+        // npot(43,902,179) is 64 MiB, so SEVENZ_CONTENT_PACK_SLACK
+        // allows 256 MiB and no more. Props 33 = 384 MiB, and posting
+        // 44 MB of genuine pack bytes still does not buy it.
+        let over = seal_disk(
+            &pack,
+            &content_header_chain(&[33, 20, 20], PACK as u64, 157_716_330),
+        );
+        let mut f = std::io::Cursor::new(over);
+        assert_eq!(
+            sevenz_disk_declared_bomb(&mut f),
+            Some(SEVENZ_REFUSE_CONTENT),
+            "the slack is a bounded multiple, not an open door"
+        );
     }
 
     #[test]

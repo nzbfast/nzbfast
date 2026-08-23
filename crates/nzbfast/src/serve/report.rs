@@ -80,6 +80,54 @@ fn scrub(s: &str, home: Option<&str>) -> String {
     out
 }
 
+/// The layer token spelled out. Deliberately NOT the dashboard's
+/// sentences: those are UI copy in 27 languages, this is an English
+/// artefact for pasting, and the two drifting apart is harmless as long
+/// as the token itself is printed beside it.
+fn layer_said(layer: &str) -> &'static str {
+    match layer {
+        "limit" => "held at the configured speed limit",
+        "line" => "running at line speed",
+        "disk" => "storage is not keeping up",
+        "cpu" => "at the CPU limit",
+        "client" => "held up inside nzbfast (decode, verify or disk writes)",
+        "provider" => "the providers are the limit",
+        "missing" => "much of the post is not there, so requests come back empty",
+        _ => "no verdict yet",
+    }
+}
+
+/// TODO 207: the same section for a job that is no longer on the wire,
+/// off the record instead of off the core. No receipts - the samples
+/// they came from are a process-global ring that means nothing after a
+/// restart, which is exactly why the VERDICT is persisted and they are
+/// not - so this prints the conclusion and how much of the run it
+/// covers, and claims nothing else.
+fn report_saved_whyslow(v: &WhyVerdict) -> String {
+    let mut o = String::from("\n== why it was slow ==\n");
+    line(
+        &mut o,
+        "verdict",
+        match v.detail.is_empty() {
+            true => format!("{} [{}]", layer_said(&v.layer), v.layer),
+            false => format!("{} [{}: {}]", layer_said(&v.layer), v.layer, v.detail),
+        },
+    );
+    // Longest-held, so the span is the claim's weight and the run
+    // length is what stops it reading as the whole story.
+    line(
+        &mut o,
+        "held for",
+        format!("{}s of {}s on the wire", v.held_secs, v.total_secs),
+    );
+    line(
+        &mut o,
+        "measured",
+        "during the download; the evidence behind it is not kept past the run",
+    );
+    o
+}
+
 /// A `key: value` line, skipped entirely when the value is empty - an
 /// absent fact should read as absent, never as a field set to nothing.
 fn line(out: &mut String, k: &str, v: impl AsRef<str>) {
@@ -108,14 +156,23 @@ impl Daemon {
         let job = self
             .queue_job(nzo_id)
             .or_else(|| self.history_job(nzo_id))?;
-        Some(self.render_report(&job))
+        Some(self.render_report(nzo_id, &job))
     }
 
-    fn render_report(&self, job: &Arc<Mutex<Job>>) -> String {
+    fn render_report(&self, nzo_id: &str, job: &Arc<Mutex<Job>>) -> String {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .ok();
         let mut o = String::new();
+        // Composed BEFORE the job is locked: it reads the whyslow core
+        // and the bench spool, and "locking a Job while holding" another
+        // container's lock is the shape this tree deadlocks in. Cheap
+        // either way - it is a string by the time the record is open.
+        // ...and the persisted one it falls back to, read under its own
+        // brief hold of the record for the same reason: nothing else is
+        // locked here yet.
+        let saved = job.lock_ok().whyslow.clone();
+        let slow = self.report_whyslow(nzo_id, saved);
         let j = job.lock_ok();
 
         o.push_str("nzbfast download report\n");
@@ -198,6 +255,8 @@ impl Daemon {
             );
         }
 
+        o.push_str(&slow);
+
         if !j.fail_message.is_empty() {
             o.push_str("\n== why it failed ==\n");
             o.push_str(&j.fail_message);
@@ -268,6 +327,134 @@ impl Daemon {
         }
         drop(j);
         scrub(&o, home.as_deref())
+    }
+
+    /// The live shortfall verdict for this job, with the numbers behind
+    /// it. Empty unless the whyslow core is currently judging THIS job -
+    /// the diagnosis is live-only and belongs to whichever download owns
+    /// the wire, so a queued job, a finished one, and anything running
+    /// while another job is downloading all get nothing here rather than
+    /// somebody else's verdict.
+    ///
+    /// Read out of `payload()`'s JSON rather than off the core directly.
+    /// That composition is where the bench corroboration and the
+    /// measured-vs-typed anchor are resolved, and a second path into the
+    /// core would be a second place for those rules to drift; the report
+    /// is a rare user-initiated action, so the Value costs nothing that
+    /// matters. Hostnames appear, for the same reason they do in
+    /// `report_servers` below: "which provider is the limit" is the
+    /// question being asked.
+    fn report_whyslow(&self, nzo_id: &str, saved: Option<WhyVerdict>) -> String {
+        let p = self.whyslow.payload(self);
+        if p.get("nzo_id").and_then(|v| v.as_str()) != Some(nzo_id) {
+            // TODO 207: not on the wire, so no receipts - but the
+            // record may still carry the verdict its network leg
+            // earned, which is the whole reason this section existed
+            // only in the window where the user could read it on
+            // screen anyway. Absent on a job nothing judged, and the
+            // section is then absent too rather than saying "unknown".
+            return match saved {
+                Some(v) => report_saved_whyslow(&v),
+                None => String::new(),
+            };
+        }
+        let f = |k: &str| p.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let layer = s("layer");
+        // The token, spelled out. Deliberately NOT the dashboard's
+        // sentences: those are UI copy in 27 languages, this is an
+        // English artefact for pasting, and the two drifting apart is
+        // harmless as long as the token itself is printed beside it.
+        let said = layer_said(layer);
+        let mut o = String::from("\n== why it was slow ==\n");
+        let detail = s("detail");
+        line(
+            &mut o,
+            "verdict",
+            match detail.is_empty() {
+                true => format!("{said} [{layer}]"),
+                false => format!("{said} [{layer}: {detail}]"),
+            },
+        );
+        line(&mut o, "held for", format!("{:.0}s", f("secs")));
+        let mbs = |k: &str| match f(k) > 0.0 {
+            true => format!("{:.1} MB/s", f(k) / 1e6),
+            false => String::new(),
+        };
+        line(&mut o, "right now", mbs("achieved_bps"));
+        line(&mut o, "providers delivered", mbs("envelope_bps"));
+        if f("hardware_bps") > 0.0 {
+            line(
+                &mut o,
+                "line ceiling",
+                format!("{} ({})", mbs("hardware_bps"), s("hardware_src")),
+            );
+        }
+        line(
+            &mut o,
+            "waiting on decode or disk",
+            format!("{:.1}%", f("blocked_pct")),
+        );
+        line(&mut o, "cpu", format!("{:.1}%", f("cpu_pct")));
+        if f("storage_probe_ms") > 0.0 {
+            line(
+                &mut o,
+                "test write to the download folder",
+                format!("{:.2}s", f("storage_probe_ms") / 1000.0),
+            );
+        }
+        // The receipts behind a `missing` verdict, which is the one that
+        // invites the reader to abandon a download. Only when that is
+        // the verdict talking: the counters exist either way.
+        if layer == "missing" {
+            line(
+                &mut o,
+                "articles that came back empty",
+                format!("{:.1}%", f("missing_pct")),
+            );
+            if f("missing_backbones") > 1.0 {
+                line(
+                    &mut o,
+                    "unrelated providers seeing the same gaps",
+                    format!("{:.0}", f("missing_backbones")),
+                );
+            }
+            if f("post_unix") > 0.0 {
+                line(&mut o, "posted", secs(Some(f("post_unix") as i64)));
+            }
+        }
+        // Per-connection rate is the column that makes shaping visible
+        // without an argument: one host at 2 MB/s per connection beside
+        // another at 40 is the whole finding.
+        for srv in p
+            .get("servers")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let g = |k: &str| srv.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let host = srv.get("host").and_then(|v| v.as_str()).unwrap_or("");
+            if host.is_empty() || (g("budget") == 0.0 && g("conns") == 0.0) {
+                continue;
+            }
+            let mut bits = format!(
+                "{:.0}/{:.0} connections · {:.2} MB/s per connection",
+                g("conns"),
+                g("budget"),
+                g("per_conn_bps") / 1e6
+            );
+            if srv.get("refused").and_then(|v| v.as_bool()) == Some(true) {
+                bits.push_str(" · refused");
+            }
+            if g("missing_pct") >= 0.5 {
+                bits.push_str(&format!(" · {:.1}% missing", g("missing_pct")));
+            }
+            if g("reconnects") > 0.0 {
+                bits.push_str(&format!(" · {:.0} reconnects", g("reconnects")));
+            }
+            line(&mut o, host, bits);
+        }
+        o
     }
 
     /// The providers, as they stand now. A finished job's own pool is
@@ -472,6 +659,42 @@ mod tests {
         // A short or empty HOME must not turn every "/" into a tilde.
         assert_eq!(scrub("/a/b", Some("/a")), "/a/b");
         assert_eq!(scrub("/a/b", Some("")), "/a/b");
+    }
+
+    /// The verdict section must never print somebody else's diagnosis.
+    /// The core judges exactly one job - whichever owns the wire - so a
+    /// report for any OTHER job, and every report at all while nothing
+    /// is downloading, has to come back with nothing here rather than
+    /// with the live verdict filed under the wrong name.
+    #[test]
+    fn the_verdict_section_is_silent_unless_the_core_is_judging_this_job() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-rep-why-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let d = super::super::testutil::test_daemon(&dir);
+        // A default core owns no job at all, which is the idle daemon,
+        // and the record carries no persisted verdict either.
+        assert_eq!(d.report_whyslow("anything", None), "");
+        // TODO 207: ...but a record that DOES carry one gets its
+        // section back from the record, with no receipts attached and
+        // both spans printed, however long ago the run was.
+        let saved = WhyVerdict {
+            layer: "provider".into(),
+            detail: "news.example.invalid".into(),
+            held_secs: 640,
+            total_secs: 900,
+        };
+        let out = d.report_whyslow("anything", Some(saved));
+        assert!(out.contains("== why it was slow =="), "{out}");
+        assert!(
+            out.contains("[provider: news.example.invalid]"),
+            "the token and its detail: {out}"
+        );
+        assert!(out.contains("640s of 900s"), "{out}");
+        assert!(
+            !out.contains("right now"),
+            "a finished job has no live receipts to print: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An indexer may attach `<meta>` under any key it likes, and this

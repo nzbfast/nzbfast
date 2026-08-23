@@ -9,7 +9,9 @@ use super::*;
 // The explicit #[path] is load-bearing: this module is itself reached by
 // `#[path = "daemon_tests.rs"]` from daemon.rs, and that makes rustc
 // resolve ITS children against serve/ rather than serve/daemon_tests/ -
-// so a bare `mod dupe_tests;` looks for serve/dupe_tests.rs and fails.
+// so a bare `mod dupe_tests;` looks for serve/dupe_tests.rs and fails
+// (ref-gate: that path is the file rustc would go looking for, and its
+// absence is the point of the attribute).
 // The subdirectory is also what size-gate.py's CFG_TEST_MOD resolver
 // checks (`<base>/<modname>.rs`), so the moved tests keep being read as
 // test code rather than gated at the production ceiling.
@@ -18,6 +20,11 @@ mod dupe_tests;
 
 #[path = "daemon_tests/notice_tests.rs"]
 mod notice_tests;
+
+// TODO 16g / A12: enqueue's durability verdict and orphaned-spool
+// recovery, same ceiling and #[path] requirement.
+#[path = "daemon_tests/recover_tests.rs"]
+mod recover_tests;
 
 // The read seam's stale-statement handling, out here for the same
 // ceiling and with the same #[path] requirement.
@@ -29,6 +36,11 @@ mod index_read_tests;
 // carrying the same #[path] requirement.
 #[path = "daemon_tests/park_gen_tests.rs"]
 mod park_gen_tests;
+
+// TODO 205's disk-unpack counters on the queue row, out for the ceiling
+// and carrying the same #[path] requirement.
+#[path = "daemon_tests/unpack_progress_tests.rs"]
+mod unpack_progress_tests;
 
 // B5's queue window, out for the ceiling and carrying the same
 // #[path] requirement.
@@ -46,6 +58,11 @@ mod instant_tests;
 #[cfg(feature = "indexer")]
 #[path = "daemon_tests/handback_tests.rs"]
 mod handback_tests;
+
+// TODO 218: category auto-assignment from the NZB meta/groups, plus
+// the §129 2b cat_meta test, out for the ceiling.
+#[path = "daemon_tests/infer_cat_tests.rs"]
+mod infer_cat_tests;
 
 // A4's index_stats TTL cache, same ceiling and #[path] requirement.
 #[cfg(feature = "indexer")]
@@ -328,6 +345,7 @@ fn predb_feed_needs_both_switches() {
     });
 }
 
+#[cfg(feature = "indexer")]
 #[test]
 fn queue_has_runnable_wants_queued_and_unpaused() {
     with_daemon("runnable", |d| {
@@ -488,6 +506,7 @@ fn an_add_is_on_the_event_ring_before_the_job_can_be_picked() {
             "test",
             false,
         )
+        .map(|e| e.nzo_id)
         .expect("enqueue");
         assert!(picker.join().expect("picker thread"), "nothing was picked");
 
@@ -515,203 +534,6 @@ fn an_add_is_on_the_event_ring_before_the_job_can_be_picked() {
             ring[added].1 < ring[started].1,
             "seq out of order: {ring:?}"
         );
-    });
-}
-
-/// §129 2b: real per-category behavior - the category's default
-/// priority fills a default add (explicit wins), its dir renames the
-/// subfolder (contained, sanitized), and script resolution runs
-/// job-override, then category, then global.
-#[test]
-fn cat_meta_priority_dir_and_script_apply() {
-    with_daemon("catmeta", |d| {
-        use super::CatMeta;
-        d.cat_meta.lock_ok().insert(
-            "tv".into(),
-            CatMeta {
-                dir: "series/current".into(),
-                priority: Some(1),
-                script: "/scripts/tv.py".into(),
-                nzb_name: None,
-            },
-        );
-        // dir: the category's subfolder is renamed, nested, contained.
-        let base = d.base_out_dir("tv", "job");
-        assert_eq!(base, d.out_dir().join("series").join("current").join("job"));
-        // A traversal in the meta dir cannot escape the root.
-        d.cat_meta.lock_ok().get_mut("tv").unwrap().dir = "../../evil".into();
-        assert_eq!(
-            d.base_out_dir("tv", "job"),
-            d.out_dir().join("evil").join("job")
-        );
-        d.cat_meta.lock_ok().get_mut("tv").unwrap().dir = "series/current".into();
-        // No meta = the old shape, untouched.
-        assert_eq!(
-            d.base_out_dir("movies", "job"),
-            d.out_dir().join("movies").join("job")
-        );
-        assert_eq!(d.base_out_dir("", "job"), d.out_dir().join("job"));
-
-        // priority: fills the default, loses to an explicit one.
-        let nzb = "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\
-                   <file poster=\"x\" date=\"0\" subject=\"&quot;a.bin&quot; yEnc (1/1)\">\
-                   <groups><group>g</group></groups><segments>\
-                   <segment bytes=\"1000\" number=\"1\">cm1@x</segment>\
-                   </segments></file></nzb>";
-        let id = d
-            .enqueue(
-                nzb.as_bytes(),
-                "Alpha.2026.nzb",
-                "tv",
-                -100,
-                None,
-                None,
-                "test",
-                false,
-            )
-            .unwrap();
-        let nzb2 = nzb.replace("cm1@x", "cm2@x");
-        let id2 = d
-            .enqueue(
-                nzb2.as_bytes(),
-                "Beta.2026.nzb",
-                "tv",
-                -1,
-                None,
-                None,
-                "test",
-                false,
-            )
-            .unwrap();
-        {
-            let q = d.queue.lock_ok();
-            let prio = |id: &str| {
-                q.iter()
-                    .find(|j| j.lock_ok().nzo_id == *id)
-                    .map(|j| j.lock_ok().priority)
-                    .unwrap()
-            };
-            assert_eq!(prio(&id), 1, "category default fills a default add");
-            assert_eq!(prio(&id2), -1, "an explicit priority wins");
-        }
-
-        // script resolution order.
-        let job = d
-            .queue
-            .lock_ok()
-            .iter()
-            .find(|j| j.lock_ok().nzo_id == id)
-            .cloned()
-            .unwrap();
-        let one = |p: &str| vec![std::path::PathBuf::from(p)];
-        assert_eq!(
-            d.resolve_scripts(&job),
-            one("/scripts/tv.py"),
-            "category script beats the (unset) global"
-        );
-        *d.scripts.lock_ok() = one("/scripts/global.py");
-        job.lock_ok().category = "movies".into();
-        assert_eq!(
-            d.resolve_scripts(&job),
-            one("/scripts/global.py"),
-            "no category script falls back to the global one"
-        );
-        job.lock_ok().script_override = "/scripts/mine.py".into();
-        assert_eq!(
-            d.resolve_scripts(&job),
-            one("/scripts/mine.py"),
-            "the job's own script= wins"
-        );
-        // §192: a rung is a CHAIN, and the first rung with anything
-        // wins WHOLE - the category's chain does not append to the
-        // global one.
-        job.lock_ok().script_override = "/scripts/a.py,/scripts/b.py".into();
-        assert_eq!(
-            d.resolve_scripts(&job),
-            vec![
-                std::path::PathBuf::from("/scripts/a.py"),
-                std::path::PathBuf::from("/scripts/b.py"),
-            ],
-            "the override chain runs in the order it was written"
-        );
-        job.lock_ok().script_override = "None".into();
-        assert!(
-            d.resolve_scripts(&job).is_empty(),
-            "script=None means none at all"
-        );
-
-        // record_add_params: pp + script land on the job. A bare name
-        // is what a SAB client sends back from mode=get_scripts, so it
-        // resolves through known_scripts to the real path - stored
-        // verbatim it became a cwd-relative path that ran nothing.
-        // (§129 4a: record_add_params FILLS, never clobbers - at add
-        // time these fields are empty unless the pre-queue hook set
-        // them, and the hook outranks the request. Clear the values the
-        // resolve_scripts cases above planted.)
-        {
-            let g = job_by(d, &id);
-            let mut g = g.lock_ok();
-            g.script_override = String::new();
-            g.sab_pp = None;
-        }
-        d.record_add_params(&id, Some("1"), Some("tv.py"), false);
-        {
-            let g = job_by(d, &id);
-            let g = g.lock_ok();
-            assert_eq!(g.sab_pp, Some(1));
-            assert_eq!(g.script_override, "/scripts/tv.py");
-        }
-        // ...and known_scripts is exactly what get_scripts offers:
-        // global + per-category, deduped by basename, global first.
-        let names: Vec<String> = d.known_scripts().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["global.py", "tv.py"]);
-        // An unknown name is a logged compatibility note, never a
-        // stored override - the category/global ladder stays in charge.
-        // (Also the fill-only rule doing its other job: refusing can
-        // never become a way to CLEAR an existing override.)
-        d.record_add_params(&id, None, Some("ghost.py"), false);
-        assert_eq!(job_by(d, &id).lock_ok().script_override, "/scripts/tv.py");
-        // §129 4a: fill-only in general - once set (at add time that
-        // means the pre-queue hook set it), the request's own script=
-        // does not displace it. The hook outranks the request, SAB
-        // pre-queue semantics.
-        d.record_add_params(&id, None, Some("/elsewhere/mine.py"), false);
-        assert_eq!(
-            job_by(d, &id).lock_ok().script_override,
-            "/scripts/tv.py",
-            "a planted override survives the request's script="
-        );
-        let clear = || job_by(d, &id).lock_ok().script_override = String::new();
-        // A path-bearing value is operator intent and stays as written.
-        clear();
-        d.record_add_params(&id, None, Some("/elsewhere/mine.py"), false);
-        assert_eq!(
-            job_by(d, &id).lock_ok().script_override,
-            "/elsewhere/mine.py"
-        );
-        // ...but ONLY for a full-key caller. `addfile`/`addurl` are on
-        // the add-only allowlist and `resolve_scripts` hands
-        // `script_override` straight to `Command::new` on the job tail,
-        // so accepting a path here let the NZB key - which ships to
-        // browser push extensions - choose which program the daemon
-        // runs. The previous override must survive untouched: refusing
-        // must not become a way to CLEAR someone else's setting.
-        d.record_add_params(&id, None, Some("/tmp/pwn.sh"), true);
-        assert_eq!(
-            job_by(d, &id).lock_ok().script_override,
-            "/elsewhere/mine.py",
-            "an add-only credential may not choose the program to run"
-        );
-        // A configured name is still fine on the add-only key: it can
-        // only select something the operator already installed.
-        clear();
-        d.record_add_params(&id, None, Some("tv.py"), true);
-        assert_eq!(job_by(d, &id).lock_ok().script_override, "/scripts/tv.py");
-        // SAB's own null still suppresses the whole ladder.
-        clear();
-        d.record_add_params(&id, None, Some("None"), false);
-        assert_eq!(job_by(d, &id).lock_ok().script_override, "None");
-        assert!(d.resolve_scripts(&job_by(d, &id)).is_empty());
     });
 }
 
@@ -838,6 +660,54 @@ fn cat_list_is_sorted_star_filtered_comma_joined() {
     });
 }
 
+/// TODO 46: a user category is a category an *arr may be configured
+/// against, so its slug joins the list clients are offered - while the
+/// `categories` setting's own round-trip value stays untouched, or the
+/// slug would be written back to settings.json as a filing category and
+/// outlive the user category it came from.
+#[test]
+fn client_cats_offers_user_category_slugs_without_touching_cat_list() {
+    with_daemon("clientcats", |d| {
+        {
+            let mut cats = d.cats.lock_ok();
+            cats.clear();
+            for c in ["tv", "*", "movies"] {
+                cats.insert(c.to_string());
+            }
+        }
+        assert_eq!(d.cat_list(), "movies, tv");
+        assert_eq!(
+            d.client_cats().into_iter().collect::<Vec<_>>(),
+            vec!["*", "movies", "tv"]
+        );
+
+        *d.custom_categories.write_ok() = vec![
+            nzbkit::categories::CustomCategory {
+                slug: "formula-1".into(),
+                name: "Formula 1".into(),
+                pattern: "formula.?1".into(),
+                not_match: String::new(),
+                base: nzbkit::categories::BaseBehavior::None,
+            },
+            // A slug already present as a filing category must not
+            // double up - the union is a set, not a concatenation.
+            nzbkit::categories::CustomCategory {
+                slug: "movies".into(),
+                name: "Movies".into(),
+                pattern: "x".into(),
+                not_match: String::new(),
+                base: nzbkit::categories::BaseBehavior::Movie,
+            },
+        ];
+        assert_eq!(
+            d.client_cats().into_iter().collect::<Vec<_>>(),
+            vec!["*", "formula-1", "movies", "tv"]
+        );
+        // The setting is unchanged, so nothing new can be written back.
+        assert_eq!(d.cat_list(), "movies, tv");
+    });
+}
+
 #[test]
 fn rename_style_mirrors_every_toggle() {
     with_daemon("style", |d| {
@@ -926,6 +796,7 @@ fn enabled_indexers_counts_only_enabled_and_drives_the_tri_state() {
     });
 }
 
+#[cfg(feature = "indexer")]
 #[test]
 fn scoreboard_reference_prefers_the_named_account_and_never_falls_through() {
     with_daemon("sbref", |d| {
@@ -977,6 +848,7 @@ fn scoreboard_reference_prefers_the_named_account_and_never_falls_through() {
 /// and empty must each be tellable apart - a card that only knows
 /// "string present" says "0 of 24 checks used" while every tick is
 /// refused.
+#[cfg(feature = "indexer")]
 #[test]
 fn corr_confirm_source_state_tells_the_four_states_apart() {
     with_daemon("ccfstate", |d| {
@@ -1863,6 +1735,7 @@ fn an_accepted_nzb_pairs_its_msgids_onto_scanned_rows() {
             "watch",
             false,
         )
+        .map(|e| e.nzo_id)
         .unwrap();
         // Only two of the second row's: under quorum, nothing recorded.
         d.enqueue(
@@ -1875,6 +1748,7 @@ fn an_accepted_nzb_pairs_its_msgids_onto_scanned_rows() {
             "watch",
             true,
         )
+        .map(|e| e.nzo_id)
         .unwrap();
         let (paired, sub) = d
             .with_index(|ix| {
@@ -2082,6 +1956,7 @@ fn a_never_queued_rejection_survives_a_kill_between_its_two_store_writes() {
                 "test",
                 false,
             )
+            .map(|e| e.nzo_id)
         };
         // The original, so the next add collides with it. A name with a
         // derivable identity (SxxEyy), or there is no dupe_key to match on.
@@ -2598,6 +2473,7 @@ fn an_enqueue_cannot_interleave_into_the_idle_scan_cas_window() {
                     "test",
                     false,
                 )
+                .map(|e| e.nzo_id)
                 .expect("enqueue");
                 let _ = tx.send(());
             })

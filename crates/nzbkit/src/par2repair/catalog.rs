@@ -344,6 +344,12 @@ impl PacketCatalog {
         }
         let bytes = std::fs::read(&self.files[i].path)?;
         self.bytes_scanned += bytes.len() as u64;
+        // Memory-floor gauge (instrument-first): this whole-file read is
+        // transient but real RSS while it lives, outside every budget
+        // tier - the suspected owner of the damaged-fixture floor. The
+        // release below pairs with the drop at the end of this scan.
+        crate::memgauge::add(crate::memgauge::Sub::RepairScan, bytes.len() as u64);
+        let _scan_gauge = ScanGaugeGuard(bytes.len() as u64);
         let parsed = &mut self.parsed;
         let mut occ: Vec<Occ> = Vec::new();
         par2::scan_packets(&bytes, |pkt| {
@@ -649,5 +655,15 @@ impl SetReplay {
             ids.iter()
                 .all(|fid| self.descs.contains_key(fid) && self.ifscs.contains_key(fid))
         })
+    }
+}
+
+/// RAII release for the scan's transient read gauge: the buffer's bytes
+/// leave RSS when `scan_file`'s `bytes` drops, on every path out.
+struct ScanGaugeGuard(u64);
+
+impl Drop for ScanGaugeGuard {
+    fn drop(&mut self) {
+        crate::memgauge::sub(crate::memgauge::Sub::RepairScan, self.0);
     }
 }

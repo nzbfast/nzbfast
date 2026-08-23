@@ -18,11 +18,29 @@
 
 use super::*;
 
+/// How long the blocking terminal seal waits for the queue lock, in
+/// 10 ms tries (sweep 8, L10). Two seconds: every possible holder is a
+/// short critical section on a thread that is not a shard, and there is
+/// no live run left for the wait to starve.
+pub(super) const SEAL_LOCK_TRIES: u32 = 200;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam (F-15): bitmask of shard ordinals whose OS thread is
+    /// to be refused, answering as the kernel does on resource
+    /// exhaustion - the failure `thread::Builder` returns and bare
+    /// `thread::spawn` turned into a panic. Thread-local because
+    /// `fetch_all_sharded` spawns from its caller's thread, so a test
+    /// denying its own shards cannot touch a parallel test's run.
+    pub(super) static SHARD_SPAWN_DENY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn seal_run_blocking(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
     reason: &str,
 ) -> usize {
+    let mut seal_waits = 0u32;
     if shared.workers_live.load(Ordering::Acquire) > 0
         || shared.pending.load(Ordering::Acquire) == 0
         || shared.aborted.load(Ordering::Acquire)
@@ -30,14 +48,49 @@ pub(super) fn seal_run_blocking(
     {
         return 0;
     }
-    let mut orphans: Vec<(Arc<str>, u32)> = match shared.queue.try_lock() {
-        Ok(mut q) => q.drain(..).map(|w| (w.id, w.ord)).collect(),
-        // The shards are joined, but a QueueControl holder is not a
-        // shard: the steer consumer can be inside `requeue` right now.
-        // Seal what IS reachable rather than panicking the process -
-        // the caller drops the outcome channel immediately after, which
-        // ends the run either way.
-        Err(_) => Vec::new(),
+    // The shards are joined, but a QueueControl holder is not a shard:
+    // the steer consumer can be inside `requeue` right now.
+    //
+    // Sweep 8, L10: one failed `try_lock` used to be read as an EMPTY
+    // queue. The caller drops the outcome channel on the next line, so
+    // every id still sitting in there got no terminal outcome at all -
+    // silently, and in violation of the one-outcome-per-id contract the
+    // run promises. It takes an OS/runtime resource failure plus a
+    // narrow lock window to reach, which is why it is a Low and not why
+    // it is acceptable. Every holder of this lock is a short critical
+    // section on another thread and no shard can take it any more, so
+    // waiting is bounded in practice as well as by the loop; the same
+    // try-and-sleep discipline `QueueControl::promote` uses, with a
+    // much longer bound because there is no live run left to starve.
+    let mut orphans: Vec<(Arc<str>, u32)> = loop {
+        match shared.queue.try_lock() {
+            Ok(mut q) => break q.drain(..).map(|w| (w.id, w.ord)).collect(),
+            Err(_) if seal_waits < SEAL_LOCK_TRIES => {
+                seal_waits += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Still held after the bound: say so ONCE and keep waiting
+            // (F-14). Giving up here used to `break Vec::new()`, which
+            // dropped every queued id's terminal outcome on the floor -
+            // the very defect L10 above was fixing, reached one bound
+            // later. The holder is a short critical section, so this
+            // wait is finite in practice; and it cannot be a
+            // `blocking_lock`, because a caller that ignored the
+            // spawn_blocking contract would then panic inside a runtime
+            // worker instead of merely stalling.
+            Err(_) => {
+                if seal_waits == SEAL_LOCK_TRIES {
+                    seal_waits += 1;
+                    warn!(
+                        target: "pool",
+                        "terminal seal still waiting for the queue lock after {}ms - \
+                         holding on so every queued article gets its outcome",
+                        SEAL_LOCK_TRIES * 10
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     };
     orphans.extend(shared.inflight.lock_ok().drain().map(|(id, e)| (id, e.ord)));
     orphans.extend(
@@ -73,10 +126,6 @@ pub(super) async fn park_or_quit(cfg: &PoolConfig, server: &ServerConfig, conn: 
     }
 }
 
-/// One spawned worker: the connect ramp, the session loop, and the run's
-/// terminal-state exit protocol. Every worker leaves through here, so the
-/// last one out is the one that seals the run (see [`seal_run`]).
-#[allow(clippy::too_many_arguments)]
 /// Hot-spare filler: keeps ONE authenticated connection parked for its
 /// server until the run ends, re-dialling whenever a worker claims it.
 /// Ends with the run (`finished`), on user abort, or on graceful drain -
@@ -123,6 +172,10 @@ pub(super) async fn spare_filler(shared: Arc<Shared>, server: ServerConfig, idx:
     }
 }
 
+/// One spawned worker: the connect ramp, the session loop, and the run's
+/// terminal-state exit protocol. Every worker leaves through here, so the
+/// last one out is the one that seals the run (see [`seal_run`]).
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn worker(
     server: &ServerConfig,
     cfg: &PoolConfig,
@@ -162,12 +215,31 @@ pub(super) async fn worker(
     // TODO 112: the live-target park comes BEFORE the warm claim - a
     // slot spawned above the target must hold nothing, and a warm
     // connection it claimed would idle out in its hands rather than
-    // serve an admitted worker. `admitted: false` means the run ended
-    // while parked; fall through so `life.retire()` still seals.
-    let admitted = match &cfg.live_target {
-        Some(t) => wait_for_slot(t, slot, &mut fin, &shared).await,
-        None => true,
+    // serve an admitted worker. A None admission under a live target
+    // means the run ended while parked; fall through so `life.retire()`
+    // still seals. The guard (F-22) is handed to `session_loop`, which
+    // holds it across sessions and drops it on every exit so a parked
+    // worker takes this one's place.
+    let admit = match &cfg.live_target {
+        Some(t) => wait_for_slot(t, ctx.idx, &mut fin, &shared).await,
+        None => None,
     };
+    let admitted = cfg.live_target.is_none() || admit.is_some();
+    // Cross-job hand-over (`handoff`): a connection slot on this host,
+    // taken BEFORE the warm claim because a parked connection is a
+    // connection. Blocks while the previous job's run still holds the
+    // host at its cap; its idle workers release as they drain. Held
+    // until this worker leaves, whichever way it leaves. A run without
+    // a lease - the CLI, every test that does not opt in - takes the
+    // old path verbatim.
+    let _permit = match &cfg.lease {
+        Some(l) if admitted => tokio::select! {
+            p = l.acquire() => Some(p),
+            _ = run_over(&mut fin, &shared) => None,
+        },
+        _ => None,
+    };
+    let admitted = admitted && (cfg.lease.is_none() || _permit.is_some());
     let warm_conn = match &cfg.warm {
         Some(w) if admitted => tokio::select! {
             c = w.take(server) => c,
@@ -198,6 +270,7 @@ pub(super) async fn worker(
             connects,
             reconnects,
             slot,
+            admit,
             warm_conn,
         )
         .await;

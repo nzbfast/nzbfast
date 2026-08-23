@@ -292,15 +292,20 @@ pub(crate) fn is_droppable_metadata(name: &str) -> bool {
 ///
 /// `est_missing` is EXTRAPOLATED (a sampled miss is weighted by the
 /// file's segments-per-probe, so one miss at 10% sampling counts as ten)
-/// and is what the report prints; `proven_missing` is the number of
-/// sampled payload articles that actually came back missing on every
-/// server. Only the latter may reach IMPOSSIBLE. That split is the same
-/// rule [`measured_verdict`] follows on the bytes side, and it is what
-/// keeps an edge-clustered loss - which the stratified sampler goes out
-/// of its way to find, spending 3 probes on the head and 2 on the tail -
-/// from being multiplied by the full weight and refusing a job with
-/// three dead articles as though it had thirty. At a 100% sample the two
-/// figures are equal and nothing changes.
+/// and is what the report prints. It is deliberately NOT allowed to
+/// condemn anything: 9d3498855 split a second `proven_missing` argument
+/// off it - the count of sampled payload articles that actually came
+/// back missing on every server - and let only that one reach
+/// IMPOSSIBLE. The argument is gone from this signature (lost in the
+/// merge 1b647cf40 on the same day the paragraph below took away this
+/// function's counted IMPOSSIBLE altogether), but the rule it enforced
+/// is still live one level up: [`measured_verdict`] follows the same
+/// rule on the bytes side. What it buys is that an edge-clustered loss -
+/// which the stratified sampler goes out of its way to find, spending 3
+/// probes on the head and 2 on the tail - is not multiplied by the full
+/// weight and used to refuse a job with three dead articles as though it
+/// had thirty. At a 100% sample the two figures are equal and nothing
+/// changes.
 ///
 /// What changed on 16 Aug is that the same honesty finally reached the
 /// route that actually fires. `recovery_unknown` was only ever half the
@@ -709,13 +714,14 @@ pub(crate) fn impossible_reason(
     }
 }
 
-/// The order [`block_size_probe`] offers servers to `fetch_block_size`:
-/// flatrate first, metered behind them.
+/// The order [`block_size_probe`] offers servers to
+/// `nzbkit::preflight::probe_recovery_set`: flatrate first, metered
+/// behind them.
 ///
 /// The probe is nzbfast's OWN curiosity, which is exactly what
 /// `ServerConfig::may_spend_on_measurement` governs - and every other
 /// curiosity caller in the tree honours it, while this one dialled the
-/// list in config order. `fetch_block_size` walks that order and stops
+/// list in config order. `probe_recovery_set` walks that order and stops
 /// at the first server that answers, so a block account listed ahead of
 /// a flatrate one was billed for bytes the flatrate server would have
 /// supplied identically.
@@ -825,45 +831,6 @@ async fn block_size_probe(
     (None, tried)
 }
 
-/// Does this NZB carry more than one PAR2 recovery SET?
-///
-/// The question the declared-count cap has to ask before it may trust a
-/// volume's name. `block_size_probe` picks the cheapest Main or volume
-/// anywhere in the NZB and hands back a block size with no recovery-set
-/// identity on it (`ProbedSet` has no set field), and `live_volumes`
-/// then takes EVERY `Par2Volume` the NZB carries. On a single-set NZB
-/// that is exactly right. On a two-set one it can size set B's volumes
-/// with set A's block size.
-///
-/// That used to be harmless, and the reason it stopped is worth stating
-/// because a previous review refuted this very case on it. The old
-/// ceiling was the bare `max_recovery_blocks(bytes, block_size)`, and
-/// `measured_verdict`'s rule divides through: `floor(margined / bs) >
-/// sum(floor(V_i / bs))` cancels to a comparison of bytes, so a wrong
-/// block size dropped out on both sides and could not by itself flip a
-/// verdict. The `min(by_bytes, declared)` cap broke that cancellation -
-/// `declared` comes off a filename and does not scale with `bs` at all.
-/// So with a block size smaller than the volumes' true one the deficit
-/// inflates while the ceiling saturates at the declared sum, and a
-/// repairable set can be condemned before it is ever fetched. (The cap
-/// and that refutation landed on branches that were not ancestors of
-/// each other and met in a merge, which is how the two crossed without
-/// anyone reconciling them.)
-///
-/// Reported by name rather than by set identity because carrying set
-/// identity from the probe through the volumes and the payload, and
-/// adjudicating each set on its own, is a far larger change than the
-/// bug warrants. Dropping the cap on multi-set NZBs restores the
-/// scale-invariant behaviour exactly where it was safe, and keeps the
-/// cap's whole benefit on the single-set NZBs that are very nearly all
-/// real posts.
-///
-/// Unparseable par2 names are IGNORED rather than counted as sets of
-/// their own. A name too obfuscated to yield a stem is also too
-/// obfuscated to yield a declared count, so it can never be capped and
-/// must not be allowed to inflate this. Mis-splitting a single-set NZB
-/// would only drop the cap there - it refuses strictly less, never
-/// more - but it would quietly cost the benefit, so it is worth not
 /// Is this whitespace-delimited token a per-file counter (`01/02`)?
 fn is_counter_token(s: &str) -> bool {
     s.split_once('/').is_some_and(|(a, b)| {
@@ -926,6 +893,45 @@ fn fold_raw_stem(stem: &str) -> String {
         .to_string()
 }
 
+/// Does this NZB carry more than one PAR2 recovery SET?
+///
+/// The question the declared-count cap has to ask before it may trust a
+/// volume's name. `block_size_probe` picks the cheapest Main or volume
+/// anywhere in the NZB and hands back a block size with no recovery-set
+/// identity on it (`ProbedSet` has no set field), and `live_volumes`
+/// then takes EVERY `Par2Volume` the NZB carries. On a single-set NZB
+/// that is exactly right. On a two-set one it can size set B's volumes
+/// with set A's block size.
+///
+/// That used to be harmless, and the reason it stopped is worth stating
+/// because a previous review refuted this very case on it. The old
+/// ceiling was the bare `max_recovery_blocks(bytes, block_size)`, and
+/// `measured_verdict`'s rule divides through: `floor(margined / bs) >
+/// sum(floor(V_i / bs))` cancels to a comparison of bytes, so a wrong
+/// block size dropped out on both sides and could not by itself flip a
+/// verdict. The `min(by_bytes, declared)` cap broke that cancellation -
+/// `declared` comes off a filename and does not scale with `bs` at all.
+/// So with a block size smaller than the volumes' true one the deficit
+/// inflates while the ceiling saturates at the declared sum, and a
+/// repairable set can be condemned before it is ever fetched. (The cap
+/// and that refutation landed on branches that were not ancestors of
+/// each other and met in a merge, which is how the two crossed without
+/// anyone reconciling them.)
+///
+/// Reported by name rather than by set identity because carrying set
+/// identity from the probe through the volumes and the payload, and
+/// adjudicating each set on its own, is a far larger change than the
+/// bug warrants. Dropping the cap on multi-set NZBs restores the
+/// scale-invariant behaviour exactly where it was safe, and keeps the
+/// cap's whole benefit on the single-set NZBs that are very nearly all
+/// real posts.
+///
+/// Unparseable par2 names are IGNORED rather than counted as sets of
+/// their own. A name too obfuscated to yield a stem is also too
+/// obfuscated to yield a declared count, so it can never be capped and
+/// must not be allowed to inflate this. Mis-splitting a single-set NZB
+/// would only drop the cap there - it refuses strictly less, never
+/// more - but it would quietly cost the benefit, so it is worth not
 /// doing by accident.
 fn multiple_par2_sets(nzb: &Nzb) -> bool {
     let mut stems: Vec<String> = Vec::new();
@@ -1184,9 +1190,7 @@ pub(crate) async fn check(
     window: usize,
     fast: bool,
 ) -> Result<Verdict> {
-    use nzbkit::preflight::{
-        AbortBudget, AbortRule, SweepPlan, stat_sweep_with, stratified_sample,
-    };
+    use nzbkit::preflight::{stat_sweep_with, stratified_sample};
 
     let mut cfg_all = Config::load(config)?;
     // Answer the question about the server set the DOWNLOADER will use.
@@ -1363,151 +1367,18 @@ pub(crate) async fn check(
         (None, Vec::new())
     };
 
-    // `fast` is the daemon's profile, and both of its shortcuts are
-    // licensed by `union_missing` needing Missing on EVERY server. The
-    // first Have settles an article, so the servers behind it skip it -
-    // measured 15 Aug as 5/6 of a healthy post's queries, and a miss
-    // costs 9-31x a hit on five of the six providers in a measured
-    // six-server config, which is where the sweep's whole wall time went.
-    //
-    // Only the payload is the deficit, whichever units it is counted in.
-    // A recovery volume is budget, and furniture is neither (#23), so
-    // neither may ever trip the abort.
-    //
-    // Both budgets are CEILINGS no later evidence can raise, which is
-    // what makes an abort armed on them conservative:
-    //
-    // - The counted one sums the slice counts every volume name
-    //   declares. Absent volumes are struck off AFTER the sweep, so the
-    //   budget the verdict finally uses is at most this one.
-    // - The measured one sums `max_recovery_blocks` over every volume
-    //   the NZB carries with NONE struck off - striking one off needs a
-    //   sweep that has not run yet, and can only make the final ceiling
-    //   smaller.
-    //
-    // A deficit that clears either clears what the verdict will use. And
-    // an abort cannot invent a verdict in any case: the verdict is
-    // recomputed from the finished matrix below, and a sweep cut short
-    // has strictly fewer articles proved missing everywhere.
-    // Asked once for the whole NZB and shared by both ceilings below,
-    // so the abort and the verdict cannot disagree about whether a
-    // declared count may be trusted.
-    let cross_set_par2 = multiple_par2_sets(&nzb);
-    let plan = if fast {
-        let abort = if recovery_unknown {
-            probed_early
-                .as_ref()
-                .map(|p| p.block_size)
-                .map(|block_size| AbortBudget {
-                    // Bytes, because that is what the measured route
-                    // weighs - and the SEGMENT's own declared bytes, which
-                    // is the identical quantity `missing_payload_bytes`
-                    // sums below, id by id.
-                    //
-                    // It used to be `file.bytes() / sampled_of[fi]`: the
-                    // share of the whole file each sampled id stood for.
-                    // That is an EXTRAPOLATION, and it silently broke the
-                    // invariant three doc blocks in this file claim - that
-                    // an abort cannot cost the post its measured verdict.
-                    // At the shipped 10% sample it charged each proven miss
-                    // ten times what the verdict would count, so the sweep
-                    // stopped after ~9 misses on a deficit the verdict then
-                    // recomputed as ~9 MiB and called repairable, where the
-                    // full 100-article sample would have condemned the
-                    // post. Weighing exactly what the verdict sums is the
-                    // whole fix; it can only ever DELAY an abort, never
-                    // manufacture one.
-                    weights: file_of
-                        .iter()
-                        .zip(seg_of.iter())
-                        .map(|(&fi, &si)| {
-                            if counts_as_deficit(fi) {
-                                nzb.files[fi].segments[si].bytes as f64
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect(),
-                    rule: AbortRule::Blocks {
-                        block_size,
-                        // The same margin the verdict will apply, from the
-                        // same helper, so the two cannot drift - and it
-                        // matters more here than it does there. An abort
-                        // armed pre-sweep leans on a deficit that is still
-                        // arriving, so the discount for how much of it came
-                        // off a sample rather than a census is what keeps
-                        // the standing-down conservative.
-                        margin: sample_margin(sample_pct),
-                        ceiling: nzb
-                            .files
-                            .iter()
-                            .filter(|f| f.kind() == FileKind::Par2Volume)
-                            .map(|f| {
-                                // Capped where the name declares a
-                                // count, exactly as `measured_verdict`
-                                // caps it - the two ceilings must agree
-                                // or the abort could stand down on a
-                                // budget the verdict then reads larger.
-                                // Which means this must decline the cap
-                                // on the same condition `live_volumes`
-                                // declines it, or they disagree in the
-                                // one case that matters.
-                                let by_bytes =
-                                    nzbkit::par2::max_recovery_blocks(f.bytes(), block_size);
-                                if cross_set_par2 {
-                                    return by_bytes;
-                                }
-                                match vol_count_from_name(f.filename_hint().unwrap_or(&f.subject)) {
-                                    Some(n) => by_bytes.min(n as u64),
-                                    None => by_bytes,
-                                }
-                            })
-                            .fold(0u64, u64::saturating_add),
-                    },
-                })
-        } else {
-            // No block size, and no probe spent going to get one: this
-            // shape declares its counts, so it never reaches the
-            // pre-sweep probe above, and a healthy post must keep
-            // spending nothing. Same weights, against the volumes' own
-            // encoded bytes - the block-size-free form of the rule
-            // above, and deliberately the same comparison
-            // `block_size_could_condemn` makes after the sweep, so a
-            // stand-down cannot cost the post its measured verdict.
-            Some(AbortBudget {
-                // Segment bytes, not a file-wide share - see the twin
-                // above for why the extrapolated form was wrong.
-                weights: file_of
-                    .iter()
-                    .zip(seg_of.iter())
-                    .map(|(&fi, &si)| {
-                        if counts_as_deficit(fi) {
-                            nzb.files[fi].segments[si].bytes as f64
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect(),
-                rule: AbortRule::Bytes {
-                    margin: sample_margin(sample_pct),
-                    ceiling_bytes: nzb
-                        .files
-                        .iter()
-                        .filter(|f| f.kind() == FileKind::Par2Volume)
-                        .map(|f| f.bytes())
-                        .fold(0u64, u64::saturating_add),
-                },
-            })
-        };
-        SweepPlan {
-            connections,
-            window,
-            settle_on_have: true,
-            abort_over: abort,
-        }
-    } else {
-        SweepPlan::full(connections, window)
-    };
+    let plan = sweep_plan(
+        &nzb,
+        fast,
+        sample_pct,
+        connections,
+        window,
+        recovery_unknown,
+        probed_early.as_ref(),
+        &file_of,
+        &seg_of,
+        counts_as_deficit,
+    );
     let sweep = stat_sweep_with(&cfg_all.servers, &ids, &plan).await;
     // A sweep that skips questions cannot make a per-server availability
     // claim: a server asked 10% of them is not 10% available. So the
@@ -1574,7 +1445,6 @@ pub(crate) async fn check(
     // live ledger is exact once the par2 main packet is in hand), and in
     // PAYLOAD articles only - see verdict_of.
     let live = live_volumes(&nzb, &absent_volumes);
-    let live_bytes: Vec<u64> = live.iter().map(|&(b, _)| b).collect();
     let (damage_files, mut damage) = payload_damage(&nzb, &missing_segs, counts_as_deficit);
 
     // Verdict in PAYLOAD articles, and deliberately not a comparison: an
@@ -1583,99 +1453,21 @@ pub(crate) async fn check(
     // verdict_of.
     let mut verdict = verdict_of(est_missing, recovery, recovery_unknown, live.len(), dropped);
 
-    // The escalation, from any REPAIRABLE a block size could actually
-    // move, and `block_size_could_condemn` is the whole gate.
-    //
-    // It used to sit behind `est_missing > recovery` as well, which was
-    // the comparison deciding the verdict outright before 16 Aug. That
-    // condition is not merely redundant here, it is wrong in both
-    // directions: it fires on posts a block size could never condemn
-    // (the counted budget is ZERO on every `.vol-NN.par2` set, so one
-    // missing article satisfies it), and it stays quiet on posts whose
-    // blocks are so much larger than their articles that the count reads
-    // as comfortable while the bytes do not. The pre-gate asks the
-    // measured question itself, divided through by the block size, so it
-    // is right in both.
-    //
-    // A COST gate and nothing more - what it guards is one article on
-    // the wire, and what it decides is only whether to ask. A healthy
-    // post never trips it and spends nothing, which is what lets
-    // pre-flight be left on.
-    if let Verdict::Repairable { dropped, .. } = &verdict
-        && block_size_could_condemn(missing_payload_bytes, sample_pct, &live_bytes, &damage)
-    {
-        // Already in hand when the sweep was armed from it, and paying
-        // for the same article twice is the whole defect this ordering
-        // exists to fix. The late probe still runs when there was no
-        // early one (the report's profile), and when the early one drew
-        // the two par2 files the sweep has since proved absent
-        // everywhere - the one failure a second, now informed, attempt
-        // can actually fix. An early probe that failed for any other
-        // reason - server unreachable, no verifiable Main packet in an
-        // article that IS there - would fail again for the same reason,
-        // so it is not re-asked.
-        //
-        // Only the LATE probe can carry `block_size_could_condemn`: that
-        // gate weighs the damage against the live volume bytes, and
-        // neither number exists before the sweep. So the early probe
-        // spends its one BODY unconditionally, which is the trade this
-        // ordering makes - one article on an unsizable post that turns
-        // out healthy, against the ~100 s it saves when the same shape
-        // is dead.
-        let mut probe_ran = !probe_tried.is_empty();
-        let probed = match probed_early {
-            Some(p) => Some(p),
-            None if probe_tried.iter().all(|fi| absent_files.contains(fi)) => {
-                probe_ran = true;
-                block_size_probe(&cfg_all.servers, &nzb, &absent_files)
-                    .await
-                    .0
-            }
-            None => None,
-        };
-        match probed {
-            Some(probed) => {
-                // Only now can the grid be laid, and only over the files
-                // the fetched packets actually described. An undescribed
-                // file keeps the byte figure and nothing more, because a
-                // probe that read no FileDesc has learnt nothing about
-                // whether the set covers that file.
-                for (d, &fi) in damage.iter_mut().zip(&damage_files) {
-                    d.length = nzb.files[fi]
-                        .filename_hint()
-                        .and_then(|n| probed.described_length(n));
-                }
-                match measured_verdict(
-                    missing_payload_bytes,
-                    sample_pct,
-                    probed.block_size,
-                    &live,
-                    absent_volumes.len(),
-                    &damage,
-                    dropped.clone(),
-                ) {
-                    Some(v) => verdict = v,
-                    // Worth a line of its own: the counted budget looked
-                    // short and the measured one is not, which is the
-                    // whole reason this route stopped condemning posts
-                    // on counts.
-                    None => println!(
-                        "  note: the recovery set's blocks are {}, and the payload no \
-                         server has cannot damage more of them than the volumes can \
-                         still deliver",
-                        block_size_label(probed.block_size)
-                    ),
-                }
-            }
-            // Only when a probe actually went and looked. A pre-gate
-            // that declined to look has nothing to report.
-            None if probe_ran => println!(
-                "  note: could not read a PAR2 main packet, so the recovery volumes \
-                 whose names declare no slice count stay unsized"
-            ),
-            None => {}
-        }
-    }
+    escalate_repairable(
+        &cfg_all.servers,
+        &nzb,
+        &mut verdict,
+        probed_early,
+        &probe_tried,
+        &absent_files,
+        absent_volumes.len(),
+        missing_payload_bytes,
+        sample_pct,
+        &live,
+        &damage_files,
+        &mut damage,
+    )
+    .await;
     report_verdict(&verdict, sweep.elapsed);
     Ok(verdict)
 }
@@ -1886,6 +1678,10 @@ pub(crate) async fn run_check(
     }
     Ok(())
 }
+
+#[path = "check_sweep.rs"]
+mod check_sweep;
+use check_sweep::*;
 
 #[cfg(test)]
 #[path = "check_tests.rs"]

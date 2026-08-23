@@ -110,7 +110,7 @@ async fn preview_media_remuxes_matroska_into_fragmented_mp4() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let boundary = "----previewm";

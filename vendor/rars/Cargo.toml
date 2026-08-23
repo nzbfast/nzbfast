@@ -8,7 +8,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`, since 2026-08-22: src/rar50/blake2sp/many.rs carries
+# the crate's ONE unsafe block (entering the NEON blake2s kernel) under a
+# local `#[allow(unsafe_code)]`; its comment has the argument. Everything
+# else is still refused, and `cargo test -p rars --lib`'s
+# `unsafe_is_confined_to_the_neon_entry` test pins the count at one.
+unsafe_code = "deny"
 unused_must_use = "deny"
 
 [features]
@@ -22,7 +27,18 @@ blake2s_simd = "1.0"
 crc32fast = "1.4"
 getrandom = "0.4"
 hmac = "0.13"
+# The E8/E8E9 opcode scan. Already in the workspace lockfile via
+# aho-corasick, so the direct dependency adds no crate and no licence.
+memchr = "2"
 rayon = { version = "1.12", optional = true }
 sha1 = "0.11"
 sha2 = "0.11"
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "zeroize_derive"] }
+
+# Constants only, no calls - `O_NOFOLLOW` for the repair destination open
+# (sweep 8, M10). `unsafe_code = "deny"` above still holds: reading a
+# libc constant needs no unsafe block. Already in the workspace lockfile
+# (nzbkit depends on it), so this adds no new crate or licence.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

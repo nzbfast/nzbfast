@@ -1703,13 +1703,19 @@ async fn payout_hot_spare_skips_the_slow_start_trickle() {
     );
 }
 
-/// [`payout_leg_verified`] with an ACKING consumer (TODO 114): the
-/// collector plays the decode consumer's part of the steer seam,
-/// reporting every Done body through `note_decoded` exactly like
-/// `decode_consumer_loop` does - a Steered ack drops the body and
-/// counts nothing (the refetched copy owns the outcome). Same
-/// tallies as the verified leg: (wall, done, bad_crc, wrong_part,
-/// notes).
+/// [`payout_leg`] plus a decode pass over every Done body, with an
+/// ACKING consumer (TODO 114): the collector plays the decode
+/// consumer's part of the steer seam, reporting every Done body through
+/// `note_decoded` exactly like `decode_consumer_loop` does - a Steered
+/// ack drops the body and counts nothing (the refetched copy owns the
+/// outcome). Counts bodies whose own yEnc CRC fails (`bad_crc`) and
+/// bodies that are valid articles for the WRONG part (`wrong_part`,
+/// judged against each request's declared `part`), so the CRC-retry
+/// rigs assert on delivered DAMAGE rather than on wall clock. Returns
+/// (wall, done, bad_crc, wrong_part, notes).
+///
+/// This IS the verified leg now: 2ffa1d071 retired the un-acking
+/// `payout_leg_verified` once this superseded it.
 async fn payout_leg_steered(
     servers: Vec<(ServerConfig, PoolConfig)>,
     ids: Vec<ArticleReq>,
@@ -1811,6 +1817,7 @@ async fn crc_steer_storm_steers_damage_from_the_consumer_seam() {
             id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
+            file: u32::MAX,
         })
         .collect();
     let a = crate::mock::MockServer::start(
@@ -1869,6 +1876,7 @@ async fn crc_steer_covers_split_brain_from_the_consumer_seam() {
             id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
+            file: u32::MAX,
         })
         .collect();
     let a = crate::mock::MockServer::start(
@@ -1915,6 +1923,7 @@ async fn crc_steer_single_server_delivers_as_is_and_terminates() {
             id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
+            file: u32::MAX,
         })
         .collect();
     let a = crate::mock::MockServer::start(
@@ -1964,6 +1973,7 @@ async fn crc_steer_second_bad_copy_is_owned_not_looped() {
             id: format!("<{id}>").into(),
             age_days: 0,
             part: *part,
+            file: u32::MAX,
         })
         .collect();
     let chaos = crate::mock::Chaos {

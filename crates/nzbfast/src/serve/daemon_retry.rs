@@ -43,11 +43,14 @@ impl Daemon {
                 // History and joined the queue. Announce the move: without
                 // it the record appears to have been lost and a download
                 // nobody asked for appears to have started.
-                let mut ring = self.auto_retried.lock_ok();
-                ring.push_back((id, name, now as i64));
-                while ring.len() > 8 {
-                    ring.pop_front();
-                }
+                //
+                // §129 1b(b): on the sequence-cursored lifecycle ring,
+                // where it replaces a bounded `auto_retried` array on the
+                // queue payload that the dashboard diffed against a
+                // seen-set of its own. Emitted AFTER `retry` has moved
+                // the record, so anything acting on the event finds the
+                // job in the queue and not in history.
+                self.life_emit("job.retried", json!({"nzo_id": id, "name": name}));
             }
         }
         // The other half of the cooldown: a COMPLETED job whose move to
@@ -374,7 +377,14 @@ impl Daemon {
             // failed record's pause flag describes nothing either way.
             j.paused = false;
             j.fail_message.clear();
-            j.fail_detail.clear();
+            // §207: the verdict goes with the run it explained. `stamp`
+            // only overwrites on Some, so a re-run too short (or too
+            // unclassifiable) to earn one would otherwise keep the first
+            // attempt's verdict on its record (bug sweep 22 Aug 2026).
+            // Also drops fail_detail, the finished stamps and
+            // postproc_secs - a retry parked by preflight or give-up
+            // never reaches the tail that rewrites the last one.
+            j.clear_attempt_verdicts();
             // M5: a row an NZBGet delete verb filed here carries the
             // delete's mark, and the queued-prefetch shape keeps its
             // tombstone too (the sidecar tail may still land an Ok).
@@ -394,8 +404,6 @@ impl Daemon {
             // now spends the flag as it reads it; this is the belt to
             // that brace and the only cover for the row filed by hand.
             had_del_on_drop = std::mem::replace(&mut j.del_on_drop, false);
-            j.finished_at = None;
-            j.finished_unix = None;
             j.retries += 1;
             // A due-or-pending auto-retry is consumed by ANY retry (manual
             // included) - never leave a stale past-due stamp that would

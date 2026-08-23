@@ -22,13 +22,16 @@
 //! never be auto-exploded.
 
 use crate::*;
+use tracing::{info, warn};
 
 /// How much of a candidate's head is scanned for an appended archive.
-///
-/// 4 MiB, not 1: a 7-Zip PE stub alone is ~200 KB and RAR's own installer
-/// stubs run past a megabyte, so the old window could sit entirely inside
-/// the stub and conclude "not an archive".
-const SFX_SCAN_WINDOW: usize = 4 << 20;
+/// Owned by `nzbkit::sfx` since TODO 94 C, because the one-pass mapper's
+/// offset-0 sniff runs the same scan and the two must agree.
+use nzbkit::sfx::SFX_SCAN_WINDOW;
+
+/// The shape vocabulary the disk arm reports into - see
+/// [`sfx_disk_shape`].
+use nzbkit::extract::DiskArchive;
 
 /// Read past the scan window by this much, so a signature sitting at the
 /// window's very last byte still has its whole main header in the buffer
@@ -36,16 +39,6 @@ const SFX_SCAN_WINDOW: usize = 4 << 20;
 /// window's edge into a silent "not an archive" for the one archive that
 /// straddles it.
 const SFX_HEADER_SLACK: usize = 64 << 10;
-
-/// Ceiling on how many signature matches one file may have confirmed.
-///
-/// Confirmation is cheap - a type byte and a size word reject almost
-/// everything before a CRC is computed - but the number of matches is
-/// attacker-chosen, so the total work must not be. A file that spends this
-/// budget on decoys and puts its real archive after them is not unpacked;
-/// that is a delivered `.exe`, which is what happens today for every
-/// self-extractor, so the failure is the benign direction.
-const SFX_MAX_CANDIDATES: usize = 256;
 
 /// Is this file an SFX self-extractor - an executable-ish name with a real
 /// archive sitting behind the launcher stub?
@@ -89,17 +82,17 @@ pub(crate) fn is_sfx_archive(path: &std::path::Path) -> bool {
 /// is declined here, with a line saying so, because leaving it packed is
 /// the correct outcome and a silent decline reads as "we saw nothing".
 pub(crate) fn sfx_kind(path: &std::path::Path) -> Option<SfxKind> {
-    let sfx_ext = path.extension().is_some_and(|x| {
-        let x = x.to_string_lossy().to_lowercase();
-        x == "exe" || x == "bin" || x == "sfx"
-    });
+    let sfx_ext = path
+        .file_name()
+        .is_some_and(|n| nzbkit::sfx::is_sfx_name(&n.to_string_lossy()));
     if !sfx_ext {
         return None;
     }
     match nzbkit::zip::stubbed_archive(path) {
         Some(nzbkit::zip::Stubbed::Packaging { .. }) => return Some(SfxKind::Zip),
         Some(nzbkit::zip::Stubbed::FinalFile { what, .. }) => {
-            println!(
+            info!(
+                target: "extract",
                 "  {} carries {what} rather than packaging - left as it is",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
@@ -111,6 +104,43 @@ pub(crate) fn sfx_kind(path: &std::path::Path) -> Option<SfxKind> {
     match sfx_payload_at(&head) {
         Some((off, kind)) if off > 0 => Some(kind),
         _ => None,
+    }
+}
+
+/// What the disk SFX arm is about to unpack, for the shape badge.
+///
+/// The badge is what a user reads to understand why a job was fast or
+/// slow, and this route left it EMPTY: a self-extractor whose stub runs
+/// past the offset-0 article is a plain data file to the in-stream sniff,
+/// so nothing archive-shaped is ever classified and the queue row, the
+/// history entry and the download report all say nothing about a payload
+/// that was demonstrably an archive. Measured 23 Aug 2026 on the
+/// libarchive `test_read_format_rar5_sfx.exe` fixture at `--article-size
+/// 128K`, beside an `sfx7z` reading `7z one-pass` and a `comp5` reading
+/// `rar5 compressed on-disk`.
+///
+/// The FAMILY only, and RAR's dialect from its signature: this arm hands
+/// a whole archive to a reader and never parses a per-entry method, so
+/// there is no honest store/compressed token to add and
+/// `ArchiveShape::from_bits` renders none. `one-pass` would be a lie -
+/// these bytes landed on disk and were unpacked afterwards, which is
+/// what [`nzbkit::extract::Extractor::note_disk_archive`] latches.
+///
+/// Its own head read, like `sfx_kind` and `carve_sfx` before it: a
+/// release carries a handful of executables at most, and this runs on a
+/// path that is about to carve and unpack the whole payload.
+pub(crate) fn sfx_disk_shape(path: &std::path::Path) -> Option<DiskArchive> {
+    match sfx_kind(path)? {
+        SfxKind::Zip => Some(DiskArchive::Zip),
+        SfxKind::SevenZ => Some(DiskArchive::SevenZ),
+        SfxKind::Rar => {
+            let head = read_head(path, SFX_SCAN_WINDOW + SFX_HEADER_SLACK);
+            let (off, _) = sfx_payload_at(&head)?;
+            match nzbkit::rar::signature_version(&head[off..])? {
+                5 => Some(DiskArchive::Rar5),
+                _ => Some(DiskArchive::Rar4),
+            }
+        }
     }
 }
 
@@ -173,35 +203,16 @@ pub(crate) fn collect_sfx_archives(dir: &std::path::Path) -> Result<Vec<PathBuf>
 /// the half that matters, since the decoy constant in those binaries comes
 /// BEFORE any real payload would. TODO 159 item 7.
 pub(crate) fn sfx_payload_at(head: &[u8]) -> Option<(usize, SfxKind)> {
-    let mut spent = 0usize;
-    for off in 0..head.len().min(SFX_SCAN_WINDOW) {
-        let rest = &head[off..];
-        let kind = if rest.starts_with(b"Rar!\x1a\x07\x00") || rest.starts_with(b"Rar!\x1a\x07\x01")
-        {
-            SfxKind::Rar
-        } else if rest.starts_with(nzbkit::nameprobe::SEVENZ_MAGIC) {
-            SfxKind::SevenZ
-        } else {
-            continue;
+    // The scan itself lives in `nzbkit::sfx` since TODO 94 C - the
+    // one-pass mapper's offset-0 sniff runs the very same one, so what
+    // this gate calls an SFX and what the stream maps cannot disagree.
+    nzbkit::sfx::sfx_payload_at(head).map(|(off, f)| {
+        let kind = match f {
+            nzbkit::sfx::SfxFamily::Rar => SfxKind::Rar,
+            nzbkit::sfx::SfxFamily::SevenZ => SfxKind::SevenZ,
         };
-        spent += 1;
-        if spent > SFX_MAX_CANDIDATES {
-            break;
-        }
-        // The EARLIEST CONFIRMED signature wins: a 7z stub can mention
-        // "Rar!" in its own error strings and vice versa, so position
-        // decides between two real archives, and the header decides
-        // whether a match is a real archive at all.
-        let real = match kind {
-            SfxKind::Rar => nzbkit::rar::archive_starts_here(rest),
-            SfxKind::SevenZ => nzbkit::nameprobe::sevenz_start(rest).is_some(),
-            SfxKind::Zip => false,
-        };
-        if real {
-            return Some((off, kind));
-        }
-    }
-    None
+        (off, kind)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,7 +265,7 @@ pub(crate) fn extract_sfx(
         // itself to the ordinary zip arm - the same staging, the same
         // zip-slip and bomb guards, the same CRC gate.
         if sfx_kind(path) == Some(SfxKind::Zip) {
-            println!("unpacking self-extracting zip {name}…");
+            info!(target: "extract", "unpacking self-extracting zip {name}…");
             let job = nzbkit::zip::Finding {
                 name: name.to_string(),
                 parts: vec![path.clone()],
@@ -263,13 +274,13 @@ pub(crate) fn extract_sfx(
             all_ok &= crate::rarfix::extract_zip(dir, &[job], password);
             continue;
         }
-        println!("unpacking SFX archive {name} natively…");
+        info!(target: "extract", "unpacking SFX archive {name} natively…");
         let direct = rars::ArchiveReader::read_path_with_options(path, options)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .and_then(|archive| write_archives_to(dir, &[archive], password));
         match direct {
             Ok(()) => {
-                println!("SFX unpack complete ✔");
+                info!(target: "extract", "SFX unpack complete ✔");
                 continue;
             }
             Err(e) => {
@@ -301,17 +312,18 @@ pub(crate) fn extract_sfx(
                             SfxKind::Zip => false,
                         };
                         if ok {
-                            println!("SFX unpack complete ✔ (carved past the stub)");
+                            info!(target: "extract", "SFX unpack complete ✔ (carved past the stub)");
                         } else {
-                            println!(
-                                "⚠ SFX unpack failed ({e}), and the carved archive \
-                                      did not extract either"
+                            warn!(
+                                target: "extract",
+                                "SFX unpack failed ({e}), and the carved archive \
+                                 did not extract either"
                             );
                             all_ok = false;
                         }
                     }
                     None => {
-                        println!("⚠ SFX unpack failed ({e})");
+                        warn!(target: "extract", "SFX unpack failed ({e})");
                         all_ok = false;
                     }
                 }
@@ -357,7 +369,8 @@ fn carve_sfx(path: &std::path::Path) -> Option<(ExtractStaging, SfxKind)> {
         }
     }
     w.flush().ok()?;
-    println!(
+    info!(
+        target: "extract",
         "  carved {} archive from the SFX stub at offset {off}",
         kind.label()
     );
@@ -697,6 +710,85 @@ mod sfx_tests {
             "the zip collector must not start claiming executables either"
         );
         let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shape badge for this route, which used to be blank. A job
+    /// that unpacked through the disk SFX arm reported an EMPTY
+    /// `archive_shape` - queue row, history and the download report all
+    /// silent about a payload that was demonstrably an archive - because
+    /// the extractor only ever saw a plain data file and this arm noted
+    /// nothing. Measured 23 Aug 2026 against an `sfx7z` reading `7z
+    /// one-pass` and a `comp5` reading `rar5 compressed on-disk`.
+    ///
+    /// The RAR dialect comes off the signature past the stub, so the
+    /// badge distinguishes RAR4 from RAR5 the way the mapper-fed routes
+    /// do rather than settling for a family word the dashboard would
+    /// have to learn.
+    #[test]
+    fn the_disk_arm_names_the_family_it_is_about_to_unpack() {
+        let dir = tmp("diskshape");
+        sfx_from(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../vendor/rars/tests/fixtures/rar50/solid.rar"
+            ),
+            &dir.join("rar5.exe"),
+            8192,
+        );
+        assert_eq!(
+            sfx_disk_shape(&dir.join("rar5.exe")),
+            Some(DiskArchive::Rar5)
+        );
+
+        sfx_from(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../vendor/rars/tests/fixtures/rar15_40/rars_generated/stored.rar"
+            ),
+            &dir.join("rar4.exe"),
+            8192,
+        );
+        assert_eq!(
+            sfx_disk_shape(&dir.join("rar4.exe")),
+            Some(DiskArchive::Rar4)
+        );
+
+        sfx_from(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../nzbkit/tests/fixtures/sevenz/store-single.7z"
+            ),
+            &dir.join("sevenz.exe"),
+            8192,
+        );
+        assert_eq!(
+            sfx_disk_shape(&dir.join("sevenz.exe")),
+            Some(DiskArchive::SevenZ)
+        );
+
+        zip_sfx(
+            &dir,
+            "zip.exe",
+            8192,
+            &[Spec::stored("Show.S01E01.mkv", b"the payload")],
+        );
+        assert_eq!(sfx_disk_shape(&dir.join("zip.exe")), Some(DiskArchive::Zip));
+
+        // Everything the entry gate declines has no shape either: the
+        // badge must never claim an archive over a file this arm is
+        // going to leave exactly as it found it.
+        std::fs::write(dir.join("plain.exe"), b"MZ not an archive at all").unwrap();
+        assert_eq!(sfx_disk_shape(&dir.join("plain.exe")), None);
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../vendor/rars/tests/fixtures/rar50/solid.rar"
+            ),
+            dir.join("bare.exe"),
+        )
+        .unwrap();
+        assert_eq!(sfx_disk_shape(&dir.join("bare.exe")), None, "offset 0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -129,8 +129,7 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
     for p in pending {
         let in_queue = d
             .queue
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .any(|j| j.lock_ok().nzo_id == p.new_nzo);
         if in_queue {
@@ -156,8 +155,7 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
         }
         let hist = d
             .history
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .find(|j| j.lock_ok().nzo_id == p.new_nzo)
             .cloned();
@@ -242,8 +240,7 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 }
                 let old = d
                     .history
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .iter()
                     .find(|j| j.lock_ok().nzo_id == p.old_nzo)
                     .cloned();
@@ -281,8 +278,7 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     }
                     let _ = std::fs::remove_file(&nzb);
                     d.history
-                        .lock()
-                        .unwrap()
+                        .lock_ok()
                         .retain(|j| j.lock_ok().nzo_id != p.old_nzo);
                     d.history_tombstone(std::slice::from_ref(&p.old_nzo));
                     d.save_queue();
@@ -317,22 +313,32 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     );
                     // Narrate it where the user looks: a completed
                     // download and its history row just disappeared, and
-                    // two log lines were the only witnesses. Same ring
-                    // pattern as watch_picked - queue_json carries it,
-                    // an open dashboard toasts it.
-                    {
-                        let mut wu = d.watch_upgraded.lock_ok();
-                        wu.push_back((
-                            p.new_stem.clone(),
-                            p.prev_stem.clone(),
-                            p.prev_quality.clone(),
-                            fate.to_string(),
-                            unix_now(),
-                        ));
-                        while wu.len() > 8 {
-                            wu.pop_front();
-                        }
-                    }
+                    // two log lines were the only witnesses.
+                    //
+                    // §129 1b(b): on the sequence-cursored lifecycle
+                    // ring. It used to be a bounded `watch_upgraded`
+                    // array on the queue payload that the dashboard
+                    // diffed against a seen-set of its own - and this
+                    // one was the LATE case, like the give-up trip: the
+                    // deletes above leave the queue untouched, so on a
+                    // daemon with nothing downloading the payload
+                    // carrying the notice was not re-sent until some
+                    // unrelated mutation moved the queue revision.
+                    //
+                    // The keys are the page's, unchanged: `old`/`oldq`
+                    // are the superseded release and its quality, and
+                    // `fate` is the checked claim about its files -
+                    // "trash", "gone" or "kept" - so the sentence can
+                    // never promise a Trash the delete did not use.
+                    d.life_emit(
+                        "watchlist.upgraded",
+                        json!({
+                            "name": p.new_stem,
+                            "old": p.prev_stem,
+                            "oldq": p.prev_quality,
+                            "fate": fate,
+                        }),
+                    );
                 }
                 dirty = true;
             }
@@ -400,19 +406,13 @@ fn reconcile_slots(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchState) ->
         if nzo.is_empty() {
             continue; // already emptied - waiting for a new candidate
         }
-        let in_queue = d
-            .queue
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|j| j.lock_ok().nzo_id == nzo);
+        let in_queue = d.queue.lock_ok().iter().any(|j| j.lock_ok().nzo_id == nzo);
         if in_queue {
             continue;
         }
         let hstate = d
             .history
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .find(|j| j.lock_ok().nzo_id == nzo)
             .map(|j| j.lock_ok().state);
@@ -805,7 +805,11 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                             item.title, h_name, c.stem
                         );
                     }
-                    if let Some(nzo) = watchlist_grab(d, &c.src, &c.stem, &item.category, false) {
+                    let origin =
+                        crate::serve::origin::watchlist_origin(&slot, &c.quality, &item.title);
+                    if let Some(nzo) =
+                        watchlist_grab(d, &c.src, &c.stem, &item.category, false, &origin)
+                    {
                         info!(target: "watch", "{}: grabbed {} ({})", item.title, c.stem, c.quality);
                         note_instant(&mut state, &arrived, item.id, &c.stem, c.posted, unix_now());
                         let cp = classify(&c.stem);
@@ -841,7 +845,11 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                     // against a pack, so the pack is never deleted for
                     // one better episode.
                     let prev = cur.cloned().unwrap();
-                    if let Some(nzo) = watchlist_grab(d, &c.src, &c.stem, &item.category, true) {
+                    let origin =
+                        crate::serve::origin::watchlist_origin(&slot, &c.quality, &item.title);
+                    if let Some(nzo) =
+                        watchlist_grab(d, &c.src, &c.stem, &item.category, true, &origin)
+                    {
                         info!(
                             target: "watch",
                             "{}: upgrading {} → {} ({})",
@@ -950,7 +958,7 @@ pub(super) fn note_instant(
 /// there is no cached list (an unwatched title, a show TVmaze does not
 /// have, a first pass before the refresh) - `pack_eligible` reads that
 /// as "nobody knows", not as "nothing exists".
-#[cfg_attr(not(feature = "indexer"), allow(unused_variables))]
+#[cfg_attr(not(feature = "indexer"), expect(unused_variables))]
 pub(super) fn aired_episodes(
     d: &Arc<Daemon>,
     item: &crate::watchlist::WatchItem,
@@ -1048,12 +1056,22 @@ pub(super) fn completed_in_history(d: &Arc<Daemon>, stem: &str) -> Option<(Strin
 /// Synthesize the NZB for an indexed release and enqueue it. `promote`
 /// lifts the M14f duplicate hold: an intentional upgrade IS a duplicate
 /// of the completed original, that's the point.
+///
+/// `job_origin` is what the job records as its provenance - built by
+/// `origin::watchlist_origin` from the item, slot and quality that
+/// matched, so the drawer can say which of them did rather than only
+/// that the watchlist did. Passed in rather than built here because the
+/// decision loop is what holds all three; this function only knows the
+/// release. Not `origin`: the external arm destructures a `CandSrc`
+/// field of that name, which is the INDEXER's `SourceOrigin`, and the
+/// two are one `&str`-vs-`&SourceOrigin` slip apart.
 pub(super) fn watchlist_grab(
     d: &Arc<Daemon>,
     src: &CandSrc,
     stem: &str,
     category: &str,
     promote: bool,
+    job_origin: &str,
 ) -> Option<String> {
     // A local candidate is served out of our own index; an external one
     // is fetched from the indexer that offered it, which is also what
@@ -1071,7 +1089,7 @@ pub(super) fn watchlist_grab(
                 -100,
                 None,
                 None,
-                "watchlist",
+                job_origin,
                 false,
             )
         }
@@ -1085,8 +1103,7 @@ pub(super) fn watchlist_grab(
                 rt.usage.roll(unix_now());
                 let cfg = d
                     .indexers
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .iter()
                     .find(|i| &i.name == indexer)
                     .cloned();
@@ -1131,15 +1148,7 @@ pub(super) fn watchlist_grab(
                 }
             };
             let r = d.enqueue_fetched(
-                &fetched,
-                stem,
-                category,
-                -100,
-                None,
-                None,
-                0,
-                "watchlist",
-                false,
+                &fetched, stem, category, -100, None, None, 0, job_origin, false,
             );
             if r.is_ok() {
                 let mut rt = d.indexer_rt.lock_ok();
@@ -1151,7 +1160,7 @@ pub(super) fn watchlist_grab(
         }
     };
     match nzo {
-        Ok(nzo) => {
+        Ok(Enqueued { nzo_id: nzo, .. }) => {
             if promote {
                 {
                     let q = d.queue.lock_ok();
@@ -1209,8 +1218,7 @@ pub(super) fn watchlist_external_candidates(
 ) -> (Vec<ExtCand>, Option<String>) {
     let list: Vec<crate::newznab::IndexerConfig> = d
         .indexers
-        .lock()
-        .unwrap()
+        .lock_ok()
         .iter()
         .filter(|i| i.enabled)
         .cloned()
@@ -1300,8 +1308,7 @@ pub(super) fn watchlist_external_candidates(
             Err(e) => {
                 if matches!(e, crate::newznab::NewznabError::Limit(..)) {
                     d.indexer_rt
-                        .lock()
-                        .unwrap()
+                        .lock_ok()
                         .penalty_until
                         .insert(name.clone(), Instant::now() + INDEXER_LIMIT_BACKOFF);
                 }
@@ -1318,4 +1325,94 @@ pub(super) fn watchlist_external_candidates(
     let gated = (asked_ok == 0 && !refused.is_empty())
         .then(|| format!("indexer_error:{}", refused.join(", ")));
     (out, gated)
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+    use crate::serve::testutil::test_daemon;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nzbfast-settle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// One Completed history record, with a real payload directory so the
+    /// delete has something to remove.
+    fn completed(d: &Arc<Daemon>, root: &std::path::Path, id: &str, stem: &str) -> PathBuf {
+        let out = root.join(stem);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("payload.mkv"), b"x").unwrap();
+        let v = json!({
+            "nzo_id": id, "name": stem,
+            "out_dir": out.to_string_lossy(),
+            "nzb_path": root.join(format!("{id}.nzb")).to_string_lossy(),
+            "state": "Completed",
+        });
+        std::fs::write(root.join(format!("{id}.nzb")), b"<nzb/>").unwrap();
+        let job = Arc::new(Mutex::new(job_from_json(&v).expect("job")));
+        d.history.lock_ok().push(job);
+        out
+    }
+
+    /// §129 1b(b): a settled delete_old upgrade narrates itself on the
+    /// lifecycle ring as `watchlist.upgraded`, not through a bounded
+    /// array on the queue payload for the page to diff.
+    ///
+    /// The moment is worth an event precisely because nothing else marks
+    /// it: a COMPLETED download and its history row both disappear, and
+    /// before the notice existed two `info!` lines were the only
+    /// witnesses. It is also the LATE case the migration fixes - the
+    /// deletes here touch neither queue, so nothing bumps the queue
+    /// revision that the old transport rode, and on an idle daemon the
+    /// toast waited for an unrelated mutation.
+    ///
+    /// `fate` is asserted as well as the names, because it is a CHECKED
+    /// claim about the user's files rather than a reading of the Trash
+    /// setting (4 Aug: a 14 GB download reported "went to the Trash"
+    /// while it had been destroyed outright). The Trash is off under
+    /// `cfg(test)`, so a removal that happened is "gone".
+    #[test]
+    fn a_settled_upgrade_reaches_the_dashboard_as_a_lifecycle_event() {
+        let _steady = crate::smart::trash_globals_steady();
+        let dir = tmp("upgraded");
+        let d = test_daemon(&dir);
+        completed(&d, &dir, "new1", "New.Show.S01E01.1080p.WEB-TEST");
+        let old_out = completed(&d, &dir, "old1", "Old.Show.S01E01.720p.WEB-TEST");
+
+        let mut state = crate::watchlist::WatchState::default();
+        state.pending.push(crate::watchlist::PendingDelete {
+            slot: "7:s01e01".to_string(),
+            new_nzo: "new1".to_string(),
+            new_stem: "New.Show.S01E01.1080p.WEB-TEST".to_string(),
+            old_nzo: "old1".to_string(),
+            prev_rank: 3,
+            prev_stem: "Old.Show.S01E01.720p.WEB-TEST".to_string(),
+            prev_quality: "720p".to_string(),
+        });
+
+        assert!(
+            settle_pending_upgrades(&d, &mut state),
+            "a settled upgrade is a state change"
+        );
+        assert!(state.pending.is_empty(), "the entry must not be re-parked");
+        assert!(!old_out.exists(), "the superseded payload should be gone");
+
+        let (events, reset, _) = d.life_since(0);
+        assert!(!reset, "this test's traffic is far inside the ring");
+        let e = events
+            .iter()
+            .find(|e| e["kind"] == "watchlist.upgraded")
+            .unwrap_or_else(|| panic!("no watchlist.upgraded on the ring: {events:?}"));
+        assert_eq!(e["name"], "New.Show.S01E01.1080p.WEB-TEST");
+        assert_eq!(e["old"], "Old.Show.S01E01.720p.WEB-TEST");
+        assert_eq!(e["oldq"], "720p");
+        assert_eq!(e["fate"], "gone");
+        assert_eq!(e["schema_version"], 1);
+        assert!(e["seq"].as_u64().unwrap_or(0) > 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

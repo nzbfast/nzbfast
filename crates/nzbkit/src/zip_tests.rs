@@ -638,6 +638,207 @@ fn a_saturated_zip64_archive_behind_a_prepended_stub_opens_and_extracts() {
     }
 }
 
+/// Splice a zip64 end record and its locator between the directory
+/// and the EOCD of a plain 32-bit archive, giving the record an
+/// extensible data sector of `sector` bytes. `saturate` writes the
+/// EOCD's 32-bit copies as -1, the shape a writer emits once the
+/// archive really is too big for them.
+///
+/// §4.3.6 declares the sector's length in ONE place - the record's
+/// own size field, which counts every byte after it - so a reader
+/// that assumes the record is 56 bytes cannot see the sector at all.
+/// The caller supplies the sector's bytes, so a test can plant
+/// whatever it likes in there.
+fn splice_zip64_end_record(z: &[u8], sector: &[u8], saturate: bool) -> Vec<u8> {
+    let eocd = z.len() - 22;
+    let entries = rd_u16(&z[eocd + 10..]) as u64;
+    let cd_size = rd_u32(&z[eocd + 12..]) as u64;
+    let cd_off = rd_u32(&z[eocd + 16..]) as u64;
+    let mut out = z[..eocd].to_vec();
+    let rec_at = out.len() as u64;
+    out.extend_from_slice(b"PK\x06\x06");
+    // Size of the record after this field: 44 fixed bytes + the sector.
+    out.extend_from_slice(&(44 + sector.len() as u64).to_le_bytes());
+    out.extend_from_slice(&45u16.to_le_bytes()); // version made by
+    out.extend_from_slice(&45u16.to_le_bytes()); // version needed
+    out.extend_from_slice(&0u32.to_le_bytes()); // this disk
+    out.extend_from_slice(&0u32.to_le_bytes()); // directory's disk
+    out.extend_from_slice(&entries.to_le_bytes()); // entries on this disk
+    out.extend_from_slice(&entries.to_le_bytes()); // entries in total
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_off.to_le_bytes());
+    out.extend_from_slice(sector); // the extensible data sector
+    out.extend_from_slice(b"PK\x06\x07"); // locator
+    out.extend_from_slice(&0u32.to_le_bytes()); // record's disk
+    out.extend_from_slice(&rec_at.to_le_bytes()); // ARCHIVE-relative
+    out.extend_from_slice(&1u32.to_le_bytes()); // total disks
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    if saturate {
+        out.extend_from_slice(&u16::MAX.to_le_bytes());
+        out.extend_from_slice(&u16::MAX.to_le_bytes());
+        out.extend_from_slice(&u32::MAX.to_le_bytes());
+        out.extend_from_slice(&u32::MAX.to_le_bytes());
+    } else {
+        out.extend_from_slice(&(entries as u16).to_le_bytes());
+        out.extend_from_slice(&(entries as u16).to_le_bytes());
+        out.extend_from_slice(&(cd_size as u32).to_le_bytes());
+        out.extend_from_slice(&(cd_off as u32).to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    out
+}
+
+/// The fixture §162 item 3 asked for, and the result it defines.
+///
+/// A zip64 end record may carry an "extensible data sector" (§4.3.6),
+/// which makes the record longer than 56 bytes; its length lives in
+/// the record's own size field and nowhere else. Unprefixed, this
+/// already opened - the directory's own end names the record's
+/// position - so this half is the control, and it is what says the
+/// fixture is a legal archive before the prefixed half is asked to
+/// open it.
+///
+/// The sector sizes are 8 (the smallest a writer would bother with),
+/// 64, and 1000 (past a single 512-byte block, and past every
+/// candidate the fixed-position probe could reach).
+#[test]
+fn a_zip64_record_with_an_extensible_data_sector_opens() {
+    let a = payload(9_000, 21);
+    let z = fixtures::zip_of(&[Spec::stored("a.bin", &a)]);
+    for saturate in [false, true] {
+        for sector in [0usize, 8, 64, 1000] {
+            let out = splice_zip64_end_record(&z, &payload(sector, 66), saturate);
+            let tag = format!("sec{sector}-sat{saturate}");
+            let (d, ar) = open_bytes(&format!("rd-z64sec-{tag}"), &out);
+            let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
+            assert_eq!(ar.entries().len(), 1, "{tag}");
+            assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+    }
+}
+
+/// The same archive with a stub in front - §162 item 3 itself.
+///
+/// Everything the directory stores is archive-relative, so on a
+/// prefixed archive the record's own pointer misses by the stub and
+/// the reader has to find the record PHYSICALLY. §4.3.6 puts it
+/// immediately before the 20-byte locator, which sits immediately
+/// before the EOCD, so its END is pinned at `eocd_at - 20` whatever
+/// its length - and its length is what the size field says. A probe
+/// that instead assumes 56 bytes reads at `eocd_at - 76`, which is
+/// the record's home only when the sector is empty; with a sector it
+/// lands INSIDE the record and finds nothing, and the archive is
+/// refused.
+///
+/// The fixture is a legal archive and that is established OUTSIDE
+/// this reader, which is the whole point of item 3 asking for one:
+/// measured 23 Aug 2026, Python 3.14.6 `zipfile`, Info-ZIP `unzip`
+/// 6.00 and 7-Zip 26.02 all open it unprefixed, and `zipfile` opens
+/// it again once the 511-byte stub is sliced off. What none of them
+/// does is open it PREFIXED. `zipfile` takes its prepended-data
+/// branch under the comment "Assume no 'zip64 extensible data'" and
+/// raises `BadZipFile`; `unzip` dies with "read failure while
+/// seeking for End-of-centdir-64 signature"; 7-Zip declines every
+/// prefixed variant of this fixture, sector or not, so it has no
+/// opinion on the sector either way. Each of the three reads the
+/// sector and the prefix separately and none of them reads both, so
+/// the expected result here is the payload - not a parity with any
+/// of them.
+#[test]
+fn a_prefixed_zip64_record_with_an_extensible_data_sector_opens() {
+    let a = payload(9_000, 21);
+    let z = fixtures::zip_of(&[Spec::stored("a.bin", &a)]);
+    for saturate in [false, true] {
+        for sector in [8usize, 64, 1000] {
+            let out = splice_zip64_end_record(&z, &payload(sector, 66), saturate);
+            for stub in [1usize, 511, 200_000] {
+                let mut with = payload(stub, 77);
+                with.extend_from_slice(&out);
+                let tag = format!("sec{sector}-sat{saturate}-stub{stub}");
+                let (d, ar) = open_bytes(&format!("rd-z64sec-stub-{tag}"), &with);
+                let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
+                assert_eq!(ar.entries().len(), 1, "{tag}");
+                assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
+                std::fs::remove_dir_all(&d).unwrap();
+            }
+        }
+    }
+}
+
+/// What makes the physical probe safe to widen, now that it no
+/// longer reads one fixed position. A sector is arbitrary bytes, so
+/// it can carry the end-record signature; a bare signature match
+/// would let those bytes name the record's start and shift the whole
+/// directory under the parse. Two plants, one for each half of the
+/// answer, and the archive must open on the real record either way.
+///
+/// The first wears the signature and declares a length that does NOT
+/// reach the locator, which is the arithmetic doing the work: §4.3.6
+/// pins the record's end there, so a candidate whose own `12 + size`
+/// lands anywhere else is not the record.
+///
+/// The second is the harder one - a complete 56-byte record sitting
+/// exactly 56 bytes before the locator, so its length DOES reach it
+/// and the arithmetic cannot separate the two. What separates them is
+/// containment: it is inside the real record's declared extent, and a
+/// sector's bytes are data, so the outer match is the record and the
+/// inner one is something it carries.
+#[test]
+fn a_planted_end_record_inside_the_sector_is_not_the_record() {
+    let a = payload(9_000, 21);
+    let z = fixtures::zip_of(&[Spec::stored("a.bin", &a)]);
+    let plant = |reaches: bool| {
+        let mut sector = payload(200, 66);
+        let at = sector.len() - 56;
+        sector[at..at + 4].copy_from_slice(b"PK\x06\x06");
+        // 44 puts the plant's end on the locator, which is what makes
+        // it a real rival; 40 puts it four bytes short.
+        let sz: u64 = if reaches { 44 } else { 40 };
+        sector[at + 4..at + 12].copy_from_slice(&sz.to_le_bytes());
+        sector
+    };
+    for reaches in [false, true] {
+        for saturate in [false, true] {
+            let out = splice_zip64_end_record(&z, &plant(reaches), saturate);
+            for stub in [1usize, 511] {
+                let mut with = payload(stub, 77);
+                with.extend_from_slice(&out);
+                let tag = format!("reaches{reaches}-sat{saturate}-stub{stub}");
+                let (d, ar) = open_bytes(&format!("rd-z64plant-{tag}"), &with);
+                let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
+                assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
+                std::fs::remove_dir_all(&d).unwrap();
+            }
+        }
+    }
+}
+
+/// The probe is a bounded READ as well as a bounded accept: the
+/// one-pass source blocks on bytes that have not arrived, so how far
+/// back of the EOCD it will look is capped. A sector past that cap
+/// is refused rather than chased, and the refusal names the shape.
+#[test]
+fn a_sector_past_the_probe_bound_is_refused_by_name() {
+    let a = payload(9_000, 21);
+    let z = fixtures::zip_of(&[Spec::stored("a.bin", &a)]);
+    let out = splice_zip64_end_record(&z, &payload(8_192, 66), false);
+    let mut with = payload(511, 77);
+    with.extend_from_slice(&out);
+    let (d, ar) = open_bytes("rd-z64sec-huge", &with);
+    match ar {
+        Err(ZipError::Malformed(m)) => assert!(
+            m.contains("does not start at the beginning of the file"),
+            "the reason must name the shape: {m}"
+        ),
+        Err(e) => panic!("expected the shape to be named, got {e}"),
+        Ok(_) => panic!("a sector past the bound opened"),
+    }
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// The other prepended-stub shape, and the one the libarchive
 /// fixture actually is: the stub is there but the writer rewrote
 /// every offset to be absolute, so the archive reads from byte 0
@@ -1137,4 +1338,137 @@ fn a_size_that_disagrees_with_the_data_is_refused() {
     let (d, ar) = open_bytes("rd-size", &z);
     assert!(extract(&ar.unwrap(), 0).is_err());
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// The `LZMA_DICT_MAX` boundary, pinned in BOTH directions.
+///
+/// The upper half is the ordinary guard: a header may not declare an
+/// arbitrary window. The lower half is the one that matters and the
+/// reason this test exists - 256 MiB is exactly what `7zz -tzip
+/// -mm=LZMA -mx=9` emits (`-mx=7` emits half of it), so a future
+/// session "hardening" this constant downward would start REFUSING
+/// archives written by stock 7-Zip on Ultra. That failure would look
+/// like a user's zip becoming unextractable, which is a worse bug than
+/// the allocation the cap exists to bound. Fail loudly instead.
+///
+/// Both cases declare a one-byte entry, so `LzmaReader` clamps the
+/// window to the uncompressed size and neither case allocates a real
+/// dictionary - this pins the ACCEPT/REFUSE decision, not the window.
+#[test]
+fn the_lzma_dictionary_cap_admits_7zips_top_preset_and_nothing_above_it() {
+    fn declare(dict: u32) -> std::io::Result<()> {
+        let e = Entry {
+            name: "a.bin".into(),
+            method: METHOD_LZMA,
+            crc32: 0,
+            compressed_size: 64,
+            uncompressed_size: 1,
+            is_dir: false,
+            flags: 0,
+            dos_time: 0,
+            aes: None,
+            unix_mode: 0,
+            local_offset: 0,
+        };
+        // zip's method-14 framing: version (2), props length (2), then
+        // the lc/lp/pb byte and the dictionary size.
+        let mut src = vec![0x10, 0x02, 0x05, 0x00, 0x5d];
+        src.extend_from_slice(&dict.to_le_bytes());
+        src.extend_from_slice(&[0u8; 32]);
+        decoder(&e, std::io::Cursor::new(src)).map(|_| ())
+    }
+    assert!(
+        declare(LZMA_DICT_MAX).is_ok(),
+        "a 256 MiB dictionary is what 7-Zip's -mx=9 writes - refusing it \
+         makes ordinary Ultra-compressed zips unextractable"
+    );
+    assert!(
+        declare(128 << 20).is_ok(),
+        "128 MiB is 7-Zip's -mx=7 (Maximum) preset"
+    );
+    let err = declare(LZMA_DICT_MAX + 1).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("dictionary"), "{err}");
+}
+
+/// libFuzzer `zip_parse` artifact
+/// `oom-437816e14944e2fc4658651e31e35851fe966516` (21 Aug 2026), kept
+/// as an ordinary test because a seed alone only bites on a machine
+/// with nightly + cargo-fuzz.
+///
+/// 139 bytes declaring a 128 MiB dictionary over an 84-byte body and a
+/// 2.9 GiB uncompressed size. It is NOT a crash and NOT a leak: the
+/// window is refused or honoured by policy (`LZMA_DICT_MAX` admits
+/// this one, see above), the stream is then rejected on its own
+/// merits, and the point of the pin is that a hostile header leaves by
+/// the ordinary error path rather than panicking, aborting or hanging.
+/// The fuzzer only flagged it because that lane ran the zip targets
+/// under `-malloc_limit_mb=128`, which `fuzz-smoke.yml` applies to the
+/// 7z targets alone.
+#[test]
+fn the_lzma_oom_seed_leaves_by_the_ordinary_error_path() {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fuzz/seeds/zip_parse/oom-437816e14944e2fc4658651e31e35851fe966516"
+    ))
+    .expect("committed fuzz seed");
+    assert_eq!(bytes.len(), 139);
+    let (d, ar) = open_bytes("rd-lzma-oom-seed", &bytes);
+    let ar = ar.expect("the central directory itself is well-formed");
+    for i in 0..ar.entries().len() {
+        // No unwrap: a clean Err is the whole assertion. A panic or an
+        // abort here is the regression.
+        assert!(
+            extract(&ar, i).is_err(),
+            "a 2.9 GiB claim behind 84 compressed bytes must not decode"
+        );
+    }
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// The two committed fixtures for §162 item 3, byte-for-byte what
+/// [`splice_zip64_end_record`] builds above at a 64-byte sector and a
+/// 511-byte stub. They are here because `fuzz-smoke.yml` copies
+/// `tests/fixtures/zip/*.zip` into the `zip_parse` corpus, and this
+/// shape sits behind a signature AND an exact 8-byte length that has
+/// to land on the locator, which no mutator reaches from cold.
+///
+/// So the pin: a regenerated file must not be allowed to stop being
+/// this shape while the test still passes. Both halves are asserted
+/// structurally - there is no end record where a 56-byte one would
+/// sit (that is the sector), and the locator's pointer does not name
+/// a physical position (that is the prefix) - before either is asked
+/// to open.
+#[test]
+fn the_committed_prefixed_sector_fixtures_keep_their_meaning() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zip");
+    let a = payload(300, 21);
+    for name in [
+        "zip64_sector_prefixed.zip",
+        "zip64_sector_prefixed_saturated.zip",
+    ] {
+        let blob = std::fs::read(root.join(name)).unwrap();
+        let eocd = blob.len() - 22;
+        assert_eq!(&blob[eocd..eocd + 4], b"PK\x05\x06", "{name}: no EOCD last");
+        assert_eq!(
+            &blob[eocd - 20..eocd - 16],
+            b"PK\x06\x07",
+            "{name}: no locator"
+        );
+        assert_ne!(
+            &blob[eocd - 76..eocd - 72],
+            b"PK\x06\x06",
+            "{name}: a record at eocd-76 means the sector is gone"
+        );
+        let reloff = rd_u64(&blob[eocd - 12..]) as usize;
+        assert_ne!(
+            &blob[reloff..reloff + 4],
+            b"PK\x06\x06",
+            "{name}: the locator's pointer resolves, so the prefix is gone"
+        );
+        let (d, ar) = open_bytes(&format!("rd-z64sec-fx-{name}"), &blob);
+        let ar = ar.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(extract(&ar, 0).unwrap(), a, "{name}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

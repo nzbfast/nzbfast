@@ -73,6 +73,26 @@ subprocess.run(["tar", "--uid", "1001", "--gid", "1001",
 PY
 cp "$WORK/clean.tar.gz" "$WORK/ok-linux-x64.tar.gz"
 
+# Two things run BEFORE the owner gate. The scan-stamp check is one, and
+# is stamped for below. The other is the release-account check, the very
+# first thing the script does, which no runner and no developer box can
+# satisfy - so a `gh` stub answers it and refuses every other subcommand,
+# which also makes the upload line at the end of the script inert. Until
+# 23 Aug 2026 there was no stub and this step had never once reached the
+# gate: it reported "did not refuse" while the script had in fact stopped
+# at `gh login ... is not nzbfast`.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gh" <<'ENDOFGH'
+#!/bin/sh
+case "$*" in
+    "api user --jq .login") echo nzbfast ;;
+    *) echo "STUB gh refused: $*" >&2; exit 1 ;;
+esac
+ENDOFGH
+chmod +x "$WORK/bin/gh"
+PATH="$WORK/bin:$PATH"
+export PATH
+
 # The upload script refuses anything without a current scan stamp, and
 # that check runs first, so stamp both fixtures or the owner gate is
 # never reached and the test passes without having tested anything.
@@ -89,10 +109,14 @@ case "$out" in
 esac
 
 # And the clean one must pass the same gate, or it refuses every release.
+# Asserted on reaching the upload line rather than on the ABSENCE of a
+# complaint: absence is also what every early exit produces, which is how
+# this read green while nothing had run.
 out=$(bash packaging/upload-release-assets.sh v0.0.0-test "$WORK/ok-linux-x64.tar.gz" 2>&1)
 case "$out" in
     *"builder identity"*|*"names the account"*) bad "refused a clean tarball" ;;
-    *) ok "a clean tarball raises no owner complaint" ;;
+    *"uploading to v0.0.0-test"*) ok "a clean tarball passes every gate" ;;
+    *) bad "a clean tarball never reached the upload: $(echo "$out" | head -1)" ;;
 esac
 
 echo

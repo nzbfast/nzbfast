@@ -16,6 +16,17 @@ use super::*;
 /// decline. That pins the CONTROL FLOW - the escalation is entered and
 /// the remaining volumes are fetched - not the repair verdict, which
 /// cannot succeed with native repair switched off.
+///
+/// The `assert!(!ok)` at the bottom carries a SECOND pin nothing else
+/// states: `rar_release`'s volumes carry neither a recovery record nor a
+/// data CRC (`fixtures::rar5_volume_n`), so this is the shape the
+/// `nothing_done` guard in `try_rar_rr_repair_hinted` exists for. Drop
+/// that guard and the RR rung skips the volumes PAR2 vouched for, finds
+/// no record in the damaged one, and hands an unchecked set to
+/// `try_unrar` - which, with no CRC anywhere, extracts the holed bytes
+/// as a success and greens this job. So do not switch this leg's fixture
+/// to `rar5_volume_n_crc`: the missing CRC is what gives the assertion
+/// its teeth.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_external_par2_still_reaches_the_native_escalation() {
     if !have_par2() {
@@ -67,6 +78,120 @@ async fn a_missing_external_par2_still_reaches_the_native_escalation() {
     assert!(
         !ok,
         "with native repair switched off there is nothing left to repair with:\n{log}"
+    );
+}
+
+/// Sweep 8 M1's production-route regression (TODO 199 item 7): a
+/// recovery volume that lands PARTIAL must be refetched by the
+/// escalation, not excluded from it forever.
+///
+/// `fetch_volumes` fetches a batch of chosen volumes, and the caller
+/// recorded the whole batch in `fetched_files` - the escalation's
+/// exclusion list - whatever actually landed. One lost article left its
+/// volume short on disk and permanently ineligible: the escalation's
+/// "fetch all remaining" skipped exactly the volume that was missing
+/// slices, and a job with enough recovery in the post to repair was
+/// declared unrepairable. The fix returns the failure count and clears
+/// the batch on any failure, because the count cannot say WHICH volume
+/// was short and only a complete volume may ever be excluded.
+///
+/// The oracle is the escalation's own traffic, read off the mock
+/// server: the short volume's surviving articles are asked for a SECOND
+/// time. Pre-fix they are asked exactly once and the volume stays
+/// short. Both repair engines are shut off (native by switch, external
+/// by an empty PATH) so the first pass is reliably short and the
+/// escalation is reliably entered - this pins the CONTROL FLOW, not a
+/// repair verdict, which is what the finding is about.
+///
+/// The shipped fix carried unit-level coverage only; this drives the
+/// real orchestration through `run_get`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_recovery_volume_is_refetched_by_the_escalation() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (fx, _inner, _vol_names) = rar_release("m1-partial-vol", true);
+    let art = |needle: &str, suffix: &str| {
+        fx.articles
+            .keys()
+            .find(|k| k.contains(needle) && k.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no article matching {needle}{suffix}"))
+            .clone()
+    };
+    // Payload damage, so a repair is genuinely needed.
+    let payload_gone = [
+        art("r_part2_rar", "-3@mock>"),
+        art("r_part2_rar", "-5@mock>"),
+    ];
+    // The BIGGEST recovery volume, which any minimal cover of a large
+    // deficit selects - so the batch that comes back short is one the
+    // first pass actually chose. One of its articles is lost.
+    let stem: String = {
+        let mut vols: Vec<&String> = fx
+            .articles
+            .keys()
+            .filter(|k| k.contains("vol") && k.contains("par2"))
+            .collect();
+        vols.sort();
+        let last = vols.last().expect("the fixture posts recovery volumes");
+        last.rsplit_once('-')
+            .expect("article ids end -N@mock>")
+            .0
+            .to_string()
+    };
+    let mut family: Vec<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.starts_with(&stem))
+        .cloned()
+        .collect();
+    family.sort();
+    assert!(
+        family.len() > 1,
+        "the short volume must be multi-article for this rig to mean anything"
+    );
+    let short_article = family[0].clone();
+    let siblings: Vec<String> = family[1..].to_vec();
+
+    let mut missing: std::collections::HashSet<String> = payload_gone.into_iter().collect();
+    missing.insert(short_article);
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            missing,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, _ok) = tokio::task::spawn_blocking(move || {
+        run_get(
+            &cfg,
+            &nzb,
+            &out,
+            &[("PATH", ""), ("NZBFAST_NO_NATIVE_REPAIR", "1")],
+        )
+    })
+    .await
+    .unwrap();
+    assert!(
+        log.contains("repair short - fetching all"),
+        "the escalation must be entered at all:\n{log}"
+    );
+    let served = srv.serve_counts();
+    let counts: Vec<(String, u64)> = siblings
+        .iter()
+        .map(|id| (id.clone(), served.get(id).copied().unwrap_or(0)))
+        .collect();
+    assert!(
+        counts.iter().any(|(_, n)| *n > 1),
+        "the short recovery volume was never asked for again - it stayed on the \
+         escalation's exclusion list, which is the finding. Its articles were \
+         served {counts:?}\n{log}"
     );
 }
 
@@ -199,22 +324,29 @@ async fn a_late_head_on_a_damaged_volume_still_repairs_one_pass() {
     // Degradation leg, same fixture: on a genuinely small budget the
     // spill must fire exactly as before the budget-aware ceiling - the
     // volume goes to disk, the disk-fed repair takes over, and the job
-    // still ends byte-correct. 200 MB budget → 90 MB holds slice →
-    // 22.5 MB window, far under the ~80 MB the late head runs behind.
+    // still ends byte-correct. 100 MB budget → 45 MB holds slice →
+    // 11.25 MB window, far under the ~80 MB the late head runs behind.
+    //
+    // It was 200 MB (a 90 MB slice) until the late-head grace landed:
+    // the grace lets a slot still waiting for its offset-0 article hold
+    // up to the WHOLE slice rather than a quarter of it, so an 80 MB
+    // pile inside a 90 MB slice now rides the head out instead of
+    // spilling. Halving the budget puts the volume back outside the
+    // slice, which is the shape this leg was written to pin.
     let cfg = fx.write_config(&[&srv]);
     let nzb = fx.write_nzb();
     let out_small = fx.dir.join("out-small");
     let out_small2 = out_small.clone();
     let expect = inner;
     let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(&cfg, &nzb, &out_small2, &[], &["--mem-limit", "200M"])
+        run_get_args(&cfg, &nzb, &out_small2, &[], &["--mem-limit", "100M"])
     })
     .await
     .unwrap();
     assert!(ok, "small-budget job failed:\n{log}");
     assert!(
         log.contains("materializing volumes for repair"),
-        "a 22 MB hold window rode out an 80 MB late head - the small-budget \
+        "an 11 MB hold window rode out an 80 MB late head - the small-budget \
          spill stopped degrading:\n{log}"
     );
     assert_eq!(

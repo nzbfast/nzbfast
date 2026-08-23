@@ -366,4 +366,187 @@ impl Daemon {
             info!(target: "queue", "restored {nq} queued + {nh} history jobs");
         }
     }
+
+    /// Does a live queue or history row name this exact spool path?
+    ///
+    /// The one ownership question `recover_orphaned_spool` must ask
+    /// before it unlinks anything, and it must ask it against the rows
+    /// as they stand NOW: a row adopted earlier in the same pass counts.
+    fn path_is_recorded(&self, p: &Path) -> bool {
+        self.queue
+            .lock_ok()
+            .iter()
+            .chain(self.history.lock_ok().iter())
+            .any(|j| j.lock_ok().nzb_path == p)
+    }
+
+    /// TODO 16g / A12: adopt back into the queue every spooled .nzb that
+    /// no record names. `enqueue` writes the NZB to the spool BEFORE it
+    /// saves queue.json, and the save is best-effort (ENOSPC, EIO, a
+    /// read-only volume), so a job accepted in a run whose saves never
+    /// landed again leaves exactly one trace behind: its spool file. The
+    /// watch poller keeps the user's copy in that case (since 16g's first
+    /// half), but every other add path - the *arrs, the dashboard, RSS,
+    /// the kept-files retry button - has no copy to keep, and their job
+    /// simply vanished at the next start.
+    ///
+    /// Idempotent by construction, which is what makes it safe to run on
+    /// every start rather than behind some "the last run was unclean"
+    /// guess:
+    ///
+    ///  * a file named by a queue row, a history row or a kept-files
+    ///    notice is not an orphan, whatever state its job is in;
+    ///  * an orphan is re-adopted under the id in its OWN file name, so a
+    ///    second start finds that id in the queue and skips it - and the
+    ///    *arr that was handed the id still holds a valid handle;
+    ///  * a file whose id IS known but whose path is not (a spool sibling
+    ///    left by an older layout) is left alone rather than adopted as a
+    ///    second copy;
+    ///  * an orphan byte-identical to a record already held (same
+    ///    `nzb_sha`) is a duplicate copy, not a lost job, and is removed
+    ///    - unless a row names that very path, which is what an
+    ///    adoption earlier in this same pass can have made of it.
+    ///
+    /// Runs after `load_queue` and after the settings restore: the
+    /// categories must be loaded for §218 to infer one, because the
+    /// category the job was originally added under is not recoverable -
+    /// it lived only in the record that was lost. The duplicate hold
+    /// applies as it would to any add: a release the user re-added under
+    /// another NZB while this one was unrecorded comes back as an
+    /// ALTERNATIVE behind it, not as a second download. Returns how many
+    /// were adopted.
+    pub(in crate::serve) fn recover_orphaned_spool(&self) -> usize {
+        use std::collections::HashSet;
+        let Ok(rd) = std::fs::read_dir(&self.spool) else {
+            return 0;
+        };
+        let mut named: HashSet<std::ffi::OsString> = HashSet::new();
+        let mut ids: HashSet<String> = HashSet::new();
+        let mut shas: HashSet<String> = HashSet::new();
+        let mut note = |g: &Job| {
+            if let Some(f) = g.nzb_path.file_name() {
+                named.insert(f.to_os_string());
+            }
+            ids.insert(g.nzo_id.clone());
+            shas.insert(g.nzb_sha.clone());
+        };
+        for j in self.queue.lock_ok().iter() {
+            note(&j.lock_ok());
+        }
+        for j in self.history.lock_ok().iter() {
+            note(&j.lock_ok());
+        }
+        for k in self.delete_kept.lock_ok().iter() {
+            if let Some(f) = Path::new(&k.nzb).file_name() {
+                named.insert(f.to_os_string());
+            }
+        }
+        // (allocator number, display stem, path), oldest id first so the
+        // queue comes back in the order the jobs were accepted.
+        let mut orphans: Vec<(u64, String, PathBuf)> = Vec::new();
+        for entry in rd.flatten() {
+            let fname = entry.file_name();
+            if named.contains(&fname) {
+                continue;
+            }
+            let Some(fname) = fname.to_str() else {
+                continue;
+            };
+            let Some(rest) = fname
+                .strip_suffix(".nzb")
+                .and_then(|f| f.strip_prefix("SABnzbd_nzo_nzbfast"))
+            else {
+                continue;
+            };
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            let Ok(n) = digits.parse::<u64>() else {
+                continue;
+            };
+            if ids.contains(&format!("SABnzbd_nzo_nzbfast{n}")) {
+                continue;
+            }
+            let stem = rest[digits.len()..].trim_start_matches('-').to_string();
+            orphans.push((n, stem, entry.path()));
+        }
+        orphans.sort();
+        let mut adopted = 0;
+        for (n, stem, path) in orphans {
+            let id = format!("SABnzbd_nzo_nzbfast{n}");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if bytes.is_empty() {
+                // A delete whose unlink was refused empties the spool
+                // copy as its last resort (`drop_spool`). It names no
+                // record and holds no articles: adopting it would
+                // resurrect the release the user cancelled, as a job
+                // that can only fail.
+                continue;
+            }
+            let sha = nzb_sha(&bytes);
+            if !shas.insert(sha) {
+                if self.path_is_recorded(&path) {
+                    // Not a spare copy: a row adopted EARLIER IN THIS
+                    // PASS names this very path. `enqueue_as` reruns the
+                    // pre-queue hook, which can rename the release and
+                    // so write its copy under a name this scan had
+                    // already snapshotted as a separate orphan. Removing
+                    // it here left the durable row pointing at nothing -
+                    // an unrecoverable loss, since that row then keeps
+                    // the next start from seeing an orphan at all.
+                    continue;
+                }
+                info!(
+                    target: "queue",
+                    "{}: a spare copy of an NZB the queue already holds - removed",
+                    path.display()
+                );
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            // Never hand this number out again, whatever the allocator
+            // was restored to.
+            self.next_id.fetch_max(n + 1, Ordering::Relaxed);
+            match self.enqueue_as(
+                Some(&id),
+                &bytes,
+                &stem,
+                "",
+                SAB_DEFAULT_PRIORITY,
+                None,
+                None,
+                "recovered",
+                false,
+            ) {
+                Ok(e) if e.durable => {
+                    adopted += 1;
+                    ids.insert(id.clone());
+                    info!(
+                        target: "queue",
+                        "recovered {id} ({stem}) from {} - it was accepted by the last \
+                         run but its record never reached disk",
+                        path.display()
+                    );
+                    // `enqueue_as` wrote its own spool copy (usually over
+                    // this very path); an original left under another
+                    // name would read as a fresh orphan next start.
+                    if !self.path_is_recorded(&path) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                // Not durable: the file stays, and the next start asks
+                // again under the same id - which is the idempotence.
+                Ok(_) => {}
+                Err(e) => warn!(
+                    target: "queue",
+                    "{}: left in the spool, could not be re-adopted: {e}",
+                    path.display()
+                ),
+            }
+        }
+        if adopted > 0 {
+            info!(target: "queue", "recovered {adopted} job(s) from orphaned spool files");
+        }
+        adopted
+    }
 }

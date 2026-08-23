@@ -6,6 +6,7 @@
 use crate::*;
 use nzbkit::pool::{BufPool, PoolConfig};
 use std::path::Path;
+use tracing::info;
 
 /// The wired fleet. Field names match the local bindings the inline
 /// code used.
@@ -38,7 +39,7 @@ pub(super) fn has_steer_peer(servers: &[ServerConfig]) -> bool {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn build_fleet(
     cfg_all: &Config,
     config: &Path,
@@ -49,149 +50,41 @@ pub(super) async fn build_fleet(
     job_family: &str,
     budget: &nzbkit::mem::MemBudget,
 ) -> Fleet {
-    let buf_pool = BufPool::new(budget.bufpool_bufs());
+    let buf_pool = BufPool::new_gauged(
+        budget.bufpool_bufs(),
+        nzbkit::memgauge::Sub::RawFree,
+        nzbkit::memgauge::Sub::RawOut,
+    );
     // Decoded-payload buffers, recycled the same way as the network-side
     // `buf_pool` - the decoder writes each article's bytes into a buffer
     // taken from here and the consumer returns it after write+verify, so
     // the hot path does no per-article ~800 KB payload allocation.
-    let out_pool = BufPool::new(budget.bufpool_bufs());
-    // Stall-detection timeout; env override exists for the chaos suite
-    // (a mock stall shouldn't cost a test 30 wall-clock seconds).
-    let read_timeout = std::env::var("NZBFAST_READ_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or_else(|| PoolConfig::default().read_timeout);
-    // Both tail knobs read the one settings.json the dashboard writes
-    // (same loader as conntune::enabled, so the daemon and the CLI
-    // agree); the env vars override PER KNOB in either direction - the
-    // bench suite A/Bs single knobs against a live setting ("1"/"2"
-    // arms, anything else disarms).
-    let saved = crate::persist::load_json_with_backup(&config.with_file_name("settings.json"));
-    // The unset-setting defaults for both switches come from
-    // `PoolConfig::shipped()`, so "what the daemon ships" has ONE
-    // definition that test fleets can build from as well - a rig that
-    // takes `PoolConfig::default()` measures a pool with the whole
-    // speculation layer dark.
-    let ship = PoolConfig::shipped();
-    // "Adaptive connection timeouts" (setting adaptive_timeouts, ON by
-    // default): two-phase adaptive read bounds in place of the flat
-    // whole-response timeout. Fault rigs (research/SPECULATION-
-    // EXPERIMENTS-2026-08-04.md rounds 5/5b/5c): 4x on dead-air
-    // stalls, stacks on brownout, zero false kills on jitter.
-    let adaptive = saved
-        .as_ref()
-        .and_then(|v| v.get("adaptive_timeouts").and_then(|v| v.as_bool()))
-        .unwrap_or(ship.adaptive_timeout);
-    let adaptive_timeout = std::env::var("NZBFAST_ADAPTIVE_TIMEOUT")
-        .ok()
-        .map_or(adaptive, |v| v == "1");
-    // "Race slow articles" (setting race_stragglers, ON by default).
-    // Covers the three speculation knobs with measured payouts: early
-    // tail fan-out (farm: tail 1.66 s -> 0.60 s), adaptive hedging
-    // (rig: 12-13 s -> 6-8 s on a stalled article), and slope recycle
-    // (rig: 45 s -> 25 s on one degraded session).
-    let race = saved
-        .as_ref()
-        .and_then(|v| v.get("race_stragglers").and_then(|v| v.as_bool()))
-        .unwrap_or(ship.tail_fanout);
-    let tf = std::env::var("NZBFAST_TAIL_FANOUT").ok();
-    let tail_fanout = tf.as_deref().map_or(race, |v| v == "1" || v == "2");
-    let tail_fanout_early = tf.as_deref().map_or(race, |v| v == "2");
-    let hedge = std::env::var("NZBFAST_HEDGE")
-        .ok()
-        .map_or(race, |v| v == "1");
-    // TODO 115 (dark, env-only): dup-race an article after ~1 s of
-    // pre-byte silence instead of waiting out the adaptive TTFB budget
-    // (its floor is 2 s, paid serially per stall - the deadair matrix
-    // residual). Rides the adaptive read path, so it is inert with
-    // adaptive_timeouts off. Graduates the race_stragglers way only
-    // with the jitter safety leg and the greet-delay rigs green.
-    let ttfb_hedge = std::env::var("NZBFAST_TTFB_HEDGE").is_ok_and(|v| v == "1");
-    // "Give up on a dead server after" (setting server_outage_mins,
-    // 0 = never). Read from the same settings.json as the knobs above so
-    // the CLI and the daemon agree; the env override is for tests, which
-    // cannot afford to wait out fifteen real minutes.
-    let outage_budget = std::env::var("NZBFAST_SERVER_OUTAGE_MINS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .or_else(|| {
-            saved
-                .as_ref()
-                .and_then(|v| v.get("server_outage_mins").and_then(|v| v.as_u64()))
-        })
-        .map_or(ship.outage_budget, |m| {
-            (m > 0).then(|| std::time::Duration::from_secs(m * 60))
-        });
-    let recycle_slope = std::env::var("NZBFAST_RECYCLE_SLOPE")
-        .ok()
-        .map_or(race, |v| v == "1");
-    // Still dark (env-only): the race-loss recycle (subsumed by the
-    // slope recycle in practice) and the hot spare (needs cap-aware
-    // gating first - at an exact provider cap the spare would steal a
-    // worker slot). NZBFAST_KEEPALIVE is read directly in the nntp dial
-    // path (NZBFAST_DIAL_RACE was too, until §129 3c priced it out).
-    let recycle_slow = std::env::var("NZBFAST_RECYCLE_SLOW").is_ok_and(|v| v == "1");
-    let hot_spare = std::env::var("NZBFAST_HOT_SPARE").is_ok_and(|v| v == "1");
-    // M7b.2 depth steering (dark, env-only): a server whose windowed
-    // per-conn rate falls under 1/4 of the best other live server's
-    // runs shallow pipelines (depth 1) instead of parking `window`
-    // articles behind each slow session. Graduates the race_stragglers
-    // way only with the steering rig's A/B and the real-line legs green
-    // (research/DESIGN-PROVIDER-STEERING-RACING-2026-08-08.md §7).
-    let steer_depth = std::env::var("NZBFAST_STEER_DEPTH").is_ok_and(|v| v == "1");
-    // M7b.2 envelope racing (dark, env-only): per-owner hedge bounds,
-    // the idle-picker envelope race, and the fleet-wide dup-spend
-    // hygiene cap; the whole-run 2x slow-owner rule retires while
-    // armed. Same graduation route as steer_depth. The per-server
-    // block_account setting (design 5.7) is LANDED and wired into
-    // PoolConfig::block_account below, so the economics no longer rest
-    // on the level > 0 inference alone.
-    let race_envelope = std::env::var("NZBFAST_RACE_ENVELOPE").is_ok_and(|v| v == "1");
-    // TODO 115, graduated 5 Aug: cap-aware flap keepers - a
-    // flap-clamped server whose accept cap was OBSERVED (dials bounced
-    // off a capacity refusal) holds min(cap, budget) keepers instead of
-    // one, so a provider willing to serve two sessions is not clamped
-    // to half of that. Redials stay death-driven and bounce-paced, so
-    // dials remain in the single-keeper's order - not the 217-dial
-    // hammering the fault matrix measured from NZBGet on this shape.
-    // Priced on the standalone chaos flap leg (one box, one corpus):
-    // 43/43 s at 24 dials off, 40/40 s at 36 dials on - ties the best
-    // competitor's wall at a sixth of its dials. Env overrides either
-    // way.
-    let flap_cap_keepers = std::env::var("NZBFAST_FLAP_CAP_KEEPERS")
-        .ok()
-        .is_none_or(|v| v == "1");
-    // TODO 111/114 CRC retry-elsewhere, graduated to the consumer seam
-    // 6 Aug: on a yEnc CRC failure (or a wrong-article body) the
-    // article is refetched from a DIFFERENT server once, instead of
-    // letting the damage ride to PAR2 repair - the corrupt-storm
-    // matrix leg goes DNF -> byte-perfect, and every competitor
-    // already does this. Detection is the decode consumer's EXISTING
-    // pass (QueueControl::note_decoded), so the old pool-side second
-    // decode - ~25% CPU at the loopback ceiling, the reason slow-CPU
-    // boxes were priced out - is gone: the m1 full-rate A/B has the
-    // steer at off-parity user CPU (9.3 vs the pool decode's 14.3
-    // cpu-s per 8 GB) with equal walls, and the only remaining cost
-    // is the forced per-article CRC where M32 delegation would have
-    // skipped it (+4.5% user on a PAR2 full-MD5 job, wall parity).
-    //
-    // Default ON where an elsewhere exists. "2+ enabled servers" is
-    // necessary but not sufficient: the steer marks tried_fail, and a
-    // fill server's pickup gate demands the primary's 430 bit - so a
-    // primary + fill pair can never steer, and a same-host (or same
-    // explicit group) sibling serves the same wrong copy. Pay the
-    // forced CRC only where a same-LEVEL peer on a different
-    // host/backbone exists; the delivery-time other_can_take check
-    // enforces the same rule live. Single-server configs pay nothing
-    // at all. NZBFAST_CRC_STEER overrides both ways (the chaos rig's
-    // same-host twins depend on =1); NZBFAST_CRC_RETRY is honored as
-    // an alias - it named the same feature while the detection lived
-    // in the pool, and the rig drivers still set it.
-    let multi_server = has_steer_peer(&cfg_all.servers);
-    let crc_steer = std::env::var("NZBFAST_CRC_STEER")
-        .or_else(|_| std::env::var("NZBFAST_CRC_RETRY"))
-        .map_or(multi_server, |v| v == "1");
+    let out_pool = BufPool::new_gauged(
+        budget.bufpool_bufs(),
+        nzbkit::memgauge::Sub::OutFree,
+        nzbkit::memgauge::Sub::OutOut,
+    );
+    let FleetKnobs {
+        read_timeout,
+        adaptive_timeout,
+        tail_fanout,
+        tail_fanout_early,
+        hedge,
+        ttfb_hedge,
+        outage_budget,
+        recycle_slope,
+        recycle_slow,
+        hot_spare,
+        steer_depth,
+        tail_taper,
+        race_envelope,
+        race_sat_pct,
+        race_escape,
+        stall_live,
+        peak_arrivals,
+        flap_cap_keepers,
+        crc_steer,
+    } = read_knobs(cfg_all, config);
     // Per-server budget: the CLI --connections is a ceiling; a server's
     // config `connections` (its account limit) caps its own pool; a
     // fresh auto-tuned knee (conntune.json, M7b.1) caps below that -
@@ -236,11 +129,9 @@ pub(super) async fn build_fleet(
     // announcing a cap that is not being applied is the same lie the
     // pinned-server exclusion exists to avoid.
     if !live_tune && !tuned_note.is_empty() {
-        println!(
-            "  connection auto-tune: {} (measured sweet spot; \
-             Settings → Auto-tune connections turns this off)",
-            tuned_note.join(" · ")
-        );
+        let note = tuned_note.join(" · ");
+        info!(target: "tune", "connection auto-tune: {note} (measured sweet spot; \
+             Settings → Auto-tune connections turns this off)");
     }
     // Config is reloaded for every daemon job, while the warm pool lives
     // across jobs. Reconcile the cache before building the new fleet so
@@ -289,6 +180,24 @@ pub(super) async fn build_fleet(
     } else {
         Default::default()
     };
+    // TODO 208 item 1: the fleet cap (`nzbkit::pool::linecap` has the
+    // measurements). The SEED half: the whole fleet is capped at a
+    // small CONSTANT, split equally across the servers and still under
+    // each account's own number. Enters as a `min` on `base`, the same
+    // seam `host_caps` uses, so a pin still wins and a knee or a live
+    // seed still only lowers it. It binds on every run now that the cap
+    // is no longer divided out of the line: a CLI run and a daemon's
+    // first job, which have no `anchor`, are capped here like any
+    // other. The anchor is still stamped on every server's pool config
+    // - the in-run shed stands down without one
+    // (`Shared::line_cap_tick`), and the stall bound sizes an article's
+    // share from it.
+    let line_cap = crate::conntune::line_cap_fleet();
+    let anchor_bps = hub
+        .as_ref()
+        .map(|h| h.line_anchor_bps.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let line_share = crate::conntune::line_cap_share(cfg_all.servers.len());
     let seed_bucket = crate::conntune::bucket_of(crate::conntune::local_hour());
     let seed_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -301,6 +210,15 @@ pub(super) async fn build_fleet(
             let mut base = connections.min(s.connections.max(1) as usize);
             if let Some(cap) = host_caps.get(&s.host) {
                 base = base.min((*cap).max(1));
+            }
+            if let Some(share) = line_share
+                && !s.pin_connections
+                && share < base
+            {
+                info!(target: "tune", "line cap: {} {share} of {base} (fleet cap {line_cap} \
+                       across {} servers; NZBFAST_LINE_CAP=0 turns this off)",
+                      s.host, cfg_all.servers.len());
+                base = share;
             }
             let applied =
                 crate::conntune::applied_connections(base, s.pin_connections, tuned.get(&s.host));
@@ -326,19 +244,51 @@ pub(super) async fn build_fleet(
                     }
                     (base, Some(t))
                 }
-                _ => (applied, None),
+                // The in-run shed needs a target to move. A pinned
+                // server gets none (its number is a statement), and a
+                // single connection has nowhere to go. Per job, not on
+                // the hub: with no walker there is no belief to carry
+                // across jobs, and the seed above re-derives it.
+                // Handed out anchor or not: a mid-run one finds it.
+                _ => (
+                    applied,
+                    (line_cap > 0 && !s.pin_connections && applied > 1)
+                        .then(|| nzbkit::pool::ConnTarget::new(applied)),
+                ),
             };
+            // Cross-job hand-over: this host's slice of the daemon's
+            // connection budget, sized to exactly the fleet spawned
+            // here, and the run's idle signal. Both absent off the
+            // daemon hub (CLI, sidecar), where no successor exists.
+            let lease = hub
+                .as_ref()
+                .and_then(|h| h.conn_budget.get())
+                .map(|b| b.lease(&nzbkit::pool::handoff::ConnBudget::key(s), conns));
+            let handoff = hub.as_ref().and_then(|h| h.handoff.lock_ok().clone());
             let cfg = PoolConfig {
                 connections: conns,
                 live_target,
+                lease,
+                handoff,
+                line_cap_fleet: line_cap,
+                line_anchor_bps: anchor_bps,
                 window,
+                // The get pipeline's drain releases this charge
+                // (drain_outcome_batch); see the field doc for why only
+                // a releasing consumer may set it.
+                channel_gauge: Some(nzbkit::memgauge::Sub::Channel),
                 buf_pool: Some(buf_pool.clone()),
                 read_timeout,
                 adaptive_timeout,
                 tail_fanout,
                 tail_fanout_early,
                 steer_depth,
+                tail_taper,
                 race_envelope,
+                race_sat_pct,
+                race_escape,
+                stall_live,
+                peak_arrivals,
                 // §5.7, and the one place the setting meets the pool:
                 // per-server, never OR-folded across the fleet, because
                 // the whole point of the flag is that one account's
@@ -416,6 +366,10 @@ pub(super) async fn build_fleet(
     }
 }
 
+#[path = "fleet_knobs.rs"]
+mod fleet_knobs;
+use fleet_knobs::*;
+
 #[cfg(test)]
 mod shipped_defaults {
     use super::*;
@@ -428,9 +382,9 @@ mod shipped_defaults {
     /// layer dark, because the library's neutral posture is not the
     /// product's. `shipped()` exists so a rig can say "the pool as the
     /// daemon ships it" in one token; this test is what stops that
-    /// claim from quietly becoming false. The two `unwrap_or`s above
-    /// read their default OUT of `shipped()`, so the values cannot
-    /// drift - what this catches is the other direction: a sixth knob
+    /// claim from quietly becoming false. The two `unwrap_or`s in
+    /// `read_knobs` read their default OUT of `shipped()`, so the values
+    /// cannot drift - what this catches is the other direction: a sixth knob
     /// added to one side and not the other, or a switch that stops
     /// fanning out to all four of its fields.
     #[tokio::test]
@@ -443,6 +397,9 @@ mod shipped_defaults {
             "NZBFAST_HEDGE",
             "NZBFAST_RECYCLE_SLOPE",
             "NZBFAST_ADAPTIVE_TIMEOUT",
+            "NZBFAST_RACE_ESCAPE",
+            "NZBFAST_STALL_LIVE",
+            "NZBFAST_PEAK_ARRIVALS",
         ] {
             if std::env::var_os(k).is_some() {
                 eprintln!("skipped: {k} overrides the shipped posture");
@@ -473,6 +430,11 @@ mod shipped_defaults {
                 ("tail_fanout_early", c.tail_fanout_early),
                 ("hedge", c.hedge),
                 ("recycle_slope", c.recycle_slope),
+                // TODO 202 §17: on by default, so it belongs with the
+                // shipped posture rather than the dark list below.
+                ("race_escape", c.race_escape),
+                ("stall_live", c.stall_live),
+                ("peak_arrivals", c.peak_arrivals),
             ]
         };
         assert_eq!(
@@ -554,5 +516,111 @@ mod block_account_wiring {
             "the flag must ride each server's own PoolConfig, not the fleet's"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod line_cap_seed {
+    use super::*;
+
+    /// TODO 208 item 1: the link anchor reaches the seed. Five servers
+    /// at 100 each on a link seen to move 12.5 MB/s (100 Mbit) open
+    /// ten apiece - the measured fleet-50 rung - and each non-pinned
+    /// server gets a live target for the in-run shed, while a pinned
+    /// server keeps its number AND gets no target (a statement, not a
+    /// state). A hub with no anchor (a fresh install, and the CLI's
+    /// `None` hub) dials the configured fleet once.
+    async fn build(cfg: &Config, hub: &Option<Arc<StreamHub>>) -> Vec<(String, usize, bool)> {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-linecap-{}-{}",
+            std::process::id(),
+            hub.is_some()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let fleet = build_fleet(
+            cfg,
+            &dir.join("config.local.json"),
+            100,
+            4,
+            hub,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        fleet
+            .servers
+            .iter()
+            .map(|(s, p)| (s.host.clone(), p.connections, p.live_target.is_some()))
+            .collect()
+    }
+
+    fn five() -> Config {
+        serde_json::from_str(
+            r#"{"servers":[
+                 {"host":"a.example","connections":100},
+                 {"host":"b.example","connections":100},
+                 {"host":"c.example","connections":100},
+                 {"host":"d.example","connections":100},
+                 {"host":"e.example","connections":100,"pin_connections":true}
+               ]}"#,
+        )
+        .unwrap()
+    }
+
+    /// The constant is fleet 25 over five servers = 5 each, whatever
+    /// the line, and the pinned server keeps the number it was given.
+    #[tokio::test]
+    async fn the_constant_seeds_five_per_server_and_a_pin_wins() {
+        let hub = Arc::new(StreamHub {
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(12_500_000),
+            ..Default::default()
+        });
+        let got = build(&five(), &Some(hub)).await;
+        let want: Vec<(String, usize, bool)> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|h| (format!("{h}.example"), 5, true))
+            .chain(std::iter::once(("e.example".to_string(), 100, false)))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// TODO 208 item 1, the behaviour change the constant brings: a run
+    /// with no link anchor - every CLI run, and a daemon's first job -
+    /// is capped like any other, where the per-Mbit rule let it dial
+    /// the configured fleet for want of a line to divide. The in-run
+    /// shed still stands down without an anchor, so the targets are
+    /// still handed out.
+    #[tokio::test]
+    async fn no_anchor_is_capped_too_because_a_constant_needs_no_line() {
+        for hub in [None, Some(Arc::new(StreamHub::default()))] {
+            let got = build(&five(), &hub).await;
+            assert!(
+                got.iter().all(|(h, c, t)| if h == "e.example" {
+                    *c == 100 && !*t
+                } else {
+                    *c == 5 && *t
+                }),
+                "{got:?}"
+            );
+        }
+    }
+
+    /// The retired 720 Mbit stand-down: a gigabit anchor used to hand
+    /// the fleet back whole. §208 measured fleet 20 a second AHEAD of
+    /// fleet 360 on an unshaped 1 GbE line, so it no longer does.
+    #[tokio::test]
+    async fn a_gigabit_anchor_is_capped_as_well() {
+        let hub = Arc::new(StreamHub {
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(125_000_000),
+            ..Default::default()
+        });
+        let got = build(&five(), &Some(hub)).await;
+        assert!(
+            got.iter()
+                .all(|(h, c, _)| *c == if h == "e.example" { 100 } else { 5 }),
+            "{got:?}"
+        );
     }
 }

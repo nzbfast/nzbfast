@@ -325,7 +325,12 @@ sich live, einmal pro Sekunde. Die Karten, von oben nach unten:</p>
 <ul>
 <li><b>Tempolimit</b>-Menü - feste Limits, <i>auto · LAN hat Vorrang</i> (ein
 RTT-gesteuerter Modus, der zurückweicht, wenn jemand anderes im Haus die Leitung
-braucht) oder unbegrenzt.</li>
+braucht) oder unbegrenzt.
+Die Vorgaben sind runde Zahlen für runde Leitungen, und ein Upload von 37&nbsp;Mb/s ist
+keine davon: <b>eigener Wert…</b> fragt stattdessen nach der Zahl und nimmt alles, was
+auch die API nimmt (<code>25M</code>, <code>500K</code> oder 0 für kein Limit). Das
+Menü zeigt dann <b>(eigenes)</b> mit der Rate daneben, bis du wieder eine Vorgabe oder
+<i>auto</i> wählst.</li>
 <li><b>Pausieren für…</b> - alles für 15&nbsp;Min/30&nbsp;Min/1&nbsp;Std/3&nbsp;Std pausieren,
 mit automatischem Fortsetzen, oder der Pause-Knopf für eine offene Pause. Pause
 greift sofort: Der aktive Transfer stoppt binnen Sekunden und setzt später aus dem
@@ -368,6 +373,7 @@ beigetragen hat, und eine „Hinzugefügt von“-Zeile, die sagt, woher der Job 
 <b>.nzb herunterladen</b> speichert dir die <code>.nzb</code>-Datei des Jobs -
 nzbfast behält eine eigene Kopie, das funktioniert also für jeden Job, auch wenn
 die Originaldatei längst weg ist.</li>
+<li><b>"Warum ist das langsam?"</b> Während ein Job lädt, trägt die Zeile unter seinem Fortschrittsbalken ein Urteil über <em>diesen</em> Job, nicht über die Maschine: <i>Ihre Anbieter sind die Grenze</i>, <i>diese Maschine ist am CPU-Limit</i>, <i>der Speicher kommt nicht mit</i> und so weiter. Ein Klick darauf öffnet die Zeile mit den Belegen: was deine Leitung kann, was die Anbieter geliefert haben, was gerade ankommt, und eine Tabelle pro Server, in der ein gedrosselter Anbieter auf einen Blick zu sehen ist. Ein Job mit voller Geschwindigkeit sagt hier nichts, und ein Job, dessen Urteil noch entsteht, ebenso wenig.</li>
 <li>Badges zeigen Sonderzustände: <i>zurückgestellt (langsam)</i>, <i>Prefetch</i>,
 <i>pausiert</i> (siehe <a href="#performance">Performance-Tools</a>).</li>
 <li>Ein Burn-down-Diagramm verfolgt die verbleibenden GB über die ganze
@@ -401,7 +407,7 @@ Ende heißt: Artikel kommen beschädigt an.
 Die Schublade jeder Zeile sagt, wer den Job hinzugefügt hat, und hat dieselbe
 Schaltfläche <b>.nzb herunterladen</b> wie die Warteschlange - praktisch, um ein
 Release woanders noch einmal herunterzuladen oder die <code>.nzb</code> an eine
-Problemmeldung anzuhängen.</p>
+Problemmeldung anzuhängen. Daneben steht <b>Bericht erstellen</b>, das meist die bessere Beilage ist: siehe <a href="#troubleshooting">Fehlerbehebung</a>.</p>
 <p>Die Karte listet standardmäßig zehn Downloads, der Rest ist einen Klick entfernt, über die Schaltfläche ▤. Status, Ort und der Grund eines Fehlschlags liegen hinter einem Klick auf die Zeile selbst, damit der häufige Fall - was fertig wurde, wie groß, wann - ohne Scrollen lesbar bleibt. Zieh stattdessen die Unterkante der Karte, damit die Liste auf einer von dir gewählten Höhe scrollt. <b>History rows</b> unter Einstellungen → Oberfläche ändert die Zehn; da es eine Eigenschaft des Daemons ist und nicht deines Browsers, gilt es für jedes Gerät, das auf diese Installation schaut. <b>Colour History names</b> daneben färbt fertige Namen grün und fehlgeschlagene rot; ausgeschaltet bleiben die Namen schlicht, und der farbige Punkt wie auch die Details der Zeile sagen weiterhin, was was ist.</p>
 <p>nzbfast behält den Verlauf für immer, sofern Sie nichts anderes sagen. <b>Verlauf
 aufräumen</b> unter Einstellungen → System entfernt alte Einträge nach zwei
@@ -423,10 +429,11 @@ Größe.</p>
 
 <h3 id="dash-layout">Das Dashboard anordnen</h3>
 <p>Das Dashboard gehört Ihnen. Vier Vorgänge, überall gleich benannt: eine Karte
-<b>Verschieben</b>, <b>Verdichten</b>, in der <b>Größe ändern</b> oder
-<b>Ausblenden</b>. Jede Wahl merkt sich der Browser, in dem sie getroffen wurde, jedes
-Gerät behält also seine eigene Anordnung, und <b>Layout zurücksetzen</b> unter
-Einstellungen → Oberfläche setzt jede Karte, Größe und Spalte auf den
+<b>Verschieben</b>, <b>Verdichten</b>, in der <b>Größe ändern</b> oder <b>Ausblenden</b>.
+Jede Wahl merkt sich das Browserprofil, in dem sie getroffen wurde: die Reihenfolge Ihrer
+Karten und die ausgeblendeten gelten bei jeder Fenstergröße in diesem Profil, während
+Karten- und Diagrammgrößen dem Desktop vorbehalten bleiben. <b>Layout zurücksetzen</b>
+unter Einstellungen → Oberfläche setzt jede Karte, Größe und Spalte auf den
 Auslieferungszustand zurück.</p>
 <p><b>Layout anpassen</b> ist der geführte Weg hinein und der schnellste Weg zu sehen, was
 eine Karte kann. Öffnen Sie es über den dezenten Link direkt über der ersten Karte oder
@@ -452,12 +459,13 @@ Zahlen, weniger Platz. Beim Verlauf wechselt er zwischen den zehn jüngsten Down
 dem Rest Ihres Verlaufs. <b>Kompaktmodus</b> unter Einstellungen → Oberfläche erledigt das
 ganze Dashboard auf einmal.</li>
 <li><b>Größe ändern.</b> Eine Karte mit einer Liste oder einem Diagramm trägt einen Balken
-an ihrer Unterkante: ziehen Sie ihn auf die gewünschte Höhe. Der Balken ist blass, bis Sie
-auf die Karte zeigen, dann erscheint er als haarfeine Linie über die volle Breite mit
-Rillen in der hinteren Ecke; er nimmt auch den Tastaturfokus an, wo die Pfeiltasten nach
-oben und unten die Höhe stellen und Umschalt größere Schritte macht. Welche Karten einen
-haben, ändert sich, wie Karten eigene Listen bekommen und verlieren: nehmen Sie den Balken
-als Antwort und nicht eine Aufzählung hier. In <b>Layout anpassen</b> sagen die Karten ohne
+an ihrer Unterkante, wo Sie eine Maus oder ein Trackpad haben: ziehen Sie ihn auf die
+gewünschte Höhe. Ein Touchscreen bekommt keinen. Der Balken ist blass, bis Sie auf die
+Karte zeigen, dann erscheint er als haarfeine Linie über die volle Breite mit Rillen in
+der hinteren Ecke; er nimmt auch den Tastaturfokus an, wo die Pfeiltasten nach oben und
+unten die Höhe stellen und Umschalt größere Schritte macht. Welche Karten einen haben,
+ändert sich, wie Karten eigene Listen bekommen und verlieren: nehmen Sie den Balken als
+Antwort und nicht eine Aufzählung hier. In <b>Layout anpassen</b> sagen die Karten ohne
 Balken es selbst.</li>
 <li><b>Ausblenden.</b> Der letzte Knopf in der Titelzeile blendet die Karte aus.
 Ausgeblendete Karten sammeln sich in einer Leiste <b>Ausgeblendet</b> am Fuß des
@@ -500,13 +508,15 @@ Breite.</p>
 <tr><th>Methode</th><th>So geht’s</th></tr>
 <tr><td><b>Drag &amp; Drop</b></td><td>Zieh eine oder mehrere <code>.nzb</code>-Dateien irgendwo aufs Dashboard.</td></tr>
 <tr><td><b>Watch-Ordner</b></td><td>Leg in den Einstellungen einen Ordner fest; jede dort
-gespeicherte <code>.nzb</code> wird binnen 5 Sekunden aufgegriffen und in den
+gespeicherte <code>.nzb</code> wird aufgegriffen, sobald sie landet, und in den
 Papierkorb verschoben, und ein offenes Dashboard meldet jede Übernahme beim Namen
 („… aus Downloads übernommen“), sodass eine Datei, die aus dem Ordner verschwindet,
 nie ein Rätsel bleibt. Du behältst deine Dateien lieber? Schalte <b>.nzb-Dateien
 nach Übernahme behalten</b> ein (siehe <a href="#settings">§9</a>). Richte den
 Download-Ordner deines Browsers dorthin - für Ein-Klick-Grabs
-von Indexer-Seiten.</td></tr>
+von Indexer-Seiten. Unterordner, Dateien, die sich als keine NZB entpuppen, und das Nachprüf-Intervall,
+das ein Ordner auf einer Netzwerkfreigabe braucht, haben jeweils einen eigenen Schalter;
+siehe <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Von einer URL</b></td><td>Füge einen NZB-Link ein (API <code>mode=addurl</code>, oder über jede verbundene App).</td></tr>
 <tr><td><b>nzblnk:-Links</b></td><td>Füge einen <code>nzblnk:</code>-Link irgendwo im Dashboard ein oder zieh ihn hinein. Aus dem macOS-DMG oder dem Windows-Installer installiert, kannst du auch direkt auf einem Board einen anklicken. Siehe <a href="#nzblnk">nzblnk-Links</a> weiter unten.</td></tr>
 <tr><td><b>Index durchsuchen</b></td><td>Klick ein vollständiges Release in der Durchsuchen-Karte an.</td></tr>
@@ -625,11 +635,27 @@ bringt mehr Poster auf den Schirm, groß weniger.</li>
 Zeile legen für Poster und Handlung, alles aus deinem eigenen Index.</li>
 <li><b>Nach Titel gruppieren</b>, der Schalter daneben: eine Zeile je Titel, die
 Releases darunter. Öffne sie mit <b>&#9656;</b> oder per Klick auf die Zeile; das
-Kästchen am Titel wählt die gezeigten Releases aus. Gruppieren gilt nur für
-<b>Diesen Index</b>.</li>
-<li><b>Reiter</b> für Filme / Serien / Sonstiges, Sofortsuche und sieben
-Sortierungen: <b>Für dich</b>, Neueste Posts, Erscheinungsjahr, Top bewertet,
-Titel A–Z, Größte und Am meisten gepostet.</li>
+Kästchen am Titel wählt die gezeigten Releases aus. Gruppieren gilt nur für <b>Diesen
+Index</b>; wählst du <b>Indexer</b> oder <b>Beides</b>, wird die Tabelle wieder flach
+und sagt es.</li>
+<li><b>Jede Release eines Titels</b> steht in seiner Karte, mit Auflösung, Codec,
+Tonformat und Dynamikumfang (Dolby Vision, HDR10) aus dem Release-Namen gelesen, dazu
+Größe, Alter und ob noch jeder Teil bei deinem Provider liegt. Stell <b>Bevorzugte
+Fassung</b> unter Einstellungen → Organisieren → Indexierung ein, dann steigen die
+passenden nach oben, mit einer Markierung <b>beste Übereinstimmung</b> und
+hervorgehobenen Treffer-Tags. Nichts wird versteckt: Release-Namen lassen diese Tags
+ständig weg, eine Vorliebe ändert also nur die Reihenfolge. Sie entscheidet auch, auf
+welche Fassung die Merkliste hochstuft.</li>
+<li><b>Reiter</b> für Filme / Serien / Sonstiges, Sofortsuche und sieben Sortierungen:
+<b>Für dich</b>, Neueste Posts, Erscheinungsdatum, Top bewertet, Titel A–Z, Größte und
+Am meisten gepostet. Die Schaltfläche <b>↓</b> neben der Sortierung dreht sie um, jede
+läuft also auch andersherum (älteste, kleinste, niedrigste, Z–A).</li>
+<li><b>Erscheinungsdatum</b> ist das ursprüngliche Erscheinen oder die
+Erstausstrahlung, auf den Tag genau, wo der Metadaten-Anbieter uns eines gegeben hat:
+es beantwortet „was ist diese Woche wirklich erschienen“, was Neueste Posts nicht kann
+(das ist das Upload-Datum, und der Repost eines 30 Jahre alten Films landet dort ganz
+oben). Titel, die vor dieser Sortierung angereichert wurden, oder deren Anbieter kein
+Datum hatte, fallen auf ihr Jahr zurück, bis du ihre Metadaten aktualisierst.</li>
 <li><b>Nur zugeordnete</b> ist standardmäßig an und blendet unidentifizierten Müll
 aus; ein Chip „+N ohne Match“ zeigt ihn.</li>
 <li>Klick eine Kachel für das Detailblatt: Handlung, IMDb-Bewertung und -Stimmen,
@@ -817,7 +843,7 @@ gespeichert und übersteht Neustarts (UI-Werte schlagen Kommandozeilen-Flags).</
 <h3>Tempo &amp; Zeitplan <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Einstellung</th><th>Was sie bewirkt</th></tr>
-<tr><td>Tempolimit</td><td>Limit in Bytes/Sek. (<code>50M</code>, <code>1G</code>, 0 = unbegrenzt). Fernsteuer-Apps schicken womöglich Prozente - setz das <i>Leitungstempo</i>, damit sie richtig übersetzt werden.</td></tr>
+<tr><td>Tempolimit</td><td>Limit in Bytes/Sek. (<code>50M</code>, <code>1G</code>, 0 = unbegrenzt). Fernsteuer-Apps schicken womöglich Prozente - setz das <i>Leitungstempo</i>, damit sie richtig übersetzt werden. Der Eintrag <b>eigener Wert…</b> in der Kopfzeile setzt dasselbe Limit, ohne die Einstellungen zu öffnen.</td></tr>
 <tr><td>Auto-Tempo</td><td>RTT-gesteuertes Limit, das anderem Verkehr im Haushalt weicht und sich wieder ausdehnt, wenn die Leitung ruhig ist.</td></tr>
 <tr><td>Langsame Downloads zurückstellen</td><td>Ein Job, der an einem einzelnen langsamen Server festhängt, während andere warten, wandert ans Ende der Warteschlange (Fortschritt bleibt). Siehe <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch auf freien Servern</td><td>Server, die dem aktiven Job nichts nützen, starten den nächsten eingereihten. Siehe <a href="#performance">§13</a>.</td></tr>
@@ -865,6 +891,15 @@ enthält, das wieder ein RAR enthält, ist im Usenet normal, und nzbfast folgt d
 ohne zweiten Durchgang. An der Grenze bleibt das tiefste Archiv einfach liegen, nicht
 weiter entpackt, und der Download wird trotzdem fertig. Nur für ungewöhnlich tiefe
 Releases erhöhen.</p>
+<p><b>Rechte für fertige Downloads</b> (eine erweiterte Einstellung) ist eine umask, dieselbe Zahl wie bei Docker und in den
+Einrichtungsanleitungen: <code>002</code> ergibt Ordner 775 und Dateien 664, <code>022</code> ergibt 755 und
+644. Leer ist der Standard und ändert nichts. Setzen Sie sie, wenn Sonarr oder Radarr als anderer Benutzer
+derselben Gruppe laufen und nicht lesen oder importieren können, was hier landet: bei einer
+systemd-Installation können sie das meist nicht, weil die Unit alles, was der Dienst schreibt, nur für
+den Eigentümer lesbar hält, um den API-Schlüssel zu schützen. Die Rechte werden gesetzt,
+sobald ein fertiger Job sich nicht mehr bewegt, und umfassen den Job-Ordner, alles darin und die Ordner zwischen
+ihm und dem Download-Ordner, denn Importieren per Umbenennen braucht Schreibrecht auf dem Ordner, aus dem
+umbenannt wird. Unter Windows wirkungslos, das kennt so etwas nicht.</p>
 
 <h3>Auto-Umbenennen &amp; Aufräumen <span class="pill live">live</span></h3>
 <p><b>Fertige Downloads umbenennen</b> (standardmäßig an) gibt dem Ordner und der
@@ -927,6 +962,29 @@ gemerkt, auch über Neustarts hinweg, und nicht erneut eingereiht; speichere sie
 neu, um sie erneut herunterzuladen. Wie auch immer du dich entscheidest: Die
 Schublade jedes Jobs hat eine Schaltfläche <b>.nzb herunterladen</b>, eine Kopie
 der <code>.nzb</code> eines Jobs ist also nie mehr als einen Klick entfernt.</p>
+<p><b>Auch Unterordner durchsuchen</b> (standardmäßig aus) übernimmt auch Dateien
+aus Ordnern innerhalb des Watch-Ordners, und der Name des ersten Unterordners wird zur
+Kategorie des Downloads: eine Datei in <code>watch/tv</code> landet in der Kategorie tv.
+Das ist der schnellste Weg, Grabs zu sortieren, ohne das Dashboard anzufassen - richte
+ein Browser-Lesezeichen auf <code>watch/tv</code> und ein zweites auf
+<code>watch/movies</code>, und die Ablage passiert schon beim Hereinkommen. Ein Ordner
+namens <code>rejected</code> ist die eine Ausnahme und bleibt immer unangetastet.</p>
+<p><b>Unbrauchbare Dateien beiseitelegen</b> (standardmäßig aus) verschiebt alles, was
+keine brauchbare NZB ist, in einen Ordner <code>rejected</code> im Watch-Ordner, mit
+einer kleinen Textdatei daneben, die sagt, was nicht stimmte. Lohnt sich für einen
+Ordner, in den dein Browser speichert, wo eine Login- oder Fehlerseite unter einem
+<code>.nzb</code>-Namen ankommen kann. Aus bleibt die Datei liegen, wo du sie
+hingelegt hast, und der Grund steht stattdessen über der Warteschlange. Eine Datei, die
+nur unvollständig aussieht, bleibt in beiden Fällen liegen, denn sie kommt vielleicht
+noch an.</p>
+<p><b>Ordner erneut prüfen alle</b> (eine erweiterte Einstellung) ist nur eine
+Rückfallebene und damit nicht der Regler, der Übernahmen schnell macht. Eine auf diesem
+Rechner abgelegte Datei wird in dem Moment bemerkt, in dem sie landet, weil das System
+es meldet; dieses Intervall deckt allein die Ordner ab, über die das System nichts
+melden kann, in der Praxis also eine Netzwerkfreigabe, die von einem anderen Computer
+beschrieben wird. In Sekunden, 1 bis 3600, Standard 5. Senke es, wenn Übernahmen von
+einer Freigabe spät wirken, erhöhe es, wenn die Nachprüfungen den Verkehr auf einer
+langsamen Leitung nicht wert sind.</p>
 
 <h3 id="set-indexers">Indexer durchsuchen <span class="pill live">live</span></h3>
 <p>Deine Konten bei NZB-Indexer-Seiten, je eine Zeile, damit eine Suche auf der Wand
@@ -1074,7 +1132,13 @@ unangetastet weiter, und das Log sagt warum.</p>
 <h3>Lebenszyklus-Ereignisse und signierte Webhooks</h3>
 <p>Jeder Job-Meilenstein ist ein versioniertes Ereignis: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, dazu
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(ein automatischer Neuversuch hat einen fehlgeschlagenen Download erneut
+eingereiht) und <code>job.delete_kept</code> (ein Löschen hat den Eintrag
+entfernt, konnte aber dessen Dateien nicht entfernen), dazu
+<code>watch.picked</code> (eine .nzb wurde aus dem Überwachungsordner geholt),
+<code>watchlist.upgraded</code> (ein Watchlist-Upgrade ist angekommen und die
+ersetzte Kopie wurde entfernt),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> und <code>quota.reached</code>. Jedes trägt
 <code>schema_version</code> (derzeit 1; neue Schlüssel können ohne Erhöhung
@@ -1129,6 +1193,12 @@ Kategorie-Routing verhalten sich alle so, wie die *arrs es erwarten.</p>
 <li>nzbfast beantwortet <code>caps</code>-, <code>search</code>-, <code>tvsearch</code>-
 und <code>movie</code>-Abfragen aus seinem eigenen Index deiner beobachteten Gruppen,
 und <code>/getnzb/&lt;id&gt;</code> reicht die NZB zurück.</li>
+<li>Gesucht wird nach Namen oder nach id: Serien nehmen eine TVDB-, IMDb- oder
+TVmaze-id, Filme eine IMDb- oder TMDB-id, und die App liest aus <code>caps</code>,
+welche. TVDB-ids werden erst angeboten, sobald der Index sie gesammelt hat, was von
+allein im Hintergrund passiert. Eine id, zu der wir nichts haben, bekommt ein leeres
+Ergebnis, und eine id, die wir gar nicht auflösen können, wird namentlich abgelehnt:
+keine von beiden bekommt je eine Liste unpassender Releases.</li>
 </ol>
 <div class="note"><b>Schalte zuerst den eingebauten Indexer ein</b> (Einstellungen →
 Indexierung). Er ist standardmäßig aus, und solange er aus ist, beantwortet diese Fassade
@@ -1152,8 +1222,13 @@ unterstützt:</p>
 <tr><td>Passwort</td><td>dein <b>API-Key</b></td></tr>
 </table></div>
 <p>Die volle JSON-RPC-Oberfläche, die diese Apps nutzen, wird bedient: Status,
-Warteschlange mit Umsortieren/Pause/Löschen, Verlauf, NZB hinzufügen, Tempolimit,
-Pause/Fortsetzen, Log.</p>
+Warteschlange mit Umsortieren/Umbenennen/Pause/Löschen, Verlauf, NZB hinzufügen (Datei
+oder URL), Tempolimit, Pause/Fortsetzen, Log. Die Zugangsdaten dürfen auch in der URL
+stehen, in NZBGets eigener Form <code>http://user:apikey@host:6789/</code>, die
+LunaSea schickt.</p>
+<p><b>Für nzb360-Nutzer:</b> trage nzbfast als <b>SABnzbd</b>-Server ein (nächster
+Abschnitt). nzb360 spricht mit echtem NZBGet über XML-RPC, das nzbfast nicht bedient,
+sein NZBGet-Modus kommt also nicht durch.</p>
 <h3>Apps, die SABnzbd sprechen</h3>
 <div class="tblwrap"><table>
 <tr><th>Feld in der App</th><th>Wert</th></tr>
@@ -1465,7 +1540,7 @@ zeigt.</td></tr>
 <h2 id="troubleshooting">18 · Fehlerbehebung</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Prüfen</th></tr>
-<tr><td>Langsame Downloads</td><td>Lass den <b>System-Benchmark</b> laufen - er nennt den Flaschenhals direkt beim Namen. Ist es das Netzwerk: <b>Verbindungs-Tuning</b> laufen lassen, die Verbindungszahlen pro Server prüfen und sicherstellen, dass deine Provider nicht alle ein Backbone sind (<b>Server-Diversität</b>).</td></tr>
+<tr><td>Langsame Downloads</td><td>Frag zuerst den Download selbst: während er läuft, nennt die Zeile unter seinem Fortschrittsbalken die Schicht, die <i>diesen</i> Job aufhält, und ein Klick auf dieses Urteil öffnet die Zeile mit den Belegen dafür (siehe <a href="#dash-queue">Warteschlange</a>). Lass den <b>System-Benchmark</b> laufen - er nennt den Flaschenhals direkt beim Namen. Ist es das Netzwerk: <b>Verbindungs-Tuning</b> laufen lassen, die Verbindungszahlen pro Server prüfen und sicherstellen, dass deine Provider nicht alle ein Backbone sind (<b>Server-Diversität</b>).</td></tr>
 <tr><td>Langsam nur bei sehr großen Jobs<br>(NAS oder Maschine mit wenig RAM)</td><td>Erwartet, und messbar: Ein ausgehungertes Speicher-Budget lagert Caches auf die Festplatte aus und kostet ab ~87 GB 20–40 %. Siehe <a href="#memory">Speicher-Budget</a> für die Zahlen und wie viel RAM du geben solltest. Kleinere Jobs sind nicht betroffen.</td></tr>
 <tr><td>Download scheitert mit „articles missing“</td><td>Der Post ist abgelaufen oder wurde bei deinen Providern entfernt. Ein zweiter Provider auf einem anderen Backbone rettet die meisten dieser Fälle. <code>nzbfast check</code> sagt das schon vor dem Download voraus. Und die Wand markiert die wahrscheinlich verschwundenen vorab mit ihrem
 Verfügbarkeitspunkt (<a href="#oracle">§13</a>). Ein erstes Scheitern dieser Art
@@ -1483,7 +1558,7 @@ sieht genauso aus und löst sich von allein.</td></tr>
 <tr><td>Daemon startet nicht: Port belegt</td><td>Eine andere Instanz läuft schon - oder ändere <code>--port</code>.</td></tr>
 <tr><td>Wo sind die Logs?</td><td>Die Log-Karte im Dashboard, oder das Terminal bzw. die Logdatei, mit der du <code>serve</code> gestartet hast.</td></tr>
 </table></div>
-<div class="note"><b>Hängst du immer noch?</b>Die Log-Karte nennt den Übeltäter
+<div class="note"><b>Hängst du immer noch?</b>Für ein Problem mit einem einzelnen Download nimm <b>Bericht erstellen</b>: Es steckt in der Schublade dieses Jobs in der Warteschlange, solange er läuft, und danach in seiner Verlaufs-Schublade. Es kopiert alles über genau diesen einen Download, darunter nur dessen eigene Protokollzeilen statt der des ganzen Dienstes. Benutzernamen, Passwörter und API-Schlüssel werden nie gelesen, und dein Benutzerordner wird als <code>~</code> geschrieben. Die Log-Karte nennt den Übeltäter
 meistens - häng ihr Ende an, wenn du ein Problem meldest, zusammen mit deiner
 <code>nzbfast --version</code>.</div>
 

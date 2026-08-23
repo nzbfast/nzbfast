@@ -471,6 +471,8 @@ fn job_round_trip_preserves_fields() {
         "cleaned_files": 5u64,
         "cleaned_par2": 6u64,
         "cleaned_trash": true,
+        "whyslow": {"layer": "provider", "detail": "news.example.invalid",
+                    "held_secs": 640u64, "total_secs": 900u64},
     });
     let j = job_from_json(&v).expect("parses");
     assert_eq!(j.nzo_id, "n42");
@@ -534,11 +536,51 @@ fn job_round_trip_preserves_fields() {
     assert_eq!(j.cleaned_files, 5);
     assert_eq!(j.cleaned_par2, 6);
     assert!(j.cleaned_trash);
+    let why = j.whyslow.clone().expect("the verdict survives the wire");
+    assert_eq!(why.layer, "provider");
+    assert_eq!(why.detail, "news.example.invalid");
+    assert_eq!((why.held_secs, why.total_secs), (640, 900));
 
     // Serialize and parse again: the persisted form is a fixed point.
     let v1 = job_json(&j);
     let j2 = job_from_json(&v1).expect("round-trips");
     assert_eq!(v1, job_json(&j2));
+}
+
+/// TODO 207: every record written before the verdict field existed has
+/// to read as ABSENT. Not as `unknown` (which is a verdict this surface
+/// emits, meaning "the evidence disagreed with itself") and not as
+/// `line` (which would tell the reader the download was fine). Same
+/// trap as `bad_blocks`, where a stored 0 meant both "verified, nothing
+/// bad" and "nothing ever verified this".
+#[test]
+fn a_record_from_before_the_verdict_field_reads_as_absent() {
+    let pre = minimal_job_value();
+    assert!(pre.get("whyslow").is_none(), "the fixture is pre-field");
+    let j = job_from_json(&pre).expect("parses");
+    assert!(j.whyslow.is_none(), "no field means no verdict");
+    // ...and it stays absent through a rewrite, so a compaction cannot
+    // invent one for it.
+    assert_eq!(job_json(&j)["whyslow"], Value::Null);
+    assert!(job_from_json(&job_json(&j)).unwrap().whyslow.is_none());
+
+    // The shapes that must ALSO read as absent rather than as a
+    // verdict: the honest `unknown` the live core publishes, a layer
+    // token from some future build, and a torn record.
+    for bad in [
+        json!({"layer": "unknown"}),
+        json!({"layer": "quantum"}),
+        json!({"layer": 7}),
+        json!("provider"),
+        Value::Null,
+    ] {
+        let mut v = minimal_job_value();
+        v["whyslow"] = bad.clone();
+        assert!(
+            job_from_json(&v).unwrap().whyslow.is_none(),
+            "{bad} must not become a verdict"
+        );
+    }
 }
 
 #[test]
@@ -871,4 +913,36 @@ fn an_aged_post_still_retries_while_the_loss_is_ambiguous() {
         "{census}; no usable connection to news.example.net for the entire run"
     ));
     assert!(auto_retry_eligible(&starved, cooldown));
+}
+
+// ---- clear_attempt_verdicts (bug sweep 22 Aug 2026, F-16/F-17) ----
+
+#[test]
+fn clear_attempt_verdicts_drops_whyslow_and_postproc_secs() {
+    let mut j = job_from_json(&serde_json::json!({
+        "nzo_id": "cav1",
+        "name": "x",
+        "nzb_path": "/spool/cav1.nzb",
+        "out_dir": "/dl/cav1",
+        "state": "Queued",
+    }))
+    .expect("job_from_json");
+    j.whyslow = Some(WhyVerdict {
+        layer: "line".into(),
+        detail: String::new(),
+        held_secs: 3,
+        total_secs: 4,
+    });
+    j.postproc_secs = 12.5;
+    j.fail_detail = "detail".into();
+    j.fail_message = "msg".into();
+    j.finished_unix = Some(1);
+    j.finished_at = Some(std::time::Instant::now());
+    j.clear_attempt_verdicts();
+    assert!(j.whyslow.is_none());
+    assert_eq!(j.postproc_secs, 0.0);
+    assert!(j.fail_detail.is_empty());
+    assert!(j.finished_unix.is_none() && j.finished_at.is_none());
+    // Not the helper's to clear: retry and demote own this one.
+    assert_eq!(j.fail_message, "msg");
 }

@@ -7,11 +7,16 @@
 mod daemon_authkey;
 // §123 chip-6 fault x lifecycle cross product (sibling dir, size gate).
 mod daemon_chip6;
+// TODO 222: the bomb verdict must reach the job message on every route
+// into the unpack ladder (sibling dir, size gate).
+mod daemon_bomb;
 // Queue-finished actions: the once-per-drain edge and its refusals
 // (sibling dir, size gate).
 mod daemon_finish;
 // §138 opt-in give-up legs (sibling dir, size gate).
 mod daemon_health;
+// §239 feed_preview dry run (sibling dir, size gate).
+mod daemon_feedpreview;
 // The four NZBGet delete verbs and the prefetch-delete leg (sibling
 // dir, size gate).
 mod daemon_delete;
@@ -20,18 +25,34 @@ mod daemon_delete;
 mod daemon_handles;
 // §129 4a pre-queue hook legs (sibling dir, size gate).
 mod daemon_hooks;
+// TODO 166: a user's index write is bounded and says "busy" rather
+// than parking a worker (sibling dir, size gate).
+mod daemon_indexbusy;
 // §154 zero-configured-servers hold (sibling dir, size gate).
 mod daemon_noservers;
+// Sweep 8 M3's id-floor leg (sibling dir, size gate).
+mod daemon_idfloor;
 // Passworded archives end to end (sibling dir, size gate).
 mod daemon_password;
+// Bug sweep 23 Aug 2026 F8: an absurd pause length is clamped, not
+// panicked on, on every route that takes one (sibling dir, size gate).
+mod daemon_pauseclamp;
 // §100 retry-without-refetch after a failed unpack (sibling dir, gate).
 mod daemon_retry;
 // Passwords attached mid-download, and the prefer_external_unrar switch:
 // moved to a child module by TODO 106. Declared here, so they still run in
 // this binary against these fixtures.
 mod daemon_unpackroute;
+// The disk SFX arm end to end - the shape badge this route used to
+// leave blank (sibling dir, size gate).
+mod daemon_sfx;
 // §76 fast-job media chip regression (sibling dir, size gate).
 mod daemon_mediafast;
+// TODO 207: the persisted "why was this slow" verdict (sibling dir).
+mod daemon_whyslow;
+// The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
+// serve / wait_ready), one copy for every suite that spawns a daemon.
+mod harness;
 mod playback_contract;
 // §73 phase 3 remux endpoint (sibling dir, size gate).
 mod preview_media;
@@ -44,27 +65,16 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
+
+use harness::{Daemon, free_port};
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
         .map(|i| (i as u8).wrapping_mul(29).wrapping_add(seed))
         .collect()
-}
-
-/// OS-assigned free port for a daemon under test. The old pid-derived
-/// scheme (`BASE + pid % M`, mixed moduli) collided for whole pid windows
-/// - e.g. pid ∈ [80000,81000) gave two tests the same port, killing
-/// whichever daemon bound second - and could also land on the ephemeral
-/// range the suites' own client sockets draw from.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// Response body of a request to the daemon (headers stripped).
@@ -169,44 +179,16 @@ fn raw_once(port: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        // ...and reap it. kill() alone leaves a zombie holding its pid
-        // for the rest of the binary's run, and this suite starts two
-        // dozen daemons.
-        let _ = self.0.wait();
-    }
-}
-
-/// A daemon under test: killed and reaped on drop, with its stdout and
-/// stderr captured to `log` so the test can read what it printed.
-struct Daemon {
-    _child: KillOnDrop,
-    port: u16,
-    log: PathBuf,
-}
-
-impl Daemon {
-    /// The child's pid, for the tests that must ask the OS about the
-    /// daemon rather than the daemon about itself.
-    fn pid(&self) -> u32 {
-        self._child.0.id()
-    }
-}
-
 /// Launch a daemon under `dir` and return once OUR daemon is serving.
 ///
 /// `build` is handed the port to serve on and returns the fully
 /// configured command; it may be called again on a fresh port, so it must
 /// not consume anything.
+///
+/// A thin wrapper on `harness::serve`, carrying the two isolations every
+/// case in this file needs.
 async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
-    for attempt in 0..3 {
-        let port = free_port();
-        let log = dir.join(format!("daemon-{port}.log"));
-        let out = std::fs::File::create(&log).unwrap();
-        let err = out.try_clone().unwrap();
+    harness::serve(dir, |port| {
         let mut cmd = build(port);
         // Central log isolation for every case in this file. These tests
         // assert on - and synchronize on - the daemon's own INFO markers,
@@ -217,7 +199,8 @@ async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
         // a barrier, timed out. Five red tests, no product defect (Codex
         // sweep 12 Aug). `info` IS the default filter, so this pins the
         // behaviour the tests were written against rather than changing it -
-        // the same isolation tests/watch_dedupe.rs already applies per case.
+        // the same isolation tests/integration/watch_dedupe.rs already
+        // applies per case.
         cmd.env("NZBFAST_LOG", "info").env_remove("RUST_LOG");
         // Central disk-guard isolation, for the same reason as the log
         // filter above: `min_free` defaults to 2 GB and the runner it is
@@ -238,68 +221,9 @@ async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
         {
             cmd.arg("--min-free").arg("0");
         }
-        cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        let child = KillOnDrop(cmd.spawn().unwrap());
-        let logfile = log.clone();
-        // The readiness wait blocks; keep it off the runtime's workers,
-        // where this test's own mock server is running.
-        let (child, ready) = tokio::task::spawn_blocking(move || {
-            let mut child = child;
-            let ready = wait_ready(&mut child, port, &logfile);
-            (child, ready)
-        })
-        .await
-        .unwrap();
-        if ready {
-            return Daemon {
-                _child: child,
-                port,
-                log,
-            };
-        }
-        // The daemon exited instead of binding: `free_port()` handed
-        // :port to a parallel test between our bind(:0) and the daemon's
-        // bind, and that test's daemon won it. Try a fresh port.
-        let tail = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(
-            attempt < 2,
-            "daemon exited without binding :{port}\n--- log ---\n{tail}"
-        );
-    }
-    unreachable!()
-}
-
-/// Wait for OUR daemon's own listener banner, not for "something answers
-/// on :port". A bare connect cannot tell the two apart, and under a full
-/// parallel run they diverge: `free_port()` can hand :port to a second
-/// test between our bind(:0) and our daemon's bind, that test's daemon
-/// wins the port, ours exits, and a plain connect then succeeds against
-/// the OTHER daemon. The test would run against a stranger and, when that
-/// stranger's owner finished and killed it, fail mid-request with
-/// ConnectionReset. The banner is read from this daemon's own log, so it
-/// can only be ours. (The bind itself happens near the top of startup -
-/// see serve()'s note beside spool_dir - so the banner, printed once
-/// startup is genuinely finished, is the readiness signal, not the bind.)
-///
-/// False means the child exited first (the port race above); a genuine
-/// hang panics with the log.
-fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
-    let banner = format!("open the dashboard at  http://localhost:{port}/");
-    for _ in 0..600 {
-        if std::fs::read_to_string(log)
-            .unwrap_or_default()
-            .contains(&banner)
-            && TcpStream::connect(("127.0.0.1", port)).is_ok()
-        {
-            return true;
-        }
-        if child.0.try_wait().ok().flatten().is_some() {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let tail = std::fs::read_to_string(log).unwrap_or_default();
-    panic!("daemon never came up on :{port}\n--- log ---\n{tail}");
+        cmd
+    })
+    .await
 }
 
 /// Seed the settings.json beside `cfg` so the daemon this test spawns
@@ -2334,7 +2258,7 @@ async fn restart_daemon_keeps_logging_to_the_same_file() {
     })
     .await;
     let port = d.port;
-    let log = d.log.clone();
+    let log = d.log_path();
     let banner = format!("open the dashboard at  http://localhost:{port}/");
 
     tokio::task::spawn_blocking(move || {
@@ -3565,6 +3489,13 @@ async fn slow_single_server_job_deferred() {
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_DEFER_WARMUP_SECS", "2")
+            // The defer verdict needs a job WAITING behind the slow one.
+            // With the cross-job hand-over on, the fast job starts on the
+            // idle fast server at once and nothing waits, so the verdict
+            // never has a reason to fire (tests/integration/queue_handoff.rs
+            // pins the three-job shape where it still does). Serial model
+            // here.
+            .env("NZBFAST_QUEUE_HANDOFF", "0")
             .env("NZBFAST_DEFER_WINDOW_SECS", "3")
             .arg("--config")
             .arg(&cfg)
@@ -3922,6 +3853,12 @@ async fn idle_servers_prefetch_next_job() {
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_DEFER_WARMUP_SECS", "2")
+            // The idle-server SIDECAR is what this test pins. With the
+            // cross-job hand-over on (tests/integration/queue_handoff.rs),
+            // the idle server's connections go to the next job as a
+            // first-class start before the sidecar's window ever opens, so
+            // the sidecar path is exercised with the hand-over off.
+            .env("NZBFAST_QUEUE_HANDOFF", "0")
             .env("NZBFAST_DEFER_WINDOW_SECS", "3")
             .arg("--config")
             .arg(&cfg)
@@ -4099,6 +4036,12 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_DEFER_WARMUP_SECS", "2")
+            // The idle-server SIDECAR is what this test pins. With the
+            // cross-job hand-over on (tests/integration/queue_handoff.rs),
+            // the idle server's connections go to the next job as a
+            // first-class start before the sidecar's window ever opens, so
+            // the sidecar path is exercised with the hand-over off.
+            .env("NZBFAST_QUEUE_HANDOFF", "0")
             .env("NZBFAST_DEFER_WINDOW_SECS", "3")
             .arg("--config")
             .arg(&cfg)
@@ -4117,7 +4060,7 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
     })
     .await;
     let port = d.port;
-    let log_path = d.log.clone();
+    let log_path = d.log_path();
 
     let (a_xml, b_xml) = (
         nzb_for("slowa.bin", &a_segs),
@@ -4209,14 +4152,17 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
             .unwrap_or_else(|| panic!("no elapsed_secs for A in history: {h}"));
         assert!(
             a_elapsed < 19.0,
-            "active job slowed to {a_elapsed:.1}s (ideal ~12.5s) - the borrow starved it"
+            "active job slowed to {a_elapsed:.1}s (ideal ~12.5s) - something took \
+             A's fleet. The borrow is one suspect; so is any rule that resizes a \
+             live fleet (the §208 line cap shed this one 4 -> 1 on 22 Aug, twice \
+             mistaken for the borrow). Read the daemon log for who moved it."
         );
         b_id
     })
     .await
     .unwrap();
 
-    let log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let log = d.log();
     assert!(
         log.contains(&format!(
             "[prefetch] {b_id} completed entirely on borrowed connections"
@@ -4928,7 +4874,8 @@ async fn pause_survives_restart() {
     .unwrap();
     // Let the daemon finish exiting before reading what it left on disk.
     std::thread::sleep(std::time::Duration::from_millis(1500));
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let s = std::fs::read_to_string(&settings).unwrap_or_default();
     assert!(
         !s.contains("\"paused\""),
@@ -5152,13 +5099,32 @@ async fn auto_retry_fires_once_after_cooldown() {
             "the automatic retry to run and fail",
         );
         assert!(h.contains("Failed"), "{h}");
-        // The requeue itself is announced. Without this ring the row the
-        // user was told had FAILED simply left History and a download
-        // nobody asked for appeared in the queue.
-        let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+        // The requeue itself is announced. Without this the row the user
+        // was told had FAILED simply left History and a download nobody
+        // asked for appeared in the queue.
+        //
+        // §129 1b(b): read off the lifecycle ring, which replaced a
+        // bounded `auto_retried` array on the queue payload that the
+        // page diffed against a seen-set of its own.
+        let q = http(
+            port,
+            "/api?mode=dashboard&events=0&apikey=sekrit&output=json",
+            None,
+        );
+        let qv: serde_json::Value = serde_json::from_str(&q).unwrap();
+        let ev = qv["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .find(|e| e["kind"] == "job.retried")
+            .unwrap_or_else(|| panic!("no job.retried on the ring: {q}"));
+        assert_eq!(ev["nzo_id"], "SABnzbd_nzo_nzbfast1", "{q}");
+        assert_eq!(ev["schema_version"], 1, "{q}");
+        // ...and the queue payload no longer carries the retired array.
+        let plain = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
         assert!(
-            q.contains("\"auto_retried\":[{") && q.contains("\"nzo_id\":\"SABnzbd_nzo_nzbfast1\""),
-            "the requeue must reach the dashboard as an event: {q}"
+            !plain.contains("auto_retried"),
+            "the queue-borne ring should be gone: {plain}"
         );
         // The consumed stamp is cleared with its reason, so the row
         // cannot go on advertising a retry that already happened.
@@ -5764,7 +5730,7 @@ async fn archive_shape_is_live_in_the_queue_and_kept_in_history() {
     .unwrap();
     // The same fact reaches the log (and so `nzbfast get`'s console),
     // folded into the volume line rather than printed on its own.
-    let log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let log = d.log();
     assert!(
         log.contains("extracting in-stream [RAR5 · stored · one-pass]"),
         "shape missing from the volume line:\n{log}"
@@ -6170,7 +6136,7 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
     .unwrap();
     // Rig check: the delete really did land on a live transfer (the whole
     // point - a job cancelled before it started never reaches park()).
-    let log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let log = d.log();
     assert!(
         log.contains("[queue] active download stopped by user"),
         "the delete did not hit a running download:\n{log}"
@@ -6370,7 +6336,8 @@ async fn categories_are_configurable_and_survive_a_restart() {
 
     // Restart: the category must still be there. Nothing was ever
     // downloaded, so the old queue-derived list would have lost it.
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let d = serve(&dir, &launch).await;
     let port = d.port;
     tokio::task::spawn_blocking(move || {
@@ -6643,7 +6610,8 @@ async fn synthesised_naming_defaults_on_and_its_off_switch_persists() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let d = serve(&dir, &launch).await;
     let port = d.port;
     tokio::task::spawn_blocking(move || {
@@ -6876,7 +6844,7 @@ async fn going_offline_winds_down_the_running_download() {
     .await;
     let port = d.port;
     let served = srv.served.clone();
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let boundary = "----offb";
@@ -7061,7 +7029,7 @@ async fn offline_outranks_force_and_a_client_resume() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         // Offline FIRST, with nothing running: this is about job START,
@@ -7240,7 +7208,7 @@ async fn preview_probe_reports_what_the_file_is() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let boundary = "----previewb";
@@ -7428,7 +7396,7 @@ async fn preview_probe_answers_while_the_file_is_still_downloading() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let boundary = "----previewlive";
@@ -8144,7 +8112,7 @@ async fn the_queue_row_says_what_the_file_is_and_flags_a_mislabelled_one() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         // The lie is in the NZB's own filename, which becomes the job
@@ -8411,7 +8379,8 @@ async fn the_three_plain_relay_formats_reach_the_feed_table() {
         "plain-format lines must never look nameable: {saw}"
     );
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8596,13 +8565,14 @@ async fn nested_zip_in_a_real_store_rar_extracts_through_the_daemon() {
             "an intermediate {stray} was materialized - produced {names:?}"
         );
     }
-    let log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let log = d.log();
     assert!(
         !log.contains("nested fallback"),
         "the nested chase demoted:\n{log}"
     );
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8740,7 +8710,8 @@ async fn change_cat_refuses_a_job_that_started_inside_its_window() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8892,7 +8863,7 @@ async fn giveup_breaker_unmonitors_after_final_failure() {
     let port = d.port;
 
     let spool = dir.join(".spool");
-    let dbg_log = d.log.clone();
+    let dbg_log = d.log_path();
     let seen = arr_seen.clone();
     tokio::task::spawn_blocking(move || {
         // Ghost articles the news server does not carry.
@@ -8976,13 +8947,32 @@ async fn giveup_breaker_unmonitors_after_final_failure() {
             "{st}"
         );
 
-        // The trip also rides the queue payload the dashboard already
+        // The trip also rides the §129 1b lifecycle ring the dashboard
         // polls every second - that is what toasts the moment.
-        let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+        //
+        // §129 1b(b): it used to ride a SECOND, queue-borne array
+        // (`giveup_tripped`) that the page diffed against a seen-set,
+        // and that array only reached the client when the queue
+        // revision moved. A breaker trip moves nothing, so on an idle
+        // daemon the toast waited for an unrelated mutation. Read the
+        // ring instead - `events=0` means "everything this boot".
+        let q = http(port, "/api?mode=dashboard&events=0&apikey=sekrit&output=json", None);
         let qv: serde_json::Value = serde_json::from_str(&q).unwrap();
-        let ev = &qv["queue"]["giveup_tripped"][0];
+        let ev = qv["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .find(|e| e["kind"] == "giveup.tripped")
+            .unwrap_or_else(|| panic!("no giveup.tripped on the ring: {q}"));
         assert_eq!(ev["name"], "Giveup.Show.S01E02.720p.WEB.x264-TEST", "{q}");
-        assert_eq!(ev["count"], 1, "{q}");
+        assert_eq!(ev["threshold"], 1, "{q}");
+        assert_eq!(ev["schema_version"], 1, "{q}");
+        // ...and the queue payload no longer carries the retired copy.
+        let plain = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+        assert!(
+            !plain.contains("giveup_tripped"),
+            "the queue-borne ring should be gone: {plain}"
+        );
 
         // "Try again" forgets the counters, so nothing is given up any
         // more (and the latch is re-armed - see clear_target).
@@ -9016,7 +9006,8 @@ async fn giveup_breaker_unmonitors_after_final_failure() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9115,7 +9106,8 @@ async fn queue_activity_field_reports_the_fetch_phase() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9219,6 +9211,15 @@ async fn whyslow_block_rides_the_queue_payload() {
                 assert!(w["post_unix"].is_i64(), "{q}");
                 assert!(w["missing_pct"].is_number(), "{q}");
                 assert!(w["missing_backbones"].is_u64(), "{q}");
+                // ...and the same verdict reaches the shareable report,
+                // which is the artefact someone actually sends. It was
+                // the one place a live diagnosis never appeared.
+                let id = w["nzo_id"].as_str().unwrap();
+                let rep = http(port, &format!("/api?mode=report&value={id}"), None);
+                let rv: serde_json::Value = serde_json::from_str(&rep).unwrap();
+                let txt = rv["report"].as_str().unwrap_or("");
+                assert!(txt.contains("== why it was slow =="), "{txt}");
+                assert!(txt.contains(&format!("[{layer}")), "verdict token missing: {txt}");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -9228,7 +9229,8 @@ async fn whyslow_block_rides_the_queue_payload() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9469,7 +9471,8 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9608,7 +9611,8 @@ async fn a_completed_move_reports_its_destination_and_no_split() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9728,7 +9732,8 @@ async fn raising_connections_reopens_a_stored_low_knee() {
     assert_eq!(k["checked"], 0, "reopened knee not queued for a re-probe");
     assert_eq!(k["limit"], 24);
     assert_eq!(k["connections"], 6, "the measurement itself must survive");
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
 
     // Phase 3: the same install, restarted. A tester who has ALREADY set
     // 24 gets no settings write to hang the fix on, so the boot sweep is
@@ -9739,7 +9744,8 @@ async fn raising_connections_reopens_a_stored_low_knee() {
     let k = knee();
     assert_eq!(k["suspect"], true, "boot did not sweep a pre-guard knee");
     assert_eq!(k["limit"], 24);
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -9888,7 +9894,8 @@ async fn a_finished_download_carries_the_configured_permissions() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -10017,7 +10024,8 @@ async fn clear_queue_empties_every_row_and_counts_them() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -10112,6 +10120,99 @@ async fn arr_category_contract_priority_pp_and_script_are_honored() {
         "cat script must be the configured one\n{c}"
     );
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 28: a RELATIVE `--out` must still be reported ABSOLUTE.
+///
+/// `serve::startup::absolute_out_root` resolves the flag against the
+/// daemon's cwd, and the reason is a client contract, not tidiness:
+/// Sonarr reads `misc.complete_dir` out of `get_config` to learn where
+/// this client puts files, and a relative path means nothing to a
+/// process with a different cwd - often a different container or host -
+/// so it reports "Remote Path Mapping" while the downloads land
+/// perfectly. That is the v1.0.9 report.
+///
+/// Nothing guarded it. Every other daemon spawn in these suites passes
+/// an absolute temp path, so the resolution never ran under test, and
+/// the only assertion on the key - in the Sonarr cycle at the top of
+/// this file - is `contains("complete_dir")`, which pins the key's
+/// PRESENCE and would pass just as happily on the bare word "complete".
+///
+/// All three surfaces that publish the path are checked, because they
+/// are three call sites of `d.out_dir()` and only one of them is the
+/// one Sonarr reads: `get_config`'s `misc`, and both spellings in
+/// `fullstatus` (`complete_dir` and the no-underscore `completedir`
+/// the *arrs actually resolve a relative path through).
+#[tokio::test]
+async fn a_relative_out_is_reported_absolute() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-relout-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    // getcwd resolves symlinks, and $TMPDIR on macOS is one
+    // (/var -> /private/var), so the daemon's own resolution lands on
+    // the canonical spelling. Compare against that, not against `dir`.
+    let real = std::fs::canonicalize(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(&cfg, "{\"servers\":[]}").unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_OPEN", "1")
+            // The whole point: cwd is the scratch dir and `--out` is a
+            // bare relative name, the way a `cd /downloads && nzbfast
+            // serve --out complete` install has it.
+            .current_dir(&dir)
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--out")
+            .arg("complete");
+        c
+    })
+    .await;
+    let port = d.port;
+    let want = real.join("complete");
+    let want = want.to_string_lossy().into_owned();
+
+    let c = http(port, "/api?mode=get_config&output=json", None);
+    let v: serde_json::Value =
+        serde_json::from_str(&c).unwrap_or_else(|e| panic!("not JSON ({e}): {c}"));
+    let got = v["config"]["misc"]["complete_dir"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no misc.complete_dir: {c}"));
+    assert!(
+        Path::new(got).is_absolute(),
+        "get_config must answer an ABSOLUTE complete_dir, got {got:?}"
+    );
+    assert_eq!(
+        got, want,
+        "complete_dir must resolve against the daemon's cwd"
+    );
+
+    // Both fullstatus spellings, same resolution.
+    let s = http(port, "/api?mode=fullstatus&output=json", None);
+    let v: serde_json::Value =
+        serde_json::from_str(&s).unwrap_or_else(|e| panic!("not JSON ({e}): {s}"));
+    for key in ["complete_dir", "completedir"] {
+        let got = v["status"][key]
+            .as_str()
+            .unwrap_or_else(|| panic!("no status.{key}: {s}"));
+        assert!(
+            Path::new(got).is_absolute(),
+            "fullstatus {key} must be ABSOLUTE, got {got:?}"
+        );
+        assert_eq!(
+            got, want,
+            "fullstatus {key} must resolve against the daemon's cwd"
+        );
+    }
+
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -219,7 +219,9 @@ impl Daemon {
             "failure-link",
             false,
         ) {
-            Ok(id) => info!(target: "failurelink", "{name}: queued a replacement ({id})"),
+            Ok(Enqueued { nzo_id: id, .. }) => {
+                info!(target: "failurelink", "{name}: queued a replacement ({id})")
+            }
             Err(e) => warn!(target: "failurelink", "{name}: replacement was not usable: {e}"),
         }
     }
@@ -524,6 +526,28 @@ impl Daemon {
         // refusal would re-send the payload to every idle tab.
         self.queue_rev.fetch_add(1, Ordering::Relaxed);
         self.save_delete_kept();
+        // §129 1b(b): the STRIP still rides the queue payload above -
+        // it is not a moment that scrolls past, it is a folder still on
+        // disk and the page keeps it until the user dismisses it. What
+        // moves here is the one-toast-each NUDGE towards that strip,
+        // which is a moment, and which the page used to recover by
+        // diffing the array against a seen-set of its own.
+        //
+        // Emitted only on the arm that actually raised a notice: the
+        // dedupe above returns early, and re-announcing a path the ring
+        // already holds is exactly what that dedupe exists to stop.
+        self.life_emit(
+            "job.delete_kept",
+            json!({
+                "name": name,
+                "path": path.display().to_string(),
+                "why": why,
+                // What the page needs is whether the Retry button can
+                // be offered at all, which is the same question the
+                // strip row answers - not the spool path itself.
+                "retry": nzb.is_some(),
+            }),
+        );
         true
     }
 
@@ -595,6 +619,7 @@ impl Daemon {
             return;
         }
         self.hub.activity.lock_ok().remove(id);
+        self.hub.unpack.lock_ok().remove(id);
         self.hub.tail_cancel.lock_ok().remove(id);
     }
 
@@ -680,6 +705,67 @@ impl Daemon {
         {
             let _ = std::fs::remove_file(&nzb);
         }
+    }
+
+    /// M32: a FIRST failure with missing articles gets ONE
+    /// automatic retry after a cooldown - propagation lag is a real
+    /// cause of missing articles that clears on its own, and the
+    /// journal makes the rerun fetch only what's still missing. Only
+    /// transient shapes qualify: password and takedown verdicts don't,
+    /// and nor does a post too old for propagation to explain it.
+    ///
+    /// The predicate itself is `will_auto_retry`, shared with
+    /// `run_post_job_hooks_gen` so the report/re-grab side and the
+    /// duplicate promotion below agree with what actually happens here.
+    ///
+    /// Stamps `auto_retry_at` and the reason token the drawer renders, and
+    /// says so once in the log. The PREDICATE stays at the call site - the
+    /// duplicate promotion below reads the same answer. Split out of
+    /// `park_gen` (TODO 106), body verbatim.
+    fn arm_auto_retry(&self, job: &Arc<Mutex<Job>>, id: &str) {
+        let secs = self.auto_retry_secs.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // What we are waiting FOR decides both the delay and what
+        // to call it. Propagation filling in missing articles takes
+        // real time; a pool that stalled on this machine has nothing
+        // to wait for at all, and the old copy told the user to sit
+        // out 20 minutes for a propagation that was never the
+        // problem.
+        let kind = fail_kind(&job.lock_ok().fail_message);
+        let (secs, why, token) = match kind {
+            FailKind::Transport => (
+                secs.min(SHORT_RETRY_SECS),
+                "connection trouble, not missing articles - retrying shortly",
+                RETRY_WHY_TRANSPORT,
+            ),
+            // Everything left is missing articles on a post young
+            // enough for propagation to be a live explanation -
+            // `retry_may_still_help` refused the rest.
+            _ => (
+                secs,
+                "articles missing - propagation may fill them",
+                RETRY_WHY_PROPAGATION,
+            ),
+        };
+        {
+            let mut g = job.lock_ok();
+            g.auto_retry_at = Some(now + secs);
+            // Beside the stamp, because the delay above was chosen
+            // from it: the drawer says "2 minutes, because this was
+            // the link and not the post" in the user's own language,
+            // which needs the reason as a token and not as this
+            // English log line.
+            g.auto_retry_why = Some(token.to_string());
+        }
+        info!(
+            target: "retry",
+            "{id}: {why}; automatic retry in {} min \
+             (resumes from the journal; only the gaps will be refetched)",
+            secs.div_ceil(60)
+        );
     }
 
     /// Park a finished job in history (NZBGet-style: failures are parked,
@@ -789,10 +875,12 @@ impl Daemon {
         if gen0.is_some_and(|g0| Self::record_generation(&job.lock_ok()) != g0) {
             return;
         }
-        // Activity and §129's tail-cancel die with the row - BELOW the
-        // re-read, not above it, or the guard cannot guard the one thing
-        // the comment above says it exists for (sweep 4, M4c).
+        // Activity, §205's unpack counters and §129's tail-cancel die
+        // with the row - BELOW the re-read, not above it, or the guard
+        // cannot guard the one thing the comment above says it exists
+        // for (sweep 4, M4c).
         self.hub.activity.lock_ok().remove(&id);
+        self.hub.unpack.lock_ok().remove(&id);
         self.hub.tail_cancel.lock_ok().remove(&id);
         let tombstone = job.lock_ok().tombstone;
         // Watchdog demotion: back into the queue (deferred, at the end)
@@ -820,9 +908,7 @@ impl Daemon {
                 g.fail_message.clear();
                 // The evidence goes with the verdict it explained - a
                 // re-queued job that fails again captures its own.
-                g.fail_detail.clear();
-                g.finished_at = None;
-                g.finished_unix = None;
+                g.clear_attempt_verdicts();
                 g.demote = false;
                 g.deferred = true;
                 g.defer_count += 1;
@@ -946,61 +1032,9 @@ impl Daemon {
             // above requeues that retry's park unconditionally.
             job.lock_ok().demote = false;
         }
-        // M32: a FIRST failure with missing articles gets ONE
-        // automatic retry after a cooldown - propagation lag is a real
-        // cause of missing articles that clears on its own, and the
-        // journal makes the rerun fetch only what's still missing. Only
-        // transient shapes qualify: password and takedown verdicts don't,
-        // and nor does a post too old for propagation to explain it.
-        //
-        // The predicate itself is `will_auto_retry`, shared with
-        // `run_post_job_hooks` so the report/re-grab side and the
-        // duplicate promotion below agree with what actually happens here.
         let armed_auto_retry = self.will_auto_retry(&job);
         if armed_auto_retry {
-            let secs = self.auto_retry_secs.load(Ordering::Relaxed);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // What we are waiting FOR decides both the delay and what
-            // to call it. Propagation filling in missing articles takes
-            // real time; a pool that stalled on this machine has nothing
-            // to wait for at all, and the old copy told the user to sit
-            // out 20 minutes for a propagation that was never the
-            // problem.
-            let kind = fail_kind(&job.lock_ok().fail_message);
-            let (secs, why, token) = match kind {
-                FailKind::Transport => (
-                    secs.min(SHORT_RETRY_SECS),
-                    "connection trouble, not missing articles - retrying shortly",
-                    RETRY_WHY_TRANSPORT,
-                ),
-                // Everything left is missing articles on a post young
-                // enough for propagation to be a live explanation -
-                // `retry_may_still_help` refused the rest.
-                _ => (
-                    secs,
-                    "articles missing - propagation may fill them",
-                    RETRY_WHY_PROPAGATION,
-                ),
-            };
-            {
-                let mut g = job.lock_ok();
-                g.auto_retry_at = Some(now + secs);
-                // Beside the stamp, because the delay above was chosen
-                // from it: the drawer says "2 minutes, because this was
-                // the link and not the post" in the user's own language,
-                // which needs the reason as a token and not as this
-                // English log line.
-                g.auto_retry_why = Some(token.to_string());
-            }
-            info!(
-                target: "retry",
-                "{id}: {why}; automatic retry in {} min \
-                 (resumes from the journal; only the gaps will be refetched)",
-                secs.div_ceil(60)
-            );
+            self.arm_auto_retry(&job, &id);
         }
         // Re-read once more: the demote arm above returns, so this is the
         // first point the history/promotion decisions are actually taken.
@@ -1196,6 +1230,12 @@ impl Daemon {
     /// the 10 Aug sweep (M3) neither said so - the subscriber that
     /// starts a media scan or spins a disk down when the queue empties
     /// simply never heard about those two.
+    ///
+    /// Idle is not answered by the queue alone: a post-processing tail
+    /// leaves the walk's sight well before its `job.completed` is
+    /// emitted, so the lane counter is half the question. The whole of
+    /// that argument is at `Daemon::postproc_backlog`, and the retry
+    /// that gets the suppressed edge said is `BacklogTicket`'s Drop.
     pub(in crate::serve) fn note_queue_idle(&self) {
         // Latch already set = idle is already announced and nothing has
         // re-armed it, so the CAS below cannot succeed and the answer to
@@ -1219,11 +1259,28 @@ impl Daemon {
         // the queue lock follows enqueue's established order (ring and
         // webhook channel are leaves under it).
         let _q = self.queue.lock_ok();
-        let idle = !_q.iter().any(|j| {
+        let quiet = !_q.iter().any(|j| {
             let g = j.lock_ok();
             matches!(g.state, JobState::Downloading | JobState::Finishing)
                 || (g.state == JobState::Queued && !g.paused)
         });
+        // The other half of the question, because the walk above cannot
+        // see a tail for most of the time one owes its `job.completed`:
+        // `run_tail` stamps the row `Completed` early, which matches no
+        // arm up there, and `park_gen` then retains the row out of the
+        // queue a hundred lines before it files the record into history
+        // - a window in which the job is in NEITHER list.
+        //
+        // Under this hold, and AFTER the walk rather than before it,
+        // which is what makes a Relaxed load enough. Every increment is
+        // published to this thread by a lock it has just taken: for a
+        // tail still in the queue, by the job mutex the walk took to
+        // read its state (the lane's increments both sit on the far
+        // side of a write that walk observes); for one already retained
+        // out, by the queue mutex held here, which its park released.
+        // Read FIRST, neither edge is in place yet and a stale zero
+        // beside a fresh queue is representable.
+        let idle = quiet && self.postproc_backlog.load(Ordering::Relaxed) == 0;
         #[cfg(test)]
         {
             let spool = self.spool.display().to_string();

@@ -450,20 +450,9 @@ const HARD_EXTRA: &[&str] = &[
     "pcm",
     "mp2",
     "ac4",
-    // edition markers ("Director's Cut", "Ultimate Edition", "Uncut")
-    "directors",
-    "director",
-    "theatrical",
-    "uncut",
-    "uncensored",
-    "restored",
-    "anniversary",
-    "collectors",
-    "collector",
-    "definitive",
-    "ultimate",
-    "edition",
-    "cut",
+    // "dc" is an edition marker too (Director's Cut), but unlike the
+    // EDITION_WORDS block it is an acronym, never a name word, so it
+    // stays unconditional furniture here.
     "dc",
     // print provenance
     "int",
@@ -496,6 +485,30 @@ const HARD_EXTRA: &[&str] = &[
     "ip",
 ];
 
+/// Edition markers ("Director's Cut", "Ultimate Edition", "Uncut").
+/// Furniture like the rest of HARD_EXTRA - except that these are plain
+/// English words a title can end in, so `identity_tail` keeps one when it
+/// directly follows an identity word: "Paddock.Uncut" is the show
+/// "Paddock Uncut" (tester Gary's F1TV post, 21 Aug 2026), not an uncut
+/// print of a show called "Paddock". After a year or other furniture
+/// ("Movie.2020.UNCUT.1080p") they stay furniture, so ordinary film
+/// shapes still leave `extra` empty and dupe keys unchanged.
+const EDITION_WORDS: &[&str] = &[
+    "directors",
+    "director",
+    "theatrical",
+    "uncut",
+    "uncensored",
+    "restored",
+    "anniversary",
+    "collectors",
+    "collector",
+    "definitive",
+    "ultimate",
+    "edition",
+    "cut",
+];
+
 /// Dub / subtitle markers the language table doesn't carry.
 const SOFT_EXTRA: &[&str] = &["truefrench", "vff", "vfq", "vfi", "vf", "vo", "subfrench"];
 
@@ -506,6 +519,7 @@ fn is_hard_furniture(t: &str) -> bool {
         || vcodec_of(t).is_some()
         || acodec_of(t).is_some()
         || HARD_EXTRA.contains(&t)
+        || EDITION_WORDS.contains(&t)
     {
         return true;
     }
@@ -552,12 +566,30 @@ pub fn token_role(tok: &str) -> TokenRole {
 pub fn identity_tail<'a, I: IntoIterator<Item = &'a str>>(after_year: I) -> Vec<&'a str> {
     let mut tail: Vec<&str> = Vec::new();
     let mut any_ident = false;
+    let mut prev_ident = false;
     for tok in after_year {
         match token_role(tok) {
-            TokenRole::HardFurniture => break,
-            TokenRole::SoftFurniture => tail.push(tok),
+            TokenRole::HardFurniture => {
+                // An edition word straight after an identity word is the
+                // name continuing, not an edition: "Paddock.Uncut.1080p"
+                // is the show "Paddock Uncut". Straight after the year or
+                // other furniture ("Movie.2020.UNCUT.1080p",
+                // "Movie.2020.German.Uncut.1080p") it is the edition it
+                // always was, so ordinary film shapes are untouched. See
+                // EDITION_WORDS.
+                if prev_ident && EDITION_WORDS.contains(&tok.to_ascii_lowercase().as_str()) {
+                    tail.push(tok);
+                } else {
+                    break;
+                }
+            }
+            TokenRole::SoftFurniture => {
+                prev_ident = false;
+                tail.push(tok);
+            }
             TokenRole::Identity => {
                 any_ident = true;
+                prev_ident = true;
                 tail.push(tok);
             }
         }

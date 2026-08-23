@@ -155,3 +155,190 @@ fn a_recategorize_with_no_sidecar_moves_the_partial_files() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A history-less delete of a LIVE job drops the queue row durably at
+/// once and unlinks the spooled `.nzb` only when the download drains
+/// (`spend_deferred_delete`). A kill in that window left an adoptable
+/// spool file behind, so `recover_orphaned_spool` re-added - and
+/// re-downloaded - the release an *arr had just cancelled.
+#[test]
+fn a_deleted_live_jobs_spool_copy_is_not_re_adopted_by_recovery() {
+    let dir = tmp("maskdel");
+    let d = test_daemon(&dir);
+    let e = d
+        .enqueue(
+            NZB,
+            "Cancelled.Release.nzb",
+            "",
+            -100,
+            None,
+            None,
+            "test",
+            false,
+        )
+        .expect("enqueue");
+    // A control of the SAME shape under an unknown id: it must come
+    // back, or this test would pass against a matcher that adopts
+    // nothing at all.
+    // Distinct bytes, so it is adopted on its own account rather than
+    // removed as a spare copy of something the queue already holds.
+    let control = d.spool.join("SABnzbd_nzo_nzbfast9001-Other.Release.nzb");
+    let other = String::from_utf8_lossy(NZB).replace("one@x", "two@x");
+    std::fs::write(&control, other).expect("control copy");
+
+    let job = d.queue.lock_ok()[0].clone();
+    let original = {
+        let mut g = job.lock_ok();
+        g.state = JobState::Downloading;
+        g.tombstone = true;
+        let original = g.nzb_path.clone();
+        payload::mask_spool_from_recovery(&mut g);
+        original
+    };
+    // The delete's own effect: the row is gone from the live queue and
+    // from queue.json, park has not run yet.
+    d.queue.lock_ok().clear();
+
+    let masked = job.lock_ok().nzb_path.clone();
+    assert!(!original.exists(), "the adoptable name is gone");
+    assert!(
+        masked.exists() && masked.to_string_lossy().ends_with(".nzb.deleting"),
+        "park's unlink must still name the real file: {}",
+        masked.display()
+    );
+    assert_eq!(
+        d.recover_orphaned_spool(),
+        1,
+        "only the control is an orphan"
+    );
+    let back: Vec<String> = d
+        .queue
+        .lock_ok()
+        .iter()
+        .map(|j| j.lock_ok().nzo_id.clone())
+        .collect();
+    assert!(
+        !back.contains(&e.nzo_id),
+        "the cancelled release came back: {back:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A non-active delete whose spool unlink is REFUSED must not have the
+/// release re-adopted at the next start.
+///
+/// The record is dropped durably at the delete, so the surviving file
+/// names nothing and `recover_orphaned_spool` reads it as a job whose
+/// record never reached disk: the release the user cancelled came back
+/// and downloaded again. A read-only spool directory refuses the rename
+/// as well as the unlink, which is why `drop_spool` has the third
+/// resort this leans on.
+#[cfg(unix)]
+#[test]
+fn a_delete_whose_spool_unlink_is_refused_is_not_re_adopted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp("unlinkdeny");
+    let d = test_daemon(&dir);
+    let e = d
+        .enqueue(
+            NZB,
+            "Cancelled.Release.nzb",
+            "",
+            -100,
+            None,
+            None,
+            "test",
+            false,
+        )
+        .expect("enqueue");
+    // A control of the same shape under an unknown id, so this cannot
+    // pass against a matcher that adopts nothing at all.
+    let control = d.spool.join("SABnzbd_nzo_nzbfast9002-Other.Release.nzb");
+    let other = String::from_utf8_lossy(NZB).replace("one@x", "two@x");
+    std::fs::write(&control, other).expect("control copy");
+
+    let job = d.queue.lock_ok()[0].clone();
+    let (nzb, out_dir) = {
+        let g = job.lock_ok();
+        (g.nzb_path.clone(), g.out_dir.clone())
+    };
+    let was = std::fs::metadata(&d.spool)
+        .expect("spool")
+        .permissions()
+        .mode();
+    std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let mut held = std::collections::HashMap::new();
+    hold_or_drop_spool(false, &out_dir, &nzb, &mut held);
+    // The delete's own effect: the record is gone for good.
+    d.queue.lock_ok().clear();
+    assert!(
+        nzb.exists(),
+        "the fault under test is an unlink that was refused"
+    );
+    std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(was)).expect("chmod back");
+
+    assert_eq!(
+        d.recover_orphaned_spool(),
+        1,
+        "only the control is an orphan"
+    );
+    let back: Vec<String> = d
+        .queue
+        .lock_ok()
+        .iter()
+        .map(|j| j.lock_ok().nzo_id.clone())
+        .collect();
+    assert!(
+        !back.contains(&e.nzo_id),
+        "the cancelled release came back: {back:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Recovery must never remove the spool path a row it just made durable
+/// names.
+///
+/// The orphan list and the `nzb_sha` set are snapshotted before any
+/// adoption, and `enqueue_as` writes its own copy under the name the
+/// add path derives - which can be a name this very scan snapshotted as
+/// a second orphan. That copy is then byte-identical to the one just
+/// adopted, so the duplicate arm removed it and left the durable row
+/// pointing at nothing: unrecoverable, because the row keeps the next
+/// start from seeing an orphan at all.
+#[test]
+fn recovery_leaves_every_durable_rows_nzb_in_place() {
+    let dir = tmp("twopath");
+    let d = test_daemon(&dir);
+    // Old-layout orphan (no stem) beside the byte-identical copy under
+    // the name the add path derives for it. Sorted stem-first, so the
+    // old-layout one is adopted and the other is the "spare copy".
+    let old = d.spool.join("SABnzbd_nzo_nzbfast4242.nzb");
+    std::fs::write(&old, NZB).expect("orphan");
+    let derived = {
+        let probe = tmp("twopath-probe");
+        let p = test_daemon(&probe);
+        std::fs::write(p.spool.join("SABnzbd_nzo_nzbfast4242.nzb"), NZB).expect("probe orphan");
+        assert_eq!(p.recover_orphaned_spool(), 1, "probe adoption");
+        let name = p.queue.lock_ok()[0].lock_ok().nzb_path.clone();
+        let name = name.file_name().expect("file name").to_os_string();
+        let _ = std::fs::remove_dir_all(&probe);
+        d.spool.join(name)
+    };
+    assert_ne!(derived, old, "the two-path shape needs two names");
+    std::fs::write(&derived, NZB).expect("second copy");
+
+    assert_eq!(d.recover_orphaned_spool(), 1, "one job, two copies of it");
+    for j in d.queue.lock_ok().iter() {
+        let p = j.lock_ok().nzb_path.clone();
+        assert!(
+            p.exists(),
+            "the durable row's NZB was removed as a spare copy: {}",
+            p.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

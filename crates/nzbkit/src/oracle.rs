@@ -169,43 +169,122 @@ const BACKBONE_ALIASES: &[(&str, &str)] = &[
     //   under Usenet.farm. It keys as `frugalusenet`.
 ];
 
-/// Normalize a server host to its backbone key: take the registrable
-/// label (skipping TLD-ish tails like "co.uk"), strip digits/dashes
-/// (news2, ssl-eu), then apply the reseller alias map.
+/// Normalize a server host to its backbone key: find the brand, strip
+/// digits/dashes (news2, ssl-eu), then apply the reseller alias map.
 /// news.newshosting.com → newshosting → highwinds; news.eweka.nl →
 /// eweka (its own spool); news2.blocknews.net → blocknews → netnews.
+///
+/// # Modern TLDs (sweep 8, L9)
+///
+/// The brand used to be "the first label from the right that is not
+/// TLD-ish", where TLD-ish meant three characters or less plus a short
+/// hard-coded list. Every modern long TLD therefore BECAME the brand:
+/// `reader.alpha.cloud` and `reader.beta.cloud` are two unrelated
+/// providers and both normalized to `cloud`, so their capacity
+/// evidence, their UI verdicts and any opt-in demotion were pooled as
+/// one spool. `news.newsgroup.ninja` normalized to `ninja` and walked
+/// straight past the `newsgroupninja` alias that exists for it. The
+/// file already carried a hand-written `("farm", "usenetfarm")` entry
+/// for exactly this failure, which is the shape of a rule that does not
+/// generalize.
+///
+/// A maintained public-suffix list is the right answer and is a large
+/// dependency for a ledger key, so this takes the fallback the handoff
+/// allows: match the alias table against label SEQUENCES first (which
+/// is what finds `usenet.farm` and `newsgroup.ninja` without either
+/// being a single label), then fall back conservatively - today's
+/// registrable-label rule only where the last label really does look
+/// like a TLD, and the last TWO labels joined where it does not, so two
+/// unrelated hosts under one long TLD stay two keys. Erring toward too
+/// many keys is the safe direction: a split spool costs a little
+/// evidence, a merged one INVENTS it.
 pub fn backbone_of(host: &str) -> String {
-    let host = host.to_ascii_lowercase();
-    let host = host.split(':').next().unwrap_or(&host); // strip :port
+    let lower = host.trim().to_ascii_lowercase();
+    let host = strip_port(&lower);
+    // An address is its own spool. Without this every IPv4 host keyed
+    // on its THIRD OCTET (`127.0.0.1` → `0`), which pooled every LAN
+    // and mock server that happened to share one.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
     let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
-    // Walk from the end past TLD-ish labels (short, or common ccTLD
-    // second levels like "co"/"com"); the first substantive label is the
-    // brand. A bare hostname (tests, LAN) is its own label.
-    const TLDISH: &[&str] = &["co", "com", "net", "org", "ac", "gov"];
-    let mut base = *labels.last().unwrap_or(&"");
-    for (i, l) in labels.iter().enumerate().rev() {
-        let last = i + 1 == labels.len();
-        if last && (l.len() <= 3 || TLDISH.contains(l)) {
-            continue; // TLD
+    if labels.is_empty() {
+        return host.to_string();
+    }
+    let alpha = |l: &str| -> String { l.chars().filter(|c| c.is_ascii_alphabetic()).collect() };
+    let alias_of = |key: &str| -> Option<String> {
+        BACKBONE_ALIASES
+            .iter()
+            .find(|(a, _)| *a == key)
+            .map(|(_, b)| (*b).to_string())
+    };
+    // Longest suffix first: `news.usenet.farm` must find `usenetfarm`
+    // before the single label `farm` finds it by the hand-written entry,
+    // and `news.newsgroup.ninja` has no single label to find at all.
+    for start in 0..labels.len() {
+        let joined: String = labels[start..].iter().map(|l| alpha(l)).collect();
+        if let Some(b) = alias_of(&joined) {
+            return b;
         }
-        if !last && TLDISH.contains(l) {
+    }
+    for l in &labels {
+        if let Some(b) = alias_of(&alpha(l)) {
+            return b;
+        }
+    }
+    // No alias. The last label is a TLD only when it looks like one -
+    // and where it does not, the brand cannot be identified without a
+    // public-suffix list, so keep enough of the host to keep unrelated
+    // providers apart.
+    const TLDISH: &[&str] = &["co", "com", "net", "org", "ac", "gov"];
+    let last = *labels.last().unwrap();
+    if !(last.len() <= 3 || TLDISH.contains(&last)) {
+        let take = labels.len().min(2);
+        let joined: String = labels[labels.len() - take..]
+            .iter()
+            .map(|l| alpha(l))
+            .collect();
+        return if joined.is_empty() {
+            host.to_string()
+        } else {
+            joined
+        };
+    }
+    let mut base = last;
+    for (i, l) in labels.iter().enumerate().rev() {
+        let is_last = i + 1 == labels.len();
+        if is_last {
+            continue; // the TLD, established above
+        }
+        if TLDISH.contains(l) {
             continue; // second-level TLD (co.uk)
         }
         base = l;
         break;
     }
-    let stripped: String = base.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-    let key = if stripped.is_empty() {
-        base.to_string()
+    let stripped = alpha(base);
+    if stripped.is_empty() {
+        host.to_string()
     } else {
         stripped
-    };
-    for (alias, backbone) in BACKBONE_ALIASES {
-        if key == *alias {
-            return (*backbone).to_string();
-        }
     }
-    key
+}
+
+/// Host without its port, handling the bracketed IPv6 form.
+///
+/// A bare `split(':')` is wrong for `[2001:db8::1]:563` and for a bare
+/// IPv6 literal, which is how every address in this file used to lose
+/// everything after its first colon.
+fn strip_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // Exactly one colon means host:port; more means a bare IPv6 literal,
+    // which has no port to strip.
+    if host.matches(':').count() == 1 {
+        return host.split(':').next().unwrap_or(host);
+    }
+    host
 }
 
 /// The backbone `host` belongs to, but ONLY when that name came from
@@ -1154,8 +1233,56 @@ mod tests {
         assert_eq!(backbone_of("news.provider.co.uk"), "provider");
         // Bare hostname (mock servers, LAN) is its own key.
         assert_eq!(backbone_of("localhost"), "localhost");
-        // IPs degrade to a stable (if opaque) key - mock/LAN only.
-        assert_eq!(backbone_of("127.0.0.1"), "0");
+        // Sweep 8, L9: an ADDRESS is its own spool. Every IPv4 host used
+        // to key on its third octet - `127.0.0.1` answered `0` - so two
+        // unrelated LAN or mock servers that happened to share one were
+        // pooled as a single backbone.
+        assert_eq!(backbone_of("127.0.0.1"), "127.0.0.1");
+        assert_eq!(backbone_of("10.0.0.5:119"), "10.0.0.5");
+        assert_ne!(backbone_of("192.168.1.10"), backbone_of("192.168.2.10"));
+        // IPv6, bare and bracketed-with-port: the old `split(':')` port
+        // strip cut every address at its first colon.
+        assert_eq!(backbone_of("2001:db8::1"), "2001:db8::1");
+        assert_eq!(backbone_of("[2001:db8::1]:563"), "2001:db8::1");
+        assert_eq!(backbone_of("[::1]"), "::1");
+    }
+
+    /// Sweep 8, L9: a long modern TLD is not a brand.
+    ///
+    /// The rule was "the first label from the right longer than three
+    /// characters", so every provider under `.cloud` normalized to
+    /// `cloud` and their capacity evidence, UI verdicts and opt-in
+    /// demotion were pooled into one imaginary spool. The file already
+    /// carried a hand-written `("farm", "usenetfarm")` entry for the
+    /// same failure one TLD over, which is what a rule that does not
+    /// generalize looks like.
+    #[test]
+    fn a_long_tld_is_not_a_backbone() {
+        // Two unrelated providers under one long TLD stay two keys.
+        let a = backbone_of("reader.alpha.cloud");
+        let b = backbone_of("reader.beta.cloud");
+        assert_ne!(a, b, "{a} vs {b}");
+        assert_ne!(a, "cloud");
+        assert_ne!(b, "cloud");
+
+        // A known reseller is found even when its brand is SPLIT across
+        // the label boundary by the TLD - which is the case the old rule
+        // could only answer with a hand-written single-label alias.
+        assert_eq!(backbone_of("news.newsgroup.ninja"), "highwinds");
+        assert_eq!(
+            backbone_of("news.newsgroup.ninja"),
+            backbone_of("news.newsgroupninja.com"),
+            "one reseller, one spool, however its name is split by the TLD"
+        );
+        assert_eq!(backbone_of("news.usenet.farm"), "usenetfarm");
+        assert_eq!(backbone_of("usenet.farm:563"), "usenetfarm");
+        // And an alias further left still wins over the tail.
+        assert_eq!(backbone_of("news.giganews.example.cloud"), "giganews");
+
+        // Short TLDs and two-part ccTLDs keep every existing answer.
+        assert_eq!(backbone_of("news.eweka.nl"), "eweka");
+        assert_eq!(backbone_of("news.provider.co.uk"), "provider");
+        assert_eq!(backbone_of("nntp.futureprovider.io"), "futureprovider");
     }
 
     /// The point of the 20 Aug 2026 split: takedowns propagate within a

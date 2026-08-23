@@ -50,10 +50,10 @@ impl RelAgg {
         db.prepare_cached(&format!(
             "SELECT COUNT(*), COALESCE(SUM(bytes),0),
                     COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                             ELSE json_array_length(segments) END >= total_parts),0),
+                             ELSE seg_count(segments) END >= total_parts),0),
                     COALESCE(SUM(LOWER(filename) LIKE '%.par2'),0),
                     COALESCE(SUM(CASE WHEN nsegs > 0 THEN nsegs
-                                      ELSE json_array_length(segments) END),0),
+                                      ELSE seg_count(segments) END),0),
                     COALESCE(SUM(total_parts),0),
                     COALESCE(SUM({EXE_FILE_SQL}),0)
              FROM files WHERE release_id=?1"
@@ -186,6 +186,7 @@ mod tests {
     #[test]
     fn apply_file_tracks_recompute() {
         let db = Connection::open_in_memory().unwrap();
+        crate::index::segcodec::register(&db).unwrap();
         db.execute_batch(
             "CREATE TABLE files(release_id INTEGER, filename TEXT,
                 total_parts INTEGER NOT NULL, bytes INTEGER NOT NULL DEFAULT 0,
@@ -204,19 +205,18 @@ mod tests {
             ("a.rar", Some((5, 10, 500)), 10, 10, 1000),
         ];
         for (name, old, segs, total, bytes) in steps {
-            let seg_json = serde_json::to_string(
+            let seg_blob = crate::index::segcodec::encode(
                 &(1..=segs)
-                    .map(|n| (n, format!("<{n}@x>"), bytes / segs))
+                    .map(|n| (n as u32, format!("<{n}@x>"), (bytes / segs) as u64))
                     .collect::<Vec<_>>(),
-            )
-            .unwrap();
+            );
             db.execute(
                 "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
                  VALUES(1, ?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(release_id, filename) DO UPDATE SET
                    total_parts=excluded.total_parts, bytes=excluded.bytes,
                    segments=excluded.segments, nsegs=excluded.nsegs",
-                rusqlite::params![name, total, bytes, seg_json, segs],
+                rusqlite::params![name, total, bytes, seg_blob, segs],
             )
             .unwrap();
             agg.apply_file(name, old, segs, total, bytes);

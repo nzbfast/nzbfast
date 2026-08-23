@@ -4,6 +4,31 @@
 
 use crate::*;
 
+/// The UX §15 plan pair for ONE run - see [`StreamHub::fetch`].
+#[derive(Debug, Default)]
+pub struct FetchCounters {
+    pub plan: Arc<std::sync::atomic::AtomicU64>,
+    pub done: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl FetchCounters {
+    /// (accounted-for, planned, still to fetch), or None before the plan
+    /// is published.
+    pub fn left(&self) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::Ordering;
+        let plan = self.plan.load(Ordering::Relaxed);
+        if plan == 0 {
+            return None;
+        }
+        // Clamped, not trusted: the two counters are independent atomics
+        // and a reader can land between the plan store and the adds that
+        // follow it. Better a percentage that pauses at 100 than one that
+        // prints 103% or an underflowed remainder.
+        let done = self.done.load(Ordering::Relaxed).min(plan);
+        Some((done, plan, plan - done))
+    }
+}
+
 /// Live handle the daemon's streaming endpoint uses to reach the active
 /// download's output writers (M11). `get` installs its extractor here for
 /// the duration of the run.
@@ -30,8 +55,16 @@ pub(crate) struct StreamHub {
     /// `get_with_progress` publishes the plan before the first article can
     /// land; a zero plan means "no run owns these yet" and every reader
     /// falls back rather than dividing by it.
-    pub fetch_plan: Arc<std::sync::atomic::AtomicU64>,
-    pub fetch_done: Arc<std::sync::atomic::AtomicU64>,
+    ///
+    /// One PAIR PER RUN, behind a lock, since the cross-job hand-over
+    /// (`nzbkit::pool::handoff`): job N's pipeline keeps adding its last
+    /// in-flight articles to the `done` handle it took at its start for
+    /// seconds after job N+1 has claimed the hub, so a shared counter
+    /// zeroed at the transition credited N's tail to N+1's bar. The
+    /// daemon installs a fresh pair at every transition
+    /// (`fresh_fetch_counters`); a pipeline clones the handles once
+    /// (`fetch_counters`) and never looks at the hub for them again.
+    pub fetch: std::sync::Mutex<Arc<FetchCounters>>,
     /// Unix seconds of the YOUNGEST article in the ACTIVE run's NZB, or
     /// 0 for "we do not know" - which is NOT the same as "posted just
     /// now" and must never be read as it.
@@ -99,6 +132,18 @@ pub(crate) struct StreamHub {
     /// entire point. Daemon only: a one-shot CLI `get` has no second job
     /// to hand them to, so it keeps the old connect-and-QUIT behaviour.
     pub warm: std::sync::OnceLock<Arc<nzbkit::warmpool::WarmPool>>,
+    /// Cross-job connection hand-over (`nzbkit::pool::handoff`): the
+    /// per-host connection leases every primary run on this hub takes
+    /// its sockets from, so job N's drain and job N+1's start never hold
+    /// more than one job's cap between them. Set once by the daemon at
+    /// boot; absent on a CLI run and on a sidecar's private hub, whose
+    /// fleet is bounded by `host_conn_caps` instead.
+    pub conn_budget: std::sync::OnceLock<Arc<nzbkit::pool::handoff::ConnBudget>>,
+    /// The run that owns this hub publishes its hand-over signal here
+    /// (installed by the runner before the fetch spawns, read once by
+    /// the fleet builder). Latched when that run's fleet starts going
+    /// idle after queue-dry - the runner's cue to start the next job.
+    pub handoff: std::sync::Mutex<Option<Arc<nzbkit::pool::handoff::HandoffSignal>>>,
     /// Hosts the daemon has ruled out for the NEXT download (exhausted
     /// block accounts); get_with_progress skips them at pool build.
     pub excluded_hosts: std::sync::Mutex<Vec<String>>,
@@ -126,6 +171,13 @@ pub(crate) struct StreamHub {
     /// live-tuned. State, never a setting: nothing here is persisted.
     pub live_targets:
         std::sync::Mutex<std::collections::HashMap<String, Arc<nzbkit::pool::ConnTarget>>>,
+    /// TODO 208 item 1: the link anchor in bytes/s the NEXT download's
+    /// pool build sizes its fleet from (`linkpeak.effective`: the
+    /// persisted measured peak, else the typed line speed), 0 = none.
+    /// Written by the runner at every job start beside `excluded_hosts`;
+    /// stays 0 on a CLI run and on a prefetch sidecar's fresh hub, where
+    /// the pool's own gauge does the capping within the run instead.
+    pub line_anchor_bps: std::sync::atomic::AtomicU64,
     /// The `live_tune` setting, mirrored here by the daemon (settings
     /// apply + restart restore) because the pool build in get/fleet.rs
     /// reaches the hub, not the daemon. False on a CLI run and on a
@@ -163,6 +215,17 @@ pub(crate) struct StreamHub {
     /// has no hub and a prefetch sidecar writes to its own hub, which
     /// the queue payload never reads.
     pub activity: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+    /// TODO 205: live DISK-unpack progress, per owning nzo_id and for
+    /// exactly the same reason `activity` is keyed that way - job N's
+    /// unpack ladder runs while job N+1 downloads, so a single slot
+    /// would be the wrong job's within seconds. The in-stream path
+    /// needs no entry here: its writers are on `extractor`, which
+    /// belongs to whatever is downloading now, and that IS the job it
+    /// is reporting for. Entries appear and vanish with the ladder's
+    /// own `unpackprog::UnpackArm`, and `Daemon::park` sweeps beside
+    /// `activity` as a backstop.
+    pub unpack:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>>,
     /// Bytes this run will NOT fetch because the journal already has
     /// those articles on disk (a resume).
     ///
@@ -251,17 +314,22 @@ impl StreamHub {
     /// caller must fall back rather than divide by a plan belonging to
     /// nobody.
     pub fn fetch_left(&self) -> Option<(u64, u64, u64)> {
-        use std::sync::atomic::Ordering;
-        let plan = self.fetch_plan.load(Ordering::Relaxed);
-        if plan == 0 {
-            return None;
-        }
-        // Clamped, not trusted: the two counters are independent atomics
-        // and a reader can land between the plan store and the adds that
-        // follow it. Better a percentage that pauses at 100 than one that
-        // prints 103% or an underflowed remainder.
-        let done = self.fetch_done.load(Ordering::Relaxed).min(plan);
-        Some((done, plan, plan - done))
+        self.fetch_counters().left()
+    }
+
+    /// The pair the run that owns this hub counts into. A pipeline takes
+    /// this once at its start and keeps the handles.
+    pub fn fetch_counters(&self) -> Arc<FetchCounters> {
+        self.fetch.lock_ok().clone()
+    }
+
+    /// Install a zeroed pair for the job taking the hub over and return
+    /// it. The previous owner's handles keep counting into the previous
+    /// pair, which nothing reads any more.
+    pub fn fresh_fetch_counters(&self) -> Arc<FetchCounters> {
+        let fresh = Arc::new(FetchCounters::default());
+        *self.fetch.lock_ok() = fresh.clone();
+        fresh
     }
 
     /// Clone the installed extractor, but only when it belongs to `want`.
@@ -449,7 +517,7 @@ impl SeekCtl {
 
     /// The pending-article ids carrying output bytes of `name` for every
     /// span, in span order - the mapping behind [`Self::promote_output_spans`]
-    /// and [`Self::span_can_still_arrive`].
+    /// and [`Self::span_deliverable`].
     pub(crate) fn map_span_ids(
         &self,
         name: &str,
@@ -549,11 +617,7 @@ impl SeekCtl {
         // to this slot (honest posts - the overlay stays empty). First
         // insertion wins on a cross-slot duplicate, like the hint map.
         if self.slot_by_name.get(&key) != Some(&slot) {
-            self.observed_by_name
-                .write()
-                .unwrap()
-                .entry(key)
-                .or_insert(slot);
+            self.observed_by_name.write_ok().entry(key).or_insert(slot);
         }
         flag.store(true, Ordering::Release);
     }

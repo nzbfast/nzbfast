@@ -24,6 +24,15 @@ use super::*;
 /// call site and `clippy::type_complexity` says so.
 pub(super) struct FinalizeOutcome {
     pub(super) needs_pw: bool,
+    /// The unlock ladder's own reason for refusing, when it named one.
+    ///
+    /// Today only a bomb verdict, and it is not a password story at
+    /// all: the set may well open with the first candidate once there is
+    /// room, so `needs_pw` stays false and the row must not send the
+    /// user off to find a password that was never the problem. Written
+    /// onto `fail_message` by the caller, which is where a *arr reads
+    /// the job's verdict.
+    pub(super) unlock_refused: Option<String>,
     pub(super) pw_used: Option<String>,
     pub(super) blocked_by: String,
     pub(super) moved: Option<PathBuf>,
@@ -42,6 +51,7 @@ impl FinalizeOutcome {
     pub(super) fn crashed() -> Self {
         FinalizeOutcome {
             needs_pw: false,
+            unlock_refused: None,
             pw_used: None,
             blocked_by:
                 "post-processing did not finish (internal error) - retry the job to re-run it"
@@ -58,7 +68,7 @@ impl FinalizeOutcome {
 
 /// The pass itself. Runs on a blocking thread; takes owned values only,
 /// exactly as the closure it replaces did.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn finalize_payload(
     d3: Arc<Daemon>,
     nzo3: String,
@@ -96,6 +106,7 @@ pub(super) fn finalize_payload(
         out2 = dest.clone();
     }
     let mut needs_pw = false;
+    let mut unlock_refused: Option<String> = None;
     let mut pw_used: Option<String> = None;
     let mut locked_name = String::new();
     if let Some(vol) = crate::smart::encrypted_archive(&out2) {
@@ -112,8 +123,21 @@ pub(super) fn finalize_payload(
         // §99 try-order keys, read once per locked job: which
         // site supplied the NZB, and who posted it.
         let poster2 = crate::smart::nzb_poster(&nzb2);
+        // A refusal that NAMED itself ends the whole walk below rather
+        // than being read as "this password did not work" once per
+        // candidate. See [`crate::smart::unlock`]. The reason travels in
+        // an argument rather than a capture so that the walk can read it
+        // between attempts.
+        let mut refused: Option<String> = None;
+        let spend = |pw: &str, refused: &mut Option<String>| match crate::smart::unlock(&out2, pw) {
+            Ok(()) => true,
+            Err(why) => {
+                *refused = why;
+                false
+            }
+        };
         match pw2.as_deref() {
-            Some(pw) if crate::smart::unlock(&out2, pw) => {
+            Some(pw) if spend(pw, &mut refused) => {
                 // The job's own password worked - refresh the
                 // §99 association so the next job from this
                 // site or poster tries it first.
@@ -129,11 +153,24 @@ pub(super) fn finalize_payload(
                 // recorded onto the job below - history then
                 // shows has_password, and a retry of this job
                 // reuses it directly.
-                match d3
-                    .read_unpack_passwords_for(&site2, &poster2)
-                    .into_iter()
-                    .find(|pw| crate::smart::unlock(&out2, pw))
-                {
+                //
+                // A loop rather than `find`, for the stand-down: the
+                // walk stops at a named refusal, including one the job's
+                // own password already raised above. It is the disk, and
+                // every candidate below meets the same one - a full disk
+                // used to burn the entire file and then blame the
+                // passwords in it.
+                let mut winner: Option<String> = None;
+                for pw in d3.read_unpack_passwords_for(&site2, &poster2) {
+                    if refused.is_some() {
+                        break;
+                    }
+                    if spend(&pw, &mut refused) {
+                        winner = Some(pw);
+                        break;
+                    }
+                }
+                match winner {
                     Some(pw) => {
                         info!(
                             target: "unlock",
@@ -141,6 +178,14 @@ pub(super) fn finalize_payload(
                         );
                         d3.record_unlock_password(&site2, &poster2, &pw);
                         pw_used = Some(pw);
+                    }
+                    None if refused.is_some() => {
+                        // Not a password story: nothing here was ever
+                        // tested against the archive. The reason is the
+                        // job's verdict and the 🔑 is not raised.
+                        warn!(target: "unlock", "{name2:?}: the unlock was refused - {}",
+                            refused.as_deref().unwrap_or_default());
+                        unlock_refused = refused.take();
                     }
                     None => {
                         info!(
@@ -194,7 +239,7 @@ pub(super) fn finalize_payload(
         // never parsed - so there is nothing to ask about.
         crate::identity::Identity::default()
     } else {
-        d3.resolve_identity(&out2, &name2, crc2)
+        d3.resolve_identity(&nzo3, &out2, &name2, crc2)
     };
     // The counts survive into the job record now (see
     // Job::cleaned_files): these sweeps delete files out of a
@@ -264,6 +309,7 @@ pub(super) fn finalize_payload(
     );
     FinalizeOutcome {
         needs_pw,
+        unlock_refused,
         pw_used,
         blocked_by,
         moved,

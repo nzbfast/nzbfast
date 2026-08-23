@@ -881,7 +881,7 @@ async fn stream_runway_wait_is_time_capped_on_slow_lines() {
     let cfg = dir.join("config.json");
     let d = chaos_daemon(&dir, &cfg, &[srv.addr]).await;
     let port = d.port;
-    let log = d.log.clone();
+    let log = d.log_path();
     tokio::task::spawn_blocking(move || {
         upload_nzb(port, &xml);
         wait_stream_up(port, 60.0);
@@ -990,7 +990,7 @@ async fn stream_zero_fills_terminally_missing_articles() {
     let cfg = dir.join("config.json");
     let d = chaos_daemon(&dir, &cfg, &[srv.addr]).await;
     let port = d.port;
-    let log = d.log.clone();
+    let log = d.log_path();
     tokio::task::spawn_blocking(move || {
         upload_nzb(port, &xml);
         wait_stream_up(port, 60.0);
@@ -1056,7 +1056,7 @@ async fn stream_zero_fills_after_the_run_detaches() {
     })
     .await;
     let port = d.port;
-    let log = d.log.clone();
+    let log = d.log_path();
     tokio::task::spawn_blocking(move || {
         upload_nzb(port, &xml);
         wait_stream_up(port, 60.0);

@@ -23,8 +23,7 @@ pub(super) fn sweep_orphan_spool_nzbs(d: &Arc<Daemon>) -> usize {
     const GRACE_SECS: u64 = 3600;
     let referenced: std::collections::HashSet<PathBuf> = d
         .queue
-        .lock()
-        .unwrap()
+        .lock_ok()
         .iter()
         .chain(d.history.lock_ok().iter())
         .map(|j| j.lock_ok().nzb_path.clone())
@@ -123,4 +122,152 @@ pub(super) fn restart_in_place(
 ) {
     // Unreachable: the handler refuses restart off Unix before spawning.
     warn!(target: "restart", "not supported on this platform");
+}
+
+/// Collect abandoned poster-upload staging files out of the art cache.
+///
+/// `m_wall_art` writes an upload to [`api::wall::art_staging_name`]'s
+/// dotted name and publishes it by rename only once the index row that
+/// names it has landed (Codex F-07, 8453aaf0a); every path that gives up
+/// on the upload removes its own staging file. What no such path can
+/// reach is one left by a process that DIED between the write and the
+/// rename, and nothing else ever looked for it: the name is unservable
+/// by construction (`art_name_ok` refuses the `-`), no index row names
+/// it, and `db_bytes` / `live_bytes` measure the SQLite file rather than
+/// this directory - so up to 8 MB per crashed upload accumulates where
+/// neither the user nor the index-size cap can see it. `wall_refresh`
+/// with `value=all` needs nothing from this: it already
+/// `remove_dir_all`s the whole art directory.
+///
+/// Age, never the pid in the name. The pid is a liveness hint and no
+/// more - pids wrap, so a file a crashed daemon left behind can name a
+/// live process, and on this side of it a live upload's own staging file
+/// carries OUR pid either way. An hour is the sibling spool sweep's
+/// grace period and is far past any legitimate window: the only wait
+/// between the write and the rename is `index_write_checked`, bounded at
+/// `Daemon::HTTP_INDEX_WAIT` (5 s).
+#[cfg(feature = "indexer")]
+pub(super) fn sweep_abandoned_art_staging(d: &Arc<Daemon>) -> usize {
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+    sweep_art_staging_in(&d.spool.join("art"), GRACE)
+}
+
+/// The directory walk behind [`sweep_abandoned_art_staging`], split off
+/// the daemon so a test can plant files and name its own threshold.
+#[cfg(feature = "indexer")]
+fn sweep_art_staging_in(art: &std::path::Path, grace: std::time::Duration) -> usize {
+    let Ok(rd) = std::fs::read_dir(art) else {
+        return 0; // no art directory yet: nothing to collect
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for e in rd.flatten() {
+        let name = e.file_name();
+        if !name.to_str().is_some_and(api::wall::is_art_staging_name) {
+            continue;
+        }
+        // An unreadable mtime and a mtime in the FUTURE both mean leave
+        // it: `duration_since` fails on the second rather than
+        // saturating, and a clock that stepped backwards is no reason to
+        // delete an upload somebody may still be publishing.
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= grace);
+        if old && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        info!(target: "wall", "removed {removed} abandoned poster upload(s) from the art cache");
+    }
+    removed
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod tests {
+    use super::*;
+
+    fn age_to(p: &std::path::Path, secs: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(p)
+            .expect("open for mtime")
+            .set_modified(when)
+            .expect("set mtime");
+    }
+
+    /// The gap Codex F-07's fixer named and left open: a process that
+    /// dies between the staged write and the publishing rename leaves a
+    /// file no later request can reach, and until this sweep existed
+    /// nothing collected it.
+    ///
+    /// The pair is the whole test. Collecting the OLD file is only half
+    /// of it - a sweep that also took the fresh one would delete the
+    /// bytes of an upload currently parked on `index_write_checked`, and
+    /// the user would be told their poster was saved over a file that no
+    /// longer exists. Everything else in the directory (the live poster,
+    /// its thumbnail, a dotted file that is not ours) has to survive
+    /// being older than the threshold.
+    #[test]
+    fn a_stale_art_staging_file_is_collected_and_a_fresh_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-artstage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let live = crate::wall::art_name("m:the matrix:1999", false);
+        let stale = dir.join(format!(".{live}.new-1234-56789"));
+        let fresh = dir.join(format!(".{live}.new-4321-98765"));
+        let poster = dir.join(&live);
+        let thumb = dir.join(format!("thumb_{live}"));
+        // Dotted, old, and NOT one of ours - the sweep's name filter is
+        // what keeps it, not its age.
+        let alien = dir.join(".DS_Store");
+        for p in [&stale, &fresh, &poster, &thumb, &alien] {
+            std::fs::write(p, b"bytes").expect("plant");
+        }
+        for p in [&stale, &poster, &thumb, &alien] {
+            age_to(p, 7200);
+        }
+
+        let removed = sweep_art_staging_in(&dir, std::time::Duration::from_secs(3600));
+
+        assert_eq!(removed, 1, "exactly the abandoned staging file");
+        assert!(!stale.exists(), "the abandoned staging file survived");
+        assert!(fresh.exists(), "an in-flight upload was deleted");
+        assert!(poster.exists() && thumb.exists() && alien.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The recogniser and the producer are in `api/wall.rs` together;
+    /// this is the round trip that pins them to each other, from the
+    /// side that DELETES. A change to the staging format that this stops
+    /// matching is a change that starts orphaning files again.
+    #[test]
+    fn the_sweep_recognises_what_the_uploader_writes() {
+        for key in ["m:the matrix:1999", "t:severance", ""] {
+            for backdrop in [false, true] {
+                let live = crate::wall::art_name(key, backdrop);
+                let staged = api::wall::art_staging_name(&live);
+                assert!(api::wall::is_art_staging_name(&staged), "{staged}");
+                assert!(!api::wall::is_art_staging_name(&live), "{live}");
+            }
+        }
+        for n in [
+            "",
+            ".",
+            ".new-1-2",
+            "m_x_jpg.new-1-2",
+            ".m_x.jpg.new-1",
+            ".m_x.jpg.new-a-2",
+            ".m_x.jpg.new-1-",
+            ".notes.new-draft",
+            ".notes.new-draft-2",
+        ] {
+            assert!(!api::wall::is_art_staging_name(n), "{n}");
+        }
+    }
 }

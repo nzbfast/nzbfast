@@ -114,7 +114,8 @@ const INDEXED: &[(&str, &str)] = &[
             AND title_key NOT IN (SELECT key FROM wall_hidden)
             AND EXISTS (SELECT 1 FROM files f
                         WHERE f.release_id = releases.id
-                          AND json_array_length(f.segments) < f.total_parts)",
+                          AND (CASE WHEN f.nsegs > 0 THEN f.nsegs
+                                               ELSE seg_count(f.segments) END) < f.total_parts)",
     ),
     // The header-encryption stats, all four. `idx_rel_enc` is partial on
     // `enc_class>0` and three of these did not repeat it, so each was a

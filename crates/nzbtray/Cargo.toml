@@ -2,7 +2,7 @@
 name = "nzbtray"
 # Keep in lockstep with crates/nzbfast (the version source of truth) -
 # the installer stamps that string on both exes' packaging.
-version = "1.2.1"
+version = "1.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -29,7 +29,7 @@ serde_json = "1"
 # whose runtime.json it just read, BEFORE handing over the stored API key.
 # Same crate the daemon and nzbkit already use, so nothing new enters the
 # tree - see probe_body::proof_matches.
-sha2 = "0.10"
+sha2 = "0.11"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -48,4 +48,4 @@ windows-sys = { version = "0.61", features = [
 # JSON parser and hash have to be reachable off Windows too. Dev-only:
 # nothing is added to what actually ships.
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"

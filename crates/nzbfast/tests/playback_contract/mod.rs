@@ -76,7 +76,7 @@ async fn playback_contract_answers_readiness_and_scoped_tokens() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let upload = |name: &str| {

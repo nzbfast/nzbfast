@@ -78,7 +78,67 @@ pub(super) fn disk_stat(_path: &std::path::Path) -> Option<(u64, u64)> {
 /// The filesystem that will hold `path` is the one holding its nearest
 /// existing ancestor, so fall back to asking that.
 pub(crate) fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    if let Some(fake) = free_bytes_override() {
+        return Some(fake);
+    }
     disk_stat_walk(path).map(|(free, _)| free)
+}
+
+/// Test-only injection seam: what every caller of [`free_bytes`] is told
+/// the disk holds, parsed once from `NZBFAST_TEST_FREE_BYTES`.
+///
+/// TODO 222. The decompression-bomb guard is a FREE-SPACE test - the
+/// native pass budgets `free - EXTRACT_RESERVE` and
+/// [`crate::rarfix::preflight::declared_exceeds_free`] compares the
+/// declared unpacked size against the same number - so the only way to
+/// reach either refusal is to be on a disk too small for the archive.
+/// The 22 Aug 2026 repro did that with a 1.5 GB APFS sparse image and a
+/// 2 GB-of-zeros RAR5, and nothing in CI could follow: a tmpfs of a
+/// chosen size needs root on Linux, `hdiutil` on macOS, and neither
+/// exists on the Windows runners. Injecting the ANSWER is portable
+/// everywhere, and it is the same number the whole ladder reads, so the
+/// routes it drives are the production routes.
+///
+/// An env var rather than a process-local cell (the shape
+/// `requeue_gate_barrier` and `Extractor::seed_dropped_volume` take)
+/// because the test that needs it is a DAEMON test: the ladder runs in
+/// a spawned `nzbfast` binary, and a cell in the test process cannot
+/// reach it. That is the same reasoning - and the same rung of the same
+/// argument - as `NZBFAST_TEST_FORBID_UNRAR`, which the integration
+/// suites set per spawned child for exactly this reason (see
+/// [`crate::rarfix::external_unrar_closed`]).
+///
+/// Parsed ONCE and cached: the value must not change under a job that
+/// measured it at the top of its tail, and a per-call `getenv` on a
+/// path the min-free guard polls is a syscall nobody asked for. Unset
+/// (the shipped case, and every case that is not a test) the cache
+/// holds `None` and this is one relaxed load ahead of the real walk.
+///
+/// Scoped to `free_bytes` and NOT to [`disk_stat_walk`] beside it, so
+/// the injection moves the GUARDS (min-free, the bomb budget, the
+/// preflight, the eating forecast) and leaves the (free, total) pair
+/// the dashboard and the NZBGet status report render alone. A test that
+/// wants to see the daemon's own reading of the real disk still can.
+///
+/// Announced on the log the first time it is read, because a daemon
+/// whose free-space guards are reading fiction must say so - and it is
+/// how the daemon suite proves the seam is armed in the spawned
+/// process at all.
+fn free_bytes_override() -> Option<u64> {
+    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        let v = std::env::var("NZBFAST_TEST_FREE_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        if let Some(free) = v {
+            tracing::warn!(
+                target: "disk",
+                "NZBFAST_TEST_FREE_BYTES is set: every free-space reading in this \
+                 process is {free} bytes, not what the filesystem says"
+            );
+        }
+        v
+    })
 }
 
 /// (free, total) of the filesystem that holds - or will hold - `path`,
@@ -346,6 +406,9 @@ pub(crate) async fn park_on_full_disk(
         let mut j = job.lock_ok();
         j.state = JobState::Queued;
         j.downloaded_bytes = on_disk_bytes;
+        // Same as the pause requeue: the abort's whyslow verdict and
+        // tail figures belong to the stint that stopped, not the job.
+        j.clear_attempt_verdicts();
         info!(
             target: "guard",
             "{} stopped on a full disk - parked back in the queue \

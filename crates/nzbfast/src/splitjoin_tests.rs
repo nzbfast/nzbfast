@@ -22,7 +22,7 @@ fn payload(len: usize) -> Vec<u8> {
 
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Write `total` as `name.001`, `.002`, … in `chunk`-byte parts.
@@ -520,6 +520,75 @@ fn a_split_zip_container_still_routes_to_the_zip_arm() {
     }
 }
 
+/// TODO 212, the ladder-level half. A header-encrypted `.7z.NNN` set the
+/// 7z arm cannot open (wrong password) must NOT then be rejoined by step
+/// 7's container rescue: the arm already read the parts as one byte-space
+/// and a join publishes the same bytes, so the rescue could only write
+/// the payload a second time and delete the parts. The parts stay, byte
+/// for byte, and nothing else appears. The same set opens with its key,
+/// through the same arm, with nothing joined along the way.
+#[test]
+fn a_split_header_encrypted_7z_is_never_rejoined_by_the_rescue() {
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter, Password, encoder_options::AesEncoderOptions};
+    let inner = payload(120_000);
+    let bytes = {
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(true);
+        w.set_content_methods(vec![
+            AesEncoderOptions::new(Password::from("todo-212-ladder")).into(),
+        ]);
+        w.push_archive_entry(ArchiveEntry::new_file("inner.bin"), Some(&inner[..]))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    for (pw, opens) in [(Some("wrong"), false), (Some("todo-212-ladder"), true)] {
+        let dir = split_dir(&format!("mhe-7z-{}", if opens { "key" } else { "nokey" }));
+        write_two_parts(&dir, "release.7z", &bytes);
+        let before = sha256(
+            &[
+                std::fs::read(dir.join("release.7z.001")).unwrap(),
+                std::fs::read(dir.join("release.7z.002")).unwrap(),
+            ]
+            .concat(),
+        );
+        let verdict = extract_one_level(&dir, pw, 0).unwrap();
+        assert!(
+            !dir.join("release.7z").exists(),
+            "{pw:?}: the parts were joined into release.7z"
+        );
+        if opens {
+            assert_eq!(verdict, Some(NestOutcome::Produced), "{pw:?}");
+            assert_eq!(std::fs::read(dir.join("inner.bin")).unwrap(), inner);
+        } else {
+            assert_ne!(verdict, Some(NestOutcome::Produced), "{pw:?}");
+            assert!(!dir.join("inner.bin").exists());
+            let after = sha256(
+                &[
+                    std::fs::read(dir.join("release.7z.001")).unwrap(),
+                    std::fs::read(dir.join("release.7z.002")).unwrap(),
+                ]
+                .concat(),
+            );
+            assert_eq!(
+                before, after,
+                "the parts must be left exactly as they landed"
+            );
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                ["release.7z.001", "release.7z.002"],
+                "nothing else may be left behind"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// A split final payload gets no relaxation it has not earned: the set
 /// still has to be a set. A hole in the run refuses it, and the parts stay
 /// exactly where they landed.
@@ -540,4 +609,313 @@ fn a_holed_split_cbz_is_still_refused() {
         assert!(p.exists(), "{} is untouched", p.display());
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 211, the headline case: a single store `.rar` cut into numbered
+/// parts. Part 1 is a RAR head over a fraction of an archive, so the RAR
+/// arm fails on it (`input is too short`) exactly as it does in the field;
+/// the container rescue then joins the parts, the ordinary path extracts
+/// the archive, and the payload lands. Measured before the fix: rc=1 with
+/// every part still on disk and nothing delivered.
+///
+/// "The RAR arm fails" is a two-rung ladder, and the second rung is the
+/// external `unrar` subprocess. This test needs BOTH to fail before the
+/// rescue is reached, and the exact-listing assertions below need the
+/// failed attempts to have left nothing behind. That used to hold only
+/// because no dev box and no CI runner has an `unrar` on `$PATH`; it
+/// holds by construction now, because the hatch is closed for the whole
+/// unit-test build (`rarfix::external_unrar_closed`, which carries the
+/// reasoning).
+#[test]
+fn a_split_of_a_single_rar_is_joined_once_the_rar_arm_fails() {
+    use nzbkit::rar::fixtures;
+    let dir = split_dir("rar-split");
+    let total = payload(240_000);
+    let archive = fixtures::rar5_volume(&[("film.mkv", total.len() as u64, &total, false, false)]);
+    let parts = write_parts(&dir, "stage.rar", &archive, archive.len().div_ceil(4));
+    assert_eq!(parts.len(), 4);
+
+    // The strict scan refuses it twice over - the head on part 1 and the
+    // `.rar` base - and the container scan is the only thing that sees it.
+    assert!(collect_split_sets(&dir).unwrap().is_empty());
+    assert_eq!(collect_container_split_sets(&dir).unwrap().len(), 1);
+
+    assert_eq!(
+        extract_one_level(&dir, None, 0).unwrap(),
+        Some(NestOutcome::Produced)
+    );
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("film.mkv")).unwrap()),
+        sha256(&total),
+        "the archive member is delivered byte for byte"
+    );
+    for p in &parts {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    assert!(
+        !dir.join("stage.rar").exists(),
+        "the container the rescue built is spent too"
+    );
+    assert!(
+        !dir.join(".nzbfast-nest").exists(),
+        "the scratch dir is gone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rescue replaces the RAR arms' verdict on the container it joined,
+/// and ONLY theirs: an unrelated broken archive beside the split set
+/// keeps its own failure (Codex F-01). Before the fix the level said
+/// `Produced` with the 7z still sitting there unopened.
+#[test]
+fn a_split_container_rescue_does_not_absolve_an_unrelated_broken_archive() {
+    use nzbkit::rar::fixtures;
+    let dir = split_dir("rar-split-plus-broken-7z");
+    let total = payload(240_000);
+    let archive = fixtures::rar5_volume(&[("film.mkv", total.len() as u64, &total, false, false)]);
+    write_parts(&dir, "stage.rar", &archive, archive.len().div_ceil(4));
+    // A 7z signature over eight bytes: the 7z arm opens it and fails.
+    std::fs::write(dir.join("broken.7z"), b"7z\xBC\xAF\x27\x1C\x00\x04").unwrap();
+
+    assert_eq!(
+        extract_one_level(&dir, None, 0).unwrap(),
+        Some(NestOutcome::Failed),
+        "the broken 7z was laundered by the split rescue"
+    );
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("film.mkv")).unwrap()),
+        sha256(&total),
+        "the rescue itself still delivers the split archive's member"
+    );
+    assert!(
+        dir.join("broken.7z").exists(),
+        "a failed archive is never removed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex F-01, 23 Aug 2026. Two container-split sets in one directory: a
+/// named final payload (`comic.cb7`, real 7z bytes, byte-split) and an
+/// ordinary split `.rar`. The rescue joins both, and the scratch pass
+/// returns ONE verdict for the directory. The RAR extracts, so that
+/// verdict is `Produced` - and the cleanup loop then deleted every joined
+/// file, including the `.cb7` no arm can ever claim (both the 7z arm and
+/// the stray-archive door refuse a final name). Its parts had gone with
+/// the join, so the deliverable was lost outright. Now it survives, byte
+/// for byte, while the spent RAR input is still removed.
+#[test]
+fn a_joined_final_payload_survives_a_sibling_sets_success() {
+    use nzbkit::rar::fixtures;
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+    let dir = split_dir("cb7-beside-rar-split");
+
+    let page = payload(120_000);
+    let cb7 = {
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.push_archive_entry(ArchiveEntry::new_file("page.bin"), Some(&page[..]))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let cb7_parts = write_two_parts(&dir, "comic.cb7", &cb7);
+
+    let total = payload(240_000);
+    let archive = fixtures::rar5_volume(&[("film.mkv", total.len() as u64, &total, false, false)]);
+    let rar_parts = write_parts(&dir, "stage.rar", &archive, archive.len().div_ceil(4));
+
+    // Both sets reach the rescue, and only the rescue: the strict scan
+    // refuses each of them.
+    assert!(collect_split_sets(&dir).unwrap().is_empty());
+    assert_eq!(collect_container_split_sets(&dir).unwrap().len(), 2);
+
+    // `Failed`, not `Produced`: the 7z arm sniffed `comic.cb7.001` as an
+    // obfuscated single container before the rescue ran and failed on the
+    // truncated read, and that verdict is one of the `others` the rescue
+    // is not allowed to overwrite. Stale, but conservative - and beside
+    // the point here, which is what is left on disk.
+    assert_eq!(
+        extract_one_level(&dir, None, 0).unwrap(),
+        Some(NestOutcome::Failed)
+    );
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("film.mkv")).unwrap()),
+        sha256(&total),
+        "the split RAR's member is still delivered"
+    );
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("comic.cb7")).unwrap()),
+        sha256(&cb7),
+        "the joined final payload survives, byte for byte"
+    );
+    assert!(
+        !dir.join("stage.rar").exists(),
+        "the spent RAR input is still removed"
+    );
+    for p in cb7_parts.iter().chain(rar_parts.iter()) {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    assert!(
+        !dir.join(".nzbfast-nest").exists(),
+        "the scratch dir is gone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The discriminator, in both directions. A GENUINE numbered volume set
+/// carries the `Rar!` signature on every member, and concatenating those
+/// would publish garbage and delete the volumes - so a head on any part
+/// past the first refuses the set in the container reading too, which is
+/// the only reading that forgives a head at all.
+#[test]
+fn a_head_past_part_one_refuses_the_container_reading() {
+    use nzbkit::rar::fixtures;
+    let dir = split_dir("headed-parts");
+    let total = payload(400_000);
+    let half = total.len() / 2 + 1;
+    let n = total.len() as u64;
+    // A real two-volume set, sized so only the head rule can refuse it.
+    std::fs::write(
+        dir.join("film.001"),
+        fixtures::rar5_volume_n(&[("film.mkv", n, &total[..half], false, true)], 0),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("film.002"),
+        fixtures::rar5_volume_n(&[("film.mkv", n, &total[half..], true, false)], 1),
+    )
+    .unwrap();
+    assert!(
+        collect_container_split_sets(&dir).unwrap().is_empty(),
+        "every part carries a head: this is a volume set, not a byte split"
+    );
+    // And a headless part 1 is not a container split either - a decoy or a
+    // truncated grab stays with the arm its name names.
+    let bare = split_dir("headless-container");
+    write_parts(&bare, "release.rar", &payload(60_000), 20_000);
+    assert!(collect_container_split_sets(&bare).unwrap().is_empty());
+    assert!(collect_split_sets(&bare).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&bare);
+}
+
+/// Recovery data never joins, in either reading: the rescue deletes what it
+/// joins, and a `.par2`/`.rev` set is an INPUT to the repair that could
+/// still save the job.
+#[test]
+fn the_container_reading_still_refuses_recovery_data() {
+    let dir = split_dir("container-par2");
+    let mut packet = b"PAR2\x00PKT".to_vec();
+    packet.extend(payload(10_000 - 8));
+    for base in ["set.par2", "set.rev", "set.vol000+01"] {
+        std::fs::write(dir.join(format!("{base}.001")), &packet).unwrap();
+        std::fs::write(dir.join(format!("{base}.002")), payload(10_000)).unwrap();
+    }
+    assert!(collect_container_split_sets(&dir).unwrap().is_empty());
+    assert!(collect_split_sets(&dir).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex F-12, the detection half. The rescue has spent the parts by the
+/// time it stages the joined container, so a container that cannot be
+/// moved into the scratch dir is the ONLY copy of that payload and it is
+/// sitting in the output directory unopened. `stage_joined_into` must
+/// say so rather than hand the extraction a shorter list.
+///
+/// A mode-500 scratch directory is a real `EACCES` from `rename(2)` -
+/// creating an entry needs write permission on the destination directory
+/// - which is why the F-12 audit's "add an injected rename-failure seam"
+/// is not needed here. Unix only: Windows has no equivalent that a test
+/// can set without an ACL dance.
+#[cfg(unix)]
+#[test]
+fn a_joined_container_that_cannot_be_staged_is_reported_not_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = split_dir("stage-eacces");
+    let ok = dir.join("moves.bin");
+    let stuck = dir.join("stays.bin");
+    std::fs::write(&ok, payload(64)).unwrap();
+    std::fs::write(&stuck, payload(64)).unwrap();
+    let sub = dir.join("scratch");
+    std::fs::create_dir(&sub).unwrap();
+
+    // The positive control, in the same scratch dir while it is still
+    // writable: the file moves, comes back in the list, and `moved_all`
+    // stands.
+    let (staged, moved_all) = stage_joined_into(vec![ok.clone()], &sub);
+    assert!(moved_all, "a writable scratch dir stages everything");
+    assert_eq!(staged, vec![ok.clone()]);
+    assert!(sub.join("moves.bin").is_file() && !ok.exists());
+
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(sub.join("probe"), b"x").is_ok() {
+        // A root-owned CI container ignores the mode bits, so there is no
+        // EACCES to force and the assertions below would be vacuous. Say
+        // so rather than pass silently.
+        eprintln!("skipping: this process writes a mode-500 directory (running as root?)");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let (staged, moved_all) = stage_joined_into(vec![stuck.clone()], &sub);
+    assert!(
+        !moved_all,
+        "a container that could not be staged must be reported"
+    );
+    assert!(
+        staged.is_empty(),
+        "and must not be offered to the extraction as if it had moved"
+    );
+    assert!(
+        stuck.is_file(),
+        "the only copy of the joined payload stays exactly where it was"
+    );
+
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex F-12, the fold half - the part the detection above is useless
+/// without. An empty scratch dir extracts to `None`, which is also how
+/// the honest "nobody claimed it, so the joined container IS the
+/// payload" ending reads; before the fix both mapped to `Produced` and a
+/// rescue that had staged nothing certified the job.
+///
+/// The neighbouring inputs are pinned in the same table so the F-12 arm
+/// cannot be widened into one of them by accident.
+#[test]
+fn an_unstaged_container_is_never_certified_as_the_payload() {
+    // Nothing went wrong and nobody claimed the join: the container is
+    // the payload, and this is the one `None` that means success.
+    assert_eq!(
+        rescue_verdict(true, true, None, true),
+        NestOutcome::Produced
+    );
+    // The same `None`, because the container never reached the scratch
+    // dir at all.
+    assert_eq!(
+        rescue_verdict(true, false, None, true),
+        NestOutcome::Failed,
+        "an empty scratch dir read as a delivered payload (F-12)"
+    );
+    // And a staging failure is not absolved by a SECOND container that
+    // did move and did extract - the first one is still unopened.
+    assert_eq!(
+        rescue_verdict(true, false, Some(NestOutcome::Produced), true),
+        NestOutcome::Failed
+    );
+    // The two neighbours: a set that would not join, and a lift-back
+    // that left output stranded in the scratch dir.
+    assert_eq!(
+        rescue_verdict(false, true, Some(NestOutcome::Produced), true),
+        NestOutcome::Failed
+    );
+    assert_eq!(
+        rescue_verdict(true, true, Some(NestOutcome::Produced), false),
+        NestOutcome::Failed
+    );
+    // A zip gap is carried through rather than promoted to a failure or
+    // laundered into a success.
+    assert_eq!(
+        rescue_verdict(true, true, Some(NestOutcome::ZipGap), true),
+        NestOutcome::ZipGap
+    );
 }

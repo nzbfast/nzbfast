@@ -408,6 +408,7 @@ mod tests {
             "__NZBFAST_INDEXERS__",
             "__NZBFAST_LOCALE__",
         ];
+        #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
         let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
         #[cfg(feature = "indexer")]
         pages.push(("wall", WALL_HTML));

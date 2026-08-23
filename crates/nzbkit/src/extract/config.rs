@@ -60,10 +60,17 @@ pub(super) fn nested_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
-/// Soak isolation switch for the chasing decompressor alone: with it set,
-/// nested routing still runs (store-in-store keeps streaming) but a
-/// compressed inner archive demotes to a materialized file exactly as it
-/// did before the chase existed. Latched at construction.
+/// Soak isolation switch for the RAR chasing decompressor alone: with it
+/// set, nested routing still runs (store-in-store keeps one-pass) but a
+/// compressed inner RAR demotes to a materialized file exactly as it did
+/// before the chase existed. Latched at construction.
+///
+/// RAR ONLY, by design: it does NOT gate the 7z chase (or the zip one).
+/// Each chase family has its own switch - `NZBFAST_NO_NESTED_7Z`,
+/// `NZBFAST_NO_NESTED_ZIP` - so a soak can isolate one decoder without
+/// turning off the others; `NZBFAST_NO_NESTED_ONEPASS` is the switch
+/// that takes the whole nested path down. Its doc used to say "inner
+/// archive", which overstated it (TODO 37 open list, closed 23 Aug 2026).
 pub(super) fn chase_env_off() -> bool {
     chase_env_off_value(std::env::var("NZBFAST_NO_NESTED_CHASE").ok().as_deref())
 }
@@ -193,8 +200,57 @@ pub(super) fn rar_trim_env_off() -> bool {
     rar_trim_env_off_value(std::env::var("NZBFAST_NO_RAR_TRIM").ok().as_deref())
 }
 
+/// TODO 211 (b) escape hatch: `NZBFAST_NO_RAR_SPLIT=1` turns off the
+/// one-pass mapping of a declared `.rar.NNN` byte split, so the parts
+/// materialize and the TODO 211 (a) rescue joins them on disk exactly as
+/// before the mapper learned the shape. Latched at construction.
+pub(super) fn rar_split_env_off() -> bool {
+    rar_split_env_off_value(std::env::var("NZBFAST_NO_RAR_SPLIT").ok().as_deref())
+}
+
+/// Pure parse of the RAR split escape-hatch value (same rationale as
+/// [`nested_env_off_value`]).
+pub(super) fn rar_split_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
 /// Pure parse of the RAR trim escape-hatch value.
 pub(super) fn rar_trim_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Escape hatch for the RAR trim's drop-not-spill: with it set, every
+/// trim spills its consumed prefix into the volume file (the pre-22 Aug
+/// 2026 behaviour, a write of consumed input a clean job never reads
+/// back), so a demote materializes from disk and RAM alone and no
+/// re-fetch is ever needed. Latched at construction.
+pub(super) fn rar_drop_env_off() -> bool {
+    rar_drop_env_off_value(std::env::var("NZBFAST_NO_RAR_DROP").ok().as_deref())
+}
+
+/// Pure parse of the RAR drop escape-hatch value.
+pub(super) fn rar_drop_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Kill switch for the TAR chase at every depth (TODO 163 item 6):
+/// with it set, a `.tar` - posted or inside another archive -
+/// materializes as an ordinary file and the disk pass sees it exactly
+/// as it did before the arm existed.
+///
+/// ONE gate where zip has two (`NZBFAST_NO_NESTED_ZIP` plus
+/// `NZBFAST_NO_TOP_ZIP`), because zip's nested lift and its top-level
+/// chase shipped as separate phases and each wanted its own soak
+/// switch. Tar lands whole, and a declining top-level tar simply lands
+/// on disk, so a second gate would say nothing the first does not.
+/// Latched at construction.
+pub(super) fn tar_env_off() -> bool {
+    tar_env_off_value(std::env::var("NZBFAST_NO_TAR").ok().as_deref())
+}
+
+/// Pure parse of the tar escape-hatch value (same rationale as
+/// [`nested_env_off_value`]).
+pub(super) fn tar_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
@@ -226,16 +282,6 @@ pub(super) fn output_crc_env_off_value(v: Option<&str>) -> bool {
 }
 
 impl Extractor {
-    /// Plaintext-once override (tests + future daemon setting): pin the
-    /// in-stream decrypt gate regardless of the env default. Only
-    /// meaningful before the first encrypted span arrives; existing
-    /// [`CryptoState`]s are not torn down. Never enables on a resume or
-    /// disabled extractor (in-stream mapping is off there anyway).
-    pub fn set_instream_decrypt(&self, on: bool) {
-        let mut inner = self.inner.lock_ok();
-        inner.instream_decrypt = on && self.enabled && !self.resume;
-    }
-
     /// Ceiling on how much space an inner-file writer may RESERVE, shared
     /// by every nesting level (see [`Limits::prealloc_cap`]). Pass the
     /// NZB's posted byte count: a store archive cannot legitimately unpack
@@ -246,8 +292,7 @@ impl Extractor {
     /// is read per writer creation.
     pub fn set_prealloc_ceiling(&self, bytes: u64) {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_ok()
             .limits
             .prealloc_cap
             .store(bytes, Ordering::Relaxed);
@@ -321,6 +366,13 @@ impl Extractor {
         self.inner.lock_ok().top_chase_on = on;
     }
 
+    /// Tar-chase gate (see `NZBFAST_NO_TAR`, latched at construction).
+    /// Same set-before-spans discipline as the other gates: a `.tar` is
+    /// classified once, on its offset-0 article.
+    pub fn set_tar(&self, on: bool) {
+        self.inner.lock_ok().tar_on = on;
+    }
+
     /// Top-level zip gate (see `NZBFAST_NO_TOP_ZIP`, latched at
     /// construction). Same set-before-spans discipline as the other
     /// gates: a posted `.zip` is classified once, on its offset-0
@@ -336,15 +388,15 @@ impl Extractor {
     /// a container-sizing header, unlike 7z), so this is what tells the
     /// chase when every part's decoded size is in. Same set-before-
     /// spans discipline as the gates: declare before the first write.
+    ///
+    /// Also the CLOSE of a parent-opened nested set (§94 D): when a
+    /// pending set already sits under `base`, the count resolves it
+    /// here and its tail promote is raised - see `zip_split.rs`.
     pub fn declare_zip_split(&self, base: &str, parts: u32) {
         if parts == 0 {
             return;
         }
-        self.inner
-            .lock()
-            .unwrap()
-            .zip_split_decl
-            .insert(base.to_ascii_lowercase(), parts);
+        self.declare_zip_split_closed(&base.to_ascii_lowercase(), parts);
     }
 
     /// Drop-behind trim gate (see `NZBFAST_NO_7Z_TRIM`, latched at
@@ -361,6 +413,14 @@ impl Extractor {
     /// set it up front.
     pub fn set_rar_trim(&self, on: bool) {
         self.inner.lock_ok().rar_trim_on = on;
+    }
+
+    /// RAR trim drop-not-spill gate (see `NZBFAST_NO_RAR_DROP`, latched
+    /// at construction). Safe to flip mid-download like
+    /// [`Self::set_rar_trim`]: it only decides what a trim does with the
+    /// bytes it releases.
+    pub fn set_rar_drop(&self, on: bool) {
+        self.inner.lock_ok().rar_drop_on = on;
     }
 
     /// Final-output CRC gate (see `NZBFAST_NO_OUTPUT_CRC`, latched at
@@ -429,24 +489,39 @@ impl Extractor {
     /// ONLY, deliberately not inherited by children - nested levels'
     /// bytes are outside the PAR2 set, so a child chase gating on a
     /// level-0 slot index would wait on the wrong slot's verification.
+    /// A child chase gates instead through `ChildGate` (row 27), which
+    /// translates its routed offsets onto the parent volumes' cells.
     /// Wire before the download starts (buffers created earlier would
     /// miss it).
     pub fn set_verify_gate(&self, gate: Arc<crate::live::VerifyGate>) {
         self.inner.lock_ok().verify_gate = Some(gate);
     }
 
-    /// Install the finish-decrypt publish gate (see [`DecryptBarrier`]).
-    /// Set it before `finish()`; children created afterwards inherit it,
-    /// and children created earlier are updated too, so wiring order at
-    /// the call site can't leave a level ungated.
-    pub fn set_decrypt_barrier(&self, barrier: DecryptBarrier) {
+    /// Whether chase decodes PARK on the verify gate (§94 B proper) or
+    /// only consult its watermark (the dropping trim). See
+    /// `Inner::verify_gate_waits`. Travels down the chain: a child that
+    /// already exists is updated too.
+    pub fn set_verify_gate_waits(&self, waits: bool) {
         let child = {
             let mut inner = self.inner.lock_ok();
-            inner.decrypt_barrier = Some(barrier.clone());
+            inner.verify_gate_waits = waits;
             inner.child.clone()
         };
         if let Some(c) = child {
-            c.set_decrypt_barrier(barrier);
+            c.set_verify_gate_waits(waits);
+        }
+    }
+
+    /// A mapped repair has PROVED the whole PAR2 set (it re-read every
+    /// file of the set through the view it wrote through): every
+    /// engaged gate cell goes to "fully vouched". Without this a chase
+    /// parked at a block the repair rebuilt waits until finish releases
+    /// it, and the whole decode runs in the tail instead of behind the
+    /// repair (row 27). No gate installed: nothing to do.
+    pub fn release_verify_gate(&self) {
+        let gate = self.inner.lock_ok().verify_gate.clone();
+        if let Some(g) = gate {
+            g.release_all();
         }
     }
 
@@ -457,18 +532,5 @@ impl Extractor {
     /// hook would rewrite some unrelated root slot's records.
     pub fn set_materialized_hook(&self, hook: MaterializedHook) {
         self.inner.lock_ok().materialized = Some(hook);
-    }
-
-    /// Install the post-rename decrypt publish notification (see
-    /// [`DecryptPublish`]). Same inheritance contract as the barrier.
-    pub fn set_decrypt_publish(&self, publish: DecryptPublish) {
-        let child = {
-            let mut inner = self.inner.lock_ok();
-            inner.decrypt_publish = Some(publish.clone());
-            inner.child.clone()
-        };
-        if let Some(c) = child {
-            c.set_decrypt_publish(publish);
-        }
     }
 }

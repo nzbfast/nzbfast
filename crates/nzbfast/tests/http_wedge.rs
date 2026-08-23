@@ -41,23 +41,18 @@
 //! `wall_tip` - but the ceiling is what makes the NEXT slow query a slow
 //! query rather than an outage.
 
+mod harness;
 mod scratch;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use nzbkit::nntp::OverEntry;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use harness::Daemon;
 
 /// One attempt, returning the response BODY. Err ONLY when the daemon
 /// produced nothing at all; anything that produced a byte is an answer,
@@ -170,19 +165,6 @@ fn api(port: u16, q: &str) -> serde_json::Value {
     serde_json::from_str(&body).unwrap_or_else(|e| panic!("bad JSON for {q:?}: {e}\n{body}"))
 }
 
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-struct Running {
-    _child: KillOnDrop,
-    port: u16,
-}
-
 fn over(number: u64, subject: &str, msgid: &str, date: i64) -> OverEntry {
     OverEntry {
         number,
@@ -224,30 +206,26 @@ fn seed_index(dir: &Path, n: usize) {
         .unwrap();
 }
 
-fn serve(dir: &Path) -> Running {
+fn serve(dir: &Path) -> Daemon {
     serve_with_hooks(dir, true)
 }
 
 /// `hooks` gates NZBFAST_DEBUG_HOOKS. Every daemon in this file goes
 /// through here, including the one that must run WITHOUT the hook:
-/// launching inline instead cost that test the port-race handling below,
-/// and it failed with ECONNREFUSED under a loaded box - it waited 30s for
-/// a banner that a daemon which had already lost :port and exited was
-/// never going to print, then talked to nothing.
-fn serve_with_hooks(dir: &Path, hooks: bool) -> Running {
-    for attempt in 0..3 {
-        let port = free_port();
-        let log = dir.join("daemon.log");
-        let out = std::fs::File::create(&log).unwrap();
-        let err = out.try_clone().unwrap();
+/// launching inline instead cost that test the port-race handling in
+/// `harness::serve_blocking`, and it failed with ECONNREFUSED under a
+/// loaded box - it waited 30s for a banner that a daemon which had
+/// already lost :port and exited was never going to print, then talked
+/// to nothing.
+fn serve_with_hooks(dir: &Path, hooks: bool) -> Daemon {
+    harness::serve_blocking(dir, |port| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         if hooks {
             cmd.env("NZBFAST_DEBUG_HOOKS", "1");
         } else {
             cmd.env_remove("NZBFAST_DEBUG_HOOKS");
         }
-        let child = cmd
-            .env("NZBFAST_NO_ENRICH", "1")
+        cmd.env("NZBFAST_NO_ENRICH", "1")
             .env_remove("NZBFAST_OPEN")
             .arg("--config")
             .arg(dir.join("config.json"))
@@ -259,41 +237,9 @@ fn serve_with_hooks(dir: &Path, hooks: bool) -> Running {
             .arg("--out")
             .arg(dir.join("complete"))
             .arg("--index-db")
-            .arg(dir.join("index.db"))
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .unwrap();
-        let mut running = Running {
-            _child: KillOnDrop(child),
-            port,
-        };
-        // Readiness = OUR banner in OUR log (see index_size_cap.rs for
-        // why a bare connect can catch a stranger on a recycled port).
-        let banner = format!("open the dashboard at  http://localhost:{port}/");
-        let mut dead = false;
-        for _ in 0..300 {
-            if std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .contains(&banner)
-                && TcpStream::connect(("127.0.0.1", port)).is_ok()
-            {
-                return running;
-            }
-            if running._child.0.try_wait().ok().flatten().is_some() {
-                dead = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let tail = std::fs::read_to_string(&log).unwrap_or_default();
-        drop(running);
-        assert!(
-            attempt < 2,
-            "daemon never announced its listener on {port} (exited early: {dead})\n{tail}"
-        );
-    }
-    unreachable!()
+            .arg(dir.join("index.db"));
+        cmd
+    })
 }
 
 /// One dashboard tab + one long index-lock hold must leave the daemon

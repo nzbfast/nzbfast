@@ -85,11 +85,20 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
     let shaped = d.shaped_hosts.lock_ok();
     let capped = d.capped_hosts.lock_ok();
     let global = d.connections.load(Ordering::Relaxed).max(1);
+    // TODO 208 item 1: the line-aware cap the next build will seed
+    // under, so "using M of N" shows the number the job will open.
+    let line_share =
+        crate::conntune::line_cap_share(c.servers.iter().filter(|s| s.enabled).count());
     c.servers
         .iter()
         .filter(|s| s.enabled)
         .map(|s| {
-            let base = global.min(s.connections.max(1) as usize);
+            let mut base = global.min(s.connections.max(1) as usize);
+            if let Some(share) = line_share
+                && !s.pin_connections
+            {
+                base = base.min(share);
+            }
             let budget = if live_tune && !s.pin_connections {
                 crate::conntune::seed_connections(store.get(&s.host), bkt, now, base)
             } else {

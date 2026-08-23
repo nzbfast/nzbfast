@@ -191,7 +191,11 @@ pub struct ServerLive {
     /// delivered bodies - do not rename or filter.
     pub(crate) srv_rate: AtomicU64,
     pub(crate) srv_rate_at: AtomicU64,
-    pub(crate) srv_art_ms: AtomicU64,
+    /// `pub`, unlike its two neighbours: the daemon's "Why is this
+    /// slow?" payload publishes it per provider (`whyslow.rs`), so it
+    /// crosses the crate boundary. It stayed crate-private for as long
+    /// as it had no reader at all.
+    pub srv_art_ms: AtomicU64,
     pub steered: AtomicBool,
     /// Unix ms when this server LAST stopped granting sessions, 0 while
     /// it holds one. Set by the first dial that fails or is refused,

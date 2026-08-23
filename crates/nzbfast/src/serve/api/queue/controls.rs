@@ -117,15 +117,22 @@ pub(in crate::serve) fn note_queue_idle_unless_active(d: &Daemon, stopped_active
 /// same 60 s, which is far past any launch: a job that never attaches a
 /// pool has already failed on its own by then.
 ///
-/// Only ever aimed at `active_stream` - the owner test, never
+/// Only ever aimed at the job named, by owner - never by
 /// `state == Downloading` (see `owns_hub`): job N stays Downloading
 /// through its whole disk tail while N+1 is on the wire holding these
 /// handles, and this loop firing at the wrong one is the "deleted a
-/// finished job, killed a healthy unrelated download" bug. While the hub
-/// names anyone else the loop only WAITS - it never fires blind - so the
+/// finished job, killed a healthy unrelated download" bug. While no slot
+/// names one of ours the loop only WAITS - it never fires blind - so the
 /// launch window (the record is Downloading, the pipeline has not
 /// published yet) is covered without ever pointing the abort at a
 /// stranger.
+///
+/// Both live slots count: the active hub AND the job draining behind it
+/// since the cross-job hand-over, whose own handles moved into
+/// `drain_dl` (see `Daemon::fire_drain`). Gating on `owns_hub` alone
+/// left a deleted predecessor's metered traffic running to its own end,
+/// with the loop waiting out its full 60 s because `was_ours` could
+/// never become true for it.
 ///
 /// Shared so the SAB/API delete arm and the NZBGet JSON-RPC delete
 /// variants cannot drift, like the two helpers above it.
@@ -145,7 +152,7 @@ pub(in crate::serve) fn stop_deleted_transfer(d: &Arc<Daemon>, stopped: Vec<Stri
         let mut was_ours = false;
         for _ in 0..240 {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            if d.owns_hub(|id| stopped.iter().any(|s| s == id)) {
+            if d.owns_wire(|id| stopped.iter().any(|s| s == id)) {
                 was_ours = true;
                 if fire_delete_abort(&d, &stopped) {
                     return;
@@ -169,7 +176,12 @@ pub(in crate::serve) fn stop_deleted_transfer(d: &Arc<Daemon>, stopped: Vec<Stri
 /// only mean the QueueControl found a live run to abort.
 fn fire_delete_abort(d: &Arc<Daemon>, stopped: &[String]) -> bool {
     if !d.owns_hub(|id| stopped.iter().any(|s| s == id)) {
-        return false;
+        // Not the active transfer - but a job that handed the hub over
+        // and is still draining behind the new one keeps its own stop
+        // handles in the drain slot, and they are the only way to stop
+        // its metered traffic. Aimed by id, so the successor is never
+        // touched.
+        return d.fire_drain(true, |id| stopped.iter().any(|s| s == id));
     }
     if let Some(f) = d.hub.abort.lock_ok().as_ref() {
         f.store(true, Ordering::Relaxed);

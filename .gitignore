@@ -82,6 +82,19 @@ runtime.json
 # ignored - that one is per-machine.
 !.claude/settings.json
 
+# CPython bytecode caches. The repo's python tooling runs from inside
+# the checkout - the repo-root gates (size, lock, doc, ref, par2,
+# provenance, leg-warn) and the per-session .claude/tools hooks - and
+# CPython drops a __pycache__/ next to whichever script it imported.
+# The session hook fires on EVERY session in EVERY worktree, so before
+# this rule landed `git status` opened with an untracked directory in
+# every lane, which is exactly the noise a shared checkout cannot
+# afford when the rule is "stage by explicit path". Repo-wide rather
+# than one path: two of those gates ship publicly, so a public
+# contributor running them lands in the same place.
+__pycache__/
+*.pyc
+
 # merge debris and editor state
 *.orig
 *.rej

@@ -15,22 +15,20 @@
 //!    recently opened - survive a shrink that would otherwise take them;
 //!  * the two new modes sit behind the FULL key, not the add-only NZB key.
 
+// The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
+// serve_blocking / wait_ready), one copy for every suite that spawns a
+// daemon.
+mod harness;
 mod scratch;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
+
+use harness::Daemon;
 
 use nzbkit::nntp::OverEntry;
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn http(port: u16, req: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect daemon");
@@ -47,19 +45,6 @@ fn http(port: u16, req: &str) -> String {
 fn api(port: u16, q: &str) -> serde_json::Value {
     let body = http(port, &format!("/api?output=json&{q}"));
     serde_json::from_str(&body).unwrap_or_else(|e| panic!("bad JSON for {q:?}: {e}\n{body}"))
-}
-
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-struct Running {
-    _child: KillOnDrop,
-    port: u16,
 }
 
 fn over(number: u64, subject: &str, msgid: &str, date: i64) -> OverEntry {
@@ -136,14 +121,10 @@ fn seed_index(dir: &Path, stems: &[&str]) {
         .unwrap();
 }
 
-fn serve(dir: &Path) -> Running {
-    for attempt in 0..3 {
-        let port = free_port();
-        let log = dir.join("daemon.log");
-        let out = std::fs::File::create(&log).unwrap();
-        let err = out.try_clone().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-            .env("NZBFAST_NO_ENRICH", "1")
+fn serve(dir: &Path) -> Daemon {
+    harness::serve_blocking(dir, |port| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        cmd.env("NZBFAST_NO_ENRICH", "1")
             .env_remove("NZBFAST_OPEN")
             .arg("--config")
             .arg(dir.join("config.json"))
@@ -158,49 +139,9 @@ fn serve(dir: &Path) -> Running {
             .arg("--out")
             .arg(dir.join("complete"))
             .arg("--index-db")
-            .arg(dir.join("index.db"))
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .unwrap();
-        let mut running = Running {
-            _child: KillOnDrop(child),
-            port,
-        };
-        // Readiness is OUR daemon's own listener banner in OUR log, not
-        // "something answers on :port". A bare connect cannot tell the two
-        // apart: `free_port()` can hand :port to a parallel test between our
-        // bind(:0) and our daemon's bind, that daemon wins the port, ours
-        // exits, and a plain connect then succeeds against the STRANGER -
-        // so the suite runs against it and fails with ConnectionReset when
-        // its owner finishes. The banner is printed straight after the bind
-        // returns, and this log is ours alone.
-        let banner = format!("open the dashboard at  http://localhost:{port}/");
-        let mut dead = false;
-        for _ in 0..300 {
-            if std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .contains(&banner)
-                && TcpStream::connect(("127.0.0.1", port)).is_ok()
-            {
-                return running;
-            }
-            if running._child.0.try_wait().ok().flatten().is_some() {
-                dead = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let tail = std::fs::read_to_string(&log).unwrap_or_default();
-        drop(running);
-        // A dead child is the lost-port race and earns a fresh port; the
-        // last attempt fails either way, carrying the daemon's own log.
-        assert!(
-            attempt < 2,
-            "daemon never announced its listener on {port} (exited early: {dead})\n{tail}"
-        );
-    }
-    unreachable!()
+            .arg(dir.join("index.db"));
+        cmd
+    })
 }
 
 fn cfg(port: u16, name: &str, value: &str) -> serde_json::Value {
@@ -295,7 +236,7 @@ fn size_cap_settings_round_trip_validate_and_survive_a_restart() {
     assert_eq!(cfg(d.port, "index_max_bytes", "7G")["status"], true);
     assert_eq!(cfg(d.port, "index_evict_order", "oldest")["status"], true);
     assert_eq!(cfg(d.port, "index_evict_kinds", "tv")["status"], true);
-    drop(d);
+    let _log = d.stop();
     let d = serve(&dir);
     let l = live(d.port);
     assert_eq!(l["index_max_bytes"], 7_000_000_000u64);
@@ -434,7 +375,7 @@ fn a_pending_compact_fires_at_the_next_idle_window() {
         );
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
-    let log = std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let log = d.log();
     assert!(
         log.contains("compacted at idle"),
         "the compact should say so in the log:\n{log}"

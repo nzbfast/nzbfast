@@ -78,14 +78,38 @@ pub(super) fn flush_pending_r(
         }
         frags.sort_by_key(|f| f.vol_off);
         let mut covered_to = p.off;
+        let mut gap = false;
         for f in &frags {
             if f.vol_off > covered_to {
-                return true; // gap - stays parked
+                gap = true; // a hole the placements do not fill
+                break;
             }
             covered_to = covered_to.max(f.vol_off + f.len);
         }
-        if frags.is_empty() || covered_to < end {
-            return true;
+        // TODO 252 (23 Aug 2026): the placement trail is not the only
+        // way an article's bytes reach a MATERIALIZED volume, so where
+        // it comes up short, ask the volume file itself. The demote
+        // reconstruction reports every write it makes (`refeed_active`),
+        // but the post-write re-route in `Extractor::write` and the
+        // forward-delivery re-check both land their bytes with the flag
+        // down and surface nothing - and the read-back skips any range
+        // whose pwrite has not landed yet, which is the window those two
+        // exist to close. The article then stayed parked for the life of
+        // the job and refetched on the next run, ~8% of runs of the e2e
+        // resume rig standalone here and ~40% under a loaded suite.
+        // `materialized_span_on_disk` makes the same claim the slot's
+        // `M` line makes, off the writer's own coverage map rather than
+        // off an inference: an unwritten byte anywhere in the span
+        // answers `None` and the article stays parked, which is the safe
+        // direction.
+        let mut on_disk = None;
+        if gap || frags.is_empty() || covered_to < end {
+            let Some((name, size)) = extractor.materialized_span_on_disk(p.sidx, p.off, p.len)
+            else {
+                return true; // stays parked
+            };
+            frags = vec![nzbkit::extract::Frag::identity(&name, p.off, p.len)];
+            on_disk = Some((name, size));
         }
         // Every byte of the span is durably on disk (the re-feed writes
         // ran under the extractor's routing lock, before the placements
@@ -94,7 +118,8 @@ pub(super) fn flush_pending_r(
         if p.par2_main {
             journal.record(&p.id);
         } else {
-            let slot_file = extractor.slot_file_info(p.sidx);
+            let widened = on_disk.is_some();
+            let slot_file = on_disk.or_else(|| extractor.slot_file_info(p.sidx));
             let mut frags = frags;
             // A parked article completing AFTER its slot demoted may mix
             // identity fragments (the reconstruction's own writes) with
@@ -103,7 +128,11 @@ pub(super) fn flush_pending_r(
             // positional rewrite. Same fact, applied at record time: the
             // materialized volume holds every one of these bytes at its
             // final offset.
-            if extractor.slot_materialized(p.sidx)
+            // The widened arm above already composed its one fragment
+            // that way, from the same locked read that established the
+            // coverage.
+            if !widened
+                && extractor.slot_materialized(p.sidx)
                 && let Some((name, _)) = slot_file.as_ref()
             {
                 for f in frags.iter_mut() {
@@ -148,10 +177,10 @@ pub(super) struct DecodeCtx {
     pub(super) decoded_bytes: Arc<AtomicU64>,
     pub(super) fetch_done: Arc<AtomicU64>,
     pub(super) decode_errors: Arc<AtomicU64>,
-    pub(super) retention_excluded: Arc<AtomicU64>,
-    pub(super) missing_430: Arc<AtomicU64>,
-    pub(super) takedown_430: Arc<AtomicU64>,
-    pub(super) transport_failed: Arc<AtomicU64>,
+    pub(super) retention_excluded: Arc<CauseSplit>,
+    pub(super) missing_430: Arc<CauseSplit>,
+    pub(super) takedown_430: Arc<CauseSplit>,
+    pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) decode_error_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
@@ -162,6 +191,11 @@ pub(super) struct DecodeCtx {
     pub(super) journal: Arc<nzbkit::journal::Journal>,
     pub(super) backfill: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<u64>>>>,
     pub(super) sniff: Arc<SniffCtl>,
+    /// §94 A: the restored files the replay still owes, fed back per
+    /// slot the moment that slot's offset-0 article is written - which
+    /// is the first moment its mapper can place them. See
+    /// `rig::ReplayPending`.
+    pub(super) replay: Arc<super::rig::ReplayPending>,
     pub(super) queue_ctl: Arc<nzbkit::pool::QueueControl>,
     pub(super) rt: tokio::runtime::Handle,
     pub(super) throttle_mbps: Option<f64>,
@@ -173,6 +207,78 @@ pub(super) struct DecodeCtx {
     /// it a corrupt body on a delegated slot is invisible until the
     /// verifier's block hash, past steer time.
     pub(super) crc_steer: bool,
+}
+
+/// One loss-cause ledger, counted separately for PAYLOAD and RECOVERY
+/// articles (sweep 8, M7).
+///
+/// These counters used to be flat totals over every slot alike, and the
+/// diagnosis gates read them as statements about the payload. They are
+/// not. One irrelevant 430 on a `.par2` article suppressed
+/// `all_transport` and had a release whose payload died entirely in
+/// transport reported as missing/gone - to the user, and to the
+/// indexer. The mirror image is worse: one transport failure on a
+/// recovery article suppressed the wholly-gone verdict for a post that
+/// really was gone, so the job waited and re-grabbed instead of saying
+/// so. Takedown dominance was distorted the same way, because it is a
+/// ratio of two of these.
+///
+/// So the split is taken at COLLECTION, where the article's slot is
+/// still in hand: diagnosis reads `payload`, and `recovery` is repair
+/// context. An outcome whose id maps to no slot at all counts as
+/// payload - it cannot be shown to be parity, and payload is the
+/// conservative side (it blocks the optimistic verdicts rather than
+/// licensing them).
+#[derive(Default, Debug)]
+pub(super) struct CauseSplit {
+    payload: AtomicU64,
+    recovery: AtomicU64,
+}
+
+impl CauseSplit {
+    pub(super) fn add(&self, recovery: bool) {
+        let c = if recovery {
+            &self.recovery
+        } else {
+            &self.payload
+        };
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Losses charged to payload slots - what every diagnosis gate asks.
+    pub(super) fn payload(&self) -> u64 {
+        self.payload.load(Ordering::Relaxed)
+    }
+
+    /// Losses charged to recovery slots - repair context, never a
+    /// payload verdict.
+    pub(super) fn recovery(&self) -> u64 {
+        self.recovery.load(Ordering::Relaxed)
+    }
+
+    /// Both - for counts that describe the RUN rather than the payload
+    /// (the console census says how many segments went unrequested, and
+    /// a `.par2` article that went unrequested still did).
+    pub(super) fn total(&self) -> u64 {
+        self.payload() + self.recovery()
+    }
+}
+
+/// Is this article's slot a RECOVERY slot (sweep 8, M7)?
+///
+/// Unknown ids count as PAYLOAD: a body whose id maps to no slot cannot
+/// be shown to be parity, and payload is the conservative side - it
+/// blocks the optimistic verdicts (`post_gone`, `all_transport`) rather
+/// than licensing them.
+fn is_recovery_article(
+    id: &str,
+    id_to_slot: &crate::unpack::IdSlots,
+    slots: &[Arc<FileSlot>],
+) -> bool {
+    id_to_slot
+        .get(id)
+        .and_then(|&(sidx, _)| slots.get(sidx as usize))
+        .is_some_and(|s| s.is_par2())
 }
 
 /// The PAR2 activation race's dependency set (TODO 106 phase 2.1, cut
@@ -256,16 +362,39 @@ impl Par2Race<'_> {
 /// behavior is identical. Empty means the channel closed and drained.
 fn drain_outcome_batch(
     rx: &Arc<std::sync::Mutex<tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>>>,
+    journal: &nzbkit::journal::Journal,
 ) -> Vec<nzbkit::pool::FetchOutcome> {
     let mut batch = Vec::with_capacity(8);
     let mut rx = rx.lock_ok();
-    if let Some(first) = rx.blocking_recv() {
+    // The journal batches placement records (TODO 30a, Finding 6) and
+    // lands them by size or age as records arrive - which means a
+    // STALL leaves the last batch queued until the next article. This
+    // is the one point every decoder passes on its way to blocking: if
+    // the channel is empty right now, land what is queued before
+    // waiting on it. Costs one uncontended lock per idle transition and
+    // nothing on a busy stream (the try_recv hit skips it).
+    let first = match rx.try_recv() {
+        Ok(o) => Some(o),
+        Err(_) => {
+            journal.flush();
+            rx.blocking_recv()
+        }
+    };
+    if let Some(first) = first {
         batch.push(first);
         while batch.len() < 8 {
             match rx.try_recv() {
                 Ok(o) => batch.push(o),
                 Err(_) => break,
             }
+        }
+    }
+    // Memory-floor gauge: these raw bodies just left the fetch->decode
+    // channel (they stay charged to RawOut until the pool gets them
+    // back). Released by capacity, matching the sender's charge exactly.
+    for o in &batch {
+        if let nzbkit::pool::FetchOutcome::Done { raw, .. } = o {
+            nzbkit::memgauge::sub(nzbkit::memgauge::Sub::Channel, raw.capacity() as u64);
         }
     }
     batch
@@ -305,6 +434,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         journal,
         backfill,
         sniff,
+        replay,
         queue_ctl,
         rt,
         throttle_mbps,
@@ -322,7 +452,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         rt: &rt,
     };
     loop {
-        let batch = drain_outcome_batch(&rx);
+        let batch = drain_outcome_batch(&rx, &journal);
         if batch.is_empty() {
             break; // channel closed and drained
         }
@@ -434,7 +564,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                 integrity.verified_article_crc,
                             ) {
                                 Err(e) => {
-                                    eprintln!("write {name}: {e}");
+                                    warn!(target: "get", "write {name}: {e}");
                                     decode_error_sample
                                         .lock_ok()
                                         .get_or_insert_with(|| format!("write {name}: {e}"));
@@ -458,14 +588,28 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                         &disk_full_sample,
                                         &queue_ctl,
                                     ) {
-                                        eprintln!(
-                                            "⚠ out of disk space - stopping the download; \
+                                        warn!(
+                                            target: "get",
+                                            "out of disk space - stopping the download; \
                                              what landed is journaled and a retry resumes \
                                              without refetching it"
                                         );
                                     }
                                 }
                                 Ok(persist) => {
+                                    // §94 A: an offset-0 write is what
+                                    // moves a slot from "cannot place"
+                                    // to "can" - its own header parses,
+                                    // and it may complete the run of
+                                    // volumes a later one's base
+                                    // resolves through. So every one of
+                                    // them re-checks what the replay
+                                    // still owes. A no-op on a fresh
+                                    // run, on the adopt path, and once
+                                    // the replay has drained.
+                                    if dec.offset() == 0 && !slot.is_par2() && !replay.is_empty() {
+                                        replay.try_drain(&extractor, &verifier);
+                                    }
                                     match &persist {
                                         nzbkit::extract::Persist::Placed(frags) => {
                                             if slot.is_par2_main {
@@ -588,6 +732,12 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                             let end = off.saturating_add(out.len());
                                             if end <= MAX_PAR2_CAPTURE {
                                                 if buf.len() < end {
+                                                    // Memory-floor gauge:
+                                                    // capture growth.
+                                                    nzbkit::memgauge::add(
+                                                        nzbkit::memgauge::Sub::Par2Capture,
+                                                        (end - buf.len()) as u64,
+                                                    );
                                                     buf.resize(end, 0);
                                                 }
                                                 buf[off..end].copy_from_slice(&out);
@@ -634,7 +784,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                 continue;
                             }
                             fetch_done.fetch_add(nbytes, Ordering::Relaxed);
-                            eprintln!("decode error ({id}): {e}");
+                            warn!(target: "get", "decode error ({id}): {e}");
                             decode_error_sample
                                 .lock_ok()
                                 .get_or_insert_with(|| format!("decode error: {e}"));
@@ -661,16 +811,17 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                 }
                                 _ => String::new(),
                             };
-                            println!("  ✔ {} → extracting in-stream{shape}", slot.hint);
+                            info!(target: "get", "✔ {} → extracting in-stream{shape}", slot.hint);
                         } else if extractor.is_chased(sidx) {
                             // A chased slot may own a file since
                             // drop-behind trimming - but it is a
                             // partial spill, not a finished download,
                             // and announcing it as one is a lie.
-                            println!("  ✔ {} → extracting in-stream", slot.hint);
+                            info!(target: "get", "✔ {} → extracting in-stream", slot.hint);
                         } else if let Some(p) = extractor.slot_path(sidx) {
-                            println!(
-                                "  ✔ {}",
+                            info!(
+                                target: "get",
+                                "✔ {}",
                                 p.file_name().unwrap_or_default().to_string_lossy()
                             );
                         }
@@ -678,25 +829,29 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     }
                 }
                 FetchOutcome::Missing { id, cause } => {
+                    // Sweep 8, M7: which SIDE lost this article. Taken
+                    // here because here is the only place the slot is
+                    // still in hand - see `CauseSplit`.
+                    let rec = is_recovery_article(&id, &id_to_slot, &slots);
                     match cause {
                         nzbkit::pool::MissingCause::Retention => {
-                            retention_excluded.fetch_add(1, Ordering::Relaxed);
+                            retention_excluded.add(rec);
                         }
                         nzbkit::pool::MissingCause::Gone { takedown } => {
-                            missing_430.fetch_add(1, Ordering::Relaxed);
+                            missing_430.add(rec);
                             // The hint rides its own counter so the
                             // failure summary can say "removed", and
                             // stays inside missing_430 for everything
                             // else - a takedown is still a refusal.
                             if takedown {
-                                takedown_430.fetch_add(1, Ordering::Relaxed);
+                                takedown_430.add(rec);
                             }
                         }
                     }
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
                 FetchOutcome::Failed { id, error } => {
-                    transport_failed.fetch_add(1, Ordering::Relaxed);
+                    transport_failed.add(is_recovery_article(&id, &id_to_slot, &slots));
                     transport_sample.lock_ok().get_or_insert(error);
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
@@ -704,6 +859,148 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         }
     }
 }
+
+/// Memory-floor attribution sampler (250 ms): reads RSS + footprint and,
+/// on a new sampled RSS high, stores a coincident snapshot of every
+/// memgauge - the "where did the high-water go" record the job summary
+/// prints. Two mach task_info calls per tick, microseconds each;
+/// deliberately in-process so it cannot wake a sleeping cluster the way
+/// an external ps poller does (the 21 Aug cpu_s observer effect).
+/// Instrument-first: nothing reads the sample to make a decision.
+///
+/// Runs through post-processing too (repair and settle read-back can BE
+/// the high-water), so it is stopped by token rather than by aborting a
+/// held JoinHandle: the summary printer bumps the token when it is done
+/// (tail.rs), and a daemon's next job simply spawns a fresh sampler.
+///
+/// The high-water record is the JOB's, not the process's: the sampler
+/// writes into the `PeakRecord` this guard owns, so the next job's
+/// spawn cannot wipe a predecessor's attribution while its tail is
+/// still running (bug sweep 22 Aug 2026, F-19). The process-wide
+/// reader (the daemon's instrument endpoint) is pointed at the newest
+/// record here; the gauges themselves stay process-wide, because live
+/// charges (a retained free list, a capture) carry across jobs.
+///
+/// The record is ALSO registered in memgauge's live registry under a
+/// label, which is what lets the daemon's instrument endpoint report an
+/// overlapping tail's job as well as the newest one; the registry entry
+/// goes when this guard drops.
+pub(super) fn spawn_mem_sampler(stream_owner: &str, nzb_path: &std::path::Path) -> MemSampler {
+    let run = MEM_SAMPLER_RUN.fetch_add(1, Ordering::Relaxed) + 1;
+    let record = Arc::new(nzbkit::memgauge::PeakRecord::new());
+    nzbkit::memgauge::install_latest_peak_record(record.clone());
+    nzbkit::memgauge::register_peak_record(
+        run,
+        &mem_sampler_label(stream_owner, nzb_path),
+        &record,
+    );
+    let handle = {
+        let record = record.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let trace = holds_trace_enabled();
+            let mut n: u32 = 0;
+            while MEM_SAMPLER_RUN.load(Ordering::Relaxed) == run {
+                tick.tick().await;
+                record.note_rss_sample();
+                n = n.wrapping_add(1);
+                if trace && n.is_multiple_of(2) {
+                    log_holds_trace(run);
+                }
+            }
+        })
+    };
+    MemSampler {
+        run,
+        record,
+        handle,
+    }
+}
+
+/// A live sampler, the generation token it was born with, and the peak
+/// record it writes. The token is what [`stop_mem_sampler`] needs:
+/// stopping by token rather than by an unconditional bump means a job's
+/// stop cannot retire a LATER job's sampler (the daemon overlaps one
+/// job's tail with the next's download). The record is what the job's
+/// summary reads (tail.rs `print_mem_floor`).
+pub(super) struct MemSampler {
+    pub(super) run: u64,
+    pub(super) record: Arc<nzbkit::memgauge::PeakRecord>,
+    // Not #[expect]: the unit tests read the field, so the expectation is
+    // unfulfilled under cfg(test).
+    #[allow(dead_code)]
+    pub(super) handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MemSampler {
+    fn drop(&mut self) {
+        // The guard's life IS the job's, tail included, so dropping it
+        // is the one point every path reaches - including an early
+        // error return that never prints a summary.
+        nzbkit::memgauge::unregister_peak_record(self.run);
+    }
+}
+
+/// How a job names itself in the memory-floor registry: the daemon's
+/// nzo_id, which is what an API reader correlates against the queue,
+/// falling back to the NZB's stem for a CLI run (which has no nzo_id and
+/// no API reader either, but a named row beats a blank one in a log).
+fn mem_sampler_label(stream_owner: &str, nzb_path: &std::path::Path) -> String {
+    if !stream_owner.is_empty() {
+        return stream_owner.to_string();
+    }
+    nzb_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "job".to_string())
+}
+
+/// `NZBFAST_HOLDS_TRACE` set: the sampler also prints the live
+/// process-wide holds gauge at 2 Hz. Read once per process - a
+/// `var_os` per tick would be cheap, but a cached bool is free.
+fn holds_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NZBFAST_HOLDS_TRACE").is_some())
+}
+
+/// One `[holds-trace]` sample: the live `Sub::Holds` gauge NOW, not at
+/// any high-water. The bench rig maxes over these to get a true
+/// holds-over-time high-water for a leg. The `[mem-floor] ... holds N
+/// MB` line in the job summary is NOT that: it is the gauge at the
+/// instant the sampled RSS high-water last moved, and under a clamped
+/// budget that instant is chosen by allocator retention, not by live
+/// bytes (23 Aug 2026: 1118-1152 MB reported against a reconstructed
+/// ~1.25-1.35 GB true high-water on the bench box at 2400M). Two overlapping
+/// jobs each print the same process-wide figure, tagged by their run
+/// token; a max over the file is unaffected.
+fn log_holds_trace(run: u64) {
+    let g = nzbkit::memgauge::snapshot();
+    let holds = g.cur_of(nzbkit::memgauge::Sub::Holds);
+    info!(
+        target: "holds-trace",
+        "holds {} MB ({} B, sampler {})",
+        holds / 1_000_000,
+        holds,
+        run
+    );
+}
+
+/// Generation token for [`spawn_mem_sampler`]; bumping it retires every
+/// live sampler (each loops only while the token still equals the value
+/// it was born with).
+pub(super) static MEM_SAMPLER_RUN: AtomicU64 = AtomicU64::new(0);
+
+/// Retire the sampler born with `run` (called once the job summary has
+/// printed). A no-op when a newer sampler has already taken the token:
+/// that one belongs to the next job and must keep running.
+pub(super) fn stop_mem_sampler(run: u64) {
+    let _ = MEM_SAMPLER_RUN.compare_exchange(run, run + 1, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+#[path = "workers_mem_sampler_tests.rs"]
+mod mem_sampler_tests;
 
 // Live rate ticker (2 s), driven by the consumer-side decoded counter.
 // Missing-article churn shows too: a mostly-taken-down post decodes
@@ -743,8 +1040,9 @@ pub(super) fn spawn_rate_ticker(
             } else {
                 String::new()
             };
-            println!(
-                "  … {:>7.1} MB/s ({:.2} Gbps)  written {:.2} GB{miss}",
+            info!(
+                target: "get",
+                "{:>7.1} MB/s ({:.2} Gbps)  written {:.2} GB{miss}",
                 (now - last) as f64 / dt / 1e6,
                 (now - last) as f64 * 8.0 / dt / 1e9,
                 now as f64 / 1e9
@@ -852,8 +1150,9 @@ pub(super) fn spawn_deadlock_watchdog(
             }
             frozen += poll;
             if frozen >= secs && outstanding > 0 {
-                eprintln!(
-                    "⚠ download stalled: no decode progress AND no article \
+                warn!(
+                    target: "stall",
+                    "download stalled: no decode progress AND no article \
                      resolved for {frozen}s with {outstanding} segment(s) still \
                      outstanding - the connection pool has wedged. Dumping state \
                      and aborting; the journal keeps what landed, PAR2 fills any \
@@ -878,7 +1177,7 @@ pub(super) fn spawn_deadlock_watchdog(
 // NZBFAST_NO_SPEC_PREFETCH=1. Risk is bounded to one small volume of
 // possibly-wasted bytes. Skipped when the set bootstraps from a
 // volume (one is already inbound) or the NZB ships no volumes.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn spawn_spec_prefetch(
     allowed: bool,
     has_main: bool,
@@ -1044,11 +1343,16 @@ pub(super) fn spawn_spec_prefetch(
                         return;
                     }
                     match fetched {
-                        Ok((0, paths)) if !paths.is_empty() => {
+                        // One rung is one volume, so the fetch-wide
+                        // total and this file's own count are the same
+                        // number here - `total()` reads it without
+                        // threading the rung's file index in.
+                        Ok((f, paths)) if f.total() == 0 && !paths.is_empty() => {
                             covered += count.max(1);
                             pre.lock_ok().push((fi, paths));
                         }
-                        Ok((failures, paths)) if !paths.is_empty() => {
+                        Ok((f, paths)) if !paths.is_empty() => {
+                            let failures = f.total();
                             // A PARTIAL volume: some articles failed.
                             // Recording its file index would strike the
                             // WHOLE volume off the post-settle fetch
@@ -1245,7 +1549,7 @@ pub(super) fn par_race_missing_blocks(
 // final read-back finds the absent blocks and the repair self-proves
 // by re-reading the whole set (the invariant this leans on).
 // Fires at most once per run.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn spawn_par_race(
     slots: &[Arc<FileSlot>],
     verifier: &Arc<nzbkit::live::LiveVerifier>,
@@ -1742,7 +2046,7 @@ pub(super) fn spawn_tail_giveup(
 /// net_done, re-read the late-attach password, and await the M15b
 /// backfill. Returns the elapsed network time and the effective
 /// password for the disk tail.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn drain_network(
     prefetch_stop: &Arc<std::sync::atomic::AtomicBool>,
     spec_prefetch_task: Option<tokio::task::JoinHandle<()>>,
@@ -1761,7 +2065,7 @@ pub(super) async fn drain_network(
     disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
     note_activity: &(dyn Fn(&'static str) + Sync),
-    net_done: Option<tokio::sync::oneshot::Sender<()>>,
+    net_done: Option<tokio::sync::oneshot::Sender<std::time::Instant>>,
     hub: &Option<Arc<StreamHub>>,
     stream_owner: &str,
     password: Option<String>,
@@ -1792,6 +2096,10 @@ pub(super) async fn drain_network(
     // of an out-of-order set) journal now; anything still parked
     // refetches on resume, which is exactly the truthful record.
     flush_pending_r(pending_r, extractor, journal);
+    // The network phase is over: land the placement batch the journal
+    // was still holding (the decoders' idle flush covers a stall, this
+    // covers the end).
+    journal.flush();
     // Final D-record flush: seams that closed after the last article's
     // own flush pass settle now; anything still RAM-held refetches on
     // resume, which is exactly the truthful record.
@@ -1822,8 +2130,9 @@ pub(super) async fn drain_network(
     ticker.abort();
     watchdog.abort();
     if stalled.load(Ordering::Relaxed) {
-        println!(
-            "  ⚠ recovered from a stalled pool by aborting the tail - \
+        warn!(
+            target: "stall",
+            "recovered from a stalled pool by aborting the tail - \
              verifying and repairing what landed"
         );
     }
@@ -1868,7 +2177,7 @@ pub(super) async fn drain_network(
     // finished transfer read as "downloading, 100%, 0 MB/s" for minutes.
     note_activity("verifying");
     if let Some(tx) = net_done {
-        let _ = tx.send(());
+        let _ = tx.send(std::time::Instant::now());
     }
     // M24 late attach (C1): a password set via mode=set_password while
     // this job downloaded. The `password` binding above was resolved at
@@ -1889,8 +2198,9 @@ pub(super) async fn drain_network(
         && let Ok(fed) = h.await
         && fed > 0
     {
-        println!(
-            "  » backfilled {:.1} MB of pre-activation spans during download",
+        info!(
+            target: "par2",
+            "backfilled {:.1} MB of pre-activation spans during download",
             fed as f64 / 1e6
         );
     }
@@ -1907,10 +2217,10 @@ pub(super) struct Counters {
     pub(super) rx: Arc<std::sync::Mutex<tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>>>,
     pub(super) decoded_bytes: Arc<AtomicU64>,
     pub(super) decode_errors: Arc<AtomicU64>,
-    pub(super) retention_excluded: Arc<AtomicU64>,
-    pub(super) missing_430: Arc<AtomicU64>,
-    pub(super) takedown_430: Arc<AtomicU64>,
-    pub(super) transport_failed: Arc<AtomicU64>,
+    pub(super) retention_excluded: Arc<CauseSplit>,
+    pub(super) missing_430: Arc<CauseSplit>,
+    pub(super) takedown_430: Arc<CauseSplit>,
+    pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) decode_error_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
@@ -1972,18 +2282,18 @@ pub(super) fn build_counters(
     // Segments the pool never asked anyone for: outside every configured
     // server's retention window. Reported by cause in the failure summary
     // - to the user these were indistinguishable from real takedowns.
-    let retention_excluded = Arc::new(AtomicU64::new(0));
+    let retention_excluded = Arc::new(CauseSplit::default());
     // The other two loss ledgers the failure summary reads. A real 430
     // verdict and a transport failure demand opposite responses (the
     // post is dead vs the provider flaked), yet both used to land in the
     // same per-slot "missing" count - a flaky provider read as a
     // takedown, all the way to the indexer failure report.
-    let missing_430 = Arc::new(AtomicU64::new(0));
+    let missing_430 = Arc::new(CauseSplit::default());
     // Of those, the ones whose refusal SAID the article was removed
     // (a takedown or removal notice) - a hint for the failure summary,
     // never a separate verdict class.
-    let takedown_430 = Arc::new(AtomicU64::new(0));
-    let transport_failed = Arc::new(AtomicU64::new(0));
+    let takedown_430 = Arc::new(CauseSplit::default());
+    let transport_failed = Arc::new(CauseSplit::default());
     // First error of each kind, verbatim, for the failure summary to
     // quote - the counter alone says nothing a bug report can act on.
     let transport_sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
@@ -2001,7 +2311,7 @@ pub(super) fn build_counters(
         .ok()
         .and_then(|v| v.parse().ok());
     if let Some(m) = throttle_mbps {
-        println!("⚠ consumer throttle active: {m} MB/s (slow-disk simulation)");
+        warn!(target: "get", "consumer throttle active: {m} MB/s (slow-disk simulation)");
     }
     let throttle_t0 = Instant::now();
 
@@ -2041,7 +2351,7 @@ pub(super) fn build_counters(
 /// [`decode_consumer_loop`] over a DecodeCtx built from these shared
 /// handles. Returns the join handles and the shared pending-D cell the
 /// drain pass flushes.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn spawn_decode_consumers(
     decoders: usize,
     rx: &Arc<std::sync::Mutex<tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>>>,
@@ -2053,10 +2363,10 @@ pub(super) fn spawn_decode_consumers(
     decoded_bytes: &Arc<AtomicU64>,
     fetch_done: &Arc<AtomicU64>,
     decode_errors: &Arc<AtomicU64>,
-    retention_excluded: &Arc<AtomicU64>,
-    missing_430: &Arc<AtomicU64>,
-    takedown_430: &Arc<AtomicU64>,
-    transport_failed: &Arc<AtomicU64>,
+    retention_excluded: &Arc<CauseSplit>,
+    missing_430: &Arc<CauseSplit>,
+    takedown_430: &Arc<CauseSplit>,
+    transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
     disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
@@ -2067,6 +2377,7 @@ pub(super) fn spawn_decode_consumers(
     journal: &Arc<nzbkit::journal::Journal>,
     backfill: &Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<u64>>>>,
     sniff: &Arc<SniffCtl>,
+    replay: &Arc<super::rig::ReplayPending>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
     rt: &tokio::runtime::Handle,
     throttle_mbps: Option<f64>,
@@ -2080,11 +2391,14 @@ pub(super) fn spawn_decode_consumers(
     let mut consumers = Vec::new();
     // Plaintext-once D records parked until their seam bytes settle on
     // disk (see the PlacedCrypto arm below). Shared across the decode
-    // threads; leftovers at join time simply refetch on resume.
-    let pending_d: Arc<std::sync::Mutex<Vec<PendingD>>> = Default::default();
+    // threads; leftovers at join time simply refetch on resume. Owned
+    // by the replay (TODO 158 item 2): a resumed article it re-feeds
+    // parks into the same list, and it may feed before these threads
+    // exist.
+    let pending_d: Arc<std::sync::Mutex<Vec<PendingD>>> = replay.pending_d.clone();
     // Held articles parked until their drained placements cover the
     // span (see ParkedR). Leftovers at drain time refetch on resume.
-    let pending_r: Arc<std::sync::Mutex<PendingR>> = Default::default();
+    let pending_r: Arc<std::sync::Mutex<PendingR>> = replay.pending_r.clone();
     // More decode threads than cores is pure scheduler churn (measured on
     // the 2-CPU cgroup rig): the default 4 stands on big metal, small
     // boxes get one per core.
@@ -2118,6 +2432,7 @@ pub(super) fn spawn_decode_consumers(
             journal: journal.clone(),
             backfill: backfill.clone(),
             sniff: sniff.clone(),
+            replay: replay.clone(),
             queue_ctl: queue_ctl.clone(),
             rt: rt.clone(),
             throttle_mbps,
@@ -2131,91 +2446,6 @@ pub(super) fn spawn_decode_consumers(
         consumers.push(thread);
     }
     (consumers, pending_d, pending_r)
-}
-
-#[cfg(test)]
-mod pending_r_tests {
-    use super::*;
-
-    /// TODO 100 follow-up: articles that arrive before the offset-0
-    /// sniff establishes the store mapper park as `Persist::Held`; once
-    /// the sniff lands and the extractor drains them into the inner
-    /// file, `flush_pending_r` must complete their journal records -
-    /// and the records must be RESTORABLE, not merely written. Without
-    /// the join, the first run's journal nondeterministically lacked
-    /// `R` records for early/mid payload articles of a mapped store
-    /// set, and every crash/ENOSPC resume refetched them for no
-    /// reason.
-    #[test]
-    fn held_articles_journal_after_their_holds_drain() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-pending-r-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let data: Vec<u8> = (0..600_000u32)
-            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
-            .collect();
-        let vol =
-            nzbkit::rar::fixtures::rar5_volume(&[("movie.mkv", 600_000, &data, false, false)]);
-        let (journal, _) = nzbkit::journal::Journal::open(&dir, b"nzb-held").unwrap();
-        let ex = nzbkit::extract::Extractor::new(&dir, 1, true);
-        let pending_r = std::sync::Mutex::new(PendingR::default());
-        let art = 100_000usize;
-        let n = vol.len().div_ceil(art);
-        // Every article except offset-0, in reverse: all park.
-        for i in (1..n).rev() {
-            let s = i * art;
-            let e = ((i + 1) * art).min(vol.len());
-            match ex
-                .write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
-                .unwrap()
-            {
-                nzbkit::extract::Persist::Held(frags) => {
-                    pending_r.lock_ok().parked.push(ParkedR {
-                        sidx: 0,
-                        id: format!("<er-{i}@t>").into(),
-                        name: "v.rar".into(),
-                        size: vol.len() as u64,
-                        off: s as u64,
-                        len: (e - s) as u64,
-                        frags,
-                        par2_main: false,
-                    });
-                }
-                _ => panic!("article {i} arrived pre-sniff and must park as Held"),
-            }
-            flush_pending_r(&pending_r, &ex, &journal);
-        }
-        assert_eq!(
-            pending_r.lock_ok().parked.len(),
-            n - 1,
-            "nothing may journal before its bytes drain"
-        );
-        // The offset-0 sniff maps the volume and the drain writes every
-        // held payload byte; the next flush completes their records.
-        ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art])
-            .unwrap();
-        flush_pending_r(&pending_r, &ex, &journal);
-        let left: Vec<u64> = pending_r.lock_ok().parked.iter().map(|p| p.off).collect();
-        // Only the final article may stay parked (it carries the
-        // end-of-archive block, which never lands in an output file).
-        assert!(
-            left.iter().all(|&o| o as usize + art >= vol.len()),
-            "payload articles still parked at offsets {left:?}"
-        );
-        // The records restore on a resume: reopen the journal cold and
-        // rebuild - every journaled article's fragments must read back.
-        drop(journal);
-        drop(ex);
-        let (_j2, resume) = nzbkit::journal::Journal::open(&dir, b"nzb-held").unwrap();
-        let restored = nzbkit::journal::restore(&dir, &resume, None);
-        for i in 1..n - 1 {
-            assert!(
-                restored.ids.contains(&format!("<er-{i}@t>")),
-                "er-{i} journaled but did not restore"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 /// The tail-side watchers as one bundle: the spec-prefetch scratch state
@@ -2236,7 +2466,7 @@ pub(super) struct TailWatchers {
 /// from the recovery side - moved out of `get_with_progress` bodily
 /// under the size gate (TODO 106). Behaviour unchanged: each spawn's
 /// gate (hub flag / env var) is exactly the inline code's.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn spawn_tail_watchers(
     hub: &Option<Arc<StreamHub>>,
     has_main: bool,
@@ -2346,19 +2576,19 @@ mod disk_full_halt_tests {
 }
 
 #[cfg(test)]
-mod par_race_tests {
+mod cause_split_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-    fn slot(hint: &str, remaining: usize, missing: usize) -> Arc<FileSlot> {
+    fn slot(hint: &str, par2: bool) -> Arc<FileSlot> {
         Arc::new(FileSlot {
             hint: hint.into(),
-            is_par2_main: false,
+            is_par2_main: par2,
             sample_skipped: false,
             par2_sniffed: AtomicBool::new(false),
-            total_segments: 3,
-            remaining: AtomicUsize::new(remaining),
-            missing: AtomicUsize::new(missing),
+            total_segments: 1,
+            remaining: AtomicUsize::new(0),
+            missing: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
             deferred: AtomicUsize::new(0),
             abandoned: AtomicUsize::new(0),
@@ -2366,393 +2596,56 @@ mod par_race_tests {
         })
     }
 
-    fn nzb() -> Nzb {
-        Nzb::parse(
-            r#"<?xml version="1.0"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
- <file subject='"a.rar" yEnc (1/3)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments>
-   <segment bytes="4000" number="1">a1@t</segment>
-   <segment bytes="4000" number="2">a2@t</segment>
-   <segment bytes="400000" number="3">a3@t</segment>
-  </segments>
- </file>
- <file subject='"b.sample.mkv" yEnc (1/2)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments>
-   <segment bytes="1000" number="1">b1@t</segment>
-   <segment bytes="50000" number="2">b2@t</segment>
-  </segments>
- </file>
-</nzb>"#
-                .as_bytes(),
-        )
-        .expect("test NZB parses")
-    }
-
-    /// Codex 5 Aug M2 defect 1: a file the recovery set does not cover
-    /// must never become a cancellation candidate - repair cannot heal
-    /// it, so abandoning its articles is permanent damage.
-    #[test]
-    fn an_uncovered_companion_is_never_a_candidate() {
-        let n = nzb();
-        let slots = vec![slot("a.rar", 2, 0), slot("b.sample.mkv", 2, 0)];
-        let set_names: std::collections::HashSet<String> =
-            [nzbkit::disk::sanitize_filename("a.rar").to_lowercase()]
-                .into_iter()
-                .collect();
-        let est = par_race_estimate(&set_names, 4096, &slots, &[0, 1], &n);
-        assert!(est.want.contains("<a1@t>"));
-        assert!(
-            !est.want.iter().any(|id| id.starts_with("<b")),
-            "uncovered b.sample.mkv articles must stay out of the race: {:?}",
-            est.want
-        );
-    }
-
-    /// Codex 5 Aug M2 defect 2: the damage guard charges the file's
-    /// LARGEST still-possible segments at exact bytes. With 2 tiny
-    /// segments done and one 400 KB straggler queued, the old average
-    /// math advertised ~34 blocks of worst-case damage; the truth is 99.
-    #[test]
-    fn damage_worst_case_uses_exact_largest_segments_not_the_average() {
-        let n = nzb();
-        let block = 4096usize;
-        let slots = vec![slot("a.rar", 1, 0), slot("b.sample.mkv", 0, 0)];
-        let set_names: std::collections::HashSet<String> =
-            [nzbkit::disk::sanitize_filename("a.rar").to_lowercase()]
-                .into_iter()
-                .collect();
-        let est = par_race_estimate(&set_names, block, &slots, &[0, 1], &n);
-        // One unresolved article: worst case is the 400000-byte
-        // segment - ceil(400000/4096)+1 = 99 blocks.
-        assert_eq!(est.out_blocks, 98 + 1);
-        // The average estimator (408000/3 = 136000 -> 35 blocks) must
-        // not be what guards the cancel.
-        assert!(est.out_blocks > 35);
-    }
-
-    /// Missing articles are bounded by their own slot's largest
-    /// declared segment, not a cross-file average.
-    #[test]
-    fn missing_blocks_bound_by_the_slots_own_largest_segment() {
-        let n = nzb();
-        let block = 4096usize;
-        let slots = vec![slot("a.rar", 0, 0), slot("b.sample.mkv", 0, 2)];
-        // b's largest segment is 50000 bytes: ceil(50000/4096)+1 = 14
-        // blocks, twice.
-        assert_eq!(par_race_missing_blocks(block, &slots, &[0, 1], &n), 28);
-    }
-
-    /// The race is an experiment and must stay dark by default.
-    #[test]
-    fn par_race_defaults_off() {
-        assert!(
-            std::env::var("NZBFAST_PAR_RACE").is_err(),
-            "NZBFAST_PAR_RACE leaked into the test environment"
-        );
-    }
-
-    /// §146 tail give-up decision: one uncovered walker vetoes the whole
-    /// trade, and the 2x margin is a hard floor - at ceiling*2-1 the
-    /// ladder keeps walking.
-    #[test]
-    fn tail_giveup_needs_every_walker_covered_at_twice_the_ceiling() {
-        let n = nzb();
-        let block = 4096usize;
-        let slots = vec![slot("a.rar", 3, 0), slot("b.sample.mkv", 2, 0)];
-        let set_names: std::collections::HashSet<String> =
-            [nzbkit::disk::sanitize_filename("a.rar").to_lowercase()]
-                .into_iter()
-                .collect();
-        let est = par_race_estimate(&set_names, block, &slots, &[0, 1], &n);
-        // Walkers a1+a2: 2 blocks each (ceil(4000/4096)+1). No other
-        // damage priced in: ceiling 4, so 8 recovery blocks commit and
-        // 7 do not.
-        let wk = |id: &str, ord: u32| nzbkit::pool::Walker { id: id.into(), ord };
-        let walkers = vec![wk("<a1@t>", 0), wk("<a2@t>", 1)];
-        assert!(tail_giveup_covered(&walkers, &est, block, 0, 0, 8));
-        assert!(!tail_giveup_covered(&walkers, &est, block, 0, 0, 7));
-        // Damage already priced in raises the ceiling with it.
-        assert!(!tail_giveup_covered(&walkers, &est, block, 3, 0, 8));
-        assert!(tail_giveup_covered(&walkers, &est, block, 3, 0, 14));
-        // An uncovered companion's article vetoes everything, however
-        // many blocks are on hand - repair cannot rebuild it.
-        let with_b = vec![wk("<a1@t>", 0), wk("<b1@t>", 2)];
-        assert!(!tail_giveup_covered(&with_b, &est, block, 0, 0, 10_000));
-    }
-
-    /// R1, 20 Aug 2026: recovery volumes are PREALLOCATED to their full
-    /// length at the first article, so a census scan taken while the
-    /// side-fetch is still writing sees the final length with only some
-    /// of the content - and the old (path -> len, count) cache served
-    /// that mid-write undercount for the rest of the job (traced live:
-    /// 17 of 128 slices on one leg, 6 on another). `on_hand` froze, the
-    /// 2x margin never cleared, the tail give-up never fired, and
-    /// damaged posts walked the refusal ladder 32-68% slower. A first
-    /// fix that refused to cache only a ZERO scan was falsified by R1
-    /// step 3 - a nonzero undercount poisons identically.
+    /// Sweep 8, M7, the collection half: a loss is charged to the side
+    /// that actually lost it, and an id belonging to no slot is charged
+    /// to PAYLOAD.
     ///
-    /// The invariant that actually holds: a scan of a file written to
-    /// within [`CENSUS_QUIET`] is returned but never remembered, and a
-    /// quiet file's scan is remembered even when it found nothing (the
-    /// index par2 genuinely has no slices - re-reading it every 200 ms
-    /// tick is the cost A5 exists to remove).
+    /// The unknown-id rule is the conservative one and it is deliberate.
+    /// Payload evidence blocks the optimistic verdicts (`post_gone`,
+    /// `all_transport`) rather than licensing them, so an outcome we
+    /// cannot attribute can at worst make the diagnosis less confident -
+    /// never more.
     #[test]
-    fn a_busy_files_scan_is_never_cached_a_quiet_ones_is() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-r1-census-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let mut cache: std::collections::HashMap<PathBuf, (u64, std::time::SystemTime, usize)> =
-            std::collections::HashMap::new();
+    fn a_loss_is_charged_to_the_side_that_lost_it() {
+        let slots = vec![slot("movie.mkv", false), slot("movie.vol00+01.par2", true)];
+        let mut map: crate::unpack::IdSlots = Default::default();
+        map.insert("<payload@x>".into(), (0, 1000));
+        map.insert("<parity@x>".into(), (1, 1000));
 
-        // Freshly written = mtime now = a writer may still be active.
-        // Content does not matter (not par2, scans to 0); what is pinned
-        // is that NOTHING about a busy file is remembered.
-        let busy = dir.join("half-written.par2");
-        std::fs::write(&busy, vec![0u8; 4096]).unwrap();
-        assert_eq!(
-            cached_recovery_blocks(&busy, &[7u8; 16], 1024, &mut cache),
-            0
-        );
+        assert!(!is_recovery_article("<payload@x>", &map, &slots));
+        assert!(is_recovery_article("<parity@x>", &map, &slots));
         assert!(
-            cache.is_empty(),
-            "a busy file's scan was cached - a mid-write undercount would be served all job"
+            !is_recovery_article("<stranger@x>", &map, &slots),
+            "an id that maps to no slot cannot be shown to be parity, and payload \
+             is the side that blocks a verdict rather than licensing one"
         );
 
-        // The same file, quiet: backdate mtime past the gate. Now the
-        // zero IS remembered - it is the file's true count.
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(&busy)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
-        assert_eq!(
-            cached_recovery_blocks(&busy, &[7u8; 16], 1024, &mut cache),
-            0
-        );
-        assert_eq!(
-            cache.get(&busy).map(|&(l, _, n)| (l, n)),
-            Some((4096, 0)),
-            "a quiet file's scan must be cached, zero included"
-        );
+        // A sniffed recovery slot counts too - `is_par2` is the sniff
+        // OR the static main, and a bootstrap sniff lands mid-run.
+        slots[0]
+            .par2_sniffed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(is_recovery_article("<payload@x>", &map, &slots));
 
-        // A later write moves mtime, which must invalidate the entry:
-        // same length, new content, fresh scan (and no re-cache while
-        // the file is busy again).
-        std::fs::write(&busy, vec![1u8; 4096]).unwrap();
-        assert_eq!(
-            cached_recovery_blocks(&busy, &[7u8; 16], 1024, &mut cache),
-            0
-        );
-        let cached_mtime = cache.get(&busy).map(|&(_, t, _)| t).unwrap();
-        assert_eq!(
-            cached_mtime, old,
-            "a rewritten (busy) file re-entered the cache through the stale entry"
-        );
-
-        // Unreadable / absent: never remembered.
-        let missing = dir.join("not-here.par2");
-        assert_eq!(
-            cached_recovery_blocks(&missing, &[7u8; 16], 1024, &mut cache),
-            0
-        );
-        assert!(!cache.contains_key(&missing), "a failed read was cached");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let c = CauseSplit::default();
+        c.add(false);
+        c.add(true);
+        c.add(true);
+        assert_eq!((c.payload(), c.recovery(), c.total()), (1, 2, 3));
     }
 }
+
+// The par-race, spec-ladder and pending-R tests, out under the size
+// gate (TODO 106): this file is production code and was 35 lines under
+// the file ceiling. Children of `workers` (plain `mod`, so they resolve
+// to get/workers/), named for their files so size-gate.py's
+// CFG_TEST_MOD resolver keeps scoring them as test code. The pending-R
+// rigs moved out on 23 Aug 2026, when TODO 252 gave them a second one.
+#[cfg(test)]
+mod pending_r_tests;
 
 #[cfg(test)]
-mod spec_ladder_tests {
-    use super::*;
+mod par_race_tests;
 
-    fn ladder_nzb() -> Arc<Nzb> {
-        Arc::new(
-            Nzb::parse(
-                br#"<?xml version="1.0"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
- <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments><segment bytes="700000" number="1">pay@t</segment></segments>
- </file>
- <file subject='"m.vol07+08.par2" yEnc (1/2)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments>
-   <segment bytes="500000" number="1">v8a@t</segment>
-   <segment bytes="500000" number="2">v8b@t</segment>
-  </segments>
- </file>
- <file subject='"m.vol00+01.par2" yEnc (1/1)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments><segment bytes="130000" number="1">v1@t</segment></segments>
- </file>
- <file subject='"m.vol01+02.par2" yEnc (1/1)' date="1700000000">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments><segment bytes="260000" number="1">v2@t</segment></segments>
- </file>
-</nzb>"#,
-            )
-            .unwrap(),
-        )
-    }
-
-    /// C5: the retained ladder is triples only - recovery volumes,
-    /// sorted smallest-first, counts read from the volume names. The
-    /// payload file never appears.
-    #[test]
-    fn the_ladder_retains_triples_smallest_first() {
-        let n = ladder_nzb();
-        assert_eq!(
-            spec_ladder(&n),
-            vec![(2, 1, 130_000), (3, 2, 260_000), (1, 8, 1_000_000)]
-        );
-    }
-
-    /// Exact-fit escalation: the smallest rung covering the deficit,
-    /// falling back to the biggest left when none covers it.
-    #[test]
-    fn pick_rung_exact_fits_then_falls_back_to_biggest() {
-        let n = ladder_nzb();
-        let ladder = spec_ladder(&n);
-        assert_eq!(pick_rung(&ladder, 1), 0, "deficit 1: the 1-slice rung");
-        assert_eq!(pick_rung(&ladder, 2), 1, "deficit 2: skip the 1-slice rung");
-        assert_eq!(pick_rung(&ladder, 3), 2, "deficit 3: only vol07+08 covers");
-        assert_eq!(
-            pick_rung(&ladder, 99),
-            2,
-            "deficit beyond every rung: the biggest left"
-        );
-    }
-
-    /// A selected rung's requests carry exactly the volume's articles -
-    /// bracketed ids, part numbers, every id mapped to the rung's file
-    /// index - and the id map's key IS the `ArticleReq`'s handle (R9:
-    /// one allocation per id, pointer equality not string equality).
-    #[test]
-    fn a_selected_rung_builds_its_volumes_requests() {
-        let n = ladder_nzb();
-        let mut reqs = Vec::new();
-        let mut idm = std::collections::HashMap::new();
-        crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
-        assert_eq!(
-            reqs.iter().map(|r| (&*r.id, r.part)).collect::<Vec<_>>(),
-            [("<v8a@t>", 1), ("<v8b@t>", 2)]
-        );
-        assert_eq!(idm.len(), 2);
-        for r in &reqs {
-            let (key, &fi) = idm.get_key_value(&r.id).expect("every request mapped");
-            assert_eq!(fi, 1);
-            assert!(
-                Arc::ptr_eq(key, &r.id),
-                "{}: the id map holds a COPY of the request id, not the handle",
-                r.id
-            );
-        }
-    }
-
-    /// C5 measurement (ignored - it is a number, not a gate). Prices
-    /// what `spawn_spec_prefetch` RETAINS for the whole run before any
-    /// article has gone missing: a field-scale recovery set (25
-    /// volumes, 25k recovery segments, powerpost-length ids), RSS
-    /// bracketed around the spawn call itself. The body is
-    /// type-agnostic, so it drops onto the pre-C5 eager-ladder tree
-    /// unchanged and re-takes the before half.
-    ///
-    /// Run: `cargo test -p nzbfast --release --bin nzbfast c5_spec -- --ignored --nocapture`
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore]
-    async fn c5_spec_ladder_rss_at_field_scale() {
-        fn rss_kb() -> u64 {
-            let out = std::process::Command::new("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-                .expect("ps");
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0)
-        }
-        const VOLS: usize = 25;
-        const SEGS: usize = 1000;
-        let mut xml = String::from(
-            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
-        );
-        xml.push_str(
-            " <file subject='\"big.part01.rar\" yEnc (1/1)' date=\"1700000000\">\n\
-             <groups><group>alt.binaries.test</group></groups>\n<segments>\n\
-             <segment bytes=\"768000\" number=\"1\">payload@t</segment>\n\
-             </segments>\n </file>\n",
-        );
-        for v in 0..VOLS {
-            xml.push_str(&format!(
-                " <file subject='\"big.vol{:03}+1000.par2\" yEnc (1/{SEGS})' date=\"1700000000\">\n\
-                 <groups><group>alt.binaries.test</group></groups>\n<segments>\n",
-                v * SEGS
-            ));
-            for s in 0..SEGS {
-                // A representative powerpost id: ~50 bytes bracketed.
-                xml.push_str(&format!(
-                    "<segment bytes=\"768000\" number=\"{}\">vol{v:03}seg{s:04}.\
-                     aBcDeFgHiJkLmNoPqRsT@powerpost.local</segment>\n",
-                    s + 1
-                ));
-            }
-            xml.push_str("</segments>\n </file>\n");
-        }
-        xml.push_str("</nzb>\n");
-        let n = Arc::new(Nzb::parse(xml.as_bytes()).expect("parse"));
-        drop(xml);
-        let rec_segs: usize = n
-            .files
-            .iter()
-            .filter(|f| f.kind() == FileKind::Par2Volume)
-            .map(|f| f.segments.len())
-            .sum();
-        let servers: Vec<(ServerConfig, nzbkit::pool::PoolConfig)> = Vec::new();
-        let out_dir = std::env::temp_dir().join(format!("nzbfast-c5-{}", std::process::id()));
-        let buf_pool = nzbkit::pool::BufPool::new(2);
-        let prefetched: Arc<std::sync::Mutex<Vec<(usize, Vec<std::path::PathBuf>)>>> =
-            Default::default();
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let demand = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let before = rss_kb();
-        let t0 = std::time::Instant::now();
-        let task = spawn_spec_prefetch(
-            true,
-            true,
-            &n,
-            &servers,
-            &[],
-            &out_dir,
-            &buf_pool,
-            &prefetched,
-            &stop,
-            &demand,
-        )
-        .expect("volumes present, so the watcher must spawn");
-        let spawn_cost = t0.elapsed();
-        let after = rss_kb();
-        // What rung selection pays post-C5 to build one volume's
-        // requests - the added loss-to-first-recovery-BODY latency,
-        // priced against the loop's 250 ms poll.
-        let t1 = std::time::Instant::now();
-        let mut reqs = Vec::new();
-        let mut idm = std::collections::HashMap::new();
-        crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
-        let rung_cost = t1.elapsed();
-        eprintln!(
-            "C5 spec ladder RSS: {rec_segs} recovery segments across {VOLS} volumes; \
-             RSS {before} -> {after} KB (delta {} KB), spawn {:?}, \
-             one {}-article rung built in {:?}",
-            after as i64 - before as i64,
-            spawn_cost,
-            reqs.len(),
-            rung_cost,
-        );
-        stop.store(true, Ordering::Release);
-        task.await.unwrap();
-    }
-}
+#[cfg(test)]
+mod spec_ladder_tests;

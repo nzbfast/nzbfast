@@ -211,7 +211,8 @@ pub enum MapBlocker {
 }
 
 enum ParseState {
-    /// Waiting for the signature at offset 0.
+    /// Waiting for the signature at `archive_base` (offset 0 for a bare
+    /// volume, the stub's length for an SFX).
     Signature,
     /// Next block header expected at `cursor`.
     Blocks,
@@ -233,6 +234,14 @@ pub struct VolumeMapper {
     pub complete: bool,
     /// Declared size of the volume file (yEnc total), for EOF detection.
     volume_size: u64,
+    /// Where the archive begins inside the file. 0 for every bare
+    /// volume; a self-extractor's launcher-stub length (TODO 94 C),
+    /// found by `sfx::sfx_payload_at` before this mapper is built. Every
+    /// offset this mapper speaks - cursor, entries, `map_span`,
+    /// `mapped_through` - stays in FILE coordinates, so the header stash
+    /// keeps the stub exactly as it keeps any other non-data bytes and a
+    /// demote materializes the posted `.exe` byte for byte.
+    archive_base: u64,
     state: ParseState,
     cursor: u64,
     /// Contiguous window starting at `win_base` (== cursor when blocked).
@@ -499,6 +508,25 @@ const V5_TYPE_MAIN: u64 = 1;
 /// what one crafted size vint can make a caller checksum.
 const V5_MAIN_HEADER_MAX: u64 = 64 << 10;
 
+/// Which RAR dialect's signature `bytes` opens with - 4 or 5.
+///
+/// The signature ALONE, deliberately: this is for a caller that has
+/// already established a real archive starts here (with
+/// [`archive_starts_here`], which is the check that makes a magic number
+/// evidence) and now only needs to name the dialect for a badge or a log
+/// line. The two signatures share their first six bytes and differ at the
+/// seventh, so neither is a prefix of the other and the order below is
+/// free.
+pub fn signature_version(bytes: &[u8]) -> Option<u8> {
+    if bytes.starts_with(SIG5) {
+        Some(5)
+    } else if bytes.starts_with(SIG4) {
+        Some(4)
+    } else {
+        None
+    }
+}
+
 /// Does a real RAR archive begin at byte 0 of `bytes` - the signature AND
 /// a CRC-valid main header behind it?
 ///
@@ -569,6 +597,19 @@ impl VolumeMapper {
     /// encrypted store-mode entries (the password is check-verified
     /// against the archive before any entry is trusted).
     pub fn with_password(volume_size: u64, password: Option<std::sync::Arc<str>>) -> VolumeMapper {
+        Self::with_password_at(volume_size, password, 0)
+    }
+
+    /// [`Self::with_password`] for an archive that starts `archive_base`
+    /// bytes into the file - a self-extractor's payload behind its stub.
+    /// The signature is expected AT that offset, not searched for: the
+    /// caller has already located and confirmed it, and a mapper that
+    /// scanned for itself would believe decoy constants inside the stub.
+    pub fn with_password_at(
+        volume_size: u64,
+        password: Option<std::sync::Arc<str>>,
+        archive_base: u64,
+    ) -> VolumeMapper {
         VolumeMapper {
             version: None,
             entries: Vec::new(),
@@ -576,9 +617,10 @@ impl VolumeMapper {
             volume_number: None,
             complete: false,
             volume_size,
+            archive_base,
             state: ParseState::Signature,
-            cursor: 0,
-            win_base: 0,
+            cursor: archive_base,
+            win_base: archive_base,
             win: Vec::new(),
             filled: Vec::new(),
             password,
@@ -588,16 +630,35 @@ impl VolumeMapper {
         }
     }
 
-    /// Feed one decoded span. Returns true if new entries were parsed (the
-    /// caller should re-try held spans and re-resolve bases).
+    /// Where the archive begins inside the file (0 unless this mapper was
+    /// built with [`Self::with_password_at`]). A re-keyed mapper must be
+    /// rebuilt at the same base or it reads the stub as a signature.
+    pub fn archive_base(&self) -> u64 {
+        self.archive_base
+    }
+
+    /// Feed one decoded span. Returns true if the parse made progress -
+    /// the cursor moved, or the volume finished - so the caller re-tries
+    /// held spans and re-resolves bases.
+    ///
+    /// "Progress" is cursor movement, NOT "a new entry appeared". The
+    /// window only keeps bytes near the cursor, so a span that lands
+    /// past it is parked by the caller until the cursor catches up; a
+    /// block that moves the cursor without adding an entry (a service
+    /// block such as a multi-MB recovery record, skipped whole) still
+    /// brings those parked bytes into reach. Measured 22 Aug 2026 on a
+    /// `-rr10p` store set: the end block's article arrived before the
+    /// record's header, the Skip advanced the cursor 10 MB with no
+    /// entry, nothing re-fed the parked end block, and settle demoted
+    /// the set as `incomplete mapping` on 2 of 13 runs.
     pub fn feed(&mut self, offset: u64, data: &[u8]) -> bool {
         if matches!(self.state, ParseState::Done) {
             return false;
         }
         self.stash(offset, data);
-        let before = self.entries.len();
+        let before = self.cursor;
         self.advance();
-        self.entries.len() > before || matches!(self.state, ParseState::Done)
+        self.cursor > before || matches!(self.state, ParseState::Done)
     }
 
     /// Copy the part of the span that overlaps the parse window.
@@ -666,12 +727,48 @@ impl VolumeMapper {
         // on `volume_size > 0` because a yEnc span with no `size=` leaves it
         // unknown.
         if self.volume_size > 0 && next > self.volume_size {
-            self.fail(MapBlocker::Corrupt("data area exceeds volume"));
+            self.fail_volume_bound(next, self.volume_size);
             return false;
         }
         self.cursor = next;
         self.rebase(next);
         true
+    }
+
+    /// Refuse at the volume bound, naming BOTH terms on the way out.
+    ///
+    /// The blocker is a `&'static str`, so the reason a demoted set
+    /// carries ("data area exceeds volume") says a bound was crossed and
+    /// nothing whatever about WHICH side was wrong - which is exactly
+    /// the question TODO 118 item 2 has been unable to answer since 5
+    /// Aug 2026, when one reporter's post tripped this on 60 volume
+    /// groups out of 60. The only evidence anyone will ever have of a
+    /// field occurrence is that reporter's log, and until this line the
+    /// log did not carry the arithmetic.
+    ///
+    /// `want` is where the header says the block ends; `have` is the
+    /// volume length the POST declared, which is `=ybegin size=` (see
+    /// `yenc::check_part_geometry`, whose note says in as many words
+    /// that real posters get that field wrong on otherwise perfectly
+    /// good articles, and that nothing here verifies it). The size of
+    /// the overshoot is what separates the two explanations: measured 23
+    /// Aug 2026 on RARLAB rar 7.23 store volumes, a healthy volume has
+    /// only 8 bytes of tail slack (16 on a non-final volume), so an
+    /// overshoot under a few hundred bytes means the DECLARATION is
+    /// short by a trailing block or two, while an overshoot of megabytes
+    /// means the header genuinely describes a data area this volume
+    /// never held - a byte-split part 1 (TODO 211 b), or a packer
+    /// writing the whole file's packed size into every volume.
+    fn fail_volume_bound(&mut self, want: u64, have: u64) {
+        tracing::warn!(
+            target: "extract",
+            "rar volume bound: block ends at {want}, post declares {have} bytes \
+             (over by {}), volume={:?} archive_base={} - one-pass mapping refused",
+            want.saturating_sub(have),
+            self.volume_number,
+            self.archive_base,
+        );
+        self.fail(MapBlocker::Corrupt("data area exceeds volume"));
     }
 
     /// Move the window base forward to `new_base` (>= win_base).
@@ -711,8 +808,8 @@ impl VolumeMapper {
                     let a = self.avail();
                     if a.len() < 8 {
                         if self.volume_size > 0
-                            && self.volume_size < 8
-                            && a.len() as u64 >= self.volume_size
+                            && self.volume_size < self.archive_base + 8
+                            && self.archive_base + a.len() as u64 >= self.volume_size
                         {
                             self.fail(MapBlocker::NotRar);
                         }
@@ -720,10 +817,10 @@ impl VolumeMapper {
                     }
                     if &a[..8] == SIG5 {
                         self.version = Some(RarVersion::V5);
-                        self.cursor = 8;
+                        self.cursor = self.archive_base + 8;
                     } else if &a[..7] == SIG4 {
                         self.version = Some(RarVersion::V4);
-                        self.cursor = 7;
+                        self.cursor = self.archive_base + 7;
                     } else {
                         self.fail(MapBlocker::NotRar);
                         return;
@@ -929,14 +1026,17 @@ impl VolumeMapper {
             // wrong password native-decrypt garbage that ships as success.
             //
             // Such an entry (and a genuinely check-less one) is still
-            // MAPPABLE, because the verdict has simply moved to finish: the
-            // extractor refuses plaintext-once for an unverified password, so
-            // the inner file assembles CIPHERTEXT - byte-identical to the
-            // volumes, hence still demotable - and `decrypt_finished` requires
-            // the whole-file checksum (the group's last piece carries it) to
-            // pass before anything publishes. No checksum available there
-            // means the group fails and the volumes materialize, which is
-            // exactly where this used to route immediately.
+            // MAPPABLE, because the verdict has simply moved to finish.
+            // It USED to assemble ciphertext for a decrypt pass to
+            // adjudicate; since TODO 27 phase 3 it decrypts in-stream
+            // like every other encrypted set - the re-encrypt shim
+            // rebuilds byte-exact volumes even under a wrong key, so
+            // nothing is lost by decrypting before the verdict - and
+            // `verify_encrypted_outputs` requires the whole-file
+            // checksum (the group's last piece carries it) to pass
+            // before anything publishes. No checksum available there
+            // means the group demotes and the volumes materialize,
+            // which is exactly where this used to route immediately.
             Some(chk) if !rarcrypt::check_is_wellformed(chk) => None,
             Some(_) => None, // password verified - safe to native-decrypt
             // No stored check at all: same deal - unverifiable here,
@@ -987,6 +1087,36 @@ impl VolumeMapper {
                 out.push((i, s - ds, s - off, x - s));
             }
         }
+    }
+
+    /// Tell a mapper built with an UNKNOWN size (`0`) how long its volume
+    /// really is, once the caller learns it. TODO 211 (b): a numbered
+    /// byte split of one `.rar` (`x.rar.001`..) is a single volume whose
+    /// extent is not in any header - part 1's header states its entry's
+    /// data size and nothing about the container - so the extractor maps
+    /// it open-ended and closes it here when the short last part reports.
+    /// Re-runs the two `volume_size` rules the parse applied lazily: a
+    /// cursor already past the new end is the same `data area exceeds
+    /// volume` refusal `advance_to` makes (the declared data area cannot
+    /// fit in the bytes that exist), and a parse parked at `NeedMore`
+    /// exactly at the end completes by the EOF rule. A size of `0` is a
+    /// no-op; so is a mapper that is already done.
+    pub fn set_volume_size(&mut self, size: u64) {
+        self.volume_size = size;
+        if size == 0 || matches!(self.state, ParseState::Done) {
+            return;
+        }
+        if self.cursor > size {
+            self.fail_volume_bound(self.cursor, size);
+            return;
+        }
+        self.advance();
+    }
+
+    /// The declared volume size this mapper was built with (`0` when the
+    /// caller has not told it yet - see [`Self::set_volume_size`]).
+    pub fn volume_size(&self) -> u64 {
+        self.volume_size
     }
 
     /// The volume offset below which every byte is either header (parsed)
@@ -1763,7 +1893,7 @@ fn v4_header_crc(h: &[u8]) -> V4HeaderCrc {
         // found 13 Aug by `rar_name_probe` fuzzing on a 10-byte 0x73
         // header declaring `head_size` 8), or silently into the NEXT
         // block's bytes when more had. Neither is a real archive - WinRAR
-        // never writes one, and `looks_like_v4_main` has always refused
+        // never writes one, and `archive_starts_here` has always refused
         // `hsize < 13` outright - so a header claiming this is not
         // authoritative about anything.
         0x73 if flags & MHD_COMMENT != 0 => {
@@ -1959,12 +2089,6 @@ fn merge_interval(list: &mut Vec<(usize, usize)>, mut s: usize, mut e: usize) {
     *list = merged;
 }
 
-// ---------------------------------------------------------------------------
-// Multi-volume archive: piece base-offset resolution
-// ---------------------------------------------------------------------------
-
-/// Base (inner-file) offsets for every parsed piece, resolved in volume
-/// order. A piece's base is only known once every piece of the same file
 /// Does this on-disk volume need a password? Feeds the file's head
 /// through the header parser: encrypted headers (RAR4 MHD_PASSWORD /
 /// RAR5 encryption block) or any password-protected file entry (headers
@@ -2007,6 +2131,12 @@ pub fn headers_encrypted_to(path: &std::path::Path, password: Option<&str>) -> b
     matches!(m.blocker, Some(MapBlocker::EncryptedHeaders))
 }
 
+// ---------------------------------------------------------------------------
+// Multi-volume archive: piece base-offset resolution
+// ---------------------------------------------------------------------------
+
+/// Base (inner-file) offsets for every parsed piece, resolved in volume
+/// order. A piece's base is only known once every piece of the same file
 /// in earlier volumes has a known length - resolution is re-run as
 /// volumes parse (cheap: O(total pieces)).
 pub struct ArchiveMap {
@@ -2532,6 +2662,13 @@ pub mod fixtures;
 // keeps the private parser reachable.
 #[cfg(test)]
 mod v4_header_tests;
+
+// RAR4 mapping against bytes RARLAB's own archiver wrote, which is a
+// different claim from `tests.rs`'s RAR4 half: those fixtures came out
+// of the vendored writer, so they can only exercise fields we already
+// know how to emit. Same child-module reason as v4_header_tests.
+#[cfg(test)]
+mod archiver_tests;
 
 #[cfg(test)]
 mod tests;

@@ -156,7 +156,7 @@ fn bomb_declaring_containers_fail_the_key_check_at_the_gate() {
     for name in ["bomb-content-dict.7z", "recovered-zero-start.bin"] {
         let p = std::path::Path::new(fixtures).join(name);
         assert_eq!(
-            sevenz_password_check_capped(&p, Some("any"), 1 << 20),
+            sevenz_password_check_capped(std::slice::from_ref(&p), Some("any"), 1 << 20),
             SevenzKey::Fails,
             "{name} must fail at the gate"
         );
@@ -191,22 +191,22 @@ fn a_capped_7z_key_check_is_indeterminate_not_a_pass() {
 
     // Unbounded enough to reach the checksum: the answers are settled.
     assert_eq!(
-        sevenz_password_check_capped(&z, Some("right"), 1 << 20),
+        sevenz_password_check_capped(std::slice::from_ref(&z), Some("right"), 1 << 20),
         SevenzKey::Opens
     );
     assert_eq!(
-        sevenz_password_check_capped(&z, Some("wrong"), 1 << 20),
+        sevenz_password_check_capped(std::slice::from_ref(&z), Some("wrong"), 1 << 20),
         SevenzKey::Fails
     );
     // Cut short of it, neither value can be judged - and the wrong one
     // must NOT come back as a pass.
     assert_eq!(
-        sevenz_password_check_capped(&z, Some("wrong"), 1_024),
+        sevenz_password_check_capped(std::slice::from_ref(&z), Some("wrong"), 1_024),
         SevenzKey::Unknown,
         "a read that stopped before the checksum settles nothing"
     );
     assert_eq!(
-        sevenz_password_check_capped(&z, Some("right"), 1_024),
+        sevenz_password_check_capped(std::slice::from_ref(&z), Some("right"), 1_024),
         SevenzKey::Unknown
     );
 
@@ -215,7 +215,7 @@ fn a_capped_7z_key_check_is_indeterminate_not_a_pass() {
     let list = dir.join("pw.txt");
     std::fs::write(&list, "wrong\nright\n").unwrap();
     crate::smart::set_operator_password_file(Some(list));
-    let cands = sevenz_password_candidates(&z, &dir, None);
+    let cands = sevenz_password_candidates(std::slice::from_ref(&z), &dir, None);
     assert_eq!(
         cands.first().and_then(|(v, _)| v.clone()).as_deref(),
         Some("right")
@@ -271,4 +271,268 @@ fn each_encrypted_rar_group_resolves_its_own_password() {
 
     crate::smart::set_operator_password_file(None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 162 item 5: five sites printed the auto-unlock notice and they
+/// had drifted into three wordings - with the archive name, without it,
+/// and "with a harvested password" carrying no source at all - so the
+/// same unlock read as two different events depending on which arm
+/// answered. `log_auto_unlocked` is the only site now, and this keeps it
+/// that way: the string is what a user greps for and what the e2e suite
+/// asserts on, and nothing else would notice a second spelling.
+#[test]
+fn the_auto_unlock_notice_has_exactly_one_spelling() {
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut hits: Vec<String> = Vec::new();
+    let mut stack = vec![src];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            // This file quotes the string to look for it.
+            if p.file_name() == Some(std::ffi::OsStr::new("pwfile_tests.rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap();
+            for line in text.lines() {
+                // The doc comment above the helper quotes the shape too,
+                // and a comment is not a log call.
+                if line.contains("auto-unlocked") && !line.trim_start().starts_with("//") {
+                    hits.push(format!("{}: {}", p.display(), line.trim()));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        hits.len(),
+        1,
+        "the notice must be printed from `log_auto_unlocked` alone: {hits:#?}"
+    );
+    assert!(
+        hits[0].contains("passwords.rs"),
+        "the one site must be the helper: {hits:#?}"
+    );
+}
+
+/// Observed 23 Aug 2026: an UNENCRYPTED `.7z` taken down the disk
+/// unpack path announced a false auto-unlock and paid for a candidate
+/// sweep it never needed.
+///
+/// 7-Zip ignores a password on an unencrypted container, so
+/// `sevenz_password_check` answers `Opens` for ANY value - and the
+/// candidate sweep had no early settle for the no-password case (only
+/// for a PROVIDED password that opens), so it harvested, "proved" the
+/// first stem it found, and handed the extraction a password. The
+/// notice is a lie a user may act on ("this release was passworded"),
+/// and each probe may decode up to 64 MB of the first entry against
+/// [`PW_PROBE_BUDGET`].
+#[test]
+fn an_unencrypted_7z_is_settled_before_any_password_is_harvested() {
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+    let dir = std::env::temp_dir().join(format!("nzbfast-7zplain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 13 + 9) as u8).collect();
+    let bytes = {
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.push_archive_entry(ArchiveEntry::new_file("movie.mkv"), Some(&payload[..]))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let z = dir.join("plain_release_name.7z");
+    std::fs::write(&z, &bytes).unwrap();
+    let parts = std::slice::from_ref(&z);
+
+    // The premise, both halves: the directory DOES harvest a candidate,
+    // and the probe calls that candidate proven - because there is
+    // nothing to decrypt, not because the value is right.
+    let harvested = harvest_password_candidates(&dir, None);
+    let stem = harvested
+        .iter()
+        .find(|c| c.source == "release/sibling stem")
+        .map(|c| c.value.clone())
+        .expect("the container's own stem is a candidate");
+    assert_eq!(
+        sevenz_password_check(parts, Some(&stem)),
+        SevenzKey::Opens,
+        "an unencrypted container opens under any value at all"
+    );
+
+    // So the shortlist must settle on NO password, before the harvest -
+    // one entry, no value, nothing for `extract_sevenz` to announce.
+    let cands = sevenz_password_candidates(parts, &dir, None);
+    assert_eq!(
+        cands.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>(),
+        vec![None],
+        "an archive that opens with no password needs no candidates"
+    );
+
+    // And it still unpacks.
+    assert!(extract_one_level(&dir, None, 0).unwrap().is_some());
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), payload);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The header check that lets an unencrypted 7z skip its decode probe
+/// must still read a DATA-encrypted container as encrypted, even when
+/// its headers are plaintext.
+///
+/// That is the shape a naive fix gets wrong. `sevenz_needs_password`
+/// keys on `PasswordRequired` / `MaybeBadPassword` from the header
+/// parse, so it answers only for `-mhe` archives and comes back FALSE
+/// for a container written with `set_encrypt_header(false)` over AES
+/// content - which parses cleanly with no password at all. Short-
+/// circuiting on that would hand every such archive an empty password
+/// and end the job packed. `sevenz_is_encrypted` reads the blocks'
+/// coder ids instead, so it sees the AES coder either way.
+#[test]
+fn a_data_encrypted_7z_with_plaintext_headers_reads_as_encrypted() {
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter, Password, encoder_options::AesEncoderOptions};
+    let dir = std::env::temp_dir().join(format!("nzbfast-7zcoder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let payload: Vec<u8> = (0..20_000u32).map(|i| (i * 17 + 3) as u8).collect();
+
+    let write = |encrypt_header: bool, aes: bool| {
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(encrypt_header);
+        if aes {
+            w.set_content_methods(vec![AesEncoderOptions::new(Password::from("right")).into()]);
+        }
+        w.push_archive_entry(ArchiveEntry::new_file("payload.bin"), Some(&payload[..]))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+
+    // Plaintext headers over AES content: the whole point of the test.
+    let data_enc = dir.join("data_enc.7z");
+    std::fs::write(&data_enc, write(false, true)).unwrap();
+    assert!(
+        !nzbkit::nameprobe::sevenz_needs_password(&data_enc),
+        "the premise: the header parse alone calls this one unlocked"
+    );
+    assert!(
+        crate::rarfix::sevenz_set_is_encrypted(std::slice::from_ref(&data_enc)),
+        "an AES content coder is encryption whatever the headers say"
+    );
+
+    // Header-encrypted: the parse cannot even reach the coders, and the
+    // fail-closed answer covers it.
+    let hdr_enc = dir.join("hdr_enc.7z");
+    std::fs::write(&hdr_enc, write(true, true)).unwrap();
+    assert!(crate::rarfix::sevenz_set_is_encrypted(
+        std::slice::from_ref(&hdr_enc)
+    ));
+
+    // And the one answer that is load-bearing: a plain container proves
+    // itself clean, which is what skips the 64 MB decode probe.
+    let plain = dir.join("plain.7z");
+    std::fs::write(&plain, write(false, false)).unwrap();
+    assert!(!crate::rarfix::sevenz_set_is_encrypted(
+        std::slice::from_ref(&plain)
+    ));
+
+    // Not a 7z at all, and a missing file: both fail closed, so the
+    // caller's existing probe path runs unchanged.
+    let junk = dir.join("junk.7z");
+    std::fs::write(&junk, b"not a 7z container at all").unwrap();
+    assert!(crate::rarfix::sevenz_set_is_encrypted(
+        std::slice::from_ref(&junk)
+    ));
+    assert!(crate::rarfix::sevenz_set_is_encrypted(
+        std::slice::from_ref(&dir.join("absent.7z"))
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex sweep F-10, 23 Aug 2026: a 7z whose FIRST block is plaintext
+/// and whose second is AES must not settle its password off the
+/// plaintext one.
+///
+/// `sevenz_set_is_encrypted` reads the container as encrypted (any AES
+/// block), so the shortlist falls through to the decode probe - and the
+/// probe read the first data entry, which is block 0's plaintext member
+/// and decodes to its checksum under `None` and under any wrong value
+/// alike. That `Opens` returned the caller's value as the ONLY
+/// candidate, so the harvest never ran and the extraction died on the
+/// encrypted block with the right password sitting in a sidecar.
+#[test]
+fn a_mixed_7z_settles_its_password_on_the_encrypted_block() {
+    use sevenz_rust2::{ArchiveEntry, ArchiveWriter, Password, encoder_options::AesEncoderOptions};
+    let plain: Vec<u8> = (0..9_000u32).map(|i| (i * 7 + 1) as u8).collect();
+    let secret: Vec<u8> = (0..11_000u32).map(|i| (i * 11 + 5) as u8).collect();
+    // Two blocks: plain.txt written with the default methods, then
+    // secret.txt under AES with plaintext headers, so the container
+    // opens with no password at all. That is `7z a` twice over.
+    let bytes = {
+        let mut w = ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        w.set_encrypt_header(false);
+        w.push_archive_entry(ArchiveEntry::new_file("plain.txt"), Some(&plain[..]))
+            .unwrap();
+        w.set_content_methods(vec![
+            AesEncoderOptions::new(Password::from("SECRET")).into(),
+        ]);
+        w.push_archive_entry(ArchiveEntry::new_file("secret.txt"), Some(&secret[..]))
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+
+    let stage = |tag: &str| {
+        let dir = std::env::temp_dir().join(format!("nzbfast-7zmix-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let z = dir.join("mixed_release_name.7z");
+        std::fs::write(&z, &bytes).unwrap();
+        let list = dir.join("pw.txt");
+        std::fs::write(&list, "wrong\nSECRET\n").unwrap();
+        crate::smart::set_operator_password_file(Some(list));
+        (dir, z)
+    };
+
+    // The premise, and the verdicts the probe must now give.
+    let (probe_dir, z) = stage("probe");
+    let parts = std::slice::from_ref(&z);
+    assert!(
+        crate::rarfix::sevenz_set_is_encrypted(parts),
+        "one AES block makes the container encrypted"
+    );
+    assert_eq!(
+        sevenz_password_check(parts, None),
+        SevenzKey::Fails,
+        "no password cannot decode the encrypted block"
+    );
+    assert_eq!(
+        sevenz_password_check(parts, Some("wrong")),
+        SevenzKey::Fails
+    );
+    assert_eq!(
+        sevenz_password_check(parts, Some("SECRET")),
+        SevenzKey::Opens
+    );
+
+    // And both job-password arms reach the harvested value and unpack
+    // BOTH members, not just the plaintext one.
+    for (tag, provided) in [("none", None), ("wrong", Some("wrong"))] {
+        let (dir, z) = stage(tag);
+        let cands = sevenz_password_candidates(std::slice::from_ref(&z), &dir, provided);
+        assert!(
+            cands.iter().any(|(v, _)| v.as_deref() == Some("SECRET")),
+            "{tag}: the harvested password must be on the shortlist, got {cands:?}"
+        );
+        assert!(extract_one_level(&dir, provided, 0).unwrap().is_some());
+        assert_eq!(std::fs::read(dir.join("plain.txt")).unwrap(), plain);
+        assert_eq!(std::fs::read(dir.join("secret.txt")).unwrap(), secret);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    crate::smart::set_operator_password_file(None);
+    let _ = std::fs::remove_dir_all(&probe_dir);
 }

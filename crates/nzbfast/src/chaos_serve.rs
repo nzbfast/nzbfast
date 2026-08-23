@@ -97,6 +97,22 @@ pub struct Cli {
     /// or fan-out policy against the ladder must set this.
     #[arg(long)]
     pub miss_delay_ms: Option<u64>,
+    /// Refuse every connection past this many LIVE ones, on every
+    /// server this instance serves, with `502 max connections reached:
+    /// N` - an account sitting AT its provider's connection cap. It is
+    /// a different fault from `authcap` (which refuses every AUTH, so
+    /// the server is worth nothing) and from `capghost` (which refuses
+    /// everything for a window and then clears): here the cap is real,
+    /// permanent, and the grants already held keep working. That is the
+    /// shape TODO 146 item 3 asks about - the tail give-up's demand rung
+    /// borrows up to 8 connections per server while the main fleet idles
+    /// at queue-dry, and the reasoning that shipped with it says the
+    /// extra dials bounce off the capacity machinery and the rung
+    /// degrades to the old 1-conn pace rather than failing. Set this to
+    /// the main fleet's own per-server width and the borrow has nowhere
+    /// to go.
+    #[arg(long)]
+    pub accept_cap: Option<u64>,
     /// Article-ize real files from disk into the corpus (repeatable).
     /// A playable video here turns the chaos rig into a playback
     /// end-to-end fixture; --files 0 serves only these.
@@ -141,6 +157,7 @@ pub struct Opts {
     par2_redundancy: Option<u32>,
     fault_count: Option<usize>,
     miss_delay_ms: Option<u64>,
+    accept_cap: Option<u64>,
     media: Vec<PathBuf>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
@@ -152,10 +169,10 @@ impl Cli {
     /// Resolve the size strings into [`Opts`].
     ///
     /// `parse` is the crate's own size parser, passed in rather than
-    /// called directly: this file is compiled straight into
-    /// `tests/fault_contract.rs` with `#[path]`, and that test crate has
-    /// no `crate::serve` to reach. Passing it keeps one parser in the
-    /// tree and keeps the include compiling.
+    /// called directly: this file is compiled straight into the
+    /// integration test crate by `tests/integration/main.rs`'s
+    /// `#[path]`, and that crate has no `crate::serve` to reach. Passing
+    /// it keeps one parser in the tree and keeps the include compiling.
     pub fn opts(self, parse: impl Fn(&str) -> Option<u64>) -> Result<Opts> {
         let cli = self;
         let size = |v: &str, what: &str| parse(v).ok_or_else(|| anyhow!("bad {what} {v:?}"));
@@ -174,6 +191,7 @@ impl Cli {
             par2_redundancy: cli.par2_redundancy,
             fault_count: cli.fault_count,
             miss_delay_ms: cli.miss_delay_ms,
+            accept_cap: cli.accept_cap,
             media: cli.media,
             tls_cert: cli.tls_cert,
             tls_key: cli.tls_key,
@@ -194,11 +212,11 @@ pub const TLS_PROFILES: &[&str] = &["tlsfail", "tlstruncate", "tlscorrupt", "tls
 /// What one profile does to each server. `label` feeds the log lines.
 ///
 /// Public because the §129 3c fault-contract suite
-/// (`crates/nzbfast/tests/fault_contract.rs`) builds its in-process
-/// legs from THIS table rather than a second copy of it. A contract
-/// that drifts from the profiles the bench matrix races is worth
-/// nothing, and two profile tables would drift the day 3a/3b add a
-/// shape to one of them.
+/// (`crates/nzbfast/tests/integration/fault_contract.rs`) builds its
+/// in-process legs from THIS table rather than a second copy of it. A
+/// contract that drifts from the profiles the bench matrix races is
+/// worth nothing, and two profile tables would drift the day 3a/3b add
+/// a shape to one of them.
 pub struct Plan {
     pub chaos: Chaos,
     /// TLS-layer faults for the faulty server, applied in the acceptor
@@ -453,6 +471,8 @@ fn pem_pair(
 /// `dead_code` because the binary itself always goes through
 /// [`plan_with_tls`]; the consumer of this signature is the 3c contract
 /// suite, which compiles this file into its own crate.
+// Not #[expect]: the contract suite's compilation DOES reach it, so
+// the expectation is unfulfilled there.
 #[allow(dead_code)]
 pub fn plan(
     profile: &str,
@@ -533,8 +553,270 @@ fn shaped_plan(per_conn_bps: u64, line_bps: u64, base: Chaos, clean_twin: Chaos)
     }
 }
 
+/// The steady-state fault shapes: a server that answers wrongly, refuses,
+/// disappears, or goes quiet, plus the two that never answer at all.
+///
+/// `None` for a profile this arm does not know, so the caller still owns the
+/// `unknown profile` message and its `PROFILES` list. Same shape as
+/// `tls_plan`, `miss_plan` and `shaped_plan` beside it - the file already
+/// splits its match this way. Split out of `plan_with_tls` (TODO 106), arms
+/// verbatim.
+fn steady_plan(
+    profile: &str,
+    base: Chaos,
+    clean_twin: Chaos,
+    all_ids: &[String],
+    n: usize,
+    seed: u64,
+    fault_count: Option<usize>,
+) -> Option<Plan> {
+    Some(match profile {
+        // Broken account / 502 storm: connect and AUTH succeed, every
+        // BODY answers "502 byte limit exceeded", forever. The clean
+        // twin carries the group; the race prices per-server circuit
+        // breaking (a client without one grinds the broken account).
+        "bodyerror" => Plan {
+            chaos: Chaos {
+                body_error: Some(u64::MAX),
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: Some(clean_twin),
+            onset_note: "bodyerror: every BODY on the faulty server answers 502 \
+                         (AUTH fine), forever, structural from t0; clean twin on \
+                         port2"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Capacity refusal vs bad credential: AUTH on the faulty
+        // server always fails with the REAL capacity wording on reply
+        // code 481 - the same code a wrong password uses. A client
+        // that reads it as a bad credential disables the server; one
+        // that reads it as capacity paces and retries. Either way the
+        // clean twin carries the job; the spread is wall + dial count.
+        "authcap" => Plan {
+            chaos: Chaos {
+                auth_rejected: true,
+                auth_refusal_text: Some("481 max simultaneous IP addresses reached".into()),
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: Some(clean_twin),
+            onset_note: "authcap: every AUTH on the faulty server refused with \
+                         '481 max simultaneous IP addresses reached', structural \
+                         from t0; clean twin on port2"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // authcap's contrast arm: the SAME 481 code with bad-credential
+        // wording. A wording-aware client keeps pacing on authcap (the
+        // capacity refusal clears when sessions close) but STOPS
+        // dialing here (a wrong password never fixes itself); a client
+        // that only reads the code shows identical dial counts on both.
+        "authbad" => Plan {
+            chaos: Chaos {
+                auth_rejected: true,
+                auth_refusal_text: Some("481 authentication failed".into()),
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: Some(clean_twin),
+            onset_note: "authbad: every AUTH on the faulty server refused with \
+                         '481 authentication failed', structural from t0; clean \
+                         twin on port2"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // CGNAT eviction: every connection's NAT entry dies after 25
+        // bodies - permanent dead air, no close, no RST. A reconnect
+        // gets a fresh entry. Single server: the only recovery is
+        // noticing the silence and redialing.
+        // Issue #16's restart shape: the provider still counts a dead
+        // process's sessions, so for the first 45 s EVERY dial bounces
+        // off the capacity refusal - then the lease expires and the
+        // account works normally. A resilient client keeps paced
+        // redials alive through the window and eases back in; the
+        // reported bug is stalling at 0 MB/s instead.
+        "capghost" => Plan {
+            chaos: Chaos {
+                cap_ghost_ms: 45_000,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "capghost: every dial refused with the 502 capacity \
+                         text for the first 45000 ms (ghost sessions hold the \
+                         cap), normal accepts after"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Hard outage: for the first 45 s every accepted connection is
+        // closed with no greeting and no refusal text - the wifi-drop /
+        // VPN-reconnect / router-reboot shape. Unlike capghost there is
+        // nothing to classify: the dial simply fails. A resilient
+        // client parks its fleet behind one paced prober and comes
+        // back at full width when the window clears; the failure mode
+        // is retiring every worker in ~15-30 s and failing the job.
+        "outage" => Plan {
+            chaos: Chaos {
+                refuse_connect_ms: 45_000,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "outage: every accepted connection closed with no \
+                         greeting for the first 45000 ms (hard connect \
+                         failure), normal accepts after"
+                .into(),
+            onset_after_bodies: None,
+        },
+        "cgnat" => Plan {
+            chaos: Chaos {
+                mute_after_bodies: 25,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "cgnat: each connection goes permanently silent after 25 \
+                         bodies (no close); a reconnect gets a fresh NAT entry"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Satellite handover: three staggered WANs, each frozen 4 s of
+        // every 12 s cycle (connection conn_no % 3 belongs to a WAN).
+        // Brief, recovering dead air - killing sessions here is
+        // mostly wrong, waiting is mostly right.
+        "handover" => Plan {
+            chaos: Chaos {
+                handover: Some((12_000, 4_000, 3)),
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "handover: 3 staggered WANs, each frozen 4000 ms per \
+                         12000 ms cycle, structural from t0"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Slow-start trickle: every fresh connection crawls at 50 KB/s
+        // for its first 3 s, then runs at the healthy rate. The shape
+        // where a reconnect-happy strategy pays and a parked spare
+        // rides the window out idle.
+        "slowstart" => Plan {
+            chaos: Chaos {
+                slow_start: Some((3_000, 50_000)),
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "slowstart: every new connection paced at 50000 B/s for \
+                         its first 3000 ms, healthy after"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Truncated bodies: a spread of articles are cut mid-payload
+        // and the connection dropped, EVERY request (a damaged spool
+        // entry). Clean twin holds good copies - partial-write and
+        // requeue correctness, and whether the retry goes elsewhere.
+        "truncate" => {
+            let count = fault_count.unwrap_or(12);
+            let truncate: HashSet<String> = spread_positions(n, count, seed)
+                .into_iter()
+                .map(|i| all_ids[i].clone())
+                .collect();
+            let note = format!(
+                "truncate: {} articles cut mid-payload with the connection \
+                 dropped, every request, structural from t0; clean twin on \
+                 port2 holds good copies",
+                truncate.len()
+            );
+            Plan {
+                chaos: Chaos { truncate, ..base },
+                tls: TlsChaos::default(),
+                twin: Some(clean_twin),
+                onset_note: note,
+                onset_after_bodies: None,
+            }
+        }
+        // §129 lane rig: a handful of PAYLOAD articles permanently 430,
+        // single server, no twin - the damage shape that forces a PAR2
+        // repair in the post-network tail (run with --par2-redundancy).
+        // Faults are drawn from the first half of the corpus order so
+        // the recovery volumes (appended last) are never the casualty.
+        "gone" => {
+            let count = fault_count.unwrap_or(4);
+            let missing: HashSet<String> = spread_positions(n / 2, count, seed)
+                .into_iter()
+                .map(|i| all_ids[i].clone())
+                .collect();
+            let note = format!(
+                "gone: {} payload articles answer 430 forever; with recovery \
+                 volumes served, repair from parity is the only way home",
+                missing.len()
+            );
+            Plan {
+                chaos: Chaos { missing, ..base },
+                tls: TlsChaos::default(),
+                twin: None,
+                onset_note: note,
+                onset_after_bodies: None,
+            }
+        }
+        // Wholly-dead post: EVERY article 430s, each refusal costing a
+        // real round trip. Nobody can complete - the metric is wall to
+        // TERMINAL (the gate reads DNF by design; a fast honest
+        // failure beats a slow one).
+        "deadpost" => Plan {
+            chaos: Chaos {
+                missing: all_ids.iter().cloned().collect(),
+                missing_delay_ms: 70,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "deadpost: every article answers 430 after a 70 ms round \
+                         trip; completion is impossible - the wall to a TERMINAL \
+                         failed state is the measurement"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Exit-path wedge check: a healthy server that never answers
+        // QUIT (TCP ack, no goodbye). The job completes; the question
+        // is whether the client's exit waits on the goodbye.
+        "mutequit" => Plan {
+            chaos: Chaos {
+                mute_quit: true,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: None,
+            onset_note: "mutequit: healthy server that never answers QUIT; the \
+                         measurement is whether completion pays an exit-path hang"
+                .into(),
+            onset_after_bodies: None,
+        },
+        // Connect-path wedge check: the faulty server accepts TCP but
+        // never greets; the clean twin carries the job. Prices how
+        // much a mute frontend costs a client that keeps a session
+        // slot parked in connect().
+        "mutegreeting" => Plan {
+            chaos: Chaos {
+                mute_greeting: true,
+                ..base
+            },
+            tls: TlsChaos::default(),
+            twin: Some(clean_twin),
+            onset_note: "mutegreeting: faulty server accepts connections but \
+                         never sends the greeting, structural from t0; clean \
+                         twin on port2"
+                .into(),
+            onset_after_bodies: None,
+        },
+        _ => return None,
+    })
+}
+
 /// [`plan`] with the TLS shapes' inputs supplied.
-#[allow(clippy::too_many_arguments)]
 pub fn plan_with_tls(
     profile: &str,
     all_ids: &[String],
@@ -800,247 +1082,6 @@ pub fn plan_with_tls(
             onset_after_bodies: None,
         },
         "shaped" => shaped_plan(per_conn_bps, line_bps, base, clean_twin),
-        // Broken account / 502 storm: connect and AUTH succeed, every
-        // BODY answers "502 byte limit exceeded", forever. The clean
-        // twin carries the group; the race prices per-server circuit
-        // breaking (a client without one grinds the broken account).
-        "bodyerror" => Plan {
-            chaos: Chaos {
-                body_error: Some(u64::MAX),
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: Some(clean_twin),
-            onset_note: "bodyerror: every BODY on the faulty server answers 502 \
-                         (AUTH fine), forever, structural from t0; clean twin on \
-                         port2"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Capacity refusal vs bad credential: AUTH on the faulty
-        // server always fails with the REAL capacity wording on reply
-        // code 481 - the same code a wrong password uses. A client
-        // that reads it as a bad credential disables the server; one
-        // that reads it as capacity paces and retries. Either way the
-        // clean twin carries the job; the spread is wall + dial count.
-        "authcap" => Plan {
-            chaos: Chaos {
-                auth_rejected: true,
-                auth_refusal_text: Some("481 max simultaneous IP addresses reached".into()),
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: Some(clean_twin),
-            onset_note: "authcap: every AUTH on the faulty server refused with \
-                         '481 max simultaneous IP addresses reached', structural \
-                         from t0; clean twin on port2"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // authcap's contrast arm: the SAME 481 code with bad-credential
-        // wording. A wording-aware client keeps pacing on authcap (the
-        // capacity refusal clears when sessions close) but STOPS
-        // dialing here (a wrong password never fixes itself); a client
-        // that only reads the code shows identical dial counts on both.
-        "authbad" => Plan {
-            chaos: Chaos {
-                auth_rejected: true,
-                auth_refusal_text: Some("481 authentication failed".into()),
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: Some(clean_twin),
-            onset_note: "authbad: every AUTH on the faulty server refused with \
-                         '481 authentication failed', structural from t0; clean \
-                         twin on port2"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // CGNAT eviction: every connection's NAT entry dies after 25
-        // bodies - permanent dead air, no close, no RST. A reconnect
-        // gets a fresh entry. Single server: the only recovery is
-        // noticing the silence and redialing.
-        // Issue #16's restart shape: the provider still counts a dead
-        // process's sessions, so for the first 45 s EVERY dial bounces
-        // off the capacity refusal - then the lease expires and the
-        // account works normally. A resilient client keeps paced
-        // redials alive through the window and eases back in; the
-        // reported bug is stalling at 0 MB/s instead.
-        "capghost" => Plan {
-            chaos: Chaos {
-                cap_ghost_ms: 45_000,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "capghost: every dial refused with the 502 capacity \
-                         text for the first 45000 ms (ghost sessions hold the \
-                         cap), normal accepts after"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Hard outage: for the first 45 s every accepted connection is
-        // closed with no greeting and no refusal text - the wifi-drop /
-        // VPN-reconnect / router-reboot shape. Unlike capghost there is
-        // nothing to classify: the dial simply fails. A resilient
-        // client parks its fleet behind one paced prober and comes
-        // back at full width when the window clears; the failure mode
-        // is retiring every worker in ~15-30 s and failing the job.
-        "outage" => Plan {
-            chaos: Chaos {
-                refuse_connect_ms: 45_000,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "outage: every accepted connection closed with no \
-                         greeting for the first 45000 ms (hard connect \
-                         failure), normal accepts after"
-                .into(),
-            onset_after_bodies: None,
-        },
-        "cgnat" => Plan {
-            chaos: Chaos {
-                mute_after_bodies: 25,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "cgnat: each connection goes permanently silent after 25 \
-                         bodies (no close); a reconnect gets a fresh NAT entry"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Satellite handover: three staggered WANs, each frozen 4 s of
-        // every 12 s cycle (connection conn_no % 3 belongs to a WAN).
-        // Brief, recovering dead air - killing sessions here is
-        // mostly wrong, waiting is mostly right.
-        "handover" => Plan {
-            chaos: Chaos {
-                handover: Some((12_000, 4_000, 3)),
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "handover: 3 staggered WANs, each frozen 4000 ms per \
-                         12000 ms cycle, structural from t0"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Slow-start trickle: every fresh connection crawls at 50 KB/s
-        // for its first 3 s, then runs at the healthy rate. The shape
-        // where a reconnect-happy strategy pays and a parked spare
-        // rides the window out idle.
-        "slowstart" => Plan {
-            chaos: Chaos {
-                slow_start: Some((3_000, 50_000)),
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "slowstart: every new connection paced at 50000 B/s for \
-                         its first 3000 ms, healthy after"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Truncated bodies: a spread of articles are cut mid-payload
-        // and the connection dropped, EVERY request (a damaged spool
-        // entry). Clean twin holds good copies - partial-write and
-        // requeue correctness, and whether the retry goes elsewhere.
-        "truncate" => {
-            let count = fault_count.unwrap_or(12);
-            let truncate: HashSet<String> = spread_positions(n, count, seed)
-                .into_iter()
-                .map(|i| all_ids[i].clone())
-                .collect();
-            let note = format!(
-                "truncate: {} articles cut mid-payload with the connection \
-                 dropped, every request, structural from t0; clean twin on \
-                 port2 holds good copies",
-                truncate.len()
-            );
-            Plan {
-                chaos: Chaos { truncate, ..base },
-                tls: TlsChaos::default(),
-                twin: Some(clean_twin),
-                onset_note: note,
-                onset_after_bodies: None,
-            }
-        }
-        // §129 lane rig: a handful of PAYLOAD articles permanently 430,
-        // single server, no twin - the damage shape that forces a PAR2
-        // repair in the post-network tail (run with --par2-redundancy).
-        // Faults are drawn from the first half of the corpus order so
-        // the recovery volumes (appended last) are never the casualty.
-        "gone" => {
-            let count = fault_count.unwrap_or(4);
-            let missing: HashSet<String> = spread_positions(n / 2, count, seed)
-                .into_iter()
-                .map(|i| all_ids[i].clone())
-                .collect();
-            let note = format!(
-                "gone: {} payload articles answer 430 forever; with recovery \
-                 volumes served, repair from parity is the only way home",
-                missing.len()
-            );
-            Plan {
-                chaos: Chaos { missing, ..base },
-                tls: TlsChaos::default(),
-                twin: None,
-                onset_note: note,
-                onset_after_bodies: None,
-            }
-        }
-        // Wholly-dead post: EVERY article 430s, each refusal costing a
-        // real round trip. Nobody can complete - the metric is wall to
-        // TERMINAL (the gate reads DNF by design; a fast honest
-        // failure beats a slow one).
-        "deadpost" => Plan {
-            chaos: Chaos {
-                missing: all_ids.iter().cloned().collect(),
-                missing_delay_ms: 70,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "deadpost: every article answers 430 after a 70 ms round \
-                         trip; completion is impossible - the wall to a TERMINAL \
-                         failed state is the measurement"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Exit-path wedge check: a healthy server that never answers
-        // QUIT (TCP ack, no goodbye). The job completes; the question
-        // is whether the client's exit waits on the goodbye.
-        "mutequit" => Plan {
-            chaos: Chaos {
-                mute_quit: true,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: None,
-            onset_note: "mutequit: healthy server that never answers QUIT; the \
-                         measurement is whether completion pays an exit-path hang"
-                .into(),
-            onset_after_bodies: None,
-        },
-        // Connect-path wedge check: the faulty server accepts TCP but
-        // never greets; the clean twin carries the job. Prices how
-        // much a mute frontend costs a client that keeps a session
-        // slot parked in connect().
-        "mutegreeting" => Plan {
-            chaos: Chaos {
-                mute_greeting: true,
-                ..base
-            },
-            tls: TlsChaos::default(),
-            twin: Some(clean_twin),
-            onset_note: "mutegreeting: faulty server accepts connections but \
-                         never sends the greeting, structural from t0; clean \
-                         twin on port2"
-                .into(),
-            onset_after_bodies: None,
-        },
         // §129 3b: the four TLS-layer shapes. The mock underneath is
         // HEALTHY in every one of them - the fault lives in the acceptor
         // in front of it, which is the whole point: these are failures
@@ -1050,7 +1091,10 @@ pub fn plan_with_tls(
             tls_plan(profile, base, clean_twin, tls_in)
         }
         "freshmiss" | "oldmiss" => miss_plan(profile, all_ids, base, clean_twin, seed, fault_count),
-        other => bail!("unknown profile {other:?}; one of {}", PROFILES.join("|")),
+        other => match steady_plan(other, base, clean_twin, all_ids, n, seed, fault_count) {
+            Some(p) => p,
+            None => bail!("unknown profile {other:?}; one of {}", PROFILES.join("|")),
+        },
     })
 }
 
@@ -1364,6 +1408,16 @@ pub async fn run(opts: Opts) -> Result<()> {
         plan.chaos.missing_delay_ms = ms;
         if let Some(t) = &mut plan.twin {
             t.missing_delay_ms = ms;
+        }
+    }
+    // --accept-cap overrides the same way and for the same reason. It
+    // reaches the TWIN too: the cap models an account, the twin is this
+    // instance's second server, and a rig that capped only the faulty
+    // one would leave the borrow somewhere to go and measure nothing.
+    if let Some(cap) = opts.accept_cap {
+        plan.chaos.accept_cap = Some(cap);
+        if let Some(t) = &mut plan.twin {
+            t.accept_cap = Some(cap);
         }
     }
     let twin_articles = plan.twin.is_some().then(|| articles.clone());

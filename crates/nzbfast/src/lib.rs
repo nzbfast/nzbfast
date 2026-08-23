@@ -5,13 +5,22 @@
 //! this same module tree independently and nothing is shared at compile
 //! time except the source files themselves.
 //!
-//! `dead_code`/`unused_imports` are allowed because this root has no
+//! `dead_code`/`unused_imports` are waived because this root has no
 //! CLI: everything only the subcommand arms call is dead here by
 //! construction, and proving each item live per-root would fork the
 //! module files. The bin root keeps full lint coverage.
+//!
+//! `#![expect]` rather than `#![allow]`, checked rather than assumed:
+//! both are FULFILLED here, measured 23 Aug 2026 in every shape that
+//! reaches this root - `-p nzbfast --features ffi`, the
+//! `--no-default-features --features ffi` combination nzbfast-ffi
+//! actually asks for, and `-p nzbfast-ffi --target
+//! aarch64-apple-ios-sim`. The blanket is broad, so the claim it makes
+//! is only that SOMETHING here is dead; the day that stops being true
+//! the waiver should go, and this is what will say so.
 #![cfg(feature = "ffi")]
-#![allow(dead_code)]
-#![allow(unused_imports)]
+#![expect(dead_code)]
+#![expect(unused_imports)]
 // Same reason as main.rs: `job_json` is one `json!` literal per
 // persisted Job field, and the macro recurses per key.
 #![recursion_limit = "256"]
@@ -57,6 +66,7 @@ mod post_cmd;
 mod rarfix;
 mod ratelimit;
 mod repair;
+mod resumeout;
 mod rss;
 #[cfg(feature = "indexer")]
 mod scan;
@@ -68,6 +78,7 @@ mod splitjoin;
 mod srrdb;
 mod tools;
 mod unpack;
+mod unpackprog;
 #[cfg(feature = "indexer")]
 mod wall;
 #[cfg(not(feature = "indexer"))]

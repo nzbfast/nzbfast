@@ -37,6 +37,7 @@ use super::*;
 /// what actually keeps this reachable.
 #[inline]
 pub(super) fn server_bit(si: usize) -> u32 {
+    debug_assert!(si < MAX_SERVERS, "server index {si} has no routing bit");
     if si < MAX_SERVERS { 1u32 << si } else { 0 }
 }
 
@@ -88,6 +89,25 @@ impl Shared {
     /// whole article costs at most (article_retries + 1) attempts per
     /// configured server before a Failed, the same bound the 430 ladder
     /// has always carried.
+    /// M8 (sweep 8): put back the `spent` bits [`Shared::claim_done`]
+    /// dropped when a body was provisionally claimed, because the
+    /// decode verdict has now sent that article back into the queue.
+    /// The article is not terminal after all, so the evidence that
+    /// opened its fill tier has to be live again before a worker can
+    /// adopt the requeue - `next_work`'s pickup gate reads the same map
+    /// (`tried_430 | spent_mask`), so without this the steer's chosen
+    /// server is admitted by `other_can_take` and then gated out at the
+    /// pick. Caller holds the steer inbox, which is what keeps the
+    /// restore ahead of any adoption.
+    pub(super) fn restore_spent(&self, id: &str, bits: u32) {
+        if bits == 0 {
+            return;
+        }
+        let mut m = self.spent.lock_ok();
+        *m.entry(Arc::from(id)).or_insert(0) |= bits;
+        self.spent_n.store(m.len(), Ordering::Release);
+    }
+
     pub(super) fn note_spent(&self, w: &Work, bit: u32) -> bool {
         let (fresh, spent) = {
             let mut m = self.spent.lock_ok();
@@ -113,11 +133,26 @@ impl Shared {
     /// any) is satisfied. Used to steer a transport-failed article's retry
     /// away from the server that just failed it.
     pub(super) fn other_can_take(&self, w: &Work, me: usize) -> bool {
+        self.other_can_take_with(w, me, 0)
+    }
+
+    /// [`Shared::other_can_take`] with routing evidence the live map no
+    /// longer holds folded in.
+    ///
+    /// M8 (sweep 8): a provisional `claim_done` drops the article's
+    /// `spent` entry at HANDOFF, before the decode verdict that may yet
+    /// send the article back down the ladder - so the bad-body steer
+    /// asked this question with the exact evidence that opened the fill
+    /// tier already erased, and refused an otherwise valid retry. The
+    /// steer carries the pre-claim mask on its stashed `Handed` record
+    /// and passes it here; every other caller reads the live map alone
+    /// and passes 0.
+    pub(super) fn other_can_take_with(&self, w: &Work, me: usize, extra_spent: u32) -> bool {
         // A spent lower tier counts toward the gate exactly as a 430
         // does: it is done with this article either way, and without
         // that the failing primary reads "nobody else can have it" and
         // retakes its own casualty until the budget is gone.
-        let evidence = w.tried_430 | self.spent_mask(&w.id);
+        let evidence = w.tried_430 | self.spent_mask(&w.id) | extra_spent;
         for (si, &level) in self.levels.iter().enumerate() {
             if si == me || self.alive[si].load(Ordering::Relaxed) == 0 {
                 continue;

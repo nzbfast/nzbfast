@@ -537,6 +537,17 @@ pub fn avi() -> Vec<u8> {
 
 /// Deterministic sample payload: distinguishable per frame, so a
 /// byte-identity assertion cannot pass by accident.
+///
+/// "Distinguishable" is not "unique as a substring", and a test that
+/// SEARCHES a file for one frame has to know the difference. The filler
+/// cycles every 256 bytes, and XOR by 0x80 is exactly a 128-byte shift
+/// of that cycle - so `frame(t, n)` and `frame(t ^ 0x80, m)` are the
+/// same bytes offset by 128, and whichever is longer contains the
+/// shorter one whole. Since the tags here are `BASE ^ index`, that
+/// pairs frame `i` with frame `i ^ 128`. Assert on the shorter-partner
+/// side of such a pair, or assert on an offset rather than a search
+/// (`nzbfast`'s `tests/integration/stream_repair.rs` does the former,
+/// and checks it at runtime).
 fn frame(tag: u8, n: usize) -> Vec<u8> {
     (0..n).map(|i| tag ^ (i as u8).wrapping_mul(31)).collect()
 }
@@ -704,6 +715,20 @@ const A_STEP_MS: i64 = 20;
 /// The video and audio payloads this fixture contains, in decode order.
 /// The byte-identity test compares the remuxed `mdat` against these.
 pub fn mkv_remux_streams() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    mkv_remux_streams_scaled(1)
+}
+
+/// The same streams with every frame `scale` times as long.
+///
+/// The frame COUNT, the timing and the block framing are untouched, so
+/// a scaled fixture is the same walk over the same structure - only
+/// heavier. That is what a test needs when the thing under test is not
+/// the walk at all but the FILE: a posting whose articles take seconds
+/// to arrive, whose damaged span sits megabytes past a player's
+/// playhead, or whose remuxed output cannot fit in a socket buffer (see
+/// `nzbfast`'s `tests/integration/stream_repair.rs`).
+pub fn mkv_remux_streams_scaled(scale: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    assert!(scale >= 1, "a fixture cannot be scaled below its own size");
     let mut video = Vec::new();
     let mut audio = Vec::new();
     for k in 0..CLUSTERS {
@@ -711,14 +736,14 @@ pub fn mkv_remux_streams() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
             let n = k * V_PER_CLUSTER + j;
             // Sizes vary but do not grow without bound: a fixture that
             // is mostly one enormous frame stops testing the walk.
-            video.push(frame(0xA0 ^ n as u8, 300 + (n % 40) * 7));
+            video.push(frame(0xA0 ^ n as u8, (300 + (n % 40) * 7) * scale));
         }
         for j in 0..A_PER_CLUSTER {
             let n = k * A_PER_CLUSTER + j;
             // Every fourth cluster laces at a fixed size, which needs
             // equal frames.
             let size = if k % 4 == 2 { 160 } else { 140 + (n % 11) * 3 };
-            audio.push(frame(0x50 ^ n as u8, size));
+            audio.push(frame(0x50 ^ n as u8, size * scale));
         }
     }
     (video, audio)
@@ -727,7 +752,13 @@ pub fn mkv_remux_streams() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 /// A Matroska file with two seconds of payload, Cues behind the
 /// clusters, and every block framing the walk has to handle.
 pub fn mkv_remux_fixture() -> Vec<u8> {
-    let (video, audio) = mkv_remux_streams();
+    mkv_remux_fixture_scaled(1)
+}
+
+/// The same file built from [`mkv_remux_streams_scaled`] - identical in
+/// structure, `scale` times the bytes.
+pub fn mkv_remux_fixture_scaled(scale: usize) -> Vec<u8> {
+    let (video, audio) = mkv_remux_streams_scaled(scale);
     let info_el = info(1_920.0, None);
     let tracks_el = tracks(&[remux_video_track(), remux_audio_track()]);
 

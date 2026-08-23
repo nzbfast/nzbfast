@@ -50,8 +50,10 @@ use std::time::{Duration, Instant};
 /// is exactly the mistake §4 C3 describes ("lanes should be per
 /// provider, not per kind").
 // Slim builds only exercise the Srrdb/Xrel/Qlever lanes; gating variants would
-// cascade through every match below, so the unused ones are allowed instead.
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+// cascade through every match below, so the unused ones are expected dead
+// instead - measured 23 Aug 2026 in `--no-default-features`, plain and
+// --all-targets, on macOS, Windows and Linux, and under the ffi/iOS root.
+#[cfg_attr(not(feature = "indexer"), expect(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Provider {
     /// Hard ~1 req/s, enforced, and they block abusers. Not a courtesy.
@@ -190,8 +192,12 @@ impl Provider {
 /// "refill, and if short, sleep the deficit" bucket has, because a
 /// waiting caller computes its sleep from `now` and never accounts for
 /// the callers already reserved ahead of it.
+///
+/// `cool_until` is a SECOND horizon and deliberately not the same one -
+/// see [`penalise`] for why one clock cannot serve both jobs.
 struct Bucket {
     tat: Instant,
+    cool_until: Instant,
 }
 
 fn buckets() -> &'static Mutex<HashMap<Provider, Bucket>> {
@@ -218,7 +224,10 @@ pub fn acquire(p: Provider) {
     let wait = {
         let now = Instant::now();
         let mut map = buckets().lock_ok();
-        let b = map.entry(p).or_insert(Bucket { tat: now });
+        let b = map.entry(p).or_insert(Bucket {
+            tat: now,
+            cool_until: now,
+        });
         // How long until this request would be conforming. Computed as
         // `tat - (now + tolerance)` rather than `(tat - tolerance) - now`
         // so no Instant is ever moved backwards past its origin.
@@ -253,7 +262,10 @@ pub fn try_acquire(p: Provider, max_wait: Duration) -> bool {
     let wait = {
         let now = Instant::now();
         let mut map = buckets().lock_ok();
-        let b = map.entry(p).or_insert(Bucket { tat: now });
+        let b = map.entry(p).or_insert(Bucket {
+            tat: now,
+            cool_until: now,
+        });
         let wait = b.tat.saturating_duration_since(now + tolerance);
         if wait > max_wait {
             return false;
@@ -267,16 +279,61 @@ pub fn try_acquire(p: Provider, max_wait: Duration) -> bool {
     true
 }
 
+/// The longest a provider may put itself out of reach with one
+/// `Retry-After`. An hour is already far past anything measured here
+/// (Wikidata's counts down inside a ~60 s window); the clamp exists so
+/// a bogus or hostile header cannot retire a provider for a week.
+const COOL_MAX: u64 = 3600;
+
 /// Push this provider's next slot out by `secs`, on top of whatever is
 /// already queued. For an explicit "you are going too fast" from
 /// upstream (HTTP 429/503 + Retry-After), where carrying on at the
 /// nominal rate is what gets a client banned.
+///
+/// TWO horizons come out of one header, and they are different on
+/// purpose (TODO 26c):
+///
+/// - `tat` is what [`acquire`] SLEEPS on, so it stays clamped to a
+///   minute. A background lane that parks for the full hour a provider
+///   is entitled to ask for is a lane that cannot see `stop.stopping()`
+///   for an hour, and shutdown is only checked between batches.
+/// - `cool_until` is the provider's actual instruction, and NOTHING
+///   sleeps on it: callers ask [`cooling`] and skip the request. That is
+///   what stops the next ROW spending the same refused window - the
+///   clamped minute above expires long before a `Retry-After: 900` does,
+///   so without it title 2 of the batch walks straight into title 1's
+///   429, and title 3 after that.
 pub fn penalise(p: Provider, secs: u64) {
-    let secs = secs.clamp(1, 60);
     let now = Instant::now();
     let mut map = buckets().lock_ok();
-    let b = map.entry(p).or_insert(Bucket { tat: now });
-    b.tat = b.tat.max(now) + Duration::from_secs(secs);
+    let b = map.entry(p).or_insert(Bucket {
+        tat: now,
+        cool_until: now,
+    });
+    b.tat = b.tat.max(now) + Duration::from_secs(secs.clamp(1, 60));
+    b.cool_until = b
+        .cool_until
+        .max(now + Duration::from_secs(secs.clamp(1, COOL_MAX)));
+}
+
+/// How much longer this provider has explicitly asked not to be called.
+/// `ZERO` when it has not asked at all, or when the wait it asked for
+/// has passed.
+///
+/// Per PROVIDER, which is the whole point: a Wikidata 429 must not stop
+/// the same title asking Wikipedia, or the movie lane asking AniList -
+/// those are separate services with separate allowances (see
+/// `Provider::Wikipedia`). The caller's contract is to treat a non-zero
+/// answer as "could not ask", never as "there is nothing there".
+///
+/// Feature-gated like `try_acquire`: the only caller is the wall's
+/// provider chain, and a slim build has no wall.
+#[cfg(feature = "indexer")]
+pub fn cooling(p: Provider) -> Duration {
+    let now = Instant::now();
+    buckets().lock_ok().get(&p).map_or(Duration::ZERO, |b| {
+        b.cool_until.saturating_duration_since(now)
+    })
 }
 
 #[cfg(test)]
@@ -409,6 +466,59 @@ mod tests {
             !try_acquire(Provider::Wikidata, Duration::from_millis(200)),
             "the grant above did not claim the slot"
         );
+    }
+
+    /// TODO 26c: a 429 backs off THAT provider for as long as it asked,
+    /// and reaches no other.
+    ///
+    /// The bucket's own penalty is clamped to a minute, deliberately, so
+    /// no lane thread parks longer than that - which is exactly why the
+    /// cooldown is a separate horizon. Without it the next row in the
+    /// batch spends a minute and then walks straight into the same
+    /// refusal, and the row after that does it again: one 429 becomes a
+    /// batch of blanked titles.
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn a_long_retry_after_cools_one_provider_and_only_that_one() {
+        // Xrel and Omdb are this test's own buckets, and "its own" means
+        // in the whole BINARY, not just in this module. The bucket map
+        // is process-global and `cargo test --bin nzbfast` runs every
+        // module's tests in one process, so a cooldown left here is
+        // still there when another module's test reads it. This test and
+        // `crate::wall::tests::a_429_is_could_not_ask_and_carries_its_retry_after`
+        // both landed in 84ae50bd7 asserting the same per-service
+        // property, both picked "a provider nothing else in this FILE
+        // touches", and picked the same two - so the wall test read the
+        // hour of WikidataQlever cooling the clamp check below leaves
+        // behind, and `cargo test --bin nzbfast` was red on main from 22
+        // to 23 Aug 2026. Nothing caught it because nextest gives every
+        // test its own process, so the whole documented CI sweep is
+        // blind to this entire class.
+        //
+        // The fix is DISJOINT buckets rather than a `clear_cooling()`
+        // helper: these tests run in parallel threads, so a clear at the
+        // top of one is free to wipe a penalty the other just wrote.
+        // Before reusing a provider here, grep the tree for
+        // `penalise(`/`cooling(` and take one that no other TEST names.
+        // Note that `acquire` is not a hazard - it moves `tat`, never
+        // `cool_until` - but a provider some other test acquires is
+        // still the wrong choice, because `penalise` moves BOTH and
+        // would park that test on a 60 s sleep.
+        assert_eq!(cooling(Provider::Xrel), Duration::ZERO);
+        penalise(Provider::Xrel, 900);
+        let left = cooling(Provider::Xrel);
+        assert!(
+            left > Duration::from_secs(880) && left <= Duration::from_secs(900),
+            "asked for 900 s and got {left:?} - the header was clamped away"
+        );
+        assert_eq!(
+            cooling(Provider::Omdb),
+            Duration::ZERO,
+            "one service's refusal backed off an unrelated one"
+        );
+        // A bogus header cannot retire a provider for a week.
+        penalise(Provider::Omdb, 400 * 24 * 3600);
+        assert!(cooling(Provider::Omdb) <= Duration::from_secs(COOL_MAX));
     }
 
     #[test]

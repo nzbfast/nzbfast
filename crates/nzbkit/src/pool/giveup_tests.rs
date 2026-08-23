@@ -41,6 +41,7 @@ fn work(id: &str) -> Work {
     Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: id.into(),
         attempts: 0,

@@ -33,6 +33,23 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FeedConfig {
+    /// This feed's identity, as far as the settings UI is concerned.
+    ///
+    /// TODO §20c: the url used to be the only key a saved edit could be
+    /// matched on, and that is exactly why the url could not be masked -
+    /// a client that never saw the real url could not send one back, and
+    /// a merge keyed on the url would have read the mask as a NEW feed
+    /// and thrown the credential away. So the key had to stop being the
+    /// secret. This is opaque, non-secret and derived from nothing (16
+    /// random hex): it survives a rename, a reorder, a rules edit and a
+    /// re-keyed url, which is what "stable" has to mean for a merge key.
+    ///
+    /// `#[serde(default)]` and filled in by [`assign_feed_ids`] at load,
+    /// so a settings.json written before this field existed migrates
+    /// silently and losslessly - see `spawn_rss_poller`, which persists
+    /// the ids it minted so they stay stable across the next restart.
+    #[serde(default)]
+    pub id: String,
     pub url: String,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
@@ -83,6 +100,246 @@ impl FeedConfig {
         }
         format!("{h:016x}")
     }
+
+    /// This feed's url as the settings UI is allowed to see it - the
+    /// address with every credential-shaped part of it taken out. See
+    /// [`mask_feed_url`] for what "credential-shaped" means here.
+    pub fn masked_url(&self) -> String {
+        mask_feed_url(&self.url)
+    }
+}
+
+/// A fresh feed id: 16 random hex characters.
+///
+/// Not a secret and never used as one - it is a merge key, and it is
+/// handed to the browser on every `get_config`. Random rather than a
+/// counter so that two installs' settings files (or a settings.json
+/// pasted between machines) cannot collide on "2", and rather than a
+/// hash of the url so that re-keying an indexer account does not
+/// silently make the row a different feed.
+pub fn new_feed_id() -> String {
+    let mut buf = [0u8; 8];
+    if getrandom::fill(&mut buf).is_err() {
+        // getrandom failing at all means the OS entropy source is gone;
+        // an id still has to come out, and uniqueness here only has to
+        // hold within one settings file. Time plus a process-local
+        // counter gives that.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let c = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        buf = (n ^ c.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes();
+    }
+    hex::encode(buf)
+}
+
+/// Give every feed in `list` an id, and make sure no two share one.
+/// Returns whether anything changed, so a caller can persist only when
+/// there is something to persist.
+///
+/// This is the migration for every settings.json and `--feeds` file
+/// written before the id existed: they parse (the field defaults to
+/// empty), get an id here, and nothing else about them moves.
+pub fn assign_feed_ids(list: &mut [FeedConfig]) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = false;
+    for f in list.iter_mut() {
+        let trimmed = f.id.trim().to_string();
+        if trimmed != f.id {
+            f.id = trimmed.clone();
+            changed = true;
+        }
+        // A duplicate is re-minted rather than refused: ids are ours to
+        // keep unique, and a config hand-edited into two identical ones
+        // must not silently merge two feeds' saved urls onto each other.
+        if f.id.is_empty() || !seen.insert(f.id.clone()) {
+            loop {
+                let id = new_feed_id();
+                if seen.insert(id.clone()) {
+                    f.id = id;
+                    break;
+                }
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Query parameters a feed url can carry that are NEVER a credential -
+/// the newznab/RSS vocabulary plus the few filter names indexers share,
+/// with the value of everything else masked.
+///
+/// Deny by default, and that direction is deliberate. `redact_apikey`
+/// can name the parameter it blanks because WE built the url it guards;
+/// a feed url is the indexer's own construction, and its doc comment
+/// already records what that costs - sites spell the credential
+/// `apikey`, `api_key`, `r`, `i`, or put it in the path, so an
+/// allowlist of SECRET names is a guess that fails silently and leaks.
+/// An allowlist of harmless names fails the other way: an unusual
+/// filter reads as `***`, which costs readability and nothing else.
+const FEED_URL_PLAIN_PARAMS: &[&str] = &[
+    "t",
+    "q",
+    "cat",
+    "category",
+    "categories",
+    "limit",
+    "offset",
+    "extended",
+    "maxage",
+    "minage",
+    "maxsize",
+    "minsize",
+    "num",
+    "o",
+    "out",
+    "output",
+    "format",
+    "sort",
+    "genre",
+    "attrs",
+    "page",
+    "season",
+    "ep",
+    "series",
+    "group",
+    "groups",
+    "lang",
+    "rid",
+    "imdbid",
+    "tvdbid",
+    "tvmazeid",
+    "traktid",
+    "tmdbid",
+    "del",
+    "dl",
+];
+
+/// A feed url with every credential-shaped part replaced by `***`,
+/// keeping enough of it (scheme, host, path, the ordinary newznab
+/// parameters) that a user with three feeds on one indexer can still
+/// tell which row is which.
+///
+/// Three things go: the userinfo (`user:pw@`), any path segment shaped
+/// like an opaque token (some sites put the key in the path), and the
+/// value of every query parameter outside
+/// [`FEED_URL_PLAIN_PARAMS`]. The parameter NAMES stay - the name is
+/// what tells the user their key is in there.
+///
+/// This is a display transform, never a security boundary on its own:
+/// what makes the masking safe is that the real url never leaves the
+/// daemon, not that this function is exhaustive. It is also the exact
+/// string a client sends back for "I did not touch this" (see
+/// [`url_is_unchanged`]), so changing what it emits changes a
+/// round-trip - it must stay deterministic.
+pub fn mask_feed_url(url: &str) -> String {
+    let (head, frag) = match url.split_once('#') {
+        Some((h, f)) => (h, Some(f)),
+        None => (url, None),
+    };
+    let (base, query) = match head.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (head, None),
+    };
+    let mut out = mask_url_base(base);
+    if let Some(q) = query {
+        out.push('?');
+        let mut first = true;
+        for pair in q.split('&') {
+            if !first {
+                out.push('&');
+            }
+            first = false;
+            match pair.split_once('=') {
+                Some((name, value)) => {
+                    out.push_str(name);
+                    out.push('=');
+                    if value.is_empty()
+                        || FEED_URL_PLAIN_PARAMS
+                            .iter()
+                            .any(|p| name.eq_ignore_ascii_case(p))
+                    {
+                        out.push_str(value);
+                    } else {
+                        out.push_str("***");
+                    }
+                }
+                // A bare flag carries no value to hide.
+                None => out.push_str(pair),
+            }
+        }
+    }
+    if let Some(f) = frag {
+        out.push('#');
+        // A fragment is never part of what an indexer serves and is not
+        // worth reading; if one is there at all, it is not identifying
+        // the feed for anybody.
+        out.push_str(if f.is_empty() { "" } else { "***" });
+    }
+    out
+}
+
+/// The scheme/authority/path half of [`mask_feed_url`].
+fn mask_url_base(base: &str) -> String {
+    let (scheme, rest) = match base.find("://") {
+        Some(p) => base.split_at(p + 3),
+        None => ("", base),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(p) => rest.split_at(p),
+        None => (rest, ""),
+    };
+    let mut out = String::with_capacity(base.len());
+    out.push_str(scheme);
+    // `user:pw@host` - the password is a credential and the username is
+    // half of one; neither identifies the feed to its owner.
+    match authority.rsplit_once('@') {
+        Some((_, host)) => {
+            out.push_str("***@");
+            out.push_str(host);
+        }
+        None => out.push_str(authority),
+    }
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if looks_like_token(seg) {
+            out.push_str("***");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
+/// Does this path segment look like an opaque credential rather than a
+/// name? Long, drawn from the hex/base64url alphabet, and carrying a
+/// digit - which every 32-hex apikey does and `alt-binaries-teevee`
+/// does not.
+fn looks_like_token(seg: &str) -> bool {
+    seg.len() >= 16
+        && seg.bytes().any(|b| b.is_ascii_digit())
+        && seg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Is this incoming url the settings UI saying "I did not touch it"?
+///
+/// Two spellings, because two clients say it two ways: blank is the
+/// convention every other credential in this file's neighbourhood uses
+/// (a blank server password, a blank indexer apikey, a blank notify
+/// token all mean "keep the stored one"), and the mask itself is what a
+/// dashboard row sends back when the user edited the rules and left the
+/// url alone. Either way the stored url is kept, and a genuinely NEW
+/// url - which can never equal the mask of the old one - replaces it.
+pub fn url_is_unchanged(incoming: &str, stored: &str) -> bool {
+    let incoming = incoming.trim();
+    incoming.is_empty() || incoming == mask_feed_url(stored)
 }
 
 /// What the last poll of one feed actually did.
@@ -148,49 +405,177 @@ pub struct FeedItem {
     pub size: u64,
     /// Dedupe identity: <guid>, else the link.
     pub guid: String,
+    /// When the item says it was posted, as unix seconds: RSS
+    /// `<pubDate>`, else Atom `<published>`/`<updated>`, else RSS 1.0
+    /// `<dc:date>`. `None` is "this feed did not say", and the `age`
+    /// terms treat that as unknown rather than as 1970 - see
+    /// [`term_matches_at`].
+    pub pub_date: Option<i64>,
 }
 
-/// Case-insensitive `*`/`?` wildcard match (iterative, with backtracking).
+/// A feed's idea of when an item was posted, as unix seconds.
+///
+/// Two grammars reach here, and which one a feed uses is not something
+/// the caller knows: RSS spells its `<pubDate>` RFC 2822
+/// ("Tue, 02 Jul 2026 15:04:05 +0000"), Atom spells `<published>` and
+/// `<updated>` RFC 3339 ("2026-07-02T15:04:05Z"), and RSS 1.0's
+/// `<dc:date>` is RFC 3339 inside an RSS document. So both are tried,
+/// picked apart by shape rather than by which element the text came out
+/// of - a newznab server serving Atom with an RSS-shaped date in it is
+/// exactly the kind of mess this file already expects elsewhere.
+///
+/// `None` for anything unparseable, and the callers treat that as "the
+/// age is unknown" rather than as 1970 - an epoch-shaped fallback would
+/// make every undated item infinitely old and `Reject: age>30d` would
+/// quietly eat the whole feed.
+pub(crate) fn parse_feed_date(s: &str) -> Option<i64> {
+    let s = s.trim();
+    // RFC 3339 / ISO 8601 starts with the year: four digits then `-`.
+    // Anything else goes to the RFC 2822 reader, which is the one that
+    // starts with a weekday or a day number.
+    let iso =
+        s.len() >= 5 && s.as_bytes()[..4].iter().all(u8::is_ascii_digit) && s.as_bytes()[4] == b'-';
+    if !iso {
+        return crate::newznab::parse_rfc2822(s);
+    }
+    let (date, rest) = match s.find(['T', 't', ' ']) {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        // A date with no time at all is legal ISO and means midnight UTC.
+        None => (s, ""),
+    };
+    let mut d = date.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let mon: u32 = d.next()?.parse().ok()?;
+    let day: u32 = d.next()?.parse().ok()?;
+    if !(1980..=3000).contains(&year) || !(1..=12).contains(&mon) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // The zone suffix, cut off the time before it is split on `:` - an
+    // offset carries a colon of its own ("+02:00") and would otherwise
+    // be read as more of the clock.
+    let (time, off) = match rest.find(['Z', 'z']) {
+        Some(i) => (&rest[..i], 0),
+        None => match rest.rfind(['+', '-']) {
+            Some(i) => {
+                let z = &rest[i + 1..];
+                let mut zp = z.split(':');
+                let zh: i64 = zp.next().filter(|v| !v.is_empty())?.parse().ok()?;
+                let zm: i64 = zp.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                if !(0..=23).contains(&zh) || !(0..=59).contains(&zm) {
+                    return None;
+                }
+                let v = zh * 3600 + zm * 60;
+                (&rest[..i], if rest.as_bytes()[i] == b'-' { -v } else { v })
+            }
+            // No zone at all: RFC 3339 requires one, feeds in the wild
+            // omit it, and UTC is the only defensible reading of a
+            // timestamp with no other information attached.
+            None => (rest, 0),
+        },
+    };
+    let mut t = time.split(':');
+    let h: i64 = t
+        .next()
+        .filter(|v| !v.is_empty())
+        .map_or(Ok(0), str::parse)
+        .ok()?;
+    let mi: i64 = t.next().map_or(Ok(0), str::parse).ok()?;
+    // Fractional seconds are legal and carry nothing this needs.
+    let sec: i64 = t
+        .next()
+        .map(|v| v.split(['.', ',']).next().unwrap_or(v))
+        .map_or(Ok(0), str::parse)
+        .ok()?;
+    if !(0..=23).contains(&h) || !(0..=59).contains(&mi) || !(0..=60).contains(&sec) {
+        return None;
+    }
+    Some(crate::newznab::days_from_civil(year, mon, day) * 86_400 + h * 3600 + mi * 60 + sec - off)
+}
+
+/// A duration written the way a filter rule writes one: `2d`, `36h`,
+/// `90m`, `1w`, or a bare number of DAYS.
+///
+/// Days is the bare unit because the thing being measured is a post's
+/// age and nobody thinks about that in seconds.
+///
+/// The unit is matched WHOLE against a table rather than on its first
+/// letter, which is the difference between refusing `2mo` and silently
+/// reading it as two minutes. Months and years are absent on purpose:
+/// `m` has to mean one or the other and minutes is the one an age filter
+/// wants, so the other spelling is refused rather than guessed at. An
+/// unparseable term is `None`, which [`term_matches_at`] treats exactly
+/// as it treats an unknown date - the term asserts nothing, so a typo
+/// cannot silently reject a whole feed.
+pub(crate) fn parse_age_secs(s: &str) -> Option<i64> {
+    let s = s.trim().to_ascii_lowercase();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let n: i64 = digits.parse().ok()?;
+    let mult = match s[digits.len()..].trim() {
+        "" | "d" | "day" | "days" => 86_400,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600,
+        "w" | "wk" | "wks" | "week" | "weeks" => 604_800,
+        _ => return None,
+    };
+    n.checked_mul(mult)
+}
+
+/// Case-insensitive `*`/`?` wildcard match, anchored to the whole string.
+///
+/// One line, because the implementation moved down to nzbkit on 23 Aug
+/// 2026: Smart Folders rules needed the same matcher (TODO 104 item 2,
+/// #18) and `nzbkit::categories` cannot reach up into this crate. Feed
+/// terms and Smart Folder patterns are both user-typed wildcards over a
+/// release name, so one of them silently disagreeing with the other about
+/// what `*x` means is a support call nobody can reproduce.
+///
+/// Not a pure move: the version that lived here tested the literal
+/// compare BEFORE `*`, so a name containing a literal star could eat the
+/// pattern's star as an ordinary character and `*x` did not match `*ax`.
+/// The shared one orders the wildcards first (as
+/// `groups::glob_matches` already did). It can only turn a non-match into
+/// a match, never the reverse.
 pub fn glob_match(pat: &str, s: &str) -> bool {
-    let p: Vec<char> = pat.to_ascii_lowercase().chars().collect();
-    let t: Vec<char> = s.to_ascii_lowercase().chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star, mut mark) = (usize::MAX, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = pi;
-            mark = ti;
-            pi += 1;
-        } else if star != usize::MAX {
-            pi = star + 1;
-            mark += 1;
-            ti = mark;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+    nzbkit::categories::glob_match(pat, s)
 }
 
-/// One pattern term against an item: either a size comparison or a
-/// title wildcard/substring.
-fn term_matches(term: &str, item: &FeedItem) -> bool {
+/// One pattern term against an item: a size comparison, an age
+/// comparison, or a title wildcard/substring.
+///
+/// `now` is passed in rather than read here so the age arm is testable
+/// against a fixed clock; [`rules_judge`] reads it once per judgement so
+/// every term in one rule list sees the same instant.
+///
+/// `age>2d` is "posted more than two days ago" and `age<7d` is "posted
+/// less than seven days ago" - the two directions a usenet filter
+/// actually wants, which are "old enough to have propagated everywhere"
+/// and "not so old it is dead". An item whose feed gave no date matches
+/// NEITHER: the term asserts nothing about an age it does not know, so a
+/// `Reject: age>30d` cannot eat an undated feed and a
+/// `Require: age>2h` cannot pass one.
+fn term_matches_at(term: &str, item: &FeedItem, now: i64) -> bool {
     let term = term.trim();
     for (op, gt) in [(">", true), ("<", false)] {
-        if let Some(rest) = term
-            .strip_prefix("size")
-            .and_then(|r| r.trim_start().strip_prefix(op))
-        {
+        let after = |key: &str| {
+            term.strip_prefix(key)
+                .and_then(|r| r.trim_start().strip_prefix(op))
+        };
+        if let Some(rest) = after("size") {
             if let Some(n) = crate::serve::parse_size(rest.trim()) {
                 return if gt { item.size > n } else { item.size < n };
             }
             return false;
+        }
+        if let Some(rest) = after("age") {
+            let (Some(want), Some(posted)) = (parse_age_secs(rest), item.pub_date) else {
+                return false;
+            };
+            let age = now - posted;
+            return if gt { age > want } else { age < want };
         }
     }
     if term.contains('*') || term.contains('?') {
@@ -262,13 +647,29 @@ pub struct Judgement {
 
 /// Apply a feed's rule list and say which rule decided.
 pub fn rules_judge(rules: &[String], item: &FeedItem) -> Judgement {
+    rules_judge_at(rules, item, now_secs())
+}
+
+/// Wall-clock seconds. `serve`'s own `unix_now` is `pub(super)` inside
+/// that module tree and this file is a sibling of it, not a child.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// [`rules_judge`] against a given instant. The clock is read ONCE per
+/// judgement, not once per term: two `age` terms in one rule list have
+/// to describe the same moment, and a test needs an instant it chose.
+pub fn rules_judge_at(rules: &[String], item: &FeedItem, now: i64) -> Judgement {
     let mut has_accept = false;
     let mut accepted: Option<(String, RuleOpts)> = None;
     for rule in rules {
         let Some((kind, expr)) = rule.split_once(':') else {
             continue;
         };
-        let hit = term_matches(expr, item);
+        let hit = term_matches_at(expr, item, now);
         let (base, opts) = parse_kind(kind);
         match base.as_str() {
             "require" => {
@@ -537,12 +938,21 @@ fn parse_rss_items(xml: &str) -> Vec<FeedItem> {
             .map(unescape)
             .filter(|g| !g.is_empty())
             .unwrap_or_else(|| link.clone());
+        // `<pubDate>` is the RSS 2.0 spelling; `<dc:date>` is RSS 1.0's,
+        // and newznab servers emit it beside pubDate often enough to be
+        // worth the second `find` that costs nothing when it is absent.
+        let pub_date = ["pubdate", "pubDate", "date", "published", "updated"]
+            .iter()
+            .find_map(|t| tag_text(item, t))
+            .map(unescape)
+            .and_then(|d| parse_feed_date(&d));
         if !title.is_empty() && !link.is_empty() {
             out.push(FeedItem {
                 title,
                 link,
                 size,
                 guid,
+                pub_date,
             });
         }
         rest = &rest[open + close + close_pat.len()..];
@@ -613,12 +1023,22 @@ fn parse_atom_entries(xml: &str) -> Vec<FeedItem> {
             .map(unescape)
             .filter(|g| !g.is_empty())
             .unwrap_or_else(|| link.clone());
+        // `<published>` is when the entry first appeared and `<updated>`
+        // is when it last changed; only the first answers "how old is
+        // this post", so it is preferred and `<updated>` is the fallback
+        // for the many feeds that ship only the required one.
+        let pub_date = ["published", "pubdate", "pubDate", "updated", "date"]
+            .iter()
+            .find_map(|t| tag_text(entry, t))
+            .map(unescape)
+            .and_then(|d| parse_feed_date(&d));
         if !title.is_empty() && !link.is_empty() {
             out.push(FeedItem {
                 title,
                 link,
                 size,
                 guid,
+                pub_date,
             });
         }
         rest = &rest[open + close + close_pat.len()..];
@@ -636,6 +1056,15 @@ mod tests {
             link: "http://x/nzb".into(),
             size,
             guid: "g".into(),
+            pub_date: None,
+        }
+    }
+
+    /// [`item`] with a posting date, for the age arm.
+    fn dated_item(title: &str, posted: i64) -> FeedItem {
+        FeedItem {
+            pub_date: Some(posted),
+            ..item(title, 0)
         }
     }
 
@@ -648,6 +1077,7 @@ mod tests {
 
     fn feed(url: &str, category: &str, rules: &[&str]) -> FeedConfig {
         FeedConfig {
+            id: new_feed_id(),
             url: url.into(),
             interval_secs: 900,
             category: category.into(),
@@ -980,5 +1410,286 @@ mod tests {
         assert!(h.last_error.is_empty());
         assert_eq!(h.items_seen, 0);
         assert_eq!(h.last_poll, 5);
+    }
+
+    /// §163 item 1: both date grammars a feed can use, and the shapes
+    /// that turn up around them. RSS spells its pubDate RFC 2822 and
+    /// Atom spells its published RFC 3339, and a parser that read only
+    /// one of them would leave every feed of the other kind undated -
+    /// which, because an undated item matches no age term at all, is a
+    /// silent "this filter does nothing".
+    #[test]
+    fn a_feed_date_is_read_in_both_grammars() {
+        // 2026-07-02T15:04:05Z
+        const T: i64 = 1_783_004_645;
+        for s in [
+            "Thu, 02 Jul 2026 15:04:05 +0000",
+            "Thu, 02 Jul 2026 15:04:05 GMT",
+            "2026-07-02T15:04:05Z",
+            "2026-07-02t15:04:05z",
+            "2026-07-02T15:04:05.123Z",
+            "2026-07-02 15:04:05",
+            "2026-07-02T15:04:05",
+        ] {
+            assert_eq!(parse_feed_date(s), Some(T), "{s}");
+        }
+        // Offsets move the instant, in both directions and on both
+        // grammars - a feed served in local time is the commonest way a
+        // date is right to the hour and wrong by a day's filtering.
+        assert_eq!(
+            parse_feed_date("2026-07-02T17:04:05+02:00"),
+            Some(T),
+            "positive offset"
+        );
+        assert_eq!(
+            parse_feed_date("2026-07-02T11:04:05-04:00"),
+            Some(T),
+            "negative offset"
+        );
+        assert_eq!(
+            parse_feed_date("Thu, 02 Jul 2026 11:04:05 -0400"),
+            Some(T),
+            "rfc 2822 offset"
+        );
+        // A date with no clock is midnight UTC, not a parse failure.
+        assert_eq!(parse_feed_date("2026-07-02"), Some(T - 15 * 3600 - 245));
+        // And anything that is not a date is None rather than 1970: the
+        // whole age arm turns on telling "old" from "we were not told".
+        for bad in [
+            "",
+            "no",
+            "2026-13-02T00:00:00Z",
+            "2026-07-02T99:00:00Z",
+            "-",
+        ] {
+            assert_eq!(parse_feed_date(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The unit suffix, including the two decisions in it: a bare number
+    /// is DAYS, and `m` is minutes.
+    #[test]
+    fn an_age_term_reads_its_unit() {
+        assert_eq!(parse_age_secs("2d"), Some(172_800));
+        assert_eq!(parse_age_secs("2"), Some(172_800), "bare = days");
+        assert_eq!(parse_age_secs("36h"), Some(129_600));
+        assert_eq!(parse_age_secs("90m"), Some(5_400), "m is minutes");
+        assert_eq!(parse_age_secs("30s"), Some(30));
+        assert_eq!(parse_age_secs("1w"), Some(604_800));
+        assert_eq!(parse_age_secs("2 days"), Some(172_800));
+        assert_eq!(parse_age_secs("36 hrs"), Some(129_600));
+        assert_eq!(parse_age_secs("0d"), Some(0));
+        for bad in ["", "d", "2y", "2mo", "-2d", "abc"] {
+            assert_eq!(parse_age_secs(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The filter itself, in both directions, against a fixed clock.
+    #[test]
+    fn age_terms_filter_in_both_directions() {
+        const NOW: i64 = 1_800_000_000;
+        let day = 86_400;
+        let fresh = dated_item("Show.S01E01", NOW - 3600); // an hour old
+        let old = dated_item("Show.S01E02", NOW - 30 * day); // a month old
+        let judge = |rules: &[&str], it: &FeedItem| {
+            rules_judge_at(
+                &rules.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                it,
+                NOW,
+            )
+            .accept
+        };
+        // "old enough to have propagated": hold anything under 2 hours.
+        assert!(!judge(&["Require: age>2h"], &fresh));
+        assert!(judge(&["Require: age>2h"], &old));
+        // "not so old it is dead": drop anything over a week.
+        assert!(judge(&["Require: age<7d"], &fresh));
+        assert!(!judge(&["Require: age<7d"], &old));
+        // Reject is the same term from the other side.
+        assert!(!judge(&["Reject: age>7d"], &old));
+        assert!(judge(&["Reject: age>7d"], &fresh));
+        // Spacing around the operator, as the size arm allows.
+        assert!(judge(&["Require: age > 2h"], &old));
+        // And an age term composes with the rest of the language rather
+        // than replacing it.
+        assert!(judge(&["Require: age<7d", "Accept: *S01E01*"], &fresh));
+        assert!(!judge(&["Require: age<7d", "Accept: *S01E99*"], &fresh));
+    }
+
+    /// An item the feed gave no date for matches NEITHER direction. The
+    /// alternative - treating a missing date as the epoch - makes every
+    /// undated item infinitely old, so one `Reject: age>30d` would
+    /// silently swallow a whole feed that simply does not date its
+    /// items. "We were not told" is not "it is old".
+    #[test]
+    fn an_undated_item_matches_no_age_term() {
+        const NOW: i64 = 1_800_000_000;
+        let undated = item("Show.S01E01", 0);
+        assert!(undated.pub_date.is_none());
+        let judge = |r: &str| rules_judge_at(&[r.to_string()], &undated, NOW).accept;
+        assert!(!judge("Require: age>2h"), "cannot satisfy an unknown age");
+        assert!(!judge("Require: age<2h"), "nor the other direction");
+        assert!(judge("Reject: age>30d"), "and cannot be rejected on one");
+        // A malformed unit is the same non-answer, on a DATED item, so
+        // a typo cannot silently reject the feed either.
+        let dated = dated_item("Show.S01E01", NOW - 400 * 86_400);
+        assert!(!rules_judge_at(&["Require: age>2y".to_string()], &dated, NOW).accept);
+        assert!(rules_judge_at(&["Reject: age>2y".to_string()], &dated, NOW).accept);
+    }
+
+    /// The date has to come off the wire, not just out of a constructor:
+    /// RSS `<pubDate>`, RSS 1.0 `<dc:date>` (prefixed, which is the trap
+    /// this file's local-name scan exists for), and Atom `<published>`
+    /// with `<updated>` as the fallback.
+    #[test]
+    fn parsing_a_feed_carries_the_posting_date() {
+        let rss = r#"<rss><channel>
+          <item><title>A</title><link>http://x/a</link>
+            <pubDate>Thu, 02 Jul 2026 15:04:05 +0000</pubDate></item>
+          <item><title>B</title><link>http://x/b</link>
+            <dc:date>2026-07-02T15:04:05Z</dc:date></item>
+          <item><title>C</title><link>http://x/c</link></item>
+        </channel></rss>"#;
+        let got = parse_feed(rss);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].pub_date, Some(1_783_004_645), "pubDate");
+        assert_eq!(got[1].pub_date, Some(1_783_004_645), "prefixed dc:date");
+        assert_eq!(got[2].pub_date, None, "no date element at all");
+
+        let atom = r#"<feed>
+          <entry><title>A</title><link href="http://x/a"/>
+            <published>2026-07-02T15:04:05Z</published>
+            <updated>2026-08-01T00:00:00Z</updated></entry>
+          <entry><title>B</title><link href="http://x/b"/>
+            <updated>2026-07-02T15:04:05Z</updated></entry>
+        </feed>"#;
+        let got = parse_feed(atom);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0].pub_date,
+            Some(1_783_004_645),
+            "published wins over updated"
+        );
+        assert_eq!(
+            got[1].pub_date,
+            Some(1_783_004_645),
+            "updated is the fallback"
+        );
+    }
+
+    /// TODO §20c. The mask is the only version of a feed url the
+    /// settings UI ever sees, so it has two jobs at once: nothing
+    /// credential-shaped may survive it, and enough must survive it that
+    /// three feeds on one indexer are still tellable apart.
+    #[test]
+    fn a_feed_url_keeps_its_shape_and_loses_its_credentials() {
+        // The ordinary newznab feed: the key goes, the address and the
+        // filters that identify the row stay.
+        assert_eq!(
+            mask_feed_url("https://idx.example/rss?t=tvsearch&cat=5030&apikey=b8f3c1d9e7a24601"),
+            "https://idx.example/rss?t=tvsearch&cat=5030&apikey=***"
+        );
+        // Deny by default: a credential under a name nobody guessed is
+        // masked because it is not on the harmless list, not because
+        // "passkey" was foreseen.
+        assert_eq!(
+            mask_feed_url("https://idx.example/feed?passkey=zzz&r=abc&cat=tv"),
+            "https://idx.example/feed?passkey=***&r=***&cat=tv"
+        );
+        // Userinfo, and a key posing as a path segment.
+        assert_eq!(
+            mask_feed_url("https://u:pw@idx.example/rss/a1b2c3d4e5f60718/tv"),
+            "https://***@idx.example/rss/***/tv"
+        );
+        // A path segment that is a NAME, not a token: long enough, but
+        // no digit in it, so it reads.
+        assert_eq!(
+            mask_feed_url("https://idx.example/alt-binaries-teevee/rss"),
+            "https://idx.example/alt-binaries-teevee/rss"
+        );
+        // A url with nothing to hide comes back byte-identical, which is
+        // what lets `url_is_unchanged` treat "the same url" and "the
+        // mask of it" as one case.
+        for plain in [
+            "https://idx.example/rss",
+            "https://idx.example/rss?t=search&q=Some.Show.S01E01.1080p",
+            "",
+        ] {
+            assert_eq!(mask_feed_url(plain), plain, "nothing to mask in {plain}");
+        }
+        // Deterministic: the round-trip below depends on the same url
+        // masking to the same bytes every time.
+        let u = "https://idx.example/rss?apikey=k1&cat=5030#frag";
+        assert_eq!(mask_feed_url(u), mask_feed_url(u));
+        assert_eq!(
+            mask_feed_url(u),
+            "https://idx.example/rss?apikey=***&cat=5030#***"
+        );
+        // A scheme-less address is accepted by set_feeds, so it must
+        // mask too rather than fall through whole.
+        assert_eq!(
+            mask_feed_url("idx.example/rss?apikey=secret"),
+            "idx.example/rss?apikey=***"
+        );
+    }
+
+    /// The mask can never be mistaken for a url the user typed, which is
+    /// the whole basis of the merge in `set_feeds`.
+    #[test]
+    fn an_untouched_masked_url_reads_as_unchanged_and_a_new_one_does_not() {
+        let stored = "https://idx.example/rss?t=tvsearch&cat=5030&apikey=b8f3c1d9e7a24601";
+        assert!(url_is_unchanged(&mask_feed_url(stored), stored));
+        // The other spelling of the same thing, the one every other
+        // credential in the settings path already uses.
+        assert!(url_is_unchanged("", stored));
+        assert!(url_is_unchanged("   ", stored));
+        // A url the user actually retyped - including the same address
+        // with a NEW key, which must replace rather than be kept.
+        assert!(!url_is_unchanged(
+            "https://idx.example/rss?t=tvsearch&cat=5030&apikey=0000111122223333",
+            stored
+        ));
+        assert!(!url_is_unchanged("https://other.example/rss", stored));
+        // The half-edited mask: not the mask any more, so it reads as
+        // new here. `set_feeds` refuses it on the `***` marker rather
+        // than storing it - this is the case that guard exists for.
+        assert!(!url_is_unchanged(
+            "https://idx.example/rss?t=tvsearch&cat=5040&apikey=***",
+            stored
+        ));
+    }
+
+    /// The migration: a feeds list written before the id existed parses,
+    /// gets ids, and is otherwise untouched.
+    #[test]
+    fn feeds_written_before_the_id_existed_get_one_and_lose_nothing() {
+        let pre_id = r#"[{"url":"https://idx.example/rss?apikey=k1","interval_secs":600,
+            "category":"tv","rules":["Accept: *1080p*"]},
+            {"url":"https://idx.example/rss?apikey=k2"}]"#;
+        let mut list: Vec<FeedConfig> = serde_json::from_str(pre_id).expect("pre-id feeds parse");
+        assert!(list.iter().all(|f| f.id.is_empty()), "no ids on disk yet");
+        assert!(assign_feed_ids(&mut list), "the migration has work to do");
+        assert!(list.iter().all(|f| f.id.len() == 16), "{list:?}");
+        assert_ne!(list[0].id, list[1].id, "ids must be distinct");
+        // Lossless: everything else about the entries is what was on
+        // disk, defaults included.
+        assert_eq!(list[0].url, "https://idx.example/rss?apikey=k1");
+        assert_eq!(list[0].interval_secs, 600);
+        assert_eq!(list[0].category, "tv");
+        assert_eq!(list[0].rules, vec!["Accept: *1080p*".to_string()]);
+        assert_eq!(list[1].interval_secs, 900, "the default still applies");
+        // Idempotent: a second load has nothing to do, which is what
+        // stops the daemon rewriting settings.json at every start.
+        let ids: Vec<String> = list.iter().map(|f| f.id.clone()).collect();
+        assert!(!assign_feed_ids(&mut list), "second pass is a no-op");
+        assert_eq!(ids, list.iter().map(|f| f.id.clone()).collect::<Vec<_>>());
+        // A hand-edited config with two identical ids cannot be left
+        // alone: the merge key would restore one feed's url onto the
+        // other. The duplicate is re-minted.
+        let first = list[0].id.clone();
+        list[1].id = first;
+        assert!(assign_feed_ids(&mut list), "a duplicate is work");
+        assert_ne!(list[0].id, list[1].id);
+        assert_eq!(list[0].id, ids[0], "the FIRST one keeps its id");
     }
 }

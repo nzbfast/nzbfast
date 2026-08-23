@@ -106,10 +106,10 @@ impl Index {
                 AND r.files = 1
                 AND lower(f.filename) LIKE '%.nzb'
                 AND (CASE WHEN f.nsegs > 0 THEN f.nsegs
-                          ELSE json_array_length(f.segments) END) >= f.total_parts
+                          ELSE seg_count(f.segments) END) >= f.total_parts
               ORDER BY r.arrival_seq LIMIT ?2",
         )?;
-        let rows: Vec<(i64, i64, String, String, i64, String, i64)> = stmt
+        let rows: Vec<(i64, i64, String, String, i64, SegRaw, i64)> = stmt
             .query_map(rusqlite::params![after, limit as i64], |r| {
                 Ok((
                     r.get(0)?,
@@ -124,24 +124,27 @@ impl Index {
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, seq, stem, grp, junk, segjson, bytes)| {
-                // Stored as [[part, "<msgid>", bytes], ...]. A row that
-                // fails this shape is dropped AFTER the SQL LIMIT, and
-                // the caller reads an empty batch as "caught up" - so a
+            .filter_map(|(id, seq, stem, grp, junk, segraw, bytes)| {
+                // Stored as segcodec's compact form, or the older
+                // [[part, "<msgid>", bytes], ...] JSON. A row that fails
+                // both shapes is dropped AFTER the SQL LIMIT, and the
+                // caller reads an empty batch as "caught up" - so a
                 // silent drop right after the cursor is a silent
                 // permanent stall. Unreachable today (both writers
                 // serialize exactly this tuple); if schema drift ever
                 // makes it reachable, it must say so.
-                let segs: Vec<(u32, String, u64)> = match serde_json::from_str(&segjson) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "nzbimport",
-                            "release {id}: undecodable segments JSON ({e}) - candidate skipped"
-                        );
-                        return None;
-                    }
-                };
+                let segs: Vec<(u32, String, u64)> = if segcodec::is_encoded(&segraw.0) {
+                    segcodec::decode(&segraw.0)
+                } else {
+                    serde_json::from_slice(&segraw.0).ok()
+                }
+                .or_else(|| {
+                    tracing::warn!(
+                        target: "nzbimport",
+                        "release {id}: undecodable segments value - candidate skipped"
+                    );
+                    None
+                })?;
                 let mut segs: Vec<(u32, String)> =
                     segs.into_iter().map(|(n, id, _)| (n, id)).collect();
                 segs.sort_unstable_by_key(|(n, _)| *n);
@@ -238,22 +241,44 @@ impl Index {
                 ins.execute([id])?;
             }
         }
+        // The join used to be `json_each(f.segments)` in SQL; the
+        // compact form (segcodec) has no table-valued reader, so the
+        // walk decodes each row here instead. Same full scan of `files`
+        // as before - the statement was never indexed - and one row's
+        // list in memory at a time.
+        let wanted: std::collections::HashSet<&str> = msgids.iter().map(|s| s.as_str()).collect();
         let mut stmt = self.db.prepare(
-            "SELECT t.msgid, f.release_id, r.stem, r.have_parts
-               FROM files f, json_each(f.segments) je
-               JOIN temp.nzbimport_ids t ON t.msgid = json_extract(je.value, '$[1]')
-               JOIN releases r ON r.id = f.release_id",
+            "SELECT f.segments, f.release_id, r.stem, r.have_parts
+               FROM files f JOIN releases r ON r.id = f.release_id",
         )?;
-        let rows: Vec<MsgidRow> = stmt
-            .query_map([], |r| {
-                Ok(MsgidRow {
-                    msgid: r.get(0)?,
-                    release_id: r.get(1)?,
-                    stem: r.get(2)?,
-                    row_nsegs: r.get::<_, i64>(3)?.max(0) as u32,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut rows = Vec::new();
+        let mut q = stmt.query([])?;
+        while let Some(r) = q.next()? {
+            let segs = r.get::<_, SegList>(0)?.0;
+            let mut hit = false;
+            for (_, id, _) in &segs {
+                if wanted.contains(id.as_str()) {
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit {
+                continue;
+            }
+            let release_id: i64 = r.get(1)?;
+            let stem: String = r.get(2)?;
+            let row_nsegs = r.get::<_, i64>(3)?.max(0) as u32;
+            for (_, id, _) in segs {
+                if wanted.contains(id.as_str()) {
+                    rows.push(MsgidRow {
+                        msgid: id,
+                        release_id,
+                        stem: stem.clone(),
+                        row_nsegs,
+                    });
+                }
+            }
+        }
         let _ = self.db.execute("DELETE FROM nzbimport_ids", []);
         Ok(rows)
     }

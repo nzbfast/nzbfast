@@ -34,11 +34,22 @@ pub(super) fn os_open(path: &std::path::Path) -> bool {
     // paths derive from release names, which arrive in NZBs.
     #[cfg(windows)]
     let mut cmd = std::process::Command::new("explorer");
-    cmd.arg(path)
+    let opened = cmd
+        .arg(path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .is_ok()
+        .is_ok();
+    // On Windows that window opens BEHIND the browser the user clicked
+    // in, and only a foreground-lock bypass gets it in front (TODO 204,
+    // `winfront`). Folders only: the other caller here plays a media
+    // file, and the window that appears then belongs to whatever the
+    // user's default player is, with a title we cannot predict.
+    #[cfg(windows)]
+    if opened && path.is_dir() {
+        super::winfront::raise_folder_soon(path.to_path_buf());
+    }
+    opened
 }
 
 /// Can the daemon actually write into this directory? Shown next to the
@@ -158,7 +169,7 @@ pub(super) fn fs_roots(cur_download: &std::path::Path) -> Value {
         .unwrap_or_else(|| PathBuf::from("/"));
     // Mobile targets have no volume enumeration arm below: the app
     // sandbox is the whole visible filesystem, so `roots` never grows.
-    #[cfg_attr(any(target_os = "ios", target_os = "android"), allow(unused_mut))]
+    #[cfg_attr(any(target_os = "ios", target_os = "android"), expect(unused_mut))]
     let mut roots = vec![
         json!({"name": "Home", "path": home.to_string_lossy()}),
         json!({"name": "Current downloads", "path": cur_download.to_string_lossy()}),

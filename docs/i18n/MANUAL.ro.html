@@ -308,7 +308,12 @@ secundă. Cardurile, de sus în jos:</p>
 <h3>Bara de sus</h3>
 <ul>
 <li>Meniul <b>Limită de viteză</b> - plafoane fixe, <i>auto · cedează LAN-ului</i> (un mod guvernat de RTT
-care se retrage când altcineva din casă are nevoie de linie), sau nelimitat.</li>
+care se retrage când altcineva din casă are nevoie de linie), sau nelimitat.
+Valorile predefinite sunt numere rotunde pentru linii rotunde, iar un upload de
+37&nbsp;Mb/s nu e unul dintre ele: <b>personalizat…</b> îți cere cifra în schimb și
+acceptă tot ce acceptă API-ul (<code>25M</code>, <code>500K</code>, sau 0 pentru fără
+limită). Meniul afișează apoi <b>(personalizat)</b> cu viteza alături, până când alegi
+din nou o valoare predefinită sau <i>auto</i>.</li>
 <li><b>Pauză pentru…</b> - pune totul în pauză pentru 15&nbsp;min/30&nbsp;min/1&nbsp;h/3&nbsp;h cu
 reluare automată, sau folosește butonul Pauză pentru o pauză fără termen. Pauza este
 imediată: transferul activ se oprește în câteva secunde și se reia mai târziu din
@@ -347,6 +352,7 @@ blocuri verificate, cât a contribuit fiecare server la <em>acest</em> job și o
 conectată, API-ul…). Un buton <b>Descarcă fișierul .nzb</b> îți salvează fișierul
 <code>.nzb</code> al jobului - nzbfast păstrează propria copie, așa că funcționează
 pentru fiecare job, chiar și când fișierul original a dispărut demult.</li>
+<li><b>"De ce merge încet?"</b> Cât timp o descărcare rulează, linia de sub bara ei de progres poartă un verdict despre <em>acea</em> descărcare, nu despre mașină: <i>furnizorii tăi sunt limita</i>, <i>această mașină este la limita procesorului</i>, <i>stocarea nu ține pasul</i>, și așa mai departe. Dă clic pe el și rândul se deschide pe dovezi: ce poate linia ta, ce au livrat furnizorii, ce sosește acum și un tabel pe server unde un furnizor limitat se vede dintr-o privire. O descărcare la viteză maximă nu spune nimic aici, și nici una al cărei verdict încă se formează.</li>
 <li>Insignele arată stări speciale: <i>amânat (lent)</i>, <i>preîncărcare</i>,
 <i>în pauză</i> (vezi <a href="#performance">Instrumente de performanță</a>).</li>
 <li>Un grafic burn-down urmărește totalul de GB rămași în toată coada.</li>
@@ -375,7 +381,7 @@ parola și jobul se termină pe loc. Fâșia de sănătate a verificării trasea
 defecte per descărcare - o coadă în creștere înseamnă că articolele sosesc deteriorate.
 Sertarul fiecărui rând spune cine a adăugat jobul și are același buton
 <b>Descarcă fișierul .nzb</b> ca în coadă - util pentru a descărca un release din nou
-în altă parte, sau pentru a atașa fișierul <code>.nzb</code> la un raport de problemă.</p>
+în altă parte, sau pentru a atașa fișierul <code>.nzb</code> la un raport de problemă. Alături se află <b>Creează raport</b>, de obicei ce merită atașat: vezi <a href="#troubleshooting">Depanare</a>.</p>
 <p>Cardul listează implicit zece descărcări, iar restul sunt la un clic distanță, pe butonul ▤. Starea, locația și motivul pentru care un job a eșuat stau în spatele unui clic pe rândul însuși, astfel încât cazul obișnuit - ce s-a terminat, cât de mare, când - rămâne lizibil fără derulare. Trage în schimb de marginea de jos a cardului ca lista să deruleze la o înălțime aleasă de tine. <b>History rows</b> din Setări → Interfață schimbă acel zece; fiind o proprietate a daemonului și nu a browserului tău, se aplică fiecărui dispozitiv care se uită la această instalare. <b>Colour History names</b>, alături, colorează numele terminate în verde și pe cele eșuate în roșu; dezactivat, numele rămân neutre, iar punctul colorat și detaliile rândului spun în continuare care e care.</p>
 <p>nzbfast păstrează istoricul la nesfârșit, dacă nu spui altceva. <b>Curățarea
 istoricului</b> din Setări → Sistem elimină intrările vechi după două reguli
@@ -396,9 +402,11 @@ lungime numără fiecare intrare, indiferent cum s-a încheiat.</p>
 <h3 id="dash-layout">Aranjarea panoului</h3>
 <p>Panoul este al dumneavoastră, ca să îl aranjați. Patru operații, numite la fel oriunde
 le întâlniți: <b>Mută</b> un card, <b>Compactează</b>-l, <b>Redimensionează</b>-l sau
-<b>Ascunde</b>-l. Fiecare alegere este reținută de browserul în care ați făcut-o, așa că
-fiecare dispozitiv își păstrează propria aranjare, iar <b>Resetează aspectul</b> din Setări
-→ Interfață readuce fiecare card, dimensiune și coloană așa cum au venit.</p>
+<b>Ascunde</b>-l. Fiecare alegere este reținută de profilul de browser în care ați
+făcut-o: ordinea cardurilor și cele pe care le-ați ascuns se aplică la orice lățime a
+ferestrei în acel profil, în timp ce dimensiunile cardurilor și ale graficelor rămân doar
+pentru desktop. <b>Resetează aspectul</b> din Setări → Interfață readuce fiecare card,
+dimensiune și coloană așa cum au venit.</p>
 <p><b>Personalizează aspectul</b> este calea ghidată și cel mai rapid mod de a vedea ce
 poate face un card. Deschideți-l din legătura discretă chiar deasupra primului card sau din
 Setări → Interfață, unde este primul buton de pe rândul <b>Aspectul panoului</b>. Cât timp
@@ -422,12 +430,13 @@ cifre, mai puțin loc. Pe Istoric comută între cele mai recente zece descărc�
 istoricului dumneavoastră. <b>Mod compact</b> din Setări → Interfață face tot panoul
 dintr-o dată.</li>
 <li><b>Redimensionează.</b> Un card care ține o listă sau un grafic are o bară de-a lungul
-marginii de jos: trageți-o până la înălțimea dorită. Bara este ștearsă până când arătați
-spre card, când se desenează ca o linie subțire pe toată lățimea, cu striații în colțul din
-spate; primește și focalizarea de la tastatură, unde săgețile sus și jos stabilesc
-înălțimea, iar Shift face un pas mai mare. Care carduri au una se schimbă pe măsură ce
-cardurile capătă și pierd liste proprii: luați bara drept răspuns, nu vreo listă de aici. În
-<b>Personalizează aspectul</b>, cardurile fără bară o spun singure.</li>
+marginii de jos acolo unde aveți mouse sau touchpad: trageți-o până la înălțimea dorită.
+Un ecran tactil nu primește una. Bara este ștearsă până când arătați spre card, când se
+desenează ca o linie subțire pe toată lățimea, cu striații în colțul din spate; primește
+și focalizarea de la tastatură, unde săgețile sus și jos stabilesc înălțimea, iar Shift
+face un pas mai mare. Care carduri au una se schimbă pe măsură ce cardurile capătă și
+pierd liste proprii: luați bara drept răspuns, nu vreo listă de aici. În <b>Personalizează
+aspectul</b>, cardurile fără bară o spun singure.</li>
 <li><b>Ascunde.</b> Ultimul buton de pe rândul titlului ascunde acel card. Cardurile ascunse
 se adună într-o bară <b>Ascunse</b> la piciorul panoului; faceți clic pe un nume de acolo ca
 să aduceți unul înapoi.</li>
@@ -466,12 +475,14 @@ Shift cu o săgeată îl redimensionează.</p>
 <tr><th>Metodă</th><th>Cum</th></tr>
 <tr><td><b>Trage și plasează</b></td><td>Trage unul sau mai multe fișiere <code>.nzb</code> oriunde pe panou.</td></tr>
 <tr><td><b>Folder monitorizat</b></td><td>Setează un folder în Setări; orice <code>.nzb</code> salvat în el este
-preluat în 5 secunde și mutat la coșul de gunoi, iar un panou deschis anunță fiecare
+preluat de îndată ce ajunge și mutat la coșul de gunoi, iar un panou deschis anunță fiecare
 preluare pe nume ("… preluat din Downloads"), astfel încât un fișier care dispare din
 folder nu e niciodată un mister. Preferi să-ți păstrezi fișierele? Activează
 <b>Păstrează fișierele .nzb după preluare</b> (vezi <a href="#settings">§9</a>).
 Îndreaptă directorul de descărcări al browserului tău
-spre el pentru preluări cu un singur clic de pe site-urile de indexer.</td></tr>
+spre el pentru preluări cu un singur clic de pe site-urile de indexer. Subdosarele, fișierele care se dovedesc a nu fi NZB și intervalul de reverificare
+de care are nevoie un dosar aflat pe o partajare de rețea au fiecare comutatorul lor;
+vezi <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Dintr-un URL</b></td><td>Lipește un link NZB (API <code>mode=addurl</code>, sau prin orice aplicație conectată).</td></tr>
 <tr><td><b>Legături nzblnk:</b></td><td>Lipește o legătură <code>nzblnk:</code> oriunde pe panou, sau trage-o înăuntru. Dacă ai instalat din DMG-ul macOS sau din instalatorul Windows, poți și să dai clic pe una direct pe un board. Vezi <a href="#nzblnk">legăturile nzblnk</a> mai jos.</td></tr>
 <tr><td><b>Răsfoiește indexul</b></td><td>Dă clic pe orice release complet din cardul Răsfoiește.</td></tr>
@@ -585,11 +596,27 @@ mic încape mai mult pe ecran, mare mai puțin.</li>
 cursorul pe un rând pentru poster și rezumat, toate din propriul tău index.</li>
 <li><b>Grupează după titlu</b>, comutatorul de alături: un rând per titlu, cu
 release-urile dedesubt. Deschide-l cu <b>&#9656;</b> sau apăsând rândul; caseta de pe
-titlu selectează release-urile afișate. Gruparea este doar pentru <b>Acest
-index</b>.</li>
-<li><b>File</b> pentru Filme / Seriale / Altele, căutare instantanee și șapte
-sortări: <b>Pentru tine</b>, Cele mai noi postări, Anul apariției, Cele mai bine cotate,
-Titlu A–Z, Cele mai mari și Cele mai postate.</li>
+titlu selectează release-urile afișate. Gruparea este doar pentru <b>Acest index</b>;
+alegi <b>Indexere</b> sau <b>Ambele</b> și tabelul redevine plat, și o spune.</li>
+<li><b>Fiecare release al unui titlu</b> apare când îi deschizi fișa, cu rezoluția,
+codecul, formatul audio și gama dinamică (Dolby Vision, HDR10) citite din numele
+release-ului, plus mărimea, vechimea și dacă fiecare parte mai este la furnizorul tău.
+Setează <b>Versiunea preferată</b> în Setări → Organizare → Indexare și cele care se
+potrivesc urcă în frunte, cu un semn <b>cea mai bună potrivire</b> și etichetele
+potrivite evidențiate. Nu se ascunde nimic: numele de release omit tot timpul aceste
+etichete, așa că o preferință schimbă doar ordinea. Tot ea decide la ce encodare urcă
+urmărirea.</li>
+<li><b>File</b> pentru Filme / Seriale / Altele, căutare instantanee și șapte sortări:
+<b>Pentru tine</b>, Cele mai noi postări, Data lansării, Cele mai bine cotate, Titlu
+A–Z, Cele mai mari și Cele mai postate. Butonul <b>↓</b> de lângă sortare o
+inversează, așa că fiecare merge și în sens invers (cele mai vechi, cele mai mici,
+cele mai slab cotate, Z–A).</li>
+<li><b>Data lansării</b> este lansarea originală sau prima difuzare, la zi acolo unde
+furnizorul de metadate ne-a dat una: răspunde la „ce a apărut cu adevărat săptămâna
+asta”, lucru pe care Cele mai noi postări nu îl poate face (aceea e data încărcării,
+iar repostarea unui film de treizeci de ani ajunge acolo în frunte). Titlurile
+îmbogățite înainte ca asta să existe, sau al căror furnizor nu avea o dată, cad înapoi
+pe anul lor până le reîmprospătezi metadatele.</li>
 <li><b>Doar potrivite</b> este activ implicit, ascunzând gunoiul neidentificat; o insignă „+N nepotrivite”
 îl dezvăluie.</li>
 <li>Dă clic pe o placă pentru fișa de detalii: sinopsis, notă și voturi IMDb, distribuție -
@@ -764,7 +791,7 @@ făcută aici este salvată în <code>settings.json</code> și supraviețuiește
 <h3>Viteză și programare <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Setare</th><th>Ce face</th></tr>
-<tr><td>Limită de viteză</td><td>Plafon în octeți/sec (<code>50M</code>, <code>1G</code>, 0 = nelimitat). Aplicațiile la distanță pot trimite procentaje - setează <i>Viteza liniei</i> ca ele să se traducă corect.</td></tr>
+<tr><td>Limită de viteză</td><td>Plafon în octeți/sec (<code>50M</code>, <code>1G</code>, 0 = nelimitat). Aplicațiile la distanță pot trimite procentaje - setează <i>Viteza liniei</i> ca ele să se traducă corect. Intrarea <b>personalizat…</b> din antet setează același plafon fără a deschide Setările.</td></tr>
 <tr><td>Viteză automată</td><td>Plafon guvernat de RTT care cedează celuilalt trafic din casă și se reextinde când linia e liniștită.</td></tr>
 <tr><td>Amână automat descărcările lente</td><td>Un job blocat pe un singur server lent în timp ce altele așteaptă este mutat la coada cozii (progresul e păstrat). Vezi <a href="#performance">§13</a>.</td></tr>
 <tr><td>Preîncărcare pe serverele inactive</td><td>Serverele inutile pentru jobul activ pornesc următorul job din coadă. Vezi <a href="#performance">§13</a>.</td></tr>
@@ -810,6 +837,16 @@ este ceva obișnuit pe Usenet, iar nzbfast urmează lanțul fără o a doua trec
 limită, arhiva cea mai adâncă este pur și simplu lăsată pe loc, nedezarhivată, iar
 descărcarea se finalizează oricum. Mărește valoarea doar pentru release-uri neobișnuit
 de adânci.</p>
+<p><b>Permisiunile descărcărilor terminate</b> (o setare avansată) este un umask, același număr
+folosit de Docker și de ghidurile de instalare: <code>002</code> dă 775 folderelor și 664
+fișierelor, <code>022</code> dă 755 și 644. Gol este valoarea implicită și nu schimbă
+nimic. Setează-l când Sonarr sau Radarr rulează ca alt utilizator din același grup și nu
+pot citi sau importa ce ajunge aici: pe o instalare systemd de obicei nu pot, fiindcă unitatea ține tot
+ce scrie serviciul accesibil doar proprietarului, ca să protejeze cheia API. Permisiunile se aplică
+după ce o sarcină terminată nu se mai mută, pe folderul sarcinii, pe tot ce e în el
+și pe folderele dintre el și folderul de descărcări, fiindcă importul prin redenumire
+cere drept de scriere pe folderul din care se redenumește. Ignorat pe Windows, care nu are așa
+ceva.</p>
 
 <h3>Redenumire automată și curățare <span class="pill live">live</span></h3>
 <p><b>Redenumește descărcările finalizate</b> (activată implicit) dă folderului și
@@ -867,6 +904,27 @@ descărcare face probleme. Un fișier păstrat este ținut minte, inclusiv peste
 ai alege, sertarul fiecărui job are un buton <b>Descarcă fișierul .nzb</b>, așa că o
 copie a fișierului <code>.nzb</code> al oricărui job nu e niciodată la mai mult de un
 clic distanță.</p>
+<p><b>Scanează și subdosarele</b> (dezactivat implicit) preia fișiere și din
+dosarele aflate în interiorul folderului monitorizat, iar numele primului subdosar
+devine categoria descărcării: un fișier pus în <code>watch/tv</code> intră în categoria
+tv. E cel mai rapid mod de a sorta preluările fără a atinge panoul - îndreaptă un
+semn de carte al browserului spre <code>watch/tv</code> și altul spre
+<code>watch/movies</code>, iar clasarea e gata încă de la intrare. Un dosar numit
+<code>rejected</code> e singura excepție și e lăsat mereu în pace.</p>
+<p><b>Pune deoparte fișierele nefolosibile</b> (dezactivat implicit) mută tot ce nu e un
+NZB utilizabil într-un dosar <code>rejected</code> din interiorul folderului
+monitorizat, cu un mic fișier text alături care spune ce n-a mers. Merită ținut pornit
+pentru un dosar în care salvează browserul tău, unde o pagină de autentificare sau una
+de eroare poate ajunge cu un nume <code>.nzb</code>. Dezactivat, fișierul rămâne unde
+l-ai pus, iar motivul e arătat deasupra cozii. Un fișier care doar pare incomplet e
+lăsat pe loc în ambele cazuri, fiindcă s-ar putea să fie încă în curs de sosire.</p>
+<p><b>Reverifică dosarul la fiecare</b> (o setare avansată) e o plasă de siguranță și
+nimic mai mult, deci nu e butonul care face preluările rapide. Un fișier lăsat pe
+această mașină e observat în clipa în care aterizează, fiindcă sistemul o spune; acest
+interval acoperă doar dosarele despre care sistemul nu poate raporta, ceea ce în practică
+înseamnă o partajare de rețea scrisă de pe alt calculator. În secunde, de la 1 la 3600,
+implicit 5. Coboară-l dacă preluările de pe o partajare par întârziate, ridică-l dacă
+reverificările nu merită traficul pe o legătură lentă.</p>
 
 <h3 id="set-indexers">Caută pe indexere <span class="pill live">live</span></h3>
 <p>Conturile tale pe site-uri indexer de NZB, câte un rând fiecare, ca o căutare de pe
@@ -1010,7 +1068,12 @@ spune de ce.</p>
 <h3>Evenimente de ciclu de viață și webhook-uri semnate</h3>
 <p>Fiecare etapă a unui job este un eveniment versionat: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, plus
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(o reîncercare automată a repus în coadă o descărcare eșuată) și
+<code>job.delete_kept</code> (o ștergere a înlăturat înregistrarea, dar nu i-a
+putut înlătura fișierele), plus <code>watch.picked</code> (un .nzb a fost luat din
+folderul urmărit), <code>watchlist.upgraded</code> (o îmbunătățire din lista de
+urmărire a reușit, iar copia înlocuită a fost ștearsă),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> și <code>quota.reached</code>. Fiecare poartă
 <code>schema_version</code> (acum 1; chei noi pot apărea fără o incrementare -
@@ -1064,6 +1127,12 @@ se comportă toate cum se așteaptă *arr-urile.</p>
 <li>nzbfast servește interogările <code>caps</code>, <code>search</code>, <code>tvsearch</code> și
 <code>movie</code> din propriul index al grupurilor tale urmărite, iar
 <code>/getnzb/&lt;id&gt;</code> returnează NZB-ul.</li>
+<li>Căutările pot fi după nume sau după id: serialele acceptă un id TVDB, IMDb sau
+TVmaze, filmele un id IMDb sau TMDB, iar aplicația citește din <code>caps</code> care
+anume. Id-urile TVDB sunt oferite abia după ce indexul le-a adunat, ceea ce se
+întâmplă singur, în fundal. Un id pentru care nu avem nimic primește un rezultat gol,
+iar un id pe care nu îl putem rezolva deloc este refuzat pe nume: niciunul nu primește
+vreodată o listă de release-uri fără legătură.</li>
 </ol>
 <div class="note"><b>Pornește mai întâi indexatorul încorporat</b> (Setări → Indexare).
 Este oprit implicit, iar cât timp este oprit această fațadă răspunde la orice
@@ -1085,8 +1154,14 @@ aplicație de mobil/tabletă funcționează. Alege protocolul pe care îl accept
 <tr><td>Nume de utilizator</td><td>orice (ex. <code>nzbfast</code>)</td></tr>
 <tr><td>Parolă</td><td><b>cheia ta API</b></td></tr>
 </table></div>
-<p>Întreaga suprafață JSON-RPC folosită de aceste aplicații este servită: stare, coadă cu
-reordonare/pauză/ștergere, istoric, adăugare-NZB, limită de viteză, pauză/reluare, jurnal.</p>
+<p>Întreaga suprafață JSON-RPC folosită de aceste aplicații este servită: stare, coadă
+cu reordonare/redenumire/pauză/ștergere, istoric, adăugare-NZB (fișier sau URL),
+limită de viteză, pauză/reluare, jurnal. Datele de acces pot călători și în adresă,
+forma <code>http://user:apikey@host:6789/</code> proprie NZBGet, pe care o trimite
+LunaSea.</p>
+<p><b>Utilizatorii nzb360:</b> adaugă nzbfast ca server <b>SABnzbd</b> (secțiunea
+următoare). nzb360 vorbește cu un NZBGet real prin XML-RPC, pe care nzbfast nu îl
+servește, deci modul lui NZBGet nu se poate conecta.</p>
 <h3>Aplicații care vorbesc SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Câmpul din aplicație</th><th>Valoare</th></tr>
@@ -1385,7 +1460,7 @@ sau oriunde arată <code>--config</code> / <code>$NZBFAST_CONFIG</code>.</td></t
 <h2 id="troubleshooting">18 · Depanare</h2>
 <div class="tblwrap"><table>
 <tr><th>Simptom</th><th>Verificare</th></tr>
-<tr><td>Descărcări lente</td><td>Rulează <b>Benchmark de sistem</b> - numește strangularea direct. Dacă e rețeaua: rulează <b>Reglarea conexiunilor</b>, verifică numărul de conexiuni per server și confirmă că providerii tăi nu sunt toți un singur backbone (<b>Diversitatea serverelor</b>).</td></tr>
+<tr><td>Descărcări lente</td><td>Întreabă mai întâi descărcarea însăși: cât rulează, linia de sub bara ei de progres numește stratul care ține <i>această</i> descărcare pe loc, iar un clic pe verdict deschide rândul pe dovezile lui (vezi <a href="#dash-queue">Coadă</a>). Rulează <b>Benchmark de sistem</b> - numește strangularea direct. Dacă e rețeaua: rulează <b>Reglarea conexiunilor</b>, verifică numărul de conexiuni per server și confirmă că providerii tăi nu sunt toți un singur backbone (<b>Diversitatea serverelor</b>).</td></tr>
 <tr><td>Lent doar la joburi foarte mari<br>(NAS sau mașină cu RAM redus)</td><td>De așteptat și măsurabil: un buget de memorie înfometat face spill cache-urilor pe disc și costă 20–40% peste ~87 GB. Vezi <a href="#memory">Buget de memorie</a> pentru cifre și câtă memorie să-i dai. Joburile mai mici nu sunt afectate.</td></tr>
 <tr><td>Descărcarea eșuează cu „articole lipsă”</td><td>Postarea a expirat sau a fost retrasă la providerii tăi. Un al doilea provider pe un backbone diferit salvează majoritatea acestora. <code>nzbfast check</code> prezice asta înainte de descărcare. Iar peretele semnalează din timp release-urile probabil dispărute prin
 punctul său de disponibilitate (<a href="#oracle">§13</a>). Un prim eșec de acest fel se
@@ -1403,7 +1478,7 @@ reia singur o dată după o așteptare, fiindcă întârzierea de propagare arat
 <tr><td>Daemonul nu pornește: portul e ocupat</td><td>Rulează altă instanță - sau schimbă <code>--port</code>.</td></tr>
 <tr><td>Unde sunt jurnalele?</td><td>Cardul Jurnal din panou sau terminalul/fișierul de jurnal cu care ai lansat <code>serve</code>.</td></tr>
 </table></div>
-<div class="note"><b>Tot blocat?</b>Cardul Jurnal numește de obicei vinovatul -
+<div class="note"><b>Tot blocat?</b>Pentru o problemă la o singură descărcare, folosește <b>Creează raport</b>: se află în sertarul acelei sarcini din coadă cât timp rulează, iar apoi în sertarul ei din istoric. Copiază tot despre acea singură descărcare, inclusiv doar liniile ei de jurnal, nu ale întregului serviciu. Numele de utilizator, parolele și cheile API nu sunt niciodată citite, iar dosarul tău personal este scris ca <code>~</code>. Cardul Jurnal numește de obicei vinovatul -
 include coada lui când raportezi o problemă, împreună cu
 <code>nzbfast --version</code>.</div>
 

@@ -6,6 +6,34 @@
 use super::*;
 use crate::rar::fixtures;
 
+/// Run `ex.finish()` under a hard wall-clock deadline (a BELT, not the
+/// fix): a demote that joins a chase worker parked on a hole used to
+/// wedge forever (TODO 255), and a test with no deadline turns that into
+/// a sweep that never ends and names nothing. The fix is the finish-time
+/// seal in [`SevenZSet::seal_parts`]; this only makes a regression FAIL
+/// fast instead of hanging. `finish()` runs on a helper thread so the
+/// test thread can time it out and panic with a legible message; on the
+/// happy path it returns in well under a second.
+pub(super) fn finish_within(ex: &Arc<Extractor>, secs: u64) -> io::Result<ExtractReport> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let e = Arc::clone(ex);
+    std::thread::spawn(move || {
+        let _ = tx.send(e.finish());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(v) => v,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!(
+                "ex.finish() did not return within {secs}s - a chase worker is wedged (TODO 255)"
+            )
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("the finish() helper thread panicked - its own assertion is the failure")
+        }
+    }
+}
+
 pub(super) fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nzbfast-extract-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -79,7 +107,16 @@ pub(super) fn feed(ex: &Extractor, slot: usize, name: &str, vol: &[u8], art: usi
 /// is not what a drop-behind test is trying to measure. Real downloads
 /// arrive at wire speed against a decoder that keeps up; this is that, in
 /// a test, and it waits on the engine's own progress rather than a sleep.
-/// Returns the trimmed-byte count at the end of the feed.
+/// Returns the trimmed-byte count at the end of the feed. The wait has a
+/// 30 s per-volume deadline so a wedged engine cannot hang the suite,
+/// and when it expires the feed proceeds anyway - and from there
+/// the case measures the runaway-feed shape, not the paced one, and
+/// whatever it asserts next passes or fails for a reason the failure text
+/// cannot show. So an expiry is never silent: it prints one line naming
+/// the volume, the consumed count and the lead, and bumps
+/// [`paced_deadline_expiries`] for a case that wants to assert on it. It
+/// is deliberately NOT a hard failure here: on a loaded runner that would
+/// turn contention into a red gate (see `.config/nextest.toml`).
 pub(super) fn feed_chase_volumes_paced(
     ex: &Extractor,
     names: &[String],
@@ -92,15 +129,37 @@ pub(super) fn feed_chase_volumes_paced(
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         // The engine can only declare volume k finished once k+1 has
         // arrived and parsed, so it is always at least one behind.
-        while index >= lead
-            && ex.chase_consumed_volumes() + lead <= index
-            && ex.chase_retained_bytes() > 0
-            && std::time::Instant::now() < deadline
-        {
+        let lagging = || {
+            index >= lead
+                && ex.chase_consumed_volumes() + lead <= index
+                && ex.chase_retained_bytes() > 0
+        };
+        while lagging() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if lagging() {
+            PACED_EXPIRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            eprintln!(
+                "PACED FEED DEADLINE EXPIRED: volume {index} fed but engine consumed only {} \
+                 volumes (lead {lead}, retained {} bytes) after 30 s - the rest of this case \
+                 measures a runaway feed, not the paced shape it was written for",
+                ex.chase_consumed_volumes(),
+                ex.chase_retained_bytes()
+            );
         }
     }
     ex.chase_trimmed_bytes()
+}
+
+static PACED_EXPIRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Process-wide count of `feed_chase_volumes_paced` deadline expiries so
+/// far. Read it before and after a feed to learn whether THAT feed ran
+/// paced; a case that needs the paced shape can skip or soften its
+/// assertion when the delta is non-zero, rather than failing on a loaded
+/// box for a reason its output does not show.
+pub(super) fn paced_deadline_expiries() -> usize {
+    PACED_EXPIRIES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Uniform single-file RAR5 STORE set for the arithmetic-gate tests
@@ -177,15 +236,6 @@ pub(super) fn shape_of(ex: &Extractor) -> Vec<&'static str> {
     ex.archive_shape()
         .map(|s| s.tokens().to_vec())
         .unwrap_or_default()
-}
-
-pub(super) fn leftover_scratch(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(DEC_TMP_PREFIX))
-        .collect()
 }
 
 pub(super) fn dir_files(dir: &Path) -> Vec<String> {
@@ -474,6 +524,35 @@ pub(super) fn split_7z(arch: &[u8], n: usize) -> Vec<Vec<u8>> {
     arch.chunks(part).map(|c| c.to_vec()).collect()
 }
 
+/// How far the nested child's RAR chase has READ its first chased
+/// volume, in child-volume offsets - the served line a rewrite is
+/// judged against. None while the child has no chase yet.
+pub(super) fn child_chase_served(ex: &Extractor) -> Option<u64> {
+    let child = ex.inner.lock().unwrap().child.clone()?;
+    let ci = child.inner.lock().unwrap();
+    ci.slots
+        .iter()
+        .find_map(|s| s.chase.as_ref().map(|c| c.buf.served()))
+}
+
+/// Block until the child chase has read at least `min` bytes of its
+/// volume, or `timeout` passes (then panic - the test's premise is that
+/// the decode reaches that point on its own).
+pub(super) fn wait_child_chase_served(ex: &Extractor, min: u64, timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if child_chase_served(ex).is_some_and(|s| s >= min) {
+            return;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "child chase never read past {min}: served {:?}",
+            child_chase_served(ex)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// A chased slot's live 7z control, for the trim tests.
 pub(super) fn sevenz_ctl(ex: &Extractor, slot: usize) -> Option<Arc<SevenZCtl>> {
     ex.inner.lock().unwrap().slots[slot].sevenz.clone()
@@ -557,4 +636,79 @@ pub(super) fn feed_paced_tail_first(
         }
     }
     high_base
+}
+
+/// The invariant every held-bytes-cap forfeit has to hold, whether or
+/// not the decode had committed anything by the time it fired.
+///
+/// Here rather than in `chase_tests` (where it started) because both
+/// container families now write this ledger: the RAR forfeit through
+/// `chase_teardown`, the 7z and zip one through `sevenz_teardown_sinks`
+/// (TODO 213 item 2). Two spellings of it could drift, and the drift
+/// this exists to catch is exactly the two arms disagreeing on what a
+/// trustworthy prefix is.
+///
+/// A cap forfeit KEEPS its in-stream output for the disk pass to resume
+/// from (`ResumeOutput`), so "no partial survived" is no longer the
+/// test. What replaces it is stricter, and holds either way:
+///
+/// - a member with no mark leaves NO file behind, exactly as before;
+/// - a member with a mark leaves a file of exactly that length, whose
+///   bytes are a true prefix of the payload.
+///
+/// Deliberately not "there must be a mark": whether the engine has
+/// flushed its first megabyte before the breach depends on how fast the
+/// box is decoding against how fast the test feeds, and a suite that
+/// asserted the mark exists would be asserting the load on the machine.
+/// The 21 Aug ladder measured the field case (~3.3 GiB committed before
+/// the forfeit at 250 MB/s); what a test can pin is that the mark never
+/// lies.
+pub(super) fn assert_resume_ledger_honest(
+    dir: &Path,
+    member: &str,
+    rep: &ExtractReport,
+    payload: &[u8],
+) {
+    for r in &rep.resume_outputs {
+        let kept = std::fs::read(&r.path).unwrap_or_else(|e| {
+            panic!(
+                "the ledger names {} and it is not readable: {e}",
+                r.path.display()
+            )
+        });
+        assert_eq!(
+            kept.len() as u64,
+            r.len,
+            "{} must be cut to the mark, not left preallocated",
+            r.path.display()
+        );
+        assert!(r.len > 0, "a zero-length mark must not be reported");
+        assert_eq!(
+            &kept[..],
+            &payload[..r.len as usize],
+            "the kept prefix of {} is not the payload's",
+            r.path.display()
+        );
+        // TODO 217: the mark carries the checksum the disk pass will
+        // verify the re-decode against, and it must be the checksum of
+        // exactly the kept bytes - a ledger whose hash does not match
+        // its own file would refuse every honest resume (or worse,
+        // accept a dishonest one it happened to collide with).
+        assert_eq!(
+            r.crc32,
+            crc32fast::hash(&kept),
+            "the recorded crc32 of {} is not the crc of the kept prefix",
+            r.path.display()
+        );
+    }
+    if rep.resume_outputs.is_empty() {
+        // `member` rather than a hard-coded fixture name: all three
+        // callers happen to post an "F.bin" today, and a helper that
+        // knows that is a helper the next caller has to read before
+        // trusting.
+        assert!(
+            !dir.join(member).exists(),
+            "a partial with no mark must not be left in the output directory"
+        );
+    }
 }

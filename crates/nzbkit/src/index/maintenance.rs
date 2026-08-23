@@ -29,11 +29,11 @@ struct ShatterMember {
 /// Escape for XML - and DROP what XML 1.0 cannot carry at all.
 ///
 /// The emitted NZB's `poster=` is the raw OVER `From:` header and
-/// `subject=`/filename come from the article, so a single C0 control
-/// byte makes `/getnzb/<id>.nzb` unparseable to whatever consumes it -
+/// `subject=`/filename come from the article, so a single C0 control byte
+/// makes `/getnzb/<id>.nzb` unparseable to whatever consumes it -
 /// SABnzbd/expat, NZBGet/libxml2, any XML tooling. Escaping cannot help:
 /// `&#1;` is illegal too, and emitting one breaks our own quick-xml
-/// reader. See the twin `esc_xml` in nzbfast's serve.rs.
+/// reader. See the twin `esc_xml` in nzbfast's serve/sabcompat.rs.
 fn xml_escape(s: &str) -> String {
     let clean: String = s
         .chars()
@@ -160,12 +160,11 @@ impl Index {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, u32>(1)?,
-                r.get::<_, String>(2)?,
+                r.get::<_, SegList>(2)?.0,
             ))
         })?;
         for row in rows {
-            let (fname, total, seg_json) = row?;
-            let segs: Vec<(u32, String, u64)> = serde_json::from_str(&seg_json).unwrap_or_default();
+            let (fname, total, segs) = row?;
             // date carries the release's real post time: the pool's
             // retention routing and the availability ledger's age
             // buckets both key off it (date="0" recorded every
@@ -221,7 +220,8 @@ impl Index {
             n += tx.execute(
                 "DELETE FROM releases WHERE total_bytes < ?1 AND NOT EXISTS (
                      SELECT 1 FROM files WHERE release_id = releases.id
-                     AND json_array_length(segments) < total_parts)",
+                     AND (CASE WHEN nsegs > 0 THEN nsegs
+                               ELSE seg_count(segments) END) < total_parts)",
                 [min as i64],
             )?;
         }
@@ -600,7 +600,7 @@ impl Index {
         // containment, so a fold that dropped a member's range left the
         // folded set's sidecar unable to find its payload. Read BEFORE
         // the members are deleted.
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let (pmin, pmax, pck, sidx, stot): (
             Option<i64>,
             Option<i64>,
@@ -640,7 +640,7 @@ impl Index {
                     vcodec=?16, acodec=?17, hdr=?18,
                     pesto_ctr_min=?19, pesto_ctr_max=?20, pesto_clock=?21,
                     sess_idx=?22, sess_total=?23,
-                    nfiles_complete=?24, nfiles_exe=?25
+                    nfiles_complete=?24, nfiles_exe=?25, stem_fold=?26
               WHERE id=?1",
             rusqlite::params![
                 keep,
@@ -667,7 +667,15 @@ impl Index {
                 sidx,
                 stot,
                 agg.ncomplete,
-                agg.nexe
+                agg.nexe,
+                // The stem rewrite carries its fold with it. Leaving
+                // this out kept the FRAGMENT's fold on the merged row,
+                // so the LIKE arms in query.rs and browse.rs searched a
+                // stem the row no longer wears. `fold::stored` is
+                // sparse - "" for anything SQLite's own LOWER() would
+                // compute identically - and that empty value is exactly
+                // what those arms read as "no stored fold here".
+                super::fold::stored(base)
             ],
         )?;
         // rel_fts has no UPDATE trigger (external-content over stems),
@@ -945,7 +953,7 @@ impl Index {
         // keys on counter-range containment, so dropping the twin's
         // range would leave the folded set's sidecar unable to find its
         // payload. Read BEFORE the twin's row is deleted.
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let (pmin, pmax, pck, sidx, stot): (
             Option<i64>,
             Option<i64>,
@@ -1022,11 +1030,12 @@ impl Index {
     /// (`junk>=70`, unnamed, and the stem fails
     /// `release::stem_is_a_name` - the ONE shared verdict), a
     /// single-file row, carry a real subject part total, and agree on
-    /// that total; the stem must be at least [`SHATTER_MIN_STEM`]
-    /// chars so a generic readable-ish token ("1917", "Subs") can
-    /// never bridge two posters' unrelated files. Members' one-file
-    /// segment lists are UNIONED by part number (all rows share the
-    /// filename, so repointing rows would silently drop segments).
+    /// that total; the stem must be at least 16 chars (`LENGTH(stem)
+    /// >= 16` in the statement below) so a generic readable-ish token
+    /// ("1917", "Subs") can never bridge two posters' unrelated files.
+    /// Members' one-file segment lists are UNIONED by part number (all
+    /// rows share the filename, so repointing rows would silently drop
+    /// segments).
     ///
     /// Like `par2_sidecar_fold` this can never finish for good -
     /// ingest keeps shattering new postings - so the cursor parks at
@@ -1367,17 +1376,15 @@ impl Index {
             for id in ids {
                 let Some((tp, segs)) = stmt
                     .query_row(rusqlite::params![id, fname], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, SegList>(1)?.0))
                     })
                     .optional()?
                 else {
                     continue;
                 };
                 total_parts = total_parts.max(tp);
-                if let Ok(v) = serde_json::from_str::<Vec<(u32, String, u64)>>(&segs) {
-                    for (n, id, b) in v {
-                        merged.entry(n).or_insert((id, b));
-                    }
+                for (n, id, b) in segs {
+                    merged.entry(n).or_insert((id, b));
                 }
             }
         }
@@ -1385,13 +1392,12 @@ impl Index {
             return Ok(0);
         }
         let bytes: u64 = merged.values().map(|v| v.1).sum();
-        let seg_json = serde_json::to_string(
+        let seg_blob = segcodec::encode(
             &merged
                 .iter()
                 .map(|(n, (id, b))| (*n, id.clone(), *b))
                 .collect::<Vec<_>>(),
-        )
-        .unwrap();
+        );
         let nsegs = merged.len() as i64;
         let list = others
             .iter()
@@ -1402,7 +1408,7 @@ impl Index {
         // Merge the pesto counter range BEFORE the source rows die -
         // aggregate MIN/MAX ignore NULLs, matching ingest's monotonic
         // merge rule.
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let (pmin, pmax, pck, sidx, stot): (
             Option<i64>,
             Option<i64>,
@@ -1431,7 +1437,7 @@ impl Index {
                 keep,
                 total_parts.max(need),
                 bytes as i64,
-                seg_json,
+                seg_blob,
                 nsegs,
                 fname
             ],
@@ -1657,7 +1663,8 @@ impl Index {
                        AND title_key NOT IN (SELECT key FROM wall_hidden)
                        AND EXISTS (SELECT 1 FROM files f
                                    WHERE f.release_id = releases.id
-                                     AND json_array_length(f.segments) < f.total_parts)",
+                                     AND (CASE WHEN f.nsegs > 0 THEN f.nsegs
+                                               ELSE seg_count(f.segments) END) < f.total_parts)",
                 )?;
                 stmt.query_map([cursor, hi, cutoff], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?
@@ -1873,12 +1880,22 @@ impl Index {
     ///
     /// `analysis_limit` is what makes this affordable to run on a
     /// schedule: statistics are gathered from a bounded sample per index
-    /// rather than a full pass, which is approximate and entirely good
-    /// enough to get the join order right. `PRAGMA optimize` then does
+    /// rather than a full pass. `PRAGMA optimize` then does
     /// nothing at all on the passes where nothing has changed enough to
     /// matter - but it only reconsiders tables this connection has
     /// queried, so a database with no statistics AT ALL gets a plain
     /// ANALYZE (still under the sample limit) to guarantee a first set.
+    ///
+    /// It is the FIRST set, not the right one, and this function is no
+    /// longer the whole story. The sampled numbers are 24x to 5,554x low
+    /// on a real index and carry no STAT4 samples at all, which costs
+    /// one measured plan; the measurement, what it steers and what fixes
+    /// it are in [`Self::shallow_stat_index`], and the daemon deepens
+    /// one index per maintenance pass on top of this. Nothing here
+    /// changes: a cheap pass that lands a usable set in seconds on a
+    /// fresh install is still the right first move, and the deep leg is
+    /// built to repair what this leaves behind rather than to replace
+    /// it.
     ///
     /// Slow on the first run against a big unanalyzed database (~3
     /// minutes on the 45 GB live index) and it holds the write
@@ -1896,6 +1913,104 @@ impl Index {
         } else {
             self.db.execute_batch("ANALYZE")
         }
+    }
+
+    /// TODO 198 tail: the next index whose statistics are still a
+    /// SAMPLE rather than a measurement, biggest first - or `None` once
+    /// every index in this database has been measured properly.
+    ///
+    /// `PRAGMA analysis_limit=1000` above does two things, and only one
+    /// of them is the approximation its own documentation describes.
+    ///
+    /// The documented half: the per-value estimates in `sqlite_stat1`
+    /// are computed from the rows ANALYZE visited rather than from the
+    /// index, so they are capped near the limit. Measured 22 Aug 2026 on
+    /// a 33,359,631-release / 51 GB index, `idx_rel_kind` records
+    /// **1001** rows per `kind` value against a true **5,559,939** - a
+    /// 5,554x under-count - and it is not one index's problem: every
+    /// index on `releases` comes back 24x to 109x low (`idx_rel_stem`
+    /// 1 against 26, `idx_rel_seen` 23 against 2502, `idx_rel_posted` 2
+    /// against 99).
+    ///
+    /// The undocumented half, and the one that decides the shape of this
+    /// function: ANY non-zero limit turns STAT4 off entirely. In
+    /// `analyze.c` the sample budget is `p->mxSample = p->nLimit==0 ?
+    /// mxSample : 0`, so a limited pass writes NO `sqlite_stat4` rows at
+    /// all and the planner loses every per-value histogram - the thing
+    /// that would tell it `kind='movie'` (5.6M rows) from `kind='tv'`
+    /// (31k). That is also what makes the probe below exact rather than
+    /// a heuristic: 24 samples per index is what a full pass leaves and
+    /// zero is what a limited one leaves, so "has no `sqlite_stat4` row"
+    /// IS "was analyzed under a limit". Verified on the same database:
+    /// after a full pass all 52 non-empty indexes carry samples, so this
+    /// converges to `None` rather than cycling.
+    ///
+    /// Self-healing by construction, which a stamp would not be:
+    /// `PRAGMA optimize` re-analyzes a whole table (at the sampled
+    /// limit, wiping its samples) whenever one of its indexes lacks a
+    /// `sqlite_stat1` row - which is exactly what the B1 picker backfill
+    /// produces when it lands a new index. Measured on the 2M-row
+    /// fixture: build one index, and the next `PRAGMA optimize` resets
+    /// `i_kind` from a measured 5,559,939-shaped row back to 1001 and
+    /// deletes every sample. Reading the state out of the database means
+    /// the next pass simply measures it again.
+    ///
+    /// Empty indexes are skipped: a full pass writes no samples for one,
+    /// so including them would make this cycle forever. On a build
+    /// without `SQLITE_ENABLE_STAT4` the probe errors and the whole leg
+    /// is a permanent no-op, which is the right degradation - without
+    /// the samples there is no way to tell a measured row from a
+    /// sampled one. nzbkit's rusqlite is `bundled`, and that build
+    /// defines it.
+    pub fn shallow_stat_index(&self) -> Option<String> {
+        self.db
+            .query_row(
+                "SELECT s.idx FROM sqlite_stat1 s
+                  WHERE s.idx IS NOT NULL
+                    AND CAST(s.stat AS INTEGER) > 0
+                    AND NOT EXISTS(SELECT 1 FROM sqlite_stat4 x
+                                    WHERE x.idx = s.idx)
+                  ORDER BY CAST(s.stat AS INTEGER) DESC, s.idx LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// Measure one index's statistics with no sample limit (TODO 198
+    /// tail). The caller owns picking it - [`Self::shallow_stat_index`]
+    /// - and owns making the work abortable: this reads the whole index
+    /// holding the write lock, exactly like `build_picker_index`, so the
+    /// daemon runs it on a blocking thread under a `MaintenanceArm` and
+    /// an interrupt rolls it back for the next pass to retry.
+    ///
+    /// One index, not the database, because the cost is per index and
+    /// wildly uneven: on the 33.4M-release index the whole-database pass
+    /// is 238 s, but `idx_rel_complete_kind` is 0.1 s of it and
+    /// `idx_rel_stem` 74.4 s. A per-index pass makes the unit of work
+    /// bounded and, unlike a whole-database ANALYZE (one transaction),
+    /// makes an interrupted pass keep everything it had already
+    /// measured.
+    ///
+    /// ANALYZE of one index replaces only that index's rows, in both
+    /// stat tables - verified on the live-shaped index: after measuring
+    /// six of them by name the other twelve still carried their sampled
+    /// values. The name is a database identifier from `sqlite_stat1`,
+    /// not caller text.
+    pub fn analyze_index_deep(&self, name: &str) -> rusqlite::Result<()> {
+        // `analysis_limit` is per connection and sticky: the daemon's
+        // writer has had it set to 1000 by `optimize` since the first
+        // maintenance pass, and leaving it there would make this
+        // statement a second sampled pass that looks like a deep one.
+        self.db.execute_batch("PRAGMA analysis_limit=0")?;
+        let r = self
+            .db
+            .execute_batch(&format!("ANALYZE main.\"{}\"", name.replace('"', "\"\"")));
+        // Back to the sampled limit whatever happened, so the next
+        // `PRAGMA optimize` on this connection stays the cheap pass it
+        // is meant to be.
+        self.db.execute_batch("PRAGMA analysis_limit=1000")?;
+        r
     }
 
     /// B1: the first deferred partial index this database is still
@@ -1920,6 +2035,29 @@ impl Index {
                     )
                     .unwrap_or(true)
             })
+    }
+
+    /// Test hook: drop every picker index and push `MAX(id)` past the
+    /// inline bound, so the next `Index::open` declines to create them
+    /// and the database reaches the daemon in the DEFERRED state - the
+    /// one a real installation is in after growing past the threshold.
+    ///
+    /// Reproducing that state honestly would mean writing a million
+    /// releases into a test database; the bound is read from `MAX(id)`
+    /// precisely because it is an O(1) proxy, so one high-id row is the
+    /// same state by the code's own definition.
+    #[doc(hidden)]
+    pub fn debug_defer_picker_indexes(&self) {
+        for (name, _) in super::schema::picker_index_ddl() {
+            let _ = self.db.execute(&format!("DROP INDEX IF EXISTS {name}"), []);
+        }
+        self.db
+            .execute(
+                "INSERT INTO releases(id, stem, poster, grp)
+                   VALUES (?1, 'deferred-bound', 'p', 'g')",
+                [super::schema::PICKER_INDEX_INLINE_MAX + 1],
+            )
+            .expect("seed the deferred-state row");
     }
 
     /// Build one named picker index (from `missing_picker_index`).
@@ -2023,868 +2161,4 @@ impl Index {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::index::testutil::{entry, teardown};
-
-    /// A prune budget no test can spend: the two reapers take a
-    /// deadline, and every case except the budget test itself is about
-    /// what they reap, not when they stop.
-    fn forever() -> std::time::Instant {
-        std::time::Instant::now() + std::time::Duration::from_secs(3_600)
-    }
-
-    /// R3: the orphan sweep at the tail of `prune_size` stopped running
-    /// on every call. It runs when the prune deleted something, and
-    /// once on an index that has never been swept - the
-    /// historical-repair pass for the autocommit era, which is what the
-    /// stamp records. What it must never do is let an orphan outlive a
-    /// committed delete: the recycled rowid would adopt it.
-    #[test]
-    fn prune_size_sweeps_orphans_once_then_only_when_it_deleted() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let ix = Index::open(&dir.join("index.db")).unwrap();
-        // Children of a release that is not there: exactly what a
-        // pre-transaction crash left behind.
-        let orphan = |id: i64| {
-            ix.db
-                .execute(
-                    "INSERT INTO files(release_id, filename, total_parts) VALUES(?1, 'a.rar', 1)",
-                    [id],
-                )
-                .unwrap();
-            ix.db
-                .execute(
-                    "INSERT INTO pre_corr(release_id, predb_id, score, delta, at)
-                     VALUES(?1, 1, 900, 0, 0)",
-                    [id],
-                )
-                .unwrap();
-        };
-        let orphans = || {
-            ix.db
-                .query_row(
-                    "SELECT (SELECT COUNT(*) FROM files WHERE release_id NOT IN
-                               (SELECT id FROM releases))
-                          + (SELECT COUNT(*) FROM pre_corr WHERE release_id NOT IN
-                               (SELECT id FROM releases))",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()
-        };
-
-        orphan(901);
-        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0, "nothing to prune");
-        assert_eq!(orphans(), 0, "the historical-repair pass swept anyway");
-        assert_eq!(ix.kv_get("orphan_sweep_done_v1").as_deref(), Some("1"));
-
-        // Stamped, and this call deletes nothing: the two anti-joins -
-        // the point of the gate - are skipped, so the orphan survives.
-        orphan(902);
-        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0);
-        assert_eq!(orphans(), 2, "a no-op prune no longer walks `files`");
-
-        // A prune that deletes re-arms the sweep, and it clears the
-        // rows it just orphaned along with the ones it skipped: nothing
-        // a recycled id could adopt survives the commit.
-        ix.db
-            .execute(
-                "INSERT INTO releases(id, stem, poster, grp, total_bytes)
-                 VALUES(903, 'Huge.Rel', 'p', 'g', 9_000)",
-                [],
-            )
-            .unwrap();
-        orphan(903);
-        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 1, "oversize pruned");
-        assert_eq!(orphans(), 0, "the deleting prune swept");
-
-        // Crash recovery: an index whose sweep never got to stamp (the
-        // stamp is written in the sweep's own transaction, so this is
-        // the only shape a rollback can leave) sweeps on the next call
-        // whatever the prune matched.
-        ix.db
-            .execute("DELETE FROM kv WHERE k='orphan_sweep_done_v1'", [])
-            .unwrap();
-        orphan(904);
-        assert_eq!(ix.prune_size(1, 5_000).unwrap(), 0);
-        assert_eq!(orphans(), 0, "an unstamped index sweeps unconditionally");
-        teardown(&dir, ix);
-    }
-
-    /// A4: `stats_cached` memoizes the full-table-scan figures per
-    /// connection. Within the TTL a write - even one on this very
-    /// connection - is invisible (a progress line tolerates that);
-    /// a zero TTL always recomputes; and an exact `stats()` call
-    /// reseeds the memo for free.
-    #[test]
-    fn stats_cached_serves_the_memo_within_ttl_and_stats_reseeds_it() {
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-index-statsmemo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let ix = Index::open(&dir.join("index.db")).unwrap();
-        let ins = |stem: &str| {
-            ix.db
-                .execute(
-                    "INSERT INTO releases(stem, poster, grp, first_posted, complete)
-                     VALUES(?1, 'p', 'g', 1000, 1)",
-                    [stem],
-                )
-                .unwrap();
-        };
-        let ttl = std::time::Duration::from_secs(3_600);
-        ins("a");
-        assert_eq!(ix.stats_cached(ttl).unwrap(), (1, 1), "cold memo computes");
-        ins("b");
-        assert_eq!(
-            ix.stats_cached(ttl).unwrap(),
-            (1, 1),
-            "within the TTL the memo is served - the new row stays unseen"
-        );
-        assert_eq!(
-            ix.stats_cached(std::time::Duration::ZERO).unwrap(),
-            (2, 2),
-            "a zero TTL always recomputes"
-        );
-        ins("c");
-        assert_eq!(ix.stats().unwrap(), (3, 3), "the exact query sees all");
-        ins("d");
-        assert_eq!(
-            ix.stats_cached(ttl).unwrap(),
-            (3, 3),
-            "stats() reseeded the memo in passing"
-        );
-        teardown(&dir, ix);
-    }
-
-    /// The sampler's pick, after it stopped sorting the whole table
-    /// (see `Index::oracle_pick`). The seek draw changed HOW candidates
-    /// are found; what it must not change is which of them wins - a
-    /// never-sampled release outranks a sampled one, and junk stays out
-    /// of the sample entirely.
-    #[test]
-    fn oracle_pick_prefers_the_unsampled_and_skips_junk() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-opick-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let ix = Index::open(&dir.join("index.db")).unwrap();
-        ix.db
-            .execute(
-                "INSERT INTO releases(stem, poster, grp, first_posted, junk, oracle_at)
-                 VALUES('sampled','p','g',1000, 0, 500),
-                       ('never','p','g',2000, 0, 0),
-                       ('junky','p','g',3000, 90, 0)",
-                [],
-            )
-            .unwrap();
-
-        // Seeded so the draw is replayable; the window is tiny here, so
-        // every seek lands on the same three rows either way.
-        let picked = ix.oracle_pick_seeded(2, 7).unwrap();
-        let names: Vec<i64> = picked.iter().map(|&(_, _, posted)| posted).collect();
-        // Never-sampled first, sampled second, junk not at all.
-        assert_eq!(names, vec![2000, 1000], "picked {picked:?}");
-
-        // Stamping the unsampled row rotates the pick, which is what
-        // stops one release pinning the sampler forever.
-        let rid = picked[0].0;
-        ix.oracle_mark(rid, 9_000).unwrap();
-        let after = ix.oracle_pick_seeded(1, 7).unwrap();
-        assert_eq!(after.first().map(|r| r.2), Some(1000), "got {after:?}");
-
-        teardown(&dir, ix);
-    }
-
-    /// The repost table: remember once, recognise later, and never let a
-    /// second download rewrite what the first one taught us.
-    #[test]
-    fn par_hashes_remember_first_and_recognise_reposts() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-ph-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let ix = Index::open(&dir.join("index.db")).unwrap();
-        let pairs = |hs: &[&str]| -> Vec<(String, String)> {
-            hs.iter()
-                .map(|h| ((*h).to_string(), format!("{h}.r00")))
-                .collect()
-        };
-
-        // Nothing known yet.
-        assert_eq!(ix.par_hash_lookup(&pairs(&["aa", "bb"])).unwrap(), None);
-
-        let named = pairs(&["aa", "bb", "cc"]);
-        assert_eq!(
-            ix.par_hash_remember(
-                &named,
-                "Example.Movie.2019.1080p-GRP",
-                "m:example movie:2019",
-                100
-            )
-            .unwrap(),
-            3
-        );
-        // A repost whose sidecar shares ONE volume fingerprint is the
-        // same bytes, and one hit answers for the whole set - and the
-        // answer says WHICH fingerprint proved it.
-        assert_eq!(
-            ix.par_hash_lookup(&pairs(&["zz", "cc"])).unwrap(),
-            Some((
-                "cc".into(),
-                "Example.Movie.2019.1080p-GRP".into(),
-                "m:example movie:2019".into()
-            ))
-        );
-
-        // The obfuscated repost must NOT overwrite the good name: the
-        // first writer knew what it was, and every future repost depends
-        // on that answer staying put.
-        assert_eq!(
-            ix.par_hash_remember(&named, "8a7f2c1b9d0e4f", "", 200)
-                .unwrap(),
-            0,
-            "a later download rewrote a fingerprint it did not name"
-        );
-        assert_eq!(
-            ix.par_hash_lookup(&pairs(&["aa"])).unwrap().unwrap().1,
-            "Example.Movie.2019.1080p-GRP"
-        );
-
-        // A nameless job records nothing at all rather than a blank row
-        // that would then shadow the real name forever.
-        assert_eq!(
-            ix.par_hash_remember(&pairs(&["dd"]), "  ", "", 300)
-                .unwrap(),
-            0
-        );
-        assert_eq!(ix.par_hash_lookup(&pairs(&["dd"])).unwrap(), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn retention_prune_reaps_old_spares_recent_hidden_and_undated() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-ret-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut ix = Index::open(&dir.join("index.db")).unwrap();
-        const DAY: i64 = 86_400;
-        let now = 1_000 * DAY;
-        // now: full-size rows at various ages + one undated + one hidden.
-        let mut old = entry(
-            "\"Ancient.Movie.2001.1080p.mkv\" yEnc (1/1)",
-            "p@x",
-            "r1",
-            4 << 30,
-        );
-        old.date = now - 800 * DAY;
-        let mut recent = entry(
-            "\"Fresh.Movie.2026.1080p.mkv\" yEnc (1/1)",
-            "p@x",
-            "r2",
-            4 << 30,
-        );
-        recent.date = now - 10 * DAY;
-        let mut hidden = entry(
-            "\"Hidden.Movie.2000.1080p.mkv\" yEnc (1/1)",
-            "p@x",
-            "r3",
-            4 << 30,
-        );
-        hidden.date = now - 900 * DAY;
-        let undated = entry(
-            "\"Undated.Movie.2010.1080p.mkv\" yEnc (1/1)",
-            "p@x",
-            "r4",
-            4 << 30,
-        );
-        ix.ingest("alt.test", &[old, recent, hidden, undated], now)
-            .unwrap();
-        ix.hide_title(&crate::release::parse_release("Hidden.Movie.2000.1080p").key)
-            .unwrap();
-
-        // Keep 2 years (~730 days): the 800/900-day rows are candidates,
-        // but the 900-day one is hidden and must survive.
-        let (removed, done) = ix.prune_age(730 * DAY, now, forever()).unwrap();
-        assert!(
-            done,
-            "a prune with budget to spare reports itself caught up"
-        );
-        assert_eq!(removed, 1, "only the old non-hidden row");
-        assert_eq!(ix.search("ancient", 10).unwrap().len(), 0, "old reaped");
-        assert_eq!(ix.search("fresh", 10).unwrap().len(), 1, "recent kept");
-        assert_eq!(
-            ix.search("hidden movie", 10).unwrap().len(),
-            1,
-            "hidden kept"
-        );
-        assert_eq!(
-            ix.search("undated", 10).unwrap().len(),
-            1,
-            "unknown-date kept"
-        );
-        // FTS index stayed in sync (rowid count == releases count) and no
-        // orphan files rows survived the batch delete.
-        let (rels, _) = ix.stats().unwrap();
-        let fts_rows: i64 = ix
-            .db
-            .query_row("SELECT COUNT(*) FROM rel_fts", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fts_rows as u64, rels, "FTS in sync");
-        let orphans: i64 = ix
-            .db
-            .query_row(
-                "SELECT COUNT(*) FROM files WHERE release_id NOT IN (SELECT id FROM releases)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(orphans, 0, "no orphan files rows");
-        teardown(&dir, ix);
-    }
-
-    #[test]
-    fn stale_partials_reaps_dead_junk_spares_wall_and_settle() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-stale-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut ix = Index::open(&dir.join("index.db")).unwrap();
-        const DAY: i64 = 86_400;
-        let now = 1_000 * DAY;
-        // Obfuscated hash name -> junk>=50, missing parts, OLD -> dead, reaped.
-        let mut dead = entry(
-            "\"ugpoqs3l6bthdkgbn1ktwkl2wwxju8.part1.rar\" yEnc (1/9)",
-            "p@x",
-            "s1",
-            750_000,
-        );
-        dead.date = now - 30 * DAY;
-        // Same junk shape and an OLD POST, but only just indexed (mid-backfill
-        // into history): first_seen is recent, so the reaper must spare it - the
-        // settle clock is index age, not post age. (The old code reaped this.)
-        let mut fresh = entry(
-            "\"zzq9x2m7v5t8k1n3b6h4j0w2e5r7y9.part1.rar\" yEnc (1/9)",
-            "p@x",
-            "s2",
-            750_000,
-        );
-        fresh.date = now - 30 * DAY;
-        // Wall-visible (parses clean, junk<50), missing parts, OLD -> the
-        // always-on reaper must NOT touch it (opt-in age prune's job).
-        let mut real = entry(
-            "\"Real.Show.S01E01.720p.WEB.x264-GRP.mkv\" yEnc (1/9)",
-            "p@x",
-            "s3",
-            400 << 20,
-        );
-        real.date = now - 30 * DAY;
-        // Junk + COMPLETE + old -> not this reaper (spares complete blobs).
-        let mut donejunk = entry(
-            "\"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3.mkv\" yEnc (1/1)",
-            "p@x",
-            "s4",
-            750_000,
-        );
-        donejunk.date = now - 30 * DAY;
-        // dead/real/donejunk were indexed long ago (first_seen old); `fresh`
-        // is indexed now, so its settle window has not elapsed.
-        ix.ingest("alt.test", &[dead, real, donejunk], now - 30 * DAY)
-            .unwrap();
-        ix.ingest("alt.test", &[fresh], now).unwrap();
-
-        let (removed, done) = ix.prune_stale_partials(7 * DAY, now, forever()).unwrap();
-        assert!(
-            done,
-            "a prune with budget to spare reports itself caught up"
-        );
-        assert_eq!(removed, 1, "only the old junk missing-parts row");
-        assert_eq!(
-            ix.search("ugpoqs3l6bthdkgbn1ktwkl2wwxju8", 10)
-                .unwrap()
-                .len(),
-            0,
-            "dead junk reaped"
-        );
-        assert_eq!(
-            ix.search("zzq9x2m7v5t8k1n3b6h4j0w2e5r7y9", 10)
-                .unwrap()
-                .len(),
-            1,
-            "in settle window"
-        );
-        assert_eq!(
-            ix.search("real show", 10).unwrap().len(),
-            1,
-            "wall-visible spared"
-        );
-        assert_eq!(
-            ix.search("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3", 10)
-                .unwrap()
-                .len(),
-            1,
-            "complete junk spared"
-        );
-        teardown(&dir, ix);
-    }
-
-    /// A deadline the caller has already spent still buys ONE batch and
-    /// then hands the write mutex back, saying it is not caught up.
-    ///
-    /// This is the 15 Aug wedge, in the small. The reap's batching
-    /// bounded a transaction and nothing else, so an entry with more
-    /// rows than a batch simply kept going: on a live 34.6 M-row index
-    /// that was six hours holding the index write mutex, with every
-    /// other index caller parked behind it - the download runner among
-    /// them, which left a finished job frozen in the queue reading
-    /// "Extracting" for the life of the daemon. The two assertions are
-    /// the whole contract: it stops at ONE batch, and it SAYS there is
-    /// more, which is what stops the caller stamping its hourly clock
-    /// and walking away.
-    #[test]
-    fn stale_partials_stops_on_the_deadline_and_reports_more_to_do() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-budget-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut ix = Index::open(&dir.join("index.db")).unwrap();
-        const DAY: i64 = 86_400;
-        let now = 1_000 * DAY;
-        // One batch (8000) and change, all in the reaper's sights:
-        // obfuscated stem (junk >= 50), missing parts, long settled.
-        let dead: Vec<crate::nntp::OverEntry> = (0..8_500u32)
-            .map(|i| {
-                let mut e = entry(
-                    &format!("\"ugpoqs3l6bthdkgbn1ktwkl2ww{i:04x}.part1.rar\" yEnc (1/9)"),
-                    "p@x",
-                    &format!("b{i}"),
-                    750_000,
-                );
-                e.date = now - 30 * DAY;
-                e
-            })
-            .collect();
-        ix.ingest("alt.test", &dead, now - 30 * DAY).unwrap();
-
-        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let (removed, done) = ix.prune_stale_partials(7 * DAY, now, spent).unwrap();
-        // One CHUNK, not one 8000-row batch. That is the 20 Aug tightening:
-        // the batch used to be the unbounded thing left, since a row count
-        // says nothing about what a row costs to delete (see
-        // `prune_batch_until`). A spent budget now buys the smallest unit of
-        // work there is, and the deleted rows are the FIRST 64 - the reaper
-        // walks in rowid order, so the tail is untouched, not skipped.
-        assert_eq!(
-            removed, 64,
-            "a spent budget buys exactly one chunk, never a whole batch"
-        );
-        assert!(!done, "rows are still waiting - the caller must come back");
-
-        // ...and coming back finishes it, which is what makes the
-        // hourly stamp safe to withhold above. Nothing may be lost in
-        // between: a short batch parks the cursor on the last id that
-        // actually went, so the next pass picks up the other 8,000.
-        let (rest, done) = ix.prune_stale_partials(7 * DAY, now, forever()).unwrap();
-        assert_eq!(rest, 8_436, "the remainder, on the next pass");
-        assert!(done, "nothing left to reap");
-        let left: i64 = ix
-            .db
-            .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(left, 0, "a short batch skipped rows instead of resuming");
-        teardown(&dir, ix);
-    }
-
-    /// The other half of the same wedge (read-only sweep 3, M9): the
-    /// SELECTION is bounded too, not just the loop around it.
-    ///
-    /// A deadline checked between statements cannot stop the statement
-    /// that is running, and this reaper's own predicates have no index
-    /// to ride - so one selection was a full walk of the releases table
-    /// with the write mutex held, however long that took. Here the rows
-    /// worth reaping sit at the END of the table behind 8,000 that are
-    /// not: a walk that reaches them has scanned everything, which is
-    /// exactly what a spent budget must not buy. The stride keeps the
-    /// statement to its own slice of the rowid space and the cursor
-    /// makes the next call resume there rather than start again.
-    #[test]
-    fn stale_partials_bounds_one_selection_to_a_stride_of_the_table() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-stride-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut ix = Index::open(&dir.join("index.db")).unwrap();
-        const DAY: i64 = 86_400;
-        let now = 1_000 * DAY;
-        let old = now - 30 * DAY;
-        // A full stride of rows this reaper must never take: junk-hidden
-        // and long settled, but COMPLETE, so only a scan that reads them
-        // all can tell.
-        let whole: Vec<crate::nntp::OverEntry> = (0..8_000u32)
-            .map(|i| {
-                let mut e = entry(
-                    &format!("\"a1b2c3d4e5f6a1b2c3d4e5f6{i:06x}.mkv\" yEnc (1/1)"),
-                    "p@x",
-                    &format!("c{i}"),
-                    750_000,
-                );
-                e.date = old;
-                e
-            })
-            .collect();
-        ix.ingest("alt.test", &whole, old).unwrap();
-        // ...and the reapable rows behind them, so they sit past the
-        // first stride's rowids.
-        let dead: Vec<crate::nntp::OverEntry> = (0..100u32)
-            .map(|i| {
-                let mut e = entry(
-                    &format!("\"ugpoqs3l6bthdkgbn1ktwkl2ww{i:04x}.part1.rar\" yEnc (1/9)"),
-                    "p@x",
-                    &format!("d{i}"),
-                    750_000,
-                );
-                e.date = old;
-                e
-            })
-            .collect();
-        ix.ingest("alt.test", &dead, old).unwrap();
-
-        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let (removed, done) = ix.prune_stale_partials(7 * DAY, now, spent).unwrap();
-        assert_eq!(
-            removed, 0,
-            "a spent budget buys ONE stride of rowids - reaching the rows \
-             beyond it means the whole table was scanned under the mutex"
-        );
-        assert!(!done, "the lap is unfinished - the caller must come back");
-
-        // The next call resumes at the cursor rather than walking the
-        // spared stride again, and finishes the lap.
-        let (rest, done) = ix.prune_stale_partials(7 * DAY, now, forever()).unwrap();
-        assert_eq!(rest, 100, "the reapable rows, on the next pass");
-        assert!(done, "the lap finished");
-        assert_eq!(
-            ix.kv_get("stale_prune_cursor").as_deref(),
-            Some("0"),
-            "a finished lap parks the cursor so the next entry starts a fresh one"
-        );
-        teardown(&dir, ix);
-    }
-
-    /// The 2 Aug wedge's proximate cause was an index that had never been
-    /// analyzed, so this pins the two things the daily maintenance leg
-    /// needs from `optimize`: a database with no statistics at all comes
-    /// out of it WITH some (the `PRAGMA optimize` path alone would not
-    /// guarantee that - it only reconsiders tables the connection has
-    /// queried), and calling it again on an already-analyzed database is
-    /// a no-op rather than an error, because the leg runs it forever.
-    #[test]
-    fn optimize_creates_statistics_and_is_safe_to_repeat() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-analyze-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut ix = Index::open(&dir.join("index.db")).unwrap();
-        let now = 1_753_000_000i64;
-        let entries: Vec<crate::nntp::OverEntry> = (0..200)
-            .map(|i| crate::nntp::OverEntry {
-                number: i + 1,
-                subject: format!("\"Stats.Test.S01E{i:02}.1080p-GRP.rar\" yEnc (1/1)"),
-                from: "p@x".into(),
-                date: now - (i as i64) * 3_600,
-                message_id: format!("<stats{i}@x>"),
-                bytes: 4096,
-            })
-            .collect();
-        ix.ingest("alt.binaries.teevee", &entries, now).unwrap();
-
-        let stat_rows = |ix: &Index| -> i64 {
-            ix.db
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'sqlite_stat1'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        assert_eq!(stat_rows(&ix), 0, "a fresh index has never been analyzed");
-        ix.optimize().expect("first optimize");
-        assert_eq!(
-            stat_rows(&ix),
-            1,
-            "the first pass must produce statistics, not defer to a query that never came"
-        );
-        let analyzed: i64 = ix
-            .db
-            .query_row("SELECT COUNT(*) FROM sqlite_stat1", [], |r| r.get(0))
-            .unwrap();
-        assert!(analyzed > 0, "and rows in them, not just the table");
-
-        // Every later pass, forever. Nothing to do is the normal case.
-        ix.optimize().expect("second optimize");
-        ix.optimize().expect("third optimize");
-        assert!(
-            ix.stats().unwrap().0 > 0,
-            "the index still answers after being analyzed"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A VACUUM is minutes of synchronous rewriting on a multi-GB index,
-    /// and the daemon holds it under the same gate a starting download
-    /// waits on - so the rewrite has to be abortable, or a job that
-    /// arrives mid-compact stalls for its whole duration. The property
-    /// that makes aborting safe: VACUUM is one transaction, so the
-    /// database is exactly as it was.
-    #[test]
-    fn a_compact_can_be_aborted_and_leaves_the_database_intact() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-vacabort-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.db");
-        let ix = Index::open(&path).unwrap();
-
-        // Ballast enough that the rewrite has a VM phase worth
-        // interrupting in at all. Since the interrupt is delivered from
-        // a progress handler rather than on a timer, "enough" is an
-        // OPCODE count, not a duration: the handler fires every
-        // `num_ops` VDBE steps OF THE STATEMENT RUNNING AT THE TIME, so
-        // the only requirement is that some statement inside the VACUUM
-        // runs past `num_ops`. VACUUM copies each table with one
-        // `INSERT INTO vacuum_db.x SELECT * FROM main.x`, which measures
-        // ~5 opcodes per row, so at the 1000 below the floor is ~200
-        // SURVIVING rows - 400 built, half deleted. Measured: 400 built
-        // fires exactly once, 300 never fires at all.
-        //
-        // The 2 000 below is therefore five handler calls against a
-        // floor of 1. It is NOT sized for duration, whatever the 20 000
-        // it replaced suggests, so do not read it as "the rewrite must
-        // last long enough to be hit" and do not tune it as a timing
-        // margin. Five is ample: the floor moves only if VACUUM's copy
-        // loop changes its opcodes per row, and it cannot spend fewer
-        // than the ~4 it takes to step a cursor and insert a record.
-        //
-        // Undershooting is not a flake. Too little ballast means the
-        // handler never fires at all, and `fired` below then fails
-        // loudly and identically on every platform - it cannot walk the
-        // interrupt somewhere subtler, because the fire point is a count
-        // of opcodes within one statement rather than a moment in time.
-        let payload = vec![7u8; 4096];
-        ix.db
-            .execute_batch("CREATE TABLE IF NOT EXISTS vac_ballast(id INTEGER PRIMARY KEY, b BLOB)")
-            .unwrap();
-        {
-            let tx = ix.db.unchecked_transaction().unwrap();
-            for _ in 0..2_000 {
-                tx.execute("INSERT INTO vac_ballast(b) VALUES(?1)", [&payload])
-                    .unwrap();
-            }
-            tx.commit().unwrap();
-        }
-        ix.db
-            .execute("DELETE FROM vac_ballast WHERE id % 2 = 0", [])
-            .unwrap();
-        let free_before: i64 = ix
-            .db
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .unwrap();
-        assert!(free_before > 0, "the delete left the rewrite nothing to do");
-
-        // The interrupt has to land inside the rewrite's VM phase, and
-        // nothing about ELAPSED TIME says when that is. Only the first
-        // part of a VACUUM - copying the live pages into the temp
-        // database - runs in the VDBE, which is the only place the
-        // interrupt flag is read; the `sqlite3BtreeCopyFile` tail that
-        // writes the result back over the original checks nothing and
-        // cannot be stopped. Measured on Windows against an 80 MB index
-        // (see `interrupt_handle`): the window is the first few hundred
-        // milliseconds of a rewrite that runs ~2 s idle and ~6 s with
-        // the cores busy, because the window is memory-speed work and
-        // only the tail is disk-bound. Load stretches the rewrite and
-        // leaves the window where it was.
-        //
-        // Both earlier shapes bet on time and lost. Sleeping 5 ms and
-        // interrupting once failed the Windows nightly leg on 2026-08-02
-        // (it fired before VACUUM had begun). Interrupting in a 1 ms
-        // loop until compact() returns failed the per-push windows-unit
-        // leg on d1716767, twice including the nextest retry: a freshly
-        // spawned thread on a loaded runner took longer to reach its
-        // first call than the window stayed open. On a 14-core Windows
-        // laptop with every core busy that first call measured 27-32 ms;
-        // the margin is real but it is only ever a margin.
-        //
-        // So take time out of it. The progress callback runs from
-        // inside the rewrite's own VM loop, so when it fires the VACUUM
-        // is provably mid-flight and provably still in the phase that
-        // reads the flag. It hands the job to another thread - the
-        // daemon aborts a compact from another thread, and that is the
-        // property worth pinning - and blocks until that thread's
-        // `interrupt()` has returned, so the rewrite cannot outrun it.
-        // The callback returns false: aborting is the interrupt's job
-        // here, not the progress handler's, or the test would pass
-        // without `interrupt_handle` working at all.
-        //
-        // 1000 opcodes is also what keeps the first call landing in the
-        // table copy rather than in VACUUM's own preamble. Traced by
-        // reporting the busy statement from inside the handler: at 1000
-        // the first call is always the `INSERT INTO vacuum_db.
-        // 'vac_ballast' SELECT*FROM main.'vac_ballast'`; at 100 and 10
-        // it is the schema mirror; at 5 it is the `ATTACH '' AS
-        // vacuum_...` that opens the temp database, which fails as
-        // "unable to open database" instead of "interrupted" - still an
-        // Err, so still a green test, but no longer the interrupt this
-        // is here to pin.
-        let handle = ix.interrupt_handle();
-        let (ask, asked) = std::sync::mpsc::channel::<()>();
-        let (landed, confirm) = std::sync::mpsc::channel::<()>();
-        let aborter = std::thread::spawn(move || {
-            if asked.recv().is_ok() {
-                handle.interrupt();
-                let _ = landed.send(());
-            }
-        });
-        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let once = std::sync::Arc::clone(&fired);
-        ix.db
-            .progress_handler(
-                1000,
-                Some(move || {
-                    if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        // A dead aborter closes the channel rather than
-                        // hanging the rewrite here.
-                        if ask.send(()).is_ok() {
-                            let _ = confirm.recv();
-                        }
-                    }
-                    false
-                }),
-            )
-            .unwrap();
-        let r = ix.compact();
-        ix.db.progress_handler(1000, None::<fn() -> bool>).unwrap();
-        aborter.join().unwrap();
-        assert!(
-            fired.load(std::sync::atomic::Ordering::SeqCst),
-            "the rewrite never reached its VM loop, so nothing was interrupted"
-        );
-        assert!(
-            r.is_err(),
-            "the rewrite must abort rather than run to completion"
-        );
-        // And it aborted with work still to do. `fired` alone only says
-        // the VM loop was reached; the free pages are what say the
-        // interrupt beat `sqlite3BtreeCopyFile`, because a rewrite that
-        // reached the copy-back has no freelist left. This is the
-        // property the ballast is sized for, so it is the one that has
-        // to fail if the ballast ever gets too small to hold the first
-        // handler call inside the copy.
-        let free_after: i64 = ix
-            .db
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            free_after, free_before,
-            "the abort landed after the rewrite, so it saved nothing"
-        );
-
-        // Nothing was lost: the odd-id half is still all there, and the
-        // index is usable straight afterwards.
-        let n: i64 = ix
-            .db
-            .query_row("SELECT COUNT(*) FROM vac_ballast", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1_000, "an aborted VACUUM must not cost a single row");
-        assert!(
-            ix.db_bytes().unwrap() > 0,
-            "the connection still works after the abort"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The exit path's checkpoint: fold the log into the database and
-    /// leave nothing behind.
-    ///
-    /// This is what a proper CLOSE does for free, and the daemon never
-    /// closes - it exits through `process::exit` or `exec`. So the whole
-    /// write-ahead log survived every stop, and the next start recovered
-    /// it instead of opening a database that was already whole.
-    #[test]
-    fn checkpoint_truncate_leaves_no_write_ahead_log() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-ckpt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("index.db");
-        let ix = Index::open(&db).unwrap();
-        ix.kv_set("probe", "before").unwrap();
-        let wal = dir.join("index.db-wal");
-        assert!(
-            wal.metadata().map(|m| m.len()).unwrap_or(0) > 0,
-            "fixture wrote nothing to the log - the assertion below would prove nothing"
-        );
-
-        assert!(
-            ix.checkpoint_truncate(std::time::Duration::from_secs(1))
-                .unwrap(),
-            "nothing else holds this database, so the checkpoint had no reason to report busy"
-        );
-
-        assert_eq!(
-            wal.metadata().map(|m| m.len()).unwrap_or(0),
-            0,
-            "the log is still on disk after a truncating checkpoint"
-        );
-        // And the point of folding it in: the data is in the database
-        // file itself, so the next open has nothing to recover.
-        drop(ix);
-        let reopened = Index::open(&db).unwrap();
-        assert_eq!(reopened.kv_get("probe").as_deref(), Some("before"));
-        teardown(&dir, reopened);
-    }
-
-    /// A reader that has not caught up blocks a TRUNCATE checkpoint, and
-    /// the caller is an exit with a budget. It must come back with
-    /// `false` inside the wait it asked for rather than sitting on the
-    /// connection's own 10 s busy timeout.
-    #[test]
-    fn checkpoint_truncate_gives_up_on_a_reader_inside_its_wait() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-ckptb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("index.db");
-        let ix = Index::open(&db).unwrap();
-        ix.kv_set("probe", "one").unwrap();
-
-        // A read transaction left open on a second connection: the
-        // shape of a query handler holding a pooled read connection
-        // when the signal arrives.
-        let reader = Index::open_read_only(&db).unwrap();
-        reader.db.execute_batch("BEGIN").unwrap();
-        assert_eq!(reader.kv_get("probe").as_deref(), Some("one"));
-        // Written after the reader pinned its snapshot, so the log now
-        // holds frames that reader cannot see - which is precisely what
-        // a checkpoint may not overwrite.
-        ix.kv_set("probe", "two").unwrap();
-
-        let started = std::time::Instant::now();
-        let truncated = ix
-            .checkpoint_truncate(std::time::Duration::from_millis(300))
-            .unwrap();
-        let took = started.elapsed();
-
-        assert!(!truncated, "a pinned reader must be reported, not ignored");
-        assert!(
-            took < std::time::Duration::from_secs(5),
-            "waited {took:?} - the wait argument was ignored and this fell back \
-             to the connection's own 10 s busy timeout"
-        );
-        // The timeout it borrowed is put back, not left at 300 ms.
-        let restored: i64 = ix
-            .db
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(restored, 10_000, "the busy timeout was not put back");
-
-        reader.db.execute_batch("COMMIT").unwrap();
-        drop(reader);
-        teardown(&dir, ix);
-    }
-}
+mod tests;

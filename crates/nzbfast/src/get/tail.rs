@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 // post-drain census and the settle/repair ladder both run inside it.
 use super::census::{Census, take_census};
 use super::settle::{SettleVerdict, settle_verify_repair};
-use super::workers::{self, PendingR};
+use super::workers::{self, CauseSplit, PendingR};
 use tracing::{info, warn};
 
 /// How the unpack tail left the job. The orchestrator destructures the
@@ -22,7 +22,176 @@ pub(super) struct UnpackVerdict {
     pub(super) reextract_failed: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The 🔒 line, in one place: the no-password arm prints it, and since
+/// TODO 164 so does a PAR2-vouched encrypted leftover (the ladder
+/// unpacked a sibling, the vouched set never had a password to try).
+/// One spelling, because the daemon's finalize and the suites read it.
+fn warn_locked_no_password() {
+    warn!(
+        target: "password",
+        "🔒 archive is password-protected and no password was found - \
+         verified volumes kept in the output directory. Supply one with \
+         --password, a <meta type=\"password\"> in the NZB, or a \
+         {{{{password}}}} suffix on the NZB filename, then retry."
+    );
+}
+
+/// The unrar ladder over the DEMOTED volume groups: the three arms
+/// (compressed or passworded-with-a-password, unowned, locked without a
+/// password) and the bomb floor ahead of them. Carved out of
+/// `unpack_tail` when TODO 164 put the leftover judgement on the two
+/// ladder arms; body otherwise verbatim.
+fn demoted_volume_ladder(
+    ex_report: &nzbkit::extract::ExtractReport,
+    out_dir: &Path,
+    password: Option<&str>,
+    par2_covered: Option<&std::collections::HashSet<String>>,
+    all_good: &mut bool,
+    reextract_failed: &mut Option<String>,
+    locked_no_password: &mut bool,
+) {
+    // The unrar ladder below reasons about RAR VOLUMES, so a top-level 7z
+    // chase that demoted is filtered out of it entirely: that demote
+    // leaves a materialized .7z, which the post-extraction pass further
+    // down owns. Left in, its reason text steers all three arms wrongly -
+    // "held-bytes cap" reads as an unowned set and "encrypted" as a
+    // locked RAR - and each one ends at try_unrar over a directory with
+    // no RAR in it, which answers false and fails a job that is fine.
+    let vol_fallbacks: Vec<&(String, String)> = ex_report
+        .fallbacks
+        .iter()
+        .filter(|(_, w)| !sevenz_disk_fallback(w))
+        .collect();
+    // Compressed (non-encrypted) archives can't stream-extract, but a
+    // bundled unrar unpacks the verified volumes. Encrypted sets join in
+    // when a password is known; without one they stay on disk.
+    let enc_fallback = vol_fallbacks
+        .iter()
+        .any(|(_, w)| w.contains("encrypted") || w.contains("password"));
+    // Every OTHER demote leaves its volumes unowned - see
+    // [`fallback_needs_disk_unpack`].
+    let unowned_fallback = vol_fallbacks
+        .iter()
+        .any(|(_, w)| fallback_needs_disk_unpack(w));
+    // An SFX demote is the tail's SFX arm's (`sevenz_disk_fallback` is what
+    // keeps it out of `vol_fallbacks` and so out of all three arms here) -
+    // with one exception. Locked with no password to try, the carve has
+    // nothing to do: `extract_sfx` hands the archive to a reader that will
+    // refuse it, and the job would fail over a `.exe` that is perfectly
+    // fine on disk. The answer a locked RAR set gets - volumes kept, 🔒
+    // prompt, and a retry once a password arrives - is the right one here
+    // too, so this joins the encrypted arm instead.
+    let sfx_locked = password.is_none()
+        && ex_report
+            .fallbacks
+            .iter()
+            .any(|(_, w)| sfx_locked_fallback(w));
+    // Ahead of all three arms, because it forecloses all three: a demote
+    // the bomb guard caused has nothing for a second engine to try. See
+    // [`bomb_fallback`].
+    if *all_good && let Some(why) = bomb_fallback(vol_fallbacks.iter().map(|(_, w)| w.as_str())) {
+        *all_good = false;
+        *reextract_failed = Some(why);
+    } else if *all_good
+        && (vol_fallbacks.iter().any(|(_, w)| w.contains("compressed"))
+            || (enc_fallback && password.is_some()))
+    {
+        // The unrar outcome IS the job outcome here: a corrupt compressed
+        // set (or a wrong password) must not exit 0 with loose volumes.
+        // On success the volumes are spent (Part B of the 2026-07-29
+        // one-pass spec): a demoted 57.8 GB job used to finish holding
+        // both the movie AND its full volume set.
+        let _cpu = crate::lanegate::heavy_cpu_blocking();
+        match try_unrar_outcome(out_dir, password) {
+            Ok(outcome) => {
+                remove_spent_volumes(&outcome.spent);
+                settle_leftovers(&outcome, par2_covered, reextract_failed, locked_no_password);
+                *all_good &= reextract_failed.is_none();
+            }
+            // TODO 211's last rung - see the twin below.
+            Err(_) if rescue_split_after_failed_unpack(out_dir, password) => {}
+            Err(why) => {
+                *all_good = false;
+                // A refusal that named its own reason keeps it. Only the
+                // bomb rungs do (the native verdict, and the preflight
+                // ahead of the unrar spawn) and both are about the DISK,
+                // where this sentence blames the archive - the exact
+                // wrong blame the 22 Aug 2026 incident was reported as.
+                // See [`try_unrar_spent_why`].
+                *reextract_failed = Some(unpack_failure(
+                    why,
+                    "the verified volumes could not be unpacked \
+                     (compressed set, or the password is wrong)",
+                ));
+            }
+        }
+    } else if *all_good && unowned_fallback && !enc_fallback {
+        let _cpu = crate::lanegate::heavy_cpu_blocking();
+        match try_unrar_outcome(out_dir, password) {
+            Ok(outcome) => {
+                remove_spent_volumes(&outcome.spent);
+                settle_leftovers(&outcome, par2_covered, reextract_failed, locked_no_password);
+                *all_good &= reextract_failed.is_none();
+            }
+            // TODO 211: what looks like a volume set here may be a byte
+            // SPLIT of one archive - `stage.rar.001`..`.062`, where part 1
+            // is a RAR head over 1/62nd of a container and every other part
+            // is raw continuation bytes. No unpacker can open that, which
+            // is why this ladder just failed; rejoining the parts and
+            // extracting the result is the rung below the fallback. It
+            // refuses everything that is not exactly that shape, and a
+            // refusal leaves the volumes untouched for the arms above.
+            Err(_) if rescue_split_after_failed_unpack(out_dir, password) => {}
+            Err(why) => {
+                *all_good = false;
+                // Same rule as the twin above.
+                *reextract_failed = Some(unpack_failure(
+                    why,
+                    "the verified volumes could not be unpacked after a fallback",
+                ));
+            }
+        }
+    } else if *all_good && (enc_fallback || sfx_locked) {
+        *locked_no_password = true;
+        warn_locked_no_password();
+    }
+}
+
+/// TODO 164: what the ladder left packed, judged against the job's own
+/// PAR2 set. A successful run (a sibling produced) used to be the job's
+/// outcome outright; now a leftover the recovery set vouches for fails
+/// the level, and a vouched encrypted set that was never offered a
+/// password routes to the existing locked shape. Anything the set does
+/// not name keeps the decoy tolerance - see [`crate::rarfix::vouch`].
+fn settle_leftovers(
+    outcome: &crate::rarfix::UnpackOutcome,
+    par2_covered: Option<&std::collections::HashSet<String>>,
+    reextract_failed: &mut Option<String>,
+    locked_no_password: &mut bool,
+) {
+    use crate::rarfix::vouch::{VouchVerdict, failure_sentence, judge};
+    match judge(&outcome.packed, par2_covered) {
+        VouchVerdict::Tolerated => {}
+        VouchVerdict::Locked(names) => {
+            warn!(
+                target: "extract",
+                "the PAR2 set vouches for {} encrypted archive set(s) still packed: {}",
+                names.len(),
+                names.join(", ")
+            );
+            *locked_no_password = true;
+            warn_locked_no_password();
+        }
+        VouchVerdict::Failed { names, reason } => {
+            // The group's own refusal (a bomb verdict) outranks the
+            // sentence, for the same reason it does one arm up: it is
+            // about the disk, and the sentence blames the archive.
+            *reextract_failed = Some(unpack_failure(reason, &failure_sentence(&names)));
+        }
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
 pub(super) fn unpack_tail(
     extractor: &Arc<nzbkit::extract::Extractor>,
     slots: &[Arc<FileSlot>],
@@ -37,10 +206,114 @@ pub(super) fn unpack_tail(
     resume_map: bool,
     eat_consent: bool,
     note_activity: &(dyn Fn(&'static str) + Sync),
+    hub: &Option<Arc<StreamHub>>,
+    stream_owner: &str,
     mut all_good: bool,
     mut reextract_failed: Option<String>,
+    // See [`crate::get::settle::SettleVerdict::repaired`]: a repair may
+    // have rewritten the very volume bytes a forfeited chase decoded
+    // from, so the resume ledger stands down when it is set.
+    repaired: bool,
+    // TODO 164: the activated PAR2 set's FileDesc names (sanitized,
+    // lowercased - `SettleVerdict::sniff_covered`), `None` when no set
+    // activated. A group the unrar ladder leaves packed is the posted
+    // release, not a decoy, exactly when one of its volumes is named
+    // here - see [`crate::rarfix::vouch`].
+    par2_covered: Option<&std::collections::HashSet<String>>,
 ) -> Result<UnpackVerdict> {
     note_activity("extracting");
+    // TODO 205: the volume files this ladder is about to work through.
+    // Collected ONCE, up here, because two things want them and both
+    // want them before anything runs: the eat forecast below needs their
+    // bytes, and the queue row needs their COUNT - issue #47's reporter
+    // watched "unpacking" for several minutes on a NAS with no way to
+    // tell whether it was one volume or his 130.
+    let mut on_disk = collect_rar_volumes(out_dir).unwrap_or_default();
+    on_disk.extend(collect_obfuscated_rar_volumes(out_dir).unwrap_or_default());
+    let vol_bytes = crate::eatvol::volume_bytes(&on_disk);
+    // Armed before the §129 admission wait inside the block below, so a
+    // ladder parked behind another tail's disk reservation already says
+    // how big a job it is waiting to start. Held to the end of the
+    // function - every ladder arm and the nested pass are unpack work -
+    // and its Drop takes the hub entry with it, on the failure paths
+    // too. See `crate::unpackprog` for why this is not the writer
+    // registration the in-stream path publishes.
+    let _unpack_prog = crate::unpackprog::arm(hub, stream_owner, on_disk.len() as u64);
+    // A chase that forfeited on the held-bytes cap left its in-stream
+    // output on disk with a mark saying how far it is good; the ladder
+    // below resumes from there rather than re-extracting each member
+    // from byte zero (`crate::resumeout`, and the ~0.4x of payload it
+    // takes off trim-then-forfeit). Held for the whole function: its
+    // Drop removes every partial the ladder did NOT go on to finish,
+    // which is the guarantee that replaces the delete the forfeit used
+    // to do - so it must outlive every arm below, the failure paths and
+    // the early returns included.
+    //
+    // `repaired` is the disk-side half of the trust test. The extractor
+    // catches a repair that comes back THROUGH it and drops the ledger
+    // itself; a disk-side repair (`repair_dir` and the recovery-record
+    // pass, both of which the settle phase may run over materialized
+    // volumes) writes to the files directly and it never sees them. The
+    // arm still takes the partials in that case - it just offers none of
+    // them - so they are removed rather than left lying under the
+    // payload's own name.
+    //
+    // `chase_dropped_bytes` is the third route, and it exists because of
+    // the OTHER change that landed the same day. A dropping trim throws
+    // the consumed prefix away instead of spilling it, so a demote
+    // leaves holes in the volume files and `get::dropped` RE-FETCHES
+    // them - by path, not through the extractor, so neither of the two
+    // guards above sees it. The re-fetched bytes are the same posted
+    // bytes and pass the same per-article CRC, so a difference needs a
+    // body that is wrong AND checksums correctly - the one thing the
+    // in-chase conflict guard is written for. But without a resume that
+    // case still SELF-HEALS (the disk pass re-extracts everything from
+    // the re-fetched volumes), and with one it would not: the prefix
+    // would come from the first copy and the CRC-verified tail from the
+    // second. Standing down when anything was dropped keeps the
+    // self-healing, and costs an optimisation on a job that took the
+    // slower road anyway.
+    let dropped = extractor.chase_dropped_bytes() > 0;
+    let stand_down = repaired || dropped;
+    // Said out loud, because until this line the stand-down was
+    // INVISIBLE: a job that forfeited on the cap and kept a perfectly
+    // good prefix simply did not print the "resuming" line, and no
+    // counter anywhere separated "there was nothing to resume" from
+    // "there was, and we declined it". That is also what made the
+    // interaction of the two 22 Aug follow-ups unreadable from a leg's
+    // own log (TODO 214). Only when there was something to decline.
+    if stand_down && !ex_report.resume_outputs.is_empty() {
+        let bytes: u64 = ex_report.resume_outputs.iter().map(|r| r.len).sum();
+        info!(
+            target: "extract",
+            "not resuming {} member(s) ({:.1} GB will be re-extracted from byte zero): {}",
+            ex_report.resume_outputs.len(),
+            bytes as f64 / 1e9,
+            if repaired {
+                "a repair rewrote volume bytes on disk after the chase decoded them"
+            } else {
+                "the one-pass trim dropped volume bytes that were then re-fetched"
+            }
+        );
+    }
+    let _resume = if stand_down {
+        crate::resumeout::ResumeArm::stood_down(&ex_report.resume_outputs)
+    } else {
+        crate::resumeout::ResumeArm::new(&ex_report.resume_outputs)
+    };
+    // Output bytes the ladder below will NOT have to write, because the
+    // chase already did. They come off the §129 lane RESERVATION: the
+    // partials are on the filesystem now, so the free-bytes read is
+    // lower by exactly this much, and leaving the reservation at its
+    // full size would make a job wait behind another tail for room it
+    // does not want. Zero on every job that did not forfeit, and zero
+    // when the arm stood down (nothing resumes, so everything is
+    // written).
+    let resumed_on_disk: u64 = if stand_down {
+        0
+    } else {
+        ex_report.resume_outputs.iter().map(|r| r.len).sum()
+    };
     // TODO 101: should this job's disk unpack eat its own volumes as it
     // consumes them? Decided ONCE, here, where every input is known and
     // measured - the set is fully on disk by now, so the forecast is
@@ -67,19 +340,25 @@ pub(super) fn unpack_tail(
         // its volumes reading as "fits" and dying at the decrypt.
         let shape = final_shape.as_ref().map(|s| s.tag()).unwrap_or_default();
         let encrypted = shape.split_whitespace().any(|t| t == "encrypted");
-        let mut on_disk = collect_rar_volumes(out_dir).unwrap_or_default();
-        on_disk.extend(collect_obfuscated_rar_volumes(out_dir).unwrap_or_default());
-        let vol_bytes = crate::eatvol::volume_bytes(&on_disk);
         // §129 lane admission: register what this unpack still needs on
         // the output filesystem so concurrent tails stop double-counting
         // the same free space, and WAIT here (activity already says
         // "extracting") when we would fit alone but not beside them.
         // Held to the end of the function - the ladder AND the nested
         // pass write into the same forecasted room.
+        // Only the RESERVATION comes down by what the chase already
+        // wrote. `Forecast` is left on the true volume bytes on purpose:
+        // its one field does double duty - room still needed AND what
+        // eating the volumes would give back - and only the first of
+        // those shrinks here. Understating the second would decline to
+        // eat on exactly the tight disk the mode exists to rescue, and
+        // the two errors are not symmetric: a needlessly armed eat still
+        // finishes the job, a wrongly declined one meets ENOSPC.
+        let to_write = vol_bytes.saturating_sub(resumed_on_disk);
         let needed = if encrypted {
-            vol_bytes.saturating_mul(2)
+            to_write.saturating_mul(2)
         } else {
-            vol_bytes
+            to_write
         };
         _need_guard = crate::lanegate::admit_unpack(out_dir, needed, crate::eatvol::MARGIN);
         let forecast = crate::eatvol::forecast(out_dir, vol_bytes, encrypted);
@@ -97,62 +376,6 @@ pub(super) fn unpack_tail(
         }
         crate::eatvol::EatArm::new(verdict.eats())
     };
-    // Resumed runs skipped in-stream extraction - extract from the (now
-    // verified) volume files on disk. Not under §94 A replay: there the
-    // extractor mapped in-stream like a fresh run, and whatever demoted
-    // takes the same disk ladder a fresh run's demotes take, below.
-    if resuming && !no_extract && !resume_map && all_good {
-        // §129: the re-extract is the heavy-CPU stage - one at a time
-        // across concurrent tails (the permit, not the lane, is the
-        // serializer, so the MD5-parallel repair work composes).
-        let _cpu = crate::lanegate::heavy_cpu_blocking();
-        all_good = reextract_dir(out_dir, password)?;
-        if !all_good {
-            reextract_failed =
-                Some("resumed job: the verified volumes on disk could not be extracted".into());
-        }
-    }
-    // §94 A: a replayed volume whose slot MAPPED (or chased) leaves its
-    // restored source file behind - the output came through the map, so
-    // the source is now redundant. Removed only on a fully-good finish
-    // (the crash journal's records keep pointing at these files until
-    // then, so a kill mid-run still resumes from them), and only when
-    // the slot did not adopt that exact file as its plain writer.
-    if resume_map && all_good {
-        for seed in &restored.seeds {
-            // Recovery volumes were never replayed; their files belong to
-            // the ordinary end-of-job PAR2 cleanup, not to this pass.
-            if seed.slot >= slots.len() || slots[seed.slot].is_par2() {
-                continue;
-            }
-            // Never delete a path an extraction PRODUCED. The preclaim
-            // at replay time already stops an inner member taking a
-            // restored source's name, so this is the second lock on the
-            // same door (Codex sweep 3 Aug H3): identity by path string
-            // alone once deleted the only output of the job while
-            // reporting it green.
-            if ex_report.extracted.iter().any(|(n, _)| n == &seed.name) {
-                continue;
-            }
-            let p = out_dir.join(&seed.name);
-            if extractor.slot_path(seed.slot).as_deref() != Some(p.as_path()) && p.exists() {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
-    // The unrar ladder below reasons about RAR VOLUMES, so a top-level 7z
-    // chase that demoted is filtered out of it entirely: that demote
-    // leaves a materialized .7z, which the post-extraction pass further
-    // down owns. Left in, its reason text steers all three arms wrongly -
-    // "held-bytes cap" reads as an unowned set and "encrypted" as a
-    // locked RAR - and each one ends at try_unrar over a directory with
-    // no RAR in it, which answers false and fails a job that is fine.
-    let vol_fallbacks: Vec<&(String, String)> = ex_report
-        .fallbacks
-        .iter()
-        .filter(|(_, w)| !sevenz_disk_fallback(w))
-        .collect();
-    // Compressed (non-encrypted) archives can't stream-extract, but a
     // Set when the set is locked and no password was found: the verified
     // volumes ARE the deliverable until one arrives, so the nested pass must
     // not then try (and fail) to unpack them. A NAMED encrypted set was
@@ -163,103 +386,72 @@ pub(super) fn unpack_tail(
     // password prompt, where the identical named set finishes Completed and
     // offers the unlock.
     let mut locked_no_password = false;
-    // bundled unrar unpacks the verified volumes. Encrypted sets join in
-    // when a password is known; without one they stay on disk.
-    let enc_fallback = vol_fallbacks
-        .iter()
-        .any(|(_, w)| w.contains("encrypted") || w.contains("password"));
-    // Every OTHER demote leaves its volumes unowned - see
-    // [`fallback_needs_disk_unpack`].
-    let unowned_fallback = vol_fallbacks
-        .iter()
-        .any(|(_, w)| fallback_needs_disk_unpack(w));
-    if all_good
-        && (vol_fallbacks.iter().any(|(_, w)| w.contains("compressed"))
-            || (enc_fallback && password.is_some()))
-    {
-        // The unrar outcome IS the job outcome here: a corrupt compressed
-        // set (or a wrong password) must not exit 0 with loose volumes.
-        // On success the volumes are spent (Part B of the 2026-07-29
-        // one-pass spec): a demoted 57.8 GB job used to finish holding
-        // both the movie AND its full volume set.
+    //
+    // Declared ahead of the resumed-run arm since TODO 164: that arm
+    // reaches the same leftover judgement as the fresh-run arms, and a
+    // vouched encrypted leftover sets this from there too.
+    // Resumed runs skipped in-stream extraction - extract from the (now
+    // verified) volume files on disk. Not under §94 A replay: there the
+    // extractor mapped in-stream like a fresh run, and whatever demoted
+    // takes the same disk ladder a fresh run's demotes take, below.
+    if resuming && !no_extract && !resume_map && all_good {
+        // §129: the re-extract is the heavy-CPU stage - one at a time
+        // across concurrent tails (the permit, not the lane, is the
+        // serializer, so the MD5-parallel repair work composes).
         let _cpu = crate::lanegate::heavy_cpu_blocking();
-        match try_unrar_spent(out_dir, password) {
-            Some(spent) => remove_spent_volumes(&spent),
-            None => {
-                all_good = false;
-                reextract_failed = Some(
-                    "the verified volumes could not be unpacked \
-                     (compressed set, or the password is wrong)"
-                        .into(),
+        // The reason the ladder refused with wins over the generic
+        // sentence when there is one: a bomb verdict is about the DISK,
+        // and "the volumes could not be extracted" reads as a damaged
+        // archive. See [`reextract_dir_why`].
+        match reextract_dir_outcome(out_dir, password)? {
+            // TODO 164: the same leftover judgement the fresh-run arms
+            // below make, on the same set.
+            Ok(packed) => {
+                let outcome = crate::rarfix::UnpackOutcome {
+                    spent: Vec::new(),
+                    packed,
+                };
+                settle_leftovers(
+                    &outcome,
+                    par2_covered,
+                    &mut reextract_failed,
+                    &mut locked_no_password,
                 );
+                all_good &= reextract_failed.is_none();
             }
-        }
-    } else if all_good && unowned_fallback && !enc_fallback {
-        let _cpu = crate::lanegate::heavy_cpu_blocking();
-        match try_unrar_spent(out_dir, password) {
-            Some(spent) => remove_spent_volumes(&spent),
-            None => {
+            Err(why) => {
                 all_good = false;
-                reextract_failed =
-                    Some("the verified volumes could not be unpacked after a fallback".into());
+                reextract_failed = Some(unpack_failure(
+                    why,
+                    "resumed job: the verified volumes on disk could not be extracted",
+                ));
             }
         }
-    } else if all_good && enc_fallback {
-        locked_no_password = true;
-        println!(
-            "🔒 archive is password-protected and no password was found - \
-             verified volumes kept in the output directory. Supply one with \
-             --password, a <meta type=\"password\"> in the NZB, or a \
-             {{{{password}}}} suffix on the NZB filename, then retry."
-        );
     }
+    if resume_map && all_good {
+        drop_replayed_sources(extractor, slots, restored, ex_report, out_dir);
+    }
+    // The unrar ladder over the demoted volume groups - see
+    // [`demoted_volume_ladder`].
+    demoted_volume_ladder(
+        ex_report,
+        out_dir,
+        password,
+        par2_covered,
+        &mut all_good,
+        &mut reextract_failed,
+        &mut locked_no_password,
+    );
     // The downloaded volume set is done with. Everything below works on
     // what extraction PRODUCED, which this mode has no business eating.
     drop(eat_arm);
-    // The post IS an SFX: every member is an .exe/.bin/.sfx with a RAR or
-    // 7z signature sitting past a launcher stub. Nothing above sees one -
-    // the in-stream mapper sniffs offset 0, so a stub reads as a plain
-    // data file, the job "completes" with two executables as the payload,
-    // and the nested pass below never runs (an .exe is not an extractable
-    // archive to it, deliberately). This is the entry gate for that
-    // shape, and it belongs HERE rather than in the nested pass because
-    // only this frame can tell a downloaded file from a produced one.
-    //
-    // That distinction is the whole safety argument. A payload's
-    // `setup.exe` is very often a legitimate WinRAR SFX installer and must
-    // never be auto-exploded, which is why `extract_one_level`'s step 3
-    // is depth-0 only - but by the time we get here, extraction output
-    // and downloaded files share one directory, so "top level" no longer
-    // means "downloaded". `slot_path` does: it is the live on-disk path of
-    // a slot the DOWNLOAD wrote (rename-aware, so a deobfuscated name
-    // still matches). Only those paths are eligible; anything extraction
-    // produced is invisible to this arm however executable it looks.
-    //
-    // Runs before the nested pass, not instead of it: an SFX wrapping a
-    // RAR that wraps another archive still denests, because the pass
-    // below sees what this produced.
-    if all_good && !no_extract && !locked_no_password {
-        let downloaded: std::collections::HashSet<std::path::PathBuf> = (0..slots.len())
-            .filter_map(|i| extractor.slot_path(i))
-            .collect();
-        let sfx: Vec<std::path::PathBuf> = collect_sfx_archives(out_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| downloaded.contains(p))
-            .collect();
-        if !sfx.is_empty() {
-            // Same permit as every other arm: carving a stub off and
-            // unpacking what is behind it is heavy CPU and heavy disk.
-            let _cpu = crate::lanegate::heavy_cpu_blocking();
-            if !extract_sfx(out_dir, &sfx, password) {
-                all_good = false;
-                reextract_failed = Some(
-                    "the downloaded self-extracting archive could not be unpacked \
-                     (damaged, encrypted, or an unsupported compression method)"
-                        .into(),
-                );
-            }
-        }
+    if all_good
+        && !no_extract
+        && !locked_no_password
+        && let Some(msg) = sfx_pass(extractor, slots, out_dir, password)
+    {
+        all_good = false;
+        reextract_failed = Some(msg);
     }
     // Post-extraction pass: nested archives (a RAR whose payload is one
     // more RAR), 7z sets, and SFX payloads unpack here - the inner layer
@@ -297,7 +489,7 @@ pub(super) fn unpack_tail(
             Err(e) => {
                 // Park failure degrades to the historical skip - never
                 // risk the pass seeing the outer set.
-                println!("⚠ could not isolate leftover volumes for the nested pass: {e}");
+                warn!(target: "extract", "could not isolate leftover volumes for the nested pass: {e}");
                 None
             }
         }
@@ -307,9 +499,14 @@ pub(super) fn unpack_tail(
     if let Some(hold) = nested_hold {
         // Same permit as the ladder arms above: the nested pass is a
         // full re-extract of what the outer extraction produced.
+        // The pass's own reason where it has one, on the same rule as
+        // the three arms above: a bomb refused inside the nested pass is
+        // about the DISK, and every sentence this match composes blames
+        // the archive. See [`extract_nested_why`].
+        let mut nested_why: Option<String> = None;
         let nested_res = {
             let _cpu = crate::lanegate::heavy_cpu_blocking();
-            extract_nested(out_dir, password, 1)
+            extract_nested_why(out_dir, password, 1, &mut nested_why)
         };
         // Restore parked volumes before judging the result - they must be
         // back in place on every path, including the failure ones.
@@ -343,34 +540,39 @@ pub(super) fn unpack_tail(
                 // unrelated `Subs/subs.zip` sits beside it.
                 let zip_gap = outcome == NestOutcome::ZipGap;
                 match unsupported_archive_present(out_dir) {
-                    Some(u) if zip_gap && !u.blocking => println!("{}", u.message()),
+                    Some(u) if zip_gap && !u.blocking => u.log(),
                     Some(u) if zip_gap => {
-                        println!("{}", u.message());
+                        u.log();
                         all_good = false;
-                        reextract_failed = Some(format!(
-                            "the payload {} could not be unpacked \
-                             (damaged, encrypted, or an unsupported compression method)",
-                            u.display
+                        reextract_failed = Some(unpack_failure(
+                            nested_why.take(),
+                            &format!(
+                                "the payload {} could not be unpacked \
+                                 (damaged, encrypted, or an unsupported compression method)",
+                                u.display
+                            ),
                         ));
                     }
                     // Either a non-zip gap over a named archive, or a pass
                     // that stopped without leaving one we can point at.
                     other => {
                         all_good = false;
-                        reextract_failed = Some(match other {
-                            Some(u) => format!(
-                                "{} in the output directory could not be unpacked",
-                                u.display
-                            ),
-                            None => {
-                                "an archive in the output directory could not be unpacked".into()
-                            }
-                        });
+                        reextract_failed = Some(unpack_failure(
+                            nested_why.take(),
+                            &match other {
+                                Some(u) => format!(
+                                    "{} in the output directory could not be unpacked",
+                                    u.display
+                                ),
+                                None => "an archive in the output directory could not be unpacked"
+                                    .into(),
+                            },
+                        ));
                     }
                 }
             }
             Err(e) => {
-                println!("⚠ nested-archive pass failed: {e}");
+                warn!(target: "extract", "nested-archive pass failed: {e}");
                 all_good = false;
                 reextract_failed = Some("the nested-archive pass failed".into());
             }
@@ -382,19 +584,132 @@ pub(super) fn unpack_tail(
     })
 }
 
+/// §94 A: a replayed volume whose slot MAPPED (or chased) leaves its
+/// restored source file behind - the output came through the map, so
+/// the source is now redundant. Removed only on a fully-good finish
+/// (the crash journal's records keep pointing at these files until
+/// then, so a kill mid-run still resumes from them), and only when
+/// the slot did not adopt that exact file as its plain writer.
+/// Split out of `unpack_tail` (TODO 106), body verbatim.
+fn drop_replayed_sources(
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    slots: &[Arc<FileSlot>],
+    restored: &nzbkit::journal::Restored,
+    ex_report: &nzbkit::extract::ExtractReport,
+    out_dir: &Path,
+) {
+    for seed in &restored.seeds {
+        // Recovery volumes were never replayed; their files belong to
+        // the ordinary end-of-job PAR2 cleanup, not to this pass.
+        if seed.slot >= slots.len() || slots[seed.slot].is_par2() {
+            continue;
+        }
+        // Never delete a path an extraction PRODUCED. The preclaim
+        // at replay time already stops an inner member taking a
+        // restored source's name, so this is the second lock on the
+        // same door (Codex sweep 3 Aug H3): identity by path string
+        // alone once deleted the only output of the job while
+        // reporting it green.
+        if ex_report.extracted.iter().any(|(n, _)| n == &seed.name) {
+            continue;
+        }
+        let p = out_dir.join(&seed.name);
+        if extractor.slot_path(seed.slot).as_deref() != Some(p.as_path()) && p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// The post IS an SFX: every member is an .exe/.bin/.sfx with a RAR or
+/// 7z signature sitting past a launcher stub. This is the entry gate for
+/// that shape, and it belongs HERE rather than in the nested pass because
+/// only this frame can tell a downloaded file from a produced one.
+///
+/// Two ways a stub reaches it. Out of the offset-0 sniff's reach (a stub
+/// longer than the first article, a zip SFX, a signature with no valid
+/// header behind it), the file lands on disk as plain data and nothing
+/// above ever looks at it - the nested pass will not either, since an
+/// `.exe` is deliberately not an extractable archive to it. Or the sniff
+/// DID fire (TODO 94 C) and the mapper it started inside the stub then
+/// demoted, in which case the posted `.exe` is materialized whole and the
+/// unrar ladder has already been told to leave it alone, by the
+/// `SFX_DISK_FALLBACK_PREFIX` on its demote reason. Either way what is on
+/// disk here is the posted file, byte for byte.
+///
+/// That distinction is the whole safety argument. A payload's
+/// `setup.exe` is very often a legitimate WinRAR SFX installer and must
+/// never be auto-exploded, which is why `extract_one_level`'s step 3
+/// is depth-0 only - but by the time we get here, extraction output
+/// and downloaded files share one directory, so "top level" no longer
+/// means "downloaded". `slot_path` does: it is the live on-disk path of
+/// a slot the DOWNLOAD wrote (rename-aware, so a deobfuscated name
+/// still matches). Only those paths are eligible; anything extraction
+/// produced is invisible to this arm however executable it looks.
+///
+/// Runs before the nested pass, not instead of it: an SFX wrapping a
+/// RAR that wraps another archive still denests, because the pass
+/// below sees what this produced.
+///
+/// `Some(msg)` is the sentence the queue row shows. Split out of
+/// `unpack_tail` (TODO 106), body verbatim.
+fn sfx_pass(
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    slots: &[Arc<FileSlot>],
+    out_dir: &Path,
+    password: Option<&str>,
+) -> Option<String> {
+    let downloaded: std::collections::HashSet<std::path::PathBuf> = (0..slots.len())
+        .filter_map(|i| extractor.slot_path(i))
+        .collect();
+    let sfx: Vec<std::path::PathBuf> = collect_sfx_archives(out_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| downloaded.contains(p))
+        .collect();
+    if !sfx.is_empty() {
+        // What the badge says for this route. The shape is normally
+        // noted by the EXTRACTOR as it classifies a slot, and on this
+        // one it never got the chance: a stub deeper than the offset-0
+        // article makes the file a plain download to the in-stream
+        // sniff, so the job finished with an EMPTY `archive_shape`
+        // while the other two SFX routes filled theirs. Latched BEFORE
+        // the attempt, not after it: the bit says these bytes were
+        // written to disk to be unpacked afterwards, which is true of a
+        // failed unpack too - and a failed job's report is exactly where
+        // a reader most needs to know what the payload was.
+        for p in &sfx {
+            if let Some(what) = sfx_disk_shape(p) {
+                extractor.note_disk_archive(what);
+            }
+        }
+        // Same permit as every other arm: carving a stub off and
+        // unpacking what is behind it is heavy CPU and heavy disk.
+        let _cpu = crate::lanegate::heavy_cpu_blocking();
+        if !extract_sfx(out_dir, &sfx, password) {
+            return Some(
+                "the downloaded self-extracting archive could not be unpacked \
+                 (damaged, encrypted, or an unsupported compression method)"
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
 /// The end-of-extraction report: finish() the extractor, apply the
 /// deferred deobfuscation renames, collect the outer volume stems the
 /// nested pass must park, and print what came out in-stream.
 pub(super) fn report_extraction(
     extractor: &Arc<nzbkit::extract::Extractor>,
+    ex_report: nzbkit::extract::ExtractReport,
     deferred_renames: &[(usize, String)],
+    published_names: &mut crate::unpack::PublishedNames,
     out_dir: &Path,
 ) -> Result<(
     nzbkit::extract::ExtractReport,
     std::collections::HashSet<String>,
     Option<nzbkit::extract::ArchiveShape>,
 )> {
-    let ex_report = extractor.finish()?;
     // Now that no writer holds the partial file, a chased slot that
     // demoted can take the deobfuscated name after all. A slot whose
     // chase SUCCEEDED has no file left to rename (sevenz_finish deletes
@@ -403,7 +718,7 @@ pub(super) fn report_extraction(
     for (sidx, pname) in deferred_renames {
         if let Some(path) = extractor.slot_path(*sidx)
             && path.exists()
-            && let Some(new) = publish_verified_name(&path, pname, out_dir)
+            && let Some(new) = publish_verified_name(&path, pname, out_dir, *sidx, published_names)
         {
             extractor.note_slot_renamed(*sidx, new);
         }
@@ -441,7 +756,8 @@ pub(super) fn report_extraction(
         // (7z and zip) reported "(0.0 MB)" under a list of files whose
         // own sizes were right. Found on a live 160 MB zip, 31 Jul.
         let extracted_mb: u64 = ex_report.extracted.iter().map(|(_, s)| *s).sum();
-        println!(
+        info!(
+            target: "extract",
             "extracted {} file(s) in-stream ({:.1} MB) - volumes never touched disk{}:",
             ex_report.extracted.len(),
             extracted_mb as f64 / 1e6,
@@ -456,12 +772,12 @@ pub(super) fn report_extraction(
             } else {
                 ""
             };
-            println!("  ▶ {name} ({:.1} MB){lock}", *size as f64 / 1e6);
+            info!(target: "extract", "{name} ({:.1} MB){lock}", *size as f64 / 1e6);
         }
     } else if let Some(sh) = final_shape.as_ref() {
         // Nothing came out in-stream, so the shape has not been printed
         // anywhere yet - and it is exactly what explains why.
-        println!("archive: {}", sh.display());
+        info!(target: "extract", "archive: {}", sh.display());
     }
     // Coalesce fallback reports by reason (an encrypted 180-volume set
     // would otherwise print 180 identical lines).
@@ -470,8 +786,9 @@ pub(super) fn report_extraction(
         *by_reason.entry(why.as_str()).or_default() += 1;
     }
     for (why, n) in by_reason {
-        println!(
-            "  ⚠ direct extraction fell back for {n} volume group(s): {why} - volumes on disk"
+        warn!(
+            target: "extract",
+            "direct extraction fell back for {n} volume group(s): {why} - volumes on disk"
         );
     }
     Ok((ex_report, outer_vol_stems, final_shape))
@@ -535,8 +852,9 @@ pub(super) fn sweep_sniffed_leftovers(
         if gone > 0 {
             // "freed" only when the bytes actually left the disk - see
             // the adoption-source sweep above.
-            println!(
-                "  cleaned up {gone} obfuscated leftover(s), {:.1} MB {}",
+            info!(
+                target: "cleanup",
+                "cleaned up {gone} obfuscated leftover(s), {:.1} MB {}",
                 freed as f64 / 1e6,
                 if recoverable { "to the Trash" } else { "freed" }
             );
@@ -548,7 +866,7 @@ pub(super) fn sweep_sniffed_leftovers(
 /// retire the journal and return Ok; otherwise print the diagnostics
 /// block the dashboard log ring mirrors and fail with the closest
 /// cause. Body is a verbatim move from the orchestrator's tail.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn finish_job(
     all_good: bool,
     out_dir: &Path,
@@ -560,10 +878,11 @@ pub(super) fn finish_job(
     incomplete: usize,
     derrs: u64,
     recovery_errs: u64,
-    missing_430: &Arc<AtomicU64>,
-    takedown_430: &Arc<AtomicU64>,
+    missing_430: &Arc<CauseSplit>,
+    takedown_430: &Arc<CauseSplit>,
     retention_skipped: u64,
-    transport_failed: &Arc<AtomicU64>,
+    retention_skipped_payload: u64,
+    transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
     dead_servers: &[String],
@@ -641,24 +960,21 @@ pub(super) fn finish_job(
     // classify Unrepairable and do retry (Codex sweep 6, N3).
     if incomplete > 0 || derrs > 0 {
         let causes = LossCauses {
-            missing_430: missing_430.load(Ordering::Relaxed),
-            takedown_430: takedown_430.load(Ordering::Relaxed),
-            retention_excluded: retention_skipped,
-            transport_failed: transport_failed.load(Ordering::Relaxed),
+            // Sweep 8, M7: PAYLOAD-only, every one of them. A cause
+            // counter that folds recovery articles in is not a
+            // statement about the payload, and every gate below reads
+            // these as if it were - see `workers::CauseSplit`.
+            missing_430: missing_430.payload(),
+            takedown_430: takedown_430.payload(),
+            retention_excluded: retention_skipped_payload,
+            transport_failed: transport_failed.payload(),
+            missing_430_recovery: missing_430.recovery(),
+            takedown_430_recovery: takedown_430.recovery(),
+            retention_excluded_recovery: retention_skipped - retention_skipped_payload,
+            transport_failed_recovery: transport_failed.recovery(),
             transport_sample: transport_sample.lock_ok().clone(),
             decode_sample: decode_error_sample.lock_ok().clone(),
             recovery_errs,
-            // The recovery-side share of the three cause counters above:
-            // every counted loss also bumps its slot's `missing` via
-            // `article_lost`, so summing the recovery slots' counters
-            // here is the same ledger read back per class. `remaining`
-            // deliberately NOT included - an unresolved recovery article
-            // never bumped a cause counter.
-            recovery_lost: slots
-                .iter()
-                .filter(|s| s.is_par2())
-                .map(|s| s.missing.load(Ordering::Relaxed) as u64)
-                .sum(),
             dead_servers,
             left_servers,
             // Sniffed slots count: "this post carries no PAR2 recovery
@@ -683,6 +999,173 @@ pub(super) fn finish_job(
             "verification failed and PAR2 repair could not complete".into()
         ))
     }
+}
+
+/// Instrument-first: this job's yEnc verified-CRC reuse geometry.
+///
+/// The decoder verifies a whole-article CRC32 that block verification
+/// currently throws away. Reusing it is only sound for an article that is
+/// exactly one untrimmed, block-aligned, full PAR2 block from a fresh
+/// decode under fast verify, and whether real posts are shaped that way
+/// is nobody's guess to make - so every job reports its own geometry and
+/// a later decision reads the numbers. Nothing is optimized yet.
+///
+/// Silent on a job that mapped no spans (no PAR2 set, or no IFSC blocks):
+/// there is no ratio to report and a zero line would only be noise.
+pub(super) fn print_crc_reuse_geometry(verifier: &Arc<nzbkit::live::LiveVerifier>) {
+    let g = verifier.crc_reuse_geometry();
+    if g.spans == 0 {
+        return;
+    }
+    let pct = |part: u64, whole: u64| {
+        if whole == 0 {
+            0.0
+        } else {
+            part as f64 * 100.0 / whole as f64
+        }
+    };
+    info!(
+        target: "crc-geometry",
+        "{}/{} articles ({:.1}%) are exactly one PAR2 block; {:.2} GB of {:.2} GB mapped ({:.1}% of bytes)",
+        g.qualifying,
+        g.spans,
+        pct(g.qualifying, g.spans),
+        g.qualifying_bytes as f64 / 1e9,
+        g.spans_bytes as f64 / 1e9,
+        pct(g.qualifying_bytes, g.spans_bytes),
+    );
+}
+
+/// M15 memory summary - the line benchmarks quote and budgets tune.
+/// Lifted out of `get_with_progress` for the size gate.
+pub(super) fn print_mem_summary(
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    budget: &nzbkit::mem::MemBudget,
+    mem_sampler: &super::workers::MemSampler,
+) {
+    let (pp_peak, pp_spilled) = verifier.partials_stats();
+    info!(
+        target: "mem",
+        "peak RSS {:.2} GB · holds peak {:.0} MB · verify partials peak {:.0} MB ({pp_spilled} blocks to read-back) · chase trimmed {:.0} MB ({:.0} dropped) · budget {:.2} GB",
+        nzbkit::mem::peak_rss().unwrap_or(0) as f64 / 1e9,
+        extractor.holds_peak() as f64 / 1e6,
+        pp_peak as f64 / 1e6,
+        // Direct counter for the chase drop-behind (row 30 of the
+        // shape-coverage note): bytes of a chased set spilled back into
+        // their own volume files because the set outgrew holds_cap.
+        // Nonzero means the set only fit because of the trim.
+        extractor.chase_trimmed_bytes() as f64 / 1e6,
+        extractor.chase_dropped_bytes() as f64 / 1e6,
+        budget.total as f64 / 1e9,
+    );
+    // Held-bytes backpressure (TODO 94 item E), its own line and only
+    // when it engaged, so the `[mem]` summary above keeps its shape for
+    // every parser that reads it by name.
+    let park_cycles = extractor.holds_park_cycles();
+    if park_cycles > 0 {
+        info!(
+            target: "mem",
+            "holds backpressure engaged {park_cycles} time(s): chased articles parked at the pool near the holds cap instead of forfeiting the chase"
+        );
+    }
+    print_mem_floor(&mem_sampler.record);
+    // The sampler served this summary; a later job spawns its own, and
+    // the token keeps this stop from retiring it if it already has.
+    super::workers::stop_mem_sampler(mem_sampler.run);
+}
+
+/// Instrument-first: the memory-floor attribution block (memgauge).
+///
+/// Motivated by the 21 Aug --mem-limit ladder: peak RSS sat near 700 MB
+/// with `holds peak` and `partials peak` at 0, insensitive to a 66x
+/// budget change and to 100-vs-4 connections - so no tracked tier owned
+/// the floor and nobody had ever instrumented it. These lines say where
+/// the sampled high-water actually went, with the remainder NAMED as
+/// unattributed rather than implied.
+///
+/// Three deliberate readings:
+/// - `retained` = rss minus phys_footprint at the same instant: pages
+///   the allocator (mimalloc here) already offered back that ps-style
+///   RSS still counts. Allocator policy, not working set.
+/// - the attribution sum EXCLUDES `wire est` (an 800 KB-per-pipelined-
+///   item estimate that overlaps the raw pool) and `channel` (a subset
+///   of raw outstanding) - both print for comparison only.
+/// - `unattributed` = footprint minus the summed gauges: binary, thread
+///   stacks, rustls, rars working memory, allocator metadata, and
+///   anything not yet hooked.
+///
+/// Reads THIS job's record (F-19): in the daemon the next job's download
+/// can already be sampling into its own record while this tail prints.
+fn print_mem_floor(record: &nzbkit::memgauge::PeakRecord) {
+    use nzbkit::memgauge::Sub;
+    let Some(at) = record.peak_attribution() else {
+        return; // job shorter than one sampler tick
+    };
+    let mb = |v: u64| v as f64 / 1e6;
+    let g = &at.gauges;
+    let attributed: u64 = [
+        Sub::RawFree,
+        Sub::RawOut,
+        Sub::OutFree,
+        Sub::OutOut,
+        Sub::Par2Capture,
+        Sub::JobMeta,
+        Sub::VerifierMeta,
+        Sub::Holds,
+        Sub::RepairScan,
+        Sub::RepairWork,
+    ]
+    .into_iter()
+    .map(|s| g.cur_of(s))
+    .sum();
+    let retained = at.rss.saturating_sub(at.footprint);
+    let unattributed = at.footprint.saturating_sub(attributed);
+    info!(
+        target: "mem-floor",
+        "sampled peak rss {:.0} MB · footprint {:.0} MB · allocator retained {:.0} MB",
+        mb(at.rss),
+        mb(at.footprint),
+        mb(retained),
+    );
+    info!(
+        target: "mem-floor",
+        "at that sample: raw bodies {:.0} MB ({:.0} out + {:.0} free, {:.0} queued) · decoded {:.0} MB ({:.0} out + {:.0} free) · par2 capture {:.0} MB · job meta {:.0} MB · verifier tables {:.0} MB · holds {:.0} MB · [wire est {:.0} MB] · unattributed {:.0} MB",
+        mb(g.cur_of(Sub::RawFree) + g.cur_of(Sub::RawOut)),
+        mb(g.cur_of(Sub::RawOut)),
+        mb(g.cur_of(Sub::RawFree)),
+        mb(g.cur_of(Sub::Channel)),
+        mb(g.cur_of(Sub::OutFree) + g.cur_of(Sub::OutOut)),
+        mb(g.cur_of(Sub::OutOut)),
+        mb(g.cur_of(Sub::OutFree)),
+        mb(g.cur_of(Sub::Par2Capture)),
+        mb(g.cur_of(Sub::JobMeta)),
+        mb(g.cur_of(Sub::VerifierMeta)),
+        mb(g.cur_of(Sub::Holds)),
+        mb(g.cur_of(Sub::WireEst)),
+        mb(unattributed),
+    );
+    if g.peak_of(Sub::RepairScan) > 0 || g.peak_of(Sub::RepairWork) > 0 {
+        info!(
+            target: "mem-floor",
+            "repair: working set {:.0} MB at the sample / {:.0} MB own peak (syndrome rows + feed batches + rebuilt blocks) · scan reads {:.0} MB at the sample / {:.0} MB own peak (transient whole-volume reads)",
+            mb(g.cur_of(Sub::RepairWork)),
+            mb(g.peak_of(Sub::RepairWork)),
+            mb(g.cur_of(Sub::RepairScan)),
+            mb(g.peak_of(Sub::RepairScan)),
+        );
+    }
+    info!(
+        target: "mem-floor",
+        "own peaks: raw out {:.0} · raw free {:.0} · channel {:.0} · decoded out {:.0} · decoded free {:.0} · capture {:.0} · wire est {:.0} MB",
+        mb(g.peak_of(Sub::RawOut)),
+        mb(g.peak_of(Sub::RawFree)),
+        mb(g.peak_of(Sub::Channel)),
+        mb(g.peak_of(Sub::OutOut)),
+        mb(g.peak_of(Sub::OutFree)),
+        mb(g.peak_of(Sub::Par2Capture)),
+        mb(g.peak_of(Sub::WireEst)),
+    );
 }
 
 /// Rename a failed job's direct-extracted payload AND its downloaded
@@ -710,57 +1193,6 @@ pub(super) fn finish_job(
 /// difference between a user getting two of three files (SABnzbd's
 /// answer on that post) and none (NZBGet's), and the round-4 evidence
 /// says two is the better answer.
-/// Instrument-first: this job's yEnc verified-CRC reuse geometry.
-///
-/// The decoder verifies a whole-article CRC32 that block verification
-/// currently throws away. Reusing it is only sound for an article that is
-/// exactly one untrimmed, block-aligned, full PAR2 block from a fresh
-/// decode under fast verify, and whether real posts are shaped that way
-/// is nobody's guess to make - so every job reports its own geometry and
-/// a later decision reads the numbers. Nothing is optimized yet.
-///
-/// Silent on a job that mapped no spans (no PAR2 set, or no IFSC blocks):
-/// there is no ratio to report and a zero line would only be noise.
-pub(super) fn print_crc_reuse_geometry(verifier: &Arc<nzbkit::live::LiveVerifier>) {
-    let g = verifier.crc_reuse_geometry();
-    if g.spans == 0 {
-        return;
-    }
-    let pct = |part: u64, whole: u64| {
-        if whole == 0 {
-            0.0
-        } else {
-            part as f64 * 100.0 / whole as f64
-        }
-    };
-    println!(
-        "crc-reuse-geometry: {}/{} articles ({:.1}%) are exactly one PAR2 block; {:.2} GB of {:.2} GB mapped ({:.1}% of bytes)",
-        g.qualifying,
-        g.spans,
-        pct(g.qualifying, g.spans),
-        g.qualifying_bytes as f64 / 1e9,
-        g.spans_bytes as f64 / 1e9,
-        pct(g.qualifying_bytes, g.spans_bytes),
-    );
-}
-
-/// M15 memory summary - the line benchmarks quote and budgets tune.
-/// Lifted out of `get_with_progress` for the size gate.
-pub(super) fn print_mem_summary(
-    verifier: &Arc<nzbkit::live::LiveVerifier>,
-    extractor: &Arc<nzbkit::extract::Extractor>,
-    budget: &nzbkit::mem::MemBudget,
-) {
-    let (pp_peak, pp_spilled) = verifier.partials_stats();
-    println!(
-        "mem: peak RSS {:.2} GB · holds peak {:.0} MB · verify partials peak {:.0} MB ({pp_spilled} blocks to read-back) · budget {:.2} GB",
-        nzbkit::mem::peak_rss().unwrap_or(0) as f64 / 1e9,
-        extractor.holds_peak() as f64 / 1e6,
-        pp_peak as f64 / 1e6,
-        budget.total as f64 / 1e9,
-    );
-}
-
 fn quarantine_failed_payload(
     out_dir: &Path,
     extracted: &[String],
@@ -770,8 +1202,9 @@ fn quarantine_failed_payload(
 ) {
     let (hold, spare) = partition_failed_payload(extracted, unhealed_slots, extractor);
     if !spare.is_empty() {
-        println!(
-            "  {} extracted file(s) came out of archives the repair proved whole, and \
+        info!(
+            target: "repair",
+            "{} extracted file(s) came out of archives the repair proved whole, and \
              are left in place: {}",
             spare.len(),
             spare.join(", ")
@@ -788,8 +1221,9 @@ fn quarantine_failed_payload(
     done.extend(vol_done);
     failed.extend(vol_failed);
     if !done.is_empty() {
-        println!(
-            "  {} unverified file(s) renamed to *{} so nothing imports them: {} \
+        info!(
+            target: "verify",
+            "{} unverified file(s) renamed to *{} so nothing imports them: {} \
              (the bytes are kept - a retry resumes from them)",
             done.len(),
             nzbkit::journal::PARTIAL_SUFFIX,
@@ -798,8 +1232,9 @@ fn quarantine_failed_payload(
         info!(target: "quarantine", "renamed {} unverified payload file(s) aside", done.len());
     }
     for name in &failed {
-        println!(
-            "  ⚠ could not rename the unverified {name} aside - it is INCOMPLETE despite \
+        warn!(
+            target: "verify",
+            "could not rename the unverified {name} aside - it is INCOMPLETE despite \
              its name and size, do not import it"
         );
         warn!(target: "quarantine", "{name}: could not be renamed aside");
@@ -947,13 +1382,14 @@ fn drop_spared_metadata(out_dir: &Path, spared: &[String]) -> Vec<String> {
             Ok(()) => gone.push(name.clone()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone.push(name.clone()),
             Err(e) => {
-                println!("  could not remove the partial {}: {e}", p.display());
+                warn!(target: "get", "could not remove the partial {}: {e}", p.display());
                 kept.push(name.clone());
             }
         }
     }
     if kept.is_empty() {
-        println!(
+        info!(
+            target: "get",
             "complete, without {} metadata file(s) no server had: {} \
              (the partial copy was removed - nothing can rebuild it)",
             gone.len(),
@@ -978,7 +1414,7 @@ fn drop_spared_metadata(out_dir: &Path, spared: &[String]) -> Vec<String> {
 /// not an accident: `finish_job` below takes 26 and
 /// `settle_verify_repair` 24, and a bundle struct costs the same lines
 /// at the call site plus a definition to keep in step.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn finish_run(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     stats: &[nzbkit::pool::PoolStats],
@@ -992,11 +1428,11 @@ pub(super) async fn finish_run(
     out_dir: &Path,
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     decode_errors: &Arc<AtomicU64>,
-    retention_excluded: &Arc<AtomicU64>,
+    retention_excluded: &Arc<CauseSplit>,
     decoded_bytes: &Arc<AtomicU64>,
-    missing_430: &Arc<AtomicU64>,
-    takedown_430: &Arc<AtomicU64>,
-    transport_failed: &Arc<AtomicU64>,
+    missing_430: &Arc<CauseSplit>,
+    takedown_430: &Arc<CauseSplit>,
+    transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
     stalled: &Arc<std::sync::atomic::AtomicBool>,
@@ -1018,6 +1454,7 @@ pub(super) async fn finish_run(
     hub: &Option<Arc<StreamHub>>,
     stream_owner: &str,
     budget: &nzbkit::mem::MemBudget,
+    mem_sampler: &super::workers::MemSampler,
 ) -> Result<()> {
     // Post-drain accounting: see take_census. The destructure keeps every
     // downstream read on the same names the inline code used.
@@ -1036,6 +1473,7 @@ pub(super) async fn finish_run(
         recovery_errs,
         derrs,
         retention_skipped,
+        retention_skipped_payload,
         recovery_missing,
     } = take_census(
         servers,
@@ -1058,8 +1496,10 @@ pub(super) async fn finish_run(
         reextract_failed,
         repair_shortfall,
         deferred_renames,
+        mut published_names,
         sniff_covered,
         unhealed_slots,
+        repaired,
     } = settle_verify_repair(
         verifier,
         extractor,
@@ -1088,9 +1528,24 @@ pub(super) async fn finish_run(
     )
     .await?;
 
+    // finish() is where a chase that FAILED demotes (chase_finish ->
+    // fallback_group). If its trim had been dropping, the materialized
+    // volumes have holes: re-fetch them now, before the deferred
+    // renames below take the slots' posted names away and before the
+    // unpack ladder reads the files (see get/dropped.rs).
+    let ex_report = extractor.finish()?;
+    super::dropped::refetch_dropped_volumes(
+        extractor, slot_file, servers, nzb, out_dir, buf_pool, cancel,
+    )
+    .await?;
     // Extraction summary: see report_extraction in get/tail.rs.
-    let (ex_report, outer_vol_stems, final_shape) =
-        report_extraction(extractor, &deferred_renames, out_dir)?;
+    let (ex_report, outer_vol_stems, final_shape) = report_extraction(
+        extractor,
+        ex_report,
+        &deferred_renames,
+        &mut published_names,
+        out_dir,
+    )?;
 
     // finish() is where end-of-download demotes fire (the non-uniform
     // store set, the CRC gate, settle_unclassified), and their hold
@@ -1101,6 +1556,7 @@ pub(super) async fn finish_run(
     // already hold (measured 13 Aug 2026: 9 of the 10 articles a
     // volumes-on-disk retry still pulled were exactly these).
     workers::flush_pending_r(pending_r, extractor, &journal);
+    journal.flush();
 
     // Second late-attach read (C1): the settle/repair phase between the
     // network drain and this ladder runs for minutes on a big damaged
@@ -1141,8 +1597,12 @@ pub(super) async fn finish_run(
             resume_map,
             eat_consent,
             &note_activity,
+            hub,
+            stream_owner,
             all_good,
             reextract_failed,
+            repaired,
+            sniff_covered.as_ref(),
         )
     })?;
     // Unpacking is over. The token used to be left saying "extracting"
@@ -1156,7 +1616,7 @@ pub(super) async fn finish_run(
     note_activity("finalizing");
     // M15 memory summary - the line benchmarks quote and budgets tune:
     // see print_mem_summary in get/tail.rs.
-    print_mem_summary(verifier, extractor, budget);
+    print_mem_summary(verifier, extractor, budget, mem_sampler);
     // Instrument-first, no behaviour: see print_crc_reuse_geometry.
     print_crc_reuse_geometry(verifier);
 
@@ -1180,6 +1640,7 @@ pub(super) async fn finish_run(
         missing_430,
         takedown_430,
         retention_skipped,
+        retention_skipped_payload,
         transport_failed,
         transport_sample,
         decode_error_sample,
@@ -1293,7 +1754,6 @@ mod tests {
 
     /// The same, with the direct-extracted payload list the quarantine
     /// pass reads.
-    #[allow(clippy::too_many_arguments)]
     fn run_finish_ex(
         dir: &Path,
         all_good: bool,
@@ -1335,10 +1795,11 @@ mod tests {
             incomplete,
             derrs,
             recovery_errs,
-            &Arc::new(AtomicU64::new(0)),
-            &Arc::new(AtomicU64::new(0)),
+            &Arc::new(CauseSplit::default()),
+            &Arc::new(CauseSplit::default()),
             0,
-            &Arc::new(AtomicU64::new(0)),
+            0,
+            &Arc::new(CauseSplit::default()),
             &Arc::new(std::sync::Mutex::new(None)),
             &Arc::new(std::sync::Mutex::new(None)),
             &[],
@@ -1359,7 +1820,7 @@ mod tests {
 
     /// The same again, with the slots and extractor the downloaded-file
     /// quarantine reads.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn run_finish_full(
         dir: &Path,
         all_good: bool,
@@ -1383,10 +1844,11 @@ mod tests {
             incomplete,
             derrs,
             0,
-            &Arc::new(AtomicU64::new(0)),
-            &Arc::new(AtomicU64::new(0)),
+            &Arc::new(CauseSplit::default()),
+            &Arc::new(CauseSplit::default()),
             0,
-            &Arc::new(AtomicU64::new(0)),
+            0,
+            &Arc::new(CauseSplit::default()),
             &Arc::new(std::sync::Mutex::new(None)),
             &Arc::new(std::sync::Mutex::new(None)),
             &[],

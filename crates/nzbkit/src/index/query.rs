@@ -114,6 +114,33 @@ pub(super) fn fts_match(query: &str) -> String {
         .join(" ")
 }
 
+/// The stem half of a normalized substring match, in SQL.
+///
+/// Two arms, and both are needed: the `REPLACE`/`LOWER` expression is
+/// what SQLite can compute for itself, and `stem_fold` is the Unicode
+/// fold of the rows whose case `LOWER()` cannot reach - Cyrillic, Greek,
+/// and every other script outside `A-Z`. The column is sparse ('' means
+/// "the expression on the left is already correct for this row", which
+/// is nearly every row), so the fold arm is an ADDITION to the old
+/// clause, never a replacement for it, and the `<> ''` test spells that
+/// out for the reader as well as skipping a LIKE that cannot match. See
+/// index/fold.rs.
+///
+/// `pfx` is the table-alias placeholder the caller's own SQL uses (`""`
+/// where there is none, `"{}"` in browse.rs / cards.rs, whose `alias()`
+/// fills it in later); `p` is the already-rendered bind reference.
+///
+/// The `LOWER(...)` spelling here and [`fold::sql_twin`] are one
+/// expression in two languages. Change either and change both, or the
+/// two arms of the search start disagreeing about what a stem says.
+pub(super) fn stem_fold_arm(pfx: &str, p: &str) -> String {
+    format!(
+        "(REPLACE(REPLACE(REPLACE(LOWER({pfx}stem),'.',' '),'_',' '),'-',' ') \
+           LIKE '%' || {p} || '%' \
+         OR ({pfx}stem_fold <> '' AND {pfx}stem_fold LIKE '%' || {p} || '%'))"
+    )
+}
+
 impl Index {
     /// Search by substring over the stem (case-insensitive), newest first.
     pub(super) fn search_once(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<Release>> {
@@ -121,14 +148,12 @@ impl Index {
         // dotted ("Show.Name.S01E02") but *arr clients query with spaces
         // ("show name s01e02"), so normalize both sides to spaces and
         // require every query word to appear. Empty query = everything.
-        let norm = |s: &str| {
-            s.to_ascii_lowercase()
-                .replace(['.', '_', '-'], " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let terms: Vec<String> = norm(query)
+        //
+        // The fold is Unicode (index/fold.rs), not `to_ascii_lowercase`
+        // as it was until TODO 5 phase 2c: a query typed in lowercase
+        // Cyrillic or Greek has to reach the `stem_fold` arm below in
+        // the same spelling that column was written in.
+        let terms: Vec<String> = fold::query(query)
             .split(' ')
             .filter(|t| !t.is_empty())
             .map(String::from)
@@ -163,8 +188,10 @@ impl Index {
             let rows = stmt.query_map(rusqlite::params![m, limit], release_from_row)?;
             return rows.collect();
         }
-        // "REPLACE(REPLACE(REPLACE(LOWER(stem)…))" mirrors `norm` in SQL.
-        const NS: &str = "REPLACE(REPLACE(REPLACE(LOWER(stem),'.',' '),'_',' '),'-',' ')";
+        // The pre-feed leg's own normalization. It mirrors
+        // `fold::sql_twin` as far as SQL can, which is ASCII only - the
+        // stem leg gets the rest from `stem_fold_arm`, and a fed name
+        // has no fold column of its own (see index/fold.rs).
         const PS: &str = "REPLACE(REPLACE(REPLACE(LOWER(pre_title),'.',' '),'_',' '),'-',' ')";
         let where_clause = if terms.is_empty() {
             "1=1".to_string()
@@ -180,7 +207,13 @@ impl Index {
                     .collect::<Vec<_>>()
                     .join(" AND ")
             };
-            format!("({}) OR (pre_title <> '' AND ({}))", chain(NS), chain(PS))
+            let stem_chain = terms
+                .iter()
+                .enumerate()
+                .map(|(i, _)| stem_fold_arm("", &format!("?{}", i + 1)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("({stem_chain}) OR (pre_title <> '' AND ({}))", chain(PS))
         };
         let sql = format!(
             "SELECT {REL_COLS} FROM releases WHERE {where_clause}
@@ -229,14 +262,15 @@ impl Index {
         }
         // Same normalization `search` uses: stems are stored dotted and
         // a header may be spelled with spaces (or the other way round).
-        let norm = |s: &str| {
-            s.to_ascii_lowercase()
-                .replace(['.', '_', '-'], " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let want = norm(header);
+        //
+        // Unicode, not ASCII, since TODO 5 phase 2c - and here that was
+        // a live bug rather than a missing feature. Rung 2 finds a
+        // Cyrillic stem perfectly well (FTS5's unicode61 folds the whole
+        // range), then handed it to a `contains` test whose own fold was
+        // ASCII-only, so `война.и.мир` matched the index and was thrown
+        // away by the verification. Measured before the fix: the lowercase
+        // header resolved to nothing while the SHOUTED one resolved fine.
+        let want = fold::query(header);
         let mut out: Vec<Release> = Vec::new();
         let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
         let mut push = |rows: Vec<Release>, out: &mut Vec<Release>| {
@@ -306,9 +340,9 @@ impl Index {
             stmt.query_map(rusqlite::params![m, FIND_SCAN_CAP], release_from_row)?
                 .collect::<Result<_, _>>()?
         } else {
-            const NS: &str = "REPLACE(REPLACE(REPLACE(LOWER(stem),'.',' '),'_',' '),'-',' ')";
+            let arm = stem_fold_arm("", "?1");
             let mut stmt = self.db.prepare(&format!(
-                "SELECT {REL_COLS} FROM releases WHERE {NS} LIKE '%' || ?1 || '%'
+                "SELECT {REL_COLS} FROM releases WHERE {arm}
                   ORDER BY first_seen DESC LIMIT ?2"
             ))?;
             stmt.query_map(rusqlite::params![want, FIND_SCAN_CAP], release_from_row)?
@@ -317,7 +351,7 @@ impl Index {
         push(
             cands
                 .into_iter()
-                .filter(|r| norm(&r.stem).contains(&want))
+                .filter(|r| fold::query(&r.stem).contains(&want))
                 .collect(),
             &mut out,
         );
@@ -939,6 +973,139 @@ mod tests {
         put("m:alien nation:1988", "movie", 1988);
         assert_eq!(ix.movie_year("alien").unwrap(), None);
         assert_eq!(ix.movie_year("").unwrap(), None);
+    }
+
+    /// TODO 5 phase 2c: SQLite's `LOWER()` folds `A-Z` and nothing else,
+    /// so a lowercase Cyrillic or Greek query could never reach an
+    /// uppercase stem down any path that was not FTS. `releases.stem_fold`
+    /// carries the Unicode fold for exactly those rows; this pins all
+    /// three surfaces that read it, in both scripts.
+    ///
+    /// The FTS legs are here too even though they always worked
+    /// (`unicode61` folds the full range): they are what says the fold
+    /// column is an ADDITION rather than a replacement, and they are the
+    /// arm most of these queries actually take in production.
+    #[test]
+    fn a_lowercase_cyrillic_or_greek_query_finds_an_uppercase_stem() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-fold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        assert!(ix.fts, "bundled sqlite is expected to ship FTS5");
+        let mk = |f: &str, id: &str| entry(&format!("\"{f}\" yEnc (1/1)"), "a@a", id, 4 << 30);
+        ix.ingest(
+            "alt.binaries.test",
+            &[
+                mk("ВОЙНА.И.МИР.S01E01.1080p.WEB.x264-GRP.mkv", "ru1"),
+                mk("ΟΔΥΣΣΕΙΑ.2019.1080p.BluRay.x264-GRP.mkv", "el1"),
+                mk("Ordinary.Ascii.Release.2019.1080p-GRP.mkv", "as1"),
+            ],
+            1_000,
+        )
+        .unwrap();
+
+        // The write side: the two non-ASCII stems earned a stored fold,
+        // the ASCII one did not (the column is sparse - see fold.rs).
+        let folds: Vec<(String, String)> = ix
+            .db
+            .prepare("SELECT stem, stem_fold FROM releases ORDER BY stem")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let fold_of = |needle: &str| {
+            folds
+                .iter()
+                .find(|(s, _)| s.starts_with(needle))
+                .unwrap_or_else(|| panic!("no stem starting {needle}: {folds:?}"))
+                .1
+                .clone()
+        };
+        assert_eq!(fold_of("Ordinary"), "", "an ASCII stem stored a fold");
+        assert!(fold_of("ВОЙНА").starts_with("война и мир"), "{folds:?}");
+        assert!(fold_of("ΟΔΥΣΣΕΙΑ").starts_with("οδυσσεια"), "{folds:?}");
+
+        // All three read surfaces, on the FTS path they take in
+        // production, and then again with FTS switched off so the LIKE
+        // fallback - the path the fold column exists for - is the one
+        // under test. Both must agree.
+        for path in ["fts", "like"] {
+            ix.fts = path == "fts";
+            ix.pre_fts = ix.fts;
+            let n = |q: &str| ix.search(q, 10).unwrap().len();
+            assert_eq!(n("война и мир"), 1, "{path}: search ru");
+            assert_eq!(n("ВОЙНА"), 1, "{path}: search ru shouted");
+            assert_eq!(n("οδυσσεια"), 1, "{path}: search el");
+            assert_eq!(n("ΟΔΥΣΣΕΙΑ"), 1, "{path}: search el shouted");
+            assert_eq!(
+                n("ordinary ascii"),
+                1,
+                "{path}: the ASCII arm still answers"
+            );
+            assert_eq!(n("война и рим"), 0, "{path}: a term that is absent");
+
+            let browse = |q: &str| {
+                ix.browse(&BrowseQuery {
+                    q: q.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .1
+            };
+            assert_eq!(browse("война"), 1, "{path}: browse ru");
+            assert_eq!(browse("οδυσσεια"), 1, "{path}: browse el");
+            assert_eq!(browse("нетакого"), 0, "{path}: browse miss");
+
+            let cards = |q: &str| {
+                ix.browse_cards(
+                    &BrowseQuery {
+                        q: q.into(),
+                        ..Default::default()
+                    },
+                    CardSort::Latest,
+                    false,
+                    false,
+                    None,
+                )
+                .unwrap()
+                .1
+            };
+            assert_eq!(cards("война"), 1, "{path}: cards ru");
+            assert_eq!(cards("οδυσσεια"), 1, "{path}: cards el");
+        }
+        ix.fts = true;
+        ix.pre_fts = true;
+
+        // The NZBLNK ladder, which was a LIVE bug rather than a missing
+        // feature: rung 2 found the Cyrillic row through FTS and then
+        // threw it away, because the Rust-side `contains` check that
+        // verifies an FTS candidate was still ASCII-folded. The SHOUTED
+        // spelling resolved (rung 1 is byte equality); the lowercase one
+        // did not.
+        assert_eq!(
+            ix.find_by_header("война.и.мир.s01e01.1080p.web.x264-grp", 10)
+                .unwrap()
+                .len(),
+            1,
+            "lowercase Cyrillic header"
+        );
+        assert_eq!(
+            ix.find_by_header("ΟΔΥΣΣΕΙΑ.2019.1080p.BluRay.x264-GRP", 10)
+                .unwrap()
+                .len(),
+            1,
+            "exact Greek header"
+        );
+        assert_eq!(
+            ix.find_by_header("οδυσσεια.2019.1080p.bluray.x264-grp", 10)
+                .unwrap()
+                .len(),
+            1,
+            "lowercase Greek header"
+        );
+        teardown(&dir, ix);
     }
 
     #[test]

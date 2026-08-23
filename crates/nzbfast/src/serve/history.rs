@@ -92,8 +92,7 @@ pub(super) fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
         let base = if state == JobState::Completed {
             let cat_root = d
                 .move_completed_cats
-                .read()
-                .unwrap()
+                .read_ok()
                 .iter()
                 .find(|(c, _)| *c == cat)
                 .map(|(_, p)| p.clone());
@@ -621,6 +620,11 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         "identity_name": j.identity_name,
         "downloaded_bytes": j.downloaded_bytes,
         "elapsed_secs": (j.elapsed_secs * 10.0).round() / 10.0,
+        // TODO 200: the list row showed download time only, so a job
+        // that downloaded in 22 s and then sat 27 minutes in its tail
+        // read "22s - 16 MB/s" and the stuck tail left no trace in the
+        // UI record. The tail's own figure rides the summary too.
+        "postproc_secs": (j.postproc_secs * 100.0).round() / 100.0,
         "bad_blocks": j.bad_blocks,
         "verify_blocks": j.verify_blocks,
         "unpack_blocked_by": j.unpack_blocked_by,
@@ -723,8 +727,8 @@ pub(super) fn history_json(
 }
 
 /// The full SAB facade row - the pre-§129 key set, byte-stable for
-/// external clients (pinned by tests/dashboard_rev.rs). Built under the
-/// caller's job lock.
+/// external clients (pinned by tests/integration/dashboard_rev.rs).
+/// Built under the caller's job lock.
 fn history_row(d: &Daemon, j: &Job) -> Value {
     {
         // Truth-audit I: what this download is CALLED on disk, when
@@ -995,6 +999,15 @@ fn history_row(d: &Daemon, j: &Job) -> Value {
             // Ours, not SAB's: the same figure unrounded, so a tail under
             // a second is distinguishable from one that never ran.
             "postproc_secs": (j.postproc_secs * 100.0).round() / 100.0,
+            // TODO 207: and the OTHER half of "why did this take so
+            // long" - which layer owned the network leg, longest-held,
+            // with the seconds that back the claim. Another additive
+            // key: null on every record written before the field
+            // existed and on every job nothing judged, and the drawer
+            // renders no row for a null. It is the same verdict the
+            // queue row shows while the job is on the wire, so the page
+            // renders it through the same `whyPhrase()`.
+            "whyslow": j.whyslow.as_ref().map(super::whyslow::verdict_json),
             // SAB's per-stage action log. Nothing here writes one, and
             // an empty list is what SAB sends for a job that logged no
             // stages.

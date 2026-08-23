@@ -225,41 +225,6 @@ impl RSCoder8 {
 /// in cache while every source volume streams past it.
 const RECONSTRUCT_CHUNK: usize = 64 * 1024;
 
-/// Solve the full Forney decode once per byte offset.
-///
-/// This is the original reconstruction loop. It is quadratic in the volume
-/// count and allocates about half a dozen vectors per output byte, so it now
-/// runs only for erasure sets the decoder cannot derive coefficients for at
-/// all -- where it is the definition of the expected answer.
-fn reconstruct_per_symbol(
-    data_volumes: &[Option<&[u8]>],
-    recovery_by_index: &[Option<&[u8]>],
-    coder: &RSCoder8,
-    erasures: &[usize],
-    missing_data: &[usize],
-    shard_len: usize,
-    mut out: Vec<Vec<u8>>,
-) -> Result<Vec<Vec<u8>>> {
-    for offset in 0..shard_len {
-        let mut codeword = vec![0; data_volumes.len() + recovery_by_index.len()];
-        for (index, data) in data_volumes.iter().enumerate() {
-            if let Some(data) = data {
-                codeword[index] = data.get(offset).copied().unwrap_or(0);
-            }
-        }
-        for (index, data) in recovery_by_index.iter().enumerate() {
-            if let Some(data) = data {
-                codeword[data_volumes.len() + index] = data[offset];
-            }
-        }
-        coder.correct_erasures(&mut codeword, erasures)?;
-        for &index in missing_data {
-            out[index][offset] = codeword[index];
-        }
-    }
-    Ok(out)
-}
-
 /// Derive the erasure-correction coefficients once for a fixed erasure set.
 ///
 /// `correct_erasures` is linear in the codeword, and everything it derives
@@ -383,24 +348,21 @@ pub fn reconstruct_data_volumes(
     }
 
     let codeword_len = data_volumes.len() + recovery_count;
-    let matrix = match erasure_correction_matrix(&coder, codeword_len, &erasures, &known) {
-        Ok(matrix) => matrix,
-        // The erasure set defeats the decoder itself, so there are no
-        // coefficients to derive. `correct_erasures` can still return Ok for
-        // an individual codeword that needs no correction, so hand the whole
-        // job to the per-symbol path rather than answer differently from it.
-        Err(_) => {
-            return reconstruct_per_symbol(
-                data_volumes,
-                &recovery_by_index,
-                &coder,
-                &erasures,
-                &missing_data,
-                shard_len,
-                out,
-            )
-        }
-    };
+    // No fallback path: every erasure set that reaches here derives its
+    // coefficients. The erasures are distinct and inside the codeword (the
+    // data indices are unique, the recovery ones are offset past them, and
+    // the count is bounded above by `recovery_count` a few lines up), so the
+    // locator carries exactly one simple root per erasure, all of them inside
+    // the scanned range and each with a non-zero Forney denominator. An error
+    // here would mean one of those held false, which is worth surfacing
+    // rather than papering over. Until the root-scan alias fix (TODO 17e) it
+    // could hold false for a full-length 255-symbol codeword, and the
+    // original per-byte Forney loop stayed on as a fallback for exactly that
+    // case; it now lives in the test module as the differential oracle.
+    // (nzbfast-local change, 22 Aug 2026 - re-apply on the next rars
+    // re-sync, and only on top of the root-scan fix, see
+    // vendor/rars/VENDORING.md.)
+    let matrix = erasure_correction_matrix(&coder, codeword_len, &erasures, &known)?;
 
     // One multiply-by-constant table per (rebuilt volume, surviving volume).
     // `erasures` starts with `missing_data`, so matrix row `i` is the
@@ -466,6 +428,42 @@ pub fn reconstruct_data_volumes(
 mod tests {
     use super::{reconstruct_data_volumes, Error, RSCoder8, MAX_PARITY};
 
+    /// Solve the full Forney decode once per byte offset.
+    ///
+    /// This is the original reconstruction loop, quadratic in the volume count
+    /// and allocating about half a dozen vectors per output byte. It shipped as
+    /// production's fallback while a full-length codeword could defeat the root
+    /// scan; with that fixed it is kept here, and only here, as the differential
+    /// oracle the bulk matrix path is checked against.
+    fn reconstruct_per_symbol(
+        data_volumes: &[Option<&[u8]>],
+        recovery_by_index: &[Option<&[u8]>],
+        coder: &RSCoder8,
+        erasures: &[usize],
+        missing_data: &[usize],
+        shard_len: usize,
+        mut out: Vec<Vec<u8>>,
+    ) -> super::Result<Vec<Vec<u8>>> {
+        for offset in 0..shard_len {
+            let mut codeword = vec![0; data_volumes.len() + recovery_by_index.len()];
+            for (index, data) in data_volumes.iter().enumerate() {
+                if let Some(data) = data {
+                    codeword[index] = data.get(offset).copied().unwrap_or(0);
+                }
+            }
+            for (index, data) in recovery_by_index.iter().enumerate() {
+                if let Some(data) = data {
+                    codeword[data_volumes.len() + index] = data[offset];
+                }
+            }
+            coder.correct_erasures(&mut codeword, erasures)?;
+            for &index in missing_data {
+                out[index][offset] = codeword[index];
+            }
+        }
+        Ok(out)
+    }
+
     /// Drive the original per-byte Forney loop directly, as the differential
     /// reference the bulk matrix path must agree with byte for byte.
     fn reconstruct_reference(
@@ -502,7 +500,7 @@ mod tests {
                 shard
             })
             .collect();
-        super::reconstruct_per_symbol(
+        reconstruct_per_symbol(
             data_volumes,
             &recovery_by_index,
             &coder,
@@ -739,6 +737,54 @@ mod tests {
 
         let rebuilt = reconstruct_data_volumes(&present, recovery_count, &recovery).unwrap();
         assert_eq!(rebuilt[data_count - 1], volumes[data_count - 1]);
+    }
+
+    /// The per-byte loop above shipped as production's fallback for exactly
+    /// one reason: while a full-length codeword scanned alpha^0 twice, its
+    /// erasure sets could not derive coefficients, and the bulk path had to
+    /// stand aside rather than answer differently from the decoder. With the
+    /// root range fixed the fallback is gone, so the claim that replaced it
+    /// has to hold: every erasure set that gets past the argument checks
+    /// derives. Sweep the full-length geometries, where the alias lived, at
+    /// erasure counts up to the whole parity budget - including the sets
+    /// that erase the last data volume, whose root is the aliased one.
+    #[test]
+    fn no_full_length_erasure_set_needs_a_per_byte_fallback() {
+        let shard_len = 8;
+        for &(data_count, recovery_count) in &[(200usize, 55usize), (250, 5), (128, 127)] {
+            assert_eq!(data_count + recovery_count, MAX_PARITY);
+            let volumes: Vec<Vec<u8>> = (0..data_count)
+                .map(|index| pseudorandom(shard_len, 0xA11A + index as u64))
+                .collect();
+            let parity = encode_columns(&volumes, recovery_count, shard_len);
+
+            for missing in [1usize, recovery_count] {
+                // The last `missing` data volumes are gone, and only the
+                // first `missing` recovery volumes survive - so the erasure
+                // set is the full parity budget, data and recovery together.
+                let mut present: Vec<Option<&[u8]>> =
+                    volumes.iter().map(|shard| Some(shard.as_slice())).collect();
+                for slot in present.iter_mut().rev().take(missing) {
+                    *slot = None;
+                }
+                let recovery: Vec<(usize, &[u8])> = (0..missing)
+                    .map(|index| (index, parity[index].as_slice()))
+                    .collect();
+
+                assert!(
+                    correction_matrix_for(&present, recovery_count, &recovery).is_ok(),
+                    "fallback needed for {data_count}+{recovery_count}, {missing} missing"
+                );
+                let rebuilt = reconstruct_data_volumes(&present, recovery_count, &recovery)
+                    .expect("full-length reconstruction");
+                for index in (data_count - missing)..data_count {
+                    assert_eq!(
+                        rebuilt[index], volumes[index],
+                        "wrong bytes for volume {index} of {data_count}+{recovery_count}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

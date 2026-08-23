@@ -66,6 +66,7 @@ async fn mapped_verdict_with_reports(
         reports,
         missing,
         &mut Vec::new(),
+        &mut Vec::new(),
         false,
         None,
         // `needed` is 0 here, so nothing fetches and the seam is
@@ -183,106 +184,6 @@ fn vol_counts_parse() {
     // exponents (par2cmdline#205) - both must parse, never panic.
     assert_eq!(vol_count_from_name("disk1.vol34529+00000.par2"), Some(0));
     assert_eq!(vol_count_from_name("x.vol10000+12345.par2"), Some(12345));
-}
-
-/// A demoted group whose volumes nobody else unpacks must reach the
-/// on-disk pass, or the job "completes" over a directory of loose .rar
-/// volumes with no payload in it. Both directions matter: the reasons
-/// somebody else owns must stay out, because sending those to unrar
-/// fails jobs that are fine today.
-#[test]
-fn demoted_volumes_nobody_owns_reach_the_disk_unpack() {
-    // Reason strings as extract.rs emits them.
-    for why in [
-        // The f9983fa tiling gate: headers that do not describe a whole
-        // file. Note "complete file" is IN this string - the near-miss
-        // that made it look handled by the old "incomplete mapping" arm.
-        "inner file's headers do not describe a complete file",
-        // MapBlocker::Corrupt, via blocker_reason.
-        "data area exceeds volume",
-        "block length does not advance",
-        // The reasons the ladder already knew.
-        "inner file failed its stored CRC",
-        "inner file carries only a hash the fast path can't verify",
-        "held-bytes cap: header stash",
-        "incomplete mapping at end of download",
-        "routed span lost its destination",
-        "chase failed: worker died",
-    ] {
-        assert!(
-            fallback_needs_disk_unpack(why),
-            "'{why}' would ship a job with no payload and exit 0"
-        );
-    }
-    // Owned by somebody else - handing these to unrar breaks jobs that
-    // work today.
-    for why in [
-        // The caller's own encrypted/password/compressed branches.
-        "encrypted headers (password required)",
-        "encrypted entries (password required)",
-        "wrong archive password",
-        "compressed or encrypted entries",
-        "encrypted data incomplete",
-        "encrypted data failed its checksum (wrong password)",
-        // The nested post-pass repairs the inner layer before unpacking.
-        "nested fallback: inner file failed its stored CRC",
-        "nested fallback: inner mapping unfinished at end of download",
-        // Not an archive at all: there is no set for unrar to open.
-        "not a RAR volume",
-        "never classified",
-        "unclassified-holds budget",
-        // The PAR2 path re-extracts these itself and removes them.
-        "materialized for repair",
-    ] {
-        assert!(
-            !fallback_needs_disk_unpack(why),
-            "'{why}' is already owned - unpacking it again fails a good job"
-        );
-    }
-}
-
-/// A top-level 7z chase that demoted is owned by the 7z post-pass,
-/// and its reason must not reach the RAR ladder at all - not the
-/// unowned arm, not the encrypted arm. Both wordings are pinned
-/// because both occur (the retention cap, and an archive whose
-/// header needs a password), and both would otherwise end at
-/// `try_unrar` over a directory holding one .7z, which fails.
-#[test]
-fn a_demoted_top_level_7z_stays_out_of_the_rar_ladder() {
-    for why in [
-        "held-bytes cap: chase memory",
-        "inner 7z is encrypted (no password)",
-        "inner 7z codec unsupported: 30101",
-        "materialized for repair",
-    ] {
-        let marked = format!("{}{why}", nzbkit::extract::SEVENZ_DISK_FALLBACK_PREFIX);
-        assert!(sevenz_disk_fallback(&marked), "'{marked}'");
-        // The underlying reason stays readable inside it - the
-        // "held-bytes cap" substring other callers key off included.
-        assert!(marked.contains(why));
-    }
-    // A RAR volume demote is untouched by the marker check.
-    assert!(!sevenz_disk_fallback("held-bytes cap: chase memory"));
-    assert!(!sevenz_disk_fallback(
-        "nested fallback: inner 7z decode failed"
-    ));
-}
-
-/// The zip twin: a demoted top-level zip chase leaves a `.zip` the
-/// disk post-pass's own ladder step owns, and its reason text -
-/// which carries "password"/"compression" wordings - must stay out
-/// of the RAR ladder for the same reason.
-#[test]
-fn a_demoted_top_level_zip_stays_out_of_the_rar_ladder() {
-    for why in [
-        "held-bytes cap: chase memory",
-        "movie.mkv is password-protected and encrypted zip is not supported",
-        "movie.mkv uses bzip2 compression, which is not built in",
-    ] {
-        let marked = format!("{}{why}", nzbkit::extract::ZIP_DISK_FALLBACK_PREFIX);
-        assert!(sevenz_disk_fallback(&marked), "'{marked}'");
-        assert!(marked.contains(why));
-    }
 }
 
 /// The speculative recovery prefetch promises "a tiny side pool (1
@@ -1001,6 +902,338 @@ fn reextract_dir_demoted_set_removes_spent_volumes() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// TODO 211's third call site: the re-extract after a PAR2 repair.
+///
+/// The same byte split of one container (`stage.rar.001`..`.004`) that the
+/// download tail now rescues, reached through `reextract_dir` instead -
+/// the path a repaired job and a resumed run both take. The volume grammar
+/// at the top of this function pulls out part 1 ALONE, because it is the
+/// only part carrying the `Rar!` magic that `.001` has to earn, so the feed
+/// loop hands the mapper a quarter of an archive, every arm demotes, and
+/// the unrar fallback finds nothing it can open. Before the rescue rung
+/// this returned Ok(false) with all four parts on disk and nothing
+/// delivered - a repaired split-container post failing exactly as TODO 211
+/// described, while the identical undamaged post succeeded.
+///
+/// The recovery file beside the parts is the second half of the proof: it
+/// is not joined (a `.par2` base refuses in either reading) and it is not
+/// swept, because deciding a job's recovery data is `par_cleanup`'s call
+/// downstream and never this function's.
+///
+/// "The unrar fallback finds nothing it can open" is the second rung of a
+/// two-rung ladder, and it is a subprocess. This test needs it to fail
+/// before the rescue is reached, and the exact listing below needs the
+/// failed attempt to have left nothing behind - which used to hold only
+/// because no box the suite runs on has an `unrar` on `$PATH`. It holds
+/// by construction now: the hatch is closed for the whole unit-test build
+/// (`rarfix::external_unrar_closed`, which carries the reasoning).
+#[test]
+fn reextract_dir_rescues_a_split_container_after_repair() {
+    use nzbkit::rar::fixtures;
+    let dir = reex_dir("split-container");
+    let total: Vec<u8> = (0..240_000u32)
+        .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+        .collect();
+    let archive = fixtures::rar5_volume(&[("film.mkv", total.len() as u64, &total, false, false)]);
+    let chunk = archive.len().div_ceil(4);
+    let parts: Vec<PathBuf> = archive
+        .chunks(chunk)
+        .enumerate()
+        .map(|(i, c)| {
+            let p = dir.join(format!("stage.rar.{:03}", i + 1));
+            std::fs::write(&p, c).unwrap();
+            p
+        })
+        .collect();
+    assert_eq!(parts.len(), 4);
+    let par2 = dir.join("stage.par2");
+    let mut packet = b"PAR2\x00PKT".to_vec();
+    packet.extend(std::iter::repeat_n(0x11u8, 4_000));
+    std::fs::write(&par2, &packet).unwrap();
+
+    assert!(
+        reextract_dir(&dir, None).unwrap(),
+        "the repaired split container was not rescued"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("film.mkv")).unwrap(),
+        total,
+        "the archive member is delivered byte for byte"
+    );
+    for p in &parts {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    assert!(
+        !dir.join("stage.rar").exists(),
+        "the container the rescue built is spent too"
+    );
+    assert!(
+        par2.exists(),
+        "the recovery file is not this pass's to sweep"
+    );
+    assert_eq!(
+        names_in(&dir),
+        vec!["film.mkv".to_string(), "stage.par2".to_string()]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The disk pass picks up where a forfeited chase stopped.
+///
+/// The proof is deliberately destructive: the partial on disk is
+/// POISONED, so its bytes are not what the archive holds. If the pass
+/// resumed, those bytes survive and only the tail is appended; if it
+/// re-extracted from byte zero, they are overwritten and the file comes
+/// out byte-exact. Asserting the poison survives is the only assertion
+/// that can tell the two apart from outside - a correct-prefix fixture
+/// passes either way and proves nothing.
+///
+/// (In production the prefix IS the archive's own bytes - the extractor
+/// only records a mark for output it wrote itself, and voids the ledger
+/// if a repair rewrites what it decoded from. See
+/// `nzbkit::extract::ResumeOutput`.)
+#[test]
+fn a_resumed_member_keeps_its_prefix_and_gets_only_the_tail_appended() {
+    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
+    let dir = reex_dir("resume-append");
+    let a: Vec<u8> = (0..200_000u32)
+        .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+        .collect();
+    let archive = Rar50Writer::new(WriterOptions::default())
+        .compressed_entries(&[CompressedEntry {
+            name: b"a.bin",
+            data: &a,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        }])
+        .finish()
+        .unwrap();
+    std::fs::write(dir.join("set.rar"), &archive).unwrap();
+
+    const MARK: u64 = 80_000;
+    let out = dir.join("a.bin");
+    // The chase's kept prefix: the member's own leading bytes, with the
+    // checksum the chase would have recorded over them (TODO 217 - a
+    // filler prefix no longer passes, because the pass now VERIFIES the
+    // re-decode against the mark's crc before appending a byte).
+    std::fs::write(&out, &a[..MARK as usize]).unwrap();
+    // Append-proof: a hard link shares the inode, so it sees the append
+    // in place; a from-zero re-extract publishes a NEW inode over the
+    // name and the witness keeps the short prefix.
+    let witness = dir.join("witness.bin");
+    std::fs::hard_link(&out, &witness).unwrap();
+    let _arm = crate::resumeout::ResumeArm::new(&[nzbkit::extract::ResumeOutput {
+        member: "a.bin".to_string(),
+        path: out.clone(),
+        len: MARK,
+        crc32: crc32fast::hash(&a[..MARK as usize]),
+    }]);
+
+    let spent = try_unrar_spent(&dir, None).expect("the unpack failed");
+    let got = std::fs::read(&out).unwrap();
+    assert_eq!(got, a, "the published member is not byte-exact");
+    assert_eq!(
+        std::fs::read(&witness).unwrap(),
+        a,
+        "the pass did not append to the kept prefix in place - it re-extracted"
+    );
+    // And the set is SPENT. The proof-of-output rule the deletion needs
+    // is a before/after diff of the directory, and a resumed member is
+    // invisible to it - its path was there before this pass ran. Without
+    // `resumeout::finished_any` the payload comes out complete with the
+    // whole volume set still sitting beside it.
+    assert_eq!(
+        spent,
+        vec![dir.join("set.rar")],
+        "the volumes the resumed unpack read were not reported spent"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// TODO 217's mismatch arm, driven through the real native pass: the
+/// kept prefix carries the checksum the chase honestly recorded, but
+/// the volumes on disk decode to something else (a repair or a dropped
+/// range's re-fetch rewrote them after the chase read them). The
+/// verification catches it at the mark, the rewind clears the ledger,
+/// and the retry extracts from byte zero - so the published member is
+/// byte-exact where a trusting resume would have published the stale
+/// prefix under a passing job.
+///
+/// RED against a revert: without the checksum compare the pass appends
+/// the member's tail to the stale prefix and the first assert fails on
+/// a corrupt `a.bin`.
+#[test]
+fn a_stale_prefix_fails_its_checksum_and_the_pass_rewinds_to_byte_zero() {
+    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
+    let dir = reex_dir("resume-mismatch");
+    let a: Vec<u8> = (0..200_000u32)
+        .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+        .collect();
+    let archive = Rar50Writer::new(WriterOptions::default())
+        .compressed_entries(&[CompressedEntry {
+            name: b"a.bin",
+            data: &a,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        }])
+        .finish()
+        .unwrap();
+    std::fs::write(dir.join("set.rar"), &archive).unwrap();
+
+    const MARK: u64 = 80_000;
+    // What the chase wrote and hashed - decoded from a copy of the
+    // volumes that no longer matches what is on disk now. The ledger
+    // entry is internally consistent (its crc IS the crc of its file),
+    // which is exactly why only comparing against the RE-DECODE can
+    // catch it.
+    let stale: Vec<u8> = (0..MARK as usize).map(|i| (i as u8) ^ 0x5A).collect();
+    let out = dir.join("a.bin");
+    std::fs::write(&out, &stale).unwrap();
+    let witness = dir.join("witness.bin");
+    std::fs::hard_link(&out, &witness).unwrap();
+    let _arm = crate::resumeout::ResumeArm::new(&[nzbkit::extract::ResumeOutput {
+        member: "a.bin".to_string(),
+        path: out.clone(),
+        len: MARK,
+        crc32: crc32fast::hash(&stale),
+    }]);
+
+    assert!(try_unrar(&dir, None), "the rewind should still unpack");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        a,
+        "the published member must be the from-zero extract, not the stale splice"
+    );
+    // The stale partial's inode was unlinked by the rewind, never
+    // appended to: the witness (its other hard link) still holds
+    // exactly the stale prefix.
+    assert_eq!(
+        std::fs::read(&witness).unwrap(),
+        stale,
+        "the stale prefix was appended to instead of being abandoned"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Two entries of one name share one plan key, so a resume of `a.bin`
+/// would have BOTH open the partial at the mark and the published file
+/// come out as A's prefix with B's tail - while both entries report
+/// success (Codex F-02). A name the batch carries twice is not resumed.
+#[test]
+fn duplicate_member_names_are_never_resumed() {
+    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
+    let dir = reex_dir("resume-dupe-names");
+    let a: Vec<u8> = (0..120_000u32)
+        .map(|i| (i as u8).wrapping_mul(19).wrapping_add(3))
+        .collect();
+    let b: Vec<u8> = (0..120_000u32)
+        .map(|i| (i as u8).wrapping_mul(5).wrapping_add(7))
+        .collect();
+    let entry = |data: &'static [u8]| CompressedEntry {
+        name: b"a.bin",
+        data,
+        mtime: None,
+        attributes: 0,
+        host_os: 0,
+    };
+    let (a_static, b_static): (&'static [u8], &'static [u8]) = (
+        Box::leak(a.clone().into_boxed_slice()),
+        Box::leak(b.clone().into_boxed_slice()),
+    );
+    let archive = Rar50Writer::new(WriterOptions::default())
+        .compressed_entries(&[entry(a_static), entry(b_static)])
+        .finish()
+        .unwrap();
+    std::fs::write(dir.join("set.rar"), &archive).unwrap();
+
+    const MARK: u64 = 40_000;
+    let out = dir.join("a.bin");
+    std::fs::write(&out, vec![0xA5u8; MARK as usize]).unwrap();
+    let _arm = crate::resumeout::ResumeArm::new(&[nzbkit::extract::ResumeOutput {
+        member: "a.bin".to_string(),
+        path: out.clone(),
+        len: MARK,
+        crc32: 0,
+    }]);
+    assert!(try_unrar(&dir, None), "the unpack failed");
+    let got = std::fs::read(&out).unwrap();
+    assert!(
+        got == a || got == b,
+        "the published file is neither member whole - a spliced resume"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The two guards that send a member down the ordinary byte-zero route.
+///
+/// A partial whose length has MOVED since the extractor cut it is no
+/// longer the prefix the mark speaks for; a partial sitting somewhere
+/// other than where this pass would publish the member (a deduplicated
+/// name, here) is not the member's file at all. Either way the entry is
+/// skipped and the extraction is exactly what it always was - which the
+/// poisoned prefix proves by being overwritten.
+#[test]
+fn a_partial_that_moved_or_was_renamed_is_extracted_from_byte_zero() {
+    use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
+    let a: Vec<u8> = (0..120_000u32)
+        .map(|i| (i as u8).wrapping_mul(23).wrapping_add(5))
+        .collect();
+    let archive = Rar50Writer::new(WriterOptions::default())
+        .compressed_entries(&[CompressedEntry {
+            name: b"a.bin",
+            data: &a,
+            mtime: None,
+            attributes: 0,
+            host_os: 0,
+        }])
+        .finish()
+        .unwrap();
+
+    // Guard 1: the file grew after the mark was taken.
+    {
+        let dir = reex_dir("resume-moved");
+        std::fs::write(dir.join("set.rar"), &archive).unwrap();
+        let out = dir.join("a.bin");
+        std::fs::write(&out, vec![0xA5u8; 50_000]).unwrap();
+        let _arm = crate::resumeout::ResumeArm::new(&[nzbkit::extract::ResumeOutput {
+            member: "a.bin".to_string(),
+            path: out.clone(),
+            len: 40_000,
+            crc32: 0,
+        }]);
+        assert!(try_unrar(&dir, None), "the unpack failed");
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            a,
+            "it should have re-extracted"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // Guard 2: the partial is not at the path this pass publishes to.
+    {
+        let dir = reex_dir("resume-renamed");
+        std::fs::write(dir.join("set.rar"), &archive).unwrap();
+        let stray = dir.join("a-1.bin");
+        std::fs::write(&stray, vec![0xA5u8; 40_000]).unwrap();
+        {
+            let _arm = crate::resumeout::ResumeArm::new(&[nzbkit::extract::ResumeOutput {
+                member: "a.bin".to_string(),
+                path: stray.clone(),
+                len: 40_000,
+                crc32: 0,
+            }]);
+            assert!(try_unrar(&dir, None), "the unpack failed");
+            assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+        }
+        // ...and the arm took the stray away with it, rather than
+        // leaving a short file beside the payload.
+        assert!(!stray.exists(), "the untaken partial was left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 /// KEEP (Part B): an encrypted set with no password. The verified
 /// volumes ARE the deliverable until a password arrives, and the
 /// unlock flow re-reads them - a successful "password required" pass
@@ -1573,6 +1806,197 @@ fn obfuscated_volumes_extract_like_named_ones() {
     std::fs::remove_dir_all(&obf).unwrap();
 }
 
+/// Two obfuscated two-volume RAR5 sets in one directory that span a
+/// member of the SAME name (`film.mkv`) with different bytes, with the
+/// continuation names sorted in the reverse order of the heads.
+///
+/// Both heads are open and both expect volume 1, and the only linkage
+/// evidence - the split member's name across the boundary - is
+/// identical for both. The partitioner used to take the FIRST such
+/// match, so the second set's continuation was appended to the first
+/// set, which then closed, and the first set's continuation fell
+/// through to the sole-candidate arm and was appended to the second
+/// with no boundary check at all. Two complete sets became two
+/// cross-wired ones: with no stored CRC to catch it, one of them
+/// "extracted" and published a `film.mkv` that is the head of one set
+/// glued to the tail of the other.
+///
+/// Ambiguous evidence is no evidence: the pass must decline, publish
+/// nothing, and keep every input byte-identical for PAR2 repair or a
+/// retry to work from.
+#[test]
+fn ambiguous_obfuscated_continuations_are_not_guessed() {
+    let a: Vec<u8> = (0..200_000u32)
+        .map(|i| (i as u8).wrapping_mul(13).wrapping_add(5))
+        .collect();
+    let b: Vec<u8> = (0..200_000u32)
+        .map(|i| (i as u8).wrapping_mul(29).wrapping_add(2))
+        .collect();
+    let va = reex_vols_named(&a, "film.mkv");
+    let vb = reex_vols_named(&b, "film.mkv");
+
+    // Heads sort A then B; continuations sort B then A.
+    let dir = reex_dir("obf-ambig");
+    let files = [
+        ("aa01", &va[0]),
+        ("aa02", &vb[0]),
+        ("ab01", &vb[1]),
+        ("ab02", &va[1]),
+    ];
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    let ok = extract_local(&dir, None).unwrap_or(false);
+    assert!(
+        !ok,
+        "two sets whose boundary evidence is identical cannot be partitioned, \
+         so the pass must not report success"
+    );
+    assert!(
+        !dir.join("film.mkv").exists(),
+        "a cross-wired payload was published"
+    );
+    for (name, bytes) in files {
+        assert_eq!(
+            &std::fs::read(dir.join(name)).unwrap(),
+            bytes,
+            "input volume {name} was consumed or altered"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// One four-volume RAR4 stored set, written twice: once under names
+/// that order it and once under hash names that do not.
+fn rar4_vols(total: &[u8], per_volume: usize) -> Vec<Vec<u8>> {
+    rars::rar15_40::write_stored_volumes(
+        rars::rar15_40::StoredEntry {
+            name: b"film.mkv",
+            data: total,
+            file_time: 0,
+            file_attr: 0,
+            host_os: 0,
+            password: None,
+            file_comment: None,
+        },
+        rars::rar15_40::WriterOptions::default(),
+        per_volume,
+    )
+    .unwrap()
+}
+
+/// The obfuscated collector cannot order a RAR4 volume set, and the
+/// boundary is the NAMES, not the family: the same four volumes extract
+/// under `.rar`/`.rNN` and cannot be touched under hash names. RAR4
+/// headers carry no volume number and, as `archive_volume_number`
+/// records, interior volumes are otherwise header-identical, so nothing
+/// on this path can put them back in order.
+///
+/// Pinned because the failure has to stay the SAFE one. This is a
+/// missing capability, and a missing capability must not turn into a
+/// lost download: the run may not publish a partial `film.mkv`, and it
+/// may not spend a single volume - PAR2 repair, `.rev` reconstruction
+/// and a plain retry all read them, and on a finished download they are
+/// the only copy. It must also still FAIL, so an *arr sees a failure and
+/// re-grabs rather than importing an empty directory.
+#[test]
+fn obfuscated_rar4_set_fails_cleanly_and_keeps_every_volume() {
+    let total: Vec<u8> = (0..400_000u32)
+        .map(|i| (i as u8).wrapping_mul(23).wrapping_add(7))
+        .collect();
+    let vols = rar4_vols(&total, 100_000);
+    assert_eq!(vols.len(), 4, "fixture must be a real multi-volume set");
+
+    // Named: the ordinary RAR4 path unpacks it, so the family itself is
+    // supported and only the ordering is at stake below.
+    let named = reex_dir("rar4-named");
+    std::fs::write(named.join("x.rar"), &vols[0]).unwrap();
+    for (i, v) in vols[1..].iter().enumerate() {
+        std::fs::write(named.join(format!("x.r{i:02}")), v).unwrap();
+    }
+    assert!(
+        extract_local(&named, None).unwrap(),
+        "named RAR4 volume set must extract"
+    );
+    assert_eq!(std::fs::read(named.join("film.mkv")).unwrap(), total);
+
+    // Obfuscated: same bytes, hash names in an order that is not volume
+    // order. Nothing can recover the sequence, so the job fails.
+    let obf = reex_dir("rar4-obf");
+    let hashes = ["d1f9c0", "a074be", "c55201", "b3e8a7"];
+    for (name, v) in hashes.iter().zip(vols.iter()) {
+        std::fs::write(obf.join(name), v).unwrap();
+    }
+    assert!(
+        !extract_local(&obf, None).unwrap_or(false),
+        "an obfuscated RAR4 set cannot be ordered, so it must not report success"
+    );
+    assert!(
+        !obf.join("film.mkv").exists(),
+        "a partial payload was published from an unordered set"
+    );
+    for (name, v) in hashes.iter().zip(vols.iter()) {
+        assert_eq!(
+            &std::fs::read(obf.join(name)).unwrap(),
+            v,
+            "volume {name} was spent or damaged by a run that produced nothing"
+        );
+    }
+
+    std::fs::remove_dir_all(&named).unwrap();
+    std::fs::remove_dir_all(&obf).unwrap();
+}
+
+/// TODO 205 end to end: the disk ladder must report what it is doing
+/// while it does it. Issue #47's reporter watched a 130-volume
+/// obfuscated set unpack for several minutes on a NAS behind one static
+/// word - the queue row could not say whether it was one volume or his
+/// hundred and thirty, nor how far in it was.
+///
+/// This runs the same route his set takes (`extract_obfuscated_rar`,
+/// reached here through `extract_local`) with the ladder armed, and
+/// asks the hub entry the queue payload reads: the volume count is
+/// there before a byte moves, and the byte total arrives from the
+/// archive headers rather than from anything the extraction had to
+/// finish first.
+#[test]
+fn an_armed_disk_ladder_publishes_its_volume_count_and_its_bytes() {
+    let total: Vec<u8> = (0..400_000u32)
+        .map(|i| (i as u8).wrapping_mul(23).wrapping_add(5))
+        .collect();
+    let vols = reex_vols(&total);
+    let dir = reex_dir("prog-obf");
+    std::fs::write(dir.join("bb0a1f"), &vols[0]).unwrap();
+    std::fs::write(dir.join("aa93c2"), &vols[1]).unwrap();
+
+    let hub = std::sync::Arc::new(crate::streamhub::StreamHub::default());
+    let arm = crate::unpackprog::arm(&Some(hub.clone()), "nzo-205", 2);
+    let p = hub
+        .unpack
+        .lock_ok()
+        .get("nzo-205")
+        .cloned()
+        .expect("the arm registers the job");
+    // Before anything runs: the count is knowable (the set is on disk),
+    // the bytes are not yet.
+    assert_eq!((p.volumes(), p.total(), p.done()), (2, 0, 0));
+
+    assert!(extract_local(&dir, None).unwrap(), "set must extract");
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    // The member is ONE file split across both volumes, and both
+    // volumes carry its whole-file header - the total must be the file,
+    // not the file times the volume count.
+    assert_eq!(p.total(), 400_000, "header total counts each file once");
+    assert_eq!(p.done(), 400_000, "every byte reported by the end");
+
+    // ...and the row stops claiming to unpack the moment the ladder is
+    // over, on this path and on the failure ones.
+    drop(arm);
+    assert!(hub.unpack.lock_ok().is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Sorted file names directly inside `dir` (our scratch dirs excluded).
 fn names_in(dir: &std::path::Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
@@ -1696,6 +2120,160 @@ fn failed_obfuscated_extraction_keeps_every_volume() {
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// A volume that begins INSIDE a member whose earlier volume is not on
+/// disk - a mid-set fragment. `Rar!` magic, parses fine, and no
+/// unpacker on earth can produce a byte from it.
+fn mid_set_fragment() -> Vec<u8> {
+    use nzbkit::rar::fixtures;
+    let body: Vec<u8> = (0..80_000u32).map(|i| (i as u8) ^ 0x5A).collect();
+    // Volume #2 of some set: `is_split_before` on its only member, and
+    // volumes #0 and #1 are nowhere.
+    fixtures::rar5_volume_n(&[("orphan.mkv", 300_000, &body, true, true)], 2)
+}
+
+/// THE case: a complete obfuscated set that unpacks perfectly, and one
+/// unusable stray middle volume sitting in the same directory. The job
+/// SUCCEEDS - the payload was delivered - and the stray is left alone.
+///
+/// The sweep collects candidates by `Rar!` MAGIC, not by extension, so
+/// any stray with a RAR head became a set of its own, failed (a middle
+/// volume has no first part), and failed the entire job with "an
+/// archive in the output directory could not be unpacked". Reached in
+/// the field 22 Aug 2026 through par2cmdline's leftover `<name>.1`
+/// backup - see `tests/integration/stream_repair.rs`'s
+/// `an_external_repair_of_a_volume_set_still_admits_the_child`, whose
+/// FINDING (a) is that SOURCE, fixed separately in
+/// `repair::purge_par2_backups`. This is the generic half: a user's own
+/// file, a partial from an interrupted external tool, or a `.rev`-shaped
+/// payload the parser latches onto all reproduce it.
+#[test]
+fn a_stray_mid_set_volume_does_not_fail_a_job_whose_set_unpacked() {
+    let total: Vec<u8> = (0..400_000u32)
+        .map(|i| (i as u8).wrapping_mul(17).wrapping_add(3))
+        .collect();
+    let vols = reex_vols(&total);
+    let stray = mid_set_fragment();
+    for depth in [0usize, 1] {
+        let dir = reex_dir(&format!("obf-stray-{depth}"));
+        std::fs::write(dir.join("b7d1e4a05c93f28610ab77de"), &vols[0]).unwrap();
+        std::fs::write(dir.join("29fc0b6e83d417a95c20ee31"), &vols[1]).unwrap();
+        std::fs::write(dir.join("f04a91cd2b7e635018df44ba"), &stray).unwrap();
+
+        assert!(
+            obf_extract_at(&dir, depth),
+            "depth {depth}: one unusable stray middle volume failed a job \
+             whose own set extracted correctly"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("film.mkv")).unwrap(),
+            total,
+            "depth {depth}: payload"
+        );
+        // Never eaten and never swept: whatever the fragment belongs to,
+        // it is not the set we just spent. Forgiving its failure AND
+        // deleting it is the one combination that loses a file.
+        assert_eq!(
+            std::fs::read(dir.join("f04a91cd2b7e635018df44ba")).unwrap(),
+            stray,
+            "depth {depth}: the stray was altered or removed"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// The field shape itself: the job's own set is already unpacked and
+/// gone (a named set the ladder above spent, or par2's `<name>.1` left
+/// beside the repaired payload), so the stray is the ONLY `Rar!`-magic
+/// file the nested pass sees. It must still not fail the job.
+///
+/// Distinct from the test above because it also covers the "no
+/// extractor claimed it" backstop at the bottom of `extract_one_level`:
+/// an arm that stayed silent here would leave the level unclaimed, and
+/// that backstop reads the stray's RAR head and returns `Failed` - the
+/// same job failure through a different door.
+#[test]
+fn a_stray_mid_set_volume_alone_beside_the_payload_does_not_fail_the_job() {
+    let dir = reex_dir("obf-stray-alone");
+    let payload: Vec<u8> = (0..250_000u32).map(|i| (i as u8) ^ 0x33).collect();
+    std::fs::write(dir.join("movie.mkv"), &payload).unwrap();
+    let stray = mid_set_fragment();
+    std::fs::write(dir.join("movie.mkv.1"), &stray).unwrap();
+
+    assert!(
+        obf_extract_at(&dir, 1),
+        "a leftover mid-set volume beside the delivered payload failed the job"
+    );
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(dir.join("movie.mkv.1")).unwrap(),
+        stray,
+        "the stray was altered or removed"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// …and the guarantee that keeps the forgiveness honest, which outranks
+/// both: a directory whose obfuscated content is NOTHING BUT fragments
+/// has no payload to point at, so `ObfReport::ok` - what
+/// `repair::reextract_dir` and `rarfix` read, where the volumes on disk
+/// ARE the job's own payload - still says no. A job that quietly
+/// succeeds while leaving real payload packed is the worse failure.
+#[test]
+fn fragments_with_nothing_extracted_beside_them_still_fail() {
+    let dir = reex_dir("obf-frag-only");
+    let stray = mid_set_fragment();
+    std::fs::write(dir.join("3ab19f7c05e2d846b1cc90fa"), &stray).unwrap();
+    let obf = crate::unpack::collect_obfuscated_rar_volumes(&dir).unwrap();
+    assert_eq!(obf.len(), 1, "the fragment must be collected by magic");
+
+    let report = crate::unpack::extract_obfuscated_rar(&dir, &obf, None, 1);
+    assert!(
+        !report.strays.is_empty() && !report.produced && !report.failed,
+        "expected a stray-only verdict, got {report:?}"
+    );
+    assert!(
+        !report.ok(),
+        "a directory of nothing but mid-set fragments reported the payload delivered"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("3ab19f7c05e2d846b1cc90fa")).unwrap(),
+        stray,
+        "the fragment was altered or removed"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A memberless `.rev`-shaped set beside a headless fragment: the
+/// recovery volume extracts as a no-op and must not count as "a set
+/// extracted", or the fragment is forgiven and the caller greens a
+/// directory that published nothing (Codex F-23).
+#[test]
+fn a_memberless_recovery_volume_does_not_forgive_a_lone_fragment() {
+    let dir = reex_dir("obf-rev-plus-frag");
+    let rev = rev_shaped_file();
+    let frag = mid_set_fragment();
+    std::fs::write(dir.join("0f1e2d3c4b5a69788796a5b4"), &rev).unwrap();
+    std::fs::write(dir.join("3ab19f7c05e2d846b1cc90fa"), &frag).unwrap();
+    let obf = crate::unpack::collect_obfuscated_rar_volumes(&dir).unwrap();
+    assert_eq!(obf.len(), 2, "both files must be collected by magic");
+
+    let report = crate::unpack::extract_obfuscated_rar(&dir, &obf, None, 1);
+    assert!(
+        !report.produced && !report.failed && report.strays.len() == 1,
+        "expected a stray-only verdict, got {report:?}"
+    );
+    assert!(!report.ok(), "a memberless set forgave a stray fragment");
+    assert_eq!(
+        std::fs::read(dir.join("0f1e2d3c4b5a69788796a5b4")).unwrap(),
+        rev
+    );
+    assert_eq!(
+        std::fs::read(dir.join("3ab19f7c05e2d846b1cc90fa")).unwrap(),
+        frag
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A `.rev` recovery volume rides along with the obfuscated set, is
@@ -2226,4 +2804,109 @@ async fn head_damaged_plain_slot_declines_the_mapped_lane() {
         "head damage on a sniffed-plain slot must decline to the disk lane"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The purge that keeps par2cmdline's leftover `<name>.1` backups from
+/// failing a repaired job (22 Aug 2026, see `purge_par2_backups`).
+///
+/// Everything here is about what it REFUSES to delete: it runs after a
+/// successful repair, in the user's own output directory, so each guard
+/// is a file somebody would be entitled to be angry about losing.
+#[test]
+fn the_par2_backup_purge_takes_only_the_backups_this_run_made() {
+    let dir = tdir("par2purge");
+    let write = |name: &str| std::fs::write(dir.join(name), b"x").unwrap();
+    let there = |name: &str| dir.join(name).exists();
+
+    // Predates the run: par2 did not make it, so it is not ours.
+    write("r.part1.rar.1");
+    let before = dir_entry_names(&dir).expect("a readable directory snapshots");
+
+    // par2's own backups of two damaged volumes - the whole point.
+    write("r.part2.rar.1");
+    write("r.part3.rar.2");
+    // The repaired targets themselves.
+    write("r.part1.rar");
+    write("r.part2.rar");
+    write("r.part3.rar");
+    // A target that IS `.<digits>`-named: the set declares it, so it
+    // survives however much it looks like a backup of `odd.rar`.
+    write("odd.rar.1");
+    // Not a backup of anything the set names.
+    write("stranger.rar.1");
+    // A `.N` sibling of a real target, but N is not a number.
+    write("r.part2.rar.bak");
+    // A directory that matches the pattern exactly.
+    std::fs::create_dir(dir.join("r.part1.rar.9")).unwrap();
+
+    let targets: Vec<(String, u64)> = ["r.part1.rar", "r.part2.rar", "r.part3.rar", "odd.rar.1"]
+        .iter()
+        .map(|n| ((*n).to_string(), 1))
+        .collect();
+    purge_par2_backups(&dir, &targets, &before);
+
+    assert!(!there("r.part2.rar.1"), "par2's backup was not purged");
+    assert!(!there("r.part3.rar.2"), "a `.2` backup was not purged");
+    for kept in [
+        "r.part1.rar.1",
+        "r.part1.rar",
+        "r.part2.rar",
+        "r.part3.rar",
+        "odd.rar.1",
+        "stranger.rar.1",
+        "r.part2.rar.bak",
+        "r.part1.rar.9",
+    ] {
+        assert!(
+            there(kept),
+            "the purge took {kept}, which is not its to take"
+        );
+    }
+
+    // No targets at all (an obfuscated set we never named) purges nothing.
+    let before = dir_entry_names(&dir).unwrap();
+    write("r.part2.rar.3");
+    purge_par2_backups(&dir, &[], &before);
+    assert!(there("r.part2.rar.3"), "an empty target list purged a file");
+
+    // An unreadable directory snapshots as None, so the caller skips the
+    // purge entirely (Codex F-06): a missing or partial snapshot must not
+    // make every pre-existing `.N` look freshly made.
+    assert!(dir_entry_names(&dir.join("does-not-exist")).is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// The row-26 in-place chase repair went default-ON on 22 Aug 2026, so
+// the switch that matters is now the one that turns it OFF. This is the
+// PURE half of it: reading the process environment here would race the
+// parallel test runner, which is why `chase_repair_on` is a two-line
+// wrapper over a value parser (the `nzbkit::extract::config` pattern).
+//
+// The teeth are the middle two cases. A near-miss value must NOT disarm
+// - a job that quietly takes the 3.05x materialize route because a shell
+// exported `NZBFAST_NO_CHASE_REPAIR=true` would look like a performance
+// regression with no fingerprint in the log.
+#[test]
+fn only_an_exact_one_disarms_the_chase_repair() {
+    assert!(
+        chase_repair_on_value(None),
+        "unset must be ON after the flip"
+    );
+    assert!(
+        !chase_repair_on_value(Some("1")),
+        "the kill switch must bite"
+    );
+    assert!(
+        chase_repair_on_value(Some("")),
+        "empty is not the kill switch"
+    );
+    assert!(
+        chase_repair_on_value(Some("true")),
+        "only `1` is the kill switch"
+    );
+    assert!(
+        chase_repair_on_value(Some("0")),
+        "`0` is not the kill switch"
+    );
 }

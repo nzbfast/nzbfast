@@ -67,21 +67,55 @@ pub fn rar4_encrypted_headers(pad: usize) -> Vec<u8> {
 /// One store-mode RAR5 volume holding the given (name, total_size,
 /// piece, split_before, split_after) pieces. No volume-number field
 /// (like a standalone .rar) - use [`rar5_volume_n`] for numbered sets.
+///
+/// Carries NO data CRC, same as [`rar5_volume_n`] - read the warning
+/// there before using this under a test that damages bytes.
 pub fn rar5_volume(pieces: &[(&str, u64, &[u8], bool, bool)]) -> Vec<u8> {
     let with_crc: Vec<_> = pieces
         .iter()
         .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
         .collect();
-    rar5_volume_inner(&with_crc, None)
+    rar5_volume_inner(&with_crc, None, &[])
 }
 
 /// Numbered multi-volume member (RAR5 volume_number, 0-based).
+///
+/// **Emits NO data CRC**: file flag 0x04 is never set and no checksum
+/// rides any piece, unlike real archivers, which always stamp one. That
+/// is deliberate and fine for the many tests that only exercise
+/// parsing, mapping, holds, splitting and the like - nothing in those
+/// paths ever looks at a CRC.
+///
+/// But a test that DAMAGES bytes and then asserts an extraction
+/// succeeds must not reach for this blind. With no checksum anywhere
+/// the extraction succeeds on the corrupt bytes too, so the "damaged,
+/// repaired, extraction verifies" leg greens whether or not the repair
+/// did anything, and proves nothing. Either build the set with
+/// [`rar5_volume_n_crc`], or compare the extracted payload to the
+/// posted bytes byte for byte, or open the leg with an
+/// `assert!(!try_unrar(..))` control that shows the damage is real -
+/// `assert_the_fixture_is_really_damaged` in
+/// `crates/nzbfast/src/rarfix/rrhint_tests.rs` is the worked example.
+/// This warning exists because on 22 Aug 2026 the vendored
+/// `Rar50VolumeWriter` was found to write no CRC on split STORED
+/// members either, so six such legs had been passing over bytes nothing
+/// verified (the 2026-08-22 row in `vendor/rars/VENDORING.md`); this
+/// fixture has the same hole, on purpose, under a name with dozens of
+/// call sites.
+///
+/// And the absence is LOAD-BEARING in one place, so do not "fix" it
+/// tree-wide: e2e's `rar_release` in `crates/nzbfast/tests/e2e.rs`
+/// builds on this fixture precisely so its volumes carry neither a
+/// recovery record nor a CRC, which is the shape
+/// `a_missing_external_par2_still_reaches_the_native_escalation` needs
+/// to pin the `nothing_done` guard in `try_rar_rr_repair_hinted`. Both
+/// carry doc comments saying so.
 pub fn rar5_volume_n(pieces: &[(&str, u64, &[u8], bool, bool)], vol_no: u64) -> Vec<u8> {
     let with_crc: Vec<_> = pieces
         .iter()
         .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
         .collect();
-    rar5_volume_inner(&with_crc, Some(vol_no))
+    rar5_volume_inner(&with_crc, Some(vol_no), &[])
 }
 
 /// Like [`rar5_volume_n`], with a stored data CRC32 per piece (file
@@ -94,12 +128,36 @@ pub fn rar5_volume_n_crc(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: u64,
 ) -> Vec<u8> {
-    rar5_volume_inner(pieces, Some(vol_no))
+    rar5_volume_inner(pieces, Some(vol_no), &[])
+}
+
+/// [`rar5_volume_n`] with a SERVICE block (type 3, the shape of a `-rr`
+/// recovery record) carrying `service` bytes of data area between the
+/// last file block and the end-of-archive block. Real `rar a -rr10p`
+/// volumes end exactly this way: file data, then a record a tenth the
+/// volume's size, then the 7-byte end block.
+///
+/// Like its base, this stamps NO data CRC on the file block - the
+/// service block is just bytes, not a checksum over the file - so the
+/// warning on [`rar5_volume_n`] applies here too: a test that damages
+/// these volumes must show the damage is real before trusting a
+/// successful extraction.
+pub fn rar5_volume_n_service(
+    pieces: &[(&str, u64, &[u8], bool, bool)],
+    vol_no: u64,
+    service: &[u8],
+) -> Vec<u8> {
+    let with_crc: Vec<_> = pieces
+        .iter()
+        .map(|&(n, t, p, b, a)| (n, t, p, b, a, None))
+        .collect();
+    rar5_volume_inner(&with_crc, Some(vol_no), service)
 }
 
 fn rar5_volume_inner(
     pieces: &[(&str, u64, &[u8], bool, bool, Option<u32>)],
     vol_no: Option<u64>,
+    service: &[u8],
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(super::SIG5);
@@ -136,6 +194,19 @@ fn rar5_volume_inner(
             hflags |= 0x10;
         }
         block_v5(2, hflags, &body, piece, &mut out);
+    }
+    if !service.is_empty() {
+        // Service header body: file-style flags, unpacked size,
+        // attributes, compression info, host os, name ("RR").
+        let mut body = Vec::new();
+        vint(0, &mut body);
+        vint(service.len() as u64, &mut body);
+        vint(0, &mut body);
+        vint(0, &mut body);
+        vint(0, &mut body);
+        vint(2, &mut body);
+        body.extend_from_slice(b"RR");
+        block_v5(3, 0x02, &body, service, &mut out);
     }
     // End of archive (type 5) with end-flags body (0 = last volume).
     let mut end_body = Vec::new();
@@ -324,6 +395,22 @@ fn rar4_enc_file_header(piece: &EncPiece4<'_>) -> Vec<u8> {
     let hc = (crc32fast::hash(&h[2..]) & 0xffff) as u16;
     h[..2].copy_from_slice(&hc.to_le_bytes());
     h
+}
+
+/// `vol` with a WinRAR-shaped ENDARC block appended: flags 0x4001
+/// (next volume follows, skip if unknown), as every non-final volume of
+/// a real RAR3 set carries. The rars v4 writer emits none, and without
+/// one a volume whose data runs to its end needs no tail read at all -
+/// which hides exactly the wait TODO 220 is about.
+pub fn with_rar4_end_block(mut vol: Vec<u8>, next_volume: bool) -> Vec<u8> {
+    let mut h = vec![0u8, 0];
+    h.push(0x7b);
+    h.extend_from_slice(&(if next_volume { 0x4001u16 } else { 0x4000 }).to_le_bytes());
+    h.extend_from_slice(&7u16.to_le_bytes());
+    let hc = (crc32fast::hash(&h[2..]) & 0xffff) as u16;
+    h[..2].copy_from_slice(&hc.to_le_bytes());
+    vol.extend_from_slice(&h);
+    vol
 }
 
 fn rar4_end_block() -> Vec<u8> {

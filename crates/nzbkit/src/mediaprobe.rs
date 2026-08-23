@@ -665,9 +665,6 @@ pub fn normalize_lang(raw: &str) -> String {
 pub struct LiveProbeReader {
     pub w: std::sync::Arc<crate::disk::FileWriter>,
     pub f: std::fs::File,
-    /// Present iff the backing file is encrypted-store ciphertext:
-    /// coverage widens to the ciphertext blocks the CBC decrypt needs.
-    pub crypt: Option<crate::extract::StreamCrypt>,
     pub pos: u64,
 }
 
@@ -682,27 +679,25 @@ impl Read for LiveProbeReader {
         // covered_intervals, not covered: a read that starts on landed
         // bytes and runs into a hole returns the covered prefix, so
         // forward progress stays monotone.
-        let avail = match &self.crypt {
-            Some(c) => {
-                let (lo, cl) = c.covered_bounds(self.pos, want);
-                if self.w.covered(lo, cl) { want } else { 0 }
-            }
-            None => self
-                .w
-                .covered_intervals(self.pos, want)
-                .iter()
-                .find(|&&(s, _)| s == self.pos)
-                .map(|&(s, e)| e - s)
-                .unwrap_or(0),
-        };
+        //
+        // No decryptor arm any more: an encrypted store output holds
+        // PLAINTEXT while it downloads (plaintext-once), so the probe
+        // reads it exactly like any other file. Until TODO 27 phase 3
+        // such a file was ciphertext until the finish pass, and this
+        // reader carried a `StreamCrypt` plus the widened
+        // `covered_bounds` the CBC chain needed.
+        let avail = self
+            .w
+            .covered_intervals(self.pos, want)
+            .iter()
+            .find(|&&(s, _)| s == self.pos)
+            .map(|&(s, e)| e - s)
+            .unwrap_or(0);
         if avail == 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "gap"));
         }
         let n = avail as usize;
-        match &self.crypt {
-            Some(c) => c.decrypt_range(&self.f, self.pos, &mut buf[..n])?,
-            None => crate::disk::read_exact_at(&self.f, &mut buf[..n], self.pos)?,
-        }
+        crate::disk::read_exact_at(&self.f, &mut buf[..n], self.pos)?;
         self.pos += avail;
         Ok(n)
     }

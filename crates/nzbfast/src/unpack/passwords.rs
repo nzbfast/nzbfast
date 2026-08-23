@@ -8,6 +8,7 @@
 //! as `pwfile_tests`, whose cases cover this file.
 
 use super::*;
+use tracing::{info, warn};
 
 /// Ceiling on password candidates tested per level. Each candidate costs
 /// one PBKDF2-HMAC-SHA256 derivation (2^lg2 rounds - intentionally slow),
@@ -240,47 +241,54 @@ pub(crate) const SEVENZ_PROBE_CAP: u64 = 64 << 20;
 /// Copy entry answered `capped=true` for a wrong password whose full
 /// read answers false). Reaching the cap is `Unknown`, and only the
 /// extraction can settle it.
-pub(crate) fn sevenz_password_check(
-    container: &std::path::Path,
-    password: Option<&str>,
-) -> SevenzKey {
-    sevenz_password_check_capped(container, password, SEVENZ_PROBE_CAP)
+///
+/// "First file entry" means the first that can actually judge the key:
+/// where the metadata names an AES block, entries outside one are
+/// skipped, because a plaintext entry decodes to its checksum under
+/// every value at all (see [`sevenz_encrypted_entry_names`]).
+pub(crate) fn sevenz_password_check(parts: &[PathBuf], password: Option<&str>) -> SevenzKey {
+    sevenz_password_check_capped(parts, password, SEVENZ_PROBE_CAP)
 }
 
 /// [`sevenz_password_check`] with the read bound spelled out, so a test
 /// can reach the capped branch without a 65 MiB fixture.
 pub(crate) fn sevenz_password_check_capped(
-    container: &std::path::Path,
+    parts: &[PathBuf],
     password: Option<&str>,
     cap: u64,
 ) -> SevenzKey {
-    use sevenz_rust2::{ArchiveReader, Password};
-    let pw = match password {
-        Some(p) if !p.is_empty() => Password::from(p),
-        _ => Password::empty(),
-    };
     // Bomb-gated like nzbkit's sevenz_needs_password: a container whose
-    // end header declares an oversized decode is refused before
-    // ArchiveReader::open allocates on the declaration's say-so -
-    // "does this password open it" is a question only a readable 7z
-    // gets to ask, and this probe runs per candidate on the demoted
-    // container the in-stream gate just refused. The declared variant
-    // is the content-aware gate: the first-entry read below DECODES a
-    // content block, so its dictionary and PPMd declarations must be
-    // judged too.
-    if let Ok(mut probe) = std::fs::File::open(container)
-        && nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut probe).is_some()
-    {
-        return SevenzKey::Fails;
-    }
-    let Ok(mut reader) = ArchiveReader::open(container, pw) else {
+    // end header declares an oversized decode is refused before the
+    // library allocates on the declaration's say-so - "does this
+    // password open it" is a question only a readable 7z gets to ask,
+    // and this probe runs per candidate on the demoted container the
+    // in-stream gate just refused. `open_sevenz` holds that gate and
+    // reads a split set where it lies (TODO 212): a header-encrypted
+    // `.7z.NNN` set answers off its last part, unjoined.
+    let Ok(mut reader) = crate::rarfix::open_sevenz(parts, password) else {
         return SevenzKey::Fails;
     };
+    // Only an entry whose own block passes through AES can judge a key.
+    // A container may MIX blocks - `7z a` a file plain, then add a
+    // second with `-p -mhe=off`, and block 0 is plaintext while block 1
+    // is encrypted - and entries arrive in block order, so the first
+    // data entry was block 0's and decoded to its checksum under ANY
+    // value, `None` included (Codex sweep F-10, 23 Aug 2026). That
+    // `Opens` settled the shortlist at the caller's value and the
+    // sidecar password the later block needs was never harvested.
+    // Empty means nothing in here is encrypted, and then the first data
+    // entry is the right one to read, exactly as before.
+    let encrypted = sevenz_encrypted_entry_names(reader.archive());
     let capped = std::cell::Cell::new(false);
+    let probed = std::cell::Cell::new(false);
     let res = reader.for_each_entries(|entry, rd| {
         if entry.is_directory || !entry.has_stream {
             return Ok(true); // need a real data stream to verify the key
         }
+        if !encrypted.is_empty() && !encrypted.contains(&entry.name) {
+            return Ok(true); // a plaintext entry decodes under any value
+        }
+        probed.set(true);
         let mut sink = std::io::sink();
         // Reading the (verification-only) first entry to end trips CRC as
         // well as decode errors; bound it so a huge first member can't
@@ -291,18 +299,70 @@ pub(crate) fn sevenz_password_check_capped(
         capped.set(n > cap);
         Ok(false) // stop after the first data entry
     });
-    match (res.is_ok(), capped.get()) {
+    // An encrypted entry the walk never reached settles nothing either:
+    // fail closed so the caller harvests rather than trusting a value
+    // no AES coder ever saw.
+    let missed = !encrypted.is_empty() && !probed.get();
+    match (res.is_ok() && !missed, capped.get()) {
         (false, _) => SevenzKey::Fails,
         (true, true) => SevenzKey::Unknown,
         (true, false) => SevenzKey::Opens,
     }
 }
 
+/// The names of the entries a 7z key check may honestly read: those
+/// whose block passes through the AES-256-SHA256 coder. Empty for a
+/// container with no encrypted data block at all.
+///
+/// `file_block_index` is the archive's own file-to-block map, and an
+/// entry with no block (an empty file) is not one a key check can use.
+fn sevenz_encrypted_entry_names(
+    archive: &sevenz_rust2::Archive,
+) -> std::collections::HashSet<String> {
+    let aes = |bi: usize| {
+        archive.blocks.get(bi).is_some_and(|b| {
+            b.coders
+                .iter()
+                .any(|c| c.encoder_method_id() == sevenz_rust2::EncoderMethod::ID_AES256_SHA256)
+        })
+    };
+    archive
+        .files
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| {
+            archive
+                .stream_map
+                .file_block_index
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(aes)
+        })
+        .map(|(_, f)| f.name.clone())
+        .collect()
+}
+
 /// [`sevenz_password_check`] as the two-state question its callers ask
 /// when they only need "is this worth trying" - an indeterminate answer
 /// counts as yes, because the extraction is what settles it.
-pub(crate) fn sevenz_password_opens(container: &std::path::Path, password: Option<&str>) -> bool {
-    sevenz_password_check(container, password) != SevenzKey::Fails
+pub(crate) fn sevenz_password_opens(parts: &[PathBuf], password: Option<&str>) -> bool {
+    sevenz_password_check(parts, password) != SevenzKey::Fails
+}
+
+/// The one auto-unlock announcement in the tree, so its wording cannot
+/// drift again. It did: three sites printed "auto-unlocked {name} with
+/// password from {source}" and two more printed the same event without
+/// the name, or with "a harvested password" and no source at all (TODO
+/// 162 item 5). One shape, and it names both halves the user needs -
+/// which archive opened, and where the key came from.
+pub(crate) fn log_auto_unlocked(archive: &std::path::Path, source: &str) {
+    info!(
+        target: "password",
+        "🔑 auto-unlocked {} with password from {}",
+        archive.file_name().unwrap_or_default().to_string_lossy(),
+        source
+    );
 }
 
 /// Resolve the working password for this level's encrypted archive by
@@ -318,13 +378,20 @@ pub(crate) fn resolve_level_password(
     if let Some(rar) = first_encrypted_rar(dir) {
         return resolve_rar_password(&rar, dir, provided);
     }
-    // Single-container 7z only: a multi-part encrypted .7z.001 set would
-    // need joining to probe, out of scope for v1 - it keeps today's path.
+    // Single-container 7z only. The probe can read a split set unjoined
+    // now (TODO 212), but this level-wide resolve keeps its v1 shape:
+    // `extract_sevenz` resolves per CONTAINER and covers the split case.
     if let Ok(jobs) = collect_sevenz_archives(dir)
-        && let Some(z) = jobs.iter().find(|p| p.len() == 1).map(|p| p[0].clone())
-        && !sevenz_password_opens(&z, None)
+        && let Some(z) = jobs.iter().find(|p| p.len() == 1)
+        // Header-first, same reason as in `sevenz_password_candidates`:
+        // an unencrypted container has always opened unkeyed here, so
+        // the probe's only job on this arm was to spend a 64 MB decode
+        // confirming it. The metadata answers it for free, and a false
+        // is the only answer that short-circuits.
+        && crate::rarfix::sevenz_set_is_encrypted(z)
+        && !sevenz_password_opens(z, None)
     {
-        return resolve_sevenz_password(&z, dir, provided);
+        return resolve_sevenz_password(z, dir, provided);
     }
     // Encrypted zip. Both schemes carry a verifier in the entry framing,
     // so a candidate is settled without decoding a byte - which makes
@@ -390,7 +457,7 @@ pub(crate) fn zip_password_candidates(
     // so the working-password case still costs one verifier read.
     for cand in harvest_password_candidates(dir, provided) {
         if t0.elapsed() > PW_PROBE_BUDGET {
-            println!("⚠ password probe budget exhausted - keeping the park path");
+            warn!(target: "password", "password probe budget exhausted - keeping the park path");
             break;
         }
         if nzbkit::zip::password_opens(parts, Some(&cand.value)) {
@@ -414,19 +481,14 @@ pub(crate) fn resolve_zip_password(
     let t0 = std::time::Instant::now();
     for cand in harvest_password_candidates(dir, provided) {
         if t0.elapsed() > PW_PROBE_BUDGET {
-            println!("⚠ password probe budget exhausted - keeping the park path");
+            warn!(target: "password", "password probe budget exhausted - keeping the park path");
             break;
         }
         if nzbkit::zip::password_opens(parts, Some(&cand.value)) {
-            println!(
-                "🔑 auto-unlocked {} with password from {}",
-                parts
-                    .first()
-                    .and_then(|p| p.file_name())
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-                cand.source
-            );
+            // Deliberately silent: the zip arm re-harvests this same
+            // directory per container and announces the unlock that
+            // really produced the payload, so announcing here too
+            // printed the identical line twice for one event.
             return Some(cand.value);
         }
     }
@@ -478,15 +540,11 @@ pub(crate) fn resolve_rar_password(
             continue;
         }
         if t0.elapsed() > PW_PROBE_BUDGET {
-            println!("⚠ password probe budget exhausted - keeping the park path");
+            warn!(target: "password", "password probe budget exhausted - keeping the park path");
             break;
         }
         if matches!(probe.verify(&cand.value), PwVerdict::Verified) {
-            println!(
-                "🔑 auto-unlocked {} with password from {}",
-                rar.file_name().unwrap_or_default().to_string_lossy(),
-                cand.source
-            );
+            log_auto_unlocked(rar, &cand.source);
             return Some(cand.value);
         }
     }
@@ -501,16 +559,45 @@ pub(crate) fn resolve_rar_password(
 /// 64 MB cap is not (see [`sevenz_password_check`]), and putting those
 /// last keeps the normal case at one extraction while still letting a
 /// big-first-member archive reach the value that really opens it.
+///
+/// An unencrypted container needs no candidate list at all, and says so
+/// from its end header ([`crate::rarfix::sevenz_set_is_encrypted`]) with
+/// nothing decoded. Failing that, what the caller already holds is
+/// probed FIRST - and that includes holding nothing, which is what
+/// settles a container the header check could not prove clean.
 pub(crate) fn sevenz_password_candidates(
-    z: &std::path::Path,
+    z: &[PathBuf],
     dir: &std::path::Path,
     provided: Option<&str>,
 ) -> Vec<(Option<String>, String)> {
     let keep = || vec![(provided.map(str::to_string), String::from("job password"))];
-    if let Some(p) = provided
-        && sevenz_password_check(z, Some(p)) == SevenzKey::Opens
-    {
-        return keep(); // provided password already works, settled
+    // Cheapest settle first: ask the END HEADER whether there is any
+    // encrypted coder in the container at all. A plain archive answers
+    // no from its parsed metadata alone, and that is the same verdict
+    // the probe below reaches by decoding up to 64 MB of the first
+    // entry - a full LZMA pass whose only finding is that there was
+    // nothing to decrypt, over bytes the real extraction decodes again
+    // moments later. `sevenz_set_is_encrypted` fails closed, so every
+    // header-encrypted, malformed or unprovable shape falls through to
+    // exactly the probe ordering below.
+    if !crate::rarfix::sevenz_set_is_encrypted(z) {
+        return keep(); // settled off the header: nothing to decrypt
+    }
+    // Probe what the caller actually has - a password, or NOTHING - and
+    // settle on `Opens` either way. The None arm is the whole point: an
+    // unencrypted container opens under every value at all (7-Zip
+    // ignores a password it has no use for), so without it the
+    // no-password case fell through to the harvest, the first stem
+    // found there probed as "proven", and the extraction ran with a
+    // password it never needed and announced a false auto-unlock - up
+    // to 64 MB of decode per candidate, against `PW_PROBE_BUDGET`, to
+    // buy a line that reads as "this release was passworded" (23 Aug
+    // 2026, seen while verifying TODO 94 C). `Fails` (header-encrypted,
+    // or plaintext headers over encrypted data) and `Unknown` (a first
+    // member past the 64 MB cap) both fall through to the harvest
+    // exactly as before, one fast failing probe later.
+    if sevenz_password_check(z, provided) == SevenzKey::Opens {
+        return keep(); // settled: this is what the extraction needs
     }
     // The 7z header does not advertise its KDF depth up front and each
     // probe may decode up to 64 MB, so the wall-clock budget is the
@@ -519,7 +606,7 @@ pub(crate) fn sevenz_password_candidates(
     let (mut proven, mut maybe) = (Vec::new(), Vec::new());
     for cand in harvest_password_candidates(dir, provided) {
         if t0.elapsed() > PW_PROBE_BUDGET {
-            println!("⚠ password probe budget exhausted - keeping the park path");
+            warn!(target: "password", "password probe budget exhausted - keeping the park path");
             break;
         }
         match sevenz_password_check(z, Some(&cand.value)) {
@@ -534,7 +621,7 @@ pub(crate) fn sevenz_password_candidates(
 }
 
 pub(crate) fn resolve_sevenz_password(
-    z: &std::path::Path,
+    z: &[PathBuf],
     dir: &std::path::Path,
     provided: Option<&str>,
 ) -> Option<String> {
@@ -545,9 +632,9 @@ pub(crate) fn resolve_sevenz_password(
     if provided == Some(best.as_str()) {
         return None; // the provided password IS the answer
     }
-    println!(
-        "🔑 auto-unlocked {} with a harvested password",
-        z.file_name().unwrap_or_default().to_string_lossy()
-    );
+    // No announcement here. This is the head of a SHORTLIST, not a
+    // settled answer - a probe that hit the 64 MB cap never reached the
+    // entry's checksum - and `extract_sevenz` prints the line for
+    // whichever candidate actually produced the payload.
     Some(best)
 }

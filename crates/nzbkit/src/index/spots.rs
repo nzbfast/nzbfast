@@ -176,7 +176,7 @@ impl Index {
     /// and the article a download would reach for first. Lowest segment
     /// because that is the one part every file has.
     pub fn release_head_article(&self, rid: i64) -> rusqlite::Result<Option<String>> {
-        let segs: Option<String> = self
+        let segs: Option<SegList> = self
             .db
             .prepare_cached(
                 "SELECT segments FROM files WHERE release_id=?1
@@ -184,10 +184,9 @@ impl Index {
             )?
             .query_row([rid], |r| r.get(0))
             .optional()?;
-        let Some(segs) = segs else {
+        let Some(SegList(mut parsed)) = segs else {
             return Ok(None);
         };
-        let mut parsed: Vec<(u32, String, u64)> = serde_json::from_str(&segs).unwrap_or_default();
         parsed.sort_by_key(|(n, _, _)| *n);
         Ok(parsed.into_iter().next().map(|(_, id, _)| id))
     }
@@ -409,10 +408,9 @@ impl Index {
                 let mut stmt = self
                     .db
                     .prepare_cached("SELECT segments FROM files WHERE release_id=?1")?;
-                let rows = stmt.query_map([rid], |r| r.get::<_, String>(0))?;
+                let rows = stmt.query_map([rid], |r| r.get::<_, SegList>(0))?;
                 for segs in rows {
-                    let mut parsed: Vec<(u32, String, u64)> =
-                        serde_json::from_str(&segs?).unwrap_or_default();
+                    let mut parsed = segs?.0;
                     parsed.sort_by_key(|(n, _, _)| *n);
                     if let Some((_, id, _)) = parsed.first() {
                         payload.push(id.clone());
@@ -725,19 +723,30 @@ impl Index {
         };
         self.db
             .prepare_cached(
-                "INSERT INTO releases(stem, poster, grp, first_seen, first_posted)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
+                // stem_fold: the Unicode fold the LIKE search paths
+                // need, '' for an ASCII stem. Not in the DO UPDATE arm
+                // because `stem` is part of the conflict key - see the
+                // same write in ingest.rs, and index/fold.rs.
+                "INSERT INTO releases(stem, poster, grp, first_seen, first_posted, stem_fold)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(stem, poster, grp) DO UPDATE SET
                    first_posted=MIN(first_posted, excluded.first_posted)",
             )?
-            .execute(rusqlite::params![stem, poster_key, grp, now, up])?;
+            .execute(rusqlite::params![
+                stem,
+                poster_key,
+                grp,
+                now,
+                up,
+                fold::stored(&stem)
+            ])?;
         let rid: i64 = self
             .db
             .prepare_cached("SELECT id FROM releases WHERE stem=?1 AND poster=?2 AND grp=?3")?
             .query_row(rusqlite::params![stem, poster_key, grp], |r| r.get(0))?;
         for f in &files {
             let bytes: u64 = f.parts.iter().map(|(_, _, b)| *b).sum();
-            let seg_json = serde_json::to_string(&f.parts).unwrap();
+            let seg_blob = segcodec::encode(&f.parts);
             self.db
                 .prepare_cached(
                     "INSERT INTO files(release_id, filename, total_parts, bytes, segments, nsegs)
@@ -751,7 +760,7 @@ impl Index {
                     f.fname,
                     f.total,
                     bytes as i64,
-                    seg_json,
+                    seg_blob,
                     f.parts.len() as i64
                 ])?;
             // Key into the reverse message-id map exactly as ingest
@@ -2028,17 +2037,18 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2, "the repost needs its own release row");
         // ...and the first generation's manifest is untouched.
-        let old_seg: String = ix
+        let old_seg = ix
             .db
             .query_row(
                 "SELECT segments FROM files WHERE release_id=?1",
                 [first],
-                |x| x.get(0),
+                |x| x.get::<_, SegList>(0),
             )
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(
-            old_seg.contains("old1"),
-            "the repost overwrote the original manifest: {old_seg}"
+            old_seg.iter().any(|(_, id, _)| id.contains("old1")),
+            "the repost overwrote the original manifest: {old_seg:?}"
         );
         teardown(&d, ix);
     }

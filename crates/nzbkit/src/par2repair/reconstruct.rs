@@ -95,6 +95,14 @@ impl Reconstructor {
             );
         }
         let words = block_size / 2;
+        // Memory-floor gauge: the syndrome rows are the repair's one
+        // whole-run allocation - m x block_size, live from here to the
+        // back-substitution (610 MB on the first leg that motivated
+        // this: 165 recovery blocks x 3.7 MB).
+        let syn_charge = crate::memgauge::Charge::new(
+            crate::memgauge::Sub::RepairWork,
+            (recovery.len() * block_size) as u64,
+        );
         let mut exponents = Vec::with_capacity(recovery.len());
         let mut syndromes = Vec::with_capacity(recovery.len());
         for (e, data) in recovery {
@@ -234,6 +242,7 @@ impl Reconstructor {
             batch: FeedBatch::with_capacity(BATCH_BYTES),
             batch_capacity: BATCH_BYTES,
             ntt_selected: ntt_budget.is_some(),
+            syn_charge,
             ntt_fault: match path {
                 SyndromePath::NttForceCorrupt(_) => NttFault::Corrupt,
                 SyndromePath::NttForcePanic(_) => NttFault::Panic,
@@ -293,8 +302,8 @@ impl Reconstructor {
     /// `max_batch` bounds the handle's assembly buffer - callers split
     /// [`BATCH_BYTES`] across handles so total in-flight memory stays
     /// what the single-feeder design used. Drop every Feeder (they
-    /// flush on drop) BEFORE calling [`finish`], or finish blocks on
-    /// the channel.
+    /// flush on drop) BEFORE calling [`Self::finish`], or finish blocks
+    /// on the channel.
     pub fn feeder(&self, max_batch: usize) -> Feeder {
         let max_batch = max_batch.max(1 << 20);
         Feeder {
@@ -342,6 +351,12 @@ impl Reconstructor {
         let m = self.missing.len();
         let words = self.block_size / 2;
         let mut out: Vec<Vec<u16>> = vec![vec![0u16; words]; m];
+        // Memory-floor gauge: the rebuilt output blocks coexist with the
+        // syndrome rows through the back-substitution - together they
+        // are the repair's true peak window. Released at return (the
+        // caller writes the blocks out and drops them promptly).
+        let _out_charge =
+            crate::memgauge::Charge::new(crate::memgauge::Sub::RepairWork, (m * words * 2) as u64);
         if m > 0 {
             // Same tiled multi-accumulate as the syndrome fold: the
             // m x m back-substitution re-reads every syndrome row per
@@ -363,6 +378,7 @@ impl Reconstructor {
         // reads them, so they must not stay live across the byte
         // conversion, which briefly holds two copies of the output.
         drop(syndromes);
+        self.syn_charge.release_all();
         // On little-endian a word slice already IS its PAR2 byte view,
         // so this is a memcpy per block rather than a per-byte iterator
         // chain over the whole repaired payload.
@@ -401,6 +417,13 @@ impl Reconstructor {
             .count();
         let mut pad_arena: Vec<u8> = Vec::new();
         pad_arena.reserve_exact(n_short * self.block_size);
+        // Memory-floor gauge: the zero-padded tail arena - up to a
+        // second copy of the corpus on a many-small-files set (the same
+        // transient the retention backstop's pad term prices).
+        let _pad_charge = crate::memgauge::Charge::new(
+            crate::memgauge::Sub::RepairWork,
+            (n_short * self.block_size) as u64,
+        );
         let mut pads: Vec<(usize, usize, usize)> = Vec::new(); // (table idx, pad off, len)
         pads.reserve_exact(n_short);
         for b in retained {

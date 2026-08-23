@@ -103,7 +103,7 @@ impl Daemon {
     ///
     /// EVERY reader of the watchlist goes through this, not through
     /// `self.watchlist` directly. The two lists have separate writers on
-    /// purpose (see [`Daemon::list_items`]), so a reader that took only
+    /// purpose (see [`ListState::items`]), so a reader that took only
     /// one of them would silently ignore half the list - and the one
     /// reader that matters is `watchlist_pass`, which is the single path
     /// that grabs anything.

@@ -70,7 +70,11 @@ header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wra
    component. */
 header .nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 header h1{font-size:19px;margin:0;display:flex;align-items:center;gap:9px;font-weight:650}
-header .v{color:var(--dim);font-weight:400;font-size:12px}
+/* min-width for the same reason the update chip moved below the nav:
+   this span is EMPTY until the first poll answers, and growing it from
+   nothing to "v1.1.3 beta 1" dragged the nav sideways on every load. A
+   floor, not a fixed width - a longer locale string still grows. */
+header .v{color:var(--dim);font-weight:400;font-size:12px;min-width:5.5em}
 /* The logo is a step-through: each click lands on the next screen. It
    keeps the h1's icon/text gap because wrapping them broke it. */
 header .logo{display:inline-flex;align-items:center;gap:9px;cursor:pointer}
@@ -810,6 +814,25 @@ body.dense #dashview .chgrip{display:none}
    column widens the sentence. The old fixed max-width:150px cut phase
    sentences to a few words no matter how wide the cell was. */
 .actline{font-size:11.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:0;min-width:100%}
+/* §129 4b discoverability: the whyslow verdict on a downloading row is
+   the answer, and it is also the door to the evidence behind it. The
+   clause has been on the row since the feature shipped and read as
+   prose, so the receipts panel in the drawer - the three-layer gap, the
+   per-provider table, the write test - was found only by people who
+   happened to fold a row open. Marked as a control here, named "Why is
+   this slow?" in the tooltip, one click from the panel.
+   Text, not a bordered mini button: .actline is a single ellipsized
+   11.5px line inside the Progress cell, and button.mini is 44px tall
+   under the coarse-pointer block below, which would have doubled the
+   height of every downloading row on a phone. The `button.whychip`
+   specificity (0,1,1) is what beats that block's bare `button` rule
+   regardless of source order. */
+button.whychip{background:transparent;border:0;padding:0;margin:0;min-height:0;
+  font:inherit;color:var(--dim);cursor:pointer;vertical-align:baseline;
+  text-decoration:underline dotted;text-underline-offset:2px}
+button.whychip .ic{width:12px;height:12px;vertical-align:-2px;margin-inline-end:3px;opacity:.85}
+button.whychip:hover,button.whychip:focus-visible{color:var(--fg);text-decoration-style:solid}
+button.whychip:hover .ic,button.whychip:focus-visible .ic{opacity:1}
 .lane.verify .bar i{background:var(--ok)}.lane.extract .bar i{background:var(--acc2)}
 .lane .note{color:var(--dim);font-variant-numeric:tabular-nums}
 /* Provider rows flow into columns so the card stays wide, not tall. */
@@ -1513,6 +1536,16 @@ body.setsearching .setmore{display:none}
 .savebar.top{position:static;margin:0 -18px 12px;padding:0 18px 10px;
   background:none;-webkit-backdrop-filter:none;backdrop-filter:none;
   border-top:none;border-bottom:1px solid var(--line);border-radius:0}
+/* TODO 46: a savebar that is NOT the last thing in its card. The foot
+   bar's -16px bottom margin exists so it sits flush on the card's edge,
+   and in the middle of a card that margin pulls the next section up
+   under it - the merged Categories card had "Your categories" reading as
+   a caption on the buttons above it. Sticky is wrong here too: two
+   pinned copies of "+ Add category / Apply categories" would follow the
+   page at once. This one stays in flow and rules off its own section. */
+.savebar.mid{position:static;margin:14px -18px 18px;padding:10px 18px;
+  background:none;-webkit-backdrop-filter:none;backdrop-filter:none;
+  border-radius:0;border-bottom:1px solid var(--line)}
 /* Four pickers that are one setting: wrap them rather than stacking four
    full-width selects down the settings column. */
 .prefq{display:flex;flex-wrap:wrap;gap:6px}
@@ -1685,13 +1718,19 @@ body.chipcolor-shape .qbadge.shape.t-mid{color:var(--acc);border-color:color-mix
    failures are opposites, so the sentence is the whole point. */
 input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 8%,var(--surface-2))}
 .rulewarn{grid-column:1/-1;font-size:11.5px;line-height:1.45;color:var(--warn);margin:-2px 0 4px}
-.catrow{display:grid;grid-template-columns:130px 1fr 1fr 130px 36px;gap:8px;margin:6px 0;align-items:center}
+/* TODO 46: name | match | but-not | treat as | the short name it is
+   offered to the *arrs under | remove. That last cell is a read-only
+   echo of the slug, and it is there because the wiring is otherwise
+   invisible: the slug is what reaches Sonarr, and it is NOT the display
+   name beside it. Declare every track - see the .catfilerow note. */
+.catrow{display:grid;grid-template-columns:130px 1fr 1fr 130px 104px 36px;gap:8px;margin:6px 0;align-items:center}
+.catrow .catslug{font-size:11.5px;overflow:hidden;text-overflow:ellipsis}
 /* #19: category | folder (+ browse) | priority | script | nzb name |
    remove, with the validation line spanning the row like .fhealth does.
    The track list has to name every child: it still said 3 columns after
    §129 2b added priority and script, so those two wrapped onto a second
    line with the select crushed into the 36px remove column. */
-.catfilerow{display:grid;grid-template-columns:180px 1fr 130px 1fr 130px 36px;gap:8px;margin:6px 0;align-items:center}
+.catfilerow{display:grid;grid-template-columns:180px 1fr 130px 1fr 1fr 130px 36px;gap:8px;margin:6px 0;align-items:center}
 /* Opt-in indexing rows: a tick, the plain-language interest, and the
    newsgroups it actually scans underneath it. */
 .wantrow{display:flex;gap:9px;align-items:flex-start;margin:7px 0;cursor:pointer}
@@ -1731,7 +1770,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 .cardmgr button[disabled]{opacity:.35;cursor:default}
 /* Phone: one column, so the control drops below its own explanation
    rather than hunting for a right-hand gutter that is no longer there. */
-@media(max-width:720px){.lsrcrow{grid-template-columns:1fr 1fr}.set .row{grid-template-columns:1fr}.set .row>label,.set .row>.hint{grid-area:auto;max-width:none}.set .row>*:not(label):not(.hint){grid-area:auto;justify-self:start;margin-top:3px}.schedrow{grid-template-columns:1fr 1fr}.feedrow{grid-template-columns:1fr 1fr}.smartrow{grid-template-columns:1fr 1fr}.wlrow{grid-template-columns:1fr 1fr}.notifyrow{grid-template-columns:1fr 1fr}.arrrow{grid-template-columns:1fr 1fr}.catrow{grid-template-columns:1fr 1fr}.catfilerow{grid-template-columns:1fr 1fr}.idxrow{grid-template-columns:1fr 1fr}}
+@media(max-width:720px){.lsrcrow{grid-template-columns:1fr 1fr}.set .row{grid-template-columns:1fr}.set .row>label,.set .row>.hint{grid-area:auto;max-width:none}.set .row>*:not(label):not(.hint){grid-area:auto;justify-self:start;margin-top:3px}.schedrow{grid-template-columns:1fr 1fr}.feedrow{grid-template-columns:1fr 1fr}.smartrow{grid-template-columns:1fr 1fr}.wlrow{grid-template-columns:1fr 1fr}.notifyrow{grid-template-columns:1fr 1fr}.arrrow{grid-template-columns:1fr 1fr}.catrow{grid-template-columns:1fr 1fr}.catrow .catslug{grid-column:1/-1}.catfilerow{grid-template-columns:1fr 1fr}.idxrow{grid-template-columns:1fr 1fr}}
 
 /* ================= phone + touch layer - purely additive ================= */
 /* Tap targets ≥44px on touch screens (and in any phone-width window). */
@@ -1833,17 +1872,6 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     data-i18n-title="hdr.ver.title" title="Check for updates" aria-label="Check for updates"
     onclick="jumpToUpdates()"
     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();jumpToUpdates()}"></span></h1>
-  <!-- Title is set by the poll, not by applyI18n: it says one thing in a
-       container and another everywhere else, so a static key here would
-       flip it to the wrong wording on every locale change. -->
-  <span class="pill" id="updChip" style="display:none;cursor:pointer"></span>
-  <!-- Armed queue-finished action. The setting is two cards deep in
-       Settings, and "why did the NAS turn itself off overnight?" has to be
-       answerable BEFORE it happens - so an arm that will end the session
-       says so where the user already looks, and switches itself off when
-       clicked. Only sleep and shutdown get the chip: a script that runs on
-       every drain is not a surprise worth a permanent badge. -->
-  <span class="pill" id="finChip" style="display:none;cursor:pointer"></span>
   <!-- One nav, same four destinations in the same order, on this page and
        on the wall. The current one is marked .on rather than renamed or
        removed: a nav that changes shape as you use it is why "go to the
@@ -1859,6 +1887,25 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <a href="#" class="pill" id="setPill" style="text-decoration:none" data-i18n-title="hdr.settings.title" title="Settings" onclick="return setView('settings')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg> <span data-i18n="hdr.settings">settings</span></a>
   <a href="/manual" target="_blank" class="pill" style="text-decoration:none" data-i18n-title="hdr.manual.title" title="User manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-manual"/></svg> <span data-i18n="hdr.manual">manual</span></a>
   </nav>
+  <!-- AFTER the nav, and that ordering is the fix for a real complaint
+       ("the navbar isn't static, it shifts around", reddit 16 Aug). The
+       header is one wrapping flex row, so anything that appears BEFORE
+       the nav moves it - and this chip appears and clears on its own
+       schedule, every time a build lands. Measured: showing it pushed
+       the whole nav onto the next row. Nothing that comes and goes may
+       sit ahead of the four destinations.
+       Title is set by the poll, not by applyI18n: it says one thing in a
+       container and another everywhere else, so a static key here would
+       flip it to the wrong wording on every locale change. -->
+  <span class="pill" id="updChip" style="display:none;cursor:pointer"></span>
+  <!-- After the nav for the reason above: this chip also comes and
+       goes. Armed queue-finished action. The setting is two cards deep in
+       Settings, and "why did the NAS turn itself off overnight?" has to be
+       answerable BEFORE it happens - so an arm that will end the session
+       says so where the user already looks, and switches itself off when
+       clicked. Only sleep and shutdown get the chip: a script that runs on
+       every drain is not a surprise worth a permanent badge. -->
+  <span class="pill" id="finChip" style="display:none;cursor:pointer"></span>
   <span class="grow"></span>
   <span class="selwrap"><svg class="ic selic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-gauge"/></svg>
   <svg class="ic selcaret" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-caret"/></svg>
@@ -2544,12 +2591,6 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <option value="fixed" data-i18n="set.disk.pace.fixed">Limit to a speed (MB/s)</option>
       <option value="full" data-i18n="set.disk.pace.full">Full speed</option>
     </select><input class="txt" id="s_move_pace_mbs" type="number" min="1" max="100000" style="width:8ch;display:none" onchange="movePaceChanged()" aria-label="MB/s"></div></div>
-  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.disk.cats">Categories<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.disk.cats.hint">the categories offered to Sonarr, Radarr and other clients, and where each one's finished downloads go. tv, movies, music and books are always available; add any others your apps are set to use - a client whose category is missing here refuses to connect. Leave a folder blank and that category lands in its own subfolder of the download root, which is what most setups want. Rows are listed alphabetically, and a category an app sends that is not here yet adds itself</span></label></div>
-  <div id="catfilerows"></div>
-  <div class="savebar">
-    <button class="ghost" onclick="addCatFileRow()" data-i18n="set.disk.cats.add">+ Add category</button>
-    <button onclick="saveCatFiles(this)" data-i18n="set.disk.cats.apply">Apply categories</button>
-  </div>
   <div class="row" data-adv="1"><label data-i18n="set.disk.outperm">Permissions on finished downloads<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.disk.outperm.hint">a umask, the same number Docker and the setup guides use: 002 gives folders 775 and files 664, 022 gives 755 and 644. Leave it empty and nzbfast changes nothing, which is what it has always done. Set it when Sonarr or Radarr run as a different user in the same group and cannot read or import what lands here - on a systemd install they usually cannot, because the unit keeps everything the daemon writes owner-only to protect the API key. Ignored on Windows, which has no such thing</span></label>
     <input class="txt sm" id="s_out_umask" data-i18n-placeholder="set.disk.outperm.ph" placeholder="off" onchange="setCfg('out_umask',this.value)"></div>
   <div class="row"><label data-i18n="set.disk.minfree">Minimum free space<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.disk.minfree.hint">pause new jobs below this, e.g. 25G. Defaults to 2G so the disk never fills completely; 0 = off</span></label>
@@ -2598,7 +2639,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input class="txt sm" type="number" min="0" max="3600" id="s_queue_finished_delay_secs" onchange="setCfg('queue_finished_delay_secs',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.parclean">Delete recovery files<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.parclean.hint">a download's .par2 repair files have done their job once everything verifies, so they are removed when it completes successfully. Turn off to keep them in the download folder</span></label>
     <input type="checkbox" id="s_par_cleanup" onchange="setCfg('par_cleanup',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.watchdir.cleanup">Cleanup after download<span class="hint" data-i18n="set.watchdir.cleanup.hint">file extensions deleted from a job's folder once it completes successfully, e.g. sfv, srr, url; empty = off. Recovery files have their own switch above</span></label>
+  <div class="row"><label data-i18n="set.watchdir.cleanup">Cleanup after download<span class="hint" data-i18n="set.watchdir.cleanup.hint">file extensions or name patterns deleted from a job's folder once it completes successfully, e.g. sfv, srr, url, *sample*, Subs/*; empty = off. Recovery files have their own switch above</span></label>
     <input class="txt" id="s_cleanup_exts" placeholder="sfv, srr, url" onchange="setCfg('cleanup_exts',this.value)"></div>
   <div class="row"><label data-i18n="set.watchdir.pwprompt">When an archive needs a password<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.pwprompt.hint">"ask right away" prompts the moment a running download turns out to be password-protected, so you can type it while it keeps downloading; "ask when finished" waits until the download completes and offers the 🔑 unlock; "never ask" completes the download quietly with the archive left packed in its folder for you to extract by hand. Set password on the download itself works in every mode</span></label>
     <select class="sel" id="s_password_prompt" style="max-width:280px" onchange="setCfg('password_prompt',this.value)">
@@ -2616,6 +2657,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
       <option value="delete" data-i18n="set.watchdir.cleanupmode.delete">always deleted permanently</option></select></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.extunrar">Unpack with external unrar<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.extunrar.hint">use the unrar program installed on this machine instead of nzbfast's built-in extractor. An escape hatch for archives that fail to unpack: the built-in path is faster on every shape we have benchmarked, so leave this off unless one does. Hash-named obfuscated posts always use the built-in path, whose renaming unrar cannot follow. Needs unrar next to the nzbfast binary or on the system PATH</span></label>
     <input type="checkbox" id="s_prefer_external_unrar" onchange="setCfg('prefer_external_unrar',this.checked?1:0)"></div>
+  <div class="row" data-adv="1" id="extUnrarRow" style="display:none;grid-template-columns:1fr"><div id="extUnrarNote" class="warn" style="font-size:12px"></div></div>
   <div class="row"><label data-i18n="set.watchdir.eatvols">When the unpack will not fit<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.eatvols.hint">some archives cannot be unpacked as they arrive: every part is written to disk first and opened afterwards, so the disk holds the parts and the unpacked files at the same time. A password-protected set needs a third copy, because unlocking writes the plain copy beside the encrypted one before swapping them. That is why a download can fail at 96% on a disk that had room for it. With this on, each archive part is deleted outright the moment the unpacker has read the last of it, so the peak is about one part plus the largest file inside. Deleted for real, not moved to the Trash: the point is space back this second. Only ever on a download that has verified. If it stops halfway, the download is fetched again, which is exactly what already happens when the disk fills, so this can only make the good case cheaper</span></label>
     <select class="sel" id="s_unpack_eat_volumes" style="max-width:340px" onchange="setCfg('unpack_eat_volumes',this.value)">
       <option value="off" data-i18n="set.watchdir.eatvols.off">keep every part until the unpack finishes</option>
@@ -2715,7 +2757,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_rename_quality_brackets" onchange="setCfg('rename_quality_brackets',this.checked?1:0);renameExample()"></div>
   <div class="row rename-sub" style="padding-left:16px"><label data-i18n="set.rename.extrawords">Keep the other words in the name<span class="hint" data-i18n="set.rename.extrawords.hint">sport, races and other events are often one title repeated all season, and only a word or two apart: "Round11 Hungary Race" vs "Round11 Hungary Qualifying". Keeping those words is what stops them all becoming the same name. Only applies where the name could not be tidied up otherwise, so ordinary films are untouched</span></label>
     <input type="checkbox" id="s_rename_extra_words" onchange="setCfg('rename_extra_words',this.checked?1:0);renameExample()"></div>
-  <div class="row rename-sub" style="padding-left:16px"><label data-i18n="set.rename.identify">Work out what a hidden film is<span class="hint" data-i18n="set.rename.identify.hint">some posts arrive with the name stripped off them, so the video lands as a string of random characters. When that happens, read the film's own running time, picture and sound formats and subtitle languages, then look those up in public film databases. Films only, and only once the download has finished. It renames the file ONLY when two separate databases agree on exactly one film, which needs a TMDB key in your config - without one it never renames, it just writes what it found into History so you can see what the file probably is</span></label>
+  <div class="row rename-sub" style="padding-left:16px"><label data-i18n="set.rename.identify">Work out what a hidden film is<span class="hint" data-i18n="set.rename.identify.hint">some posts arrive with the name stripped off them, so the video lands as a string of random characters. When that happens, read the film's own running time, picture and sound formats and subtitle languages, then look those up in public film databases. Films only, and only once the download has finished. It renames the file ONLY when two separate databases agree on exactly one film, which needs a TMDB key in the Indexing settings - without one it never renames, it just writes what it found into History so you can see what the file probably is</span></label>
     <input type="checkbox" id="s_rename_identify" onchange="setCfg('rename_identify',this.checked?1:0)"></div>
   <div class="row rename-sub" style="padding-left:16px"><label data-i18n="set.rename.eptitles">Episode titles in TV names<span class="hint" data-i18n="set.rename.eptitles.hint">name an episode file "Show - S01E02 - The Ceremony [1080p].mkv" instead of "Show - S01E02 [1080p].mkv". Off by default, because it changes filenames your library and your *arr apps have already matched on. The title comes from the episode list already stored for shows on your watchlist, so it never waits on the internet and never renames a file later: a show we have no list for keeps today's name. Titles are in the show's original language, usually English</span></label>
     <input type="checkbox" id="s_rename_episode_titles" onchange="setCfg('rename_episode_titles',this.checked?1:0);renameExample()"></div>
@@ -2728,7 +2770,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_rename_junk" onchange="setCfg('rename_junk',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.rename.mediaonly">Keep only the media file<span class="hint" data-i18n="set.rename.mediaonly.hint">⚠ permanently deletes everything except the video(s) and subtitles; every episode of a season pack is kept</span></label>
     <input type="checkbox" id="s_rename_media_only" onchange="setCfg('rename_media_only',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.rename.fromnzb">Name downloads after the .nzb file<span class="hint" data-i18n="set.rename.fromnzb.hint">the finished folder and its main file take the name of the .nzb file, instead of the tidied-up name worked out from the release. Only the biggest file is renamed: the rest of an episode pack, the sample, the subtitles and the .nfo keep the names they arrived with. Off by default, and any category can turn it on or off on its own under "Your categories"</span></label>
+  <div class="row"><label data-i18n="set.rename.fromnzb">Name downloads after the .nzb file<span class="hint" data-i18n="set.rename.fromnzb.hint2">the finished folder and its main file take the name of the .nzb file, instead of the tidied-up name worked out from the release. Only the biggest file is renamed: the rest of an episode pack, the sample, the subtitles and the .nfo keep the names they arrived with. Off by default, and any category can turn it on or off on its own under Categories</span></label>
     <input type="checkbox" id="s_rename_from_nzb" onchange="setCfg('rename_from_nzb',this.checked?1:0)"></div>
 </div>
 
@@ -2742,9 +2784,25 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   </div>
 </div>
 
+<!-- TODO 46: one Categories card, not two that both say "Categories".
+     The filing list came up from Disk & quota, where it was a row among
+     folders and quotas; the user categories were a separate card next
+     door. Side by side they read as the same feature twice - and now
+     they ARE joined, because a user category's slug is offered to the
+     *arrs alongside the filing list (Daemon::client_cats).
+     Two TABLES rather than one, and that is not a compromise: the
+     filing list is a BTreeSet rendered alphabetically (which is why #19
+     has no drag handle), while a user category list is ORDERED and the
+     order is match precedence. One table cannot be both. -->
 <div class="card set" data-sg="organise" data-sk="categories">
-  <h3 data-i18n="set.cats.title">Your categories <span class="badge live" data-i18n="badge.live">live</span></h3>
-  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.cats.rules">Categories<span class="hint" data-i18n="set.cats.rules.hint">give sport, wrestling, podcasts, audiobooks or anything else its own wall category. Each release name runs through these top to bottom, first match wins, ahead of the built-in Movies/TV classifier. Match rules are regexes (plain keywords work too), same as Smart folder rules. "Treat as" decides what happens when a download finishes: movie-like and TV-like get junk cleanup and renaming; "leave as posted" touches nothing, which is the safe choice for books, comics and audio</span></label></div>
+  <h3 data-i18n="set.disk.cats">Categories <span class="badge live" data-i18n="badge.live">live</span></h3>
+  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.catcard.list">The list your apps use<span class="hint" data-i18n="set.disk.cats.hint">the categories offered to Sonarr, Radarr and other clients, and where each one's finished downloads go. tv, movies, music and books are always available; add any others your apps are set to use - a client whose category is missing here refuses to connect. Leave a folder blank and that category lands in its own subfolder of the download root, which is what most setups want. Rows are listed alphabetically, and a category an app sends that is not here yet adds itself</span></label></div>
+  <div id="catfilerows"></div>
+  <div class="savebar mid">
+    <button class="ghost" onclick="addCatFileRow()" data-i18n="set.disk.cats.add">+ Add category</button>
+    <button onclick="saveCatFiles(this)" data-i18n="set.disk.cats.apply">Apply categories</button>
+  </div>
+  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.cats.title">Your categories<span class="hint" data-i18n="set.cats.rules.hint2">give sport, wrestling, podcasts, audiobooks or anything else its own wall category. Each release name runs through these top to bottom, first match wins, ahead of the built-in Movies/TV classifier. Match rules are regexes (plain keywords work too), same as Smart folder rules. "Treat as" decides what happens when a download finishes: movie-like and TV-like get junk cleanup and renaming; "leave as posted" touches nothing, which is the safe choice for books, comics and audio. Each one is offered to your apps as well, under the short name at the end of its row - add that name to the list above to give it a folder of its own</span></label></div>
   <div id="catrows"></div>
   <div class="savebar">
     <button class="ghost" onclick="addCatRow()" data-i18n="set.cats.add">+ Add category</button>
@@ -2754,7 +2812,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 
 <div class="card set" data-sg="organise" data-sk="rss">
   <h3 data-i18n="set.rss.title">RSS auto-grab <span class="badge live" data-i18n="badge.live">live</span></h3>
-  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.rss.feeds">Feeds<span class="hint" data-i18n="set.rss.feeds.hint">each feed is polled on its own interval; items passing the rules are queued automatically. Rules (one per line): Require: size&gt;200M · Reject: *480p* · Accept: *1080p*. An Accept rule can file its matches itself: Accept(category=tv, priority=high): *1080p*. Preview shows what the rules would do without grabbing anything</span></label></div>
+  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.rss.feeds">Feeds<span class="hint" data-i18n="set.rss.feeds.hint">each feed is polled on its own interval; items passing the rules are queued automatically. Rules (one per line): Require: size&gt;200M · Require: age&gt;2h · Reject: age&gt;30d · Reject: *480p* · Accept: *1080p*. An Accept rule can file its matches itself: Accept(category=tv, priority=high): *1080p*. Preview shows what the rules would do without grabbing anything</span><span class="hint" data-i18n="set.rss.feeds.key.hint">A saved feed address is shown with its API key hidden as ***, so the box does not hold the whole address. Leave the address as it is and the saved key is kept. To change it, paste the whole new address in, key included; an address still showing *** is refused when you apply.</span></label></div>
   <div id="feedrows"></div>
   <div class="savebar">
     <button class="ghost" onclick="addFeedRow()" data-i18n="set.rss.addfeed">+ Add feed</button>
@@ -2954,6 +3012,18 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <div class="row"><label data-i18n="set.idx.omdbget">Get a free OMDb key<span class="hint" data-i18n="set.idx.omdbget.hint">only needs an email address: we submit the signup for you; OMDb emails you the key with an activation link. Or do it yourself at omdbapi.com/apikey.aspx</span></label>
     <span><input class="txt" id="s_omdb_email" type="email" placeholder="you@example.com" style="width:210px" autocomplete="email">
     <button class="ghost" onclick="omdbSignup(this)" data-i18n="set.idx.omdbreq">Request key</button></span></div>
+  <!-- §193 a: the curated wall's adult filter. Default ON and fully
+       settable through the API since M30, with no control anywhere -
+       and the wall's own "Include adult" tick is a DIFFERENT switch
+       (the raw Spots list only), so anyone who went looking found a
+       control that did not do this and concluded the filter was
+       broken. The hint below is the one that distinguishes them. -->
+  <div class="row"><label data-i18n="set.idx.adult">Hide adult titles<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.adult.hint">on by default. Titles filed as adult are left out of the wall and the release list, whether the name came from a header scan or a spot. This is not the same control as the "Include adult" tick on the Browse page: that one only opens up the raw Spots list there, and it does not change what the wall shows</span></label>
+    <input type="checkbox" id="s_wall_hide_adult" onchange="setCfg('wall_hide_adult',this.checked?1:0)"></div>
+  <!-- §193 d: the TMDB key, which lived in the config file and an env
+       var only. Same write-only shape as the OMDb key above it. -->
+  <div class="row"><label data-i18n="set.idx.tmdb">TMDB key<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.tmdb.hint">optional: uses TMDB for wall titles, posters and cast, and gives "Work out what a hidden film is" its second source. Empty is the normal setup and nothing is lost - metadata still comes from TVmaze and Wikidata, with no key at all. TMDB does not grant API access to Usenet tools, so this is for a key you already hold. Stored here and never shown again; a key already in your config file or TMDB_API_KEY still works and this box wins over both</span></label>
+    <input class="txt" id="s_tmdb_key" type="password" value="" autocomplete="new-password" onchange="setCfg('tmdb_key',this.value)"></div>
   <div class="row"><label data-i18n="set.idx.wallmeta">Wall metadata<span class="hint" data-i18n="set.idx.wallmeta.hint">clear every cached title/poster and re-download fresh; indexed releases are untouched</span></label>
     <span><button class="ghost" onclick="refreshAllMeta(this)" data-i18n="set.idx.refreshmeta">Refresh all metadata</button></span></div>
   <div class="row"><label data-i18n="set.idx.prefq">Preferred version<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.prefq.hint">when one film or episode has been posted several times, releases matching these float to the top of its list and get a “best match” mark. Nothing is ever hidden: release names leave tags out all the time, so this only changes the order. Leave any of them on “no preference” to ignore that one</span></label>
@@ -2986,6 +3056,21 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
         <option value="x264">x264 / AVC</option><option value="VC-1">VC-1</option>
         <option value="XviD">XviD</option><option value="DivX">DivX</option></select>
     </span></div>
+  <!-- §193 b (and §131 D3, filed twice): the search log. Two halves,
+       and the toggle must not wait on the readout - it is a privacy
+       control, default ON, recording the user's own searches, and it
+       had no switch anywhere. The readout is `mode=search_misses`,
+       which has been fully built and callerless since 11 Aug: the list
+       a backfill works from. Nothing here starts a scan. -->
+  <div class="row"><label data-i18n="set.idx.slog">Remember what was searched for<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.slog.hint">on by default. Counts the searches made here and through the Sonarr/Radarr feed so the list below can say what people asked for and did not get. One row per distinct query, not a log of every keystroke. It stays on this machine, is never looked up anywhere and is never sent anywhere. Turning it off also forgets everything already recorded</span></label>
+    <input type="checkbox" id="s_index_search_log" onchange="setCfg('index_search_log',this.checked?1:0);setTimeout(refreshSearchLog,400)"></div>
+  <div class="row"><label data-i18n="set.idx.slogstat">Searches that found nothing<span class="hint" data-i18n="set.idx.slogstat.hint">what was asked for and not answered, most asked first. This is the list to work from when deciding which groups to scan or how far back to backfill. A query that stops appearing here is a gap the scanner has filled. Nothing acts on it by itself</span></label>
+    <span id="slogState" class="dim" style="font-size:12.5px;line-height:1.5"></span></div>
+  <div class="row" id="slogTblRow" style="grid-template-columns:1fr;display:none">
+    <table id="slogTbl"><thead><tr><th data-i18n="slog.col.q">Searched for</th><th data-i18n="slog.col.where">Asked from</th><th data-i18n="slog.col.n">Times</th><th data-i18n="slog.col.last">Last asked</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="row"><label data-i18n="set.idx.slogclear">Forget recorded searches<span class="hint" data-i18n="set.idx.slogclear.hint">empties the list above and leaves the recording switched on</span></label>
+    <span><button class="ghost" onclick="clearSearchLog(this)" data-i18n="set.idx.slogclear.btn">Forget them</button></span></div>
   </div><!-- /.idxon -->
   <!-- Off-state only: the database is deliberately KEPT so the switch is
        reversible without a rescan, which means the one thing the card
@@ -3248,6 +3333,14 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     </span></div>
   <div class="row"><label data-i18n="set.sec.port">Port<span class="badge restart" id="s_portbadge" data-i18n="badge.restart">applies after restart</span></label>
     <input class="txt sm" type="number" min="1" max="65535" id="s_port" onchange="setCfg('port',this.value)"></div>
+  <!-- §193 c: the listener's own address. Honoured from settings.json
+       since the --bind flag existed, and absent from the settings
+       table, so no row could exist until the daemon echoed it. Same
+       bind-time treatment as the port above and the TLS pair below:
+       the field shows what is serving NOW, and renderPending adds the
+       saved value beside it. -->
+  <div class="row"><label data-i18n="set.sec.bind">Listen on<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.sec.bind.hint">which address the dashboard and API answer on. 0.0.0.0 is the default and answers on every network this machine is on, which is what a NAS, a container or any headless box needs. 127.0.0.1 answers on this machine only, so nothing else on your network can reach it even with the key - pair that with a reverse proxy or a VPN. Careful: an address this machine does not have stops the next start from coming up at all, and the only way back is to fix it in settings.json by hand</span></label>
+    <input class="txt sm" id="s_bind" spellcheck="false" placeholder="0.0.0.0" onchange="setCfg('bind',this.value)"></div>
   <div class="row"><label data-i18n="set.sec.tlscert">HTTPS certificate<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.sec.tlscert.hint">serve the dashboard and API over HTTPS: point this at a PEM certificate file (a chain works too) and the row below at its private key, then restart. Leave both empty for plain HTTP. A reverse proxy or a VPN like Tailscale also works and needs nothing here - the manual's security section compares the options</span></label>
     <input class="txt" id="s_tls_cert" spellcheck="false" onchange="setCfg('tls_cert',this.value)"></div>
   <div class="row"><label data-i18n="set.sec.tlskey">HTTPS private key<span class="badge restart" data-i18n="badge.restart">applies after restart</span><span class="hint" data-i18n="set.sec.tlskey.hint">the PEM private key that belongs to the certificate above. With both rows set, the next restart answers on https instead of http</span></label>
@@ -4029,6 +4122,51 @@ let urlKey = '';
   const qs = q.toString();
   history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
 })();
+// ...and the same first run when the daemon opened the browser ITSELF.
+// There the URL is a child process's argv, which on Linux is a
+// world-readable /proc/<pid>/cmdline, so what arrives is not the key but
+// a one-time handoff token that only this origin can trade for it (see
+// open_dashboard). Strip it first, exactly as above - it is single-use,
+// but a spent token in the address bar is still noise in a copied link.
+//
+// The trade is a round trip, and the page's opening burst is a dozen
+// requests. Without a hold every one of them goes out keyless, is
+// refused, and is retried: a dozen entries in the daemon's auth-failure
+// log and a dozen red lines in the console, on the one run a first-time
+// user is most likely to be looking at both. So api() waits on this
+// promise BEFORE it sends, and keyRotating - the "a key is on its way,
+// wait for it rather than asking" promise refusals already honour - is
+// the belt for anything that got out anyway. A failed or refused trade
+// just resolves both, and the key modal is next, which is the behaviour
+// of a page that was handed nothing at all.
+let keyHandoff = null;
+(function(){
+  const q = new URLSearchParams(location.search), h = q.get('handoff');
+  if(!h) return;
+  q.delete('handoff');
+  const qs = q.toString();
+  history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+  keyRotateStart();
+  const trade = fetch('/handoff', {method:'POST', body:h})
+    .then(r => r.ok ? r.json() : null)
+    .then(j => {
+      const k = j && j.apikey;
+      if(!k) return;
+      // Same rule as a URL key: never displace a stored key up front. A
+      // launcher can hand over a key this browser has already rotated
+      // away from, and clobbering a working one locks the page out.
+      if(!key) adoptKey(k);
+      else if(k !== key) urlKey = k;
+    })
+    .catch(()=>{});
+  // A hung exchange must never become a hung page. Both holds are only
+  // an optimisation - they keep a dozen certain refusals out of the
+  // auth-failure log - so they expire on their own, and the page carries
+  // on into the modal, even if this daemon never answers. A trade that
+  // lands after the timeout still adopts its key; nothing is wasted.
+  keyHandoff = Promise.race([trade, new Promise(r => setTimeout(r, 10000))])
+    .finally(() => { keyHandoff = null; keyRotateEnd(); });
+})();
 let nzbkeyMem = '';                   // NZB key typed this session (never persisted) - authorizes the first apikey bootstrap
 let paused = false;
 const PERIOD = 1;                     // poll/sample period, seconds
@@ -4072,19 +4210,6 @@ function provSortSecs(){
 // per-job server-bytes baseline (stats bytes are session-cumulative; the
 // delta since the job went active is its contribution).
 let lastQ=null, lastStats=null, lastMbps=0;
-// Watch-folder pickups already toasted (or predating this page): null
-// until the first poll seeds it, so a reload never replays old events.
-let wpSeen=null;
-// ...and automatic retries already toasted. Same null-until-first-poll
-// contract, so opening the page never replays a requeue from an hour ago.
-let arSeen=null;
-// §96.3 give-up trips already toasted, same contract as wpSeen.
-let gtSeen=null;
-let wuSeen=null;
-// Kept-files notices already toasted. The STRIP shows every entry the
-// daemon still holds, seeded or not - only the toast is once-each, so a
-// reload re-reads the notice without shouting about it again.
-let dkSeen=null;
 let openDrawer=null, qDragging=null, dragEndAt=0;
 let jobBase={id:null,bytes:{}};
 
@@ -4464,6 +4589,9 @@ async function readJson(r){
 // irreversible (shutdown) require it, so a page you merely visit cannot
 // fire them with an <img> or a link prefetch.
 async function api(mode, extra, authKey, post){
+  // A launch handoff still in flight: the key is one round trip away, so
+  // hold rather than send a request that is certain to be refused.
+  if (authKey == null && keyHandoff) await keyHandoff;
   // While the key modal is up, later callers (the 1 Hz poll keeps
   // ticking) wait on its outcome instead of racing more 403s past it -
   // the daemon rate-limits bad keys per IP, and a minute of open modal
@@ -5479,6 +5607,13 @@ let histSearch='', histLimitOverride=0, histFull={};
 // poll was already in flight), the next tick sends rev 0 and refetches
 // regardless of what revision the in-flight poll adopted.
 let histAppliedWin=null;
+// Same for the QUEUE window, and for the same reason: qShowMore zeroes
+// dashQRev, but tick() returns early on the `ticking` guard when a poll
+// is already in flight, and that poll's answer overwrites dashQRev - so
+// without this the next poll would send a live revision with the bigger
+// limit, be answered "unchanged" (queue=null), and the click would do
+// nothing at all.
+let qAppliedWin=null;
 // The QUEUE is paged too, the same way and for a sharper reason.
 // The daemon builds only the rows inside this window - `queue_json`
 // used to render every slot in the queue and then throw all but the
@@ -5635,12 +5770,13 @@ async function tick(){
     const win=histWindowExtra();
     const qwin=queueWindowExtra();
     const hrevSent=(win===histAppliedWin)?dashHRev:0;
+    const qrevSent=(qwin===qAppliedWin)?dashQRev:0;
     // The events param is OMITTED on the very first poll: that primes
     // the cursor server-side (no replay of old toasts). From then on
     // the adopted cursor - zero included - is always sent, so a
     // daemon's first-ever event still reaches a page already watching.
     const r=await api('dashboard',
-      `&queue_rev=${dashQRev}&history_rev=${hrevSent}`
+      `&queue_rev=${qrevSent}&history_rev=${hrevSent}`
       +(dashEHave?`&events=${dashESeq}`:'')+qwin+win);
     // A declined key is not an outage. While key entry is turned down
     // the daemon answers every poll with a 403 body, but the payload
@@ -5660,7 +5796,7 @@ async function tick(){
       if(wasOffline){ wasOffline=false; snd('conn', true); say('conn',t('say.connBack','Connection restored.')); }
       return;
     }
-    if(r.queue) lastQFull=r.queue;
+    if(r.queue){ lastQFull=r.queue; qAppliedWin=qwin; }
     if(r.history){ lastHist=r.history; histFull={}; histAppliedWin=win; }
     dashQRev=r.queue_revision||0;
     dashHRev=r.history_revision||0;
@@ -5873,8 +6009,12 @@ async function tick(){
     // MiB, as `mbleft` arrives; the caption formats them. drawArea
     // normalises to the series' own max, so the magnitude is free to be
     // the honest one.
+    // TODO 200: a queue holding only finishing rows is not a frozen
+    // download - "0.00 MiB left" over a flat line read as download
+    // trouble on a job whose download was over. Drop the series, as an
+    // empty queue does; a paused or held queue keeps its frozen chart.
     if(burnLive) push(burnHist, totLeft);
-    else if(!qCount(q)) burnHist.length=0;
+    else if(!qCount(q)||(totLeft<=0&&q.slots.length&&q.slots.every(isTail))) burnHist.length=0;
     if(REDUCED) drawBurn(0);
     document.title = (mbps>0 && !paused) ? `${fmtRate(mbps)} · nzbfast`
       : (qCount(q)? 'nzbfast · '+(paused?t('status.paused','paused')
@@ -6007,69 +6147,17 @@ async function tick(){
       +(wf.some(f=>!f.ingested)
         ? `<div style="margin:2px 0"><button class="ghost mini" title="${escA(t('queue.wf.settings.title','Open the Watch folder settings.'))}" onclick="landOnRow('s_watch')">⚙ ${esc(t('queue.wf.settings','Watch folder settings'))}</button></div>`
         : ''));
-    // Watch-folder pickups, toasted as they happen. The daemon consumed
-    // the user's file (a browser then lists its download as "Removed"),
-    // so the moment needs its own sentence naming the folder - without
-    // it, "nzbfast deleted my download" is the natural reading. The
-    // watermark starts at the first poll's newest event, so a freshly
-    // opened page never replays history.
-    // Seen-set rather than a timestamp watermark: two files ingested in
-    // the same second must both toast, once each. Rebuilt from the
-    // payload every tick, so it stays as small as the daemon's ring.
-    const wp=q.watch_picked||[], wpKey=e=>(e.at||0)+'\0'+e.name;
-    if(wpSeen) wp.forEach(e=>{ if(!wpSeen.has(wpKey(e)))
-      toast(t('toast.watchpicked','Picked up {name} from {dir} - added to the queue.',{name:e.name,dir:e.folder})); });
-    wpSeen=new Set(wp.map(wpKey));
-    // M32: the automatic retry has just re-queued a failed job. Same
-    // ring, same seen-set contract. Without it the row the user was told
-    // had FAILED vanishes from History and a download nobody asked for
-    // appears in the queue - which reads as the record being lost.
-    const ar=q.auto_retried||[], arKey=e=>(e.at||0)+'\0'+e.nzo_id;
-    if(arSeen) ar.forEach(e=>{ if(!arSeen.has(arKey(e)))
-      toast(t('toast.autoretried','Trying {name} again now - only the missing pieces are fetched.',{name:e.name})); });
-    arSeen=new Set(ar.map(arKey));
-    // §96.3: the breaker deciding to stop chasing something is the one
-    // moment it takes an action of its own (it unmonitors the item
-    // inside Sonarr or Radarr), and it happened silently. Same seen-set
-    // pattern as the pickups above, so a page opened later never
-    // replays old trips.
-    const gt=q.giveup_tripped||[], gtKey=e=>(e.at||0)+'\0'+e.name;
-    if(gtSeen) gt.forEach(e=>{ if(!gtSeen.has(gtKey(e)))
-      toast(t('toast.giveup','Stopped chasing {name}: {n} different releases failed. Try again from the Watchlist card.',
-        {name:e.name,n:e.count})); });
-    gtSeen=new Set(gt.map(gtKey));
-    // Watchlist delete_old upgrades, toasted the same way: the upgrade
-    // deletes a COMPLETED download and drops its history row, and until
-    // this the only narration was two daemon log lines. `fate` picks the
-    // honest sentence - the toast must not promise a Trash the delete
-    // did not use (Linux default, or a Trash that stopped answering),
-    // nor a delete the Trash refused to make ('kept', which leaves the
-    // superseded copy on disk and files its own notice below). `oldq`
-    // falls back to the superseded stem for slots grabbed before
-    // qualities were stamped.
-    const wu=q.watch_upgraded||[], wuKey=e=>(e.at||0)+'\0'+e.name;
-    if(wuSeen) wu.forEach(e=>{ if(!wuSeen.has(wuKey(e))){
-      const p={name:e.name,q:e.oldq||e.old};
-      toast(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy is still on disk, see History.',p)
-        : e.fate==='trash' ? t('toast.upgraded.trash','Upgraded to {name} - the {q} copy went to the Trash.',p)
-        : t('toast.upgraded.gone','Upgraded to {name} - the {q} copy was deleted.',p)); } });
-    wuSeen=new Set(wu.map(wuKey));
     // Deletes that took the record and left the files. Not a moment that
-    // scrolls past like the four rings above: the folder is still there,
-    // so the strip stays until the user dismisses it, and the toast is
-    // only the nudge towards it. A bulk delete can refuse several at
-    // once, and the toast element holds one message - so many collapse
-    // to a count rather than clobbering each other down to the last one.
-    const dk=q.delete_kept||[], dkKey=e=>(e.at||0)+'\0'+e.path;
+    // scrolls past: the folder is still there, so the strip stays until
+    // the user dismisses it, and it is rendered from the payload every
+    // tick, seeded or not. §129 1b(b): the once-each TOAST that nudges
+    // towards this strip is a moment, and it comes off the event ring
+    // now (`job.delete_kept` in handleLifeEvents) - this array is no
+    // longer diffed against anything.
+    const dk=q.delete_kept||[];
     const dkEl=document.getElementById('deleteKept');
     dkEl.style.display=dk.length?'':'none';
     if(dk.length) setHtml(dkEl, dk.map(deleteKeptRow).join(''));
-    if(dkSeen){
-      const fresh=dk.filter(e=>!dkSeen.has(dkKey(e)));
-      if(fresh.length===1) toast(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:fresh[0].name}), true);
-      else if(fresh.length) toast(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:fresh.length}), true);
-    }
-    dkSeen=new Set(dk.map(dkKey));
 
     // §188: the history re-derivation's one-time note. Kept until
     // dismissed rather than toasted, because the pass that raises it
@@ -6547,6 +6635,13 @@ function renderHistory(slots){
       if(when) sub.push(`<span class="nowrap" title="${escA(histWhen(s,true))}">${esc(when)}</span>`);
       if(s.elapsed_secs>0.5&&s.downloaded_bytes>0)
         sub.push(`<span class="nowrap">${esc(`${fmtEta(s.elapsed_secs)} · ${fmtRate(s.downloaded_bytes/1e6/s.elapsed_secs)}`)}</span>`);
+      // TODO 200: the time AFTER the download, when it is the story.
+      // Gary's card read "22s - 16 MB/s" for a job that took 27
+      // wall-clock minutes: the figure above is the network leg only,
+      // so the stuck tail - the exact thing reported - left no trace
+      // in the record. Same nowrap-fact shape as the line above.
+      const tailSpan=histTailSpan(s);
+      if(tailSpan) sub.push(tailSpan);
       // M32: the daemon has already scheduled its own retry - without
       // this line the user sees a hard failure, then watches the row
       // silently vanish and re-queue minutes later.
@@ -6772,6 +6867,18 @@ function histHoverHide(){
   clearTimeout(hovTimer); hovTimer=null; hovId='';
   const el=document.getElementById('histhov'); if(el) el.remove();
 }
+// TODO 200: the post-download tail on a history row, when it is worth
+// a line. `postproc_secs` (the slow-tail oracle: lane custody to park)
+// is shown once it is the dominant figure - at least as long as the
+// download, or past half a minute outright - and coloured warn from
+// two minutes, which is where the daemon logs the same tail as slow
+// (TAIL_SLOW_SECS). Under that it stays off the row: a two-second
+// tail on a ten-second download is furniture.
+function histTailSpan(s){
+  const tail=+s.postproc_secs||0, dl=+s.elapsed_secs||0;
+  if(!(tail>=30||(tail>=2&&tail>=dl))) return '';
+  return `<span class="nowrap${tail>=120?' warn':''}" title="${escA(t('hist.tail.title','Time spent after the download itself: verify, repair, unpack, naming, moving and index work. A large figure here is the thing to look at when a download seemed stuck at 100%.'))}">${esc(t('hist.tail','then {t} finishing',{t:fmtEta(tail)}))}</span>`;
+}
 function histHoverHtml(s){
   const failed=s.status!=='Completed';
   const rows=[];
@@ -6797,7 +6904,8 @@ function histHoverHtml(s){
   if(s.completed){
     const rate=(s.elapsed_secs>0.5&&s.downloaded_bytes>0)
       ? ` <span class="dim">· ${esc(fmtEta(s.elapsed_secs))} · ${esc(fmtRate(s.downloaded_bytes/1e6/s.elapsed_secs))}</span>`:'';
-    rows.push([t('hist.finished','Finished'), esc(histWhen(s,true))+rate]);
+    const tailSpan=histTailSpan(s);
+    rows.push([t('hist.finished','Finished'), esc(histWhen(s,true))+rate+(tailSpan?` <span class="dim">· </span>${tailSpan}`:'')]);
   }
   rows.push([t('col.category','Category'), esc(s.category||'*')]);
   if(s.identity_name) rows.push([t('hist.identity','Identified as'), esc(s.identity_name)]);
@@ -6871,13 +6979,20 @@ function probeFetch(id){
   // One header read per poll, and the file does not change shape often.
   // A settled answer is never re-fetched; an unfinished one is, slowly.
   if(e.busy) return;
-  if(e.at&&(performance.now()-e.at<6000||!(e.j&&e.j.pending))) return;
+  if(e.at&&(performance.now()-e.at<6000||!probeUnsettled(e.j))) return;
   e.busy=true;
   // A refusal (no such job, nothing playable in it, a key the page does
   // not have) is a settled answer, not a pending one: without a body to
   // stand in for it the box would sit on "reading the file…" forever.
+  // The refusal bodies are JSON too, so they are parsed rather than
+  // thrown away - one of them (503 `moving`: the payload is in flight
+  // to its final folder, so the daemon looked in a folder the bytes
+  // have left) is the ONE refusal that is not settled, and the box has
+  // to keep asking or it would say "no video file" about a file that is
+  // whole and lands seconds later.
   fetch('/preview/probe/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}})
-    .then(r=>r.ok?r.json():{media:null,pending:false}).catch(()=>({media:null,pending:false}))
+    .then(r=>r.json().catch(()=>({media:null,pending:false})))
+    .catch(()=>({media:null,pending:false}))
     .then(j=>{
       e.busy=false; e.at=performance.now(); e.j=j;
       const box=document.getElementById('pv-'+id);
@@ -6885,10 +7000,14 @@ function probeFetch(id){
         box.innerHTML=probeBody(id);
         // The history drawer does not re-render on a tick the way the
         // queue one does, so a still-arriving file needs its own nudge.
-        if(j&&j.pending) setTimeout(()=>{ if(document.getElementById('pv-'+id)) probeFetch(id); },6000);
+        if(probeUnsettled(j)) setTimeout(()=>{ if(document.getElementById('pv-'+id)) probeFetch(id); },6000);
       }
     });
 }
+// Worth asking again: more of the file is still landing, or the payload
+// is being moved to its final folder. Everything else - an answer, or a
+// refusal about a job that will not change - is settled.
+function probeUnsettled(j){ return !!(j&&(j.pending||j.moving)); }
 // Language names come from the browser, in the reader's own language:
 // "German" in English, "Deutsch" in German. No catalogue key needed.
 const _langName={};
@@ -6905,7 +7024,9 @@ function probeBody(id){
   const e=PROBE[id]||{}, j=e.j;
   if(!j) return `<span class="dim">${esc(t('probe.checking','reading the file…'))}</span>`;
   const m=j.media;
-  if(!m) return `<span class="dim">${esc(j.pending
+  if(!m) return `<span class="dim">${esc(j.moving
+    ? t('probe.moving','the files are being moved to their final folder - this reads again when the move lands')
+    : j.pending
     ? t('probe.pending','not enough of the file has arrived yet')
     : t('probe.none','no video file to read here'))}</span>`;
   const v=(m.video||[])[0];
@@ -7304,6 +7425,16 @@ async function pvWhyRemuxFailed(){
       setTimeout(()=>{ if(job===pvJob) pvReopen(pvStart); }, 2000);
       return;
     }
+    // 503 is the other "not yet": a finished payload in flight to its
+    // final folder, which the daemon looked for in the folder the bytes
+    // have left. Whole, and readable again when the move lands - so
+    // wait on its Retry-After rather than calling the file unopenable.
+    if(r.status===503&&pvRetry<60){
+      pvRetry++;
+      setHtml('pvnote', esc(t('probe.moving','the files are being moved to their final folder - this reads again when the move lands')));
+      setTimeout(()=>{ if(job===pvJob) pvReopen(pvStart); }, 5000);
+      return;
+    }
   }catch(e){ if(job!==pvJob) return; }
   setHtml('pvnote', esc(t('probe.err.open','This browser could not open the file. Use the button below to open it in your own player.')));
 }
@@ -7460,6 +7591,12 @@ async function toggleHistRow(tr){
     + (s.unpack_blocked_by&&!failed
         ? ` <span class="warn">· ${esc(t('hist.packed','still packed: {name}',{name:s.unpack_blocked_by}))}</span>`:'')]];
   if(s.completed) rows.push([t('hist.finished','Finished'), esc(histWhen(s,true))]);
+  // TODO 200: the two legs side by side, whenever the tail ran at all.
+  // The list row only speaks up when the tail dominates; the drawer is
+  // the whole record, so here it is always.
+  if(+s.postproc_secs>0) rows.push([t('hist.tail.head','After the download'),
+    esc(t('hist.tail.detail','{t} of verify, unpack, naming, moving and index work, after a download of {d}',{t:fmtEta(+s.postproc_secs),d:fmtEta(+s.elapsed_secs||0)}))
+    +(+s.postproc_secs>=120?` <span class="warn">· ${esc(t('hist.tail.slow','this is the slow part of this job'))}</span>`:'')]);
   // The category, changeable right here. The right-click menu has had
   // this for a while; the drawer is where people actually look for it.
   rows.push([t('col.category','Category'),
@@ -7611,6 +7748,23 @@ async function toggleHistRow(tr){
             ? t('hist.verify.clean','No damage found, in {n} checked blocks.',{n:(+s.verify_blocks).toLocaleString(LOCALE)})
             : t('hist.verify.clean0','No damage found.'))}</span>`)]);
   }
+  // TODO 207: ...and why it was slow, for jobs where that question has
+  // an answer. The verdict is captured at network-drain and persisted
+  // on the record (serve/whyslow.rs), so this is the same claim the
+  // queue row makes while the job is on the wire - rendered through the
+  // same whyPhrase(), which already speaks every layer token in every
+  // language we ship. No new copy, and none needed.
+  //
+  // Same silence rule as the row chip, for the same reason: a download
+  // that ran at line speed needs no caveat, and a verdict that never
+  // formed is not news. A record written before the field existed
+  // carries no verdict at all and renders no row - absence is absence,
+  // never "unknown" and never "line".
+  const wv=s.whyslow;
+  if(wv&&['provider','cpu','client','disk','limit','missing'].includes(wv.layer))
+    rows.push([t('diag.title','Why is this slow?'),
+      whyPhrase(wv)+(wv.held_secs>5
+        ? ` <span class="dim">(${esc(t('diag.held','for {n}s',{n:wv.held_secs}))})</span>`:'')]);
   // The Location row printed a path and nothing else, while the one
   // control that opens it lived behind a right-click - which does not
   // exist on touch. Same for the only destructive-cleanup path in the
@@ -7677,6 +7831,14 @@ async function toggleHistRow(tr){
   // was cleared answers 404 and dlNzb says so in a toast.
   rows.push([t('drawer.nzbfile','NZB file'),
     `<button class="ghost mini" title="${escA(t('drawer.getnzb.title',"Save this job's .nzb file - nzbfast keeps its own copy even after the original is gone"))}" onclick="event.stopPropagation();dlNzb('${s.nzo_id}')">⬇ ${t('drawer.getnzb','Download .nzb')}</button>`]);
+  // The report, beside the .nzb - the two "take this away with you"
+  // actions of the drawer, and the only two that produce something to
+  // paste or attach. It is still in the ⋯ menu; this is the copy that
+  // makes anyone reach for it, and the drawer is where a user who is
+  // trying to work out what went wrong already is.
+  rows.push([t('rep.title','Download report'),
+    `<button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport('${escA(s.nzo_id)}')">🧾 ${esc(t('menu.report','Create report'))}</button>`
+    +`<div class="dim" style="margin-top:4px">${esc(t('rep.what','Everything about this one download as text you can paste into a support thread: what it is, which servers it used, what the NZB contained, and this job\'s own log lines. Your usernames, passwords and API keys are not in it, and your home folder is written as ~.'))}</div>`]);
   // What the container itself says it holds. Only for a job that
   // finished with files on disk - a failed one has nothing to read.
   // ...and a button to actually play it. The block spelled out codecs,
@@ -7963,8 +8125,25 @@ function pipeline(s,mbps,queued,done,failed){
           t('prov.stat.down','no connection for {n}s',{n:num(sv.down.secs,0)})}</span>`;
       } else if(sv.connected===0){
         const tried=sv.tried||0, miss=sv.missing||0;
+        // TODO 200: a server at a fill level (SABnzbd's "priority",
+        // NZBGet's "level") only ever takes articles every live
+        // lower-level server has already missed - so while the
+        // primary answers everything it moves nothing, however slowly
+        // the primary crawls. That is correct steering, and Gary's
+        // newsdemon sat at "standby" through two jobs at 3 MB/s with
+        // no word of why. The level goes on the row, and when the
+        // verdict for the running job is that the primary is the
+        // limit, the reason lands under the row with the fix.
+        const lvl=+((srvList||[]).find(x=>x.host===sv.host)||{}).level||0;
         if(tried>0&&miss>=tried) stat=` · <span class="warn" title="${escA(t('prov.stat.nothere.title','{n} articles not found here: this content is not on this backbone',{n:num(miss,0)}))}">${t('prov.stat.nothere','not here')}</span>`;
         else if(tried>0)         stat=` · <span class="dim" title="${escA(t('prov.stat.idle.title','has some of this content, but other backbones are serving the pool right now'))}">${t('prov.stat.idle','idle')}</span>`;
+        else if(lvl>0){
+          stat=` · <span class="dim" title="${escA(t('prov.stat.fill.title','a level-{n} fill server: it is only asked for articles every lower-level server has already missed, so it stays idle while they answer everything - even when they are slow. Set it to level 0 to download from it at the same time as your other servers.',{n:lvl}))}">${t('prov.stat.fill','fill, level {n}',{n:lvl})}</span>`;
+          const w=lastQ&&lastQ.whyslow, lim=w&&w.layer==='provider'&&w.detail?String(w.detail):'';
+          if(lim&&lim!==sv.host) detail=`<div class="srvwhy dim">${esc(t('prov.fill.starved','{p} is the limit right now and this server is not helping: at level {n} it only takes what the lower levels miss, and {p} is missing nothing. To download from both at once, give this server level 0.',{p:lim.replace(/^(news|reader)\./,''),n:lvl}))}
+    <a href="#settings/servers" onclick="landOnServer('${escA(sv.host)}');return false">${
+      t('prov.refused.open','Open this server’s settings')}</a></div>`;
+        }
         else                     stat=` · <span class="dim" title="${escA(t('prov.stat.standby.title','a backup backbone the pool has not had to call on for this download'))}">${t('prov.stat.standby','standby')}</span>`;
       }
       // Why is the budget lower than the number in Settings? Because
@@ -8223,7 +8402,27 @@ function actLine(s){
     case 'fetching':return d?t('queue.act.fetching','downloading from {s}',{s:d}):t('queue.act.downloading','downloading');
     case 'verifying':return t('queue.act.verifying','verifying');
     case 'repairing':return t('queue.act.repairing','repairing');
-    case 'extracting':return t('queue.act.extracting','unpacking');
+    // TODO 205: the DISK unpack ladder, with numbers when it has them.
+    // It runs for minutes on a big obfuscated set (issue #47: 130
+    // volumes on a NAS), and until now it printed this one word for
+    // every one of them - which reads as a hang, exactly as the bare
+    // "Moving · moving files" did before U1. `unpack` is present only
+    // while that ladder is running; the in-stream path has its own
+    // lane on the pipeline card and never sends it. Front-loaded like
+    // the rest: the bytes are the part that moves.
+    case 'extracting':{
+      const u=s.unpack;
+      const vols=u&&u.volumes>1?u.volumes:0;
+      if(u&&u.total>0){
+        const p={a:gb(u.done),b:gb(u.total),u:unit('GB'),n:vols};
+        return vols?t('queue.act.unpackvols','unpacking {a} of {b} {u} across {n} volumes',p)
+                   :t('queue.act.unpackbytes','unpacking {a} of {b} {u}',p);
+      }
+      // The count lands before the first volume set is parsed, so this
+      // is the shape a just-started ladder shows.
+      if(vols) return t('queue.act.unpackcount','unpacking {n} volumes',{n:vols});
+      return t('queue.act.extracting','unpacking');
+    }
     // U1: the write-out tail in plain words. A row at 100% saying
     // nothing but "Moving · moving files" read as a hang; the sentence
     // says the download itself is over. Front-loaded so the actline's
@@ -8239,6 +8438,12 @@ function actLine(s){
     case 'identifying':return t('queue.act.identifying','looking up what this release is');
     case 'renaming':return t('queue.act.renaming','tidying up and naming the files');
     case 'scripting':return t('queue.act.scripting','running your post-processing script');
+    // TODO 200: the tail parked behind the index write mutex. Gary's
+    // two 20 Aug rows said "unpacking" for 14 and 27 minutes of
+    // exactly this, and a bare status word that runs for minutes reads
+    // as a hang. Front-loaded like the others: the first clause is the
+    // one the ellipsis keeps.
+    case 'indexwait':return t('queue.act.indexwait','waiting for index maintenance to let go - the download and unpack are done');
   }
   return '';
 }
@@ -8252,7 +8457,20 @@ function actSub(s){
   const whyTxt=(s.status==='Downloading'&&w&&w.nzo_id===s.nzo_id
     &&['provider','cpu','client','disk','limit','missing'].includes(w.layer))
     ?whyPhrase(w):'';
-  const why=whyTxt?`<span class="dim"> · ${whyTxt}</span>`:'';
+  // ...and it is a CONTROL, not a remark. The panel that backs this
+  // sentence up - what the line can do, what the providers delivered,
+  // the per-provider rates, the disk write test - is in this row's
+  // drawer, and nothing on the row said so. Clicking the verdict opens
+  // it and scrolls to it. The silence rules above are unchanged: no
+  // chip on a row running at line speed, and none on a verdict still
+  // forming, so this cannot turn into a "still gathering evidence"
+  // badge on every row in the queue.
+  // The separator belongs to the phase text, not to the verdict: an
+  // activity with no sentence of its own (a plain fetch) would
+  // otherwise open the line with a bare "·".
+  const why=whyTxt?`${txt?'<span class="dim"> · </span>':''}<button type="button" class="whychip" title="${
+    escA(t('diag.open','Why is this slow? Open the evidence behind this verdict.'))
+  }" onclick="event.stopPropagation();openWhySlow('${escA(s.nzo_id)}')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${whyTxt}</button>`:'';
   // The tooltip carries the WHOLE line, whyslow clause included - the
   // visible line ellipsizes to the column, and a tooltip that repeats
   // only the two-word phase answers nothing the truncation asked.
@@ -8322,7 +8540,9 @@ function whyslowBlock(s){
   if(!w||w.nzo_id!==s.nzo_id) return '';
   const srcLbl={measured:t('diag.src.measured','measured'),
     line:t('diag.src.line','your line speed setting'),
-    bench:t('diag.src.bench','probed')}[w.hardware_src]||'';
+    bench:t('diag.src.bench','probed'),
+    // §210 (d): the mark is this machine's own link, not the line.
+    link:t('diag.src.link',"this machine's network link")}[w.hardware_src]||'';
   const bars=[
     [t('diag.bar.now','right now'), +w.achieved_bps||0, ''],
     [t('diag.bar.envelope','providers delivered'), +w.envelope_bps||0, ''],
@@ -8349,7 +8569,10 @@ function whyslowBlock(s){
   const tl=(w.timeline||[]).slice(0,5);
   const tlHtml=tl.length>1?`<div class="dim" style="font-size:11.5px;margin-top:5px">${
     tl.map(e=>`${new Date(e.at_ms).toLocaleTimeString()} ${whyPhrase(e)}`).join(' · ')}</div>`:'';
-  return `<div style="font-size:12px;margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">
+  // The id is the scroll target for the row's verdict chip (openWhySlow):
+  // one panel is open at a time by construction - the drawer only ever
+  // renders for openDrawer - so a fixed id cannot collide.
+  return `<div id="whyslowBlk" style="font-size:12px;margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">
     <div><b>${t('diag.title','Why is this slow?')}</b> <span class="dim">${whyPhrase(w)}${
       w.secs>5?` <span style="opacity:.7">(${t('diag.held','for {n}s',{n:w.secs})})</span>`:''}</span></div>
     ${barHtml}${srvHtml}${tlHtml}
@@ -8611,12 +8834,13 @@ function renderQueue(){
       ?actLine(s)
       // finalizing's actLine is now a whole sentence (tailwrite); the
       // cell keeps the short word.
-      :dl&&s.activity==='finalizing'?t('queue.act.finalizing','moving files'):'';
+      :dl&&s.activity==='finalizing'?t('queue.act.finalizing','moving files')
+      :dl&&s.activity==='indexwait'?t('queue.act.indexwait.short','index busy'):'';
     // §129 2f: the checkbox renders its state straight from the Set, so
     // selection survives every setHtml tbody re-render by construction.
     const selBox=`<td class="selcol"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
     return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" draggable="${dl||tail?'false':'true'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
-      <td class="nowrap dim">${fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':fmtEta(eta)}</td>
+      <td class="nowrap dim"${tail?` title="${escA(t('queue.left.done','nothing left to download - every byte is in; this row is finishing'))}"`:''}>${tail?'-':fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':fmtEta(eta)}</td>
       <td><div class="bar"><i style="width:${s.percentage}%"></i></div>${actSub(s)}</td>
       <td class="nowrap" style="text-align:end">${ctl}</td></tr>`+
       (open?`<tr class="drawer"><td colspan="7">${drawerHtml(s)}</td></tr>`:'');
@@ -9000,6 +9224,23 @@ function originLabel(o){
     try{ host=new URL(u).hostname.replace(/^www\./,''); }catch(e){}
     return t('origin.rss','RSS feed ({h})',{h:host});
   }
+  // A watchlist grab names WHICH of your items matched, and for which
+  // slot and quality - three fields after the colon, in the order the
+  // daemon writes them (slot, quality, title) and rendered title-first
+  // because that is the one a person recognises. The daemon strips the
+  // separator out of all three, so the split cannot be fooled by a show
+  // called "A|B". slotLabel is the watchlist panel's own renderer, so
+  // "S02E03", a daily's air date and a category key's last segment all
+  // read in the drawer exactly as they do there, and a film's slot
+  // renders as nothing - "movie" beside a film's own name is noise. A
+  // record from before this landed carries the bare `watchlist` and
+  // falls through to the map below, which is why nothing migrated.
+  if(o.startsWith('watchlist:')){
+    const p=o.slice(10).split('|');
+    const d=[p.slice(2).join('|'),slotLabel(p[0]).trim(),p[1]||''].filter(Boolean).join(' · ');
+    return d?t('origin.watchlistdetail','your watchlist ({d})',{d:d})
+      :t('origin.watchlist','your watchlist');
+  }
   // An unknown token renders as NOTHING rather than as itself: a record
   // from before the field existed, or from a newer daemon, must not put
   // an internal word in front of the user. Callers skip the empty label.
@@ -9055,6 +9296,22 @@ function originGlyph(o){
   if(!ic||!l) return '';
   return ` <span class="obadge" title="${escA(t('drawer.origin','added by')+' '+l)}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#${ic}"/></svg></span>`;
 }
+// "Create report" lived in history's ⋯ menu and nowhere else. A menu
+// item is found by people already looking for it, and this is the one
+// thing worth sending when a download goes wrong - so it was the least
+// discoverable feature we have. It gets a NAME and a sentence here,
+// because the sentence is the reason it is safe to paste: a control
+// that does not say what it hands over does not get clicked by anyone
+// careful, and the careful user is exactly who files the bug.
+//
+// The daemon's job_report reads the queue store as well as history, so
+// this works on a job that is still downloading - which is when the
+// report is worth most, and the state history could never offer.
+function reportBlock(s){
+  return `<div style="font-size:12px;margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">
+    <button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport('${escA(s.nzo_id)}')">🧾 ${esc(t('menu.report','Create report'))}</button>
+    <div class="dim" style="margin-top:4px">${esc(t('rep.what','Everything about this one download as text you can paste into a support thread: what it is, which servers it used, what the NZB contained, and this job\'s own log lines. Your usernames, passwords and API keys are not in it, and your home folder is written as ~.'))}</div></div>`;
+}
 function drawerHtml(s){
   const st=lastStats||{};
   // Where this job came from - empty when the record predates the field
@@ -9084,7 +9341,13 @@ function drawerHtml(s){
     // user opens to ask "why is this here?" was exactly the one branch
     // that never said.
     const oline=dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'';
-    return files+vline+sline+oline+whyslowBlock(s)+mediaWarnBlock(s.media)+pwBlock(s)
+    // reportBlock rides directly under the whyslow panel here rather
+    // than at the foot of the drawer: on a downloading row the panel is
+    // the diagnosis and the report is that same diagnosis as text to
+    // send, and a preview probe below can be tall enough to push a
+    // footer off the screen entirely. The other two branches have no
+    // panel, so there it IS the foot.
+    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+pwBlock(s)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
       +(previewMode==='off'?'':probeHtml(s.nzo_id));
   }
@@ -9101,7 +9364,8 @@ function drawerHtml(s){
       +vline
       +(dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'')
       +mediaWarnBlock(s.media)+healthDetail(s.health)
-      +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`;
+      +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
+      +reportBlock(s);
   }
   const prios=[[2,'Force',t('prio.force','Force')],[1,'High',t('prio.high','High')],[0,'Normal',t('prio.normal','Normal')],[-1,'Low',t('prio.low','Low')]];
   return `<div class="dgrid">
@@ -9147,7 +9411,8 @@ function drawerHtml(s){
       <span class="dim">${t('drawer.prefetch.hint',"If it can't finish there, the progress is kept and the normal download resumes from it.")}</span></div>`:'')+
     pwBlock(s)+
     `<div class="dim" style="font-size:11.5px;margin-top:7px">${t('drawer.tiebreak','Queue order breaks ties within a priority: Force/High items download first regardless of position.')}
-      ${t('drawer.reorder','Reorder with the ↑ ↓ buttons on each row, or by dragging a row with the mouse.')}</div>`;
+      ${t('drawer.reorder','Reorder with the ↑ ↓ buttons on each row, or by dragging a row with the mouse.')}</div>`+
+    reportBlock(s);
 }
 // M24 queue-side password entry (Gary's report: the history 🔑 was the
 // only way in, and it exists only AFTER a job has finished and parked
@@ -10134,6 +10399,17 @@ function openQueueRow(id){
   if(!tr) return false;
   tr.scrollIntoView({block:'center',behavior:'smooth'});
   return true;
+}
+// The verdict chip on a downloading row: open that row and land on the
+// evidence, not merely at the top of a drawer whose first screen is the
+// per-file progress list. A frame of slack: openQueueRow has just
+// re-rendered the tbody, and the panel is in the markup it wrote.
+function openWhySlow(id){
+  if(!openQueueRow(id)) return;
+  requestAnimationFrame(()=>{
+    const b=document.getElementById('whyslowBlk');
+    if(b) b.scrollIntoView({block:'center',behavior:REDUCED?'auto':'smooth'});
+  });
 }
 // `ref` is the row's opaque id (the daemon matches it against the full
 // tracked path); on an older daemon it is still the file name.
@@ -11813,6 +12089,14 @@ async function runBench(btn){ await busy(btn,t('busy.running','Running…'), asy
         esc(t('bench.net.note','Network is a real Usenet download from {host} over {n} connections - not a line-speed test. Your ISP speed test measures a different thing.',
               {host:j.network_host,n:j.network_conns}))}</div>`
     : '';
+  // §210 (b): WHICH network is short. The daemon names the machine's
+  // own link when the figure ran into it, and only then - the row's
+  // advice is to add connections or a provider, which cannot move a
+  // number the LAN is holding down. Composed there (it carries the
+  // link's own rates), like the advice line beside it.
+  const linkNote=j.network_link
+    ? `<div class="dim" style="font-size:12px;margin:-2px 0 6px">${esc(j.network_link)}</div>`
+    : '';
   const mx=Math.max(...rows.map(r=>r[2]),0.01);
   o.innerHTML=`
     <div style="font-size:21px;font-weight:700;line-height:1.2">${g(j.expected_gbps)}
@@ -11827,7 +12111,7 @@ async function runBench(btn){ await busy(btn,t('busy.running','Running…'), asy
           ?' ⟵ '+t('bench.yourlimit','your limit')
           :' · ×'+num(v/(j.expected_gbps||1),(v/(j.expected_gbps||1))>=10?0:1)+' '+t('bench.headroom','headroom')}</span></div>`;
     }).join('')}</div>
-    ${netNote}
+    ${netNote}${linkNote}
     <span class="dim">${esc(tErr(j.advice))}</span>`;
   tbl.style.display='none';
   loadBenchHist();
@@ -11848,22 +12132,58 @@ async function loadBenchHist(){
         const when=whenFmt.format(new Date((e.ts||0)*1000));
         const src=e.source==='scheduled'?'⏱':'';
         if(e.error) return `<tr><td class="dim mono">${when} ${src}</td><td colspan="2" class="bad">${esc(tErr(e.error))}</td></tr>`;
+        // Rows measured on different server sets or connection counts are
+        // not comparable (a tester read a probe-method change as a 30%
+        // line regression), so say what the net figure was measured over.
+        // Old rows predate the fields and stay bare - that absence IS the
+        // "different method" marker.
+        const cn=e.network_conns?` (${t('bench.hist.conns','{n} conn',{n:e.network_conns})})`:'';
         return `<tr><td class="dim mono">${when} ${src}</td>
           <td class="mono"><b>${fmtRate(gbpsToMbps(e.expected_gbps))}</b> <span class="warn">${esc(t('bench.bn.'+e.bottleneck,e.bottleneck||''))}</span></td>
-          <td class="dim mono">net ${num(e.network_gbps||0,2)} · cpu ${num(e.compute_gbps||0,0)} · disk ${num(e.disk_gbps||0,0)}</td></tr>`;
+          <td class="dim mono" title="${esc(e.network_host||'')}">net ${num(e.network_gbps||0,2)}${esc(cn)} · cpu ${num(e.compute_gbps||0,0)} · disk ${num(e.disk_gbps||0,0)}</td></tr>`;
       }).join('')+'</tbody></table>';
   }catch(e){}
 }
 loadBenchHist();
-async function runDiv(btn){ await busy(btn,t('busy.analysing','Analyzing…'), async()=>{
+// The Analyze button. Two things it must say out loud before it runs,
+// both of them costs the click does not otherwise disclose:
+//
+//  - it dials the DOWNLOAD POOL, so a server the user switched off is
+//    not touched. `withOff` is the opt-in for "is this account worth
+//    turning back on?", offered in the report rather than sitting on the
+//    card, so it only appears when there is something to opt into.
+//  - it downloads REAL ARTICLE BODIES from every server it tests, so on
+//    a prepaid account it spends credit the user paid for. Same rule and
+//    same wording as the connection ladder above (`ladder.blockconfirm`):
+//    the automatic lanes never spend there, the manual button stays open,
+//    and it asks first.
+async function runDiv(btn,withOff){ await busy(btn,t('busy.analysing','Analyzing…'), async()=>{
   const o=document.getElementById('divOut');
-  o.textContent=t('div.running','Asking every server about articles of several ages…');
-  const j=await api('diversity');
+  const willDial=(srvList||[]).filter(s=>withOff||s.enabled!==false);
+  const flagged=willDial.filter(s=>s.block_account||s.block_bytes).map(s=>s.host);
+  if(flagged.length &&
+     !confirm(t('div.blockconfirm','{hosts}: you paid for these up front, so this check will spend data you bought. It downloads real articles from every server it tests. Run it anyway?',{hosts:flagged.join(', ')}))) return;
+  o.textContent=withOff?t('div.running.off','Asking every server, including the ones switched off, about articles of several ages…')
+                       :t('div.running','Asking every server about articles of several ages…');
+  const j=await api('diversity',withOff?'&value=1':'');
+  // Every server switched off is not an error, it is the one state where
+  // the opt-in is the whole answer - so say that, and offer it.
+  if(j.nothing_enabled){
+    o.innerHTML=`<div>${esc(t('div.alloff','Every server you have is switched off, so there is nothing to compare.'))}</div>`
+      +offerOff(j.servers_off||[],false);
+    return;
+  }
   if(j.error){ o.innerHTML=`<span class="bad">${esc(tErr(j.error))}</span>`; return; }
+  const off=j.servers_off||[];
   let html='<table><tbody>';
-  for(const s of (j.servers||[]))
-    html+=`<tr><td>${esc(s.host)}</td><td class="mono">${(s.availability*100).toFixed(0)}% ${t('div.avail','avail')}</td>
+  for(const s of (j.servers||[])){
+    // On an opt-in run the switched-off rows are IN the table, so they
+    // are labelled there. A row that looks like every other row would
+    // read as a provider the user is downloading from.
+    const tag=off.includes(s.host)?` <span class="dim">${esc(t('div.isoff','switched off'))}</span>`:'';
+    html+=`<tr><td>${esc(s.host)}${tag}</td><td class="mono">${(s.availability*100).toFixed(0)}% ${t('div.avail','avail')}</td>
       <td class="mono">${fmtRate(gbpsToMbps(s.speed_gbps))}</td><td class="dim mono">${s.rtt_ms.toFixed(0)} ms</td></tr>`;
+  }
   html+='</tbody></table>';
   if(j.pairs && j.pairs.length){
     html+=`<div style="margin-top:6px" class="dim">${t('div.overlap','Providers that look like the same network:')}</div><table><tbody>`;
@@ -11876,8 +12196,21 @@ async function runDiv(btn){ await busy(btn,t('busy.analysing','Analyzing…'), a
     html+='</tbody></table>';
   }
   html+=`<div style="margin-top:8px"><b>${esc(tErr(j.recommendation))}</b></div>`;
+  html+=offerOff(off,!!j.included_off);
   o.innerHTML=html;
 }); }
+// Name the servers this run did not test, and offer to test them. A
+// report that quietly shows fewer providers than the user configured is
+// the same defect as dialling one it should not have: in both cases the
+// page knows something about the user's servers and does not say it.
+function offerOff(off,included){
+  if(!off.length || included) return '';
+  return `<div class="dim" style="margin-top:8px">${
+    esc(t('div.offnote','Switched off, so not tested: {hosts}.',{hosts:off.join(', ')}))
+  } <a href="#" onclick="return divWithOff(this)">${
+    esc(t('div.includeoff','Include in the check'))}</a></div>`;
+}
+function divWithOff(a){ runDiv(a,true); return false; }
 
 // What happened at (or within a sample of) the hovered moment, named and
 // attributed. The tick on the graph says SOMETHING occurred; this is the
@@ -11970,6 +12303,12 @@ function maybeNotify(title, body){
 }
 function handleLifeEvents(r){
   const evs=r.events||[];
+  // A bulk delete can refuse several folders at once, and the toast
+  // element holds ONE message - so kept-files notices are collected
+  // across the batch and collapse to a count rather than clobbering
+  // each other down to the last one. That collapse is why this cannot
+  // just be another arm in the loop below.
+  const kept=[];
   for(const e of evs){
     if(e.kind==='job.completed'){
       // A locked archive is not a success to celebrate: the chime and
@@ -12001,6 +12340,59 @@ function handleLifeEvents(r){
         say('complete', t('say.complete','Download complete: {name}.',{name:sayShort(e.name)}));
         maybeNotify(t('notify.done','Download complete'), e.name);
       }
+    } else if(e.kind==='job.delete_kept'){
+      // The record went and the files did not. §129 1b(b): the strip
+      // this points at still rides the queue payload (it describes a
+      // folder that is still there, not a moment), but the nudge is a
+      // moment, and it used to be recovered by diffing that array
+      // against a seen-set. Collected, not toasted here - see `kept`.
+      kept.push(e.name);
+    } else if(e.kind==='watchlist.upgraded'){
+      // The upgrade deletes a COMPLETED download and drops its history
+      // row, and until this existed the only narration was two daemon
+      // log lines. `fate` picks the honest sentence - the toast must
+      // not promise a Trash the delete did not use (Linux default, or a
+      // Trash that stopped answering), nor a delete the Trash refused
+      // to make ('kept', which leaves the superseded copy on disk and
+      // files its own kept-files notice). `oldq` falls back to the
+      // superseded stem for slots grabbed before qualities were
+      // stamped. §129 1b(b): was a `watch_upgraded` array on the queue
+      // payload diffed against a seen-set - and a LATE one, since the
+      // upgrade's deletes move no queue revision to carry it.
+      const up={name:e.name,q:e.oldq||e.old};
+      toast(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy is still on disk, see History.',up)
+        : e.fate==='trash' ? t('toast.upgraded.trash','Upgraded to {name} - the {q} copy went to the Trash.',up)
+        : t('toast.upgraded.gone','Upgraded to {name} - the {q} copy was deleted.',up));
+    } else if(e.kind==='job.retried'){
+      // M32 / §129 1b(b): the automatic retry has just re-queued a
+      // failed job. Without a sentence here the row the user was told
+      // had FAILED vanishes from History and a download nobody asked
+      // for appears in the queue - which reads as the record being
+      // lost. Was an `auto_retried` array on the queue payload diffed
+      // against a seen-set.
+      toast(t('toast.autoretried','Trying {name} again now - only the missing pieces are fetched.',{name:e.name}));
+    } else if(e.kind==='watch.picked'){
+      // The daemon consumed the user's file (a browser then lists its
+      // download as "Removed"), so the moment needs its own sentence
+      // naming the folder - without it, "nzbfast deleted my download"
+      // is the natural reading. §129 1b(b): this was a `watch_picked`
+      // array on the queue payload diffed against a seen-set, which
+      // needed a key of at+name because two files ingested in the same
+      // second must both toast. A sequence number is that key, and the
+      // daemon owns it.
+      toast(t('toast.watchpicked','Picked up {name} from {dir} - added to the queue.',{name:e.name,dir:e.folder}));
+    } else if(e.kind==='giveup.tripped'){
+      // §96.3 / §129 1b(b): the breaker deciding to stop chasing
+      // something is the one moment it takes an action of its own (it
+      // unmonitors the item inside Sonarr or Radarr), and it happened
+      // silently. This used to ride a bounded `giveup_tripped` array on
+      // the queue payload that the page diffed against a seen-set -
+      // which only arrived when the queue REVISION moved, and a trip
+      // moves nothing, so on an idle daemon the toast waited for an
+      // unrelated mutation. `threshold` is the count the daemon has
+      // always sent under that name on this ring.
+      toast(t('toast.giveup','Stopped chasing {name}: {n} different releases failed. Try again from the Watchlist card.',
+        {name:e.name,n:e.threshold}));
     } else if(e.kind==='job.failed'){
       // A Failed row can be asking for a password too (the in-stream
       // probe saw an encrypted set) - the audible ask keeps its old
@@ -12029,6 +12421,11 @@ function handleLifeEvents(r){
       }
     }
   }
+  // The kept-files nudge, one message however many landed. The STRIP
+  // itself is rendered from the queue payload every tick and stays
+  // until dismissed - this only points at it.
+  if(kept.length===1) toast(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0]}), true);
+  else if(kept.length) toast(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), true);
   // Adopt the cursor last, whatever arrived - including the reseed
   // signal (events_reset) after this tab slept past the ring's tail.
   if(typeof r.events_seq==='number'){ dashESeq=r.events_seq; dashEHave=true; }
@@ -13078,6 +13475,8 @@ function sizeStr(b){
 // on the GET path is what lets the FIRST full key be sent in a body
 // instead of a query string - see setCfg.
 async function apiPost(mode, body, authKey){
+  // Same hold as api(): a handoff in flight is a key on its way.
+  if (authKey == null && keyHandoff) await keyHandoff;
   const sent = authKey != null ? authKey : key;
   const epoch = keyEpoch;
   const r=await fetch(`/api?mode=${mode}`,
@@ -13108,7 +13507,7 @@ async function apiPost(mode, body, authKey){
 // was the class that always was. This is distinct from the older
 // special-character bug: those requests worked perfectly and disclosed
 // the secret anyway.
-const SECRET_CFG = new Set(['apikey','nzbkey','omdb_key','notify_targets',
+const SECRET_CFG = new Set(['apikey','nzbkey','omdb_key','tmdb_key','notify_targets',
   'arr_instances','indexers','feeds','unraid_key','scoreboard_key',
   // §151: a Plex watchlist address is a bearer capability, not an
   // address - anyone holding it can read the list. One source is well
@@ -13233,7 +13632,18 @@ async function setCfg(name, value){
     // re-derived here. Shown as the toast for THIS save, in place of a
     // "Saved." the broken rule would hide behind; the amber row mark
     // appears with the loadSettings() below.
-    if(j.warning) toast(t('toast.savedWarn','Saved, but a rule needs a look - {w}',{w:j.warning}), true);
+    // TODO 60a: the same field carries the unrar probe's verdict, and
+    // that setting answers with its own note under the control - in the
+    // reader's language, and still there after the toast has gone. The
+    // daemon's sentence is the trigger and the log's record; toasting
+    // it as well would say one thing twice, once in English.
+    const inline = name==='prefer_external_unrar' ? extUnrarNote(!!j.warning) : '';
+    // Only the two rules settings are promised a RULE. Anything else
+    // that grows a warning later gets the daemon's own sentence rather
+    // than copy about rules it has none of.
+    if(j.warning) toast(inline || (RULEWARN.has(name)
+        ? t('toast.savedWarn','Saved, but a rule needs a look - {w}',{w:j.warning})
+        : j.warning), true);
     else toast(j.live===false?t('toast.savedRestart','Saved: applies after restart.'):t('toast.saved','Saved.'));
   }
   if(name!=='apikey'&&name!=='nzbkey') loadSettings();
@@ -13469,6 +13879,29 @@ async function saveKey(name, el){
 // classic "1G" typed for a 1 Gbps line, anchoring the graph 8x high.
 // The units note wins the slot: with the yardstick itself wrong, any
 // verdict scored against it is noise.
+// Settings whose save-time warning is always about a rule (#18). The
+// wrapper copy names one, so a setting that is not in here must not
+// borrow it - see setCfg.
+const RULEWARN=new Set(['smart_folders','custom_categories']);
+
+// TODO 60a: "unpack with external unrar" is on, and the daemon found no
+// unrar to hand the volumes to. The daemon probes at SAVE time only (a
+// settings read does not shell out, and PATH at save time is not PATH at
+// unpack time), so this note appears the moment the box is ticked and
+// goes when it is unticked or the tool turns up. It does NOT survive a
+// reload: nothing re-probes on a settings read, and the alternative -
+// gating the save on the probe - would make a container that mounts
+// unrar later unsettable. Returns the message it showed, so the save's
+// toast can be the same sentence rather than the daemon's English one.
+function extUnrarNote(missing){
+  const row=document.getElementById('extUnrarRow');
+  if(!row) return '';
+  const msg=missing?t('set.watchdir.extunrar.missing','unrar is not installed, so nzbfast keeps unpacking with its built-in extractor. Install unrar, or put it beside the nzbfast program, and this setting takes effect on the very next unpack.'):'';
+  row.style.display=msg?'':'none';
+  document.getElementById('extUnrarNote').textContent=msg?('⚠ '+msg):'';
+  return msg;
+}
+
 let serverTuneHint='';
 function renderTuneHint(){
   const thr=document.getElementById('tuneHintRow');
@@ -13553,9 +13986,19 @@ async function loadSettings(){
   if(document.activeElement!==fpp) fpp.checked=c.fast_par===true||c.fast_par===1;
   const peu=document.getElementById('s_prefer_external_unrar');
   if(document.activeElement!==peu) peu.checked=c.prefer_external_unrar===true||c.prefer_external_unrar===1;
+  // A note about a setting that is off is a note about nothing: clear it
+  // for whoever turned it off somewhere else (another tab, the CLI). The
+  // other direction is not symmetric - only a SAVE probes, so a settings
+  // read can never raise this note, only retire it.
+  if(!peu.checked) extUnrarNote(false);
   put('s_mem_limit', sizeStr(c.mem_limit));
   put('s_out_dir', c.out_dir); put('s_move_completed', c.move_completed||'');
-  initMovePace(c.move_pace||'yield'); renderCatFiles(c.categories||'', c.move_completed_cats||'', c.cat_meta||{}); put('s_out_umask', c.out_umask||''); put('s_min_free', sizeStr(c.min_free)); put('s_quota', sizeStr(c.quota));
+  initMovePace(c.move_pace||'yield');
+  // Same guard as #smartrows / #catrows below: register_cat adds a
+  // category the moment a job arrives carrying one, and rebuilding the
+  // table under the user would discard a half-typed row.
+  if(!document.querySelector('#catfilerows :focus')) renderCatFiles(c.categories||'', c.move_completed_cats||'', c.cat_meta||{});
+  put('s_out_umask', c.out_umask||''); put('s_min_free', sizeStr(c.min_free)); put('s_quota', sizeStr(c.quota));
   put('s_quota_period', c.quota_period||'d');
   put('s_dupe_action', c.dupe_action||'pause');
   put('s_dupe_scope', c.dupe_scope||'smart');
@@ -13714,6 +14157,17 @@ async function loadSettings(){
       if(el&&document.activeElement!==el) el.checked=!sbcats.length||sbcats.includes(k); });
   const ok=document.getElementById('s_omdb_key');
   if(document.activeElement!==ok){ ok.value=''; ok.placeholder=c.has_omdb?t('ph.keyset','set: paste a new key to replace'):t('ph.omdbunset','not set: paste your key here'); }
+  // §193 d: write-only, exactly like the two keys above - the box stays
+  // blank and the placeholder is the only thing that says one is stored.
+  const tk=document.getElementById('s_tmdb_key');
+  if(tk&&document.activeElement!==tk){ tk.value=''; tk.placeholder=c.has_tmdb?t('ph.keyset','set: paste a new key to replace'):t('ph.unset','not set'); }
+  // §193 a and b. Both ship ON, so an absent value must read as ON -
+  // !==false, not ===true, or an older daemon's silence would show the
+  // filter and the recording as off while they are running.
+  const adl=document.getElementById('s_wall_hide_adult');
+  if(adl&&document.activeElement!==adl) adl.checked=c.wall_hide_adult!==false;
+  const slg=document.getElementById('s_index_search_log');
+  if(slg&&document.activeElement!==slg) slg.checked=c.index_search_log!==false;
   put('s_index_db', c.index_db);
   // Index size cap. The daemon takes a SAB-style size string and hands
   // back bytes, exactly like mem_limit/min_free; tolerate either, so a
@@ -13727,10 +14181,11 @@ async function loadSettings(){
   EVICT_KIND_BOXES
     .forEach(([k,id])=>{ const el=document.getElementById(id);
       if(el&&document.activeElement!==el) el.checked=!ekinds.length||ekinds.includes(k); });
-  evictToggles(); refreshDbState(); predbToggles(); refreshPredb(); refreshPredbCorr(); refreshCorrConfirm(); refreshProbe7z(); refreshPesto(); refreshScoreboard();
+  evictToggles(); refreshDbState(); predbToggles(); refreshPredb(); refreshPredbCorr(); refreshCorrConfirm(); refreshProbe7z(); refreshPesto(); refreshScoreboard(); refreshSearchLog();
   put('s_library_cats', (c.library_cats||[]).join(', '));
   put('s_library_recheck_secs', c.library_recheck_secs);
   put('s_port', c.port);
+  put('s_bind', c.bind||'');
   put('s_tls_cert', c.tls_cert||'');
   put('s_tls_key', c.tls_key||'');
   // §141: an empty cors_origin is a real setting ("send no header"), not
@@ -13969,9 +14424,27 @@ function feedHealthHtml(f){
 // The health fields ride along on each entry from get_config and are
 // read-only: saveFeeds rebuilds the list from the inputs below, so
 // nothing here is ever written back.
+//
+// §20c: the url in this box is MASKED - a feed url carries the
+// indexer's API key, so get_config replaces the key with *** and the
+// real address never reaches this page. What makes the row still
+// editable is `id`, carried on the row and sent back with every save,
+// test and preview: the daemon matches on it, sees the url came back
+// exactly as it was handed out, and keeps the stored one. Typing a new
+// url over the top replaces it as it always did. A row with no id is a
+// feed the user just added, which has no stored url to keep.
 function feedRowHtml(f){
-  return `<div class="feedrow">
-    <input class="txt" data-k="url" value="${escA(f.url||'')}" placeholder="https://indexer/rss?apikey=…" title="${escA(t('feed.url.title','feed URL'))}">
+  // A saved row's url arrives with its key masked, so the box does not
+  // hold the whole address and the box has to say so: the card hint
+  // states the rule once, this title repeats it where the editing
+  // happens. Only on a row that IS masked - a freshly added row has no
+  // stored key to keep, and telling it that would be a lie.
+  const masked=(f.url||'').includes('***');
+  const urlTitle=masked
+    ? t('feed.url.masked.title','The API key in this address is hidden as ***. Leave the address as it is and the saved key is kept; to change it, paste the whole new address in, key included.')
+    : t('feed.url.title','feed URL');
+  return `<div class="feedrow" data-id="${escA(f.id||'')}">
+    <input class="txt" data-k="url" value="${escA(f.url||'')}" placeholder="https://indexer/rss?apikey=…" title="${escA(urlTitle)}">
     <input class="txt" data-k="interval" type="number" min="1" value="${Math.max(1,Math.round((f.interval_secs||900)/60))}" title="${escA(t('feed.interval.title','poll every N minutes'))}">
     <input class="txt" data-k="category" value="${escA(f.category||'')}" placeholder="${escA(t('watch.cat.ph','category'))}" title="${escA(t('feed.cat.title','category for grabbed items'))}">
     <button class="ghost" onclick="this.closest('.feedrow').remove()" title="${escA(t('feed.remove.title','Stop following this feed'))}" aria-label="${escA(t('feed.remove.title','Stop following this feed'))}">×</button>
@@ -13987,7 +14460,7 @@ async function testFeed(btn){
   const url=row.querySelector('[data-k=url]').value.trim();
   if(!url){ toast(t('feed.test.nourl','add the feed URL first'), true); return; }
   await busy(btn, t('busy.testing','Testing…'), async()=>{
-    const j=await apiPost('feed_test',{url});
+    const j=await apiPost('feed_test',{id:row.dataset.id||'',url});
     if(!out) return;
     out.innerHTML = j.status
       ? `<span class="ok">✓ ${tn('feed.h.items',j.items||0,'{n} item in the feed','{n} items in the feed')}</span>`
@@ -14018,7 +14491,7 @@ async function previewFeed(btn){
   const rules=row.querySelector('[data-k=rules]').value.split('\n').map(s=>s.trim()).filter(Boolean);
   const category=row.querySelector('[data-k=category]').value.trim();
   await busy(btn, t('busy.testing','Testing…'), async()=>{
-    const j=await apiPost('feed_preview',{url,rules,category});
+    const j=await apiPost('feed_preview',{id:row.dataset.id||'',url,rules,category});
     if(!out) return;
     if(!j.status){ out.innerHTML=`<span class="bad">✗ ${esc(tErr(j.error)||t('err.failed','failed'))}</span>`; return; }
     const items=j.items||[];
@@ -14036,10 +14509,46 @@ function addFeedRow(){
   if(fr.firstElementChild&&!fr.firstElementChild.classList.contains('feedrow')) fr.innerHTML='';
   fr.__h=null; fr.insertAdjacentHTML('beforeend', feedRowHtml({}));
 }
+// §20c: the mask edited in the middle, refused HERE rather than by the
+// daemon. set_feeds rejects a url that still carries *** after its merge
+// (the user changed one parameter of a masked address and left the mask
+// sitting in it, which nothing can reconstruct), and that refusal is
+// English on the wire like every other daemon string - §5 puts the
+// translation at the display edge. tErr() cannot reach it: it keys on
+// the exact sentence, so the key would BE the sentence, would need a
+// hand entry in extract.js's dynamic err.* family, and rewording the
+// daemon message would silently un-translate 27 locales with every gate
+// green. The display edge already knows everything the check needs, so
+// it makes the judgement itself and the daemon sentence is never what
+// this user reads: an ordinary t() key the extractor scrapes, and the
+// offending box is named by putting the cursor in it, which no toast of
+// a generic sentence could do.
+//
+// The predicate is set_feeds' own, one step earlier. defaultValue is
+// exactly the masked url get_config handed out, so a box still equal to
+// it is the untouched mask the merge keeps; anything else still
+// carrying the marker is the edit. This is a pre-check and NOT a
+// replacement - the daemon refusal stays for every other API client,
+// and it is still what answers the one case this cannot see (a row
+// whose feed was deleted elsewhere between load and save, so the merge
+// finds no id to keep a url from).
+function feedMaskEdited(){
+  for(const r of document.querySelectorAll('#feedrows .feedrow')){
+    const inp=r.querySelector('[data-k=url]'), u=inp.value.trim();
+    if(u.includes('***') && u!==inp.defaultValue.trim()) return inp;
+  }
+  return null;
+}
 async function saveFeeds(btn){ await busy(btn,t('busy.applying','Applying…'), async()=>{
+  const bad=feedMaskEdited();
+  if(bad){
+    toast(t('feed.url.mask.edited','This address still shows ***, which is where the saved API key goes. Paste the whole new address in, key included.'), true);
+    bad.scrollIntoView({block:'center',behavior:setSmooth()}); bad.focus(); bad.select();
+    return;
+  }
   const rows=[...document.querySelectorAll('#feedrows .feedrow')].map(r=>{
     const g=k=>r.querySelector(`[data-k=${k}]`).value.trim();
-    return { url:g('url'), interval_secs:(+g('interval')||15)*60, category:g('category'),
+    return { id:r.dataset.id||'', url:g('url'), interval_secs:(+g('interval')||15)*60, category:g('category'),
       rules:g('rules').split('\n').map(s=>s.trim()).filter(Boolean) };
   }).filter(f=>f.url);
   await setCfg('feeds', rows.length?JSON.stringify(rows):'');
@@ -14149,6 +14658,7 @@ function catFileRowHtml(name, dir, meta){
     <div class="pathrow"><input class="txt" data-k="dir" value="${escA(dir||m.dir||'')}" placeholder="${escA(t('set.disk.cats.dir.ph','a subfolder of the download root'))}" title="${escA(t('set.disk.cats.dir.title','where this category lands. Blank = its own subfolder of the download root; a plain name = that subfolder instead; a full path = downloads land in the root as usual and finished jobs move there'))}" oninput="catFileCheck(this)"><button class="mini" onclick="browseDir(this.previousElementSibling,'dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button></div>
     <select class="sel" data-k="prio" title="${escA(t('set.disk.cats.prio.title','default priority for downloads added in this category; an add that names its own priority wins'))}">
       ${popt('',t('set.disk.cats.prio.def','priority: default'))}${popt('2',t('set.disk.cats.prio.force','force'))}${popt('1',t('set.disk.cats.prio.high','high'))}${popt('0',t('set.disk.cats.prio.normal','normal'))}${popt('-1',t('set.disk.cats.prio.low','low'))}${popt('-2',t('set.disk.cats.prio.paused','add paused'))}</select>
+    <input class="txt" data-k="groups" value="${escA(m.groups||'')}" placeholder="${escA(t('set.disk.cats.groups.ph','auto-assign: groups / indexer category'))}" title="${escA(t('set.disk.cats.groups.title','pick this category for downloads added without one: comma-separated keywords or regexes matched against the NZB\'s own category tag and its newsgroups, e.g. alt.binaries.teevee. An NZB whose category tag equals this name matches with nothing here'))}">
     <input class="txt" data-k="script" value="${escA(m.script||'')}" placeholder="${escA(t('set.disk.cats.script.ph','script'))}" title="${escA(t('set.disk.cats.script.title','post-processing script for this category, instead of the global one (several, comma-separated, run in that order); blank = the global script'))}">
     <select class="sel" data-k="nzb" title="${escA(t('set.disk.cats.nzbname.title','name finished downloads in this category after their .nzb file. "default" follows the switch in Auto-rename & cleanup, so a category is how you allow or disallow it for one kind of download'))}">
       ${nopt('',t('set.disk.cats.nzbname.def','.nzb name: default'))}${nopt('on',t('set.disk.cats.nzbname.on','.nzb name: on'))}${nopt('off',t('set.disk.cats.nzbname.off','.nzb name: off'))}</select>
@@ -14218,6 +14728,7 @@ async function saveCatFiles(btn){ await busy(btn,t('busy.applying','Applying…'
     else if(dir) m.dir=dir;
     const prio=g('prio'); if(prio!=='') m.priority=+prio;
     const script=g('script'); if(script) m.script=script;
+    const groups=g('groups'); if(groups) m.groups=groups;
     const nzb=g('nzb'); if(nzb==='on') m.nzb_name=true; else if(nzb==='off') m.nzb_name=false;
     if(Object.keys(m).length) meta[name]=m;
   }
@@ -14267,11 +14778,13 @@ function catBaseOpts(sel){
   return o.map(([v,l])=>`<option value="${v}"${sel===v?' selected':''}>${esc(l)}</option>`).join('');
 }
 function catRowHtml(c){
+  const slug=c.slug||catSlug(c.name||'');
   return `<div class="catrow" data-slug="${escA(c.slug||'')}">
-    <input class="txt" data-k="name" value="${escA(c.name||'')}" placeholder="${escA(t('set.cats.name.ph','name, e.g. Formula 1'))}" title="${escA(t('set.cats.name.title','shown on the wall tabs and cards'))}">
+    <input class="txt" data-k="name" value="${escA(c.name||'')}" placeholder="${escA(t('set.cats.name.ph','name, e.g. Formula 1'))}" title="${escA(t('set.cats.name.title','shown on the wall tabs and cards'))}" oninput="catSlugEcho(this)">
     <input class="txt${patCls(c.match_verdict)}" data-k="match" value="${escA(c.match||'')}" placeholder="${escA(t('smart.match.ph','match: regex or keyword'))}" title="${escA(t('set.cats.match.title','matched against the release name, case-insensitive'))}">
     <input class="txt${patCls(c.not_verdict)}" data-k="not_match" value="${escA(c.not_match||'')}" placeholder="${escA(t('smart.not.ph','but not…'))}" title="${escA(t('smart.not.title','skip this rule when this matches'))}">
     <select class="sel" data-k="base" title="${escA(t('set.cats.base.title','what happens when a download in this category finishes'))}">${catBaseOpts(c.base||'none')}</select>
+    <span class="dim nowrap catslug" title="${escA(catOfferedTitle(slug))}">${esc(slug)}</span>
     <button class="ghost" onclick="this.closest('.catrow').remove()" title="${escA(t('set.cats.remove.title','Delete this category'))}" aria-label="${escA(t('set.cats.remove.title','Delete this category'))}">×</button>
     ${ruleWarnRow(c)}</div>`;
 }
@@ -14284,6 +14797,22 @@ function addCatRow(){
 // Mirror of the server's slugify: lowercase alnum runs joined by '-'.
 function catSlug(name){
   return (name||'').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join('-');
+}
+// TODO 46: the slug is also the name this category is offered to Sonarr,
+// Radarr and the rest under (Daemon::client_cats), which is worth saying
+// once per row - the display name beside it is NOT what they see.
+function catOfferedTitle(slug){
+  return slug ? t('set.cats.offered','your apps are offered this category as "{slug}"',{slug})
+              : t('set.cats.offered.none','type a name and this is the short name your apps will be offered');
+}
+// Live only until the row has been saved once: after that the slug is
+// pinned in data-slug, because renaming the display name must never
+// re-key releases already indexed under the old one.
+function catSlugEcho(el){
+  const row=el.closest('.catrow'), out=row.querySelector('.catslug');
+  if(!out || row.dataset.slug) return;
+  const s=catSlug(el.value);
+  out.textContent=s; out.title=catOfferedTitle(s);
 }
 async function saveCats(btn){ await busy(btn,t('busy.applying','Applying…'), async()=>{
   const rows=[...document.querySelectorAll('#catrows .catrow')].map(r=>{
@@ -15377,6 +15906,62 @@ async function refreshScoreboard(){
     setHtml('sbCalNote', note);
     showTbl(true);
   }catch(e){}
+}
+// ---- §193 b / §131 D3: the search log's readout ----
+// `mode=search_misses` has computed all of this since 11 Aug and had no
+// caller in either page. It is an AGGREGATE, not an event stream (one row
+// per distinct query), which is what makes a table of it small enough to
+// belong on a settings card at all. Read-only: nothing here starts a
+// scan, deepens anything or changes a group list - deciding what to do
+// about a hole is a person's job, and auto-deepen was out of scope by
+// design.
+async function refreshSearchLog(){
+  const el=document.getElementById('slogState'); if(!el) return;
+  const row=document.getElementById('slogTblRow');
+  const showTbl=v=>{ if(row) row.style.display=v?'':'none'; };
+  try{
+    const s=await api('search_misses','&days=30&limit=25');
+    if(!s.index_enabled){ setHtml('slogState', t('slog.idxoff','the indexer is off, so nothing is being searched here.')); showTbl(false); return; }
+    if(!s.enabled){ setHtml('slogState', t('slog.off','off: nothing is being recorded.')); showTbl(false); return; }
+    const parts=[t('slog.sum','{n} searches in the last {d} days, {z} of them answered with nothing ({p}%).',
+      {n:num(+s.searches||0,0),d:num(+s.window_days||30,0),z:num(+s.zero_searches||0,0),p:num(+s.miss_pct||0,1)})];
+    // The second number is the one that says whether deepening works: a
+    // query that used to miss and now answers has left the list above
+    // and been counted here instead.
+    parts.push(t('slog.state','{m} still unanswered, {r} since filled',
+      {m:num(+s.missing||0,0),r:num(+s.resolved||0,0)}));
+    parts.push(t('slog.keep','kept for {d} days or {r} queries, whichever comes first',
+      {d:num(+s.keep_days||0,0),r:num(+s.keep_rows||0,0)}));
+    setHtml('slogState', parts.join(' \u00b7 '));
+    const rows=Array.isArray(s.misses)?s.misses:[];
+    // Emptied as well as hidden: "Forget them" must not leave the last
+    // list sitting in a hidden tbody for the next render to flash.
+    if(!rows.length){ setHtml(document.querySelector('#slogTbl tbody'), ''); showTbl(false); return; }
+    const now=Math.floor(Date.now()/1000);
+    const WHERE={wall:t('slog.where.wall','here'),newznab:t('slog.where.nnab','Sonarr/Radarr')};
+    setHtml(document.querySelector('#slogTbl tbody'), rows.map(m=>
+      `<tr><td>${esc(m.q||'')}</td>`+
+      `<td>${esc(WHERE[m.surface]||m.surface||'')}</td>`+
+      `<td>${num(+m.n||0,0)}</td>`+
+      `<td>${m.last_at?esc(t('slog.ago','{t} ago',{t:fmtEta(Math.max(1,now-m.last_at))})):'-'}</td></tr>`).join(''));
+    showTbl(true);
+  }catch(e){}
+}
+// The "clear it but keep recording" half. Turning the switch OFF also
+// clears, daemon-side; this is for someone who wants the recording to
+// carry on from empty.
+async function clearSearchLog(btn){
+  await busy(btn, t('busy.working','Working…'), async()=>{
+    const r=await api('search_log_clear');
+    // TODO 166: prefer the daemon's own reason. A busy index answers
+    // "try again in a moment", and the generic line below reads as a
+    // permanent failure - which would talk the user out of the retry
+    // that works. Same fix preAssign got on the wall page.
+    toast(r&&r.status!==false
+      ? t('toast.slogcleared','Recorded searches forgotten.')
+      : ((r&&r.error)||t('toast.slogfail','Could not clear the recorded searches.')));
+    await refreshSearchLog();
+  });
 }
 // ---- Index database size: the cap, the eviction pass, the file itself ----
 // The size limit is a setting; deleting to honour it is a SEPARATE switch

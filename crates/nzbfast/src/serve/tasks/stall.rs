@@ -240,6 +240,63 @@ fn fold_caps(d: &Arc<Daemon>) -> Vec<(String, usize)> {
     out
 }
 
+/// The job one watchdog tick judges, with the gauges and stop handles
+/// that are ITS rather than whatever the hub holds right now.
+struct Watched {
+    id: String,
+    t0: Instant,
+    pool_live: Arc<nzbkit::pool::LiveStats>,
+    abort: Option<Arc<std::sync::atomic::AtomicBool>>,
+    queue_ctl: Option<Arc<nzbkit::pool::QueueControl>>,
+    /// True when this is a predecessor draining behind the hub owner.
+    draining: bool,
+}
+
+impl Watched {
+    /// Abort the judged run - the defer verdict's teeth.
+    fn stop(&self) {
+        if let Some(f) = &self.abort {
+            f.store(true, Ordering::Relaxed);
+        }
+        if let Some(c) = &self.queue_ctl {
+            c.abort();
+        }
+    }
+}
+
+/// Which job the defer watchdog judges this tick. A predecessor still
+/// draining behind the active job comes first - the queue waits on it
+/// (the runner files it before it looks at its successor), so it is the
+/// job whose slowness holds everyone up - and it is judged off the
+/// gauges and handles the runner detached for it, since the hub's are
+/// the successor's by now. Otherwise the hub owner, as ever. None while
+/// nothing is on the wire.
+fn watched(d: &Daemon) -> Option<Watched> {
+    if let Some(s) = d.drain_dl.lock_ok().as_ref()
+        && let Some(pl) = &s.pool_live
+    {
+        return Some(Watched {
+            id: s.nzo_id.clone(),
+            t0: s.t_start,
+            pool_live: pl.clone(),
+            abort: s.abort.clone(),
+            queue_ctl: s.queue_ctl.clone(),
+            draining: true,
+        });
+    }
+    let t0 = (*d.started_at.lock_ok())?;
+    let id = d.active_stream.lock_ok().clone()?;
+    let pool_live = d.hub.pool_live.lock_ok().clone()?;
+    Some(Watched {
+        id,
+        t0,
+        pool_live,
+        abort: d.hub.abort.lock_ok().clone(),
+        queue_ctl: d.hub.queue_ctl.lock_ok().clone(),
+        draining: false,
+    })
+}
+
 /// One watchdog tick's OBSERVATION half: copy any provider refusal
 /// somewhere that outlives the pool, warn once per server-outage
 /// episode, and open/clear the transfer-stall episode for the active
@@ -275,8 +332,7 @@ fn observe_transfer_and_outages(
     let servers: Vec<(String, usize, u64, bool)> = d
         .hub
         .pool_live
-        .lock()
-        .unwrap()
+        .lock_ok()
         .as_ref()
         .map(|l| {
             l.servers
@@ -482,11 +538,6 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 win.clear();
                 continue;
             }
-            let Some(t0) = *d.started_at.lock_ok() else {
-                win.clear();
-                cur = None;
-                continue;
-            };
             // The job that OWNS the hub, never merely the first
             // Downloading one in the queue: job N's tail overlaps
             // job N+1's download, so N stays Downloading (and ahead
@@ -494,14 +545,23 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             // are already N+1's. Picking by position measured N+1's
             // pool, wrote the demote onto N and fired the abort at
             // N+1 - killing a healthy download.
-            let Some(active) = d.active_stream.lock_ok().clone() else {
+            //
+            // Except while a predecessor is still DRAINING behind the
+            // owner (the cross-job hand-over): the runner holds the
+            // queue on that job, not on the owner, so it is the one
+            // whose slowness costs everyone - and the owner's own rate
+            // says nothing yet, its fleet still being handed to it
+            // one connection at a time. `watched` carries the
+            // drainer's own gauges and stop handles for exactly this.
+            let Some(w) = watched(&d) else {
                 win.clear();
+                cur = None;
                 continue;
             };
+            let (t0, active, handing_over) = (w.t0, w.id.clone(), w.draining);
             let Some(job) = d
                 .queue
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .find(|j| {
                     let g = j.lock_ok();
@@ -525,23 +585,17 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 refusal_noted = false;
                 cur = Some(id.clone());
             }
-            let (snap, tried_now, missing_now) = d
-                .hub
-                .pool_live
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|l| {
-                    let mut hosts: Vec<(String, u64)> = Vec::with_capacity(l.servers.len());
-                    let (mut tried, mut missing) = (0u64, 0u64);
-                    for s in l.servers.iter() {
-                        hosts.push((s.host.clone(), s.bytes.load(Ordering::Relaxed)));
-                        tried += s.articles_tried.load(Ordering::Relaxed);
-                        missing += s.articles_missing.load(Ordering::Relaxed);
-                    }
-                    (hosts, tried, missing)
-                })
-                .unwrap_or_default();
+            let (snap, tried_now, missing_now) = {
+                let l = &w.pool_live;
+                let mut hosts: Vec<(String, u64)> = Vec::with_capacity(l.servers.len());
+                let (mut tried, mut missing) = (0u64, 0u64);
+                for s in l.servers.iter() {
+                    hosts.push((s.host.clone(), s.bytes.load(Ordering::Relaxed)));
+                    tried += s.articles_tried.load(Ordering::Relaxed);
+                    missing += s.articles_missing.load(Ordering::Relaxed);
+                }
+                (hosts, tried, missing)
+            };
             if snap.is_empty() {
                 continue;
             }
@@ -589,9 +643,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             // only ever appears once per run, and `Some(0)` (tail
             // finished) must not trigger.
             let tail_now = tail_prefetch
-                && d.hub
-                    .queue_ctl
-                    .lock_ok()
+                && w.queue_ctl
                     .as_ref()
                     .and_then(|c| c.tail_pending())
                     .is_some_and(|p| p > 0);
@@ -639,12 +691,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                         g.defer_reason = reason.clone();
                     }
                     info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                    if let Some(f) = d.hub.abort.lock_ok().as_ref() {
-                        f.store(true, Ordering::Relaxed);
-                    }
-                    if let Some(c) = d.hub.queue_ctl.lock_ok().as_ref() {
-                        c.abort();
-                    }
+                    w.stop();
                     win.clear();
                     continue;
                 }
@@ -704,12 +751,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                         g.defer_reason = reason.clone();
                     }
                     info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                    if let Some(f) = d.hub.abort.lock_ok().as_ref() {
-                        f.store(true, Ordering::Relaxed);
-                    }
-                    if let Some(c) = d.hub.queue_ctl.lock_ok().as_ref() {
-                        c.abort();
-                    }
+                    w.stop();
                     win.clear();
                     continue;
                 }
@@ -733,10 +775,17 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             // Skipped when a period quota is configured: the quota
             // ledger is the runner's, and opportunistic fetches
             // shouldn't race a metered budget.
+            //
+            // Not while a hand-over is in progress: the next job is
+            // already running on the real hub, and a server that is
+            // idle for the DRAINING job is busy for it - a sidecar
+            // built on that reading would be a second full fleet on
+            // the server the successor is filling.
             if d.auto_prefetch.load(Ordering::Relaxed)
                 && !d.paused.load(Ordering::Relaxed)
                 && d.quota.load(Ordering::Relaxed) == 0
                 && d.sidecar.lock_ok().is_none()
+                && !handing_over
             {
                 // A server that refused to authenticate (bad
                 // credential, or at its connection/IP cap) moved no
@@ -744,20 +793,13 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 // capacity - and a sidecar whose whole fleet is
                 // refused servers prefetches nothing while the
                 // queued job it claimed sits blocked behind it.
-                let refused: std::collections::HashSet<String> = d
-                    .hub
+                let refused: std::collections::HashSet<String> = w
                     .pool_live
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|l| {
-                        l.servers
-                            .iter()
-                            .filter(|s| s.refusal.lock_ok().is_some())
-                            .map(|s| s.host.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                    .servers
+                    .iter()
+                    .filter(|s| s.refusal.lock_ok().is_some())
+                    .map(|s| s.host.clone())
+                    .collect();
                 let mut any_idle = false;
                 let idle: Vec<String> = deltas
                     .iter()
@@ -839,12 +881,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             // disarm the watchdog: with borrowing, a sidecar exists
             // almost whenever a queue does, and suppressing on it
             // would retire the defer verdict outright.
-            let idle_sidecar = d
-                .sidecar
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|s| !s.borrowed);
+            let idle_sidecar = d.sidecar.lock_ok().as_ref().is_some_and(|s| !s.borrowed);
             if defer_count >= 3 || idle_sidecar {
                 continue;
             }
@@ -876,12 +913,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 g.defer_reason = reason.clone();
             }
             info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-            if let Some(f) = d.hub.abort.lock_ok().as_ref() {
-                f.store(true, Ordering::Relaxed);
-            }
-            if let Some(c) = d.hub.queue_ctl.lock_ok().as_ref() {
-                c.abort();
-            }
+            w.stop();
             win.clear();
         }
     });

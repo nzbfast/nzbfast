@@ -20,6 +20,10 @@
 //! other index write already runs.
 
 use super::*;
+// TODO 166's busy verdict, named in `clear_search_log`'s signature.
+// `daemon_index` is a SIBLING child module of daemon.rs rather than
+// something serve/mod.rs re-exports, so it needs the path.
+use super::daemon_index::IndexBusy;
 
 /// Identity of one bucket: the same query under a different kind
 /// filter is a different hole (a movie search that misses says
@@ -209,11 +213,74 @@ impl Daemon {
     /// Stop recording and forget what was recorded. Both halves, in
     /// that order, because a privacy switch that leaves the history
     /// behind is not one.
+    ///
+    /// TODO 166: `index_write_checked`, not `with_index`. This is the
+    /// only door in this module a user can knock on, and it reached the
+    /// write mutex through exactly the unbounded park the module note
+    /// above exists to keep every OTHER search-log write off - so a
+    /// Clear clicked while the realtime tip watcher held that mutex sat
+    /// an HTTP worker on it for the whole ingest transaction (~80 s on
+    /// the live daemon). The bounded wait KEEPS the delete rather than
+    /// dropping it - it is the user's edit, not a sample - and reports
+    /// the timeout instead of waiting it out.
+    ///
+    /// The buffer half goes first and unconditionally. It holds only
+    /// counters that are not in the table yet, so clearing it is
+    /// idempotent, and a retry after a busy verdict simply finds it
+    /// already empty.
     #[cfg(feature = "indexer")]
-    pub fn clear_search_log(&self) -> usize {
+    pub(in crate::serve) fn clear_search_log(&self) -> Result<usize, IndexBusy> {
         self.search_log_buf.lock_ok().clear();
-        self.with_index(|ix| ix.search_log_clear().ok())
-            .unwrap_or(0)
+        Ok(self
+            .index_write_checked(|ix| ix.search_log_clear().ok())?
+            .unwrap_or(0))
+    }
+
+    /// The SWITCH's half of the same clear, which must not be possible
+    /// to lose.
+    ///
+    /// TODO 166's rule is that a user write survives a busy index -
+    /// queued, retried, or waited for, never best-effort. The Clear
+    /// button satisfies it by reporting the busy index and offering the
+    /// click again. This caller cannot: by the time it runs, the switch
+    /// has already been stored and answered, and there is no second
+    /// button to press. So a busy index latches instead of reporting,
+    /// and [`Self::search_log_tick`] runs it on the writer's own
+    /// thread, where waiting for the mutex is the right answer.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn clear_search_log_deferred(&self) {
+        if self.clear_search_log().is_err() {
+            self.search_log_clear_pending.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The searchlog's 60 s tick: run a deferred clear first, then
+    /// flush. Returns what the flush wrote, as `flush_search_log` does.
+    ///
+    /// The order is only belt - a latch is set with recording OFF, so
+    /// there is nothing arriving in the buffer to flush over a table
+    /// that was just emptied - but the clear is the promise this module
+    /// owes the user, so it goes first regardless.
+    #[cfg(feature = "indexer")]
+    pub fn search_log_tick(&self) -> usize {
+        if self.search_log_clear_pending.swap(false, Ordering::Relaxed) {
+            self.search_log_buf.lock_ok().clear();
+            // with_index_mut, not index_write_checked: this is the
+            // writer's own blocking thread, so parking on the mutex is
+            // exactly what it is for. The bounded wait exists to keep
+            // HTTP workers off it, and there is no worker here.
+            if self
+                .with_index_mut(|ix| ix.search_log_clear().ok())
+                .is_none()
+            {
+                // The index is switched off or the delete failed. Put
+                // the latch back rather than forgetting the promise: an
+                // index that is off has no table to hold anything, and
+                // one switched back on gets the clear then.
+                self.search_log_clear_pending.store(true, Ordering::Relaxed);
+            }
+        }
+        self.flush_search_log()
     }
 }
 
@@ -345,7 +412,7 @@ mod tests {
                 "recording continued after the switch went off"
             );
 
-            assert_eq!(d.clear_search_log(), 1);
+            assert_eq!(d.clear_search_log(), Ok(1));
             assert!(
                 d.search_log_buf.lock_ok().is_empty(),
                 "the buffer kept a search"
@@ -381,6 +448,54 @@ mod tests {
                 })
                 .expect("the counters were dropped instead of retried");
             assert_eq!(e.n, 1);
+        });
+    }
+
+    /// TODO 166: the deferred clear lands on the tick, and a tick that
+    /// still cannot reach the index puts the promise BACK.
+    ///
+    /// The integration leg in `tests/daemon_indexbusy/` covers the
+    /// ordinary path - busy mutex, latch, tick, gone - through real
+    /// HTTP. What it cannot reach is the arm where the index is switched
+    /// OFF under the latch: silently consuming the latch there would
+    /// mean the rows survive the moment the index comes back, which is
+    /// the same lost edit by a slower route.
+    #[test]
+    fn a_deferred_clear_lands_on_the_tick_and_survives_an_index_that_is_off() {
+        with_daemon("deferred", |d| {
+            d.note_search("wall", "the thing", "", 0);
+            d.flush_search_log();
+            assert_eq!(
+                d.with_index(|ix| ix.search_misses(0, 0, None, 50).ok())
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            // The index is off, so this tick cannot honour the latch -
+            // and must not pretend it did.
+            d.search_log_clear_pending.store(true, Ordering::Relaxed);
+            d.index_enabled.store(false, Ordering::Relaxed);
+            d.spot_enabled.store(false, Ordering::Relaxed);
+            d.search_log_tick();
+            assert!(
+                d.search_log_clear_pending.load(Ordering::Relaxed),
+                "the tick consumed a clear it could not run"
+            );
+
+            // Back on, and the row the switch asked to forget is gone.
+            d.index_enabled.store(true, Ordering::Relaxed);
+            d.search_log_tick();
+            assert!(
+                !d.search_log_clear_pending.load(Ordering::Relaxed),
+                "a clear that landed must not stay latched"
+            );
+            assert!(
+                d.with_index(|ix| ix.search_misses(0, 0, None, 50).ok())
+                    .unwrap()
+                    .is_empty(),
+                "the deferred clear never reached the table"
+            );
         });
     }
 }

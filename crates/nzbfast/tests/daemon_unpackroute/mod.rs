@@ -276,7 +276,7 @@ async fn set_password_mid_download_goes_one_pass() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     let inner2 = inner.clone();
     let dir2 = dir.clone();
@@ -459,7 +459,7 @@ async fn set_password_wrong_then_right_mid_download_one_pass() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     let inner2 = inner.clone();
     let dir2 = dir.clone();
@@ -572,8 +572,21 @@ async fn set_password_wrong_then_right_mid_download_one_pass() {
 /// restart), must hand a NAMED compressed set to the unrar subprocess:
 /// the top-level chase latches off (so the set materializes instead of
 /// streaming through the native decoder) and the disk unpack skips the
-/// native engine. Opt-in like the compressed e2e: needs a working
-/// `unrar` on PATH, which CI does not install.
+/// native engine. Needs a working `unrar` on PATH; pr-check's Linux leg
+/// installs one (TODO 60b), so there the skip below is a broken job
+/// rather than reduced coverage, and `NZBFAST_REQUIRE_UNRAR` says so.
+/// Everywhere else - Windows CI, a developer box with no unrar - it
+/// still skips.
+///
+/// It is also the end-to-end guard on the free-space preflight that now
+/// sits in front of that spawn (`rarfix::preflight`). The preflight's
+/// dangerous direction is over-refusal - it reads a size the POSTER
+/// declared, and a legitimate release declares a real and large one - so
+/// this asserts the refusal did not fire on a set that fits. The other
+/// direction is driven by `daemon_bomb` next door, which tells the
+/// daemon what the disk holds (`NZBFAST_TEST_FREE_BYTES`, TODO 222)
+/// instead of needing the sparse-image rig the 22 Aug repro used; the
+/// predicate itself is pinned in `rarfix::preflight`'s own tests.
 #[tokio::test(flavor = "multi_thread")]
 async fn prefer_external_unrar_setting_routes_unpack_to_subprocess() {
     let have = |c: &str| {
@@ -583,6 +596,15 @@ async fn prefer_external_unrar_setting_routes_unpack_to_subprocess() {
         })
     };
     if !have("unrar") {
+        // The par2 rule (`have_par2` in e2e.rs), for the same reason: a
+        // silently skipped test reads exactly like a green run, and this
+        // one skipped on EVERY runner for three weeks.
+        assert!(
+            std::env::var_os("NZBFAST_REQUIRE_UNRAR").is_none(),
+            "NZBFAST_REQUIRE_UNRAR is set but no unrar is on PATH - the job \
+             that sets it installs one, so this is a broken runner, not a \
+             test with nothing to prove"
+        );
         eprintln!("skipping: unrar not installed");
         return;
     }
@@ -640,7 +662,7 @@ async fn prefer_external_unrar_setting_routes_unpack_to_subprocess() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
@@ -694,6 +716,12 @@ async fn prefer_external_unrar_setting_routes_unpack_to_subprocess() {
         assert!(
             !log.contains("unpacking archive natively"),
             "native engine ran despite prefer_external_unrar:\n{log}"
+        );
+        // And the preflight let it through: this set declares what it
+        // really unpacks to, and the disk can hold it.
+        assert!(
+            !log.contains("decompression bomb"),
+            "the free-space preflight refused a set that fits:\n{log}"
         );
 
         // And the payload it published is really there.
@@ -780,7 +808,7 @@ async fn prefer_external_unrar_setting_ignored_for_obfuscated_sets() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
@@ -831,6 +859,20 @@ async fn prefer_external_unrar_setting_ignored_for_obfuscated_sets() {
         assert!(
             !log.contains("unpacking archive with unrar"),
             "obfuscated set was handed to the unrar subprocess:\n{log}"
+        );
+        // ...and the same lines are in the ring the dashboard's log
+        // pane reads, stamped and tagged. Until 22 Aug 2026 these were
+        // println!s: logtee still ringed them, but bare and unfiltered,
+        // so `NZBFAST_LOG=extract=info` could not turn them up and the
+        // warnings were indistinguishable from progress.
+        let ring = http(port, "/api?mode=log&value=2000&apikey=sekrit&output=json", None);
+        assert!(
+            ring.contains("[extract] unpacking 1 obfuscated RAR set"),
+            "stamped [extract] line missing from the log ring:\n{ring}"
+        );
+        assert!(
+            ring.contains("[extract] native unpack complete"),
+            "stamped [extract] completion missing from the log ring:\n{ring}"
         );
 
         fn find(dir: &Path, name: &str) -> bool {

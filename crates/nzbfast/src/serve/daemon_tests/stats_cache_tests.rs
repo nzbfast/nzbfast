@@ -140,3 +140,95 @@ fn refresh_index_stats_installs_fresh_figures() {
         assert_eq!(snap.0, first.0 + 2, "refresh computed the new figures");
     });
 }
+
+/// Sweep 8, L8: a flight that started BEFORE an explicit refresh may
+/// not publish itself as fresh.
+///
+/// The interleaving: a dashboard poll begins its SQLite reads; the scan
+/// pass commits and calls `refresh_index_stats`, which clears `at`,
+/// sees `refreshing` already set and returns; the older flight then
+/// finishes and stamps `Instant::now()`. Its pre-commit snapshot is
+/// then served as current for the whole 45 s TTL - the one call whose
+/// entire job is "the cache must reflect what I just wrote" defeated by
+/// the singleflight that exists to save work.
+///
+/// The old flight is simulated exactly as the sibling test above
+/// simulates the singleflight, because the real race needs a reader
+/// parked mid-statement across a committing writer.
+#[cfg(feature = "indexer")]
+#[test]
+fn an_old_flight_cannot_publish_over_an_explicit_refresh() {
+    with_daemon("statsgen", |d| {
+        d.index_enabled.store(true, Ordering::Relaxed);
+        seed_releases(d, 1, "gen");
+        let before = d.index_stats_snapshot().expect("seed");
+
+        // A flight is in the air, holding `before` as its answer.
+        let started_gen = {
+            let mut c = d.index_stats_cache.lock_ok();
+            c.refreshing = true;
+            c.generation
+        };
+
+        // The pass commits and asks for the exact recompute. It finds
+        // the flight and returns - but it bumps the generation.
+        seed_releases(d, 3, "gen2");
+        d.refresh_index_stats();
+        {
+            let c = d.index_stats_cache.lock_ok();
+            assert_ne!(
+                c.generation, started_gen,
+                "an explicit refresh must invalidate the flights it could not run"
+            );
+        }
+
+        // The old flight lands. Its figures predate the commit, so it
+        // must NOT stamp them fresh.
+        {
+            let mut c = d.index_stats_cache.lock_ok();
+            c.refreshing = false;
+            c.snap = Some(before);
+            c.at = if c.generation == started_gen {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+        }
+        assert!(
+            d.index_stats_cache.lock_ok().at.is_none(),
+            "the cache is left expired, not warm at a pre-commit snapshot"
+        );
+
+        // So the next reader gets the truth rather than waiting out the
+        // TTL on figures the pass already contradicted.
+        let after = d.index_stats_snapshot().expect("recompute");
+        assert_eq!(
+            after.0,
+            before.0 + 3,
+            "the first read after the refresh sees the pass's own result"
+        );
+    });
+}
+
+/// Bug sweep 22 Aug 2026, F-18: the eviction / shrink / scan-park sites
+/// used to clear `at` alone, which an in-flight snapshot overrides with
+/// a fresh stamp unless the generation fence moved. `expire_index_stats`
+/// does both, so those sites are the same invalidation as a refresh.
+#[cfg(feature = "indexer")]
+#[test]
+fn expire_index_stats_clears_at_and_advances_the_generation() {
+    with_daemon("statsexp", |d| {
+        d.index_enabled.store(true, Ordering::Relaxed);
+        seed_releases(d, 1, "exp");
+        let _ = d.index_stats_snapshot().expect("seed");
+        let gen_before = {
+            let c = d.index_stats_cache.lock_ok();
+            assert!(c.at.is_some(), "warm before expiry");
+            c.generation
+        };
+        d.expire_index_stats();
+        let c = d.index_stats_cache.lock_ok();
+        assert!(c.at.is_none(), "expired");
+        assert_eq!(c.generation, gen_before.wrapping_add(1), "fenced");
+    });
+}

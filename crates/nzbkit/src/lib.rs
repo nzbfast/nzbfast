@@ -38,6 +38,7 @@ pub mod logtee;
 pub mod media;
 pub mod mediaprobe;
 pub mod mem;
+pub mod memgauge;
 pub mod mkv;
 /// In-process mock NNTP server. Not part of the real API: public only for
 /// tests and examples in other crates (nzbfast's suites, mockserv).
@@ -66,11 +67,13 @@ pub mod preflight;
 pub mod rar;
 pub(crate) mod rarcrypt;
 pub mod release;
+pub mod sfx;
 pub mod shaping;
 #[cfg(feature = "indexer")]
 pub mod spot;
 pub mod sync;
 pub mod sysbench;
+pub mod tar;
 pub mod urlauth;
 pub mod warmbench;
 pub mod warmpool;

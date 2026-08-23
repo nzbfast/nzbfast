@@ -103,6 +103,24 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_DEFER_WARMUP_SECS", "2")
+            // The idle-server SIDECAR is what this test pins. With the
+            // cross-job hand-over on (`tests/integration/queue_handoff.rs`),
+            // the idle server's connections go to the next job as a
+            // first-class start before the sidecar's window ever opens,
+            // so the sidecar path is exercised with the hand-over off.
+            //
+            // Scoped to THIS test, and it STAYS - asked and answered on
+            // 23 Aug 2026, when F-04's owed integration test landed. The
+            // pin used to mean no delete test anywhere had ever run
+            // against a populated `drain_dl`, which is the gap F-04 lived
+            // in; `deleting_a_draining_predecessor_stops_its_wire_and_leaves_the_successor_running`
+            // now covers that case with the hand-over ON, so nothing is
+            // bought by lifting it here. Lifting it was also measured:
+            // this test then fails, twice out of two, on "timed out
+            // waiting for B's prefetch to start" - the hand-over starts B
+            // as a first-class job and the sidecar window never opens, so
+            // the pin is what gives this test a subject at all.
+            .env("NZBFAST_QUEUE_HANDOFF", "0")
             .env("NZBFAST_DEFER_WINDOW_SECS", "3")
             .arg("--config")
             .arg(&cfg)
@@ -280,7 +298,7 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
     })
     .await
     .unwrap();
-    let log = std::fs::read_to_string(&d.log).unwrap_or_default();
+    let log = d.log();
     assert!(
         log.contains(&format!("[prefetch] {deleted} starting")),
         "rig: the deleted job was never the prefetched one:\n{log}"
@@ -485,7 +503,8 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -654,7 +673,8 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -756,6 +776,28 @@ async fn a_kept_files_notice_can_add_the_release_again() {
         assert_eq!(note["name"], stem, "{q}");
         assert_eq!(note["retry"], true, "the notice must be able to offer the add: {q}");
 
+        // §129 1b(b): the STRIP above stays on the queue payload - it
+        // describes a folder that is still on disk, not a moment that
+        // scrolled past - but the once-each TOAST that nudges towards
+        // it is a moment, and it rides the lifecycle ring now instead
+        // of being recovered by diffing that array against a seen-set.
+        let dv: serde_json::Value = serde_json::from_str(&http(
+            port,
+            "/api?mode=dashboard&events=0&output=json",
+            None,
+        ))
+        .unwrap();
+        let ev = dv["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .find(|e| e["kind"] == "job.delete_kept")
+            .unwrap_or_else(|| panic!("a refused delete owes an event: {dv}"));
+        assert_eq!(ev["name"], stem, "{dv}");
+        assert_eq!(ev["path"], note["path"], "{dv}");
+        assert_eq!(ev["retry"], true, "{dv}");
+        assert_eq!(ev["schema_version"], 1, "{dv}");
+
         // The one click the notice now has. The path is the notice's
         // identity, and it carries '/' and (on a temp dir) '.' - so it
         // is percent-encoded rather than pasted into the query.
@@ -794,6 +836,7 @@ async fn a_kept_files_notice_can_add_the_release_again() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

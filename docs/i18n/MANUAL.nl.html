@@ -316,7 +316,12 @@ apparaat - de telefoonlay-out past zich automatisch aan). Alles wordt live bijge
 <ul>
 <li>Het <b>Snelheidslimiet</b>-menu - vaste limieten, <i>auto · wijkt voor LAN</i> (een
 RTT-gestuurde modus die inschikt zodra iemand anders in huis de lijn nodig heeft),
-of onbeperkt.</li>
+of onbeperkt.
+De voorkeuzes zijn ronde getallen voor ronde lijnen, en een upload van 37&nbsp;Mb/s is
+er geen van: <b>aangepast…</b> vraagt je in plaats daarvan om het getal en neemt alles
+wat de API ook neemt (<code>25M</code>, <code>500K</code>, of 0 voor geen limiet). Het
+menu leest daarna <b>(aangepast)</b> met de snelheid ernaast, tot je weer een voorkeuze
+of <i>auto</i> kiest.</li>
 <li><b>Pauzeer voor…</b> - pauzeer alles voor 15&nbsp;min/30&nbsp;min/1&nbsp;uur/3&nbsp;uur met
 automatisch hervatten, of gebruik de knop Pauzeren voor een pauze zonder eindtijd.
 Pauzeren is direct: de actieve overdracht stopt binnen seconden en gaat later verder
@@ -358,6 +363,7 @@ regel "toegevoegd door" die zegt waar de taak vandaan kwam (watchmap, een gekopp
 app, de API…). Een knop <b>Download de .nzb</b> slaat het <code>.nzb</code>-bestand
 van de taak voor je op - nzbfast bewaart een eigen kopie, dus dit werkt voor elke
 taak, ook als het originele bestand allang weg is.</li>
+<li><b>"Waarom is dit traag?"</b> Terwijl een taak downloadt, draagt de regel onder de voortgangsbalk een oordeel over <em>die</em> taak, niet over de machine: <i>je providers zijn de grens</i>, <i>deze machine zit aan zijn CPU-grens</i>, <i>de opslag kan het niet bijhouden</i>, enzovoort. Klik erop en de rij opent op het bewijs: wat je lijn kan, wat de providers geleverd hebben, wat er nu binnenkomt, en een tabel per server waarin een geknepen provider meteen te zien is. Een taak op volle snelheid zegt hier niets, en een taak waarvan het oordeel nog vorm krijgt evenmin.</li>
 <li>Badges tonen bijzondere toestanden: <i>uitgesteld (traag)</i>, <i>prefetchen</i>,
 <i>gepauzeerd</i> (zie <a href="#performance">Prestatietools</a>).</li>
 <li>Een burn-down-grafiek volgt het totaal aan resterende GB in de wachtrij.</li>
@@ -388,7 +394,7 @@ verificatiegezondheidsstrook zet beschadigde PAR2-blokken per download uit - een
 oplopende staart betekent dat artikelen beschadigd binnenkomen.
 De lade van elke regel zegt wie de taak toevoegde en heeft dezelfde knop
 <b>Download de .nzb</b> als de wachtrij - handig om een release ergens anders opnieuw
-te downloaden, of om de <code>.nzb</code> bij een probleemmelding te voegen.</p>
+te downloaden, of om de <code>.nzb</code> bij een probleemmelding te voegen. Ernaast staat <b>Rapport maken</b>, meestal het betere ding om bij te voegen: zie <a href="#troubleshooting">Problemen oplossen</a>.</p>
 <p>De kaart toont standaard tien downloads en de rest is één klik weg, via de knop ▤. Status, locatie en de reden van een mislukking zitten achter een klik op de regel zelf, zodat het gewone geval - wat klaar is, hoe groot, wanneer - leesbaar blijft zonder scrollen. Sleep in plaats daarvan de onderrand van de kaart om de lijst op een door jou gekozen hoogte te laten scrollen. <b>History rows</b> in Instellingen → Interface verandert die tien; omdat het een eigenschap van de daemon is en niet van je browser, geldt het voor elk apparaat dat naar deze installatie kijkt. <b>Colour History names</b> daarnaast kleurt voltooide namen groen en mislukte rood; uitgezet blijven de namen neutraal, en de gekleurde stip en de details van de regel zeggen nog steeds welke welke is.</p>
 <p>nzbfast bewaart de geschiedenis voor altijd, tenzij je iets anders zegt.
 <b>Geschiedenis opruimen</b> bij Instellingen → Systeem verwijdert oude items via
@@ -411,9 +417,11 @@ in <a href="#performance">Prestatietools</a>.</p>
 <h3 id="dash-layout">Het dashboard indelen</h3>
 <p>Het dashboard is van u om in te delen. Vier handelingen, overal met dezelfde naam: een
 kaart <b>Verplaatsen</b>, <b>Compact</b> maken, het <b>Formaat wijzigen</b> of haar
-<b>Verbergen</b>. Elke keuze onthoudt de browser waarin u haar maakte, dus elk apparaat
-houdt zijn eigen indeling, en <b>Lay-out resetten</b> in Instellingen → Interface zet elke
-kaart, grootte en kolom terug zoals ze geleverd werden.</p>
+<b>Verbergen</b>. Elke keuze onthoudt het browserprofiel waarin u haar maakte: de volgorde
+van uw kaarten en de kaarten die u verborg gelden bij elke vensterbreedte in dat profiel,
+terwijl kaart- en grafiekgroottes alleen voor het bureaublad blijven. <b>Lay-out
+resetten</b> in Instellingen → Interface zet elke kaart, grootte en kolom terug zoals ze
+geleverd werden.</p>
 <p><b>Lay-out aanpassen</b> is de begeleide ingang, en de snelste manier om te zien wat een
 kaart kan. Open het via de bescheiden link net boven de eerste kaart, of via Instellingen →
 Interface, waar het de eerste knop is in de rij <b>Dashboard-lay-out</b>. Zolang het aan
@@ -437,12 +445,13 @@ dezelfde cijfers, minder plaats. Bij Geschiedenis wisselt hij tussen de tien rec
 downloads en de rest van uw geschiedenis. <b>Compacte modus</b> in Instellingen → Interface
 doet het hele dashboard in één keer.</li>
 <li><b>Formaat wijzigen.</b> Een kaart met een lijst of een grafiek draagt een balk langs
-haar onderrand: sleep die tot de hoogte die u wilt. De balk is flauw tot u de kaart
-aanwijst, en tekent zich dan als een haarlijn over de volle breedte met ribbels in de
-achterste hoek; hij neemt ook toetsenbordaandacht, waar de pijltjes omhoog en omlaag de
-hoogte zetten en Shift een grotere stap maakt. Welke kaarten er een hebben verschuift
-naarmate kaarten eigen lijsten krijgen en verliezen: neem de balk als antwoord, niet een
-opsomming hier. In <b>Lay-out aanpassen</b> zeggen de kaarten zonder balk het zelf.</li>
+haar onderrand waar u een muis of een touchpad heeft: sleep die tot de hoogte die u wilt.
+Een aanraakscherm krijgt er geen. De balk is flauw tot u de kaart aanwijst, en tekent zich
+dan als een haarlijn over de volle breedte met ribbels in de achterste hoek; hij neemt ook
+toetsenbordaandacht, waar de pijltjes omhoog en omlaag de hoogte zetten en Shift een
+grotere stap maakt. Welke kaarten er een hebben verschuift naarmate kaarten eigen lijsten
+krijgen en verliezen: neem de balk als antwoord, niet een opsomming hier. In <b>Lay-out
+aanpassen</b> zeggen de kaarten zonder balk het zelf.</li>
 <li><b>Verbergen.</b> De laatste knop in de titelregel verbergt die kaart. Verborgen
 kaarten verzamelen zich in een balk <b>Verborgen</b> onderaan het dashboard; klik daar op
 een naam om er een terug te halen.</li>
@@ -481,11 +490,13 @@ pijltjes links en rechts hem, en Shift met een pijltje wijzigt de breedte.</p>
 <tr><th>Methode</th><th>Hoe</th></tr>
 <tr><td><b>Slepen &amp; neerzetten</b></td><td>Sleep één of meer <code>.nzb</code>-bestanden waar dan ook op het dashboard.</td></tr>
 <tr><td><b>Watchmap</b></td><td>Stel een map in bij Instellingen; elke <code>.nzb</code> die je erin
-opslaat wordt binnen 5 seconden opgepikt en naar de prullenbak verplaatst, en een open
+opslaat wordt opgepikt zodra hij landt en naar de prullenbak verplaatst, en een open
 dashboard meldt elke oppak op naam ("… opgepikt uit Downloads"), zodat een bestand dat
 uit de map verdwijnt nooit een raadsel is. Houd je je bestanden liever? Zet
 <b>.nzb-bestanden na oppakken bewaren</b> aan (zie <a href="#settings">§9</a>). Zet de downloadmap
-van je browser erop voor één-klik-grabs vanaf indexersites.</td></tr>
+van je browser erop voor één-klik-grabs vanaf indexersites. Submappen, bestanden die geen NZB blijken te zijn en het herbekijk-interval dat
+een map op een netwerkschijf nodig heeft, hebben elk hun eigen schakelaar; zie
+<a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Vanaf een URL</b></td><td>Plak een NZB-link (API <code>mode=addurl</code>, of via elke gekoppelde app).</td></tr>
 <tr><td><b>nzblnk:-links</b></td><td>Plak een <code>nzblnk:</code>-link ergens op het dashboard, of sleep hem erin. Heb je geïnstalleerd vanaf de macOS-DMG of het Windows-installatieprogramma, dan kun je er ook rechtstreeks een aanklikken op een board. Zie <a href="#nzblnk">nzblnk-links</a> hieronder.</td></tr>
 <tr><td><b>Index doorzoeken</b></td><td>Klik op een complete release in de kaart Index doorzoeken.</td></tr>
@@ -597,13 +608,29 @@ kijken; het paar onder <b>Weergave</b> wisselt ertussen. Je keuze wordt onthoude
 er meer op het scherm, groot minder.</li>
 <li><b>Hover-voorvertoning</b>, boven de Releases-tabel: houd de muis op een rij voor
 poster en samenvatting, allemaal uit je eigen index.</li>
-<li><b>Groeperen per titel</b>, de schakelaar ernaast: één rij per titel met de releases
-eronder. Open hem met <b>&#9656;</b> of door op de rij te klikken; het vinkje bij de
-titel selecteert de getoonde releases. Groeperen geldt alleen voor <b>Deze
-index</b>.</li>
-<li><b>Tabbladen</b> voor Films / Series / Overig, direct zoeken en zeven
-sorteringen: <b>Voor jou</b>, Nieuwste posts, Releasejaar, Best beoordeeld,
-Titel A–Z, Grootste en Meest gepost.</li>
+<li><b>Groeperen per titel</b>, de schakelaar ernaast: één rij per titel met de
+releases eronder. Open hem met <b>&#9656;</b> of door op de rij te klikken; het vinkje
+bij de titel selecteert de getoonde releases. Groeperen geldt alleen voor <b>Deze
+index</b>; kies <b>Indexers</b> of <b>Beide</b> en de tabel wordt weer vlak, en zegt
+dat.</li>
+<li><b>Elke release van een titel</b> staat in de kaart als je die opent, met de
+resolutie, de codec, het audioformaat en het dynamisch bereik (Dolby Vision, HDR10)
+uit de releasenaam gelezen, plus grootte, leeftijd en of elk deel nog bij je provider
+staat. Zet <b>Voorkeursversie</b> onder Instellingen → Ordenen → Indexeren en de
+passende drijven naar boven, met een <b>beste match</b>-markering en de kloppende tags
+gemarkeerd. Er wordt niets verborgen: releasenamen laten deze tags voortdurend weg,
+dus een voorkeur verandert alleen de volgorde. Hij bepaalt ook naar welke encode de
+volglijst opwaardeert.</li>
+<li><b>Tabbladen</b> voor Films / Series / Overig, direct zoeken en zeven sorteringen:
+<b>Voor jou</b>, Nieuwste posts, Releasedatum, Best beoordeeld, Titel A–Z, Grootste en
+Meest gepost. De knop <b>↓</b> naast de sortering keert hem om, dus elke sortering
+werkt ook andersom (oudste, kleinste, laagste, Z–A).</li>
+<li><b>Releasedatum</b> is de oorspronkelijke release of de eerste uitzending, op de
+dag nauwkeurig waar de metadataleverancier er een gaf: het beantwoordt «wat is er deze
+week echt uitgekomen», wat Nieuwste posts niet kan (dat is de uploaddatum, en een
+repost van een film van dertig jaar oud komt daar bovenaan). Titels die verrijkt zijn
+van voor dit bestond, of waarvan de leverancier geen datum had, vallen terug op hun
+jaar tot je hun metadata ververst.</li>
 <li><b>Alleen gematcht</b> staat standaard aan en verbergt niet-geïdentificeerde rommel;
 een chip "+N ongematcht" haalt hem tevoorschijn.</li>
 <li>Klik op een tegel voor het detailblad: synopsis, IMDb-beoordeling en -stemmen, cast -
@@ -786,7 +813,7 @@ interface winnen van opties op de opdrachtregel).</p>
 <h3>Snelheid &amp; planning <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Instelling</th><th>Wat het doet</th></tr>
-<tr><td>Snelheidslimiet</td><td>Limiet in bytes/sec (<code>50M</code>, <code>1G</code>, 0 = onbeperkt). Remote-apps kunnen percentages sturen - stel <i>Lijnsnelheid</i> in zodat die goed vertaald worden.</td></tr>
+<tr><td>Snelheidslimiet</td><td>Limiet in bytes/sec (<code>50M</code>, <code>1G</code>, 0 = onbeperkt). Remote-apps kunnen percentages sturen - stel <i>Lijnsnelheid</i> in zodat die goed vertaald worden. Het item <b>aangepast…</b> in de kopbalk zet ditzelfde plafond zonder de Instellingen te openen.</td></tr>
 <tr><td>Autosnelheid</td><td>RTT-gestuurde limiet die wijkt voor ander thuisverkeer en weer oprekt zodra de lijn stil is.</td></tr>
 <tr><td>Trage downloads automatisch uitstellen</td><td>Een taak die vastzit op één trage server terwijl andere wachten gaat naar achteren in de wachtrij (voortgang blijft bewaard). Zie <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch op inactieve servers</td><td>Servers die de actieve taak niets opleveren beginnen alvast aan de volgende in de wachtrij. Zie <a href="#performance">§13</a>.</td></tr>
@@ -832,6 +859,14 @@ archief-in-archief automatisch worden uitgepakt: een RAR-set met daarin een 7z m
 daarin weer een RAR is normaal op Usenet, en nzbfast volgt de keten zonder tweede
 ronde. Op de grens blijft het diepste archief gewoon liggen, niet verder uitgepakt, en
 de download wordt toch voltooid. Verhoog dit alleen voor ongewoon diepe releases.</p>
+<p><b>Rechten op afgeronde downloads</b> (een geavanceerde instelling) is een umask, hetzelfde getal dat Docker en de
+installatiegidsen gebruiken: <code>002</code> geeft mappen 775 en bestanden 664, <code>022</code> geeft 755 en
+644. Leeg is de standaard en verandert niets. Stel het in wanneer Sonarr of Radarr als een andere gebruiker in
+dezelfde groep draaien en niet kunnen lezen of importeren wat hier terechtkomt: bij een systemd-installatie
+kunnen ze dat meestal niet, omdat de unit alles wat de daemon schrijft alleen voor de eigenaar leesbaar houdt om
+de API-sleutel te beschermen. De rechten worden gezet zodra een afgeronde taak niet meer verplaatst wordt, op de
+map van de taak, alles erin en de mappen tussen die map en de downloadmap, want importeren door hernoemen
+vereist schrijfrecht op de map waaruit hernoemd wordt. Genegeerd op Windows, dat dit niet kent.</p>
 
 <h3>Automatisch hernoemen &amp; opschonen <span class="pill live">live</span></h3>
 <p><b>Voltooide downloads hernoemen</b> (standaard aan) geeft de map en het
@@ -891,6 +926,28 @@ onthouden, ook na een herstart, en wordt niet opnieuw toegevoegd; sla het opnieu
 om het nogmaals te downloaden. Wat je ook kiest, de lade van elke taak heeft een knop
 <b>Download de .nzb</b>, zodat een kopie van de <code>.nzb</code> van elke taak nooit
 meer dan één klik weg is.</p>
+<p><b>Ook submappen doorzoeken</b> (standaard uit) pikt ook bestanden op uit mappen
+binnen de watchmap, en de naam van de eerste submap wordt de categorie van de download:
+een bestand in <code>watch/tv</code> komt in de categorie tv. Dat is de snelste manier
+om grabs te sorteren zonder het dashboard aan te raken - zet één browserbladwijzer op
+<code>watch/tv</code> en een tweede op <code>watch/movies</code>, en het opbergen
+gebeurt al bij binnenkomst. Een map met de naam <code>rejected</code> is de ene
+uitzondering en wordt altijd met rust gelaten.</p>
+<p><b>Onbruikbare bestanden apart zetten</b> (standaard uit) verplaatst alles wat geen
+bruikbare NZB is naar een map <code>rejected</code> binnen de watchmap, met een klein
+tekstbestand ernaast dat zegt wat er mis was. De moeite waard voor een map waarin je
+browser opslaat, waar een inlogpagina of een foutpagina onder een <code>.nzb</code>-naam
+kan binnenkomen. Uit blijft het bestand liggen waar je het neerzette en verschijnt de
+reden boven de wachtrij. Een bestand dat er alleen onvolledig uitziet blijft in beide
+gevallen liggen, want het is misschien nog onderweg.</p>
+<p><b>Map opnieuw nakijken elke</b> (een geavanceerde instelling) is een vangnet en
+niets meer, dus het is niet de knop die het oppikken snel maakt. Een bestand dat je op
+deze machine neerzet wordt opgemerkt op het moment dat het landt, want het systeem meldt
+het; dit interval dekt alleen de mappen waarover het systeem niets kan melden, in de
+praktijk dus een netwerkschijf die vanaf een andere computer wordt beschreven. In
+seconden, 1 tot 3600, standaard 5. Verlaag het als het oppikken van een netwerkschijf
+laat aanvoelt, verhoog het als de controles het verkeer op een trage verbinding niet
+waard zijn.</p>
 
 <h3 id="set-indexers">Zoeken op indexers <span class="pill live">live</span></h3>
 <p>Je accounts bij NZB-indexersites, één regel per stuk, zodat een zoekopdracht op de
@@ -1034,7 +1091,12 @@ door en zegt het log waarom.</p>
 <h3>Levenscyclus-events en ondertekende webhooks</h3>
 <p>Elke mijlpaal van een taak is een geversioneerd event: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, plus
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(een automatische nieuwe poging heeft een mislukte download opnieuw in de wachtrij
+gezet) en <code>job.delete_kept</code> (een verwijdering haalde het record weg maar
+kon de bestanden niet weghalen), plus <code>watch.picked</code> (een .nzb is uit de
+volgmap gehaald), <code>watchlist.upgraded</code> (een volglijst-upgrade is geland
+en de vervangen kopie is verwijderd),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> en <code>quota.reached</code>. Elk draagt
 <code>schema_version</code> (nu 1; nieuwe sleutels kunnen verschijnen zonder
@@ -1088,6 +1150,12 @@ proberen en categorierouting gedragen zich allemaal zoals de *arrs verwachten.</
 <li>nzbfast beantwoordt <code>caps</code>-, <code>search</code>-, <code>tvsearch</code>- en
 <code>movie</code>-queries uit zijn eigen index van je gescande groepen, en
 <code>/getnzb/&lt;id&gt;</code> levert de NZB terug.</li>
+<li>Zoeken kan op naam of op id: series nemen een TVDB-, IMDb- of TVmaze-id, films een
+IMDb- of TMDB-id, en de app leest uit <code>caps</code> welke. TVDB-id's worden pas
+aangeboden zodra de index ze verzameld heeft, wat vanzelf op de achtergrond gebeurt.
+Een id waar we niets van hebben krijgt een leeg resultaat, en een id dat we helemaal
+niet kunnen oplossen wordt bij naam geweigerd: geen van beide krijgt ooit een lijst
+met releases die er niets mee te maken hebben.</li>
 </ol>
 <div class="note"><b>Zet eerst de ingebouwde indexer aan</b> (Instellingen → Indexeren).
 Hij staat standaard uit, en zolang dat zo is beantwoordt deze façade elke query met
@@ -1110,8 +1178,13 @@ vrijwel elke mobiele/tablet-app werkt. Kies het protocol dat jouw app ondersteun
 <tr><td>Wachtwoord</td><td>je <b>API-sleutel</b></td></tr>
 </table></div>
 <p>Het volledige JSON-RPC-oppervlak dat deze apps gebruiken wordt geserveerd: status,
-wachtrij met herordenen/pauzeren/verwijderen, geschiedenis, NZB toevoegen,
-snelheidslimiet, pauzeren/hervatten, log.</p>
+wachtrij met herordenen/hernoemen/pauzeren/verwijderen, geschiedenis, NZB toevoegen
+(bestand of URL), snelheidslimiet, pauzeren/hervatten, log. De inloggegevens mogen ook
+in de URL staan, NZBGets eigen vorm <code>http://user:apikey@host:6789/</code>, en dat
+is wat LunaSea stuurt.</p>
+<p><b>nzb360-gebruikers:</b> voeg nzbfast toe als <b>SABnzbd</b>-server (volgende
+sectie). nzb360 praat met een echte NZBGet over XML-RPC, wat nzbfast niet serveert,
+dus zijn NZBGet-modus kan niet verbinden.</p>
 <h3>Apps die SABnzbd spreken</h3>
 <div class="tblwrap"><table>
 <tr><th>Veld in de app</th><th>Waarde</th></tr>
@@ -1414,7 +1487,7 @@ wijst.</td></tr>
 <h2 id="troubleshooting">18 · Problemen oplossen</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptoom</th><th>Controleer</th></tr>
-<tr><td>Trage downloads</td><td>Draai de <b>Systeembenchmark</b> - die benoemt de bottleneck ronduit. Is het het netwerk: draai <b>Verbindingstuning</b>, check de aantallen verbindingen per server en controleer of je providers niet allemaal op één backbone zitten (<b>Serverdiversiteit</b>).</td></tr>
+<tr><td>Trage downloads</td><td>Vraag het eerst aan de download zelf: terwijl die loopt, noemt de regel onder de voortgangsbalk de laag die <i>deze</i> taak ophoudt, en een klik op dat oordeel opent de rij op het bewijs (zie <a href="#dash-queue">Wachtrij</a>). Draai de <b>Systeembenchmark</b> - die benoemt de bottleneck ronduit. Is het het netwerk: draai <b>Verbindingstuning</b>, check de aantallen verbindingen per server en controleer of je providers niet allemaal op één backbone zitten (<b>Serverdiversiteit</b>).</td></tr>
 <tr><td>Alleen traag bij heel grote taken<br>(NAS of machine met weinig RAM)</td><td>Verwacht, en meetbaar: een uitgehongerd geheugenbudget spilt caches naar schijf en kost 20–40% voorbij ~87 GB. Zie <a href="#memory">Geheugenbudget</a> voor de cijfers en hoeveel RAM je moet geven. Kleinere taken merken er niets van.</td></tr>
 <tr><td>Download mislukt met "articles missing"</td><td>De post is verlopen of bij je providers weggehaald. Een tweede provider op een andere backbone redt de meeste van deze gevallen. <code>nzbfast check</code> voorspelt dit vóór het downloaden. En de muur markeert de waarschijnlijk verdwenen releases vooraf met zijn
 beschikbaarheidsstip (<a href="#oracle">§13</a>). Een eerste mislukking van deze vorm
@@ -1432,7 +1505,7 @@ er precies zo uit en lost zichzelf op.</td></tr>
 <tr><td>Daemon start niet: poort in gebruik</td><td>Er draait al een instantie - of wijzig <code>--port</code>.</td></tr>
 <tr><td>Waar zijn de logs?</td><td>De Log-kaart op het dashboard, of de terminal/het logbestand waarmee je <code>serve</code> startte.</td></tr>
 </table></div>
-<div class="note"><b>Kom je er niet uit?</b>De Log-kaart benoemt meestal de boosdoener -
+<div class="note"><b>Kom je er niet uit?</b>Voor een probleem met één download gebruik je <b>Rapport maken</b>: het zit in de lade van die taak in de wachtrij zolang die loopt, en daarna in de geschiedenislade. Het kopieert alles over die ene download, waaronder alleen de eigen logregels in plaats van die van de hele dienst. Gebruikersnamen, wachtwoorden en API-sleutels worden nooit gelezen, en je persoonlijke map wordt als <code>~</code> geschreven. De Log-kaart benoemt meestal de boosdoener -
 stuur de staart ervan mee als je een probleem meldt, samen met je
 <code>nzbfast --version</code>.</div>
 

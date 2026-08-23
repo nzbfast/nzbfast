@@ -161,8 +161,13 @@ fn route_preview_probe(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query
     const MAX_PROBE_THREADS: usize = 8;
     if PROBE_THREADS.fetch_add(1, Ordering::AcqRel) >= MAX_PROBE_THREADS {
         PROBE_THREADS.fetch_sub(1, Ordering::AcqRel);
+        // JSON, not plain text: the dashboard's `probeFetch` parses every
+        // refusal body, and a bare "busy" landed there as `{}` - read as
+        // "no video file to read here" and settled, never polled again.
+        // `pending` is the key it already keeps asking about, and the cap
+        // is exactly that kind of transient.
         let _ = req.respond(
-            tiny_http::Response::from_string("busy")
+            json_resp(serde_json::json!({"error": "busy", "pending": true}))
                 .with_status_code(503)
                 .with_header(
                     tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"2"[..]).unwrap(),
@@ -456,7 +461,7 @@ fn route_watch(req: tiny_http::Request, d: &Arc<Daemon>, query: &str) {
             .unwrap_or_else(|| "watch.nzb".to_string());
         d.enqueue_fetched(&f, &name, "", 2, None, None, 0, "url", false)
     }) {
-        Ok(id) => {
+        Ok(Enqueued { nzo_id: id, .. }) => {
             // Reflect the key into the redirect ONLY when it really
             // is a configured key. On a keyless install `ok` above
             // is true for ANY `apikey=` value, and this value went
@@ -648,12 +653,10 @@ fn route_jobnzb(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_api(
     req: tiny_http::Request,
     d: &Arc<Daemon>,
     cfg_path: &std::path::Path,
-    #[cfg(feature = "indexer")] tmdb_key: &Option<String>,
     params: std::collections::HashMap<String, String>,
 ) {
     let mut req = req;
@@ -774,6 +777,12 @@ fn handle_api(
         (Some(k), _) => given.is_some_and(|g| ct_eq(g, k)),
         (None, Some(_)) => false,
     };
+    // Whoever sent this already holds the key, so the first-run token
+    // stops being worth one (`disarm_handoff_in`). A relaxed load on
+    // every run that armed nothing.
+    if full && cur_apikey.is_some() {
+        note_full_key_request();
+    }
     // SABnzbd's nzb_key stops at addfile/addurl/version, which
     // fails every push extension's "test connection" button:
     // NZB Donkey probes mode=status, NZB Unity probes
@@ -927,8 +936,6 @@ fn handle_api(
         base: &base,
         ua_hdr: &ua_hdr,
         key_q: &key_q,
-        #[cfg(feature = "indexer")]
-        tmdb_key,
         bootstrap_apikey,
         via_add_only,
     };
@@ -937,12 +944,7 @@ fn handle_api(
     let _ = req.respond(with_cors(json_resp(body), cors));
 }
 
-pub(super) fn spawn_http_workers(
-    server: tiny_http::Server,
-    daemon: Arc<Daemon>,
-    config: PathBuf,
-    #[cfg(feature = "indexer")] tmdb_key: Option<String>,
-) {
+pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>, config: PathBuf) {
     // A small worker pool over the shared listener (tiny_http's recv() is
     // thread-safe): slow handlers - sysbench (~30-60 s), server_test (12 s),
     // addurl fetches, large index searches - must not freeze queue/stats
@@ -957,8 +959,6 @@ pub(super) fn spawn_http_workers(
         let server = server.clone();
         let d = daemon.clone();
         let cfg_path = config.clone();
-        #[cfg(feature = "indexer")]
-        let tmdb_key = tmdb_key.clone();
         tokio::task::spawn_blocking(move || {
             // Snapshot this run's stop baseline at spawn: the epoch is
             // monotonic, so a stop for THIS run stays visible even after
@@ -1022,6 +1022,17 @@ pub(super) fn spawn_http_workers(
                 // clean for the 99% who never wrote one.
                 if path == "/custom.css" {
                     respond_page(req, user_css(&d.cfg_path), "text/css; charset=utf-8");
+                    continue;
+                }
+                // The one-time credential handoff for the browser this
+                // daemon opened for itself: the launch URL carries a
+                // token, not the API key, so the key never lands in a
+                // child process's argv where a local neighbour can read
+                // it. See `route_handoff` for why an unauthenticated
+                // route is the right shape here, and why every run that
+                // armed no handoff simply refuses.
+                if path == "/handoff" {
+                    route_handoff(req, &d);
                     continue;
                 }
                 // §5 i18n catalogues (key→string JSON, embedded like the HTML).
@@ -1272,9 +1283,6 @@ pub(super) fn spawn_http_workers(
                 // fallback entirely, so no handler can reach the socket
                 // after auth - see the `unwrap_or_default()` in each of
                 // them.
-                #[cfg(feature = "indexer")]
-                handle_api(req, &d, &cfg_path, &tmdb_key, params);
-                #[cfg(not(feature = "indexer"))]
                 handle_api(req, &d, &cfg_path, params);
             }
         });
@@ -1493,5 +1501,238 @@ mod tests {
             hex::encode(h.finalize())
         };
         assert_eq!(launcher_proof("tok", Some("abcdefgh")), Some(expect));
+    }
+
+    /// TODO 23 low1: the API key must never reach the browser child's
+    /// argv. It used to, as `?apikey=` in the launch URL, which on Linux
+    /// put it in a world-readable `/proc/<pid>/cmdline`.
+    ///
+    /// Asserted against the argv the spawn really uses, on every element
+    /// including the program name, because the leak was one `format!`
+    /// away from looking correct.
+    #[test]
+    fn the_browser_argv_never_carries_the_api_key() {
+        const KEY: &str = "1f8b0e5c2d4a6b8c0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b";
+        let slot = std::sync::Mutex::new(None);
+        let (prog, args) = dashboard_argv_in(&slot, 6789, false, Some(KEY));
+        assert!(!prog.contains(KEY), "{prog}");
+        for a in &args {
+            assert!(!a.contains(KEY), "key in argv: {a}");
+        }
+        // What DID go out is a handoff token, and it redeems for the key.
+        let url = args.last().expect("a url");
+        let token = url
+            .split_once("?handoff=")
+            .map(|(_, t)| t.to_string())
+            .unwrap_or_else(|| panic!("no handoff token in {url}"));
+        assert!(!token.is_empty() && token != KEY);
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Key(KEY.into()));
+    }
+
+    /// One exchange, and only for the token that was armed. A miss must
+    /// not burn the hit: any local process could otherwise disarm the
+    /// launch in flight by posting one byte.
+    #[test]
+    fn a_handoff_is_redeemable_once_and_a_miss_does_not_burn_it() {
+        let slot = std::sync::Mutex::new(None);
+        assert_eq!(
+            redeem_handoff_in(&slot, "anything"),
+            Redeem::Refused,
+            "nothing armed"
+        );
+        let token = arm_handoff_in(&slot, "the-key").expect("armed");
+        assert_eq!(redeem_handoff_in(&slot, "wrong"), Redeem::Refused);
+        assert_eq!(redeem_handoff_in(&slot, ""), Redeem::Refused);
+        assert_eq!(
+            redeem_handoff_in(&slot, &token),
+            Redeem::Key("the-key".into())
+        );
+    }
+
+    /// The second presentation of the RIGHT token is not "nothing
+    /// armed": the slot remembers the token it traded, so a replay is
+    /// told apart from a miss. Exactly one of the two presenters was the
+    /// browser this daemon spawned, and `route_handoff` rotates the key
+    /// on this answer. A wrong token after the trade is still a plain
+    /// refusal, and still burns nothing: the mark survives it.
+    #[test]
+    fn a_second_redeem_with_the_right_token_is_a_replay() {
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "the-key").expect("armed");
+        assert_eq!(
+            redeem_handoff_in(&slot, &token),
+            Redeem::Key("the-key".into())
+        );
+        assert_eq!(redeem_handoff_in(&slot, "wrong"), Redeem::Refused);
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Replay, "replayed");
+        // And again: the mark is not consumed by being seen.
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Replay);
+        // What the slot keeps is a hash, never the key, so a replay is
+        // never a second copy of the credential.
+        assert!(slot.lock_ok().as_ref().is_some_and(|h| h.holds_no_key()));
+    }
+
+    /// A request that authenticates with the full key proves its sender
+    /// already has what the token was minted to deliver, so the token
+    /// stops being worth a key. The mark stays: a later presentation is
+    /// a replay, not a miss. And a slot that was already traded is left
+    /// alone, because in the sequence where a reader traded first, that
+    /// reader's own authenticated requests must not erase the evidence
+    /// the browser's late arrival is judged against.
+    #[test]
+    fn a_full_key_request_disarms_an_armed_handoff_but_keeps_the_mark() {
+        let slot = std::sync::Mutex::new(None);
+        disarm_handoff_in(&slot);
+        assert!(slot.lock_ok().is_none(), "nothing to disarm");
+        let token = arm_handoff_in(&slot, "the-key").expect("armed");
+        disarm_handoff_in(&slot);
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Replay);
+        assert_eq!(redeem_handoff_in(&slot, "wrong"), Redeem::Refused);
+        // Traded first, then an authenticated request, then the token
+        // again: still a replay.
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "k2").expect("armed");
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Key("k2".into()));
+        disarm_handoff_in(&slot);
+        assert_eq!(redeem_handoff_in(&slot, &token), Redeem::Replay);
+    }
+
+    /// F-09: the handoff token only ever exists in the argv of a browser
+    /// this daemon spawned on this machine, so a redeemer from anywhere
+    /// else is by construction not that browser. On a `--bind 0.0.0.0`
+    /// install the door is otherwise network-reachable.
+    ///
+    /// The refusal comes BEFORE the redeem, so the remote attempt must
+    /// not burn the token: the local browser arriving second still gets
+    /// its key. The loopback presenters here are real sockets this
+    /// process opened to itself, so the account lookup runs for real and
+    /// finds our own uid (or, on a platform with no arm, nothing).
+    #[test]
+    fn a_handoff_is_redeemable_only_from_this_machine() {
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "the-key").expect("armed");
+        let lan: std::net::SocketAddr = "192.168.1.44:41000".parse().unwrap();
+        let wan: std::net::SocketAddr = "203.0.113.7:41000".parse().unwrap();
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(lan), 6789, &token),
+            Redeem::Refused
+        );
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(wan), 6789, &token),
+            Redeem::Refused
+        );
+        // No address at all is not evidence of locality either.
+        assert_eq!(
+            redeem_handoff_from(&slot, None, 6789, &token),
+            Redeem::Refused
+        );
+        // None of that burned it, and the loopback caller still trades.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let _c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (_s, lo) = l.accept().unwrap();
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(lo), port, &token),
+            Redeem::Key("the-key".into())
+        );
+        // A remote presenter of a spent token is refused, not told it
+        // was spent: the replay answer is for this machine only too.
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(lan), 6789, &token),
+            Redeem::Refused
+        );
+        // IPv6 loopback is this machine too, and one use is still one use.
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "k6").expect("armed");
+        let l6 = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let port6 = l6.local_addr().unwrap().port();
+        let _c6 = std::net::TcpStream::connect(("::1", port6)).unwrap();
+        let (_s6, lo6) = l6.accept().unwrap();
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(lo6), port6, &token),
+            Redeem::Key("k6".into())
+        );
+        assert_eq!(
+            redeem_handoff_from(&slot, Some(lo6), port6, &token),
+            Redeem::Replay
+        );
+    }
+
+    /// The residual the replay mark could not reach: an argv reader in
+    /// ANOTHER local account that trades first on a launch where the
+    /// browser never arrives. Loopback is every local account's, so the
+    /// kernel is asked who owns the presenting socket, and a socket of
+    /// another account is refused outright - before the key is taken,
+    /// so the browser still trades after it, and without the slot
+    /// forgetting anything, so the late browser is a `Key` and not a
+    /// `Replay`. A foreign presenter of an already-spent token is still
+    /// `Foreign`, not `Replay`: it never held the key, so there is
+    /// nothing to rotate. And the lookup is never made for a wrong
+    /// token, so a spray cannot make the daemon walk the table.
+    #[test]
+    fn a_presenter_from_another_local_account_is_refused_without_burning_the_token() {
+        use super::super::peeracct::PeerAccount;
+        let asked = std::cell::Cell::new(0);
+        let other = || {
+            asked.set(asked.get() + 1);
+            PeerAccount::Other("uid 1001".into())
+        };
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "the-key").expect("armed");
+        assert_eq!(
+            redeem_handoff_as(&slot, "wrong", other),
+            Redeem::Refused,
+            "a miss is refused before anyone is asked"
+        );
+        assert_eq!(asked.get(), 0);
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, other),
+            Redeem::Foreign("uid 1001".into())
+        );
+        assert_eq!(asked.get(), 1);
+        assert!(
+            slot.lock_ok().as_ref().is_some_and(|h| !h.holds_no_key()),
+            "the foreign presenter burned nothing"
+        );
+        // The browser, arriving after the reader: a Key, not a Replay.
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, || PeerAccount::Ours),
+            Redeem::Key("the-key".into())
+        );
+        // The reader again, now that it is spent: still Foreign, and the
+        // replay answer (which rotates the key) is not given to it.
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, other),
+            Redeem::Foreign("uid 1001".into())
+        );
+        // Our own account presenting twice is the replay it always was.
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, || PeerAccount::Ours),
+            Redeem::Replay
+        );
+        // A box where the owner cannot be read keeps the old rule: the
+        // token trades, once.
+        let slot = std::sync::Mutex::new(None);
+        let token = arm_handoff_in(&slot, "k2").expect("armed");
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, || PeerAccount::Unknown),
+            Redeem::Key("k2".into())
+        );
+        assert_eq!(
+            redeem_handoff_as(&slot, &token, || PeerAccount::Unknown),
+            Redeem::Replay
+        );
+    }
+
+    /// No key to hand over (every run after the first) means no token
+    /// and a plain URL - not an empty `?handoff=`, which would send the
+    /// page off to trade a token that was never minted.
+    #[test]
+    fn a_keyless_launch_opens_a_plain_url() {
+        let slot = std::sync::Mutex::new(None);
+        let (_, args) = dashboard_argv_in(&slot, 6789, true, None);
+        let url = args.last().expect("a url");
+        assert_eq!(url, "https://localhost:6789/");
+        assert!(slot.lock_ok().is_none(), "nothing armed");
     }
 }

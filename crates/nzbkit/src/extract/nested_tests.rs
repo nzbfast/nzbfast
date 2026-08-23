@@ -15,6 +15,86 @@ use super::testutil::*;
 
 // -- encrypted RAR5 store sets (native AES decryption) --
 
+// -- Finding 4 (TODO 30): promoted plain children --
+
+/// A routed child slot that classifies its inner file as Plain is
+/// terminal, so the parent caches the child's `Arc<FileWriter>` in
+/// `routed_plain` and every later article writes straight into it -
+/// parent lock, child lock, child pwrite, parent re-lock collapses to
+/// one off-lock pwrite. Landed unpinned in `3f6c129f`; this is the pin.
+///
+/// Two assertions, because neither alone is worth much:
+///
+/// * the parent group really holds a `routed_plain` entry for the raw
+///   inner name - without it the test passes verbatim on the
+///   pre-promotion ladder and pins nothing;
+/// * the output writer's PHYSICAL byte count (`written`, every
+///   `write_at`) equals the file size, so every byte was written
+///   exactly once. This is the failure the promotion could plausibly
+///   introduce: leaving the child on the per-article path as well as
+///   the parent would write each span twice, which `covered` (unique
+///   bytes) and the on-disk bytes both hide - the second write lands
+///   at the same offset with the same payload.
+///
+/// Volumes are fed IN ORDER here rather than through the shuffling
+/// `feed`: with the offset-0 sniff arriving first the promotion is live
+/// from the second article on, and measured with a doubling probe on
+/// the depth-0 job loop it then carries 343,041 of the 350,000 bytes -
+/// 98%, everything but the first article, which still walks the child
+/// ladder and is what promotes. Under a shuffled feed most of the file
+/// arrives pre-classification and drains under the lock instead, so the
+/// promoted route would carry a third of it and the byte-count
+/// assertion would be mostly about a path this test is not named for.
+#[test]
+fn promoted_plain_child_writes_each_byte_exactly_once() {
+    let e01 = payload(350_000, 21);
+    let vols: Vec<Vec<u8>> = vec![
+        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[..120_000], false, true)], 0),
+        fixtures::rar5_volume_n(
+            &[("E01.mkv", 350_000, &e01[120_000..240_000], true, true)],
+            1,
+        ),
+        fixtures::rar5_volume_n(&[("E01.mkv", 350_000, &e01[240_000..], true, false)], 2),
+    ];
+    let dir = tmpdir("f4promote");
+    let ex = Extractor::new(&dir, 3, true);
+    for (vi, vol) in vols.iter().enumerate() {
+        let name = format!("obf{:02x}.bin", (vi as u8) ^ 0x5a);
+        for s in (0..vol.len()).step_by(7000) {
+            let e = (s + 7000).min(vol.len());
+            ex.write(vi, &name, vol.len() as u64, s as u64, &vol[s..e])
+                .unwrap();
+        }
+    }
+    let promoted: Vec<String> = {
+        let inner = ex.inner.lock_ok();
+        inner
+            .groups
+            .values()
+            .flat_map(|g| g.routed_plain.keys().cloned())
+            .collect()
+    };
+    let writers = ex.writers_snapshot();
+    let rep = ex.finish().unwrap();
+
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(rep.extracted, vec![("E01.mkv".to_string(), 350_000)]);
+    assert_eq!(std::fs::read(dir.join("E01.mkv")).unwrap(), e01);
+    assert_eq!(promoted, vec!["E01.mkv".to_string()], "no promotion");
+
+    let w = writers
+        .iter()
+        .find(|(n, _)| n == "E01.mkv")
+        .map(|(_, w)| w)
+        .expect("no writer for the promoted child output");
+    assert_eq!(
+        w.written(),
+        350_000,
+        "promoted child bytes written more than once"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // -- nested one-pass: store-in-store via the recursive child --
 
 /// Outer store volumes wrapping a store archive wrapping the final
@@ -54,6 +134,18 @@ fn two_level_store_set_extracts_one_pass() {
             let name = format!("obf{:02x}.bin", (vi as u8) ^ 0x3c);
             feed(&ex, vi, &name, &vols[vi], 7000, 70 + vi as u64);
         }
+        // Finding 4's counter-case: `inner.rar` is a routed child whose
+        // slot classifies as Rar, never Plain, so the outer group must
+        // never cache a writer for it - a promotion here would pwrite
+        // the intermediate archive to disk and lose the second pass.
+        assert!(
+            ex.inner
+                .lock_ok()
+                .groups
+                .values()
+                .all(|g| g.routed_plain.is_empty()),
+            "order {order:?}: a nested RAR child promoted"
+        );
         let rep = ex.finish().unwrap();
         assert!(
             rep.fallbacks.is_empty(),

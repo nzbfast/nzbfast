@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use super::job::WhyVerdict;
 use crate::MutexExt;
 
 /// The vote window: one classification per second, verdicts need a
@@ -178,6 +179,25 @@ impl Layer {
             Layer::Unknown => "unknown",
         }
     }
+
+    /// The reverse, for a verdict read back off a history record. An
+    /// unrecognised token - a future layer, or a corrupted line - is
+    /// None, which reads as no verdict rather than as a wrong one.
+    /// `unknown` is deliberately not accepted: it IS the absence of a
+    /// verdict, and TODO 207's rule is that absence stays absence.
+    fn from_token(t: &str) -> Option<Layer> {
+        [
+            Layer::Limit,
+            Layer::Line,
+            Layer::Disk,
+            Layer::Cpu,
+            Layer::Client,
+            Layer::Provider,
+            Layer::Missing,
+        ]
+        .into_iter()
+        .find(|l| l.token() == t)
+    }
 }
 
 /// One server's cumulative counters at a tick, as read from
@@ -193,6 +213,14 @@ pub(super) struct ServerTick {
     pub refused: bool,
     pub tried: u64,
     pub missing: u64,
+    /// The pool's per-server dispatch-to-done EWMA in ms
+    /// (`ServerLive::srv_art_ms`), 0 = untrained. A LEVEL, not a
+    /// cumulative counter, so the core stores it rather than
+    /// differencing it. Carried for display only: no verdict reads it,
+    /// because article time is a queueing quantity (it folds the wait
+    /// behind pipeline-mates on purpose) and a fleet running deep
+    /// pipelines has a big one while behaving perfectly.
+    pub art_ms: u64,
 }
 
 /// Everything one second of observation carries into the core.
@@ -244,6 +272,7 @@ struct ServerState {
     refused: bool,
     tried: u64,
     missing: u64,
+    art_ms: u64,
 }
 
 /// A verdict change, for the per-job timeline.
@@ -271,6 +300,14 @@ pub(super) struct Core {
     /// (publish Unknown, honestly).
     no_majority: usize,
     timeline: VecDeque<Change>,
+    /// TODO 207: how long each (layer, detail) has been the published
+    /// verdict this run, banked as the verdict changes. The timeline
+    /// next door cannot answer this - it is capped at
+    /// [`TIMELINE_CAP`] changes, so a job that flapped for an hour has
+    /// lost its early spans by the time anyone asks - and the whole
+    /// point of the persisted verdict is that it is the LONGEST-held
+    /// one, over the whole run.
+    held_ms: HashMap<(Layer, String), u64>,
     /// Best whole-fleet delivery seen this run on an uncapped,
     /// unblocked tick: the live envelope estimate.
     envelope_bps: u64,
@@ -336,6 +373,7 @@ impl Core {
             st.refused = s.refused;
             st.tried = s.tried;
             st.missing = s.missing;
+            st.art_ms = s.art_ms;
             fleet_bytes += st.d_bytes;
             fleet_blocked += st.d_blocked;
             fleet_connected += s.connected;
@@ -649,8 +687,8 @@ impl Core {
                 .unwrap_or_default()
         };
         if (winner, detail.as_str()) != (self.verdict.0, self.verdict.1.as_str()) {
+            self.close_span(at_ms);
             self.verdict = (winner, detail.clone());
-            self.verdict_since_ms = at_ms;
             self.timeline.push_back(Change {
                 at_ms,
                 layer: winner,
@@ -674,6 +712,108 @@ impl Core {
     pub(super) fn verdict(&self) -> (Layer, &str) {
         (self.verdict.0, &self.verdict.1)
     }
+
+    /// Bank the time the standing verdict has been up, and restart its
+    /// clock at `at_ms`. Called at every verdict change and once more
+    /// where the run is summarised, so the banked spans tile the whole
+    /// run with no gap and no double count.
+    fn close_span(&mut self, at_ms: u64) {
+        let held = at_ms.saturating_sub(self.verdict_since_ms);
+        *self
+            .held_ms
+            .entry((self.verdict.0, self.verdict.1.clone()))
+            .or_default() += held;
+        self.verdict_since_ms = at_ms;
+    }
+
+    /// TODO 207: this run's verdict for the record, as of `now_ms`.
+    ///
+    /// The LONGEST-HELD layer, which is the honest summary of where the
+    /// time went and the one that matches how the live panel is read.
+    /// The last verdict before the job left the wire would be cheaper
+    /// and would call a job that was provider-bound for ten minutes a
+    /// disk problem on the strength of its final seconds.
+    ///
+    /// `Unknown` is excluded rather than allowed to win: it is the
+    /// absence of a verdict, so a run that mostly could not be judged
+    /// reports the layer that WAS judged - with `total_secs` beside it
+    /// saying how much of the run that layer actually covers, which is
+    /// what stops the shorter claim from reading as the whole story.
+    /// A span under a second is not a verdict anyone held; it rounds to
+    /// "for 0s" on every surface and is refused here instead.
+    fn summary(&self, now_ms: u64) -> Option<WhyVerdict> {
+        let mut held = self.held_ms.clone();
+        *held
+            .entry((self.verdict.0, self.verdict.1.clone()))
+            .or_default() += now_ms.saturating_sub(self.verdict_since_ms);
+        let total: u64 = held.values().sum();
+        // Longest-held LAYER first, then the longest-held detail inside
+        // it: two hosts named by the same layer are one finding about
+        // that layer, and picking the pair outright would let a third
+        // layer that never held as long win on the split.
+        //
+        // Ties break on the token, never on HashMap order - a verdict
+        // that changed with the iteration seed would be untestable and
+        // would differ between two reads of the same run.
+        let mut per_layer: HashMap<Layer, u64> = HashMap::new();
+        for ((l, _), ms) in &held {
+            *per_layer.entry(*l).or_default() += ms;
+        }
+        let (layer, layer_ms) = per_layer
+            .into_iter()
+            .filter(|(l, _)| *l != Layer::Unknown)
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.token().cmp(a.0.token())))?;
+        if layer_ms < 1_000 {
+            return None;
+        }
+        let detail = held
+            .iter()
+            .filter(|((l, _), _)| *l == layer)
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.1.cmp(&a.0.1)))
+            .map(|(k, _)| k.1.clone())
+            .unwrap_or_default();
+        Some(WhyVerdict {
+            layer: layer.token().to_string(),
+            detail,
+            held_secs: layer_ms / 1000,
+            total_secs: total / 1000,
+        })
+    }
+}
+
+/// TODO 210 item (d): the anchor this surface treats as 100%, with the
+/// LOCAL LINK folded in.
+///
+/// `linkpeak` resolves measured-against-typed and knows nothing about
+/// the LAN between this machine and the modem. A 710 Mbit line reached
+/// over a 1200 Mbps Wi-Fi link can deliver about 660, so a run riding
+/// that link at 660 was drawn against a 710 mark and classified as a
+/// shortfall - the graph showed a gap that nothing could close and the
+/// verdict blamed the providers for the access point. Same rule as
+/// `update_tune_hint`'s yardstick, so the two surfaces cannot disagree
+/// about what this machine can carry.
+///
+/// Only the TYPED arm is clamped. A `measured` anchor is a rate this
+/// machine actually sustained, which is direct evidence about the whole
+/// path; overriding it with an estimate of one hop would be arguing
+/// with the link's own answer. `link` names the clamp when it bites, so
+/// the panel can label the mark honestly rather than calling the LAN a
+/// line speed setting.
+fn link_capped(anchor: (u64, &'static str), link_ceiling: Option<u64>) -> (u64, &'static str) {
+    match link_ceiling {
+        Some(c) if anchor.1 == "line" && c < anchor.0 => (c, "link"),
+        _ => anchor,
+    }
+}
+
+/// [`link_capped`] over what the daemon currently holds.
+fn anchor(d: &super::daemon::Daemon, line_bps: u64) -> (u64, &'static str) {
+    let ceiling = d
+        .local_link
+        .lock_ok()
+        .as_ref()
+        .and_then(|l| l.ceiling_bps());
+    link_capped(d.link_peak.effective(line_bps), ceiling)
 }
 
 /// One second of observation, gathered from the daemon and fed to the
@@ -698,7 +838,7 @@ pub(super) fn feed(
         super::daemon::find_job(d.queue.lock_ok().iter(), id)
             .is_some_and(|j| j.lock_ok().state == super::job::JobState::Downloading)
     });
-    let (anchor_bps, _) = d.link_peak.effective(line_bps);
+    let (anchor_bps, _) = anchor(d, line_bps);
     let servers: Vec<ServerTick> = d
         .hub
         .pool_live
@@ -717,6 +857,7 @@ pub(super) fn feed(
                     refused: s.refusal.lock().map(|r| r.is_some()).unwrap_or(false),
                     tried: s.articles_tried.load(Ordering::Relaxed),
                     missing: s.articles_missing.load(Ordering::Relaxed),
+                    art_ms: s.srv_art_ms.load(Ordering::Relaxed),
                 })
                 .collect()
         })
@@ -775,6 +916,21 @@ impl WhySlow {
         self.core.lock_ok().disk_question
     }
 
+    /// TODO 207: this job's verdict for its history record, or None if
+    /// the core is not judging it or judged nothing.
+    ///
+    /// Ownership is checked rather than assumed: the core judges
+    /// whoever owns the wire, so asking for a job that is not the one
+    /// being judged must yield nothing at all, never the current
+    /// job's verdict under another name.
+    pub(super) fn capture(&self, nzo_id: &str, now_ms: u64) -> Option<WhyVerdict> {
+        let c = self.core.lock_ok();
+        match c.owner.as_deref() == Some(nzo_id) {
+            true => c.summary(now_ms),
+            false => None,
+        }
+    }
+
     /// The queue payload's `whyslow` block - null when no job owns the
     /// wire. `d` supplies the bench corroboration and the live server
     /// list; everything judged comes from the core.
@@ -804,7 +960,7 @@ impl WhySlow {
             (b.1, b.2)
         };
         let line = d.line_speed.load(Ordering::Relaxed);
-        let (anchor_bps, anchor_src) = d.link_peak.effective(line);
+        let (anchor_bps, anchor_src) = anchor(d, line);
         // The hardware ceiling: the best independent evidence held
         // about this link, its source named. The anchor already
         // resolves measured-vs-typed; a bench probe that beat both is
@@ -814,6 +970,33 @@ impl WhySlow {
         } else {
             (anchor_bps, anchor_src)
         };
+        // The pool's article-time pair, read BEFORE the core lock for
+        // the same reason the bench file above is: this surface never
+        // holds the core mutex across another lock.
+        //
+        // `art_ms` here is the MID-RUN fleet EWMA - the value
+        // `hedge_stale_bound` is consulting right now - and
+        // `hedge_bound_ms` is what it currently computes from it. That
+        // is deliberately not the `art` figure in the end-of-run
+        // `[pool]` log line, which is sampled while the in-flight set
+        // drains and therefore tracks the drain's duration rather than
+        // an article's (research/NOTE-2026-08-21-art-ms-semantics.md
+        // §10, where two reps of one job printed values 8.1x apart).
+        // Reported, not judged: article time folds queueing behind
+        // pipeline-mates on purpose, so a deep pipeline has a large one
+        // while nothing at all is wrong, and no verdict may rest on it.
+        let (pool_art_ms, hedge_bound_ms) = d
+            .hub
+            .pool_live
+            .lock_ok()
+            .as_ref()
+            .map(|l| {
+                (
+                    l.race.art_ms.load(Ordering::Relaxed),
+                    l.race.hedge_bound_ms.load(Ordering::Relaxed),
+                )
+            })
+            .unwrap_or((0, 0));
         let c = self.core.lock_ok();
         let Some(owner) = c.owner.clone() else {
             return Value::Null;
@@ -840,6 +1023,7 @@ impl WhySlow {
                             100.0 * s.missing as f64 / s.tried as f64
                         } else { 0.0 },
                         "reconnects": s.win_reconnects,
+                        "art_ms": s.art_ms,
                     })
                 })
                 .collect()
@@ -889,6 +1073,8 @@ impl WhySlow {
             "post_unix": c.last_post_unix,
             "missing_pct": (c.fleet_missing().unwrap_or(0.0) * 1000.0).round() / 10.0,
             "missing_backbones": c.missing_backbones(),
+            "art_ms": pool_art_ms,
+            "hedge_bound_ms": hedge_bound_ms,
             "hardware_bps": hardware_bps,
             "hardware_src": hardware_src,
             "bench_ts": bench_ts,
@@ -896,6 +1082,81 @@ impl WhySlow {
             "timeline": timeline,
         })
     }
+}
+
+/// TODO 207: stamp this run's verdict onto the record, at network-drain.
+///
+/// WHEN, and why it is here and not one step later: the core judges
+/// whoever owns the wire, so network-drain is both the last instant the
+/// verdict exists and the last instant it is about this job. The lane
+/// marks the record `Finishing` up to a few seconds later - through
+/// `settle_job_tail` and the sidecar wind-down - and the ticker keeps
+/// voting for all of it on a fleet that has already hung up, which is
+/// exactly the shape `classify`'s `never_fed` guard exists to keep out
+/// of a live verdict; banking those seconds into the held-time totals
+/// would put the same fiction into the persisted one.
+///
+/// This is deliberately the verdict for the NETWORK leg alone. A job
+/// that flew down the wire and then sat ten minutes in its tail is not
+/// a slow download and has no verdict here - `Job::postproc_secs` is
+/// the number that answers for the tail, and conflating the two would
+/// give the tail a layer name it was never judged on.
+///
+/// Stamped on the record rather than carried on the postproc ticket so
+/// that a job which FAILED on the wire keeps it too: every exit from
+/// the network phase, clean or not, passes through here.
+pub(super) fn stamp(d: &super::daemon::Daemon, nzo_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.as_millis() as u64)
+        .unwrap_or(0);
+    let Some(v) = d.whyslow.capture(nzo_id, now_ms) else {
+        return;
+    };
+    // History as well as the queue: a delete verb files a still-
+    // downloading record into history and the fetch then errors its way
+    // through here, so the record this is about is no longer where it
+    // started. One container lock at a time, and the record itself is
+    // locked only after `queue_job` / `history_job` has returned -
+    // "locking a Job while holding the queue is how this tree
+    // deadlocks".
+    if let Some(job) = d.queue_job(nzo_id).or_else(|| d.history_job(nzo_id)) {
+        job.lock_ok().whyslow = Some(v);
+    }
+}
+
+/// The persisted form. Written by `job_json`, and read back by
+/// [`verdict_from_json`] - the pair lives here, next to the token
+/// table it has to agree with.
+pub(in crate::serve) fn verdict_json(v: &WhyVerdict) -> Value {
+    json!({
+        "layer": v.layer,
+        "detail": v.detail,
+        "held_secs": v.held_secs,
+        "total_secs": v.total_secs,
+    })
+}
+
+/// ...and back, defensively. TODO 207's rule: every record written
+/// before this field existed must read as ABSENT - not as `unknown`,
+/// and not as `line`. That is the whole of it, because absence is the
+/// only thing such a record can truthfully say, and both of those
+/// tokens are claims. So there is no default anywhere on this path: a
+/// missing key, a key of the wrong shape, and a layer token this build
+/// does not know all yield None.
+pub(in crate::serve) fn verdict_from_json(v: Option<&Value>) -> Option<WhyVerdict> {
+    let v = v?;
+    let layer = Layer::from_token(v.get("layer")?.as_str()?)?;
+    Some(WhyVerdict {
+        layer: layer.token().to_string(),
+        detail: v
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        held_secs: v.get("held_secs").and_then(Value::as_u64).unwrap_or(0),
+        total_secs: v.get("total_secs").and_then(Value::as_u64).unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
@@ -919,6 +1180,7 @@ mod tests {
             refused: false,
             tried: 100,
             missing: 0,
+            art_ms: 0,
         }
     }
 
@@ -960,7 +1222,7 @@ mod tests {
             }
         }
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         fn run(
             &mut self,
             n: usize,
@@ -1026,6 +1288,75 @@ mod tests {
             Layer::Unknown,
             "no verdict before a majority"
         );
+    }
+
+    /// §210 (d). The clamp itself, over the four cases that decide it.
+    #[test]
+    fn the_local_link_caps_the_typed_line_and_nothing_else() {
+        const LINE: u64 = 710 * 125_000;
+        // Gary's shape: a 1200 Mbps Wi-Fi link carries ~660, so 660 is
+        // the mark the graph draws 100% at - and it names the link
+        // rather than calling the LAN a line speed setting.
+        let wifi = 82_500_000;
+        assert_eq!(
+            link_capped((LINE, "line"), Some(wifi)),
+            (wifi, "link"),
+            "the LAN is lower, so the LAN is the ceiling"
+        );
+        // A link that covers the line changes nothing.
+        assert_eq!(
+            link_capped((LINE, "line"), Some(200_000_000)),
+            (LINE, "line")
+        );
+        // A MEASURED anchor is a rate this machine actually sustained -
+        // direct evidence about the whole path, including this hop.
+        // An estimate of one hop may not argue with it.
+        assert_eq!(
+            link_capped((LINE, "measured"), Some(wifi)),
+            (LINE, "measured")
+        );
+        // A tunnel, or an interface the OS would not rate, gives no
+        // ceiling at all: nothing to clamp with.
+        assert_eq!(link_capped((LINE, "line"), None), (LINE, "line"));
+        // And no anchor stays no anchor - never invent one from a link.
+        assert_eq!(link_capped((0, ""), Some(wifi)), (0, ""));
+    }
+
+    /// ...and what the clamp is FOR. Gary's own numbers only move the
+    /// 100% mark (660 of 710 still rides the line bar), so this takes
+    /// the shape that also moves the VERDICT: an 866 Mbps Wi-Fi 5 link
+    /// carries ~476 Mbit under a gigabit line, and a run at that
+    /// ceiling was being blamed on the providers.
+    #[test]
+    fn riding_the_local_link_is_not_a_provider_shortfall() {
+        const LINE: u64 = 1000 * 125_000;
+        let capped = link_capped((LINE, "line"), Some(59_537_500));
+        assert_eq!(capped, (59_537_500, "link"));
+        let mut r = Rig::new();
+        r.run(
+            WINDOW,
+            58e6,
+            0,
+            capped.0,
+            30.0,
+            false,
+            &[("a", 8, 8, 58_000_000, 0, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Line);
+        // Against the unclamped line the same run reads as a shortfall
+        // the reader can do nothing about, and names a host that is
+        // delivering everything the LAN will carry.
+        let mut r = Rig::new();
+        r.run(
+            WINDOW,
+            58e6,
+            0,
+            LINE,
+            30.0,
+            false,
+            &[("a", 8, 8, 58_000_000, 0, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Provider);
     }
 
     #[test]
@@ -1693,6 +2024,150 @@ mod tests {
             r.core.verdict().0,
             Layer::Unknown,
             "a hung-up fleet's redial history is not evidence"
+        );
+    }
+
+    /// TODO 207: the verdict a finished job carries into history is the
+    /// LONGEST-HELD layer of its run, not the last one before it left
+    /// the wire. A job that was provider-bound for most of an hour and
+    /// spent its final half-minute on a busy CPU was a provider
+    /// problem, and "last verdict" - the cheap option - says the
+    /// opposite of the truth about exactly that job.
+    #[test]
+    fn the_captured_verdict_is_the_longest_held_layer_not_the_last() {
+        let mut r = Rig::new();
+        // Forty seconds shy of the anchor with the pipeline idle: the
+        // sockets could not fill the pipe.
+        r.run(
+            40,
+            500e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[("a", 8, 8, 500_000_000, 0, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Provider);
+        // ...then the run ends with the machine's own cores pegged and
+        // the workers parked on a full channel, which is a different
+        // layer and IS the last thing that was true.
+        r.run(
+            20,
+            500e6,
+            0,
+            1_000_000_000,
+            95.0,
+            false,
+            &[("a", 8, 8, 500_000_000, 8_000, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Cpu, "the LAST verdict");
+        let v = r.core.summary(r.t).expect("a judged run has a verdict");
+        assert_eq!(v.layer, "provider", "but the longest-held one is kept");
+        assert!(
+            v.held_secs > v.total_secs / 2,
+            "and it carries its own weight: {v:?}"
+        );
+        assert!(
+            (58..=61).contains(&v.total_secs),
+            "the whole observed run, not just the winning span: {v:?}"
+        );
+    }
+
+    /// ...and the honest half of the same rule: `Unknown` is the
+    /// ABSENCE of a verdict, so a run nothing could be said about
+    /// persists nothing at all. Anything else and every fast little
+    /// download in history would carry "still gathering evidence".
+    #[test]
+    fn a_run_nothing_could_judge_persists_no_verdict() {
+        let mut r = Rig::new();
+        // No anchor: "slow" is undefined, so every tick votes Unknown.
+        r.run(
+            30,
+            500e6,
+            0,
+            0,
+            30.0,
+            false,
+            &[("a", 8, 8, 500_000_000, 0, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Unknown);
+        assert!(r.core.summary(r.t).is_none());
+        // A verdict that never held a whole second is not one either -
+        // it rounds to "for 0s" on every surface that renders it.
+        let mut r = Rig::new();
+        r.run(
+            WINDOW,
+            950e6,
+            0,
+            1_000_000_000,
+            30.0,
+            false,
+            &[("a", 8, 8, 950_000_000, 0, 0, false)],
+        );
+        assert_eq!(r.core.verdict().0, Layer::Line);
+        let v = r
+            .core
+            .summary(r.t)
+            .expect("line is a verdict like any other");
+        assert_eq!(v.layer, "line");
+        assert!(r.core.summary(r.core.verdict_since_ms + 999).is_none());
+    }
+
+    /// The capture is ownership-checked, for the same reason the live
+    /// payload is: the core judges whoever owns the wire, so asking it
+    /// about any other job must yield nothing rather than this job's
+    /// verdict filed under somebody else's name.
+    #[test]
+    fn a_capture_for_another_job_is_never_this_ones_verdict() {
+        let w = WhySlow::default();
+        for i in 1..=WINDOW as u64 {
+            w.tick(Tick {
+                owner: Some("job1".into()),
+                at_ms: T0 + i * 1000,
+                achieved_bps: 500e6,
+                throttle_bps: 0,
+                anchor_bps: 1_000_000_000,
+                cpu_pct: 30.0,
+                storage: false,
+                storage_suspect: false,
+                post_unix: 0,
+                servers: vec![srv("a", 8, 8, 500_000_000 * i, 0)],
+            });
+        }
+        let at = T0 + WINDOW as u64 * 1000;
+        assert!(w.capture("job2", at).is_none(), "not job2's verdict");
+        assert_eq!(
+            w.capture("job1", at).map(|v| v.layer),
+            Some("provider".to_string())
+        );
+    }
+
+    /// The persisted form, both ways. The reading half is where TODO
+    /// 207's absence rule lives, so every shape that is not a verdict
+    /// this build understands has to come back as no verdict.
+    #[test]
+    fn the_verdict_wire_form_round_trips_and_refuses_everything_else() {
+        let v = WhyVerdict {
+            layer: "provider".into(),
+            detail: "news.example.invalid".into(),
+            held_secs: 640,
+            total_secs: 900,
+        };
+        assert_eq!(verdict_from_json(Some(&verdict_json(&v))), Some(v));
+        assert!(verdict_from_json(None).is_none());
+        for bad in [
+            json!({}),
+            json!({"layer": "unknown"}),
+            json!({"layer": "line "}),
+            json!({"detail": "news.example.invalid"}),
+        ] {
+            assert!(verdict_from_json(Some(&bad)).is_none(), "{bad}");
+        }
+        // ...and a verdict missing only its numbers is still a verdict:
+        // the layer is the claim, the seconds are its weight.
+        assert_eq!(
+            verdict_from_json(Some(&json!({"layer": "line"}))).map(|v| v.held_secs),
+            Some(0)
         );
     }
 

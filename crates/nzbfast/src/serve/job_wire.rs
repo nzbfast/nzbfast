@@ -32,6 +32,12 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         // Wall clock, so history ages survive a restart.
         "finished_unix": j.finished_unix,
         "postproc_secs": j.postproc_secs,
+        // TODO 207: the shortfall verdict for this job's network leg,
+        // null for anything nothing judged. The log marks below are
+        // deliberately absent from this list and this one deliberately
+        // is not: a mark indexes a process-global ring, a verdict is a
+        // statement about the download. See `Job::whyslow`.
+        "whyslow": j.whyslow.as_ref().map(super::whyslow::verdict_json),
         // The other wall clock, for the same reason: `queued_at` is a
         // monotonic Instant that cannot cross a process (and is taken at
         // pick), so every restored queue row answered SAB's numeric
@@ -165,6 +171,14 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
             .get("postproc_secs")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
+        // Absent on every record written before TODO 207, and that is
+        // what those records get: None. NOT `unknown` and NOT `line` -
+        // both are verdicts, and a record from before the field existed
+        // carries none. Same trap as `bad_blocks` below, where a stored
+        // 0 meant both "verified, nothing bad" and "never verified".
+        // All of the reading is in `verdict_from_json`, so the token
+        // set has one home.
+        whyslow: super::whyslow::verdict_from_json(v.get("whyslow")),
         // Never written, so never read: these index a log ring this
         // process has not filled. See `Job::log_mark`.
         log_mark: 0,

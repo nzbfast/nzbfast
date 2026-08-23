@@ -7,6 +7,60 @@
 
 use super::*;
 use crate::sync::MutexExt;
+use tracing::info;
+
+/// The forfeit reason a chase raises when the shared held-bytes budget
+/// is still over after the drop-behind trim has had its pass.
+///
+/// Load-bearing as a STRING twice over, which is why it is a constant
+/// and not a literal at each of its three raise sites. The daemon's
+/// volume remediation keys off the "held-bytes cap" substring (a bare
+/// wording once matched nothing there, demoting the volumes and then
+/// shipping the job with no payload and exit 0), and `chase_teardown`
+/// compares the WHOLE reason to decide whether the in-stream partials
+/// may be kept for the disk pass to resume from - a test no other
+/// forfeit reason may pass. The 7z and zip arms raise the same reason
+/// down their own path (`sevenz_fallback_set`, whose sink teardown
+/// applies the identical test through `chase_resume_ok`).
+pub(super) const HELD_BYTES_CAP_CHASE: &str = "held-bytes cap: chase memory";
+
+/// Escape hatch for [`Extractor::relieve_by_child_chase`]:
+/// `NZBFAST_NO_CHASE_RELIEF=1` restores the victim order this repo had
+/// before 22 Aug 2026, where a held-bytes breach was resolved by
+/// whichever call site happened to notice it first. One binary, two
+/// arms, which is what the A/B in TODO 220 needs.
+pub(super) fn chase_relief_env_off() -> bool {
+    chase_relief_env_off_value(std::env::var("NZBFAST_NO_CHASE_RELIEF").ok().as_deref())
+}
+
+/// Pure parse of the relief escape-hatch value (same rationale as the
+/// other gates in `extract::config`: the parse is tested, the read is
+/// not).
+pub(super) fn chase_relief_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// One drop-behind trim spill, planned under the routing lock and
+/// WRITTEN after it drops (TODO 37 item 1, 23 Aug 2026). The prefix
+/// `[at, at+len)` of `buf` is still in RAM while this is queued - only
+/// marked pending there, which is what credits the holds budget early -
+/// and leaves it in [`Extractor::spill_trimmed`], in bounded chunks,
+/// ending in a commit that re-proves the buffer did not move (`seq` is
+/// the rewrite tripwire) before `base` advances. A failed write commits
+/// nothing: the bytes stay in RAM and the budget is re-charged.
+pub(super) struct TrimSpill {
+    pub(super) slot: usize,
+    pub(super) buf: Arc<FrontierBuffer>,
+    pub(super) writer: Arc<FileWriter>,
+    pub(super) at: u64,
+    pub(super) len: usize,
+    pub(super) seq: u64,
+    /// `refeed_active` at plan time: the spill's placement is surfaced
+    /// through `late_placements` exactly as `plain_span` would have.
+    pub(super) refeed: bool,
+    /// RAR trims count into `chase_trimmed`; 7z trims do not.
+    pub(super) count_trimmed: bool,
+}
 
 impl Extractor {
     /// Mapping-mode span: feed headers, extract mapped parts, hold the
@@ -84,7 +138,12 @@ impl Extractor {
         // with no password. Deferring cannot leave the budget over: both of
         // those routes release this same charge.
         let blocked = inner.slots[slot].mapper.as_ref().unwrap().blocker.is_some();
-        if stashed > 0 && !blocked && inner.budget.over() && !self.page_out_holds(inner) {
+        if stashed > 0
+            && !blocked
+            && inner.budget.over()
+            && !self.page_out_holds(inner)
+            && !self.relieve_by_chase(inner, slot)
+        {
             // The header stash charges the same budget as holds, and it
             // grows on remote data: service blocks (a RAR recovery
             // record) and anything past the end-of-archive marker sit
@@ -164,6 +223,7 @@ impl Extractor {
                 routed: HashMap::new(),
                 routed_plain: HashMap::new(),
                 chase: None,
+                zip_splits_open: Vec::new(),
             });
             grp.slots.push(slot);
             if grp.fallback {
@@ -231,12 +291,16 @@ impl Extractor {
             || !matches!(b, MapBlocker::NotStore)
             || !matches!(inner.slots[slot].mode, SlotMode::Rar)
             || inner.slots[slot].group.is_some()
+            // TODO 211 (b): the chase drives one frontier per VOLUME and
+            // a split head's bytes arrive through N alias slots; a
+            // compressed split demotes and the (a) rescue joins it.
+            || inner.slots[slot].split_head.is_some()
             || inner.slots[slot].size == 0
             || inner.self_weak.upgrade().is_none()
         {
             return Ok(false);
         }
-        let (name, vol_index, v4) = {
+        let (name, vol_index, v4, base) = {
             let Some(m) = inner.slots[slot].mapper.as_ref() else {
                 return Ok(false);
             };
@@ -262,7 +326,7 @@ impl Extractor {
             } else {
                 m.volume_number.unwrap_or(0) as usize
             };
-            (e.name.clone(), vol_index, v4)
+            (e.name.clone(), vol_index, v4, m.archive_base())
         };
         let key = Self::canon_key(inner, &name);
         let grp = inner.groups.entry(key.clone()).or_insert_with(|| Group {
@@ -277,6 +341,7 @@ impl Extractor {
             routed: HashMap::new(),
             routed_plain: HashMap::new(),
             chase: None,
+            zip_splits_open: Vec::new(),
         });
         if grp.fallback {
             return Ok(false); // joins the fallback via today's path
@@ -312,7 +377,7 @@ impl Extractor {
         inner.slots[slot].mode = SlotMode::RarChase;
         let buf = Arc::new(FrontierBuffer::new_gated(
             size,
-            inner.verify_gate.clone().map(|g| (g, slot)),
+            self.chase_gate(inner, slot),
             // Arms the stalled-chase cold spill (RAR chases only - the
             // forward-only reader is what makes "beyond the gap" cold).
             Some(inner.scratch.clone()),
@@ -349,21 +414,45 @@ impl Extractor {
                 }
             }
         }
+        // Install the ChaseSlot BEFORE the failure return. The slot was
+        // committed to `SlotMode::RarChase` at the top of this block, so
+        // a bail-out that leaves `chase` at None puts the slot in a state
+        // `chase_span` calls impossible: every later span for it takes
+        // the `_ =>` arm, which debug-asserts and silently DROPS the
+        // bytes in release. With the slot installed the failure demotes
+        // through the ordinary paths instead.
+        inner.budget.add(stored);
+        inner.slots[slot].chase = Some(ChaseSlot {
+            buf: buf.clone(),
+            charged: stored,
+            dropped: Vec::new(),
+            dropped_as: String::new(),
+        });
         if let Some(e) = failed {
             for (_, span) in rest {
                 Self::uncharge_span(inner, &span);
             }
+            // The frontier is short bytes that can never arrive now, so
+            // fail it: a read that blocks on the gap errors out rather
+            // than waiting for a volume this attach never finished.
+            buf.abort("held bytes could not be reclaimed");
             return Err(e);
         }
-        inner.budget.add(stored);
         // The stash and the holds can already disagree with each other if
         // a repair landed before the chase attached. Nothing has been
-        // decoded yet, so this is the cheap case: never start.
-        let seeded_conflict = buf.conflicted();
-        inner.slots[slot].chase = Some(ChaseSlot {
-            buf: buf.clone(),
-            charged: stored,
-        });
+        // decoded yet, so this is the cheap case: never start. (Nothing
+        // has been READ yet either, so the buffer's own served-aware
+        // `conflicted` cannot see it - ask for any rewrite at all.)
+        let seeded_conflict = buf.rewritten().is_some();
+        // An SFX volume (TODO 94 C follow-up): the archive starts `base`
+        // bytes into the file, behind the launcher stub. The engine never
+        // learns that - `chase_next_volume*` hands it an `OffsetSource`
+        // whose range 0 is the signature - so the base is recorded here
+        // for the one place the engine's coordinates come back out, the
+        // watermark publish in `chase_worker`. Registered BEFORE the
+        // volume itself, so the worker cannot see a volume whose base it
+        // cannot look up.
+        ctl.bases.lock_ok().insert(vol_index, base);
         {
             let mut st = ctl.shared.lock_ok();
             st.vols.insert(vol_index, ChaseVol { buf, size, slot });
@@ -388,7 +477,7 @@ impl Extractor {
             // A volume joining a chase already in flight: the engine may
             // be far past earlier volumes, so try the drop-behind before
             // giving up on the whole set.
-            self.rar_trim_set(inner, &ctl)?;
+            self.rar_trim_set(inner, &ctl, true)?;
         }
         if inner.budget.over() {
             // Same shared budget as the holds cap, so the reason carries
@@ -396,7 +485,7 @@ impl Extractor {
             // off "held-bytes cap", and the bare wording this used to have
             // matched nothing, demoting the volumes and then shipping the
             // job with no payload and exit 0.
-            self.fallback_slot_or_group(inner, slot, "held-bytes cap: chase memory")?;
+            self.fallback_slot_or_group(inner, slot, HELD_BYTES_CAP_CHASE)?;
         }
         Ok(true)
     }
@@ -502,18 +591,92 @@ impl Extractor {
             if let Some(ctl) = inner.slots[slot].sevenz.clone() {
                 self.sevenz_trim_set(inner, &ctl)?;
             } else if let Some(ctl) = Self::rar_chase_of(inner, slot) {
-                self.rar_trim_set(inner, &ctl)?;
+                self.rar_trim_set(inner, &ctl, true)?;
             }
         }
-        if inner.budget.over() {
+        if Self::breach_stands(inner) {
             // Same shared budget as the holds cap, so the reason carries
             // the same substring: the caller keys volume-level remediation
             // off "held-bytes cap", and the bare wording this used to have
             // matched nothing, demoting the volumes and then shipping the
             // job with no payload and exit 0.
-            self.chase_forfeit(inner, slot, "held-bytes cap: chase memory")?;
+            self.chase_forfeit(inner, slot, HELD_BYTES_CAP_CHASE)?;
         }
         Ok(())
+    }
+    /// Record a dropped range, coalescing with the one before it (drops
+    /// are prefix-contiguous, so in practice one entry per volume).
+    fn note_dropped(ranges: &mut Vec<(u64, u64)>, at: u64, len: u64) {
+        if let Some(last) = ranges.last_mut()
+            && last.0 + last.1 == at
+        {
+            last.1 += len;
+        } else {
+            ranges.push((at, len));
+        }
+    }
+    /// Bytes the RAR drop-behind released with NO disk copy, this
+    /// extractor and every child below it - the part of
+    /// [`Self::chase_trimmed_bytes`] that cost nothing. A child never
+    /// drops (it cannot be re-fetched), so this is the top level's own
+    /// count in practice; the walk keeps the two accessors symmetrical.
+    pub fn chase_dropped_bytes(&self) -> u64 {
+        let (own, child) = {
+            let inner = self.inner_read();
+            (inner.chase_dropped, inner.child.clone())
+        };
+        own + child.map_or(0, |c| c.chase_dropped_bytes())
+    }
+    /// Slots that demoted AFTER a dropping trim, with the volume-offset
+    /// ranges their materialized file is missing. The caller re-fetches
+    /// these volumes (the whole NZB file - a drop is volume-granular in
+    /// practice) and clears them with [`Self::note_dropped_refetched`].
+    /// Top level only by construction (see `rar_trim_set`), and only
+    /// demoted slots: a slot whose chase succeeded has no file at all.
+    pub fn dropped_volumes(&self) -> Vec<DroppedVolume> {
+        let inner = self.inner_read();
+        inner
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.dropped.is_empty())
+            .map(|(i, s)| DroppedVolume {
+                slot: i,
+                posted: s.dropped_as.clone(),
+                current: s.name.clone(),
+                ranges: s.dropped.clone(),
+            })
+            .collect()
+    }
+    /// The caller has re-fetched this slot's volume in full (or given
+    /// up, in which case the holes stay and the disk pass reports them).
+    pub fn note_dropped_refetched(&self, slot: usize) {
+        let mut inner = self.inner.lock_ok();
+        if let Some(s) = inner.slots.get_mut(slot) {
+            s.dropped.clear();
+        }
+    }
+    /// Seed a slot's dropped-range claim directly, as the demote after a
+    /// dropping trim leaves it: the file on disk is missing `ranges`,
+    /// and the volume was posted under `posted` (which a later rename
+    /// may have moved the slot away from).
+    ///
+    /// A test hook, and `#[doc(hidden)] pub` rather than `#[cfg(test)]`
+    /// because the only consumer of [`Self::dropped_volumes`] lives in
+    /// the crate ABOVE this one - the re-fetch driver in nzbfast's
+    /// `get::dropped` module - so a hook that stops at this crate's
+    /// boundary cannot reach the code it exists to cover. The only
+    /// other way to put an extractor into this state from up there is
+    /// to replay a whole chase, forfeit and demote, which is a rig
+    /// rather than a test and was the reason that driver went untested
+    /// through two rounds of the Codex F-05 fix.
+    #[doc(hidden)]
+    pub fn seed_dropped_volume(&self, slot: usize, posted: &str, ranges: Vec<(u64, u64)>) {
+        let mut inner = self.inner.lock_ok();
+        if let Some(s) = inner.slots.get_mut(slot) {
+            s.dropped = ranges;
+            s.dropped_as = posted.to_string();
+        }
     }
     /// Bytes the RAR chase drop-behind has spilled out of RAM, this
     /// extractor and every child below it. A chased set that finishes
@@ -569,6 +732,44 @@ impl Extractor {
             })
             .sum();
         own + child.map_or(0, |c| c.chase_consumed_volumes())
+    }
+    /// Bytes the RAR engine has said it will never read again, over every
+    /// live chase in this extractor and its children - a volume reported
+    /// WHOLLY consumed counting its full size.
+    ///
+    /// The sibling of [`Self::chase_consumed_volumes`] that can see a
+    /// PARTIAL watermark, and the only way to tell "the engine has not
+    /// finished a volume yet" from "the engine has not started". TODO 220
+    /// turned on that distinction: a chase whose volume parse pinned the
+    /// whole volume reported zero here while decoding nothing, and read
+    /// from the outside exactly like a chase merely one volume behind.
+    pub fn chase_watermark_bytes(&self) -> u64 {
+        let (groups, child) = {
+            let inner = self.inner_read();
+            (
+                inner
+                    .groups
+                    .values()
+                    .filter_map(|g| g.chase.clone())
+                    .collect::<Vec<_>>(),
+                inner.child.clone(),
+            )
+        };
+        let own: u64 = groups
+            .iter()
+            .map(|ctl| {
+                let st = ctl.shared.lock_ok();
+                ctl.low_water
+                    .lock_ok()
+                    .iter()
+                    .map(|(index, &at)| {
+                        let total = st.vols.get(index).map_or(0, |v| v.size);
+                        at.min(total)
+                    })
+                    .sum::<u64>()
+            })
+            .sum();
+        own + child.map_or(0, |c| c.chase_watermark_bytes())
     }
     /// Report a TERMINAL article verdict for `slot`: that slot's bytes
     /// will never all arrive from the wire (a 430 on every provider, an
@@ -681,6 +882,7 @@ impl Extractor {
                         }
                         return;
                     }
+                    ex.park_progress();
                     ex.run_stalled_page_pass();
                 }
             });
@@ -721,22 +923,27 @@ impl Extractor {
     }
 
     /// The chase controller driving this slot's group, if any.
-    fn rar_chase_of(inner: &Inner, slot: usize) -> Option<Arc<ChaseCtl>> {
+    pub(super) fn rar_chase_of(inner: &Inner, slot: usize) -> Option<Arc<ChaseCtl>> {
         let key = inner.slots[slot].group.as_ref()?;
         inner.groups.get(key)?.chase.clone()
     }
     /// Drop-behind trim for a chased RAR set: release the bytes the
-    /// engine has read past, writing them into each volume's own archive
-    /// file on the way out.
+    /// engine has read past - DROPPED outright when the chase is healthy
+    /// and keeping pace (the decision in the body), else written into
+    /// each volume's own archive file on the way out.
     ///
-    /// Same bargain as the 7z trim it copies, for the same reasons.
-    /// Spilling into THAT file rather than a temp one is what keeps the
-    /// demote path free: a demotion materializes the volume at exactly
-    /// these offsets, so the spill is not a cost paid against demotion -
-    /// it IS demotion, done early and in pieces. `fallback_slot` then
-    /// writes only what is still in RAM and finds the rest on disk; a
-    /// chase that SUCCEEDS deletes the partial file in `chase_finish`,
-    /// because the payload came out the other way.
+    /// The spill is the same bargain as the 7z trim it copies, for the
+    /// same reasons. Spilling into THAT file rather than a temp one is
+    /// what keeps the demote path free: a demotion materializes the
+    /// volume at exactly these offsets, so the spill is not a cost paid
+    /// against demotion - it IS demotion, done early and in pieces.
+    /// `fallback_slot` then writes only what is still in RAM and finds
+    /// the rest on disk; a chase that SUCCEEDS deletes the partial file
+    /// in `chase_finish`, because the payload came out the other way.
+    /// The drop gives that bargain up for the common case, where the
+    /// spill is a write of consumed input nobody reads back: a demote
+    /// after a drop materializes with HOLES, records them on the slot
+    /// ([`Self::dropped_volumes`]), and the caller re-fetches.
     ///
     /// The watermark is the engine's own promise (see
     /// `rars::rar50::extract_volume_sequence_to_with_progress`): nothing
@@ -744,7 +951,22 @@ impl Extractor {
     /// anything a volume's watermark is 0 and nothing trims, which is why
     /// there is no arming step here - unlike 7z, whose watermark is a raw
     /// reader position that starts at EOF.
-    pub(super) fn rar_trim_set(&self, inner: &mut Inner, ctl: &Arc<ChaseCtl>) -> io::Result<()> {
+    ///
+    /// `drop_ok` is the caller's veto on the DROP arm below, and only a
+    /// veto: a caller that allows it still gets a drop only if every
+    /// condition on that gate holds. Vetoing is what a relief call site
+    /// wants (TODO 251): the rung after the trim is a forfeit, and a
+    /// drop followed by a forfeit is TODO 214's worst ending - it does
+    /// not save the spill, it converts it into a re-download AND stands
+    /// the post-forfeit resume ledger down, so the disk pass re-extracts
+    /// every member from byte zero. The relief path spills, and the
+    /// forfeit it may go on to raise keeps its ledger.
+    pub(super) fn rar_trim_set(
+        &self,
+        inner: &mut Inner,
+        ctl: &Arc<ChaseCtl>,
+        drop_ok: bool,
+    ) -> io::Result<()> {
         if !inner.rar_trim_on {
             return Ok(());
         }
@@ -752,6 +974,8 @@ impl Extractor {
         // arrivals typically run on a LATER volume than the one the
         // engine is decoding, so the bytes worth releasing belong to a
         // different slot entirely.
+        // In volume order (the map is ordered by index): the pace gate
+        // below walks the set's contiguous frontier.
         let volumes: Vec<(Arc<FrontierBuffer>, usize, u64)> = {
             let st = ctl.shared.lock_ok();
             let low = ctl.low_water.lock_ok();
@@ -766,10 +990,397 @@ impl Extractor {
                 })
                 .collect()
         };
+        // Drop or spill, decided ONCE per pass (measured 21 Aug 2026,
+        // research/MEASURED-HOLDS-LADDER-2026-08-21.md: a set 2-5x over
+        // the cap on a 110 MB/s line spilled 16 of 19 volumes, and that
+        // spill was the entire 0.48x of disk over payload - a write of
+        // consumed input a clean job never reads back). A healthy chase
+        // DROPS the prefix instead; the bargain the spill bought (a free
+        // demote) is paid by the caller re-fetching the dropped volumes
+        // IF a demote ever comes. Conditions, each load-bearing:
+        // - depth 0: only a top-level slot is an NZB file the caller can
+        //   re-fetch. A nested chase's volumes are inner members of an
+        //   outer archive, refetchable by nobody.
+        // - no lost article anywhere in the job: a demote waiting to
+        //   happen, and a demote after a drop is a re-download. (A
+        //   conflicted buffer declines `trim_to` itself.)
+        // - the engine is keeping pace with the line. The same round
+        //   measured the regime as line rate vs decode rate: at 110 MB/s
+        //   every breach finds a finished volume, at 250 MB/s the trim
+        //   wins a few rounds and the forfeit fires anyway, and THAT
+        //   ending - trim, then forfeit - is where a drop would turn the
+        //   spill into a re-download of the same bytes. Bytes consumed
+        //   (the engine's watermarks) against bytes arrived (the
+        //   buffers' contiguous frontiers) since the chase began is the
+        //   ratio that separates them: ~1.0 when the engine keeps up,
+        //   ~0.5 at 250 MB/s, ~0.13 at 950. Re-read every pass, so an
+        //   engine that falls behind later spills from then on; the
+        //   volumes already dropped are the only ones a demote refetches.
+        // - the set can finish inside the cap AT that pace at all. The
+        //   three conditions above are all about how healthy the chase is
+        //   right now and none of them knows how big the set is, which is
+        //   the hole the 22 Aug joint round fell through: past five times
+        //   the cap a keeping-pace chase still forfeits, and there the
+        //   drop buys nothing and costs a re-download AND the resume
+        //   ledger. See `rar_drop_can_finish`.
+        // - OR the held-bytes backpressure is engaged (TODO 94 item E).
+        //   The two gates above both ask "will this chase outrun the
+        //   cap and forfeit?", and a parked set cannot: its arrivals
+        //   are held to the engine's pace, which also makes the pace
+        //   ratio unmeetable by construction - the engine is always
+        //   exactly a runway behind. Measured on the 22 Aug loopback
+        //   rig: 752 MB trimmed, 0 dropped, every byte of it spilled
+        //   into the volume files the park exists to never write.
+        let parked = !inner.park.parked.is_empty();
+        let drop = drop_ok
+            && inner.rar_drop_on
+            && self.depth == 0
+            && !inner.lost_articles.load(Ordering::Relaxed)
+            && (parked
+                || (Self::rar_engine_keeping_pace(&volumes)
+                    && Self::rar_drop_can_finish(
+                        inner.budget.cap(),
+                        volumes.iter().map(|(b, _, _)| b.total()).sum(),
+                    )));
         for (buf, slot, watermark) in volumes {
-            self.rar_trim_volume(inner, slot, &buf, watermark)?;
+            self.rar_trim_volume(inner, slot, &buf, watermark, drop)?;
         }
         Ok(())
+    }
+    /// Fraction of the set's arrived bytes the engine has consumed above
+    /// which a trim drops rather than spills. See `rar_trim_set`.
+    const RAR_DROP_PACE: f64 = 0.8;
+    /// Is the engine keeping pace with arrivals? Consumed = the sum of
+    /// the watermarks (a finished volume counts whole); arrived = the
+    /// set's CONTIGUOUS frontier in volume order - every complete
+    /// volume up to the first incomplete one, plus that one's frontier.
+    /// Contiguous, not total: the scheduler fetches every volume's
+    /// offset-0 article early (the sniff probe), so summing frontiers
+    /// counts a head per volume the engine cannot reach yet, and on a
+    /// 35-volume set that alone read a keeping-pace engine as 0.79.
+    /// Both sums are cumulative over the chase, so one slow second does
+    /// not flip the answer.
+    fn rar_engine_keeping_pace(volumes: &[(Arc<FrontierBuffer>, usize, u64)]) -> bool {
+        let mut consumed = 0u64;
+        let mut arrived = 0u64;
+        let mut contiguous = true;
+        for (buf, _, wm) in volumes {
+            let total = buf.total();
+            consumed += (*wm).min(total);
+            if contiguous {
+                let f = buf.frontier().min(total);
+                arrived += f;
+                contiguous = f >= total;
+            }
+        }
+        arrived > 0 && consumed as f64 >= Self::RAR_DROP_PACE * arrived as f64
+    }
+    /// Can a chase that keeps pace carry THIS set inside the cap at all?
+    ///
+    /// The pace gate above is a RATE test and knows nothing about how big
+    /// the set is. A drop-eligible chase is holding at most
+    /// `1 - RAR_DROP_PACE` of what has arrived, so it cannot breach a cap
+    /// of `cap` until the set is larger than `cap / (1 - RAR_DROP_PACE)` -
+    /// five times it at the current threshold. Below that line a drop is
+    /// free money and the trim carries the set one-pass. PAST it the
+    /// forfeit is coming however healthy the chase looks at this instant,
+    /// and a drop is then loss twice over: it does not save the spill, it
+    /// converts the spill into a RE-DOWNLOAD of the same bytes, and the
+    /// re-fetch stands the post-forfeit resume ledger down
+    /// (`nzbfast::get::tail`) so the disk pass re-extracts every member
+    /// from byte zero.
+    ///
+    /// Measured 22 Aug 2026 (`research/MEASURED-HOLDS-JOINT-2026-08-22.md`)
+    /// on a set TEN times the holds slice at 110 MB/s, where the regime is
+    /// a coin flip: the legs that forfeited cost 1.79-2.12x of payload
+    /// with the drop on and 1.55x with it off, and one of them dropped SIX
+    /// megabytes and paid 1.8 GB of re-extraction for it, because the
+    /// stand-down is per-JOB. The legs that stayed one-pass were 1.09x
+    /// with the drop and 1.51x without, so what this gives up is a gamble,
+    /// not a win.
+    ///
+    /// The total is what the chase has SEEN. That is the whole set from
+    /// early on - the scheduler fetches every volume's offset-0 article as
+    /// its sniff probe, which is the same fact
+    /// [`Self::rar_engine_keeping_pace`] has to correct for - and an
+    /// underestimate can only be transient and errs toward the old
+    /// behaviour for at most a trim.
+    fn rar_drop_can_finish(cap: usize, set_total: u64) -> bool {
+        (1.0 - Self::RAR_DROP_PACE) * set_total as f64 <= cap as f64
+    }
+    /// Budget-breach relief a demoting group asks for BEFORE it demotes:
+    /// trim, and then if need be forfeit, the CHILD chase that this
+    /// group's routed inner files feed.
+    ///
+    /// WHY THIS EXISTS, measured 22 Aug 2026 on the TODO 220 `gran`
+    /// ladder (`research/MEASURED-HOLDS-NEST-2026-08-22.md`). Two reps of
+    /// ONE configuration - same fixture, same binary, same 110 MB/s
+    /// loopback - cost 2.083x and 4.566x of payload in device I/O, on
+    /// byte-identical output with no damage, no repair and no re-fetch.
+    /// They are not one path with two trim sizes. They are the two
+    /// different call sites that can notice `budget.over()` first, and a
+    /// budget shared down the nesting chain makes that a race:
+    ///
+    /// - `chase_span` notices, TRIMS, and forfeits the chase only if the
+    ///   trim did not relieve. The outer stays one-pass, its in-stream
+    ///   inner volumes survive on disk and the disk pass unpacks them.
+    /// - `retain_header_bytes` notices on an OUTER volume, and the outer
+    ///   GROUP demotes for a few megabytes of header stash. That is not
+    ///   a smaller version of the same thing: `delete_group_out_files`
+    ///   deletes the inner volumes already written in-stream and
+    ///   `abandon_slot` aborts the child chase under them, so the outer
+    ///   materializes, is unpacked again from disk, and the inner
+    ///   volumes are written a SECOND time.
+    ///
+    /// The hole is that the second site had no ladder at all. It never
+    /// asked the chase to trim - only `chase_span` does that - so a
+    /// breach it happened to see first went straight to the single most
+    /// expensive action available, skipping the two cheaper ones that
+    /// would have relieved it. This is that ladder, in cost order:
+    /// trim (spill), then forfeit the chase, then the demote the caller
+    /// was already going to do.
+    ///
+    /// Returns whether the budget is back under the cap. `false` leaves
+    /// the caller on the exact demote it performs today, with the same
+    /// reason string.
+    pub(super) fn relieve_by_child_chase(&self, inner: &mut Inner, slot: usize) -> bool {
+        if chase_relief_env_off() {
+            return false;
+        }
+        let Some(child) = inner.child.clone() else {
+            return false;
+        };
+        let Some(key) = inner.slots[slot].group.clone() else {
+            return false;
+        };
+        // A group already falling back has had its routed slots drained
+        // and its chase torn down; there is nothing left to trade.
+        let routed: Vec<usize> = match inner.groups.get(&key) {
+            Some(g) if !g.fallback => g.routed.values().copied().collect(),
+            _ => return false,
+        };
+        if routed.is_empty() {
+            return false;
+        }
+        let over = inner.budget.len().saturating_sub(inner.budget.cap());
+        child.relieve_chase_for_parent(&routed, over);
+        !inner.budget.over()
+    }
+
+    /// The same ladder for a chase THIS extractor owns - the TOP-LEVEL
+    /// case [`Self::relieve_by_child_chase`] cannot reach (TODO 251).
+    ///
+    /// That one finds its victim through the demoting slot's group
+    /// `routed` map, i.e. the child chase the group's inner files feed.
+    /// A compressed RAR posted DIRECTLY has no store outer and no
+    /// routed members at all - `chase_open_sink` registers its decoded
+    /// members in the ctl's `sink_slots`, never in `routed` - so on that
+    /// shape the relief declined and the caller went straight to its
+    /// demote.
+    ///
+    /// WHAT THAT COSTS, driven deterministically in
+    /// `a_top_level_breach_relieves_the_chase_before_demoting_a_volume`:
+    /// a live 20-volume chase, 18 volumes consumed, one 7000-byte
+    /// PRE-SNIFF span on the last volume with the budget one byte over.
+    /// `overflow_to_plain` flips that unsniffed slot to `Plain`, so it
+    /// can never join the set; the engine then reaches it and dies with
+    /// `chase failed: RAR 5 split entry is incomplete`; all twenty
+    /// volumes materialize and the job produces NO payload in-stream.
+    /// Not even the cap reason, so no resume ledger either - the disk
+    /// pass starts from byte zero. That is the pre-TODO 220 race, and
+    /// TODO 220 fixed the nested shape only.
+    ///
+    /// Same two rungs and the same order as the child arm: trim
+    /// (SPILL only - see `rar_trim_set`'s `drop_ok`), then forfeit a
+    /// chase that holds at least the overshoot, then the caller's own
+    /// demote. The forfeit is worth taking here even though it
+    /// materializes the whole set, because it raises
+    /// [`HELD_BYTES_CAP_CHASE`] - the one reason `chase_resume_ok`
+    /// lets the in-stream output survive - where the ending it replaces
+    /// keeps nothing.
+    ///
+    /// The caller's OWN group is skipped, and that is a safety rule
+    /// rather than a policy: forfeiting it runs `abandon_slot` over the
+    /// caller's slot, which takes its mapper away under `rar_span`'s
+    /// feet (`inner.slots[slot].mapper.as_ref().unwrap()` on the line
+    /// after the call site). Demoting that group is what the caller is
+    /// about to do anyway.
+    ///
+    /// Returns whether the caller should stand its demote down: the
+    /// budget is back under the cap, or a spill in flight has deferred
+    /// the breach (`breach_stands`), which is the state that must NOT
+    /// demote - a chase being relieved this instant is exactly what the
+    /// deferral exists to protect.
+    pub(super) fn relieve_by_own_chase(&self, inner: &mut Inner, slot: usize) -> bool {
+        if chase_relief_env_off() {
+            return false;
+        }
+        // Distinct live RAR chases, with the volume slots each one
+        // holds. Identity by pointer, as `relieve_chase_for_parent`
+        // does it and for the same reason: a `ChaseCtl` has no equality
+        // worth the name. A group already falling back has had its
+        // chase torn down and has nothing left to trade.
+        let mut sets: Vec<(Arc<ChaseCtl>, Vec<usize>)> = Vec::new();
+        for g in inner.groups.values() {
+            let Some(ctl) = g.chase.clone() else { continue };
+            if g.fallback
+                || g.slots.contains(&slot)
+                || sets.iter().any(|(c, _)| Arc::ptr_eq(c, &ctl))
+            {
+                continue;
+            }
+            sets.push((ctl, g.slots.clone()));
+        }
+        if sets.is_empty() {
+            return false;
+        }
+        for (ctl, _) in &sets {
+            // An error here is a spill write failing, which the owning
+            // slot sees again on its next span; the relief either way is
+            // whatever the trim released before it stopped.
+            let _ = self.rar_trim_set(inner, ctl, false);
+        }
+        if !Self::breach_stands(inner) {
+            return true;
+        }
+        // Re-read AFTER the trim: the overshoot the forfeit still has to
+        // clear is what decides whether it is worth taking, and a trim
+        // credits the budget the instant it plans its spill.
+        let need = inner.budget.len().saturating_sub(inner.budget.cap());
+        for (_, slots) in &sets {
+            let held: usize = slots
+                .iter()
+                .filter_map(|&s| inner.slots.get(s))
+                .filter(|s| s.sevenz.is_none())
+                .filter_map(|s| s.chase.as_ref())
+                .map(|ch| ch.charged)
+                .sum();
+            // Below the overshoot the forfeit does not save the demote,
+            // so it would cost the whole set for nothing. RAR chases
+            // only, as the child arm has it: a 7z chase charges the
+            // budget through its own sinks and forfeits through
+            // `sevenz_fallback_set`.
+            if held == 0 || held < need {
+                continue;
+            }
+            for &s in slots {
+                let live = inner
+                    .slots
+                    .get(s)
+                    .is_some_and(|sl| sl.chase.is_some() && sl.sevenz.is_none());
+                // The first forfeit demotes the whole group, which
+                // clears every member's chase - the rest of the walk
+                // then skips.
+                if live {
+                    let _ = self.chase_forfeit(inner, s, HELD_BYTES_CAP_CHASE);
+                }
+            }
+            if !inner.budget.over() {
+                return true;
+            }
+        }
+        !inner.budget.over()
+    }
+
+    /// The whole chase ladder a demote site asks for before demoting:
+    /// the child arm (TODO 220) and then the own arm (TODO 251). One
+    /// entry point so a new call site cannot pick up half of it - the
+    /// two cover disjoint shapes (nested vs top-level), and which one a
+    /// job is depends on how the poster wrapped it, not on the site.
+    pub(super) fn relieve_by_chase(&self, inner: &mut Inner, slot: usize) -> bool {
+        self.relieve_by_child_chase(inner, slot) || self.relieve_by_own_chase(inner, slot)
+    }
+
+    /// The child half of [`Self::relieve_by_child_chase`], run under the
+    /// child's own lock with the parent's held - the same nesting and
+    /// the same order `delete_group_out_files` already uses to reach
+    /// `abandon_slot`, and safe for the same reason: every child-to-
+    /// parent call takes no lock on the way up, and a teardown aborts
+    /// the chase worker without joining it.
+    ///
+    /// The trim is unconditional and cannot drop: it passes
+    /// `rar_trim_set`'s `drop_ok` veto (TODO 251), so every byte it
+    /// releases is spilled into the volume's own file and the demote
+    /// below (or later) still materializes byte-exact. The veto is
+    /// belt-and-braces here - `rar_trim_set` also gates the drop on
+    /// `self.depth == 0` and this is a child - and load-bearing in
+    /// [`Self::relieve_by_own_chase`], which is at depth 0.
+    ///
+    /// The forfeit is conditional on the chase holding at least `need`
+    /// bytes - the overshoot the caller has to clear. Below that the
+    /// forfeit does not save the demote, so it would cost the chase for
+    /// nothing. RAR chases only: a 7z chase charges the budget through
+    /// its own sinks and forfeits through `sevenz_fallback_set`, so it
+    /// is left to the site that owns it.
+    pub(super) fn relieve_chase_for_parent(&self, slots: &[usize], need: usize) {
+        let mut guard = self.inner.lock_ok();
+        let inner = &mut *guard;
+        // One trim per CHASE, not per slot: a volume set's slots share
+        // one ctl, and `rar_trim_set` already walks every volume in it.
+        // Identity by pointer - a `ChaseCtl` has no equality worth the
+        // name, and a derived one would compare the contents of two
+        // different live chases.
+        let mut done: Vec<Arc<ChaseCtl>> = Vec::new();
+        for &s in slots {
+            if s >= inner.slots.len() {
+                continue;
+            }
+            let Some(ctl) = Self::rar_chase_of(inner, s) else {
+                continue;
+            };
+            if done.iter().any(|c| Arc::ptr_eq(c, &ctl)) {
+                continue;
+            }
+            done.push(ctl.clone());
+            // An error here is a spill write failing, which the owning
+            // slot sees again on its next span; the relief either way is
+            // whatever the trim released before it stopped.
+            let _ = self.rar_trim_set(inner, &ctl, false);
+        }
+        if !Self::breach_stands(inner) {
+            drop(guard);
+            let _ = self.flush_pending_spills();
+            return;
+        }
+        let held: usize = slots
+            .iter()
+            .filter_map(|&s| inner.slots.get(s))
+            .filter(|s| s.sevenz.is_none())
+            .filter_map(|s| s.chase.as_ref())
+            .map(|ch| ch.charged)
+            .sum();
+        if held == 0 || held < need {
+            return;
+        }
+        for &s in slots {
+            let live = inner
+                .slots
+                .get(s)
+                .is_some_and(|sl| sl.chase.is_some() && sl.sevenz.is_none());
+            // The first forfeit demotes the whole group, which clears
+            // every member's chase - the rest of the walk then skips.
+            if live {
+                let _ = self.chase_forfeit(inner, s, HELD_BYTES_CAP_CHASE);
+            }
+        }
+        drop(guard);
+        // The trims above planned their spills under the lock; write
+        // them now that it is down (an error here is the same spill
+        // failure the owning slot sees again on its next span).
+        let _ = self.flush_pending_spills();
+    }
+
+    /// Half the cap: bounds the drain's memmove to a constant amount of
+    /// work per arriving byte, since two trims cannot be closer together
+    /// than that many bytes of arrival. A volume the engine is wholly
+    /// past is released regardless of size - it is finished with, and
+    /// holding it buys nothing.
+    fn rar_trim_min_release(inner: &Inner, buf: &FrontierBuffer, watermark: u64) -> u64 {
+        if watermark >= buf.total() {
+            1
+        } else {
+            (inner.budget.cap() / 2) as u64
+        }
     }
     fn rar_trim_volume(
         &self,
@@ -777,6 +1388,7 @@ impl Extractor {
         slot: usize,
         buf: &Arc<FrontierBuffer>,
         watermark: u64,
+        drop: bool,
     ) -> io::Result<()> {
         if watermark == 0 {
             return Ok(());
@@ -788,21 +1400,63 @@ impl Extractor {
             Some(ch) if Arc::ptr_eq(&ch.buf, buf) => {}
             _ => return Ok(()),
         }
-        // Half the cap: bounds the drain's memmove to a constant amount
-        // of work per arriving byte, since two trims cannot be closer
-        // together than that many bytes of arrival. A volume the engine
-        // is wholly past is released regardless of size - it is finished
-        // with, and holding it buys nothing.
-        let min_release = if watermark >= buf.total() {
-            1
-        } else {
-            (inner.budget.cap() / 2) as u64
+        let min_release = Self::rar_trim_min_release(inner, buf, watermark);
+        // A conflicted buffer declines a trim, so a prefix that DOES
+        // release comes off an unconflicted set: dropping is safe on
+        // this volume whenever the pass said so - AND the PAR2 verifier
+        // has vouched for every byte of it. A dropped range has no copy
+        // anywhere, and the settle read-back reads a live chase's
+        // still-Pending blocks back through `read_at`, which answers
+        // `nofile` below the buffer's base: every such block was marked
+        // Bad, inflating `needed` up to a false "unrepairable" on a set
+        // with no damage at all (bug sweep 22 Aug 2026). Bytes under the
+        // engaged watermark are BlockState::Ok and are never read back,
+        // so those drop; an unengaged slot (set not yet active, or no
+        // set) spills as the trim always did. No gate attached at all
+        // means no verifier will ever read back, and the drop stands.
+        //
+        // ONE MARK MOVES FOR A REASON OTHER THAN VERIFICATION, and a
+        // lane measuring trimmed-vs-spilled bytes needs to know it:
+        // once a mapped repair has PROVED the set, settle calls
+        // `Extractor::release_verify_gate`, which takes every engaged
+        // cell to `u64::MAX` (row 27, 22 Aug 2026). From that point
+        // `vouched` is true for every engaged slot, so a post-repair
+        // trim on a DAMAGED root set drops bytes that would have
+        // spilled before. That is sound for the same reason the release
+        // is - the repair re-read every file of the set through the view
+        // it wrote through, so nothing will read back - but it means a
+        // damaged-set leg's spill numbers are not comparable across
+        // binaries either side of that change. A CHILD slot is
+        // untouched by it: its `verify_gate` is None by design, so this
+        // arm has always answered true there.
+        //
+        // The cut is the same for both arms (`trim_plan` and `trim_to`
+        // share it), so the vouch is judged against the end the drop
+        // WOULD reach; a spill that does not vouch goes through the
+        // off-lock route instead.
+        let cut = watermark.min(buf.frontier_ram_edge());
+        let vouched = match inner.verify_gate.as_ref() {
+            None => true,
+            Some(g) => g.engaged_mark(slot).is_some_and(|mark| mark >= cut),
         };
+        if !(drop && vouched) {
+            // Spill, with no disk I/O under this lock: planned here,
+            // written by `flush_pending_spills` once the lock drops.
+            self.queue_trim_spill(inner, slot, buf, watermark, min_release, true)?;
+            return Ok(());
+        }
         let Some((at, bytes)) = buf.trim_to(watermark, min_release) else {
             return Ok(());
         };
         inner.chase_trimmed += bytes.len() as u64;
-        self.plain_span(inner, slot, at, &bytes)?;
+        inner.chase_dropped += bytes.len() as u64;
+        let name = inner.slots[slot].name.clone();
+        if let Some(ch) = inner.slots[slot].chase.as_mut() {
+            if ch.dropped.is_empty() {
+                ch.dropped_as = name;
+            }
+            Self::note_dropped(&mut ch.dropped, at, bytes.len() as u64);
+        }
         let now = buf.stored();
         let released = match inner.slots[slot].chase.as_mut() {
             Some(ch) => {
@@ -814,6 +1468,208 @@ impl Extractor {
         };
         inner.budget.sub(released);
         Ok(())
+    }
+    /// Plan a drop-behind spill of a chased slot's consumed prefix
+    /// (TODO 37 item 1): decide under the routing lock, write after it.
+    /// `trim_plan` marks the prefix pending - which is what credits the
+    /// holds budget NOW, so the `budget.over()` check that follows every
+    /// trim sees the relief without waiting for the disk - and the job
+    /// queued on `pending_spills` does the pwrite in
+    /// [`Self::spill_trimmed`] once the caller's lock is down. Nothing
+    /// leaves RAM until that job commits. Returns whether a spill was
+    /// planned. The writer is created here (one `open`, as `plain_job`
+    /// does) because its name claim belongs under this lock.
+    pub(super) fn queue_trim_spill(
+        &self,
+        inner: &mut Inner,
+        slot: usize,
+        buf: &Arc<FrontierBuffer>,
+        watermark: u64,
+        min_release: u64,
+        count_trimmed: bool,
+    ) -> io::Result<bool> {
+        let Some((at, len, seq)) = buf.trim_plan(watermark, min_release) else {
+            return Ok(false);
+        };
+        let writer = match self.ensure_plain_writer(inner, slot) {
+            Ok(w) => w,
+            Err(e) => {
+                buf.trim_abandon();
+                return Err(e);
+            }
+        };
+        inner.pending_spills.push(TrimSpill {
+            slot,
+            buf: buf.clone(),
+            writer,
+            at,
+            len,
+            seq,
+            refeed: inner.refeed_active,
+            count_trimmed,
+        });
+        inner.spills_in_flight += 1;
+        Self::settle_chase_charge(inner, slot, buf);
+        Ok(true)
+    }
+    /// A holds-cap breach on a chased slot, after the trim had its say:
+    /// forfeit - UNLESS a spill is still in flight, in which case the
+    /// relief is already on its way and the breach is deferred instead
+    /// (the carrying write then waits for it off-lock). Without this,
+    /// the off-lock spill demoted the 1 GB COPY 7z that the under-lock
+    /// one streamed (measured 23 Aug 2026 on the loopback mock, 20
+    /// connections): a second thread breached during the first's
+    /// write, `trim_plan` declined because one was pending, and the
+    /// breach forfeited on a set that was being relieved that instant.
+    /// True when the caller should forfeit.
+    pub(super) fn breach_stands(inner: &mut Inner) -> bool {
+        if !inner.budget.over() {
+            return false;
+        }
+        if inner.spills_in_flight > 0 {
+            inner.defer_breach = true;
+            return false;
+        }
+        true
+    }
+    /// Off-lock: wait for every in-flight spill to settle. Bounded, so
+    /// a spill job that died with its thread can never wedge an
+    /// arrival: past the bound the arrival simply proceeds and the next
+    /// breach makes its own decision.
+    pub(super) fn await_spills_settled(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut g = self.inner.lock_ok();
+        while g.spills_in_flight > 0 {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (ng, _) = self
+                .spill_settled
+                .wait_timeout(g, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            g = ng;
+        }
+    }
+    /// Bring a chased slot's `charged` back to what its buffer retains
+    /// and move the shared budget by the difference - in EITHER
+    /// direction, because an abandoned spill re-inflates `stored()`.
+    /// Only while the slot still chases THIS buffer: a demote in the
+    /// window released the whole charge and drained the spans, so
+    /// touching it again would double-settle.
+    fn settle_chase_charge(inner: &mut Inner, slot: usize, buf: &Arc<FrontierBuffer>) {
+        let now = buf.stored();
+        let Some(ch) = inner.slots.get_mut(slot).and_then(|s| s.chase.as_mut()) else {
+            return;
+        };
+        if !Arc::ptr_eq(&ch.buf, buf) {
+            return;
+        }
+        if now > ch.charged {
+            inner.budget.add(now - ch.charged);
+        } else {
+            inner.budget.sub(ch.charged - now);
+        }
+        ch.charged = now;
+    }
+    /// Run the trim spills queued under the routing lock. Off-lock by
+    /// construction, like [`Self::flush_pending_promote`]: every queued
+    /// job writes up to half the holds cap, which is exactly the I/O
+    /// that used to stall every other extractor thread behind the
+    /// lock. Every job runs even if one fails; the first error is
+    /// returned, as the under-lock write's would have been.
+    pub(super) fn flush_pending_spills(&self) -> io::Result<()> {
+        let jobs = std::mem::take(&mut self.inner.lock_ok().pending_spills);
+        let mut first_err = None;
+        for j in jobs {
+            if let Err(e) = self.spill_trimmed(j)
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+    /// One planned spill, start to finish, with no lock held across any
+    /// write: copy a bounded chunk out under the buffer's own lock,
+    /// pwrite it with nothing held, repeat; then, under the routing
+    /// lock, commit (the buffer drains the prefix and `base` moves) or
+    /// abandon (the prefix stays in RAM, budget re-charged). The commit
+    /// is refused if the buffer moved under the spill - a demote popped
+    /// the run, a conflict, a differing rewrite - and the bytes on disk
+    /// are then a harmless duplicate of what RAM still holds.
+    ///
+    /// An ENOSPC mid-way therefore leaves NO hole (TODO 37 item 3): the
+    /// written part is a partial duplicate below a `base` that never
+    /// moved, the whole prefix is still retained, and the error reaches
+    /// the article exactly as the under-lock write's did.
+    fn spill_trimmed(&self, j: TrimSpill) -> io::Result<()> {
+        // Same batch as `page_cold`: the transient copy is bounded to
+        // this whatever the release is, and the memmove that the
+        // `min_release` bar exists to amortize happens ONCE, at commit.
+        const CHUNK: usize = 16 << 20;
+        let mut done = 0usize;
+        let mut failed: Option<io::Error> = None;
+        while done < j.len {
+            let Some(bytes) = j.buf.trim_chunk(j.at, done, CHUNK, j.seq) else {
+                break;
+            };
+            if let Err(e) = j.writer.write_at(j.at + done as u64, &bytes) {
+                failed = Some(e);
+                break;
+            }
+            done += bytes.len();
+        }
+        let mut g = self.inner.lock_ok();
+        let inner = &mut *g;
+        inner.spills_in_flight = inner.spills_in_flight.saturating_sub(1);
+        if inner.spills_in_flight == 0 {
+            self.spill_settled.notify_all();
+        }
+        let committed = if failed.is_none() && done == j.len {
+            j.buf.trim_commit(j.at, j.seq)
+        } else {
+            j.buf.trim_abandon();
+            None
+        };
+        Self::settle_chase_charge(inner, j.slot, &j.buf);
+        if let Some(n) = committed {
+            self.trim_spilled_off_lock
+                .fetch_add(n as u64, Ordering::Relaxed);
+            if j.count_trimmed {
+                inner.chase_trimmed += n as u64;
+            }
+            // What `plain_span` reported for a re-fed span landing
+            // plain: file offset == volume offset by definition.
+            if j.refeed {
+                inner.late_placements.push((
+                    j.slot,
+                    Frag {
+                        file: j
+                            .writer
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        file_off: j.at,
+                        vol_off: j.at,
+                        len: n as u64,
+                    },
+                ));
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+    /// Bytes the drop-behind trim spilled through the off-lock route
+    /// and committed - the lock-placement oracle (see the field).
+    /// Walks the child chain like [`Self::chase_trimmed_bytes`]: a
+    /// nested chase trims in the CHILD, and a counter read at the root
+    /// alone reads 0 there.
+    pub fn trim_spilled_off_lock(&self) -> u64 {
+        let own = self.trim_spilled_off_lock.load(Ordering::Relaxed);
+        let child = self.inner.lock_ok().child.clone();
+        own + child.map_or(0, |c| c.trim_spilled_off_lock())
     }
     /// Page a WEDGED RAR chase's cold frontier bytes to the holds
     /// scratch, until the shared budget sits back at the
@@ -903,7 +1759,10 @@ impl Extractor {
             }
         }
         if paged_any && !scratch.announced.swap(true, Ordering::Relaxed) {
-            println!("🧊 archive decode blocked on missing articles - paging to scratch");
+            info!(
+                target: "extract",
+                "🧊 archive decode blocked on missing articles - paging to scratch"
+            );
         }
     }
 
@@ -951,23 +1810,64 @@ impl Extractor {
         // pressure (`rar_trim_set`). Recording only - the trim itself
         // needs the extractor lock, which this thread must never take
         // while a blocking volume read could be holding a buffer.
+        // The engine counts from the ARCHIVE's first byte; `low_water`
+        // is read by the trim, the pace gate and `chase_watermark_bytes`
+        // in FILE coordinates (the frontier buffer's), which differ by
+        // the stub's length on an SFX volume. Translate at this one
+        // publish point and nothing downstream learns the difference.
+        // Held-bytes backpressure: while the root has this set parked,
+        // engine progress is what releases it, so each mark wakes the
+        // pager to re-read the holds (`Extractor::park_progress`). One
+        // relaxed load when nothing is parked; the upgrade and wake are
+        // atomics and at most a spawn, which is what this thread may do.
+        let park_root = me.upgrade().map(|ex| ex.park_root());
         let mark = |index: usize, offset: u64| {
-            let mut low = ctl.low_water.lock_ok();
-            let at = low.entry(index).or_insert(0);
-            *at = (*at).max(offset);
+            let base = ctl.bases.lock_ok().get(&index).copied().unwrap_or(0);
+            let offset = file_watermark(base, offset);
+            {
+                let mut low = ctl.low_water.lock_ok();
+                let at = low.entry(index).or_insert(0);
+                *at = (*at).max(offset);
+            }
+            if let Some(root) = park_root.as_ref().and_then(|w| w.upgrade())
+                && root.park_live.load(Ordering::Relaxed)
+            {
+                root.wake_pager();
+            }
         };
         let result = if ctl.v4 {
             rars::rar15_40::extract_volume_sequence_to_with_progress(
                 |index| Self::chase_next_volume_v4(&ctl, index, pw.as_deref()),
                 crate::mem::rar_read_options(pw.as_deref()),
-                |meta| Self::chase_open_sink(&me, &ctl, &key, &meta.name, meta.is_directory),
+                |meta| {
+                    // The size rides on the open callback, as it does for
+                    // RAR5: a v4 volume now opens incrementally too, so
+                    // its size map cannot promise the later members.
+                    Self::chase_open_sink(
+                        &me,
+                        &ctl,
+                        &key,
+                        &meta.name,
+                        meta.is_directory,
+                        meta.unpacked_size,
+                    )
+                },
                 mark,
             )
         } else {
             rars::rar50::extract_volume_sequence_to_with_progress(
                 |index| Self::chase_next_volume(&ctl, index, pw.as_deref()),
                 crate::mem::rar_read_options(pw.as_deref()),
-                |meta| Self::chase_open_sink(&me, &ctl, &key, &meta.name, meta.is_directory),
+                |meta| {
+                    Self::chase_open_sink(
+                        &me,
+                        &ctl,
+                        &key,
+                        &meta.name,
+                        meta.is_directory,
+                        meta.unpacked_size,
+                    )
+                },
                 mark,
             )
         };
@@ -1000,84 +1900,92 @@ impl Extractor {
         }
         crate::extract::vol_sort_key(name).0 as usize
     }
+    /// The wait shared by both families: block until routing registers
+    /// volume `index` (volumes classify in any order), then hand back
+    /// the source the engine reads it through and the length it should
+    /// believe. `no_more` (set at finish) turns the wait into a clean
+    /// end-of-set, `None`.
+    ///
+    /// An SFX volume (TODO 94 C follow-up) is served through an
+    /// [`OffsetSource`]: rars' stream parsers want the signature at range
+    /// 0 of their source and do not scan for it, so the adapter shifts
+    /// every read by the stub's length and shortens the declared length
+    /// by the same amount. The buffer underneath still holds the file
+    /// from byte 0 - the stub included - so a demote materializes the
+    /// posted `.exe` exactly as before.
+    fn chase_wait_volume(
+        ctl: &ChaseCtl,
+        index: usize,
+    ) -> rars::Result<Option<(Arc<dyn rars::BlockingRangeSource>, u64)>> {
+        let (buf, size) = {
+            let mut st = ctl.shared.lock_ok();
+            loop {
+                if st.aborted {
+                    return Err(io::Error::other("chase aborted").into());
+                }
+                if let Some(vol) = st.vols.get(&index) {
+                    break (vol.buf.clone(), vol.size);
+                }
+                if st.no_more {
+                    return Ok(None);
+                }
+                st = ctl.cv.wait(st).unwrap();
+            }
+        };
+        let base = ctl.bases.lock_ok().get(&index).copied().unwrap_or(0);
+        let len = size.saturating_sub(base);
+        if base == 0 {
+            return Ok(Some((buf, len)));
+        }
+        Ok(Some((Arc::new(OffsetSource { buf, base }), len)))
+    }
     /// [`Self::chase_next_volume`], RAR4 family: same wait, the
-    /// `rar15_40` blocking parse.
+    /// `rar15_40` incremental parse (TODO 220: the eager walk waited for
+    /// the volume's tail, pinning a whole volume in the holds budget
+    /// before the engine read a byte of it).
     fn chase_next_volume_v4(
         ctl: &ChaseCtl,
         index: usize,
         password: Option<&[u8]>,
     ) -> rars::Result<Option<rars::rar15_40::Archive>> {
-        let (buf, len) = {
-            let mut st = ctl.shared.lock_ok();
-            loop {
-                if st.aborted {
-                    return Err(io::Error::other("chase aborted").into());
-                }
-                if let Some(vol) = st.vols.get(&index) {
-                    break (vol.buf.clone(), vol.size);
-                }
-                if st.no_more {
-                    return Ok(None);
-                }
-                st = ctl.cv.wait(st).unwrap();
-            }
+        let Some((buf, len)) = Self::chase_wait_volume(ctl, index)? else {
+            return Ok(None);
         };
-        let archive = rars::rar15_40::Archive::parse_stream(
-            buf as Arc<dyn rars::BlockingRangeSource>,
+        let archive = rars::rar15_40::Archive::parse_stream_incremental(
+            buf,
             len,
             crate::mem::rar_read_options(password),
         )?;
-        {
-            let mut sizes = ctl.sizes.lock_ok();
-            for f in archive.files() {
-                sizes
-                    .entry(String::from_utf8_lossy(&f.name).into_owned())
-                    .or_insert(f.unp_size);
-            }
-        }
         Ok(Some(archive))
     }
     /// Supply volume `index` to the sequence driver: wait until routing
     /// registers that volume's buffer (volumes classify in any order),
-    /// then run the engine's blocking header parse over it - which
-    /// returns once the volume has fully arrived. `no_more` (set at
-    /// finish) turns a wait into a clean end-of-set.
+    /// then run the engine's header parse over it - which returns as soon
+    /// as the volume's first entries are readable, NOT once the volume
+    /// has fully arrived (TODO 220). `no_more` (set at finish) turns a
+    /// wait into a clean end-of-set.
     fn chase_next_volume(
         ctl: &ChaseCtl,
         index: usize,
         password: Option<&[u8]>,
     ) -> rars::Result<Option<rars::rar50::Archive>> {
-        let (buf, len) = {
-            let mut st = ctl.shared.lock_ok();
-            loop {
-                if st.aborted {
-                    return Err(io::Error::other("chase aborted").into());
-                }
-                if let Some(vol) = st.vols.get(&index) {
-                    break (vol.buf.clone(), vol.size);
-                }
-                if st.no_more {
-                    return Ok(None);
-                }
-                st = ctl.cv.wait(st).unwrap();
-            }
+        let Some((buf, len)) = Self::chase_wait_volume(ctl, index)? else {
+            return Ok(None);
         };
-        let archive = rars::rar50::Archive::parse_stream(
-            buf as Arc<dyn rars::BlockingRangeSource>,
+        // INCREMENTAL: the walk stops where the arrived bytes stop
+        // rather than at the volume's END header, so this returns as
+        // soon as the volume's first entry is readable instead of once
+        // the whole volume has landed. TODO 220 - the eager walk pinned
+        // an entire volume in the holds budget before the engine read a
+        // byte, so a set whose VOLUMES were larger than the cap broke
+        // the budget with no watermark published at all and forfeited at
+        // every rung and at either depth. The engine finishes the walk
+        // itself, at the point it needs an entry it does not have.
+        let archive = rars::rar50::Archive::parse_stream_incremental(
+            buf,
             len,
             crate::mem::rar_read_options(password),
         )?;
-        // Record member sizes: the engine's open callback carries no
-        // size, the parsed headers do (split parts repeat the total -
-        // first sighting wins).
-        {
-            let mut sizes = ctl.sizes.lock_ok();
-            for f in archive.files() {
-                sizes
-                    .entry(String::from_utf8_lossy(f.name_bytes()).into_owned())
-                    .or_insert(f.unpacked_size);
-            }
-        }
         Ok(Some(archive))
     }
     /// Open the routing-seam sink for one extracted member: a fresh slot
@@ -1090,6 +1998,7 @@ impl Extractor {
         key: &str,
         member_name: &[u8],
         is_directory: bool,
+        size: u64,
     ) -> rars::Result<Box<dyn io::Write>> {
         if is_directory {
             return Ok(Box::new(io::sink()));
@@ -1098,7 +2007,6 @@ impl Extractor {
             return Err(io::Error::other("extractor dropped").into());
         };
         let name = String::from_utf8_lossy(member_name).into_owned();
-        let size = ctl.sizes.lock_ok().get(&name).copied().unwrap_or(0);
         // Liveness check, slot allocation and registration under ONE
         // routing-lock hold: a demotion (chase_teardown drains
         // sink_slots under the same lock) either runs before this - the
@@ -1124,15 +2032,62 @@ impl Extractor {
             pos: 0,
         }))
     }
+    /// Hold every chased volume's decode still for the duration of a
+    /// mapped repair (TODO 94 B, shape-coverage row 26). Returns a
+    /// guard: the decode resumes when it drops, on the success path and
+    /// on every early return alike, so a declined repair can never
+    /// leave a worker parked into `chase_finish`'s join.
+    ///
+    /// Every group, not just the one being patched: one repair covers a
+    /// whole PAR2 set and a set can span more than one volume group, and
+    /// a paused engine costs nothing at settle - the download is over,
+    /// so no arrival is waiting on it.
+    ///
+    /// A volume that registers DURING the pause would not be held. At
+    /// settle none can: registration is an arrival's job and the network
+    /// phase has drained. Stated rather than guarded, because the guard
+    /// would have to live on the ctl and this is the only caller.
+    pub fn pause_chase_reads(&self) -> ChaseReadPause {
+        let mut bufs: Vec<Arc<FrontierBuffer>> = Vec::new();
+        {
+            let inner = self.inner.lock_ok();
+            for g in inner.groups.values() {
+                let Some(ctl) = g.chase.as_ref() else {
+                    continue;
+                };
+                for vol in ctl.shared.lock_ok().vols.values() {
+                    bufs.push(vol.buf.clone());
+                }
+            }
+        }
+        for b in &bufs {
+            b.set_paused(true);
+        }
+        ChaseReadPause { bufs }
+    }
     /// Stop a group's chase (demotion/abandon): the worker unblocks with
     /// errors, and every partial output slot the sink opened is
     /// abandoned in the child so no half-decoded file survives.
     /// Idempotent; the join happens off-lock at finish/drop.
+    ///
+    /// The one exception is the held-bytes-cap forfeit at depth 0, whose
+    /// partials are KEPT for the disk pass to resume from - see
+    /// [`ResumeOutput`](crate::extract::ResumeOutput) for what makes that
+    /// prefix trustworthy and why no other reason qualifies.
     pub(super) fn chase_teardown(&self, inner: &mut Inner, ctl: &Arc<ChaseCtl>, reason: &str) {
         ctl.abort(reason);
+        let resume = self.chase_resume_ok(reason);
         if let Some(c) = inner.child.clone() {
             for cs in ctl.sink_slots.lock_ok().drain(..) {
-                c.abandon_slot(cs);
+                if !resume {
+                    c.abandon_slot(cs);
+                    continue;
+                }
+                // `retain_slot_output` abandons the slot itself on the
+                // shapes it declines, so a None here wants nothing more.
+                if let Some(kept) = c.retain_slot_output(cs) {
+                    inner.resume_pending.push(kept);
+                }
             }
         }
     }
@@ -1162,6 +2117,13 @@ impl Extractor {
                     if !vol.buf.is_complete() {
                         vol.buf.abort("bytes never arrived");
                     }
+                    // §94 B: settle has run, so no repair can rewrite
+                    // these bytes any more - and a cell parked at a
+                    // block no repair could fix never advances. Release
+                    // the gate so the join below stays bounded; a decode
+                    // fed an unrepaired block fails its own CRC and
+                    // demotes, exactly as an ungated one would.
+                    vol.buf.release_gate();
                 }
             }
             ctl.cv.notify_all();
@@ -1220,6 +2182,35 @@ impl Extractor {
     }
 }
 
+/// A live hold on every chased volume's decode, from
+/// [`Extractor::pause_chase_reads`]. Resuming is this guard's Drop and
+/// nothing else's: a repair that returns early, errors, or panics still
+/// releases the engines.
+pub struct ChaseReadPause {
+    bufs: Vec<Arc<FrontierBuffer>>,
+}
+
+impl Drop for ChaseReadPause {
+    fn drop(&mut self) {
+        for b in &self.bufs {
+            b.set_paused(false);
+        }
+    }
+}
+
+/// A demoted volume whose file is missing the ranges a dropping trim
+/// released - see [`Extractor::dropped_volumes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedVolume {
+    pub slot: usize,
+    /// The posted (yEnc) name, which a re-fetch writes under.
+    pub posted: String,
+    /// The slot's name now - the same, unless a PAR2 rename moved it.
+    pub current: String,
+    /// `(volume offset, len)`, ascending.
+    pub ranges: Vec<(u64, u64)>,
+}
+
 /// Which container format a `SlotMode::SevenZ` chase is actually
 /// driving. The chase machinery (frontier buffers, the one-part/N-part
 /// set, tail promote, trim, demote, finish joining) is format-agnostic;
@@ -1232,6 +2223,7 @@ impl Extractor {
 pub(super) enum ChaseFormat {
     SevenZ,
     Zip,
+    Tar,
 }
 
 impl ChaseFormat {
@@ -1239,6 +2231,7 @@ impl ChaseFormat {
         match self {
             ChaseFormat::SevenZ => "7z",
             ChaseFormat::Zip => "zip",
+            ChaseFormat::Tar => "tar",
         }
     }
 }
@@ -1249,6 +2242,15 @@ impl ChaseFormat {
 pub(super) struct ChaseSlot {
     pub(super) buf: Arc<FrontierBuffer>,
     pub(super) charged: usize,
+    /// Consumed prefix ranges the drop-behind trim released WITHOUT a
+    /// disk copy (`(offset, len)`, ascending, coalesced). Empty for a
+    /// spilling trim. A demote carries them to `Slot::dropped` so the
+    /// caller can re-fetch what the volume file is now missing.
+    pub(super) dropped: Vec<(u64, u64)>,
+    /// The slot's name when the first drop happened - the posted yEnc
+    /// name, which is what a re-fetch lands under. A PAR2 rename can
+    /// move the slot before a demote, so the demote keeps this one.
+    pub(super) dropped_as: String,
 }
 
 /// One chase = one compressed inner archive (one group): its registered
@@ -1264,13 +2266,17 @@ pub(super) struct ChaseCtl {
     /// extractor lock; taking `shared` for that would put the extractor
     /// lock ahead of the one every blocking volume wait holds.
     pub(super) low_water: Mutex<BTreeMap<usize, u64>>,
+    /// Volume index -> where the archive starts inside the volume's
+    /// file: the stub's length on an SFX volume (TODO 94 C), 0 for every
+    /// other. Written at attach, before the volume is registered; read
+    /// by [`Extractor::chase_wait_volume`] to build the engine's source
+    /// and by the watermark publish to translate back. Its own lock for
+    /// the same reason as `low_water`.
+    pub(super) bases: Mutex<BTreeMap<usize, u64>>,
     pub(super) worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Child-extractor slots the sink opened for extracted members -
     /// abandoned (partial outputs deleted) if the chase demotes.
     pub(super) sink_slots: Mutex<Vec<usize>>,
-    /// Member name -> unpacked size, recorded as each volume parses (the
-    /// engine's open callback doesn't carry the size, the headers do).
-    pub(super) sizes: Mutex<HashMap<String, u64>>,
     /// RAR family of this set: `true` drives the `rar15_40` engine, `false`
     /// the `rar50` one. Fixed at attach; a slot of the other family never
     /// joins (mixed families are not a set).
@@ -1306,9 +2312,9 @@ impl ChaseCtl {
             shared: Mutex::new(ChaseShared::default()),
             cv: Condvar::new(),
             low_water: Mutex::new(BTreeMap::new()),
+            bases: Mutex::new(BTreeMap::new()),
             worker: Mutex::new(None),
             sink_slots: Mutex::new(Vec::new()),
-            sizes: Mutex::new(HashMap::new()),
             v4,
         }
     }
@@ -1354,4 +2360,50 @@ impl io::Write for ChaseSink {
 
 #[cfg(test)]
 #[path = "chase_tests.rs"]
-mod chase_tests;
+pub(super) mod chase_tests;
+
+#[cfg(test)]
+#[path = "chase_shape_tests.rs"]
+pub(super) mod chase_shape_tests;
+
+/// A RAR archive's view of a volume that starts `base` bytes into its
+/// file - the SFX case (TODO 94 C), where a launcher stub precedes the
+/// signature. Every coordinate the engine speaks is shifted by `base`
+/// on the way in; the watermark it publishes is shifted back by
+/// [`file_watermark`] on the way out, so the [`FrontierBuffer`] and
+/// everyone reading it (the trim, the pace gate, the demote) stay in
+/// file coordinates.
+#[derive(Debug)]
+pub(super) struct OffsetSource {
+    pub(super) buf: Arc<FrontierBuffer>,
+    pub(super) base: u64,
+}
+
+impl rars::BlockingRangeSource for OffsetSource {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(at) = offset.checked_add(self.base) else {
+            return Ok(0);
+        };
+        rars::BlockingRangeSource::read_at(&*self.buf, at, buf)
+    }
+
+    fn known_len(&self) -> u64 {
+        rars::BlockingRangeSource::known_len(&*self.buf).saturating_sub(self.base)
+    }
+
+    fn total_len(&self) -> Option<u64> {
+        rars::BlockingRangeSource::total_len(&*self.buf).map(|t| t.saturating_sub(self.base))
+    }
+}
+
+/// The engine's drop-behind watermark, published in ARCHIVE coordinates
+/// (`u64::MAX` = the whole volume), as a FILE offset of the volume that
+/// starts `base` bytes in. The whole-volume marker survives unchanged,
+/// which is what the trim's "finished with" test relies on.
+pub(super) fn file_watermark(base: u64, offset: u64) -> u64 {
+    if offset == u64::MAX {
+        u64::MAX
+    } else {
+        offset.saturating_add(base)
+    }
+}

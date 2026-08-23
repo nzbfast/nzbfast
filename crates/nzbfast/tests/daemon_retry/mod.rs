@@ -25,10 +25,21 @@ use super::*;
 ///
 /// The rig is the (a) shape exactly: `NZBFAST_NO_TOP_RAR_CHASE=1`
 /// demotes a genuinely compressed volume to the disk ladder (so the set
-/// lands whole on disk, the way it did for him), and
-/// `NZBFAST_TEST_FORBID_UNRAR=1` makes that ladder's one unpacker
-/// unavailable, so the job fails AFTER a clean, fully journaled
-/// download. The retry then has to come off the disk.
+/// lands whole on disk, the way it did for him), and the ladder is left
+/// with no unpacker at all, so the job fails AFTER a clean, fully
+/// journaled download. The retry then has to come off the disk.
+///
+/// Shutting the ladder takes BOTH switches, one per engine.
+/// `NZBFAST_NO_NATIVE_UNRAR=1` sends the disk pass past the vendored
+/// rars engine to the subprocess, and `NZBFAST_TEST_FORBID_UNRAR=1`
+/// closes the subprocess. Until 22 Aug 2026 the canary alone did it,
+/// because it short-circuited `try_unrar_spent` at the top and so closed
+/// the native engine as a side effect; it now sits beside the
+/// `external_unrar_closed` hatch and means only what it says. This test
+/// is the one caller of it anywhere that wanted the whole function shut
+/// rather than just the subprocess - drop the first switch and the
+/// native engine unpacks `m3_default.rar` on its own, the job finishes
+/// Completed, and there is no Failed record to retry.
 ///
 /// Two of the three retry paths are driven here - the dashboard button
 /// (`mode=retry`) and the NZBGet facade's `HistoryRetry`, the one an
@@ -86,8 +97,10 @@ async fn unpack_failure_retries_without_refetching() {
             .env("NZBFAST_NO_ENRICH", "1")
             // Demote the compressed set to the disk ladder...
             .env("NZBFAST_NO_TOP_RAR_CHASE", "1")
-            // ...where its only unpacker refuses, so the job fails at the
-            // unpack stage with every volume verified on disk.
+            // ...past the native engine...
+            .env("NZBFAST_NO_NATIVE_UNRAR", "1")
+            // ...and onto a subprocess that refuses, so the job fails at
+            // the unpack stage with every volume verified on disk.
             .env("NZBFAST_TEST_FORBID_UNRAR", "1")
             .arg("--config")
             .arg(&cfg)

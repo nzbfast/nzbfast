@@ -29,6 +29,7 @@ counting has already produced one wrong scorecard round.
 Usage:
     tools/size-gate.py            # gate: exit 1 on any violation
     tools/size-gate.py --list     # report the largest files and functions
+    tools/size-gate.py --selftest # prove the scope resolver still works
 """
 
 import os
@@ -126,8 +127,26 @@ BASELINE_FILES = {
     # Its instrumentation is one subject and left whole: the latched
     # shape bits with their token/English rendering and the nested
     # prevalence tally are extract/shape.rs now (326 lines, no entry of
-    # its own): 3,242.
-    "crates/nzbkit/src/extract/mod.rs": 3242,
+    # its own): 3,242. Regrown to 3,302 - four lines of margin - so §94 A's
+    # slot-owned name preclaim could not land without a split: the posted
+    # file-NAMING rules (release_stem, vol_sort_key, is_final_file/name and
+    # their FINAL_FILE_EXTS list) are pure functions over names with no
+    # extractor state, one subject, and moved whole to extract/names.rs
+    # (re-exported, so no caller changed): 3,196. Three lines of margin
+    # again by 22 Aug (3,261 on a merged tree), so the delivery side of
+    # `impl Extractor` - the plain write-through and name claim, forwarded
+    # and routed delivery, the pending-queue flushes, the header stash and
+    # the tail-prefetch promote - moved whole to extract/deliver.rs as a
+    # second impl block: 2,712, under the ceiling, so its entry is GONE.
+    # Regrown to 2,982 by 23 Aug - eighteen lines of margin, the tripwire
+    # shape again - so the half deliver.rs names in its own first sentence
+    # came out next: ROUTING, meaning piece-base resolution for split
+    # continuations, the intersection of an arriving span with the
+    # mapper's parsed data areas, the per-entry destination decision and
+    # the writer/group bookkeeping it needs, is extract/routing.rs now
+    # (643 lines, a third impl block, no entry of its own): 2,357. Seven
+    # of its ten methods are called from sibling modules or the parent
+    # and took `pub(super)`; nothing else changed.
     # serve/tasks.rs was here at 6,400 (6,056 when first measured, then
     # 6,213 from pre-gate concurrent work) and the 8 Aug merges took it to
     # 6,723 - past the slack, the only file-level offender left on main.
@@ -335,21 +354,40 @@ def strip_noise(text):
 
 
 def test_line_mask(clean_lines):
-    """True for every line inside an inline `#[cfg(test)]` block."""
+    """True for every line inside an inline `#[cfg(test)]` block.
+
+    A BRACE-LESS item has to end at its `;`. This scanner used to end an
+    item only on braces, so `#[cfg(test)] static DUPE_ADMIT_BARRIER: ...;`
+    and `#[cfg(test)] mod lane_tests;` - which open no block at all - ran
+    on to the next `{` the file could offer, which is the body of whatever
+    came NEXT, and masked it as test code. Measured 22 Aug 2026: 58 files
+    carried a wrong mask, 24 functions were scored as test code that are
+    production, and one of them was over the ceiling and hidden by it -
+    `Daemon::enqueue`, 575 lines, with the brace-less static declared
+    directly above its `impl` block. That is the same defect tools/
+    lock-gate.py carried; both scanners are the same resolver family and
+    the fix is the same one.
+    """
     mask = [False] * len(clean_lines)
     i = 0
     while i < len(clean_lines):
         if CFG_TEST.match(clean_lines[i]):
-            depth, started, j = 0, False, i
+            depth, started, ended, j = 0, False, False, i
             while j < len(clean_lines):
                 s = clean_lines[j]
                 depth += s.count("{") - s.count("}")
                 if "{" in s:
                     started = True
                 if started and depth <= 0:
+                    ended = True
+                    break
+                # No block was ever opened, so this is a `static`/`const`/
+                # `use`/`mod` declaration and its `;` is the whole of it.
+                if not started and ";" in s:
+                    ended = True
                     break
                 j += 1
-            if started:
+            if ended:
                 for k in range(i, min(j + 1, len(clean_lines))):
                     mask[k] = True
                 i = j + 1
@@ -414,6 +452,15 @@ def collect():
     files_out = []  # (path, raw_lines)
     fns_out = []  # (path, name, line_1based, span, is_test)
     for p, text in contents.items():
+        # NB: this reads one HIGHER than `wc -l` on newline-terminated
+        # text, so a file `wc` calls 3,000 lines is 3,001 to the ceiling
+        # test below and FAILS. Measure headroom with the gate, not with
+        # wc. Undocumented until 23 Aug 2026, by which time it had cost
+        # two sessions in one evening - one mid-push, one misreading the
+        # cause as the `.split("\n")` in `clean` above, which yields the
+        # same number but feeds `#[cfg(test)]` scope resolution and
+        # never reaches the ceiling. Do not "fix" either: the scope
+        # resolver is what --selftest pins.
         files_out.append((p, text.count("\n") + 1))
         whole_file_is_test = (
             f"{os.sep}tests{os.sep}" in p or f"{os.sep}benches{os.sep}" in p or p in test_files
@@ -425,7 +472,148 @@ def collect():
     return files_out, fns_out
 
 
+# (name, fn name, expected is_test, source). The BRACE-LESS cases are the
+# ones that motivated the fix in test_line_mask: each of them scores
+# is_test=True against the brace-only scanner this gate shipped with, which
+# exempts a production function from FN_CEILING outright.
+SELFTEST = [
+    (
+        "a plain production fn",
+        "big",
+        False,
+        "fn big() {\n    let x = 1;\n}\n",
+    ),
+    (
+        "a fn inside a real #[cfg(test)] mod block",
+        "counts",
+        True,
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn counts() {\n        assert!(true);\n    }\n}\n",
+    ),
+    (
+        "a production fn AFTER a #[cfg(test)] mod block, which must not be swallowed",
+        "big",
+        False,
+        "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n\nfn big() {\n    let x = 1;\n}\n",
+    ),
+    (
+        "daemon_enqueue's shape: a brace-less #[cfg(test)] static above an impl",
+        "enqueue",
+        False,
+        "#[cfg(test)]\n"
+        "pub(in crate::serve) static DUPE_ADMIT_BARRIER: Mutex<\n"
+        "    Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,\n"
+        "> = Mutex::new(None);\n"
+        "\n"
+        "impl Daemon {\n"
+        "    fn enqueue(&self) -> Result<String> {\n"
+        "        Ok(String::new())\n"
+        "    }\n"
+        "}\n",
+    ),
+    (
+        "the same, for a `#[cfg(test)] mod foo;` child declaration",
+        "dest_root",
+        False,
+        "#[cfg(test)]\nmod lane_tests;\n\nfn dest_root() -> u8 {\n    0\n}\n",
+    ),
+    (
+        "a brace-less #[cfg(test)] use, which is also test scope itself",
+        "prod",
+        False,
+        "#[cfg(test)]\nuse std::sync::Barrier;\n\nfn prod() {\n    let x = 1;\n}\n",
+    ),
+]
+
+# The tokenizer half. `strip_noise` is what kept the 3 Aug offender list
+# honest, and a brace inside a string or a comment is the thing that broke
+# the version before it - so both are asserted here rather than assumed.
+SELFTEST_NOISE = [
+    (
+        "a brace inside a string literal does not open a block",
+        'fn f() {\n    let s = "}{";\n    let y = 1;\n}\nfn g() {\n    let z = 1;\n}\n',
+        {"f": 4, "g": 3},
+    ),
+    (
+        "a brace inside a raw string does not open a block",
+        'fn f() {\n    let s = r#"} { "#;\n}\nfn g() {\n    let z = 1;\n}\n',
+        {"f": 3, "g": 3},
+    ),
+    (
+        "a brace inside a comment does not open a block",
+        "fn f() {\n    // }\n    let y = 1;\n}\nfn g() {\n    let z = 1;\n}\n",
+        {"f": 4, "g": 3},
+    ),
+]
+
+
+def selftest():
+    bad = 0
+    for name, fn_name, want_test, src in SELFTEST:
+        clean = strip_noise(src).split("\n")
+        mask = test_line_mask(clean)
+        got = None
+        for n, start, _span in functions(clean):
+            if n == fn_name:
+                got = start < len(mask) and mask[start]
+        if got is None:
+            print(f"  selftest FAIL: never found fn {fn_name} in {name}", file=sys.stderr)
+            bad += 1
+        elif got != want_test:
+            scored = "test" if got else "production"
+            wanted = "test" if want_test else "production"
+            print(f"  selftest FAIL: scored {fn_name} as {scored}, wanted {wanted} - {name}", file=sys.stderr)
+            bad += 1
+    for name, src, spans in SELFTEST_NOISE:
+        got = {n: span for n, _start, span in functions(strip_noise(src).split("\n"))}
+        if got != spans:
+            print(f"  selftest FAIL: {name} measured {got}, wanted {spans}", file=sys.stderr)
+            bad += 1
+    # The point of the brace-less fix: assert the OLD brace-only scanner
+    # really does swallow the next item, so nobody simplifies it back.
+    src = SELFTEST[3][3]
+    clean = strip_noise(src).split("\n")
+    if not _brace_only_mask(clean)[5]:
+        print(
+            "  selftest FAIL: the brace-less fixture is not actually brace-less -\n"
+            "    the old scanner does not swallow it, so it proves nothing.",
+            file=sys.stderr,
+        )
+        bad += 1
+    if bad:
+        print(f"\nsize-gate: {bad} selftest case(s) failed - the gate is not doing its job.", file=sys.stderr)
+        return 1
+    print(f"size-gate: selftest ok ({len(SELFTEST)} scope cases, {len(SELFTEST_NOISE)} tokenizer cases)")
+    return 0
+
+
+def _brace_only_mask(clean_lines):
+    """The scanner this gate shipped with, kept ONLY for the selftest above."""
+    mask = [False] * len(clean_lines)
+    i = 0
+    while i < len(clean_lines):
+        if CFG_TEST.match(clean_lines[i]):
+            depth, started, j = 0, False, i
+            while j < len(clean_lines):
+                s = clean_lines[j]
+                depth += s.count("{") - s.count("}")
+                if "{" in s:
+                    started = True
+                if started and depth <= 0:
+                    break
+                j += 1
+            if started:
+                for k in range(i, min(j + 1, len(clean_lines))):
+                    mask[k] = True
+                i = j + 1
+                continue
+        i += 1
+    return mask
+
+
 def main():
+    if "--selftest" in sys.argv:
+        return selftest()
+
     files, fns = collect()
 
     if "--list" in sys.argv:

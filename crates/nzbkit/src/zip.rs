@@ -629,10 +629,43 @@ pub(crate) const METHOD_BZIP2: u16 = 12;
 pub(crate) const METHOD_LZMA: u16 = 14;
 
 /// The largest LZMA dictionary a zip entry may declare. The field is a
-/// hostile u32 from a downloaded header; the decoder grows its window
-/// lazily but clamps it to this declared value, so an absurd
-/// declaration is refused up front rather than honoured at read time.
-/// Real writers default to 8-64 MiB.
+/// hostile u32 from a downloaded header, so an absurd declaration is
+/// refused up front rather than honoured at read time.
+///
+/// 256 MiB is not slack, it is exactly 7-Zip's top preset - MEASURED
+/// 21 Aug 2026 with `7zz a -tzip -mm=LZMA -mx=N` over a payload larger
+/// than the window (7-Zip shrinks the dictionary to fit its input, so a
+/// small fixture reports the input size and tells you nothing):
+///
+/// | `-mx` | 1      | 3     | 5      | 7       | 9       |
+/// |-------|--------|-------|--------|---------|---------|
+/// | dict  | 256 KiB| 4 MiB | 32 MiB | 128 MiB | 256 MiB |
+///
+/// So LOWERING this rejects real archives: anything written with 7-Zip
+/// on "Ultra" lands exactly on the cap, and "Maximum" at half of it.
+/// Only a hand-passed `-md=` exceeds it (7-Zip will emit 1 GiB if
+/// asked), and refusing those is the line this constant draws. Do not
+/// tighten it without re-running that table.
+///
+/// What it costs when honoured: `LzDecoder::ensure_capacity` allocates
+/// the WHOLE window in one `try_reserve_exact` on the first read - it
+/// does not grow lazily, whatever the name suggests - so a valid
+/// `-mx=9` entry spends 256 MiB of untracked RSS (untracked because it
+/// lives inside the decoder, not in `MemBudget`) for as long as that
+/// entry decodes. `LzmaReader` first clamps the window to the entry's
+/// declared uncompressed size, so the real allocation is
+/// `min(dict, uncompressed_size)` and a small entry cannot buy a large
+/// window - only a LYING header can, which is what the cap bounds.
+///
+/// A tiny entry declaring the maximum is therefore a ~1,900,000x
+/// amplification (see the `oom-4378...` seed and the test over it), and
+/// that is accepted deliberately: an attacker who wants the same 256 MiB
+/// from a well-formed header needs only ~150 KiB of real compressed body
+/// (1 GiB of zeros compresses to 151,548 bytes at `-mx=9`, dictionary
+/// 256 MiB - measured the same day), which is a fraction of one article.
+/// The ratio is not the attacker's constraint here, so capping the ratio
+/// buys nothing a padded archive would not walk straight through, while
+/// risking a false refusal on genuinely compressible payloads.
 const LZMA_DICT_MAX: u32 = 1 << 28;
 
 /// Can the tree decode this method? One predicate, because the chase and
@@ -646,6 +679,29 @@ pub(crate) fn method_supported(m: u16) -> bool {
     )
 }
 
+/// The dictionary-window bytes an LZMA (method 14) entry will allocate,
+/// matching `lzma-rust2`'s own sizing: the window is
+/// `min(declared_dict, uncompressed_size)`, rounded up to a 16-byte
+/// multiple and floored at 4 KiB, allocated whole on first read. Used to
+/// charge the process budget in [`decoder`] (TODO 209).
+pub(crate) fn lzma_window_bytes(dict_size: u32, uncompressed_size: u64) -> u64 {
+    let eff = dict_size.min(u32::try_from(uncompressed_size).unwrap_or(u32::MAX));
+    (u64::from(eff).max(4096) + 15) & !15
+}
+
+/// An `LzmaReader` that holds a [`crate::mem::LzmaDictCharge`] for its
+/// dictionary window, releasing the budget when the decoder drops.
+struct BudgetedLzma<R> {
+    inner: lzma_rust2::LzmaReader<R>,
+    _charge: crate::mem::LzmaDictCharge,
+}
+
+impl<R: std::io::Read> std::io::Read for BudgetedLzma<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
 /// The decoder for `e`'s real method, wrapping an already-decrypted byte
 /// source. Only ever called for a method [`method_supported`] accepted.
 /// Construction can read from `src` - zip's LZMA framing puts a
@@ -654,7 +710,27 @@ pub(crate) fn method_supported(m: u16) -> bool {
 /// body reads.
 pub(crate) fn decoder<'a, R: std::io::Read + 'a>(
     e: &Entry,
+    src: R,
+) -> std::io::Result<Box<dyn std::io::Read + 'a>> {
+    decoder_with(e, src, DictAdmit::TryOnce)
+}
+
+/// How a method-14 decode asks for its dictionary window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DictAdmit {
+    /// Ask once; a refusal is an error the caller demotes (the chase).
+    TryOnce,
+    /// Wait for the window. For a caller with no lower rung: the
+    /// sequential disk read IS the demotion target, so refusing it files
+    /// a valid archive as a gap. See `mem::charge_lzma_dict_waiting`.
+    Wait,
+}
+
+/// [`decoder`], with the dictionary admission mode named.
+pub(crate) fn decoder_with<'a, R: std::io::Read + 'a>(
+    e: &Entry,
     mut src: R,
+    admit: DictAdmit,
 ) -> std::io::Result<Box<dyn std::io::Read + 'a>> {
     use std::io::{Error, ErrorKind::InvalidData};
     Ok(match real_method(e) {
@@ -687,13 +763,38 @@ pub(crate) fn decoder<'a, R: std::io::Read + 'a>(
                 // not defined for a zero-byte target.
                 return Ok(Box::new(std::io::empty()));
             }
-            Box::new(lzma_rust2::LzmaReader::new_with_props(
+            // Charge the decode window against the process budget before
+            // allocating it (TODO 209 items 2 & 3). The window is
+            // `min(dict, uncompressed_size)`, allocated whole on first
+            // read; a nested one-pass chase stacks one per level (measured
+            // 5 x 256 MiB = 1.25 GiB). Under `TryOnce` an additional
+            // concurrent window that would breach the budget is refused
+            // here and the chase demotes the container to disk (identical
+            // output, sequential decode). The disk read has no such lower
+            // rung and asks with `Wait`, because the gauge is process-wide
+            // and a refusal there fails a valid archive.
+            let window = lzma_window_bytes(dict_size, e.uncompressed_size);
+            let charge = match admit {
+                DictAdmit::Wait => crate::mem::charge_lzma_dict_waiting(window),
+                DictAdmit::TryOnce => crate::mem::charge_lzma_dict(window).ok_or_else(|| {
+                    Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "lzma dictionary budget exhausted by concurrent nested decode; \
+the disk pass unpacks this container sequentially",
+                    )
+                })?,
+            };
+            let reader = lzma_rust2::LzmaReader::new_with_props(
                 src,
                 e.uncompressed_size,
                 props[0],
                 dict_size,
                 None,
-            )?)
+            )?;
+            Box::new(BudgetedLzma {
+                inner: reader,
+                _charge: charge,
+            })
         }
         // Deflate by elimination - `method_supported` gates every caller.
         _ => Box::new(flate2::read::DeflateDecoder::new(src)),
@@ -732,6 +833,11 @@ const MAX_NAME: usize = 4096;
 /// 65557 bytes of the end, so this keeps the read inside the tail that
 /// both callers have already promoted.
 const MAX_Z64_TAIL_GAP: u64 = 4096;
+/// The zip64 end record's FIXED part (§4.3.6). Anything past it is the
+/// extensible data sector, whose length is declared by the record's own
+/// size field and nowhere else - so this is the record's minimum length,
+/// never its length.
+const Z64_FIXED: u64 = 56;
 
 /// One central-directory record, already Zip64-resolved.
 #[derive(Debug, Clone)]
@@ -1027,7 +1133,7 @@ impl Archive {
         // One code path for both methods: `store` is just the identity
         // decoder, so the CRC/size accounting below cannot drift between
         // them.
-        let mut rd = decoder(e, RdAdapter(&mut rd_src))?;
+        let mut rd = decoder_with(e, RdAdapter(&mut rd_src), DictAdmit::Wait)?;
         loop {
             let n = rd.read(&mut buf)?;
             if n == 0 {
@@ -1367,6 +1473,56 @@ pub(crate) struct Directory {
     pub(crate) base: u64,
 }
 
+/// Where a zip64 end record physically sits, on an archive whose own
+/// pointers cannot say - one that does not start at byte 0, so every
+/// stored offset is short by the prefix.
+///
+/// §4.3.6 fixes the tail's layout - record, 20-byte locator, EOCD - so
+/// the record's END is pinned at `eocd_at - 20` whatever its length,
+/// derived from the EOCD this reader already trusts rather than from
+/// any stored pointer. Its LENGTH is not fixed: the record may carry
+/// an extensible data sector after its 56 fixed bytes, and that
+/// sector's size is declared in the record's own size field and
+/// nowhere else. Reading the single position a 56-byte record occupies
+/// therefore lands INSIDE any record that carries one, which refused a
+/// legal archive (§162 item 3, and Python 3.14.6's `zipfile` and Info-ZIP
+/// `unzip` 6.00 both still do - measured 23 Aug 2026).
+///
+/// So the start is searched for, and what makes that safe is not the
+/// signature - a sector is arbitrary bytes and may carry one - but the
+/// record's own arithmetic: `12 + size` has to land its end exactly on
+/// the locator. Two positions can satisfy that, and the OUTER one is
+/// the record: whatever the outer one's size field covers is its
+/// sector, and a sector's bytes are data by definition, so an inner
+/// match is something the record CONTAINS. An empty sector still
+/// resolves at `eocd_at - 76`, precisely where the old probe read.
+/// Still only a CANDIDATE either way: [`prepended_base`] has to find a
+/// real directory record at the offset it implies before any of it
+/// counts, and measuring to the EOCD is tried after it.
+fn physical_zip64_record<S: Source + ?Sized>(parts: &S, eocd_at: u64) -> Option<u64> {
+    let locator_at = eocd_at.checked_sub(20)?;
+    // Read no further back than the gap the caller will ACCEPT: the
+    // one-pass source blocks on bytes that have not arrived, so this is
+    // what keeps the probe inside the tail both callers have promoted.
+    let lowest = eocd_at.saturating_sub(MAX_Z64_TAIL_GAP);
+    let span = locator_at.checked_sub(lowest)?;
+    if span < Z64_FIXED {
+        return None;
+    }
+    let mut win = vec![0u8; span as usize];
+    parts.read_exact_at(lowest, &mut win).ok()?;
+    // `i` is a candidate record START, so the size field it declares
+    // must span the whole of the rest of the window. Lowest first: see
+    // the outer-wins argument above.
+    (0..=(span - Z64_FIXED))
+        .find(|&i| {
+            let i = i as usize;
+            &win[i..i + 4] == b"PK\x06\x06"
+                && rd_u64(&win[i + 4..]).checked_add(12) == Some(span - i as u64)
+        })
+        .map(|i| lowest + i)
+}
+
 /// Locate the end-of-central-directory record and describe the
 /// directory it names.
 ///
@@ -1454,19 +1610,9 @@ pub(crate) fn find_central_directory<S: Source + ?Sized>(parts: &S) -> Result<Di
     // position, so on a stubbed archive it lands short by the stub and
     // finds nothing - and the shortfall arithmetic below then measured
     // the stub as if the record and locator were part of it, putting
-    // the directory 76 bytes past where it is. §4.3.6 fixes the layout
-    // (record, 20-byte locator, EOCD), so `eocd_at - 76` is the one
-    // position a plain 56-byte record can occupy, derived from the EOCD
-    // this reader already trusts rather than from any stored pointer.
-    // Still only a CANDIDATE: `prepended_base` has to find a real
-    // directory record at the offset it implies before any of it counts.
-    if z64_anchor.is_none()
-        && let Some(at) = eocd_at.checked_sub(76)
-    {
-        let mut sig = [0u8; 4];
-        if parts.read_exact_at(at, &mut sig).is_ok() && &sig == b"PK\x06\x06" {
-            z64_anchor = Some(at);
-        }
+    // the directory 76 bytes past where it is.
+    if z64_anchor.is_none() {
+        z64_anchor = physical_zip64_record(parts, eocd_at);
     }
     if entries == u16::MAX as u64
         || per_disk == u16::MAX as u64
@@ -1917,6 +2063,15 @@ pub mod fixtures {
         /// Flip one ciphertext byte after encryption (tamper
         /// simulation - the AE HMAC must catch it).
         pub tamper: bool,
+        /// Declared LZMA dictionary size written into the method-14
+        /// framing, INDEPENDENT of the size the encoder actually used.
+        /// The decode-side window is `min(declared, uncompressed_size)`
+        /// and is sized from this field, not from the stream's real
+        /// match distances - so a small-dict encode with a large
+        /// declaration reproduces a genuine `-mx=9` archive's decode
+        /// memory at a fraction of the encode cost (dict-window RSS rig,
+        /// TODO 209). `None` keeps the historical 64 KiB fixtures dict.
+        pub dict_size: Option<u32>,
     }
 
     impl<'a> Spec<'a> {
@@ -1931,6 +2086,7 @@ pub mod fixtures {
                 zip64: false,
                 encrypt: None,
                 tamper: false,
+                dict_size: None,
             }
         }
         pub fn deflated(name: &'a str, data: &'a [u8]) -> Spec<'a> {
@@ -1948,6 +2104,17 @@ pub mod fixtures {
         pub fn lzma(name: &'a str, data: &'a [u8]) -> Spec<'a> {
             Spec {
                 method: super::METHOD_LZMA,
+                ..Spec::stored(name, data)
+            }
+        }
+        /// A method-14 entry that DECLARES `dict_size` in its framing.
+        /// The stream is still encoded with the cheap fixtures dict, so
+        /// the declaration exceeds the real match distances - which is
+        /// exactly the decode-memory shape this exercises.
+        pub fn lzma_with_dict(name: &'a str, data: &'a [u8], dict_size: u32) -> Spec<'a> {
+            Spec {
+                method: super::METHOD_LZMA,
+                dict_size: Some(dict_size),
                 ..Spec::stored(name, data)
             }
         }
@@ -1980,15 +2147,23 @@ pub mod fixtures {
             }
             super::METHOD_LZMA => {
                 use std::io::Write as _;
-                let mut opts = lzma_rust2::LzmaOptions::with_preset(6);
-                // Tiny fixtures; a small window keeps the decode cheap
-                // and exercises nothing less.
+                // The override path (dict-window RSS rig) feeds hundreds
+                // of MiB of incompressible bytes, so it takes the fast
+                // preset; the default fixtures keep preset 6 byte-for-
+                // byte. Either way the ENCODE dict stays 64 KiB - the
+                // large window is a framing DECLARATION, not real match
+                // distance (see `Spec::dict_size`).
+                let preset = if s.dict_size.is_some() { 1 } else { 6 };
+                let mut opts = lzma_rust2::LzmaOptions::with_preset(preset);
                 opts.dict_size = 1 << 16;
                 let mut w =
                     lzma_rust2::LzmaWriter::new_no_header(Vec::new(), &opts, false).unwrap();
                 w.write_all(s.data).unwrap();
                 let props = w.props();
                 let stream = w.finish().unwrap();
+                // Declared dictionary: the override when present,
+                // otherwise the (small) dict the encoder actually used.
+                let declared_dict = s.dict_size.unwrap_or(opts.dict_size);
                 // Method 14's framing: writer version, properties
                 // length, the 5-byte properties blob, then the raw
                 // stream. No end marker - sizes are declared, so the
@@ -1997,7 +2172,7 @@ pub mod fixtures {
                 u16le(0x0014, &mut out);
                 u16le(5, &mut out);
                 out.push(props);
-                u32le(opts.dict_size, &mut out);
+                u32le(declared_dict, &mut out);
                 out.extend_from_slice(&stream);
                 out
             }

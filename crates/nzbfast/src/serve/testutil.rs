@@ -38,6 +38,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
+        postproc_backlog: Arc::new(AtomicUsize::new(0)),
         finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
@@ -53,7 +54,8 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         mover_bucket: Mutex::new(mover::PaceState::default()),
         move_pace: Mutex::new("yield".to_string()),
         reserved: Mutex::new(std::collections::HashSet::new()),
-        progress: Arc::new(AtomicU64::new(0)),
+        progress: ProgressCell::default(),
+        drain_dl: Mutex::new(None),
         active_total: AtomicU64::new(0),
         active_dl: Mutex::new(None),
         started_at: Mutex::new(None),
@@ -65,9 +67,10 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         move_completed: std::sync::RwLock::new(None),
         move_completed_cats: std::sync::RwLock::new(Vec::new()),
         spool: spool.clone(),
-        cfg_path: config,
+        cfg_path: config.clone(),
         cats: Mutex::new(DEFAULT_CATS.iter().map(|s| s.to_string()).collect()),
         port: 0,
+        bind: "127.0.0.1".to_string(),
         launcher_token: String::new(),
         port_locked: false,
         tls_cert: None,
@@ -109,7 +112,10 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         index_pesto: std::sync::atomic::AtomicBool::new(true),
         index_pesto_budget: AtomicU64::new(120),
         index_search_log: std::sync::atomic::AtomicBool::new(true),
+        #[cfg(feature = "indexer")]
         search_log_buf: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "indexer")]
+        search_log_clear_pending: std::sync::atomic::AtomicBool::new(false),
         index_nzbimport: std::sync::atomic::AtomicBool::new(true),
         index_nzbimport_budget: AtomicU64::new(300),
         bench_interval: AtomicU64::new(0),
@@ -144,7 +150,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         #[cfg(feature = "indexer")]
         instant_pending: Mutex::new(std::collections::HashMap::new()),
         instant_hint: Mutex::new(Vec::new()),
-        nzblnk_recent: Mutex::new(std::collections::VecDeque::new()),
+        nzblnk_gate: NzblnkGate::default(),
         smart_folders: Mutex::new(Vec::new()),
         par_cleanup: AtomicBool::new(true),
         postproc_jobs: AtomicU64::new(2),
@@ -198,8 +204,6 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         predb_corr_auto: seed_predb_corr_auto(&settings_path),
         #[cfg(feature = "indexer")]
         predb_max_rows: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_MAX_ROWS_DEFAULT),
-        #[cfg(not(feature = "indexer"))]
-        predb_max_rows: std::sync::atomic::AtomicU64::new(250_000),
         #[cfg(feature = "indexer")]
         predb_seed_days: std::sync::atomic::AtomicU64::new(predb_seed::PREDB_SEED_DAYS_DEFAULT),
         #[cfg(not(feature = "indexer"))]
@@ -216,7 +220,9 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         scoreboard_cats: seed_scoreboard_cats(&settings_path),
         scoreboard_key: seed_scoreboard_key(&settings_path),
         scoreboard_calibrate: seed_scoreboard_calibrate(&settings_path),
+        #[cfg(feature = "indexer")]
         scoreboard_running: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "indexer")]
         scoreboard_status: Mutex::new(String::new()),
         spot_enabled: seed_spot_enabled(&settings_path),
         spot_groups: seed_spot_groups(&settings_path),
@@ -230,12 +236,8 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         index_evict: seed_index_evict(&settings_path),
         #[cfg(feature = "indexer")]
         index_evict_order: seed_index_evict_order(&settings_path),
-        #[cfg(not(feature = "indexer"))]
-        index_evict_order: Mutex::new("ladder".to_string()),
         #[cfg(feature = "indexer")]
         index_evict_kinds: seed_index_evict_kinds(&settings_path),
-        #[cfg(not(feature = "indexer"))]
-        index_evict_kinds: Mutex::new(Vec::new()),
         #[cfg(feature = "indexer")]
         compact_pending: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
@@ -248,6 +250,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         link_peak: super::linkpeak::LinkPeak::load(spool.join("linkpeak.json")),
         whyslow: super::whyslow::WhySlow::default(),
         tune_hint: Mutex::new(String::new()),
+        local_link: Mutex::new(None),
         cpu_sample: Mutex::new(None),
         speed_win: Mutex::new(VecDeque::new()),
         usage: Mutex::new(Default::default()),
@@ -277,10 +280,6 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         watch_recursive: AtomicBool::new(false),
         watch_move_rejected: AtomicBool::new(false),
         watch_failed: Mutex::new(std::collections::HashMap::new()),
-        watch_picked: Mutex::new(std::collections::VecDeque::new()),
-        auto_retried: Mutex::new(std::collections::VecDeque::new()),
-        giveup_tripped: Mutex::new(std::collections::VecDeque::new()),
-        watch_upgraded: Mutex::new(std::collections::VecDeque::new()),
         delete_kept: Mutex::new(std::collections::VecDeque::new()),
         deleted_recent: Mutex::new(std::collections::VecDeque::new()),
         auth_fails: Mutex::new(std::collections::HashMap::new()),
@@ -309,6 +308,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         nzbkey: Mutex::new(None),
         stream_secret: seed_stream_secret(&settings_path),
         omdb_key: seed_omdb_key(&settings_path),
+        tmdb_key: seed_tmdb_key(&settings_path, &config),
         library_recheck_secs: AtomicU64::new(300),
         index_groups: Mutex::new(Vec::new()),
         index_interests: Mutex::new(String::new()),

@@ -1,6 +1,6 @@
 //! §106 phase 3: unit tests for the pure helpers and small
 //! Daemon-backed functions in serve/tasks.rs. StallTracker basics live
-//! in `stall_tests`; only the edges it misses are covered here.
+//! in `tasks_stall_tests`; only the edges it misses are covered here.
 
 use super::*;
 use serde_json::json;
@@ -436,6 +436,78 @@ fn tune_hint_bands_stale_setting_well_short_and_clear() {
     // In between: the hint clears.
     super::update_tune_hint(&d, &servers, &map(1.0));
     assert!(d.tune_hint.lock_ok().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §210: the local link is the yardstick. Providers measured at
+/// 600 Mbit on a 1 Gbit line read "well short" - unless the machine is
+/// on a Wi-Fi link that can only carry ~660, in which case the link is
+/// named first and the providers, covering what the link can carry,
+/// are NOT blamed. And a link that covers the line says nothing.
+#[test]
+fn tune_hint_scores_providers_against_the_local_link_not_the_line() {
+    use crate::serve::locallink::{LinkKind, LocalLink};
+    let dir = tdir("tune-link");
+    let d = super::super::testutil::test_daemon(&dir);
+    d.line_speed.store(125_000_000, Ordering::Relaxed);
+    let servers = vec![srv("news.a.example", None)];
+    let mut m = std::collections::HashMap::new();
+    m.insert("news.a.example".to_string(), tuned(0.6, 20, 20));
+    // No link known: 60% of the line is well short of it.
+    super::update_tune_hint(&d, &servers, &m);
+    assert!(d.tune_hint.lock_ok().contains("well short"));
+    // Wi-Fi at 1200 Mbps (~660 deliverable): the link is the story.
+    *d.local_link.lock_ok() = Some(LocalLink {
+        iface: "en0".into(),
+        kind: LinkKind::Wireless,
+        link_mbps: 1200,
+        phy: "802.11ax".into(),
+        signal_dbm: Some(-50),
+        channel: String::new(),
+        adapter_phy: String::new(),
+    });
+    super::update_tune_hint(&d, &servers, &m);
+    let h = d.tune_hint.lock_ok().clone();
+    assert!(
+        h.starts_with("this machine reaches the internet over Wi-Fi"),
+        "{h}"
+    );
+    assert!(!h.contains("well short"), "{h}");
+    // Providers at 300 Mbit are short even of the link: both are said,
+    // and the provider figure is scored against the LINK (~660), not
+    // the 1000 Mbit line.
+    m.insert("news.a.example".to_string(), tuned(0.3, 20, 20));
+    super::update_tune_hint(&d, &servers, &m);
+    let h = d.tune_hint.lock_ok().clone();
+    assert!(
+        h.contains("Also: providers measured ~300 Mbps together"),
+        "{h}"
+    );
+    assert!(
+        h.contains("of the ~660 Mbps this machine's link can carry"),
+        "{h}"
+    );
+    // A gigabit port under a gigabit line: the link says nothing of
+    // itself (950 deliverable is within 5%), but it is still the
+    // honest yardstick for the provider figure.
+    *d.local_link.lock_ok() = Some(LocalLink {
+        iface: "en3".into(),
+        kind: LinkKind::Wired,
+        link_mbps: 1000,
+        phy: "1000baseT".into(),
+        signal_dbm: None,
+        channel: String::new(),
+        adapter_phy: String::new(),
+    });
+    m.insert("news.a.example".to_string(), tuned(0.6, 20, 20));
+    super::update_tune_hint(&d, &servers, &m);
+    let h = d.tune_hint.lock_ok().clone();
+    assert!(h.starts_with("providers measured"), "{h}");
+    assert!(h.contains("~950 Mbps this machine's link can carry"), "{h}");
+    // Take the link away: back to the typed line.
+    *d.local_link.lock_ok() = None;
+    super::update_tune_hint(&d, &servers, &m);
+    assert!(d.tune_hint.lock_ok().contains("~1000 Mbps line"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1110,7 +1182,8 @@ fn a_job_shorter_than_a_watchdog_tick_still_banks_its_refusal() {
     );
 
     let mut ledger = None;
-    let _ = super::runner::settle_job_tail(&d, "nzo-subtick", &mut ledger);
+    let progress = AtomicU64::new(0);
+    let _ = super::runner::settle_job_tail(&d, "nzo-subtick", &mut ledger, &progress, None);
 
     let c = crate::conntune::load(&d.cfg_path)
         .get("s.example")

@@ -19,6 +19,14 @@ names, which is how they were checked.
 | `enc-hdrs.rar` | `-m0 -hp` single volume (encrypted headers AND data) |
 | `enc-hdr-vols.part{1,2,3}.rar` | `-m0 -hp` split |
 
+That provenance is also this directory's limit: the reader only ever
+meets field combinations our own writer knows how to emit, so `unrar t`
+accepting them proves the WRITER valid, not the reader complete. The
+shapes an actual archiver chose live in `testdata/rar4-archiver/` -
+plain stores, old-style `.rar`/`.r00` volume naming, a recovery record,
+an archive comment, `LHD_LARGE` past 4 GiB, and the unicode-name
+correction run only WinRAR emits.
+
 The facts the one-pass mapper rests on and these pin: `unp_ver` 29, one
 continuous AES-128-CBC stream per inner file with the salt repeated in
 every volume's header, `pack_size = align16(unpacked)` at the very end

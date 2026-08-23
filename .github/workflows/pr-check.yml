@@ -17,8 +17,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: toolchain
         run: rustup toolchain install stable --profile minimal && rustup default stable
-      - name: test deps (par2 for repair e2e)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      # par2 CREATES the recovery sets the repair e2e then damages and
+      # repairs (nzbfast's own verify and repair are built in, so this is
+      # a fixture tool, not a runtime one).
+      #
+      # unrar is TODO 60b, and the same kind of dependency: the
+      # `prefer_external_unrar` setting routes a named compressed set to
+      # an unrar SUBPROCESS, and the test that proves it skipped itself
+      # on every runner because only par2 was installed - so the routing
+      # direction was pinned on a developer machine and nowhere else.
+      # This is NOT a reversal of the §11 stage-4 decision to stop
+      # embedding unrar: it is a test dependency OF THE RUNNER, never a
+      # shipped or bundled binary, exactly as par2 and rar already are.
+      # It comes from multiverse; `unrar-free` is a different
+      # implementation, not a drop-in, so do not swap it in if this ever
+      # fails to install.
+      - name: test deps (par2 and unrar for the unpack suites)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2 unrar
       # Cargo.lock moves on EVERY release (packaging/bump-version.sh
       # rewrites it), so `hashFiles('Cargo.lock')` sent this job cold on
       # every release for the sake of two changed lines. Measured on
@@ -91,6 +106,12 @@ jobs:
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
+          # The unrar twin of the pin above, and for the same reason:
+          # unrar is installed for this job, so a routing test that
+          # cannot find one is a broken job rather than a test with
+          # nothing to say. Linux only - the Windows twin fetches no
+          # unrar, and the routing logic is platform-independent.
+          NZBFAST_REQUIRE_UNRAR: "1"
           # Opens an all-interfaces listener to prove the wide bind still
           # reaches the LAN (NAS boxes and remote *arrs depend on it).
           # Off by default because on a developer's macOS it means a
@@ -103,10 +124,12 @@ jobs:
       # Parity with ci-private.yml; see TODO 102b for why this is a script
       # rather than clippy's disallowed-methods.
       - name: lock gate
-        run: tools/lock-gate.py
+        run: tools/lock-gate.py --selftest && tools/lock-gate.py
       # Parity with ci-private.yml; TODO 106's regrowth ratchet.
+      # `--selftest` first, same reason as the lock gate above - the same
+      # brace-less `#[cfg(test)]` hole lived in this gate's scope resolver.
       - name: size gate
-        run: tools/size-gate.py
+        run: tools/size-gate.py --selftest && tools/size-gate.py
       # The .deb/.rpm packaging, checked without installing anything: the
       # generated systemd unit, and the property that no maintainer
       # script can remove or replace /var/lib/nzbfast (which is where the
@@ -122,12 +145,23 @@ jobs:
       - name: linux tarball gate
         run: packaging/tests/linux-tarballs.sh
       # The same rule over the OTHER archive formats a release ships -
-      # .spk, .deb, .rpm, .zip and the .qpkg both upload gates skip by
-      # name, plus nested tars and AppleDouble members. The 1.1.3 .qpkg
-      # shipped `uname='runner'` on every member because nothing looked;
-      # this is what looks. Pure shell and python, no cross-compiler.
+      # .spk, .deb, .rpm, .zip and the .qpkg the upload script's owner
+      # gate skips by name, plus nested tars and AppleDouble members. The
+      # 1.1.3 .qpkg shipped `uname='runner'` on every member because
+      # nothing looked; this is what looks. Pure shell and python, no
+      # cross-compiler.
       - name: archive identity gate
         run: packaging/tests/archive-identity.sh
+      # The upload script's macOS-metadata gate over the .qpkg, which it
+      # skipped by name until TODO 173's last open item wired
+      # packaging/qnap/unpack-qpkg.sh in. `._name` at the top level is a
+      # SECOND top-level entry and breaks every unpacker that collapses a
+      # lone wrapper directory - that is how the Proxmox install could not
+      # start its service. Also pins that the gate reads the raw inner
+      # archives rather than an unpacked tree, because bsdtar consumes
+      # AppleDouble members on extract and a tree walk would see none.
+      - name: qpkg junk gate
+        run: packaging/tests/qpkg-junk-gate.sh
       # The DSM package's postinst: where a Synology user's downloads
       # land, which is the one decision in that package that cannot be
       # tried before a NAS installs it. Fake volume trees, pure shell,
@@ -139,7 +173,17 @@ jobs:
         # No escapes: every warning blocks. The categories still allowed
         # are named in the workspace lints table in Cargo.toml, each with
         # its reason.
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --all-targets --no-deps -- -D warnings
+        #
+        # `-p nzbfast-ffi` mirrors ci-private's clippy step, which took
+        # it on 23 Aug 2026 when the archive step there stopped taking
+        # `--workspace`. It is not only that crate's own few lines: it is
+        # what turns nzbfast's `ffi` feature on, and that feature has
+        # exactly one site in the workspace - the `#![cfg]` at
+        # crates/nzbfast/src/lib.rs:21 - so without it the iOS staticlib's
+        # crate root compiles to nothing and its two `#![expect(...)]`
+        # waivers are never judged. `crates` ships whole, so a public
+        # contributor can break that root; this is the gate that says so.
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --all-targets --no-deps -- -D warnings
 
   # Windows, x64. The workspace suite had NEVER run on Windows on any
   # architecture until a Windows-on-ARM build probe added a job that ran
@@ -265,8 +309,11 @@ jobs:
       # contributor PR from landing Windows-only lint debt.
       # --keep-going because clippy otherwise stops at the first failing
       # crate and reports one crate's worth per round.
+      # `-p nzbfast-ffi` for the reason the Linux clippy step above
+      # gives; verified clean against x86_64-pc-windows-gnu on 23 Aug
+      # 2026 before it was added to any gate.
       - name: clippy
-        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray --all-targets --no-deps --keep-going -- -D warnings
+        run: cargo clippy -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --all-targets --no-deps --keep-going -- -D warnings
       # The ARM64 gate. `cargo clippy --target` runs in check mode - it
       # never links - so an x64 runner covers aarch64-pc-windows-msvc with
       # nothing installed but the rust target, and the ARM64 MSVC linker

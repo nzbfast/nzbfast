@@ -1,0 +1,778 @@
+//! The download runner: which job runs, when the next one starts, and
+//! the order their tails reach the post-processing lane.
+//!
+//! Moved out of tasks.rs whole (it sat at the file ceiling) and
+//! restructured around the cross-job hand-over
+//! (`nzbkit::pool::handoff`). Two overlaps exist now:
+//!
+//! - Job N's TAIL (settle/repair/extract, on the lane) overlaps job
+//!   N+1's download. This is the old one, and it is what `net_rx`
+//!   resolving at network-drain buys.
+//! - Job N's network DRAIN overlaps job N+1's download. New. Once N's
+//!   fleet starts going idle after queue-dry (`HandoffSignal`), the
+//!   runner picks and starts N+1 on the real daemon hub while N's last
+//!   in-flight articles are still landing. N+1's workers take N's idle
+//!   connections one at a time through the per-host lease, so the line
+//!   stays full and the two runs never hold more than one job's cap
+//!   between them.
+//!
+//! What keeps that honest is the `Running` / `detach` split below. The
+//! daemon's hub and counters belong to the NEWEST job from the moment
+//! it claims them, exactly as before; everything the runner will still
+//! need from job N after that moment is taken off the hub first
+//! ([`detach_job_tail`]) and carried until N drains. The lane sees N's
+//! ticket before N+1's by construction: after a hand-over the runner
+//! awaits N's drain and submits N before it looks at N+1's signals, so
+//! at most two pipelines are ever alive.
+//!
+//! That is an ordering of the LANE'S INBOX, and this doc said "history
+//! order is queue order" until 23 Aug 2026, which is a different and
+//! false claim. Filing happens at `park`, at the END of a tail, and the
+//! lane runs tails concurrently (`postproc_jobs`, default 2): two jobs
+//! whose tails overlap file in whichever order they finish. That is
+//! deliberate and predates the hand-over - a fast job behind one that
+//! is still repairing has always reached history first, which is the
+//! whole point of §129's lane - and the hand-over only makes the two
+//! tails start together, so the margin on a small pair is milliseconds.
+//! `tests/integration/queue_handoff.rs` asserted the false version and
+//! duly failed on a loaded CI runner; it pins the `job.finishing`
+//! sequence now, which is this inbox order and has no timing window.
+//!
+//! With no successor there is nothing to hand over to: the signal fires
+//! and `start_next` finds nothing, the run drains exactly as it always
+//! did.
+
+use super::*;
+
+/// A job whose pipeline is running: everything the runner needs once
+/// its network phase ends.
+pub(super) struct Running {
+    job: Arc<Mutex<Job>>,
+    nzo_id: String,
+    fetch: tokio::task::JoinHandle<Result<()>>,
+    net_rx: tokio::sync::oneshot::Receiver<Instant>,
+    /// When the network phase ended, as the PIPELINE stamped it - set
+    /// once `net_rx` has resolved (or dropped, which is the same
+    /// meaning: no more network work for this job), so a receiver is
+    /// never awaited twice. A dropped sender stamps the read instead.
+    net_at: Option<Instant>,
+    handoff: Arc<nzbkit::pool::handoff::HandoffSignal>,
+    t_start: Instant,
+    log_mark: u64,
+    index_job_guard: IndexJobGuard,
+    /// This job's own decoded-byte counter - the handle its pipeline
+    /// holds, whichever job owns the daemon's cell by now.
+    progress: Arc<AtomicU64>,
+    /// Taken off the hub at the hand-over, while the hub was still this
+    /// job's; None until then, and None for a job that was never handed
+    /// over (its settle detaches at drain, as before).
+    detached: Option<DetachedTail>,
+}
+
+/// What `start_next` did.
+enum Start {
+    /// A pipeline is running for the picked job.
+    Started(Running),
+    /// A job was picked and ended before any pipeline started (the
+    /// metadata-only, give-up and pre-flight arms) - pick again.
+    Ended,
+    /// Nothing to start right now: a guard holds, or the queue has no
+    /// runnable job.
+    Nothing,
+}
+
+/// The runner's loop-carried state, named so `start_next` and `finish`
+/// can take it whole.
+struct Runner {
+    d: Arc<Daemon>,
+    config: std::path::PathBuf,
+    index_pass_gate: Arc<tokio::sync::Mutex<()>>,
+    mem_budget: nzbkit::mem::MemBudget,
+    /// §129: the post-processing lane the tails hand off to. The worker
+    /// never blocks on a tail again - it blocks only on the lane's
+    /// honest backpressure bound (in the guards).
+    lane: PostprocLane,
+    guard_reason: Option<String>,
+    /// Opened lazily on the first pass with a quota set - the quota
+    /// (and its period) are live settings now.
+    ledger: Option<QuotaLedger>,
+    /// In-flight statfs probe for the min-free guard (≤1 outstanding).
+    disk_probe: Option<tokio::task::JoinHandle<Option<u64>>>,
+    /// §156 item 7: the no-servers guard's config read, on the blocking
+    /// pool under the same one-outstanding rule.
+    server_probe: ServerProbe,
+}
+
+/// Download worker: one download at a time at full pipeline speed, but
+/// job N's tail AND its network drain overlap job N+1's download - the
+/// network never idles across queue boundaries. See the module doc.
+pub(in crate::serve) fn spawn_download_worker(
+    daemon: &Arc<Daemon>,
+    config: &std::path::Path,
+    index_pass_gate: &Arc<tokio::sync::Mutex<()>>,
+    mem_budget: nzbkit::mem::MemBudget,
+) {
+    // The per-host connection budget every primary run on this hub
+    // draws its sockets from (`nzbkit::pool::handoff`). Installed here,
+    // once, because this runner is the only thing that ever starts two
+    // runs on one hub. `NZBFAST_QUEUE_HANDOFF=0` leaves it uninstalled,
+    // which is the strictly serial queue of before: no lease, no
+    // waiters, no hand-over.
+    if std::env::var("NZBFAST_QUEUE_HANDOFF")
+        .ok()
+        .is_none_or(|v| v != "0")
+    {
+        let _ = daemon
+            .hub
+            .conn_budget
+            .set(nzbkit::pool::handoff::ConnBudget::new());
+    }
+    let mut st = Runner {
+        d: daemon.clone(),
+        config: config.to_path_buf(),
+        index_pass_gate: index_pass_gate.clone(),
+        mem_budget,
+        lane: PostprocLane::new(daemon.clone()),
+        guard_reason: None,
+        ledger: None,
+        disk_probe: None,
+        server_probe: ServerProbe::default(),
+    };
+    tokio::spawn(async move {
+        let mut cur: Option<Running> = None;
+        loop {
+            let Some(mut run) = cur.take() else {
+                // Nothing running: the ordinary pick, with the guards
+                // sleeping on holds as they always have.
+                if let Start::Started(r) = start_next(&mut st, false, None).await {
+                    cur = Some(r);
+                }
+                continue;
+            };
+            // A run is live. Its network ending comes first (`biased`):
+            // a run that is already drained never takes the hand-over
+            // path.
+            let signal = run.handoff.clone();
+            let drained = tokio::select! {
+                biased;
+                at = &mut run.net_rx => Some(at.unwrap_or_else(|_| Instant::now())),
+                _ = signal.wait() => None,
+            };
+            if let Some(at) = drained {
+                run.net_at = Some(at);
+                finish(&mut st, run).await;
+                continue;
+            }
+            // N's fleet is going idle: start N+1 on the connections it
+            // sheds. The sidecar is wound down first for the same reason
+            // the drain path always did it before the next pick - the
+            // next primary may be the very job it holds, and two
+            // pipelines must never share an out_dir.
+            stop_sidecar(&st.d).await;
+            let next = loop {
+                match start_next(&mut st, true, Some(&mut run)).await {
+                    Start::Started(r) => break Some(r),
+                    Start::Ended => continue,
+                    Start::Nothing => {
+                        // Nothing startable this instant. A job added
+                        // during the drain still deserves the overlap,
+                        // so look again shortly - unless the drain ends
+                        // first.
+                        let done = tokio::select! {
+                            at = &mut run.net_rx => Some(at.unwrap_or_else(|_| Instant::now())),
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => None,
+                        };
+                        if let Some(at) = done {
+                            run.net_at = Some(at);
+                            break None;
+                        }
+                    }
+                }
+            };
+            // Whether or not a successor started, N drains now and is
+            // settled and submitted BEFORE the runner looks at anything
+            // of N+1's: that is the history-order guarantee.
+            if run.net_at.is_none() {
+                let at = (&mut run.net_rx).await.unwrap_or_else(|_| Instant::now());
+                run.net_at = Some(at);
+            }
+            finish(&mut st, run).await;
+            cur = next;
+        }
+    });
+}
+
+/// Run the guards, pick a job, run the three pre-pipeline arms, then
+/// claim the hub and spawn the pipeline.
+///
+/// `quick`: the hand-over path, where a guard that holds must return
+/// rather than sleep (the caller has a draining run to watch).
+/// `carried`: the run whose drain this start overlaps; its pool-facing
+/// figures are detached off the hub right before the new job claims
+/// it, and not a moment earlier - a start that finds nothing leaves
+/// the carried run owning the hub for its whole drain.
+async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>) -> Start {
+    let d = st.d.clone();
+    let config = st.config.clone();
+    let Some(only_force) = download_guards(
+        &d,
+        &config,
+        &st.lane,
+        &mut st.guard_reason,
+        &mut st.ledger,
+        &mut st.disk_probe,
+        &mut st.server_probe,
+        quick,
+    )
+    .await
+    else {
+        return Start::Nothing;
+    };
+    d.run_due_auto_retries();
+    let Some(job) = d.pick_job(only_force) else {
+        if !quick {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        return Start::Nothing;
+    };
+    // Never start a primary while this job's prefetch sidecar
+    // still runs (possible when a library pick bypassed the
+    // job-end stop below).
+    {
+        let picked = job.lock_ok().nzo_id.clone();
+        let holds = d
+            .sidecar
+            .lock_ok()
+            .as_ref()
+            .is_some_and(|s| s.nzo_id == picked);
+        if holds {
+            stop_sidecar(&d).await;
+            // The sidecar may have FINISHED this job while we
+            // waited. Its success arm marks the job Completed
+            // and hands the post-processing tail to a task of
+            // its own, so that tail can be unlocking, renaming
+            // or moving `out_dir` right now. Starting the
+            // pipeline would point a fresh download at the
+            // directory being moved out from under it, so
+            // re-read what we picked on and let the job go if
+            // it is no longer waiting to run.
+            let j = job.lock_ok();
+            if j.paused || j.state != JobState::Queued {
+                return Start::Ended;
+            }
+        }
+    }
+    let (nzb_path, out_dir, total, library, nzo_id, name, prio, job_password, eat_ok, failure_host) = {
+        let mut j = job.lock_ok();
+        j.state = JobState::Downloading;
+        // §129 4a: the pick is the "started" moment. A job that
+        // re-enters the runner after a demotion, disk hold or
+        // retry starts again - `resumed` carries the difference.
+        d.queue_idle_latch.store(false, Ordering::Relaxed);
+        d.life_emit(
+            "job.started",
+            json!({
+                "nzo_id": j.nzo_id,
+                "name": j.name,
+                "category": j.category,
+                "total_bytes": j.total_bytes,
+                "resumed": j.downloaded_bytes > 0,
+            }),
+        );
+        // Late-pick marker: the runner was free when this job
+        // arrived, yet took over 2 s to start it - the signature
+        // of the fixed runner-starvation bug, named so any
+        // recurrence attributes itself. Taken, not read, so a
+        // job that requeues can never replay a stale stamp.
+        if let Some(waited) = j
+            .queued_at
+            .take()
+            .filter(|_| j.idle_at_add)
+            .map(|t| t.elapsed())
+            .filter(|w| *w > std::time::Duration::from_secs(2))
+        {
+            d.note_event(
+                "late",
+                format!(
+                    "{} started {:.1} s after it was added with nothing \
+                     ahead of it - the runner was slow to pick it up",
+                    j.name,
+                    waited.as_secs_f64()
+                ),
+            );
+        }
+        (
+            j.nzb_path.clone(),
+            j.out_dir.clone(),
+            j.total_bytes,
+            j.library,
+            j.nzo_id.clone(),
+            j.name.clone(),
+            j.priority,
+            j.password.clone(),
+            j.eat_volumes_ok,
+            // §99 try-order key for the in-stream password
+            // probe: which site supplied the NZB.
+            j.failure_host.clone(),
+        )
+    };
+    let index_job_guard = d.begin_index_job();
+    // Raise the guard first so an active scan observes it and
+    // cancels, then rendezvous on the shared gate. Once this
+    // lock is acquired no scan, tip ingest, eviction or
+    // VACUUM can still be running beside the foreground job.
+    //
+    // Bounded (issue #38's second wedge shape): a lane wedged
+    // mid-I/O against a mute peer would otherwise park this
+    // runner forever with the job stuck in Downloading and
+    // nothing logged. Past the bound, say so and start - every
+    // lane also stands down on its own once the guard above is
+    // visible, so the gate is confirmation, not permission.
+    if d.index_pause_on_download.load(Ordering::Relaxed)
+        && !index_gate_rendezvous(&st.index_pass_gate, index_gate_bound()).await
+    {
+        let detail = format!(
+            "{name} started without the index-pass rendezvous - an index \
+             lane held the gate past {} s (stuck mid-I/O against an \
+             unresponsive server); it stands down on its own",
+            index_gate_bound().as_secs()
+        );
+        warn!(target: "queue", "{detail}");
+        d.note_event("indexer", detail);
+    }
+
+    // A /stream trigger re-queues a library entry at Force
+    // priority - that's the "actually download now" signal.
+    if library && prio < 2 {
+        // M14i metadata-only: STAT-sample availability instead of
+        // downloading. Pass → Completed + .strm pointer; the real
+        // fetch happens on first /stream/<id> playback.
+        d.hub.activity.lock_ok().insert(nzo_id.clone(), "preflight");
+        let verdict = crate::check(&config, &nzb_path, 10, 4, 50, true).await;
+        // The lane's unit of backlog, taken BEFORE the terminal
+        // state is stamped: from the stamp to the submit the row is
+        // terminal in the queue, which `note_queue_idle`'s walk reads
+        // as not busy, and a park landing there would announce the
+        // drain over a job that still owes its lifecycle event. See
+        // `PostprocLane::reserve`.
+        let seat = st.lane.reserve();
+        {
+            let mut j = job.lock_ok();
+            match verdict {
+                Ok(crate::Verdict::Impossible {
+                    est_missing,
+                    recovery,
+                    measured,
+                    ..
+                }) => {
+                    j.state = JobState::Failed;
+                    // The counts make the verdict checkable;
+                    // append-only, the prefix is classified on.
+                    j.fail_message = crate::with_build(format!(
+                        "pre-flight: articles missing beyond repair - {}",
+                        crate::check::impossible_reason(est_missing, recovery, &measured)
+                    ));
+                }
+                Ok(_) => {
+                    j.state = JobState::Completed;
+                    if let Err(e) = write_strm(
+                        &out_dir,
+                        &name,
+                        d.scheme(),
+                        d.port,
+                        &nzo_id,
+                        &d.stream_token(&nzo_id),
+                    ) {
+                        warn!(target: "strm", "write for {nzo_id}: {e}");
+                    }
+                }
+                Err(e) => {
+                    j.state = JobState::Failed;
+                    j.fail_message = e.to_string();
+                }
+            }
+            j.finished_at = Some(Instant::now());
+            j.finished_unix = Some(unix_now());
+        }
+        job_ended_before_pipeline(&d, carried.is_some());
+        // The hooks and the park go to the post-processing
+        // lane, not to the next two statements. This arm
+        // reaches `Completed` without downloading a byte, and
+        // Completed is the word Sonarr imports on - so the
+        // pp-script, which may be moving or renaming the .strm
+        // this arm just wrote, has to be finished before the
+        // history row exists. Awaiting that here would stall
+        // the picker for the script's whole run; the lane is
+        // where the wait is affordable. See
+        // `PostprocLane::submit_hooks_only`.
+        st.lane.submit_hooks_only(job, seat).await;
+        return Start::Ended;
+    }
+
+    // Bracket this job's console output. Everything the
+    // failure diagnosis needs - the per-file segment tally,
+    // the per-server table, the first transport error - is
+    // PRINTED and then lost: the log ring is memory-only and
+    // 2000 lines deep, so a daemon restart (or a busy hour)
+    // takes it with it, and the one-line fail_message is all
+    // that reaches history. Marked before any of this job's
+    // work so the snapshots below are its lines, nobody else's.
+    let log_mark = nzbkit::logtee::mark();
+    // Onto the RECORD as well, so `mode=report` can slice this
+    // job's lines later. The ticket's copy dies with the tail;
+    // a user asks for a report minutes or hours afterwards.
+    if let Some(j) = d
+        .queue
+        .lock_ok()
+        .iter()
+        .find(|j| j.lock_ok().nzo_id == nzo_id)
+    {
+        j.lock_ok().log_mark = log_mark;
+    }
+
+    // TODO §138 (issue #29), opt-in `post_health_fail`: the §77
+    // sample already asked every configured server about this
+    // post while the queue was idle. If every one of them said
+    // every sampled article was missing, and the post is old
+    // enough that propagation is no longer an explanation, end
+    // it here - the *arr gets a FAILURE/HEALTH it can blocklist
+    // and re-search on within seconds of the job coming up,
+    // instead of after however long it takes a doomed download
+    // to prove the same thing at full retry ladder.
+    //
+    // Free: no probe runs here, the evidence is the verdict on
+    // the record. The bar is `no_server_can_supply`, which is
+    // deliberately much narrower than the red bucket the
+    // reorder acts on - see its doc for each clause.
+    //
+    // WHY HERE and not in the prober that gathered the evidence:
+    // the runner picks a job and only then marks it Downloading,
+    // so a prober failing a queued job races that window and can
+    // park a job the runner has already started - one record in
+    // history and a live download with no queue row. The runner
+    // is single and owns the transition, so deciding here cannot
+    // race anything, and it is the same seam the opt-in
+    // `preflight` sweep below already fails jobs on.
+    //
+    // Sentence, class and consequences arrive together:
+    // `giveup_reason` opens with `post is gone`, so `fail_kind`
+    // reads Gone - no automatic retry, FAILURE/HEALTH to the
+    // *arr, "find another release" as the suggested move.
+    let giveup: Option<String> = if d.post_health_fail.load(Ordering::Relaxed) {
+        let j = job.lock_ok();
+        j.health
+            .as_ref()
+            .filter(|h| h.no_server_can_supply())
+            .map(crate::health::giveup_reason)
+    } else {
+        None
+    };
+    if let Some(reason) = giveup {
+        // The lane's seat, taken before the stamp - see
+        // `PostprocLane::reserve`.
+        let seat = st.lane.reserve();
+        {
+            let mut j = job.lock_ok();
+            j.state = JobState::Failed;
+            j.fail_message = crate::with_build(reason);
+            j.finished_at = Some(Instant::now());
+            j.finished_unix = Some(unix_now());
+            info!(target: "health", "{nzo_id}: {}", j.fail_message);
+        }
+        job_ended_before_pipeline(&d, carried.is_some());
+        // Off the picker's loop and into the lane, same as the
+        // metadata-only arm above. `Failed` is a word an *arr
+        // acts on too - it blocklists this release and
+        // re-searches - and a user's failure script runs on
+        // this path exactly as it does on a download that
+        // failed the long way round, where the lane already
+        // finishes it before the row is filed. One ordering
+        // for every ending, not one per arm.
+        //
+        // The give-up's own selling point survives it: what
+        // this feature buys is not having to spend a doomed
+        // download to reach the verdict, and none of that is
+        // given back by the script taking the time the user
+        // configured it to take. The failure REPORT still
+        // lands after the park by construction - only the
+        // script is awaited - so a re-grab can never enter the
+        // queue while the row it replaces is still in it.
+        st.lane.submit_hooks_only(job, seat).await;
+        return Start::Ended;
+    }
+
+    // Opt-in pre-flight (settings.json `preflight`): sample
+    // this post's articles before spending the bandwidth. A
+    // post nothing carries any more is otherwise discovered
+    // the slow way - every article asked of every server, at
+    // full retry ladder, for a verdict a 10% STAT sample
+    // reaches in seconds. Only `Impossible` stops the job:
+    // "repairable" is what PAR2 is for, and an errored sweep
+    // (a provider hiccup mid-probe) must never fail a job the
+    // download itself might well complete.
+    if d.preflight.load(Ordering::Relaxed) {
+        d.hub.activity.lock_ok().insert(nzo_id.clone(), "preflight");
+        match crate::check(&config, &nzb_path, 10, 4, 50, true).await {
+            Ok(crate::Verdict::Impossible {
+                est_missing,
+                recovery,
+                measured,
+                ..
+            }) => {
+                // The lane's seat, taken before the stamp - see
+                // `PostprocLane::reserve`.
+                let seat = st.lane.reserve();
+                {
+                    let mut j = job.lock_ok();
+                    j.state = JobState::Failed;
+                    j.fail_message = crate::with_build(format!(
+                        "pre-flight: articles missing beyond repair - {}",
+                        crate::check::impossible_reason(est_missing, recovery, &measured)
+                    ));
+                    j.fail_detail = crate::fail_detail_snapshot(log_mark);
+                    j.finished_at = Some(Instant::now());
+                    j.finished_unix = Some(unix_now());
+                }
+                job_ended_before_pipeline(&d, carried.is_some());
+                // Third of the three runner arms that end a job
+                // before the pipeline starts, and the lane
+                // takes its tail for the same reason as the
+                // other two.
+                st.lane.submit_hooks_only(job, seat).await;
+                return Start::Ended;
+            }
+            Ok(_) => {}
+            Err(e) => info!(target: "preflight", "sweep failed, downloading anyway: {e}"),
+        }
+    }
+
+    // The hand-over proper. Everything the runner still needs from the
+    // draining job comes off the hub NOW, while the hub is still that
+    // job's; the next statement makes it this job's.
+    let drain = carried.map(|c| {
+        info!(
+            target: "queue",
+            "{nzo_id} starting while {} drains - its idle connections are handed over as they free up",
+            c.nzo_id
+        );
+        let detached = detach_job_tail(&d, &c.nzo_id);
+        let slot = DrainSlot {
+            nzo_id: c.nzo_id.clone(),
+            t_start: c.t_start,
+            progress: c.progress.clone(),
+            counters: d.hub.fetch_counters(),
+            total: d.active_total.load(Ordering::Relaxed),
+            resume_seeded: detached.resume_seeded,
+            pool_live: detached.pool_live.clone(),
+            abort: detached.abort.clone(),
+            queue_ctl: detached.queue_ctl.clone(),
+        };
+        c.detached = Some(detached);
+        slot
+    });
+    // Claim the shared progress counters for THIS job, in one
+    // lock section with the re-pointing they describe. A queue
+    // payload that reads the owner can then never pair it with
+    // the next job's zeroes: it either gets the lock first and
+    // sees the previous owner with the previous counters, or
+    // gets it after and sees this job with this job's.
+    let progress = {
+        let mut owner = d.active_dl.lock_ok();
+        // A fresh counter rather than a zeroed one: the previous
+        // job's pipeline may still be counting its last in-flight
+        // articles into the old one (see `ProgressCell`).
+        let progress = d.progress.reset();
+        *d.drain_dl.lock_ok() = drain;
+        d.active_total.store(total, Ordering::Relaxed);
+        // The UX §15 fetch-plan pair goes with them, and the plan
+        // is zeroed FIRST: a reader that catches the gap sees "no
+        // plan" and falls back to the counters above, never a
+        // fresh plan paired with the previous job's finished
+        // count. Fresh, not zeroed, for the same reason as the
+        // byte counter.
+        d.hub.fresh_fetch_counters();
+        // §129 4b's post date goes with them, and for the same
+        // reason: a whyslow tick between the transition and the
+        // plan publish must not read the PREVIOUS job's post age
+        // against this job's article misses. 0 is "unknown",
+        // which asserts nothing.
+        d.hub.post_unix.store(0, Ordering::Relaxed);
+        *owner = Some(nzo_id.clone());
+        progress
+    };
+    let t_start = Instant::now();
+    *d.started_at.lock_ok() = Some(t_start);
+
+    reset_hub_for_job(&d, st.server_probe.config(), &nzo_id, failure_host);
+    // This run's hand-over signal, read by the fleet builder into every
+    // server's pool config. Installed after the reset so nothing the
+    // reset clears can take it with it - and ONLY alongside a budget:
+    // a signal without a lease would start the successor on a second
+    // full fleet, which is exactly the cap overshoot the lease exists
+    // to prevent. With `NZBFAST_QUEUE_HANDOFF=0` the signal is never
+    // installed, so it never latches and the runner below waits for the
+    // drain as it always did.
+    let handoff = nzbkit::pool::handoff::HandoffSignal::new();
+    *d.hub.handoff.lock_ok() = d.hub.conn_budget.get().map(|_| handoff.clone());
+    let (net_tx, net_rx) = tokio::sync::oneshot::channel::<Instant>();
+    let fetch = {
+        let config = config.clone();
+        let nzb_path = nzb_path.clone();
+        let out_dir = out_dir.clone();
+        let progress = progress.clone();
+        let hub = d.hub.clone();
+        let stream_owner = nzo_id.clone();
+        // Live settings, sampled once per job: a dashboard
+        // change applies from the NEXT download.
+        let connections = d.connections.load(Ordering::Relaxed).max(1);
+        let window = d.window.load(Ordering::Relaxed).max(1);
+        let decoders = d.decoders.load(Ordering::Relaxed).max(1);
+        let fast_verify = d.fast_verify.load(Ordering::Relaxed);
+        let verify_lean = d.verify_lean.load(Ordering::Relaxed);
+        let par_cleanup = d.par_cleanup.load(Ordering::Relaxed);
+        let skip_samples = d.skip_samples.load(Ordering::Relaxed);
+        let mem_budget = st.mem_budget;
+        tokio::spawn(async move {
+            crate::get_with_progress(
+                &config,
+                &nzb_path,
+                &out_dir,
+                connections,
+                window,
+                decoders,
+                fast_verify,
+                verify_lean,
+                false,
+                par_cleanup,
+                skip_samples,
+                job_password,
+                eat_ok,
+                Some(progress),
+                Some(hub),
+                &stream_owner,
+                Some(net_tx),
+                mem_budget,
+            )
+            .await
+        })
+    };
+    Start::Started(Running {
+        job,
+        nzo_id,
+        fetch,
+        net_rx,
+        net_at: None,
+        handoff,
+        t_start,
+        log_mark,
+        index_job_guard,
+        progress,
+        detached: None,
+    })
+}
+
+/// The three arms that end a job before a pipeline starts share this
+/// exit. The idle clock starts at every job exit, not only the
+/// completion path - the idle memory trim arms on this stamp, and a
+/// give-up as the last pick of the day otherwise left it unarmed for
+/// good (§156 item 8a). `started_at` is untouched: these arms never
+/// claimed it, and on the hand-over path it is the draining job's.
+fn job_ended_before_pipeline(d: &Arc<Daemon>, overlapping: bool) {
+    if !overlapping {
+        *d.last_download_end.lock_ok() = Instant::now();
+    }
+}
+
+/// The run's network phase is over: stand the per-job singletons down
+/// (unless a successor already owns them), settle the figures and hand
+/// the tail to the lane.
+async fn finish(st: &mut Runner, run: Running) {
+    let d = &st.d;
+    let Running {
+        job,
+        nzo_id,
+        fetch,
+        t_start,
+        net_at,
+        log_mark,
+        index_job_guard,
+        progress,
+        detached,
+        ..
+    } = run;
+    // This run was handed over if its figures were detached: the hub,
+    // the counters and `started_at` are the successor's, and only the
+    // drain-side counter is this job's to clear.
+    let handed_over = detached.is_some();
+    // Network wall time stops where the PIPELINE said it did, never
+    // here: bytes÷seconds is the history's average speed, a stalled
+    // tail once inflated a 72 s download to a recorded 121 s, and
+    // since the hand-over this call can itself run long after the
+    // network ended (the runner was holding the predecessor's drain).
+    let dl_secs = net_at
+        .unwrap_or_else(Instant::now)
+        .saturating_duration_since(t_start)
+        .as_secs_f64();
+    if handed_over {
+        *d.drain_dl.lock_ok() = None;
+    } else {
+        // Stand the watchdog down BEFORE waiting on the previous
+        // tail, not after: `started_at` means "this job's network
+        // phase is live", and the wait below can be long (job N-1's
+        // tail once sat minutes in a Finder-trash stall). This job
+        // is still Downloading in the queue for all of it, and the
+        // watchdog reading a drained pool as "one host at ~0 MB/s
+        // while others wait" demoted a job that had already
+        // finished - park then re-queued it after post-processing
+        // had renamed its directory, and the whole release
+        // downloaded a second time (31 Jul queue soak).
+        *d.started_at.lock_ok() = None;
+        // Phase marker: the pipeline (download AND checks) is over.
+        // This is what closes the chart's "checking files" shading -
+        // without it the tint would run on into the idle time after
+        // the job, dressing ordinary quiet as an endless check.
+        d.note_event(
+            "finished",
+            "job finished - the line is idle until the next download",
+        );
+        // Release the progress counters at the same instant and for
+        // the same reason: from here this job reads 100% and its
+        // phase word, and the next job is free to zero them without
+        // its bar appearing on this one's row.
+        *d.active_dl.lock_ok() = None;
+        // The network phase is what occupies the account, so the
+        // idle clock starts here rather than after the tail: the
+        // post-processing that follows touches no provider.
+        *d.last_download_end.lock_ok() = Instant::now();
+        // §129: the previous tail is the LANE's business now; only
+        // the backpressure gate at the loop top can hold the line.
+        // Wind down any idle-server prefetch before the next pick:
+        // the next primary may be the very job the sidecar holds,
+        // and two pipelines must never share an out_dir or a
+        // server's connection budget. Its journal keeps the bytes.
+        stop_sidecar(d).await;
+    }
+    let JobTail {
+        dl_bytes,
+        on_disk_bytes,
+        verifier,
+        shaper,
+        #[cfg(feature = "indexer")]
+        oracle_samples,
+    } = settle_job_tail(d, &nzo_id, &mut st.ledger, &progress, detached);
+    st.lane
+        .submit(PostprocTicket {
+            job,
+            fetch,
+            verifier,
+            shaper,
+            log_mark,
+            dl_bytes,
+            dl_secs,
+            on_disk_bytes,
+            index_job_guard,
+            #[cfg(feature = "indexer")]
+            oracle_samples,
+        })
+        .await;
+}

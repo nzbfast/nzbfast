@@ -4,8 +4,10 @@
 //! attaches no execution policy: no worker cap, and `member_flat_limit`
 //! falls back to rars' built-in buffered cap, so a gigabyte-sized member
 //! is refused the flat plan and runs the bounded ring instead. Every real
-//! entry point (crates/nzbkit/src/extract.rs, crates/nzbfast/src/main.rs)
-//! goes through `nzbkit::mem::rar_read_options`, which attaches the
+//! entry point (crates/nzbkit/src/extract/chase.rs, which took the RAR
+//! chase when the extract module was split, and
+//! crates/nzbfast/src/main.rs) goes through
+//! `nzbkit::mem::rar_read_options`, which attaches the
 //! process budget's policy - on a large host that is a 6 GiB working-memory
 //! allowance and 8+ workers. Benchmarking `ourrars` therefore measures a
 //! configuration nobody ships.

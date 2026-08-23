@@ -87,6 +87,16 @@ pub(crate) fn bench_cpu(mb: usize) {
             std::hint::black_box((d, crc32fast::hash(c)));
         }
     });
+    // The encrypted-RAR path: AES-256-CBC through nzbkit's own
+    // decryptor, so this reads whichever AES backend the build actually
+    // selected. That is the point of the stage - on aarch64 the hardware
+    // backend needs `-C target-feature=+aes` on targets cpufeatures is
+    // blind to (ARM64 Windows), and soft vs hardware here is ~230 MB/s
+    // vs ~13 GB/s. Not folded into the pipeline ceiling below because it
+    // only runs over encrypted posts.
+    stage("aes-256-cbc decrypt (rar)", &|p: &[u8]| {
+        nzbkit::sysbench::rar_aes_decrypt(p)
+    });
     // Every provider is TLS, so the AEAD runs over every downloaded
     // byte - it belongs in this budget as much as md5 does. Same
     // implementation the download path uses (aws-lc-rs, rustls'
@@ -189,6 +199,32 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
         .map(|s| (s.connections as usize).clamp(1, 100))
         .sum::<usize>()
         .min(200);
+    // §210 item (b) on the CLI side: the same link reading the daemon's
+    // System benchmark card carries. Probed here rather than read off a
+    // daemon because this command has none behind it.
+    //
+    // Started before the network leg and collected after it, for two
+    // reasons. `system_profiler SPAirPortDataType` takes ~10 s on a
+    // macOS Wi-Fi machine and 8 s of that hides behind the probe below.
+    // And the Wi-Fi figure it reads is whatever the radio last sent a
+    // frame at - so sampling it while the line is running flat out is
+    // the one moment a single sample describes the association rather
+    // than one idle exchange (the daemon does not need that: it takes
+    // the median of three probes instead, which a one-shot cannot).
+    //
+    // It overlaps the NETWORK leg and not the compute or disk legs on
+    // purpose: a subprocess competing with the all-core verify bench
+    // would depress a figure this command reports, where 8 s of
+    // network-bound transfer does not notice it.
+    //
+    // The route is taken to the first server actually probed - the one
+    // these bytes come from. The daemon's loop uses the first ENABLED
+    // server, which differs only when that server is billed per byte
+    // and sits this out; either way both take the default route to the
+    // same link on any normal machine.
+    let (link_host, link_port) = (probe_servers[0].host.clone(), probe_servers[0].port);
+    let mut link_probe =
+        tokio::task::spawn_blocking(move || crate::serve::probe_local_link(&link_host, link_port));
     print!(
         "network: probing {} server(s) for 8s on {conns} connections… ",
         probe_servers.len()
@@ -199,6 +235,19 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
         .await
         .unwrap_or((0.0, Vec::new()));
     println!("{:.2} Gbps", net);
+    // Usually already done. When it is not, say so rather than sitting
+    // silent on a finished-looking benchmark.
+    let link =
+        match tokio::time::timeout(std::time::Duration::from_millis(300), &mut link_probe).await {
+            Ok(r) => r.ok().flatten(),
+            Err(_) => {
+                print!("network: reading this machine's own network link… ");
+                std::io::stdout().flush().ok();
+                let r = link_probe.await.ok().flatten();
+                println!("done");
+                r
+            }
+        };
     let mut v = nzbkit::sysbench::verdict(net, &compute, disk);
     v.network_host = probe_servers
         .iter()
@@ -210,6 +259,19 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
         v.network_host.push_str(", …");
     }
     v.network_conns = conns;
+    // Gated exactly as the daemon path is (`measure_system` in
+    // serve/groupscan.rs): only when the network row IS the limit,
+    // because that is when the advice below tells the reader to add
+    // connections or another provider - and that is the reading this
+    // corrects on a machine sitting at its own link's ceiling.
+    // `measured_note` decides the rest and is empty unless the figure
+    // actually reached that ceiling, so this never puts a second
+    // opinion beside a healthy row.
+    if v.bottleneck == "network"
+        && let Some(l) = &link
+    {
+        v.network_link = l.measured_note((net * 1e9 / 8.0) as u64);
+    }
     // The verdict leads: the sustainable speed, then a bar per subsystem -
     // the shortest bar is the limit; the others show their headroom.
     println!(
@@ -232,6 +294,11 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
             format!("  ×{:.1} headroom", val / v.expected_gbps.max(0.01))
         };
         println!("  {label} {:<30} {val:7.2} Gbps{tail}", "█".repeat(w));
+    }
+    // Above the advice, as on the dashboard card: it is the qualifier
+    // that tells the reader whether the advice can help them at all.
+    if !v.network_link.is_empty() {
+        println!("\n{}", v.network_link);
     }
     println!("{}", v.advice);
 
@@ -514,6 +581,27 @@ pub(crate) async fn fetch(
     Ok(())
 }
 
+/// The single server a one-connection lane should talk to: the first
+/// ENABLED entry, in config order.
+///
+/// The `enabled` filter is the whole point of this function and is not a
+/// refinement. Until 23 Aug 2026 this was `cfg.servers[0].clone()`, which
+/// consulted the flag nowhere - so on any install whose FIRST configured
+/// server is the switched-off one, every caller here dialled the one
+/// account the user had taken out of service. That is not theoretical: it
+/// was found in the field holding seven established sockets to a disabled
+/// provider, opened by the hourly group-profile sampler
+/// (`serve::groupscan::sample_one_group`), while a benchmark round on
+/// another machine was using that same shared account. Nothing in the log named the
+/// host, because only the download planner prints "<host> disabled - not
+/// in the pool" and no download had run - so the switch looked like it was
+/// holding for four days while it was not.
+///
+/// Deliberately an ERROR rather than a fallback to `servers[0]` when
+/// everything is off. "The user disabled every server" and "the user has
+/// no servers" are the same instruction, and the §154 queue hold already
+/// treats them alike; quietly dialling a disabled account to avoid an
+/// error message is exactly the behaviour this function is being fixed for.
 pub(crate) fn load_server(config: &Path) -> Result<ServerConfig> {
     let cfg = Config::load(config).with_context(|| {
         format!(
@@ -521,7 +609,17 @@ pub(crate) fn load_server(config: &Path) -> Result<ServerConfig> {
             config.display()
         )
     })?;
-    Ok(cfg.servers[0].clone())
+    cfg.servers
+        .iter()
+        .find(|s| s.enabled)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "no enabled server in {} ({} configured, all switched off)",
+                config.display(),
+                cfg.servers.len()
+            )
+        })
 }
 
 /// A8 multi-server indexing: the servers worth scanning HEADERS from.
@@ -547,13 +645,23 @@ pub(crate) fn load_server(config: &Path) -> Result<ServerConfig> {
 /// free alternative.
 /// Resolve a marks server key (see [`nzbkit::index::Index::server_key`])
 /// back to its config entry - the scan loop persists only the key.
-/// None = the config no longer carries that server.
+/// None = the config no longer carries that server, or no longer carries
+/// it ENABLED.
+///
+/// `enabled` is part of "carries". The key is written by the full pass out
+/// of [`scan_servers`], which is already enabled-only, but it OUTLIVES the
+/// config: a server switched off after the pass that chose it leaves its
+/// key in the index until the next full pass re-chooses, and resolving
+/// that key unfiltered handed the tip watcher a disabled account to hold a
+/// session on. `None` is the right answer and the caller already handles
+/// it - it skips the group until the next pass, exactly as it does for a
+/// key naming a server that was deleted outright.
 #[cfg(feature = "indexer")]
 pub(crate) fn find_scan_server(config: &Path, key: &str) -> Option<ServerConfig> {
     let cfg = Config::load(config).ok()?;
     cfg.servers
         .iter()
-        .find(|s| nzbkit::index::Index::server_key(&s.host) == key)
+        .find(|s| s.enabled && nzbkit::index::Index::server_key(&s.host) == key)
         .cloned()
 }
 
@@ -1188,6 +1296,79 @@ mod multi_server_selection {
         ]));
         let picked: Vec<String> = scan_servers(&c).into_iter().map(|s| s.host).collect();
         assert_eq!(picked, ["news.eweka.nl"]);
+    }
+
+    /// Write a config to disk - `load_server` and `find_scan_server` both
+    /// take a path, because both are called from lanes that re-read the
+    /// file rather than hold a parsed copy.
+    fn cfg_file(name: &str, servers: serde_json::Value) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("nzbfast-nettools-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.local.json");
+        std::fs::write(&p, serde_json::json!({ "servers": servers }).to_string()).unwrap();
+        p
+    }
+
+    /// The 23 Aug 2026 defect, at the helper every one-connection
+    /// lane goes through: with the DISABLED account sorted first, this
+    /// used to hand it straight back.
+    #[test]
+    fn load_server_skips_a_switched_off_server_however_early_it_sorts() {
+        let p = cfg_file(
+            "off-first",
+            serde_json::json!([
+                { "host": "news.newshosting.com", "enabled": false },
+                { "host": "news.giganews.com" },
+            ]),
+        );
+        assert_eq!(load_server(&p).unwrap().host, "news.giganews.com");
+    }
+
+    /// All off is an instruction, not a config error to route around. A
+    /// fallback to `servers[0]` here would reintroduce the whole defect
+    /// for the single-server install that switched its one server off.
+    #[test]
+    fn load_server_refuses_when_every_server_is_switched_off() {
+        let p = cfg_file(
+            "all-off",
+            serde_json::json!([
+                { "host": "news.newshosting.com", "enabled": false },
+                { "host": "news.eweka.nl", "enabled": false },
+            ]),
+        );
+        let e = load_server(&p).unwrap_err().to_string();
+        assert!(
+            e.contains("no enabled server"),
+            "the error must say WHICH rule stopped it, got: {e}"
+        );
+    }
+
+    /// A `scan_primary:<group>` key outlives the config that produced it,
+    /// so resolving one has to re-check `enabled` - otherwise the tip
+    /// watcher holds a session on an account switched off after the pass
+    /// that chose it.
+    #[test]
+    fn find_scan_server_does_not_resurrect_a_disabled_primary() {
+        let p = cfg_file(
+            "stale-primary",
+            serde_json::json!([
+                { "host": "news.newshosting.com", "enabled": false },
+                { "host": "news.giganews.com" },
+            ]),
+        );
+        let stale = nzbkit::index::Index::server_key("news.newshosting.com");
+        assert!(
+            find_scan_server(&p, &stale).is_none(),
+            "a primary key naming a disabled server must resolve to None"
+        );
+        let live = nzbkit::index::Index::server_key("news.giganews.com");
+        assert_eq!(
+            find_scan_server(&p, &live).map(|s| s.host),
+            Some("news.giganews.com".to_string()),
+            "an enabled primary must still resolve"
+        );
     }
 
     /// An all-block config still gets an index: the user configured

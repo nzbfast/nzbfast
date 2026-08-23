@@ -229,10 +229,6 @@ pub fn remove(existing: &[String], unwanted: &[String]) -> (Vec<String>, usize) 
     (out, dropped)
 }
 
-/// Apply an interest delta while preserving provenance. `owned` contains
-/// only groups a previous interest merge actually appended; a group that
-/// was already in `existing` was hand-picked and must survive when an
-/// overlapping preset is unticked.
 /// Reconstruct preset provenance for an install that predates it.
 ///
 /// `reconcile` only removes groups it can prove a preset added, which is
@@ -254,6 +250,10 @@ pub fn backfill_owned(applied_keys: &[String], indexed: &[String]) -> Vec<String
         .collect()
 }
 
+/// Apply an interest delta while preserving provenance. `owned` contains
+/// only groups a previous interest merge actually appended; a group that
+/// was already in `existing` was hand-picked and must survive when an
+/// overlapping preset is unticked.
 #[cfg(feature = "indexer")]
 pub fn reconcile(
     existing: &[String],

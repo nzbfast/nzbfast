@@ -18,8 +18,20 @@
 //! group. Here the magic is the disqualifier rather than the entry ticket:
 //! a part carrying any archive head belongs to whichever arm owns that
 //! head, never to this one.
+//!
+//! ...with ONE exception, [`SplitScan::Container`], and it earns its place
+//! by a measured failure (TODO 211): an HJSplit of a single store
+//! `stage.rar` into `stage.rar.001`..`.062` is a byte split like any other,
+//! but part 1 carries the archive's own head, so the rule above refused it
+//! while the RAR arm - handed a `.001` that is 1/62nd of an archive - failed
+//! with `input is too short`, and the job ended with all 62 parts on disk
+//! and nothing delivered. That set belongs to nobody: the arm that owns the
+//! head cannot open it. So the head is forgiven on part 1 ALONE, and only
+//! once that arm has already failed on this directory - see
+//! [`rescue_split_of_container`].
 
 use crate::*;
+use tracing::{info, warn};
 
 /// One accepted split-file set: the joined output's name, and its parts in
 /// numeric order (part 1 first). Only ever produced by
@@ -36,6 +48,25 @@ pub(crate) struct SplitSet {
     /// under us between detection and join refuses instead of publishing
     /// a file that is not the payload.
     pub(crate) total: u64,
+}
+
+/// What a scan of the directory is looking for - the two readings of
+/// rule 5, and the ONLY thing that differs between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitScan {
+    /// Rule 5 in full: no part carries an archive head and the base names
+    /// no other arm's format. The ordinary arm, and the only one that runs
+    /// on a healthy pass.
+    Plain,
+    /// A byte split OF A CONTAINER: part 1 may carry an archive head and
+    /// the base may end in a container extension, because that is exactly
+    /// what a split `stage.rar` looks like from the outside. Parts 2..=n
+    /// must still be headless, and that is the whole discriminator - a
+    /// GENUINE numbered volume set (`film.001`, `film.002`, each a RAR in
+    /// its own right) carries the signature on every member, and
+    /// concatenating those would produce garbage and delete the volumes.
+    /// Only [`rescue_split_of_container`] scans this way.
+    Container,
 }
 
 /// The numeric tail of a split part: `Movie.mkv.001` -> (`Movie.mkv`, 1, 3).
@@ -74,7 +105,14 @@ fn numeric_tail(name: &str) -> Option<(&str, u32, usize)> {
 ///   a name with no alphanumeric character in it, or anything carrying a
 ///   path separator. No splitter writes those, and the base becomes an
 ///   output filename.
-fn plausible_base(base: &str) -> bool {
+///
+/// Under [`SplitScan::Container`] the FOUR container extensions are
+/// allowed - the joined `stage.rar` is the thing the ordinary path then
+/// extracts, so refusing its name is refusing the fix. Nothing else moves:
+/// `.par2`/`.par`/`.rev`/`.sfv` are recovery INPUTS and this function's
+/// caller deletes what it joins, so those refuse in either reading, as do
+/// the `.rNN`/`.zNN` volume tails (a member of a set, never a whole one).
+fn plausible_base(base: &str, scan: SplitScan) -> bool {
     if base.is_empty() || base.starts_with('.') || base.contains(std::path::is_separator) {
         return false;
     }
@@ -86,9 +124,12 @@ fn plausible_base(base: &str) -> bool {
     }
     let lower = base.to_ascii_lowercase();
     // Extensions other arms own, plus the recovery/verification sidecars.
-    for owned in [
-        ".rar", ".7z", ".zip", ".zipx", ".par2", ".par", ".rev", ".sfv",
-    ] {
+    let containers = [".rar", ".7z", ".zip", ".zipx"];
+    for owned in containers
+        .iter()
+        .filter(|_| scan == SplitScan::Plain)
+        .chain([".par2", ".par", ".rev", ".sfv"].iter())
+    {
         if lower.ends_with(owned) {
             return false;
         }
@@ -175,13 +216,94 @@ fn carries_archive_magic(path: &std::path::Path, zip_is_the_payload: bool) -> bo
 ///    are one payload rather than a coincidence of names.
 /// 5. **No archive head on any part** ([`carries_archive_magic`]) and a
 ///    **plausible base** ([`plausible_base`]) - the two halves of "some
-///    other arm owns this".
+///    other arm owns this". Under [`SplitScan::Container`] this one check
+///    reads the other way round on part 1: it must carry a head, and parts
+///    2..=n still must not.
 /// 6. **The output does not already exist.** Joining is never an overwrite -
 ///    and it is what keeps the one-digit `.1`/`.2` form honest, because the
 ///    other thing that spells names that way is a duplicate-download suffix
 ///    (`notes.txt`, `notes.txt.1`), which by construction leaves the
 ///    unsuffixed original sitting right there.
 pub(crate) fn collect_split_sets(dir: &std::path::Path) -> Result<Vec<SplitSet>> {
+    collect_sets(dir, SplitScan::Plain)
+}
+
+/// [`collect_split_sets`] reading rule 5 the [`SplitScan::Container`] way:
+/// every set here is a byte split whose part 1 carries a container's head.
+/// Never joined on its own account - [`rescue_split_of_container`] is the
+/// only caller, and it runs only after the arm that owns that head failed.
+pub(crate) fn collect_container_split_sets(dir: &std::path::Path) -> Result<Vec<SplitSet>> {
+    collect_sets(dir, SplitScan::Container)
+}
+
+/// Is this container split set the OBFUSCATED twin of a `<base>.7z.NNN`
+/// set - a numbered byte split whose part 1 opens with a 7-Zip start
+/// header, posted under a name that says nothing at all (`hash.001`,
+/// `hash.002`, ...)?
+///
+/// Such a set is a job of the 7z arm, which reads the ordered parts
+/// where they lie through `rarfix::sevenz::SplitParts` (TODO 212) - the
+/// exact bytes a join would publish, for none of what a join costs. TODO
+/// 258 priced that join at **+1.000x read and +1.000x write of the
+/// container** plus 0.49-0.75 cpu_s per GiB, against 10-25 ns a read for
+/// the in-place reader, and the numbers carry over here unchanged
+/// because it is the same reader over the same join. So
+/// `collect_sevenz_archives` groups these into one job, and
+/// [`rescue_split_of_container`] stands aside from them for the same
+/// reason it already stands aside from a `.7z` base.
+///
+/// The sniff is deliberately STRONGER than the six-byte magic
+/// `collect_sevenz_archives` accepts on a single obfuscated file, and
+/// the asymmetry is the whole safety argument. There, a false positive
+/// costs one failed open and the file stays on disk. Here it would cost
+/// the JOIN, which is this set's only other route, so a coincidence must
+/// not be able to reach it: `nzbkit::nameprobe::sevenz_start` parses the
+/// full 32-byte signature header and checks the CRC32 it carries over
+/// its own twenty geometry bytes, which is 48 bits of magic and 32 bits
+/// of checksum. A raw payload that opens that way is not a case worth
+/// designing for - and if one ever did, the parts are still all there
+/// and untouched, because this path never writes anything.
+///
+/// Header encryption does not hide it, which is what makes the whole
+/// shape identifiable before anyone has a password: `-mhe` encrypts the
+/// END header, and that lies in the LAST part, while the signature
+/// header sits in plaintext at offset 0 of part 1.
+///
+/// Named container extensions are refused ([`plausible_base`]'s ordinary
+/// reading). A `<base>.7z.NNN` set is already a 7z job by name and is
+/// grouped by `split_7z_part`; a `.rar`/`.zip`/`.zipx` base carrying a 7z
+/// head is a set whose name and head disagree, and that one keeps
+/// today's behaviour - the arm that owns the NAME fails on it first and
+/// the rescue then joins it. A named payload base (`comic.cb7`) is
+/// refused for the standing reason: its 7z bytes ARE the deliverable.
+pub(crate) fn obfuscated_sevenz_split(set: &SplitSet) -> bool {
+    use std::io::Read as _;
+    if !plausible_base(&set.base, SplitScan::Plain)
+        || nzbkit::extract::is_final_name(&set.base.to_ascii_lowercase())
+    {
+        return false;
+    }
+    let Some(first) = set.parts.first() else {
+        return false;
+    };
+    let mut head = [0u8; 32];
+    std::fs::File::open(first)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| nzbkit::nameprobe::sevenz_start(&head).is_some())
+}
+
+/// Every obfuscated 7z split set in `dir`, as the ordered part lists the
+/// 7z arm takes as jobs - the shape `collect_sevenz_archives` appends to
+/// its own scan. See [`obfuscated_sevenz_split`] for what qualifies.
+pub(crate) fn collect_obfuscated_sevenz_splits(dir: &std::path::Path) -> Result<Vec<Vec<PathBuf>>> {
+    Ok(collect_container_split_sets(dir)?
+        .into_iter()
+        .filter(obfuscated_sevenz_split)
+        .map(|s| s.parts)
+        .collect())
+}
+
+fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>> {
     use std::collections::BTreeMap;
     // base (lowercased, for grouping) -> index -> (path, base as written, size, tail width)
     type Part = (PathBuf, String, u64, usize);
@@ -250,8 +372,20 @@ pub(crate) fn collect_split_sets(dir: &std::path::Path) -> Result<Vec<SplitSet>>
         //     a final payload) are what this is applying, not widening.
         let base = parts[0].1.clone();
         let zip_is_the_payload = nzbkit::zip::is_final_file(std::path::Path::new(&base));
-        if !plausible_base(&base)
-            || parts
+        // Part 1 alone is read differently by the two scans; parts 2..=n
+        // are checked identically by both, and a head on one of THOSE is
+        // what says "this is a volume set, not a byte split".
+        let head_1 = carries_archive_magic(&parts[0].0, zip_is_the_payload);
+        let heads_ok = match scan {
+            SplitScan::Plain => !head_1,
+            // A headless `payload.zip.001` is a decoy or a truncated grab,
+            // never a split container, so it stays refused here too - the
+            // arm that owns the name reports it as the gap it is.
+            SplitScan::Container => head_1,
+        };
+        if !plausible_base(&base, scan)
+            || !heads_ok
+            || parts[1..]
                 .iter()
                 .any(|p| carries_archive_magic(&p.0, zip_is_the_payload))
         {
@@ -283,21 +417,23 @@ pub(crate) fn collect_split_sets(dir: &std::path::Path) -> Result<Vec<SplitSet>>
 pub(crate) fn join_split_sets(dir: &std::path::Path, sets: &[SplitSet]) -> bool {
     let mut all_ok = true;
     for set in sets {
-        println!(
+        info!(
+            target: "extract",
             "joining {} split part(s) into {}…",
             set.parts.len(),
             set.base
         );
         match join_one(dir, set) {
             Ok(bytes) => {
-                println!(
+                info!(
+                    target: "extract",
                     "split join complete ✔ ({:.1} MiB)",
                     bytes as f64 / (1u64 << 20) as f64
                 );
                 remove_spent_volumes(&set.parts);
             }
             Err(e) => {
-                println!("⚠ could not join {} - {e}", set.base);
+                warn!(target: "extract", "could not join {} - {e}", set.base);
                 all_ok = false;
             }
         }
@@ -305,11 +441,216 @@ pub(crate) fn join_split_sets(dir: &std::path::Path, sets: &[SplitSet]) -> bool 
     all_ok
 }
 
+/// TODO 211: rejoin a byte-split CONTAINER the arm that owns its head has
+/// just failed on, then extract what the join produced.
+///
+/// The shape, measured (`research/DISKSHAPE-ROUND-2026-08-21.md` §2.2): a
+/// single store `stage.rar` cut into `stage.rar.001`..`.062`. Part 1 is a
+/// RAR head over 1/62nd of an archive, so the in-stream mapper refuses it
+/// (`data area exceeds volume`) and the set lands whole on disk; the RAR
+/// arm then unpacks that `.001` alone and fails at offset 0x1d with `input
+/// is too short`; the joiner refused it on the head. Nobody owned it and
+/// the job ended rc=1 with all 62 parts on disk.
+///
+/// `arrived` is the container-scan taken BEFORE any arm ran, and the sets
+/// joined here are the intersection of it with a scan taken now - the same
+/// invariant step 7 keeps, for the same reason: an arm's OUTPUT must never
+/// become this collector's INPUT, and a set that changed size under us is
+/// not the set we measured.
+///
+/// The join's output is extracted in a scratch dir rather than in place.
+/// The directory this rescue runs in is by definition one where an arm has
+/// already FAILED, and quite possibly one where another arm SUCCEEDED (the
+/// ladder records and carries on); re-running the whole ladder over it
+/// would extract that arm's archive a second time, beside its own output.
+/// The scratch dance is what the top-level nested pass already does with an
+/// inner archive for exactly that reason.
+///
+/// `Ok(None)` = there was nothing to rescue and the caller's own verdict
+/// stands. Otherwise the verdict of the directory AFTER the join, which is
+/// the honest one: the parts are gone, and what is left is what the join
+/// and the extraction made of them.
+pub(crate) fn rescue_split_of_container(
+    dir: &std::path::Path,
+    arrived: &[SplitSet],
+    password: Option<&str>,
+    depth: usize,
+) -> Result<Option<NestOutcome>> {
+    let sets: Vec<SplitSet> = collect_container_split_sets(dir)?
+        .into_iter()
+        .filter(|s| arrived.contains(s))
+        // A `.7z` base is never rescued here. Every `<base>.7z.NNN` set
+        // this scan accepts is already a job of the 7z arm (step 4 takes
+        // any `.7z.<digits>` name, no head check), and since TODO 212
+        // that arm reads the parts as ONE byte-space - the exact bytes a
+        // join would publish. So if it failed, a join fails the same way,
+        // having first written the whole payload a second time and
+        // deleted the parts; on the field's header-encrypted shape with
+        // no password that is the 1.000x this rescue was measured adding
+        // back (`research/SEVENZ-MHE-ROUND-2026-08-22.md` §4.4 priced the
+        // 7z arm's own join; this was the second one, found when the
+        // first was removed). The parts stay, and the verdict stands.
+        .filter(|s| !s.base.to_ascii_lowercase().ends_with(".7z"))
+        // And neither is its obfuscated twin - a numbered set posted as
+        // `hash.001` whose part 1 carries a CRC-valid 7z start header.
+        // The 7z arm groups and reads those in place too, so a join here
+        // would re-add the 1.000x that arm just declined to pay; and on
+        // the SUCCEEDING ending - where the arm landed the payload but
+        // some other archive in this directory failed, which is what
+        // brings the rescue here at all - it would join a spent set and
+        // then DELETE its parts. See `obfuscated_sevenz_split`.
+        .filter(|s| !obfuscated_sevenz_split(s))
+        .collect();
+    if sets.is_empty() {
+        return Ok(None);
+    }
+    info!(
+        target: "extract",
+        "no arm could open the split archive - joining the parts and retrying…"
+    );
+    let joined_all = join_split_sets(dir, &sets);
+    let joined: Vec<PathBuf> = sets
+        .iter()
+        .map(|s| dir.join(&s.base))
+        .filter(|p| p.is_file())
+        .collect();
+    if joined.is_empty() {
+        return Ok(None); // nothing published; every part is still there
+    }
+    let sub = nest_scratch_dir(dir)?;
+    let (joined, moved_all) = stage_joined_into(joined, &sub);
+    // `false`: no second rescue. The parts are spent, so a nested one could
+    // only ever fire on something an extraction just produced.
+    // No reason channel: the caller this rescue answers to (step 8 of
+    // `extract_one_level_at`) has already taken its own, and the join
+    // publishes one container from parts that are already on disk.
+    let inner = extract_one_level_at(&sub, password, depth, false, &mut Vec::new(), &mut None)?;
+    if inner == Some(NestOutcome::Produced) {
+        // The container we built is spent - its bytes now sit beside it as
+        // the extracted payload, and we made the file seconds ago, so there
+        // is nothing here a user could want back. `None` (nothing claimed
+        // it) is the case where the joined file IS the payload: keep it.
+        //
+        // Except that `inner` is ONE verdict for the whole scratch dir and
+        // carries no ownership: with two sets joined here, a sibling's
+        // success makes it `Produced` even for an input no arm ever
+        // touched (Codex F-01, 23 Aug 2026). A final-payload name is
+        // exactly that input by construction - `collect_sevenz_archives`
+        // and the stray-archive door both refuse `.cb7`/`.cbr`, so its
+        // bytes ARE the deliverable and nothing can ever have consumed
+        // them. Deleting one loses it outright: the parts went with the
+        // join. Any other joined container that no arm claimed makes the
+        // aggregate `Failed`, so this branch does not run for it.
+        for p in &joined {
+            if nzbkit::extract::is_final_file(p) || nzbkit::zip::is_final_file(p) {
+                continue;
+            }
+            if let Some(name) = p.file_name() {
+                let _ = std::fs::remove_file(sub.join(name));
+            }
+        }
+    }
+    let lifted = lift_nest_outputs(&sub, dir);
+    if lifted {
+        let _ = std::fs::remove_dir_all(&sub);
+    } else {
+        warn!(
+            target: "extract",
+            "split-join lift-back incomplete - keeping {} in place",
+            sub.display()
+        );
+    }
+    Ok(Some(rescue_verdict(joined_all, moved_all, inner, lifted)))
+}
+
+/// Move each joined container into `sub`, the scratch dir the retry
+/// extraction will run in. Returns the ones that got there, and whether
+/// EVERY one did.
+///
+/// The parts are already spent, so a joined file is the only copy of
+/// itself: one that fails to move stays in `dir` unopened, and an empty
+/// scratch must not then read as "the join IS the payload" (Codex F-12,
+/// 22 Aug 2026). Split out of [`rescue_split_of_container`] so that arm
+/// is reachable without a rename seam - a scratch directory this process
+/// may not write to is a real `EACCES`, where reaching the same line
+/// through the caller needs a live pool and an unpack ladder that has
+/// already failed.
+fn stage_joined_into(joined: Vec<PathBuf>, sub: &std::path::Path) -> (Vec<PathBuf>, bool) {
+    let mut moved_all = true;
+    let staged: Vec<PathBuf> = joined
+        .into_iter()
+        .filter(|p| {
+            let Some(name) = p.file_name() else {
+                return false;
+            };
+            match std::fs::rename(p, sub.join(name)) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(target: "extract", "could not stage {} for extraction: {e}", p.display());
+                    moved_all = false;
+                    false
+                }
+            }
+        })
+        .collect();
+    (staged, moved_all)
+}
+
+/// The rescue's verdict, from the four things that can go wrong inside
+/// it. Stated as a function rather than folded inline because the F-12
+/// input is the one the others hide.
+///
+/// `inner` is what the retry extraction made of the scratch dir, and
+/// `None` there means nobody claimed the joined container - the honest
+/// "the join IS the payload" ending, and the only reason a rescue that
+/// extracted nothing still reports `Produced`. **An empty scratch dir
+/// answers `None` too**, so a joined file that never got staged reaches
+/// this with exactly the reading of a payload delivered whole; only
+/// `moved_all` separates them. `joined_all` is the same story one step
+/// earlier (a set that would not join at all) and `lifted` one step
+/// later (output the lift-back left stranded in the scratch dir).
+fn rescue_verdict(
+    joined_all: bool,
+    moved_all: bool,
+    inner: Option<NestOutcome>,
+    lifted: bool,
+) -> NestOutcome {
+    let mut out = inner.unwrap_or(NestOutcome::Produced);
+    if !joined_all || !moved_all || !lifted {
+        out = out.and(NestOutcome::Failed);
+    }
+    out
+}
+
+/// [`rescue_split_of_container`] for the callers that have just watched
+/// their own disk unpack fail on the DOWNLOADED files - the get tail's
+/// demoted-volume ladder, which unpacks through `try_unrar_spent` rather
+/// than through the extraction ladder and so never reaches step 8.
+///
+/// Nothing in this directory has been produced by an extraction yet (the
+/// unpack that would have produced it is the thing that just failed), so
+/// the scan taken now IS the arrival scan step 8 compares against. Returns
+/// true only when the join happened AND what it produced was extracted.
+pub(crate) fn rescue_split_after_failed_unpack(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> bool {
+    let arrived = match collect_container_split_sets(dir) {
+        Ok(a) if !a.is_empty() => a,
+        _ => return false,
+    };
+    matches!(
+        rescue_split_of_container(dir, &arrived, password, 0),
+        Ok(Some(o)) if o.produced()
+    )
+}
+
 /// Concatenate one set into `dir`, returning the joined size.
 ///
-/// `concat_files` is the 7z arm's join, reused verbatim: a byte-split 7z
-/// container is reassembled the same way, and one concatenation in the
-/// codebase is one place for it to be wrong.
+/// `concat_files` was the 7z arm's join until TODO 212 (22 Aug 2026)
+/// taught that arm to read its parts in place; this is now its one
+/// caller, and it lives on with the 7z code so the two stay in reach of
+/// each other.
 fn join_one(dir: &std::path::Path, set: &SplitSet) -> Result<u64> {
     let staging = ExtractStaging::new(dir)?;
     let target = staging.path().join(&set.base);

@@ -70,12 +70,12 @@ fn annotate_patterns_flags_only_bad_rules() {
 /// rejected, non-object entries).
 #[test]
 fn rules_save_warning_names_the_rule_and_carries_the_engine_error() {
-    let rules = r#"[{"name":"animes","match":"*anime*"},{"match":"1080p","not_match":"[a-"}]"#;
+    let rules = r#"[{"name":"animes","match":"(unclosed"},{"match":"1080p","not_match":"[a-"}]"#;
     let w = rules_save_warning("smart_folders", rules).expect("must warn");
-    assert!(w.contains("\"animes\"") && w.contains("*anime*"), "{w}");
+    assert!(w.contains("\"animes\"") && w.contains("(unclosed"), "{w}");
     assert!(w.contains("rule 2") && w.contains("[a-"), "{w}");
     assert!(
-        w.contains("repetition"),
+        w.contains("closing"),
         "the engine's reason must ride along: {w}"
     );
 
@@ -90,6 +90,16 @@ fn rules_save_warning_names_the_rule_and_carries_the_engine_error() {
         rules_save_warning("smart_folders", r#"[{"match":"!*"}]"#),
         None
     );
+    // Nor does a wildcard pattern: it does not compile as a regex, but
+    // that is the glob arm working rather than a mistake to report, and a
+    // toast here would nag about a rule that does what it says (§104.2).
+    assert_eq!(
+        rules_save_warning(
+            "smart_folders",
+            r#"[{"match":"*anime*","not_match":"*.sample.*"}]"#
+        ),
+        None
+    );
     // Only the two rules settings are judged, and junk never panics.
     assert_eq!(rules_save_warning("watchlist", rules), None);
     assert_eq!(rules_save_warning("smart_folders", ""), None);
@@ -99,9 +109,60 @@ fn rules_save_warning_names_the_rule_and_carries_the_engine_error() {
         None
     );
     // The custom-category editor rides the same engine.
-    let cats = r#"[{"slug":"a","name":"Anime","match":"*anime*","base":"tv"}]"#;
+    let cats = r#"[{"slug":"a","name":"Anime","match":"(unclosed","base":"tv"}]"#;
     let w = rules_save_warning("custom_categories", cats).expect("cats must warn");
     assert!(w.contains("\"Anime\""), "{w}");
+}
+
+// ---- prefer_external_unrar_warning -------------------------------------
+
+/// TODO 60a: the save is ACCEPTED either way - the assertion here is
+/// about what rides alongside it. Only the way ON warns, only when the
+/// probe finds nothing, and only for this setting's name.
+#[test]
+fn prefer_external_unrar_warning_fires_only_when_turning_it_on_without_unrar() {
+    let missing = || false;
+    let present = || true;
+    let w = prefer_external_unrar_warning_with("prefer_external_unrar", "1", missing)
+        .expect("must warn");
+    assert!(w.contains("unrar is not installed"), "{w}");
+    // The dashboard shows this verbatim, and two suites assert a config
+    // save carries no "error" - a warning that spelled the word would
+    // read as a rejection to both the reader and the assert.
+    assert!(!w.contains("error"), "a warning must not read as one: {w}");
+    // SAB-style truthy spellings are the same save.
+    assert!(prefer_external_unrar_warning_with("prefer_external_unrar", "True", missing).is_some());
+
+    // Nothing to warn about: unrar is there, or the user is turning the
+    // setting OFF, or this is some other setting entirely.
+    assert_eq!(
+        prefer_external_unrar_warning_with("prefer_external_unrar", "1", present),
+        None
+    );
+    assert_eq!(
+        prefer_external_unrar_warning_with("prefer_external_unrar", "0", missing),
+        None
+    );
+    assert_eq!(
+        prefer_external_unrar_warning_with("par_cleanup", "1", missing),
+        None
+    );
+}
+
+/// What the REAL probe can be held to on a box whose PATH is whatever
+/// it is: it answers rather than panicking, it is stable across calls
+/// (it stats, it does not spawn, so there is nothing to be flaky
+/// about), and the OFF direction is unconditional - a box with no unrar
+/// must still be able to turn the setting off in silence.
+#[test]
+fn unrar_probe_is_stable_and_never_warns_on_the_way_off() {
+    let a = prefer_external_unrar_warning("prefer_external_unrar", "1");
+    let b = prefer_external_unrar_warning("prefer_external_unrar", "1");
+    assert_eq!(a, b);
+    assert_eq!(
+        prefer_external_unrar_warning("prefer_external_unrar", "0"),
+        None
+    );
 }
 
 // ---- shape_only / path_str ---------------------------------------------
@@ -536,6 +597,7 @@ fn set_index_evict_kinds_validates_and_dedups() {
 /// built-in menu, the empty default is the full four (the ceiling), and
 /// an all-unticked list is refused rather than stored as the empty
 /// default - which would silently mean "measure everything".
+#[cfg(feature = "indexer")]
 #[test]
 fn scoreboard_cats_can_only_reduce_the_daily_requests() {
     let (_t, d) = daemon_in("sbcats");
@@ -690,6 +752,101 @@ fn set_arr_instances_validates_kind_and_url() {
     let blanked = r#"[{"name":"a","kind":"sonarr","url":"http://localhost:8989","apikey":""}]"#;
     set_arr_instances(&d, "arr_instances", blanked).unwrap();
     assert_eq!(d.arr_instances.lock_ok()[0].apikey, "k");
+}
+
+/// TODO §20c: `feeds` is the one settings list whose VALUE is the
+/// credential, so the round trip is the whole design - a saved edit
+/// carries the mask back, and only the id can tell the daemon that the
+/// mask means "keep what you have".
+#[test]
+fn a_masked_feed_url_round_trips_by_id() {
+    let (_t, d) = daemon_in("feedmask");
+    let real = "https://idx.example/rss?t=tvsearch&cat=5030&apikey=b8f3c1d9e7a24601";
+    let (live, _) = set_feeds(
+        &d,
+        "feeds",
+        &json!([{"url": real, "interval_secs": 600, "category": "tv"}]).to_string(),
+    )
+    .unwrap();
+    assert!(live);
+    let id = d.feeds.lock_ok()[0].id.clone();
+    assert_eq!(id.len(), 16, "a feed saved without an id is given one");
+    assert_eq!(d.feeds.lock_ok()[0].url, real);
+
+    // The dashboard's own round trip: the masked url comes back beside
+    // the id, with an unrelated edit on the row.
+    let masked = crate::rss::mask_feed_url(real);
+    assert!(!masked.contains("b8f3c1d9e7a24601"));
+    let (_, persist) = set_feeds(
+        &d,
+        "feeds",
+        &json!([{"id": id, "url": masked, "interval_secs": 600, "category": "tv",
+                 "rules": ["Accept: *1080p*"]}])
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(d.feeds.lock_ok()[0].url, real, "the stored url is kept");
+    assert_eq!(
+        d.feeds.lock_ok()[0].rules,
+        vec!["Accept: *1080p*".to_string()]
+    );
+    assert_eq!(d.feeds.lock_ok()[0].id, id, "and the id is stable");
+    assert!(
+        persist.to_string().contains("b8f3c1d9e7a24601"),
+        "what is persisted is the REAL url, not the mask: {persist}"
+    );
+
+    // Blank says the same thing, the way a blank apikey or notify token
+    // does everywhere else in this file.
+    set_feeds(&d, "feeds", &json!([{"id": id, "url": ""}]).to_string()).unwrap();
+    assert_eq!(d.feeds.lock_ok()[0].url, real);
+
+    // A url the user actually retyped replaces the stored one - the same
+    // address with a new key included, which is the case a merge that
+    // keyed on the url could never have got right.
+    let rekeyed = "https://idx.example/rss?t=tvsearch&cat=5030&apikey=0000111122223333";
+    set_feeds(
+        &d,
+        "feeds",
+        &json!([{"id": id, "url": rekeyed}]).to_string(),
+    )
+    .unwrap();
+    assert_eq!(d.feeds.lock_ok()[0].url, rekeyed);
+    assert_eq!(d.feeds.lock_ok()[0].id, id, "a re-key is not a new feed");
+
+    // An id that matches nothing has no stored url to keep, so there is
+    // no feed to save - not a feed with a blank address polled forever.
+    set_feeds(
+        &d,
+        "feeds",
+        &json!([{"id": "deadbeefdeadbeef", "url": ""}]).to_string(),
+    )
+    .unwrap();
+    assert!(d.feeds.lock_ok().is_empty());
+}
+
+/// The masked-field trap: editing one parameter of a masked url leaves
+/// the `***` in it, and storing that would destroy the key. Refused with
+/// a sentence that says what to do instead.
+#[test]
+fn a_half_edited_masked_feed_url_is_refused() {
+    let (_t, d) = daemon_in("feedhalf");
+    let real = "https://idx.example/rss?t=tvsearch&cat=5030&apikey=b8f3c1d9e7a24601";
+    set_feeds(&d, "feeds", &json!([{"url": real}]).to_string()).unwrap();
+    let id = d.feeds.lock_ok()[0].id.clone();
+    let e = set_feeds(
+        &d,
+        "feeds",
+        &json!([{"id": id, "url": "https://idx.example/rss?t=tvsearch&cat=5040&apikey=***"}])
+            .to_string(),
+    )
+    .unwrap_err();
+    assert!(e.contains("***"), "{e}");
+    assert_eq!(
+        d.feeds.lock_ok()[0].url,
+        real,
+        "a refused save changes nothing"
+    );
 }
 
 #[test]

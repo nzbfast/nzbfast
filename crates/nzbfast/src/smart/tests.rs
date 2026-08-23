@@ -1086,8 +1086,48 @@ fn ext_list_parsing() {
     assert!(parse_ext_list("").is_empty());
 }
 
+/// §163 item 2. The leading-`*.` strip is why `*.par2` still means the
+/// par2 EXTENSION, and it is also what used to flatten a real pattern
+/// down to one. Both halves are pinned here, because the second is only
+/// safe while the first is unchanged.
+#[test]
+fn ext_list_keeps_a_real_pattern_and_still_flattens_a_pasted_extension() {
+    // Unchanged: anything that reduces to a bare extension still does.
+    for (input, want) in [
+        ("*.par2", "par2"),
+        (".SRR", "srr"),
+        ("**.nfo", "nfo"),
+        ("url", "url"),
+        // A lone wildcard reduces to nothing and is dropped, exactly as
+        // it was before - a cleanup list that says "*" must not mean
+        // "delete the download".
+        ("*", ""),
+    ] {
+        assert_eq!(
+            parse_ext_list(input),
+            if want.is_empty() {
+                Vec::new()
+            } else {
+                vec![want.to_string()]
+            },
+            "{input}"
+        );
+    }
+    // Kept whole: a separator, or a wildcard that survives the strip.
+    for input in ["subs/*", "*sample*.mkv", "*.r??", "sub?/*.nfo"] {
+        assert_eq!(parse_ext_list(input), vec![input], "{input}");
+    }
+    // Windows spelling of a path pattern folds to the posix one, so the
+    // sweep has a single separator to match against.
+    assert_eq!(parse_ext_list("Subs\\*"), vec!["subs/*"]);
+    // And the classifier itself, on the pair that makes the rule subtle.
+    assert!(!is_cleanup_pattern("*.par2"), "strips to a bare extension");
+    assert!(is_cleanup_pattern("*.r??"), "strips to a wild one");
+}
+
 #[test]
 fn encrypted_rar_scan() {
+    use super::unlockpw::encrypted_rar;
     let dir = std::env::temp_dir().join(format!("nzbfast-smart-enc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1135,6 +1175,43 @@ fn cleanup_two_levels() {
     assert!(!dir.join("a.par2").exists());
     assert!(!dir.join("a.vol00+1.PAR2").exists());
     assert!(!dir.join("sub/b.par2").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §163 item 2: the sweep honours patterns as well as extensions, and a
+/// pattern is matched against the filename or the relative path
+/// depending on whether it carries a separator - the distinction that
+/// makes `Subs/*` mean the folder rather than any file called Subs.
+#[test]
+fn cleanup_matches_paths_and_wildcards() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-smart-clean-pat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Subs")).unwrap();
+    std::fs::create_dir_all(dir.join("keep")).unwrap();
+    for p in [
+        "Show.S01E01.mkv",
+        "Show.S01E01-sample.mkv",
+        "Show.S01E01.nfo",
+        "Subs/eng.srt",
+        "Subs/nor.srt",
+        "keep/eng.srt",
+    ] {
+        std::fs::write(dir.join(p), b"x").unwrap();
+    }
+    let (n, par2) = cleanup(&dir, &parse_ext_list("Subs/*, *sample*, nfo"));
+    assert_eq!(n, 4, "two subtitles, one sample, one nfo");
+    assert_eq!(par2, 0, "nothing here is recovery data");
+    // The separator pattern took the Subs folder and left the
+    // identically-named files under a different one.
+    assert!(!dir.join("Subs/eng.srt").exists());
+    assert!(!dir.join("Subs/nor.srt").exists());
+    assert!(dir.join("keep/eng.srt").exists(), "a different folder");
+    // The bare wildcard is about the NAME, so it reaches any level.
+    assert!(!dir.join("Show.S01E01-sample.mkv").exists());
+    // The extension arm still works beside them, and the payload stays.
+    assert!(!dir.join("Show.S01E01.nfo").exists());
+    assert!(dir.join("Show.S01E01.mkv").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1646,15 +1723,23 @@ fn a_locked_zip_is_detected_and_the_password_unpacks_it() {
 
         let found = encrypted_archive(&d).unwrap_or_else(|| panic!("{tag}: lock not detected"));
         assert_eq!(found.file_name().unwrap(), "payload.zip", "{tag}");
-        assert!(
-            !unlock(&d, "wrong"),
+        // `Err(None)`, exactly: a wrong password is not a refusal that
+        // names itself, and inventing a reason here would put one in
+        // front of the user (see `unlock`).
+        assert_eq!(
+            unlock(&d, "wrong"),
+            Err(None),
             "{tag}: a wrong password must not pass"
         );
         assert!(
             !d.join("movie.mkv").exists(),
             "{tag}: nothing published on a wrong password"
         );
-        assert!(unlock(&d, "pw123"), "{tag}: the right password must unlock");
+        assert_eq!(
+            unlock(&d, "pw123"),
+            Ok(()),
+            "{tag}: the right password must unlock"
+        );
         assert_eq!(
             std::fs::read(d.join("movie.mkv")).unwrap(),
             payload,

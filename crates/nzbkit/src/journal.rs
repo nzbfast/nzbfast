@@ -21,8 +21,12 @@
 //!                                          later runs may redefine idx)
 //!   R <slot> <fidx>:<file_off>:<vol_off>:<len>[,…] <message-id>
 //!   X <file-name>                          the journal's claim over this
-//!                                          file is retired (see
-//!                                          [`Journal::invalidate`])
+//!                                          file is retired. No producer
+//!                                          since TODO 27 phase 3 (the
+//!                                          finish decrypt that wrote it
+//!                                          is gone); the PARSER stays,
+//!                                          so an older run's journal
+//!                                          still resumes correctly.
 //!   M <slot>                               the slot demoted to a
 //!                                          materialized volume (see
 //!                                          [`Journal::record_materialized`])
@@ -106,6 +110,13 @@ thread_local! {
 
 struct WriteState {
     file: File,
+    /// Placement records composed but not yet landed - see
+    /// [`WriteState::queue`]. Every line here is complete; only the
+    /// `write(2)` is deferred.
+    pending: Vec<u8>,
+    /// When `pending` last landed (or the journal opened): the age half
+    /// of the batch rule.
+    last_land: std::time::Instant,
     /// Slots whose `S` line is already emitted this run.
     slots_emitted: HashSet<usize>,
     /// File name → index in this run's `F` table.
@@ -114,46 +125,57 @@ struct WriteState {
     used_names: HashSet<String>,
 }
 
+/// The batch rule for placement records (TODO 30a, Finding 6 - full
+/// measurement in `research/PROFILE-30a-store-path-2026-08-22.md`): a
+/// record lands when the queue holds `BATCH_BYTES`, or when the last
+/// landing is `BATCH_AGE` old, whichever comes first. One `write(2)`
+/// per article was 6-10% of decode-thread CPU (the write plus the
+/// mutex-wait behind it) - an APFS file-extending append costs the same
+/// 15-85 us whether it carries one record or 400. A kill loses at most
+/// `BATCH_AGE` of placements, refetched on resume, never corrupting
+/// anything; power loss already lost the page cache (this path is not
+/// fsynced), so the bound is for a kill.
+const BATCH_BYTES: usize = 32 << 10;
+const BATCH_AGE: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl WriteState {
+    /// Queue one complete record behind the batch rule. Ordering holds
+    /// by construction: every record passes through this one queue under
+    /// the one mutex, and a must-land-now line goes through
+    /// [`WriteState::land`], which drains the queue ahead of itself.
+    fn queue(&mut self, rec: &[u8]) {
+        self.pending.extend_from_slice(rec);
+        if self.pending.len() >= BATCH_BYTES || self.last_land.elapsed() >= BATCH_AGE {
+            self.flush();
+        }
+    }
+
+    /// Land everything queued. Errors are dropped exactly as the
+    /// per-record write dropped them - the journal is an optimisation
+    /// over a refetch, never a correctness dependency.
+    fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            let _ = self.file.write_all(&self.pending);
+            self.pending.clear();
+        }
+        self.last_land = std::time::Instant::now();
+    }
+
+    /// Land `rec` immediately, behind whatever is queued - for the rare
+    /// non-placement lines (`M`, `E`/`K`/`T`) whose callers read the file
+    /// back or fsync it, where a deferred write would reorder the journal
+    /// or void the durability they promise. `X` belonged on that list
+    /// until TODO 27 phase 3 deleted its only producer; the parser stays
+    /// for older journals, so nothing lands one any more.
+    fn land(&mut self, rec: &[u8]) -> std::io::Result<()> {
+        self.flush();
+        self.file.write_all(rec)
+    }
+}
+
 pub struct Journal {
     state: Mutex<WriteState>,
-    /// The finish decrypt's retire/publish bookkeeping. One mutex over
-    /// all three fields: the workers run concurrently and every rule in
-    /// [`Journal::record_decrypted`] reads one field against another.
-    decrypt_stash: Mutex<DecryptStash>,
     pub path: PathBuf,
-}
-
-/// State shared by the finish decrypt's retire and publish halves.
-#[derive(Default)]
-struct DecryptStash {
-    /// Placements parked by [`Journal::retire_for_decrypt`], keyed by the
-    /// retired output name, waiting for [`Journal::record_decrypted`] to
-    /// republish them as `D` records. An entry whose publish never comes
-    /// (rename failed, job died first) just dies with the journal - the
-    /// conservative refetch the bare retirement always meant.
-    parked: HashMap<String, Vec<StashedArticle>>,
-    /// Every name handed to [`Journal::retire_for_decrypt`] this run:
-    /// files the decrypt is about to replace with plaintext. Registered
-    /// BEFORE the `X` line is written, so any parse that can see the
-    /// retirement can also see that we are the ones who wrote it.
-    mutating: HashSet<String>,
-    /// The subset of `mutating` whose plaintext is published AND whose
-    /// crypt facts landed - the only files a `D` fragment may claim
-    /// restore-by-re-encryption for.
-    restorable: HashSet<String>,
-}
-
-/// One placement parked between retirement and decrypt-publish: enough
-/// to re-emit the article as a `D` record under the slot's real
-/// destination name.
-struct StashedArticle {
-    slot: usize,
-    slot_name: String,
-    slot_size: u64,
-    id: String,
-    frags: Vec<Frag>,
-    /// Parsed per-fragment crypto markers (empty for `R` records).
-    mask: Vec<bool>,
 }
 
 /// One journaled article: every fragment must restore for the article
@@ -207,6 +229,21 @@ pub struct ResumeState {
     pub crypto_files: HashMap<String, CryptoFileMeta>,
 }
 
+impl ResumeState {
+    /// Upper bound on the bytes a [`restore`] would move: every fragment
+    /// of every placement record, before any article is admitted. §94 A's
+    /// admission gate reads this BEFORE the restore, because what it
+    /// decides is whether the restore materialises volumes at all.
+    pub fn placement_bytes(&self) -> u64 {
+        self.slots
+            .values()
+            .flat_map(|r| r.articles.iter())
+            .flat_map(|a| a.frags.iter())
+            .map(|f| f.len)
+            .sum()
+    }
+}
+
 /// What [`restore`] managed to rebuild from a placement journal.
 #[derive(Default)]
 pub struct Restored {
@@ -215,6 +252,34 @@ pub struct Restored {
     /// Per-slot seeds for the extractor/verifier: the volume file to
     /// adopt and the (offset, len) spans now on disk in it.
     pub seeds: Vec<SlotSeed>,
+    /// The crypto ROUTE every output the journal names was committed to
+    /// by the run that wrote it, derived from the records rather than
+    /// journaled as its own line (TODO 158 item 2, closed 22 Aug 2026).
+    /// An output a resumed run writes under the OTHER route mixes
+    /// domains on disk while the records keep describing the old one,
+    /// and the run after that restores garbage - so the resumed
+    /// extractor is seeded with this before its first span and holds
+    /// each output to the route recorded for it.
+    ///
+    /// Wire-domain outputs: every file a plain placement fragment names
+    /// (an `R` record, or the `:0` plain-neighbour fragment of a `D`),
+    /// with the bytes those fragments cover. For an encrypted entry
+    /// that is the ciphertext route; for a plain entry or a volume
+    /// file it is merely true, and harmless to assert. Counted over
+    /// every record, admitted or not - the bytes are on disk either way
+    /// and the route was latched at enqueue in the run that wrote them.
+    pub wire_outputs: HashMap<String, u64>,
+    /// Plaintext-once outputs whose `D` articles were ADMITTED by this
+    /// restore, with the `(salt, iv)` of the head record their `E` fact
+    /// was taken from. Only an admitted article pins the route: an
+    /// output none of whose `D` records restored is refetched whole and
+    /// re-recorded under whatever route the resumed run takes, and the
+    /// last `R`/`D` per id wins at the next parse. A file that is ALSO
+    /// a wire output is a contradiction only a pre-fix journal can hold
+    /// (a run that wrote ciphertext over plaintext and recorded neither
+    /// change); its `D` articles are refused admission, so it lands here
+    /// never and in `wire_outputs` always.
+    pub plaintext_outputs: HashMap<String, ([u8; 16], [u8; 16])>,
 }
 
 pub struct SlotSeed {
@@ -222,6 +287,22 @@ pub struct SlotSeed {
     pub name: String,
     pub size: u64,
     pub spans: Vec<(u64, u64)>,
+    /// Parallel to `spans`: where each span's bytes physically ARE, as
+    /// `(file, offset)` relative to the out-dir. Populated only when
+    /// [`restore_for`] was told not to materialise volumes (§94 A's
+    /// replay reads the placements directly instead, so the bytes are
+    /// still in the output file run 1 put them in). Empty otherwise,
+    /// which means every span is at `vol_off` in `name` itself.
+    pub sources: Vec<(std::sync::Arc<str>, u64)>,
+    /// Parallel to `spans`: the message-id of the article each span
+    /// was restored from, one `Arc` shared by every span of the same
+    /// article. TODO 158 item 2 (belt-and-braces half, 23 Aug 2026):
+    /// §94 A's replay feeds these spans back through the extractor and
+    /// re-journals each article under the route the RESUMED run took,
+    /// which it can only do if it still knows which article a span
+    /// belonged to - the journal's records are per article, the seeds
+    /// per fragment. Populated in both restore modes.
+    pub article_ids: Vec<std::sync::Arc<str>>,
 }
 
 impl Journal {
@@ -265,11 +346,12 @@ impl Journal {
             Journal {
                 state: Mutex::new(WriteState {
                     file,
+                    pending: Vec::with_capacity(BATCH_BYTES + 512),
+                    last_land: std::time::Instant::now(),
                     slots_emitted: HashSet::new(),
                     files: HashMap::new(),
                     used_names: HashSet::new(),
                 }),
-                decrypt_stash: Mutex::new(DecryptStash::default()),
                 path,
             },
             resume,
@@ -284,8 +366,16 @@ impl Journal {
             c.out.push_str(id);
             c.out.push('\n');
             let mut st = self.state.lock_ok();
-            let _ = st.file.write_all(c.out.as_bytes());
+            st.queue(c.out.as_bytes());
         });
+    }
+
+    /// Land every queued placement record now. Called where the stream
+    /// pauses or ends (a decoder about to block on an empty channel, the
+    /// end of the network phase, the finish tail) so the age bound holds
+    /// across a stall, and by `Drop`.
+    pub fn flush(&self) {
+        self.state.lock_ok().flush();
     }
 
     /// Record one terminal article with its physical placement.
@@ -309,7 +399,7 @@ impl Journal {
     /// re-encryption, `:0` = ordinary copy of a plain neighbor), so
     /// [`restore`] re-encrypts instead of copying and an old binary
     /// refetches instead of copying plaintext into volume files.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn record_placed_crypto(
         &self,
         slot: usize,
@@ -332,7 +422,7 @@ impl Journal {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn record_letter(
         &self,
         letter: char,
@@ -424,7 +514,7 @@ impl Journal {
                 start = ends[i];
             }
             let _ = writeln!(out, " {id}");
-            let _ = st.file.write_all(out.as_bytes());
+            st.queue(out.as_bytes());
         });
     }
 
@@ -461,7 +551,7 @@ impl Journal {
             let _ = writeln!(out, "S {slot} {size} {dest}");
         }
         let _ = writeln!(out, "M {slot}");
-        let _ = st.file.write_all(out.as_bytes());
+        let _ = st.land(out.as_bytes());
     }
 
     /// Write the drained [`CryptoJournalEvent`]s as `E`/`K`/`T` lines.
@@ -505,240 +595,22 @@ impl Journal {
             }
         }
         let mut st = self.state.lock_ok();
-        let _ = st.file.write_all(out.as_bytes());
-    }
-
-    /// Retire this journal's claim over `files` - call it BEFORE their
-    /// bytes stop being a faithful copy of what the `R` lines recorded,
-    /// and only trust it once it returns `Ok`.
-    ///
-    /// The finish decrypt is the case that needs it: it replaces an
-    /// encrypted RAR5 store output with its plaintext, and that output is
-    /// exactly the file the placement records point INTO. Left claimed, a
-    /// resume run would copy translated fragments out of the mutated file
-    /// into the volume files and mark those message ids restored - so the
-    /// articles are skipped instead of refetched, and without PAR2 the
-    /// retry grinds on poisoned local bytes forever while the provider
-    /// still holds every original article.
-    ///
-    /// Ordering is the whole point, so this is durable before it returns
-    /// (one write, then fsync): a crash on either side of the call leaves
-    /// a consistent pair. Before it, the file still IS the recorded bytes
-    /// and the claim still stands (resume locally, no refetch); after it,
-    /// the claim is gone whether or not the mutation ever landed (refetch,
-    /// conservative but always correct).
-    ///
-    /// Retirement is positional, not global: it drops the placements
-    /// recorded EARLIER in the journal, so a later run that refetches
-    /// those articles and re-records them is trusted again.
-    pub fn invalidate(&self, files: &[String]) -> std::io::Result<()> {
-        if files.is_empty() {
-            return Ok(());
-        }
-        // One buffer, one write: a power cut can then only lose the whole
-        // batch (nothing was published yet, so the claim is still true) -
-        // never tear a name into a line that retires the wrong file.
-        let mut buf = String::new();
-        for f in files {
-            // Names can't carry a newline - `sanitize_filename` maps every
-            // control character - so one line per file stays unambiguous.
-            buf.push_str("X ");
-            buf.push_str(f);
-            buf.push('\n');
-        }
-        let mut st = self.state.lock_ok();
-        st.file.write_all(buf.as_bytes())?;
-        st.file.sync_data()
-    }
-
-    /// [`Journal::invalidate`] for the finish decrypt: retire the claim
-    /// over `files` exactly as `invalidate` does, but first park every
-    /// placement the retirement drops, so a decrypt that goes on to
-    /// PUBLISH (verified plaintext renamed over the ciphertext) can hand
-    /// them back via [`Journal::record_decrypted`] as `D` records - and a
-    /// later failure in the same job (another file's ENOSPC, the nested
-    /// pass) then costs the retry a local re-encrypt instead of a
-    /// near-full refetch (TODO 100, Gary's 14.87 GB re-download).
-    ///
-    /// The parse happens under the writer lock, so the snapshot is
-    /// consistent with every record already appended; the durable `X` is
-    /// written before this returns, same contract as `invalidate`.
-    pub fn retire_for_decrypt(&self, files: &[String]) -> std::io::Result<()> {
-        if files.is_empty() {
-            return Ok(());
-        }
-        let mut st = self.state.lock_ok();
-        // Register the names BEFORE the parse and before the `X` line
-        // lands: the write below happens under this same lock, so a
-        // concurrent worker that can see our retirement in the file can
-        // always see it here too. That ordering is what makes the parse
-        // filter next deterministic rather than a race.
-        let mine: Vec<String> = files.iter().map(|f| sanitize_filename(f)).collect();
-        let mutating = {
-            let mut d = self.decrypt_stash.lock_ok();
-            d.mutating.extend(mine.iter().cloned());
-            d.mutating.clone()
-        };
-        let mut resume = ResumeState::default();
-        if let Ok(f) = File::open(&self.path) {
-            let mut lines = utf8_lines(std::io::BufReader::new(f));
-            let _ = lines.next(); // header: fingerprint already matched at open
-            // Read THROUGH this run's own decrypt retirements. A sibling
-            // worker's `X` drops every placement that names its file -
-            // including an article whose span straddles into ours, which
-            // is exactly the one we must park: our publish is what
-            // re-records it, and if we let the sibling's `X` hide it the
-            // article survives only in the sibling's snapshot, with our
-            // fragment frozen as "ordinary copy" from before we were
-            // decrypted. `record_decrypted` re-adjudicates every
-            // fragment against `restorable`, so nothing parked here can
-            // publish a claim the file cannot honour.
-            parse_lines_through(lines, &mut resume, &mutating);
-        }
-        let mut stash = Vec::new();
-        for name in mine {
-            let mut arts = Vec::new();
-            for (slot, sp) in &resume.slots {
-                for a in &sp.articles {
-                    if a.frags.iter().any(|f| f.file == name) {
-                        arts.push(StashedArticle {
-                            slot: *slot,
-                            slot_name: sp.name.clone(),
-                            slot_size: sp.size,
-                            id: a.id.clone(),
-                            frags: a.frags.clone(),
-                            mask: a.crypto_frag.clone(),
-                        });
-                    }
-                }
-            }
-            stash.push((name, arts));
-        }
-        // The durable X, before the caller mutates a byte - identical to
-        // `invalidate` (one write, then fsync).
-        let mut buf = String::new();
-        for f in files {
-            buf.push_str("X ");
-            buf.push_str(f);
-            buf.push('\n');
-        }
-        st.file.write_all(buf.as_bytes())?;
-        st.file.sync_data()?;
-        drop(st);
-        #[cfg(test)]
-        {
-            // Test seam: the window between the durable retirement and
-            // the parked snapshot. A sibling worker's whole retire +
-            // publish can land in here, which is the interleaving the
-            // `mutating`/`restorable` rules exist for. One-shot - the
-            // first retirement to reach it consumes the pair, so the
-            // sibling released into the window does not re-park here.
-            let pair = RETIRE_STASH_BARRIER.lock_ok().take();
-            if let Some((open, go)) = pair {
-                open.wait();
-                go.wait();
-            }
-        }
-        let mut parked = self.decrypt_stash.lock_ok();
-        for (name, arts) in stash {
-            parked.parked.insert(name, arts);
-        }
-        Ok(())
-    }
-
-    /// The decrypt PUBLISHED `name` (plaintext verified and renamed into
-    /// place): write its crypt facts (`E`/`K`/`T` events, collected from
-    /// the ciphertext before the rename destroyed it) and republish the
-    /// placements [`Journal::retire_for_decrypt`] parked as `D` records -
-    /// the plaintext-once grammar, which a resume run restores by
-    /// RE-ENCRYPTING the on-disk plaintext instead of refetching.
-    ///
-    /// Ordering makes this safe without an fsync: it runs only after the
-    /// rename landed, so a kill anywhere leaves either the bare
-    /// retirement (conservative refetch) or records that truthfully
-    /// describe the published plaintext. Only power loss can reorder the
-    /// two, the same exposure the in-stream `D` path already accepts -
-    /// and the resume's full-hash verification is the backstop there.
-    pub fn record_decrypted(&self, name: &str, events: &[CryptoJournalEvent]) {
-        self.record_crypto_events(events);
-        let key = sanitize_filename(name);
-        // Snapshot the batch's state with the stash, under one lock.
-        // Reading `restorable` at EMIT time - rather than flipping the
-        // other parked stashes as each file publishes - is what makes
-        // this independent of how the concurrent workers interleaved:
-        // a stash that is still in flight when its neighbor publishes
-        // cannot be flipped, and it used to publish the pre-decrypt
-        // mask afterwards. Last R/D wins, so that stale record was the
-        // one a resume obeyed: plain-copy PUBLISHED PLAINTEXT into a
-        // volume as if it were the posted bytes, article marked
-        // restored.
-        let (arts, mutating, restorable) = {
-            let mut d = self.decrypt_stash.lock_ok();
-            // Before the early return: a file with nothing parked (its
-            // placements were all retired by a sibling first) is still
-            // published plaintext, and neighbors must see that.
-            d.restorable.insert(key.clone());
-            let Some(arts) = d.parked.remove(&key) else {
-                return;
-            };
-            (arts, d.mutating.clone(), d.restorable.clone())
-        };
-        for a in arts {
-            // A fragment in a sibling of this decrypt batch that has not
-            // published its facts is unadjudicable HERE: it is either
-            // still ciphertext (mask `false`) or already plaintext whose
-            // facts never landed (unrestorable), and this side cannot
-            // tell which. Park the whole article instead of guessing -
-            // it refetches, the conservative outcome the bare retirement
-            // always meant. The sibling's own publish re-emits it with
-            // both fragments adjudicated, so nothing is lost when the
-            // batch succeeds.
-            if a.frags.iter().any(|f| {
-                f.file != key && mutating.contains(&f.file) && !restorable.contains(&f.file)
-            }) {
-                continue;
-            }
-            // A fragment inside the published file now restores by
-            // re-encryption, and so does one in any sibling that has
-            // already published its facts; a genuinely plain neighbor
-            // (never in this batch) keeps the ordinary copy.
-            let mask: Vec<bool> = a
-                .frags
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    a.mask.get(i).copied().unwrap_or(false)
-                        || f.file == key
-                        || restorable.contains(&f.file)
-                })
-                .collect();
-            self.record_placed_crypto(
-                a.slot,
-                &a.id,
-                Some((a.slot_name.clone(), a.slot_size)),
-                &a.slot_name,
-                a.slot_size,
-                &a.frags,
-                &mask,
-            );
-        }
+        let _ = st.land(out.as_bytes());
     }
 
     /// Download finished and verified - the journal has served its purpose.
     pub fn remove(self) {
+        // Nothing queued is worth landing in a file about to be unlinked.
+        self.state.lock_ok().pending.clear();
         let _ = std::fs::remove_file(&self.path);
     }
 }
 
-/// Test seam for [`Journal::retire_for_decrypt`]: two-stage, the house
-/// shape (first barrier says the window is open, second releases it).
-#[cfg(test)]
-static RETIRE_STASH_BARRIER: Mutex<
-    Option<(
-        std::sync::Arc<std::sync::Barrier>,
-        std::sync::Arc<std::sync::Barrier>,
-    )>,
-> = Mutex::new(None);
+impl Drop for Journal {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
 
 /// Line iterator that survives a torn record. `BufRead::lines()` yields
 /// `Err(InvalidData)` at the first invalid-UTF-8 line, and the
@@ -776,19 +648,6 @@ fn utf8_lines<R: std::io::BufRead>(mut r: R) -> impl Iterator<Item = String> {
 }
 
 fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
-    parse_lines_through(lines, resume, &HashSet::new());
-}
-
-/// [`parse_lines`], but reading THROUGH the `X` retirements named in
-/// `through` - the ones this run's own finish decrypt wrote. Only
-/// [`Journal::retire_for_decrypt`] passes a non-empty set, and only to
-/// build a stash that `record_decrypted` re-adjudicates; the resume
-/// parse at open time always honours every `X`.
-fn parse_lines_through(
-    lines: impl Iterator<Item = String>,
-    resume: &mut ResumeState,
-    through: &HashSet<String>,
-) {
     // File table + per-id placements resolve in stream order: a later run
     // appends its own F table (reusing indexes) and its R lines must bind
     // to ITS definitions, so fidx→name is resolved per line, not at the end.
@@ -952,19 +811,24 @@ fn parse_lines_through(
                 placed.insert(id.to_string(), (slot, frags, crypto_frag, crypto));
             }
         } else if let Some(name) = line.strip_prefix("X ") {
-            // Claim retired ([`Journal::invalidate`]): from here on this
-            // file is no longer the bytes the records above describe, so
-            // every placement with a fragment naming it - as a copy source,
-            // or as its own identity destination - is dropped and those
-            // articles refetch. Positional by construction: R lines after
-            // this point describe the file as it is now and still count.
+            // Claim retired: from here on this file is no longer the
+            // bytes the records above describe, so every placement with a
+            // fragment naming it - as a copy source, or as its own
+            // identity destination - is dropped and those articles
+            // refetch. Positional by construction: R lines after this
+            // point describe the file as it is now and still count.
+            //
+            // Nothing writes an `X` any more. Its only producer was the
+            // legacy finish decrypt, which mutated an output the records
+            // pointed into; plaintext-once never mutates one, so TODO 27
+            // phase 3 deleted the producer and kept this arm, because a
+            // journal an OLDER build left behind must still resume
+            // correctly - and the answer it encodes (refetch) is the
+            // conservative one in every case.
             if name.is_empty() {
                 continue;
             }
             let name = sanitize_filename(name);
-            if through.contains(&name) {
-                continue;
-            }
             placed.retain(|_, (_, frags, _, _)| !frags.iter().any(|f| f.file == name));
         } else if let Some(rest) = line.strip_prefix("M ") {
             // Slot demoted to a materialized volume: everything recorded
@@ -1020,525 +884,18 @@ fn parse_lines_through(
     }
 }
 
-/// One plaintext-once fragment restore job for [`restore_crypto`]:
-/// re-encrypt plaintext `[file_off, file_off+len)` of `file` and write
-/// the resulting posted bytes at `vol_off` of the slot's volume file.
-struct CryptoRestoreJob {
-    article: usize, // index into a per-run article table
-    file_off: u64,
-    vol_off: u64,
-    len: u64,
-    dest: PathBuf,
-    dest_size: u64,
-}
-
-/// Re-encrypt plaintext-once fragments back into volume files. Returns
-/// per-article success (indexed like the caller's table). Walks each
-/// file once in offset order with a rolling CBC chain, reseeding from
-/// the journaled checkpoints across coverage holes and CROSS-VERIFYING
-/// the rolling chain against every checkpoint it passes - a mismatch
-/// (plaintext holes read as zeros, a truncated file) fails the fragment
-/// and reseeds, so at most one checkpoint stride of garbage can ever be
-/// written, and the resume run's full-hash verification catches even
-/// that (restored bytes are never trusted unhashed).
-fn restore_crypto(
-    out_dir: &Path,
-    resume: &ResumeState,
-    password: Option<&str>,
-    jobs_by_file: HashMap<&str, Vec<CryptoRestoreJob>>,
-    article_ok: &mut [bool],
-) {
-    let Some(pw) = password else {
-        for jobs in jobs_by_file.values() {
-            for j in jobs {
-                article_ok[j.article] = false;
-            }
-        }
-        return;
-    };
-    for (fname, mut jobs) in jobs_by_file {
-        let Some(meta) = resume.crypto_files.get(fname) else {
-            for j in &jobs {
-                article_ok[j.article] = false;
-            }
-            continue;
-        };
-        let fail_all = |jobs: &[CryptoRestoreJob], article_ok: &mut [bool]| {
-            for j in jobs {
-                article_ok[j.article] = false;
-            }
-        };
-        let Some(keys) = crate::rarcrypt::derive_keys(pw, &meta.salt, meta.lg2) else {
-            fail_all(&jobs, article_ok);
-            continue;
-        };
-        // Prove the password before re-encrypting a single byte: a wrong
-        // key would faithfully rebuild GARBAGE posted bytes for every
-        // fragment, which the full-hash pass then damages wholesale. No
-        // stored check means no proof - refetch instead of guessing.
-        match meta.check {
-            Some(stored) if crate::rarcrypt::make_check(&keys) == stored => {}
-            _ => {
-                fail_all(&jobs, article_ok);
-                continue;
-            }
-        }
-        let Ok(src) = File::open(out_dir.join(fname)) else {
-            fail_all(&jobs, article_ok);
-            continue;
-        };
-        let src_len = src.metadata().map(|m| m.len()).unwrap_or(0);
-        let cipher_len = crate::rarcrypt::align16(meta.unp);
-        let mut ckpts: Vec<(u64, [u8; 16])> =
-            meta.checkpoints.iter().map(|(&o, &b)| (o, b)).collect();
-        ckpts.sort_unstable();
-        jobs.sort_by_key(|j| j.file_off);
-        let mut dests: HashMap<PathBuf, Option<File>> = HashMap::new();
-        // Rolling chain state: cipher block [cpos-16, cpos).
-        let (mut cpos, mut chain): (u64, [u8; 16]) = (0, meta.iv);
-        let mut walk = vec![0u8; 64 << 10];
-        // Advance the rolling chain to `target` (16-aligned) by
-        // encrypting the plaintext between, reseeding from the best
-        // anchor at or below it; verify against every checkpoint passed.
-        // Returns false when the stretch cannot be walked faithfully.
-        let mut chain_to = |cpos: &mut u64, chain: &mut [u8; 16], target: u64| -> bool {
-            if *cpos == target {
-                return true;
-            }
-            // Best anchor at or below the target: the rolling state or
-            // the nearest checkpoint, whichever is CLOSER. Every
-            // decrypted region begins at a journaled K (the writer emits
-            // one per decrypt boundary), so the nearest anchor is always
-            // inside the target's own region and the walk can never
-            // cross a coverage hole - the shape that used to re-encrypt
-            // zero-filled plaintext into garbage posted bytes. The
-            // password itself is proven against the stored check before
-            // any of this runs.
-            let (mut at, mut c) = (0u64, meta.iv);
-            if *cpos <= target {
-                (at, c) = (*cpos, *chain);
-            }
-            let below = ckpts.partition_point(|&(ko, _)| ko <= target);
-            if let Some(&(ko, kb)) = ckpts[..below].iter().rev().find(|&&(ko, _)| ko > at) {
-                (at, c) = (ko, kb);
-            }
-            let mut next_ck = ckpts.partition_point(|&(ko, _)| ko <= at);
-            while at < target {
-                let n = walk.len().min((target - at) as usize);
-                if at + (n as u64) > src_len
-                    || crate::disk::read_exact_at(&src, &mut walk[..n], at).is_err()
-                {
-                    return false;
-                }
-                let mut enc = crate::rarcrypt::CbcEncStream::new(&keys.aes(), &c);
-                enc.encrypt(&mut walk[..n]);
-                c = walk[n - 16..n].try_into().unwrap();
-                at += n as u64;
-                // Cross-verify each checkpoint the walk passes.
-                while next_ck < ckpts.len() && ckpts[next_ck].0 <= at {
-                    let (ko, kb) = ckpts[next_ck];
-                    if ko > 0 && ko <= at {
-                        let s = (n as u64 - (at - ko)) as usize;
-                        let got: [u8; 16] = if s >= 16 {
-                            walk[s - 16..s].try_into().unwrap()
-                        } else {
-                            c // ko == at edge: the rolling block
-                        };
-                        if got != kb {
-                            return false;
-                        }
-                    }
-                    next_ck += 1;
-                }
-            }
-            (*cpos, *chain) = (at, c);
-            true
-        };
-        for j in jobs {
-            let lo = j.file_off & !15;
-            let hi = (j.file_off + j.len).next_multiple_of(16).min(cipher_len);
-            if hi <= lo || j.file_off + j.len > cipher_len {
-                article_ok[j.article] = false;
-                continue;
-            }
-            if !chain_to(&mut cpos, &mut chain, lo) {
-                article_ok[j.article] = false;
-                // Reseed for the next job from scratch.
-                (cpos, chain) = (0, meta.iv);
-                continue;
-            }
-            // Encrypt [lo, hi): plaintext from disk below unp, the
-            // journaled padding beyond it.
-            let n = (hi - lo) as usize;
-            let mut buf = vec![0u8; n];
-            let disk_end = hi.min(meta.unp);
-            let mut ok = disk_end <= src_len;
-            if ok && disk_end > lo {
-                ok = crate::disk::read_exact_at(&src, &mut buf[..(disk_end - lo) as usize], lo)
-                    .is_ok();
-            }
-            if ok && hi > meta.unp {
-                match &meta.pad {
-                    Some(pad) if pad.len() as u64 >= hi - meta.unp => {
-                        let a = (meta.unp - lo) as usize;
-                        buf[a..].copy_from_slice(&pad[..(hi - meta.unp) as usize]);
-                    }
-                    _ => ok = false,
-                }
-            }
-            if !ok {
-                article_ok[j.article] = false;
-                continue;
-            }
-            let mut enc = crate::rarcrypt::CbcEncStream::new(&keys.aes(), &chain);
-            enc.encrypt(&mut buf);
-            let new_chain: [u8; 16] = buf[n - 16..].try_into().unwrap();
-            let dest = dests.entry(j.dest.clone()).or_insert_with(|| {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    // Never truncate: the writes below land at offsets
-                    // inside a file this may be re-opening, and set_len
-                    // only ever grows it.
-                    .truncate(false)
-                    .open(&j.dest)
-                    .ok()
-                    .inspect(|d| {
-                        let cur = d.metadata().map(|m| m.len()).unwrap_or(0);
-                        if j.dest_size > cur {
-                            let _ = d.set_len(j.dest_size);
-                        }
-                    })
-            });
-            let Some(dest) = dest.as_ref() else {
-                article_ok[j.article] = false;
-                continue;
-            };
-            let a = (j.file_off - lo) as usize;
-            if crate::disk::write_all_at(dest, &buf[a..a + j.len as usize], j.vol_off).is_err() {
-                article_ok[j.article] = false;
-                continue;
-            }
-            (cpos, chain) = (hi, new_chain);
-        }
-    }
-}
-
-/// Suffix worn by a failed job's unverified payload while it waits for a
-/// retry. Chosen to be inert everywhere it might be seen: it is not a
-/// media, archive or par2 extension, so no *arr import rule, media
-/// scanner, unpack ladder or `looks_like_named_rar` scan claims it, and
-/// a user reading their download folder can see at a glance that it is
-/// not the file they asked for.
-pub const PARTIAL_SUFFIX: &str = ".nzbfast-partial";
-
-/// Take a failed job's direct-extracted payload out of circulation
-/// WITHOUT throwing its bytes away.
-///
-/// A one-pass job writes the inner file straight to the output
-/// directory, so a job that fails on missing articles leaves a payload
-/// of exactly the right name and exactly the right size with a
-/// zero-filled hole in the middle of it. That is the same false artifact
-/// `drop_spared_metadata` deletes on the success path - "a holed .nfo
-/// looks exactly like a real .nfo" - one level up, and it is worse here
-/// because it is the deliverable itself: an *arr importing on name and
-/// size takes it, a player opens it, and nothing about the directory
-/// says otherwise.
-///
-/// Renamed rather than deleted, because those bytes are also the ONLY
-/// resume state a retry has. The journal's placement (`R`) records
-/// address fragments by their offsets INSIDE this file - direct-extracted
-/// articles never touched a volume file - so deleting it turns a retry
-/// that refetches one missing article into a retry that refetches the
-/// whole post. [`unquarantine_partials`] puts the name back at the start
-/// of the next attempt, before [`restore`] reads it, so the rename costs
-/// a resume nothing.
-///
-/// This function's scope is payload NAMES the extraction reported; the
-/// failing finish holds the downloaded volume files the same way
-/// through [`quarantine_paths`] (TODO 159 item 1c - a failed job's
-/// partial download must not keep wearing real volume names in the
-/// output directory either). The discrimination over which downloaded
-/// files are held lives with the caller, which can tell a volume from
-/// a plain file the job proved whole.
-///
-/// Returns `(quarantined, failed)` by on-disk name. A failure is
-/// reported, never swallowed - the caller is already failing the job,
-/// but a payload that could not be renamed is still sitting there
-/// looking real.
-pub fn quarantine_partials(out_dir: &Path, payload: &[String]) -> (Vec<String>, Vec<String>) {
-    let paths: Vec<PathBuf> = payload
-        .iter()
-        .map(|n| out_dir.join(sanitize_filename(n)))
-        .collect();
-    quarantine_paths(&paths)
-}
-
-/// Path-level half of [`quarantine_partials`]: rename each existing
-/// file aside to `<name>.nzbfast-partial`, returning `(renamed,
-/// failed)` by file name. Callers hand it the on-disk paths a failing
-/// job must take out of circulation - the get tail's downloaded volume
-/// files - where [`quarantine_partials`] builds paths from payload
-/// names. A path already wearing the suffix is left alone, so a
-/// second pass over the same directory cannot stack suffixes.
-pub fn quarantine_paths(paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
-    let (mut done, mut failed) = (Vec::new(), Vec::new());
-    for from in paths {
-        let Some(name) = from.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        if name.ends_with(PARTIAL_SUFFIX) || !from.exists() {
-            continue;
-        }
-        let mut to = from.clone().into_os_string();
-        to.push(PARTIAL_SUFFIX);
-        match std::fs::rename(from, PathBuf::from(to)) {
-            Ok(()) => done.push(name),
-            Err(_) => failed.push(name),
-        }
-    }
-    (done, failed)
-}
-
-/// Undo [`quarantine_partials`] at the start of an attempt, so the
-/// journal's placement records find the file they address.
-///
-/// Must run BEFORE [`restore`]: a `.nzbfast-partial` file is invisible to
-/// the restore pass, which would drop every article whose bytes live in
-/// it and refetch them.
-///
-/// A base name that already exists is left alone and its quarantined
-/// copy is NOT clobbered. That case means something other than this
-/// mechanism put a file there - a re-add into an occupied directory, a
-/// user's own copy - and the live file wins; guessing between two
-/// candidates is how a resume ends up seeded with the wrong bytes.
-/// Returns the names it restored.
-pub fn unquarantine_partials(out_dir: &Path) -> Vec<String> {
-    let mut back = Vec::new();
-    let Ok(rd) = std::fs::read_dir(out_dir) else {
-        return back;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Some(n) = p.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(base) = n.strip_suffix(PARTIAL_SUFFIX) else {
-            continue;
-        };
-        if base.is_empty() {
-            continue;
-        }
-        let dest = out_dir.join(base);
-        if dest.exists() {
-            continue;
-        }
-        if std::fs::rename(&p, &dest).is_ok() {
-            back.push(base.to_string());
-        }
-    }
-    back
-}
-
-/// Rebuild the volume files a resume run works with from a placement
-/// journal: identity fragments (bytes already at their final offsets in
-/// the destination) are trusted in place; translated fragments (bytes in
-/// an extracted inner file) are COPIED back into the volume file - a
-/// local disk copy instead of a network refetch - and plaintext-once
-/// fragments (`D` records) are RE-ENCRYPTED back into posted bytes via
-/// [`restore_crypto`]. An article counts as restored only when every
-/// fragment succeeds; anything else refetches. Never fails: a missing
-/// source file just drops its articles.
-pub fn restore(out_dir: &Path, resume: &ResumeState, password: Option<&str>) -> Restored {
-    let mut out = Restored::default();
-    let mut buf = vec![0u8; 4 << 20];
-    // Phase A: the crypto fragments, per file in offset order.
-    let mut article_ids: Vec<(usize, &str)> = Vec::new(); // (slot, id)
-    let mut jobs_by_file: HashMap<&str, Vec<CryptoRestoreJob>> = HashMap::new();
-    let mut meta_missing: Vec<usize> = Vec::new();
-    for (&slot, rec) in &resume.slots {
-        if rec.name.is_empty() {
-            continue;
-        }
-        for a in &rec.articles {
-            if !a.crypto {
-                continue;
-            }
-            let article = article_ids.len();
-            article_ids.push((slot, &a.id));
-            for (i, f) in a.frags.iter().enumerate() {
-                if !a.crypto_frag.get(i).copied().unwrap_or(true) {
-                    continue; // plain neighbor: phase B copies it
-                }
-                // A crypto fragment whose E facts are missing can only
-                // refetch - falling through to a copy would put
-                // PLAINTEXT into a volume file.
-                if resume.crypto_files.contains_key(f.file.as_str()) {
-                    jobs_by_file
-                        .entry(f.file.as_str())
-                        .or_default()
-                        .push(CryptoRestoreJob {
-                            article,
-                            file_off: f.file_off,
-                            vol_off: f.vol_off,
-                            len: f.len,
-                            dest: out_dir.join(&rec.name),
-                            dest_size: rec.size,
-                        });
-                } else {
-                    meta_missing.push(article);
-                }
-            }
-        }
-    }
-    let mut article_ok = vec![true; article_ids.len()];
-    for a in meta_missing {
-        article_ok[a] = false;
-    }
-    // How long each destination already was, taken BEFORE phase A: phase A
-    // opens every crypto slot's destination with `create(true)` + `set_len`,
-    // so a file that was deleted between runs (user cleanup, or a spent-
-    // volume sweep) is recreated as a hole and a phase-B existence probe
-    // would then read true. Its identity fragments - "the bytes are already
-    // where the resume expects them" - are zeros, and they would be accepted
-    // instead of refetched, so with no PAR2 behind the job those zeros ship.
-    //
-    // The LENGTH, not just the existence, because a file that survived but
-    // was truncated (a partial write, an interrupted move, an external tool)
-    // fails the same way one step in: the path is there, so presence alone
-    // says yes, but the bytes an identity fragment names are past the end.
-    // `seed_slot` grows the file back to the recorded size and marks those
-    // spans covered, so the hole ships. An identity fragment is trusted only
-    // when the pre-restore file reached past the end of its span.
-    // `identity_without_existing_file_refetches` and
-    // `identity_against_truncated_file_refetches` are the tests for the intent.
-    let pre_len: HashMap<&str, u64> = resume
-        .slots
-        .values()
-        .filter(|r| !r.name.is_empty())
-        .filter_map(|r| {
-            Some((
-                r.name.as_str(),
-                std::fs::metadata(out_dir.join(&r.name)).ok()?.len(),
-            ))
-        })
-        .collect();
-    restore_crypto(out_dir, resume, password, jobs_by_file, &mut article_ok);
-    let crypto_verdict: HashMap<(usize, &str), bool> = article_ids
-        .iter()
-        .zip(&article_ok)
-        .map(|(&(slot, id), &ok)| ((slot, id), ok))
-        .collect();
-    // Phase B: per-article accounting + the plain copies.
-    for (&slot, rec) in &resume.slots {
-        if rec.name.is_empty() {
-            continue;
-        }
-        let dest_path = out_dir.join(&rec.name);
-        // `None` = no such file before this restore; `Some(n)` = it was n
-        // bytes long, the ceiling an identity fragment has to fit under.
-        let dest_len = pre_len.get(rec.name.as_str()).copied();
-        let mut dest: Option<File> = None; // opened lazily, only for copies
-        let mut srcs: HashMap<&str, Option<File>> = HashMap::new();
-        let mut spans: Vec<(u64, u64)> = Vec::new();
-        let mut restored_here = false;
-        for Article {
-            id,
-            frags,
-            crypto_frag,
-            crypto,
-        } in &rec.articles
-        {
-            if *crypto && crypto_verdict.get(&(slot, id.as_str())) != Some(&true) {
-                continue;
-            }
-            let mut all_ok = true;
-            for (fi, f) in frags.iter().enumerate() {
-                // A crypto article's plaintext-once fragments were
-                // written in phase A; only its plain-file fragments (a
-                // span straddling into a neighboring unencrypted output)
-                // still need the copy below.
-                if *crypto && crypto_frag.get(fi).copied().unwrap_or(true) {
-                    continue;
-                }
-                let identity = f.file == rec.name && f.file_off == f.vol_off;
-                if identity {
-                    // Bytes are already where the resume run expects them -
-                    // nothing to move, but only if the file predates us AND
-                    // was long enough to hold the span. A shorter file cannot
-                    // be holding these bytes, whatever the journal says.
-                    let held = dest_len.is_some_and(|n| f.file_off.saturating_add(f.len) <= n);
-                    if !held {
-                        all_ok = false;
-                        break;
-                    }
-                    continue;
-                }
-                let src = srcs
-                    .entry(f.file.as_str())
-                    .or_insert_with(|| File::open(out_dir.join(&f.file)).ok());
-                let Some(src) = src.as_ref() else {
-                    all_ok = false;
-                    break;
-                };
-                if dest.is_none() {
-                    dest = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        // Never truncate - same reason as the encrypt
-                        // path above: offset writes into a file that may
-                        // already hold earlier records.
-                        .truncate(false)
-                        .open(&dest_path)
-                        .ok()
-                        .inspect(|d| {
-                            let cur = d.metadata().map(|m| m.len()).unwrap_or(0);
-                            if rec.size > cur {
-                                let _ = d.set_len(rec.size);
-                            }
-                        });
-                }
-                let Some(dest) = dest.as_ref() else {
-                    all_ok = false;
-                    break;
-                };
-                let (mut done, mut ok) = (0u64, true);
-                while done < f.len {
-                    let n = ((f.len - done) as usize).min(buf.len());
-                    if crate::disk::read_exact_at(src, &mut buf[..n], f.file_off + done).is_err() {
-                        ok = false;
-                        break;
-                    }
-                    if crate::disk::write_all_at(dest, &buf[..n], f.vol_off + done).is_err() {
-                        ok = false;
-                        break;
-                    }
-                    done += n as u64;
-                }
-                if !ok {
-                    all_ok = false;
-                    break;
-                }
-            }
-            if all_ok {
-                out.ids.insert(id.clone());
-                for f in frags {
-                    spans.push((f.vol_off, f.len));
-                }
-                restored_here = true;
-            }
-        }
-        if restored_here {
-            out.seeds.push(SlotSeed {
-                slot,
-                name: rec.name.clone(),
-                size: rec.size,
-                spans,
-            });
-        }
-    }
-    out
-}
+// TODO 106: the read-back half - the plaintext-once re-encryption, the
+// partial-quarantine dance that must precede it, and the placement
+// replay itself - came out whole to journal/restore.rs. Free functions
+// with their own private helpers, so nothing changed visibility; the
+// re-export below puts every name back under `journal::` for the
+// callers in nzbfast, the sibling extract tests and this file's own
+// test module.
+mod restore;
+pub use self::restore::{
+    PARTIAL_SUFFIX, quarantine_partials, quarantine_paths, restore, restore_for,
+    unquarantine_partials,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1722,6 +1079,110 @@ mod tests {
         assert!(d.join("a.mkv").exists() && d.join(PARTIAL_SUFFIX).exists());
         assert!(unquarantine_partials(Path::new("/nonexistent/nzbfast-q")).is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// §94 A: `restore_for(.., materialize_volumes = false)` must not
+    /// write the volume file at all, and must say where each span's
+    /// bytes actually are so the replay can read them from there.
+    ///
+    /// This is the whole disk saving. Materialising first writes a full
+    /// extra copy of the resumed fraction and the replay then reads it
+    /// back - the difference between a resumed job costing 2.02x
+    /// payload of device I/O and 1.5x. If this test ever passes with a
+    /// volume file on disk, that saving has been quietly given back.
+    #[test]
+    fn a_no_materialise_restore_writes_no_volume_and_names_the_real_source() {
+        let dir = qdir("nomat");
+        let inner: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("inner.bin"), &inner).unwrap();
+        let plain: Vec<u8> = (0..30_000u32).map(|i| (i % 13) as u8).collect();
+        std::fs::write(dir.join("plain.bin"), &plain).unwrap();
+
+        let nzb = b"<nzb>nomat</nzb>";
+        let (j, _) = Journal::open(&dir, nzb).unwrap();
+        // Direct-extracted: volume bytes [5000,15000) live in inner.bin
+        // at [10000,20000). Under materialisation this is the copy.
+        j.record_placed(
+            0,
+            "<vol@x>",
+            None,
+            "vol.part1.rar",
+            25_000,
+            &[frag("inner.bin", 10_000, 5_000, 10_000)],
+        );
+        // Identity: the bytes never moved, so this one reports its own
+        // file either way - which is also every PAR2 recovery volume,
+        // and why the issue-#14 resume sniff still finds them on disk.
+        j.record_placed(
+            1,
+            "<pl@x>",
+            Some(("plain.bin".to_string(), 30_000)),
+            "ignored",
+            0,
+            &[frag("plain.bin", 2_000, 2_000, 4_000)],
+        );
+        // A source that is too SHORT for its span must still fail its
+        // article. The read happens later under no-materialise, so an
+        // article admitted here would never refetch and the replay
+        // would simply lose those bytes.
+        j.record_placed(
+            2,
+            "<short@x>",
+            None,
+            "short.rar",
+            9_000,
+            &[frag("plain.bin", 29_000, 0, 8_000)],
+        );
+        drop(j);
+
+        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
+        let restored = restore_for(&dir, &resume, None, false);
+        assert!(restored.ids.contains("<vol@x>"));
+        assert!(restored.ids.contains("<pl@x>"));
+        assert!(
+            !restored.ids.contains("<short@x>"),
+            "a source too short for its span must drop its article"
+        );
+        assert!(
+            !dir.join("vol.part1.rar").exists(),
+            "the volume was materialised anyway - the replay's saving is gone"
+        );
+
+        let vol = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
+        assert_eq!(vol.spans, [(5_000, 10_000)]);
+        assert_eq!(
+            vol.sources
+                .iter()
+                .map(|(f, o)| (&**f, *o))
+                .collect::<Vec<_>>(),
+            [("inner.bin", 10_000)],
+            "the span must name the file its bytes are really in"
+        );
+        let pl = restored.seeds.iter().find(|s| s.slot == 1).unwrap();
+        assert_eq!(
+            pl.sources
+                .iter()
+                .map(|(f, o)| (&**f, *o))
+                .collect::<Vec<_>>(),
+            [("plain.bin", 2_000)],
+            "an identity span stays in its own file at its own offset"
+        );
+
+        // And the twin: with materialisation ON, nothing changes from
+        // what every earlier caller has always got.
+        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
+        let mat = restore(&dir, &resume, None);
+        assert!(dir.join("vol.part1.rar").exists(), "the volume is rebuilt");
+        assert_eq!(
+            std::fs::read(dir.join("vol.part1.rar")).unwrap()[5_000..15_000],
+            inner[10_000..20_000],
+            "and holds the bytes the placement points at"
+        );
+        assert!(
+            mat.seeds.iter().all(|s| s.sources.is_empty()),
+            "materialised seeds carry no source list - every span is in the volume"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn frag(file: &str, file_off: u64, vol_off: u64, len: u64) -> Frag {
@@ -2018,6 +1479,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Append the retirement lines an older build's finish decrypt
+    /// would have written. Its producer (`Journal::invalidate`) went
+    /// with TODO 27 phase 3 - nothing mutates an output under live
+    /// records any more - but the PARSER stays, because a journal that
+    /// build left behind must still resume correctly. So the tests that
+    /// cover the parser write the record by hand.
+    ///
+    /// Append mode, and every caller DROPS its `Journal` first. Two
+    /// reasons, and both bite: placement records sit in
+    /// [`WriteState::pending`] behind the batch rule until a flush, so
+    /// an `X` written past a live journal lands AHEAD of records that
+    /// were composed before it and the retirement stops being
+    /// positional; and the open handle's own offset does not move with
+    /// these writes either, so a record appended through it afterwards
+    /// would land on top of them.
+    fn append_retirement(dir: &Path, files: &[&str]) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(".nzbfast.journal"))
+            .unwrap();
+        for n in files {
+            writeln!(f, "X {n}").unwrap();
+        }
+    }
+
     #[test]
     fn materialized_rewrite_is_positional_and_x_still_retires() {
         let dir = std::env::temp_dir().join(format!("nzbfast-journal-mx-{}", std::process::id()));
@@ -2056,8 +1543,8 @@ mod tests {
         }
         // Retire the volume file itself: the rewritten placements name it
         // now, so they must drop with it.
-        j.invalidate(&["vol.rar".to_string()]).unwrap();
         drop(j);
+        append_retirement(&dir, &["vol.rar"]);
         let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
         let r = restore(&dir, &resume, None);
         assert!(
@@ -2177,6 +1664,9 @@ mod tests {
 
         // Without the barrier those all come back - the intact-ciphertext
         // resume, the fast path a crash before the publish still gets.
+        // (Records are batched - land them, as a decoder's idle flush
+        // would have, before modelling the crash with a re-open.)
+        j.flush();
         {
             let (_j, resume) = Journal::open(&dir, nzb).unwrap();
             let r = restore(&dir, &resume, None);
@@ -2189,10 +1679,10 @@ mod tests {
 
         // Now the decrypt publishes: the claim over movie.mkv is retired,
         // and only then do its bytes change.
-        j.invalidate(&["movie.mkv".to_string()]).unwrap();
+        drop(j);
+        append_retirement(&dir, &["movie.mkv"]);
         let plaintext: Vec<u8> = (0..40_000u32).map(|i| (i % 97) as u8).collect();
         std::fs::write(dir.join("movie.mkv"), &plaintext).unwrap();
-        drop(j);
 
         let (j2, resume) = Journal::open(&dir, nzb).unwrap();
         let restored = restore(&dir, &resume, None);
@@ -2229,251 +1719,6 @@ mod tests {
             "the stale one stays retired"
         );
 
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// TODO 100, the publish half of the retirement handshake. The finish
-    /// decrypt retires the claim over its output, mutates it to
-    /// plaintext, and - once the rename LANDED - republishes the parked
-    /// placements as `D` records with the crypt facts. A resume run then
-    /// rebuilds the POSTED bytes by re-encrypting the local plaintext:
-    /// zero refetch for a file that was already done, instead of the
-    /// near-full re-download Gary watched.
-    #[test]
-    fn decrypt_publish_republishes_placements_as_restorable_d_records() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-dp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>decpub</nzb>";
-
-        // A real RAR5-shaped crypt: password-derived key, IV, stored
-        // check, 40 plaintext bytes -> 48 cipher bytes (8 pad).
-        let pw = "s3cret";
-        let (salt, lg2, iv) = ([7u8; 16], 4u8, [9u8; 16]);
-        let keys = crate::rarcrypt::derive_keys(pw, &salt, lg2).unwrap();
-        let unp = 40u64;
-        let plain: Vec<u8> = (0..40u8).collect();
-        let pad = vec![0xAAu8; 8];
-        let mut cipher = plain.clone();
-        cipher.extend_from_slice(&pad);
-        crate::rarcrypt::CbcEncStream::new(&keys.aes(), &iv).encrypt(&mut cipher);
-
-        // Run 1: the whole cipher stream direct-extracted into movie.mkv,
-        // posted at volume offset 8 (behind a header).
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            0,
-            "<enc@x>",
-            None,
-            "v.part1.rar",
-            8 + cipher.len() as u64,
-            &[frag("movie.mkv", 0, 8, cipher.len() as u64)],
-        );
-        // The finish decrypt: retire, mutate, publish.
-        j.retire_for_decrypt(&["movie.mkv".to_string()]).unwrap();
-        std::fs::write(dir.join("movie.mkv"), &plain).unwrap();
-        j.record_decrypted(
-            "movie.mkv",
-            &[
-                CryptoJournalEvent::Params {
-                    name: "movie.mkv".into(),
-                    salt,
-                    lg2,
-                    iv,
-                    unp,
-                    check: Some(crate::rarcrypt::make_check(&keys)),
-                },
-                CryptoJournalEvent::TailPad {
-                    name: "movie.mkv".into(),
-                    pad,
-                },
-            ],
-        );
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        // A wrong password must prove out and refetch, never rebuild
-        // garbage posted bytes.
-        let r = restore(&dir, &resume, Some("wrong"));
-        assert!(r.ids.is_empty(), "wrong password must refetch");
-        // The right one restores the article with byte-exact posted bytes.
-        let restored = restore(&dir, &resume, Some(pw));
-        assert!(
-            restored.ids.contains("<enc@x>"),
-            "published plaintext must resume locally"
-        );
-        let vol = std::fs::read(dir.join("v.part1.rar")).unwrap();
-        assert_eq!(
-            &vol[8..],
-            &cipher[..],
-            "re-encrypted posted bytes must be byte-exact"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Sweep 2 M1: the finish decrypt runs its files on concurrent
-    /// workers, and an article whose span straddles TWO encrypted
-    /// outputs is parked by both. The dangerous interleaving is a whole
-    /// retire+publish landing between a sibling's durable `X` and its
-    /// parked snapshot: the sibling has no stash to be updated in, so it
-    /// used to publish its pre-decrypt mask afterwards - "re-encrypt my
-    /// half, plain-copy the neighbour's" - and last R/D wins, so a
-    /// resume copied the neighbour's PUBLISHED PLAINTEXT into the volume
-    /// as posted bytes and marked the article restored.
-    ///
-    /// Deterministic seam, not timing: `RETIRE_STASH_BARRIER` parks the
-    /// first retirement exactly in that window.
-    #[test]
-    fn concurrent_decrypt_retirement_marks_both_straddled_fragments() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-dr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>decrace</nzb>";
-        let pw = "s3cret";
-        let lg2 = 4u8;
-
-        // Two encrypted outputs, one salt each. Both plaintexts are a
-        // whole number of AES blocks, so the cipher stream is the same
-        // LENGTH as the plaintext - a wrong "plain copy" then produces
-        // wrong volume BYTES rather than a short read, which is the
-        // damage the finding describes.
-        let build = |salt: [u8; 16], iv: [u8; 16], plain: Vec<u8>| {
-            let keys = crate::rarcrypt::derive_keys(pw, &salt, lg2).unwrap();
-            let mut cipher = plain.clone();
-            crate::rarcrypt::CbcEncStream::new(&keys.aes(), &iv).encrypt(&mut cipher);
-            (keys, plain, cipher)
-        };
-        let (keys_a, plain_a, cipher_a) = build([7u8; 16], [9u8; 16], (0..32u8).collect());
-        let (keys_b, plain_b, cipher_b) = build([11u8; 16], [13u8; 16], (32..80u8).collect());
-        let plain_c = b"a genuinely plain neighbour".to_vec();
-
-        let la = cipher_a.len() as u64;
-        let lb = cipher_b.len() as u64;
-        let lc = plain_c.len() as u64;
-        let vol_size = la + lb + lc;
-        std::fs::write(dir.join("plain.bin"), &plain_c).unwrap();
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        let j = std::sync::Arc::new(j);
-        // One article, three fragments: the two encrypted outputs it
-        // straddles plus a plain neighbour that must STAY an ordinary
-        // copy (the fix must not over-mark).
-        j.record_placed(
-            0,
-            "<span@x>",
-            None,
-            "v.part1.rar",
-            vol_size,
-            &[
-                frag("a.bin", 0, 0, la),
-                frag("b.bin", 0, la, lb),
-                frag("plain.bin", 0, la + lb, lc),
-            ],
-        );
-
-        let facts = |name: &str,
-                     salt: [u8; 16],
-                     iv: [u8; 16],
-                     keys: &crate::rarcrypt::Rar5Keys,
-                     unp: u64| {
-            vec![
-                CryptoJournalEvent::Params {
-                    name: name.into(),
-                    salt,
-                    lg2,
-                    iv,
-                    unp,
-                    check: Some(crate::rarcrypt::make_check(keys)),
-                },
-                CryptoJournalEvent::TailPad {
-                    name: name.into(),
-                    pad: Vec::new(),
-                },
-            ]
-        };
-
-        let open = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let go = std::sync::Arc::new(std::sync::Barrier::new(2));
-        *RETIRE_STASH_BARRIER.lock_ok() = Some((open.clone(), go.clone()));
-
-        // Worker A: retires a.bin, then parks in the window until the
-        // whole of B has retired AND published.
-        let ja = j.clone();
-        let dir_a = dir.clone();
-        let facts_a = facts("a.bin", [7u8; 16], [9u8; 16], &keys_a, plain_a.len() as u64);
-        let wa = std::thread::spawn(move || {
-            ja.retire_for_decrypt(&["a.bin".to_string()]).unwrap();
-            std::fs::write(dir_a.join("a.bin"), &plain_a).unwrap();
-            ja.record_decrypted("a.bin", &facts_a);
-        });
-
-        open.wait(); // A is past its durable `X`, before its snapshot parks
-        j.retire_for_decrypt(&["b.bin".to_string()]).unwrap();
-        std::fs::write(dir.join("b.bin"), &plain_b).unwrap();
-        j.record_decrypted(
-            "b.bin",
-            &facts(
-                "b.bin",
-                [11u8; 16],
-                [13u8; 16],
-                &keys_b,
-                plain_b.len() as u64,
-            ),
-        );
-        go.wait(); // release A, which now parks and publishes last
-        wa.join().unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, Some(pw));
-        assert!(
-            restored.ids.contains("<span@x>"),
-            "the straddling article must still resume locally"
-        );
-        let vol = std::fs::read(dir.join("v.part1.rar")).unwrap();
-        let mut want = cipher_a.clone();
-        want.extend_from_slice(&cipher_b);
-        want.extend_from_slice(&plain_c);
-        assert_eq!(
-            vol, want,
-            "every straddled fragment must rebuild the POSTED bytes: \
-             a fragment left marked as an ordinary copy plain-copies \
-             published plaintext into the volume"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The conservative half stays conservative: a retirement whose
-    /// publish never came (rename failed, process died between the two)
-    /// keeps refetching exactly as the bare invalidate always did.
-    #[test]
-    fn retire_for_decrypt_without_publish_still_refetches() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-rp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>retire-park</nzb>";
-        std::fs::write(dir.join("movie.mkv"), vec![1u8; 64]).unwrap();
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "v.part1.rar",
-            64,
-            &[frag("movie.mkv", 0, 0, 64)],
-        );
-        j.retire_for_decrypt(&["movie.mkv".to_string()]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.is_empty(),
-            "an unpublished retirement must refetch"
-        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2623,3 +1868,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "journal_bench_tests.rs"]
+mod journal_bench_tests;

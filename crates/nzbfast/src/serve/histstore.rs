@@ -1713,7 +1713,7 @@ mod store_tests {
             rows = jobs.len();
             wants_compaction = wants;
             if run == 2 {
-                // Hold them the way `install_records` does - one Arc<Mutex>
+                // Hold them the way `load_queue` does - one Arc<Mutex>
                 // per row - so the RSS reading below prices what the daemon
                 // actually keeps resident, not the transient Vec<Job>.
                 held = jobs.into_iter().map(|j| Arc::new(Mutex::new(j))).collect();

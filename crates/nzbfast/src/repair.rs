@@ -4,8 +4,60 @@
 
 use crate::*;
 use std::path::Path;
+use tracing::{info, warn};
 
+/// Extract the archive volumes sitting in `dir`, whether they arrived
+/// there by a repair, a resume, or a demote - "did the payload come
+/// out?" and nothing more.
+///
+/// Nothing in production reads the ladder that way any longer. The last
+/// one was `smart::unlock`, whose callers walk a LIST of passwords and
+/// so had the most to lose by dropping the reason - a single bomb
+/// verdict refused every candidate in the operator's file in turn and
+/// was then reported as "no password worked" (22 Aug 2026). It took
+/// [`reextract_dir_why`] with the rest, and what is left here is the
+/// tests, which assert "did the payload come out" and nothing more.
+#[cfg(test)]
 pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Result<bool> {
+    Ok(reextract_dir_why(dir, password)?.is_ok())
+}
+
+/// [`reextract_dir`] that also names WHY it failed, on the one class of
+/// failure that is about the DISK rather than the archive.
+///
+/// Same contract and same reasoning as [`crate::rarfix::try_unrar_spent_why`],
+/// which this delegates to for its own last rung: `Err(None)` is the
+/// ordinary failure the caller words itself, `Err(Some(why))` is a bomb
+/// verdict that must be quoted rather than paraphrased. Both of this
+/// function's callers compose a job failure from a bare `false` -
+/// "resumed job: the verified volumes on disk could not be extracted"
+/// and "PAR2 repair succeeded but re-extraction failed" - and both of
+/// those blame the archive for a full disk.
+///
+/// The third caller - `smart`'s password unlock - read the plain
+/// [`reextract_dir`] until 22 Aug 2026, on the reasoning that "did this
+/// password open anything" has no job message to compose. It has: its
+/// own callers walk a LIST of candidates, so one bomb verdict refused
+/// every password in the operator's file in turn and the job was then
+/// reported as having none that worked. It takes this function now, and
+/// what is left on the boolean is the tests.
+pub(crate) fn reextract_dir_why(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Result<std::result::Result<(), Option<String>>> {
+    Ok(reextract_dir_outcome(dir, password)?.map(|_| ()))
+}
+
+/// [`reextract_dir_why`] that also carries out what the unrar rung left
+/// PACKED beside a sibling that produced (TODO 164): the resumed-run arm
+/// of the tail runs this ladder with the job's PAR2 set in scope, and
+/// judges the leftovers against it exactly as the fresh-run arms do -
+/// see [`crate::rarfix::vouch`]. Every success path that never reaches
+/// the unrar rung left nothing packed, and says so with an empty list.
+pub(crate) fn reextract_dir_outcome(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Result<std::result::Result<Vec<crate::rarfix::PackedGroup>, Option<String>>> {
     use nzbkit::extract::{Extractor, release_stem, vol_sort_key};
     let mut rars: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -58,7 +110,8 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
         // so no caller can read a new state wrongly.
         let obf = collect_obfuscated_rar_volumes(dir)?;
         if !obf.is_empty() {
-            println!(
+            info!(
+                target: "extract",
                 "re-extracting {} obfuscated volume(s) by header order…",
                 obf.len()
             );
@@ -66,14 +119,17 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
             // this function's contract for a set it extracted (the named
             // branch below removes its own on the same terms) and what the
             // nested pass does with them today.
-            return Ok(extract_obfuscated_rar(dir, &obf, password, 1));
+            return Ok(extract_obfuscated_rar(dir, &obf, password, 1)
+                .ok()
+                .then(Vec::new)
+                .ok_or(None));
         }
         // Genuinely nothing packed: a bare recreated payload, an already
         // extracted directory. That IS a legitimate no-op and stays a
         // success - but it is said out loud, so no log or reader can take
         // it for "extracted".
-        println!("no archive volumes on disk - nothing to re-extract");
-        return Ok(true);
+        info!(target: "extract", "no archive volumes on disk - nothing to re-extract");
+        return Ok(Ok(Vec::new()));
     }
     rars.sort_by_cached_key(|p| {
         let name = p.file_name().unwrap_or_default().to_string_lossy();
@@ -116,14 +172,15 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
     // volume-eating unpack got none of it here - it budgeted against the
     // free space as it stood and could refuse the very extraction the
     // arming exists to rescue. A resumed run takes exactly this path
-    // (get.rs arms the mode and then calls `reextract_dir`), which is the
-    // one shape where the disk is tightest by definition. The native
-    // whole-set path IS the one that eats, so an armed job goes there
-    // first; a failure still falls through, and the guard below catches
-    // the case where falling through is impossible because the volumes
-    // have been spent.
+    // (get/tail.rs arms the mode and then calls `reextract_dir_outcome`),
+    // which is the one shape where the disk is tightest by definition. The
+    // native whole-set path IS the one that eats, so an armed job goes
+    // there first; a failure still falls through, and the guard below
+    // catches the case where falling through is impossible because the
+    // volumes have been spent.
     if one_set && (header_encrypted || crate::eatvol::armed()) {
-        println!(
+        info!(
+            target: "extract",
             "re-extracting {} volume(s) natively{}…",
             rars.len(),
             if header_encrypted {
@@ -134,12 +191,12 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
         );
         match try_rars_native(dir, &rars[0], password) {
             Ok(consumed) => {
-                println!("native re-extract complete ✔");
+                info!(target: "extract", "native re-extract complete ✔");
                 remove_spent_volumes(&consumed);
-                return Ok(true);
+                return Ok(Ok(Vec::new()));
             }
             Err(e) => {
-                println!("⚠ native re-extract failed ({e})");
+                warn!(target: "extract", "native re-extract failed ({e})");
                 // The comment above ("a native failure just falls through
                 // to it, having published nothing") predates §101. Under
                 // the eating mode the failed pass may have consumed
@@ -149,16 +206,32 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
                 // of `get_with_progress` and fail the whole download task
                 // rather than this step. Fail cleanly here instead.
                 if rars.iter().any(|p| !p.exists()) {
-                    println!(
-                        "  ✘ volumes were consumed as they were read (the volume-eating \
+                    warn!(
+                        target: "extract",
+                        "✘ volumes were consumed as they were read (the volume-eating \
                          unpack), so there is nothing left to re-extract from"
                     );
-                    return Ok(false);
+                    return Ok(Err(None));
                 }
             }
         }
     }
-    println!("re-extracting {} repaired volume(s)…", rars.len());
+    info!(target: "extract", "re-extracting {} repaired volume(s)…", rars.len());
+    // No `set_holds_cap` here, deliberately: since TODO 260 the ctor
+    // takes its default from the PUBLISHED process budget, and all three
+    // nzbfast entry points (`serve`, the CLI's `run`, `embedded_init`)
+    // publish one before anything can reach this path - so this pass gets
+    // the operator's 45% slice without a second copy of the arithmetic.
+    // Audited the same day: no FrontierBuffer can fill here for two
+    // independent reasons - `set_protect_sources` below gates off all four
+    // container attaches (extract/chase.rs, sevenz.rs, zip.rs, tar.rs),
+    // and this extractor is not in an `Arc`, so `self_weak` never
+    // upgrades and every attach declines regardless. Ordinary holds CAN
+    // still accumulate, though: the volumes below are fed whole and in
+    // `vol_sort_key` order, which an obfuscated set has no ordering for,
+    // so a continuation volume fed first holds its bytes until the head
+    // arrives. That is safe (a breach discards the slot and falls through
+    // to the unrar rung) but it is exactly the RAM the operator sized.
     let ex = Extractor::new(dir, rars.len(), true);
     ex.set_protect_sources();
     // Same two bounds as the download path, with the on-disk volume set
@@ -179,6 +252,33 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
     if let Some(pw) = password {
         ex.set_password(pw);
     }
+    // TODO 205: the queue row's unpack lane, on the one arm of the disk
+    // ladder that does not go through `rarfix::write_archives_to_spending`.
+    //
+    // There is no `written` accumulator to publish here and no header
+    // total either: this branch hands the volumes to nzbkit's own
+    // extractor, which parses each member as the feed reaches its header
+    // rather than up front. Its OWN output writers are both figures, and
+    // they are the very ones the IN-STREAM lane reads
+    // (`writers_snapshot`, `serve/api/queue.rs`), so the sample below
+    // counts nothing twice and the total climbs as members appear -
+    // which is what [`crate::unpackprog::raise_total`] is monotonic for.
+    //
+    // Nothing resumes on this route (`set_protect_sources` discards a
+    // demote rather than materializing it, so no slot writer can join
+    // the snapshot either), so the credit is 0.
+    let unpacked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    crate::unpackprog::watch(&unpacked, &[], 0);
+    let sample = |ex: &Extractor| {
+        let (done, total) = ex
+            .writers_snapshot()
+            .iter()
+            .fold((0u64, 0u64), |(d, t), (_, w)| {
+                (d.saturating_add(w.written()), t.saturating_add(w.size))
+            });
+        unpacked.store(done, std::sync::atomic::Ordering::Relaxed);
+        crate::unpackprog::raise_total(total);
+    };
     let mut buf = vec![0u8; 4 << 20];
     for (si, path) in rars.iter().enumerate() {
         use std::io::Read;
@@ -197,14 +297,22 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
             }
             ex.write(si, &name, size, off, &buf[..n])?;
             off += n as u64;
+            // Once per 4 MB chunk: a snapshot clones a handful of `Arc`s
+            // under a read lock, which is nothing beside the decode that
+            // just ran, and the row would otherwise sit still for a
+            // whole volume at a time.
+            sample(&ex);
         }
     }
     let rep = ex.finish()?;
+    // The last writers close inside `finish`, so the figure the row ends
+    // on comes from here rather than from the loop above.
+    sample(&ex);
     for (name, size) in &rep.extracted {
-        println!("  ▶ {name} ({:.1} MB)", *size as f64 / 1e6);
+        info!(target: "extract", "{name} ({:.1} MB)", *size as f64 / 1e6);
     }
     for (group, why) in &rep.fallbacks {
-        println!("  ⚠ '{group}': not re-extractable ({why})");
+        warn!(target: "extract", "'{group}': not re-extractable ({why})");
     }
     if rep.fallbacks.is_empty() && !rep.extracted.is_empty() {
         // Extraction verified (repair pass vouched for the volume bytes) -
@@ -212,26 +320,61 @@ pub(crate) fn reextract_dir(dir: &std::path::Path, password: Option<&str>) -> Re
         for path in &rars {
             let _ = std::fs::remove_file(path);
         }
-        println!("  removed {} volume file(s) after extraction", rars.len());
-        return Ok(true);
+        info!(target: "extract", "removed {} volume file(s) after extraction", rars.len());
+        return Ok(Ok(Vec::new()));
     }
     if rep.fallbacks.iter().all(|(_, w)| w.contains("password"))
         && !rep.fallbacks.is_empty()
         && password.is_none()
     {
-        println!("  volumes are verified on disk - password required to unpack");
-        return Ok(true);
+        warn!(target: "extract", "volumes are verified on disk - password required to unpack");
+        return Ok(Ok(Vec::new()));
     }
-    println!("  falling back to unrar on the verified volumes…");
+    // Same floor as the ladder in `try_unrar_spent_why`, one level up:
+    // this pass demoted because the extraction would not fit on the disk,
+    // and the unrar rung below carries no budget to stop it filling. The
+    // caller turns a failure into a job failure and every volume stays -
+    // and it says the VERDICT, because `bomb_fallback` has one right here
+    // and the caller's own wording ("PAR2 repair succeeded but
+    // re-extraction failed") blames the archive for the disk.
+    if let Some(why) = bomb_fallback(rep.fallbacks.iter().map(|(_, w)| w.as_str())) {
+        return Ok(Err(Some(why)));
+    }
+    info!(target: "extract", "falling back to unrar on the verified volumes…");
     // A successful disk unpack spends the volumes exactly like the clean
     // path above - leaving them behind doubled a job's disk footprint
     // (Part B, research/SPEC-onepass-obfuscated-store-sets-2026-07-29.md).
-    match try_unrar_spent(dir, password) {
-        Some(spent) => {
-            remove_spent_volumes(&spent);
-            Ok(true)
+    match try_unrar_outcome(dir, password) {
+        Ok(outcome) => {
+            remove_spent_volumes(&outcome.spent);
+            Ok(Ok(outcome.packed))
         }
-        None => Ok(false),
+        // TODO 211's third and last call site. A repaired set can be a byte
+        // SPLIT of one container (`stage.rar.001`..`.062`) exactly as often
+        // as an undamaged one can, and the collector above pulls only part 1
+        // out of it - the sole part carrying the `Rar!` magic that
+        // `rollover_or_numeric` demands - so the feed loop hands the mapper
+        // 1/62nd of an archive, every arm demotes, and unrar finds nothing
+        // it can open. Without this rung the shape TODO 211 fixed still
+        // failed whenever it ALSO needed a repair.
+        //
+        // The sweep is right here despite `set_protect_sources` above:
+        // that flag is a within-pass invariant (no fallback slot may
+        // materialize a writer over a file the feed is still reading), and
+        // `ex.finish()` has already returned. Consuming the parts is the
+        // same trade the two arms above make - the payload beside them IS
+        // their content - and it is what stops a repaired split job
+        // finishing holding both the movie and all 62 parts of it. A
+        // sibling PAR2 set is not stranded by it: recovery files are swept
+        // (or kept) downstream by `par_cleanup` on the job's own verdict,
+        // never by what the volumes did, and `collect_container_split_sets`
+        // will not join a `.par2`/`.par`/`.rev`/`.sfv` base in the first
+        // place. A refusal anywhere leaves every part exactly where it was.
+        Err(_) if rescue_split_after_failed_unpack(dir, password) => Ok(Ok(Vec::new())),
+        // Whatever the ladder refused with, verbatim: `Some` only for a
+        // bomb verdict, which is the one refusal that must not be
+        // reworded by the caller.
+        Err(why) => Ok(Err(why)),
     }
 }
 
@@ -240,9 +383,12 @@ mod sidefetch;
 // price a volume moved out whole (§129 residue 2). Re-exported rather
 // than re-pathed at every call site: nothing about the split is
 // interesting to a caller, and `use super::*` importers stay valid.
+// `VolumeFailures` is deliberately NOT re-exported: no caller outside
+// sidefetch.rs names the type, they only call `total()` / `for_file()`
+// on what the driver hands back, and an unused re-export is a warning.
 pub(crate) use sidefetch::{
-    SideCancel, fetch_volume_articles, fetch_volumes, side_pool_servers, vol_count_from_name,
-    volume_prealloc_cap, volume_reqs,
+    SideCancel, VolumeOpen, fetch_volume_articles, fetch_volume_articles_with, fetch_volumes,
+    side_pool_servers, vol_count_from_name, volume_prealloc_cap, volume_reqs,
 };
 
 /// Candidate recovery volumes of the NZB: (file idx, declared slices,
@@ -280,6 +426,55 @@ pub(crate) fn recovery_candidates(
 /// thousands of absent files is an allocation bomb, not a post.
 const MAX_RECREATED_FILES: usize = 1000;
 
+/// Is the row-26 in-place chase repair armed? DEFAULT ON since 22 Aug
+/// 2026, with `NZBFAST_NO_CHASE_REPAIR=1` as the escape hatch - the
+/// same sequencing §94 A's resume replay and §94 B's verify gate took:
+/// ship dark, soak, measure, flip in its own commit.
+///
+/// The round that flipped it, 22 Aug 2026 on a 32-core arm64 box with
+/// the out-dir on its own APFS image: on a damaged compressed RAR5 set
+/// device I/O falls from 3.06x of payload to 2.03x and wall by 10%,
+/// byte-correct on 6/6 legs, with the row-27 nested shape unchanged to
+/// the tenth of a GiB. It buys disk and wall and NOT cpu (flat at
+/// ~84.5 s), and it costs peak RSS: 784 -> 1213 MB, holds peak 73 ->
+/// 290 MB, because the rebuilt blocks are charged to the holds budget.
+/// That memory price is the reason to reach for the switch; the disk
+/// figure is the reason not to.
+///
+/// `NZBFAST_CHASE_REPAIR=1` is no longer read. It is left documented as
+/// an accepted no-op for one release (`docs/ENVIRONMENT.md`) so a
+/// soak-era shell profile or bench arm that still exports it is inert
+/// rather than surprising - it never disarmed anything, and after the
+/// flip it asks for what already happens.
+fn chase_repair_on() -> bool {
+    chase_repair_on_value(std::env::var("NZBFAST_NO_CHASE_REPAIR").ok().as_deref())
+}
+
+/// Pure parse of the escape-hatch value (unit-testable without mutating
+/// the process environment under the parallel test runner), the
+/// `nzbkit::extract::config` house pattern. Only the exact `1` disarms:
+/// an empty or misspelt value leaves the measured default in place
+/// rather than silently taking a job back to the 3x route.
+fn chase_repair_on_value(v: Option<&str>) -> bool {
+    v != Some("1")
+}
+
+/// May an in-place plain patch KEEP the slot's classification?
+///
+/// A `plain_by_sniff` slot is Plain because offset 0 held no archive
+/// magic - and a bad block over the sniff window says those were the
+/// wrong bytes. Patching such a slot in place can restore a RAR
+/// signature into a file the extractor goes on treating as plain:
+/// nothing re-sniffs after repair, so the corrected archive retired as
+/// the payload, packed, on a Completed job (Codex sweep 13 Aug R2).
+/// False routes the set to the materialize + `repair_dir` +
+/// `reextract_dir` path, which re-extracts what it repairs. The sniff
+/// window is 8 bytes (the longest magic, RAR5); block b covers bytes
+/// `[b*bs, (b+1)*bs)`.
+fn plain_patch_keeps_sniff(bad_blocks: &[usize], block_size: usize) -> bool {
+    !bad_blocks.iter().any(|&b| b.saturating_mul(block_size) < 8)
+}
+
 /// M2c.1 - repair INTO the extracted output. When every damaged file is
 /// a mapped store-mode slot, skip volume materialization entirely: read
 /// present blocks through the extractor's volume view (header stash +
@@ -304,26 +499,10 @@ const MAX_RECREATED_FILES: usize = 1000;
 ///
 /// Returns Ok(false) for every declined case (gate miss, verify fail,
 /// I/O error) - the caller falls through to the materialize +
-/// `repair_dir` path unchanged, which re-fetches at worst one round of
-/// recovery volumes we already pulled (rare: only after a post-fetch
-/// failure).
-/// May an in-place plain patch KEEP the slot's classification?
-///
-/// A `plain_by_sniff` slot is Plain because offset 0 held no archive
-/// magic - and a bad block over the sniff window says those were the
-/// wrong bytes. Patching such a slot in place can restore a RAR
-/// signature into a file the extractor goes on treating as plain:
-/// nothing re-sniffs after repair, so the corrected archive retired as
-/// the payload, packed, on a Completed job (Codex sweep 13 Aug R2).
-/// False routes the set to the materialize + `repair_dir` +
-/// `reextract_dir` path, which re-extracts what it repairs. The sniff
-/// window is 8 bytes (the longest magic, RAR5); block b covers bytes
-/// `[b*bs, (b+1)*bs)`.
-fn plain_patch_keeps_sniff(bad_blocks: &[usize], block_size: usize) -> bool {
-    !bad_blocks.iter().any(|&b| b.saturating_mul(block_size) < 8)
-}
-
-#[allow(clippy::too_many_arguments)]
+/// `repair_dir` path unchanged, handing it whatever recovery this call
+/// had already pulled (`fetched_out`), so a decline that happens AFTER
+/// the fetch does not buy the same volumes twice.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn try_mapped_repair(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     nzb: &Nzb,
@@ -342,6 +521,18 @@ pub(crate) async fn try_mapped_repair(
     // standard the disk path proves its whole set - which is what lets
     // the caller clear them from the "still short" verdict.
     recreated_names: &mut Vec<String>,
+    // Filled with the NZB file indexes of the recovery volumes this
+    // call pulled off the wire, and only when every article of them
+    // landed. A DECLINE hands this to [`fetch_and_repair`] as
+    // `banked`: the bytes are on disk, whole, and nothing about the
+    // decline invalidates them - see the reuse test there.
+    //
+    // Zero-failure only, because a partial volume may never enter an
+    // exclusion list (the sidefetch contract `fetch_and_repair`
+    // spells out): the batch count cannot say WHICH of the chosen
+    // volumes came back short, so banking any of them would strand
+    // its missing slices behind a refetch that never happens.
+    fetched_out: &mut Vec<usize>,
     // The operator asked for FULL verification rather than fast: the
     // self-prove re-reads untouched files with MD5 too, not just their
     // per-block CRC32s.
@@ -375,6 +566,17 @@ pub(crate) async fn try_mapped_repair(
     let mut total_slices = 0usize;
     let mut missing_slices = 0usize;
     let mut recreated = 0usize;
+    // Chased slots this call intends to patch in place - re-read for
+    // the conflict verdict once every rebuilt block has landed.
+    let mut chased: Vec<usize> = Vec::new();
+    // EVERY slot this call intends to patch in place, chased or not.
+    // Each was Rar / Plain / RarChase when the gate below passed it -
+    // `is_mapped`, `is_plain_patchable` and `is_chase_patchable` match
+    // nothing else - so any of them reading `demoted_to_disk` after the
+    // patch demoted DURING it, which deleted the group's extracted
+    // output. Same post-check discipline as `chased`, one question
+    // wider; see the verdict block after `repair_mapped_catalog`.
+    let mut in_place: Vec<usize> = Vec::new();
     for f in &set.files {
         let n = f.length.div_ceil(set.block_size) as usize;
         total_slices += n;
@@ -408,12 +610,30 @@ pub(crate) async fn try_mapped_repair(
                     // in a plain set member demoted every chased volume
                     // beside it to disk and re-extracted them.
                     //
-                    if !r.bad_blocks.is_empty()
-                        && !extractor.is_mapped(*sidx)
-                        && (!extractor.is_plain_patchable(*sidx)
-                            || !plain_patch_keeps_sniff(&r.bad_blocks, bs))
-                    {
-                        return Ok(false);
+                    if !r.bad_blocks.is_empty() && !extractor.is_mapped(*sidx) {
+                        let plain_ok = extractor.is_plain_patchable(*sidx)
+                            && plain_patch_keeps_sniff(&r.bad_blocks, bs);
+                        // Shape-coverage row 26: a CHASED volume can
+                        // take the rewrite too, straight into its
+                        // frontier buffer, which is what keeps a damaged
+                        // COMPRESSED set off the three-write disk route
+                        // (measured 22 Aug 2026 at 3.05x of payload
+                        // in device I/O against 1.03x for the same
+                        // damage on a store set, and re-measured the
+                        // same day at 2.03x with this route taken).
+                        // DEFAULT ON since that round; the escape
+                        // hatch is `NZBFAST_NO_CHASE_REPAIR=1` - see
+                        // `chase_repair_on`.
+                        let chase_ok = chase_repair_on() && extractor.is_chase_patchable(*sidx);
+                        if !plain_ok && !chase_ok {
+                            return Ok(false);
+                        }
+                        if chase_ok {
+                            chased.push(*sidx);
+                        }
+                    }
+                    if !r.bad_blocks.is_empty() {
+                        in_place.push(*sidx);
                     }
                     feed.push(None);
                 }
@@ -471,6 +691,19 @@ pub(crate) async fn try_mapped_repair(
             }
         }
     }
+    // A wholly-missing file's spans FEED through the normal arrival
+    // path, and routing can attach the rebuilt volume to the very chase
+    // group being patched - a buffer registered mid-pause, which
+    // `pause_chase_reads` does not hold. The engine is forward-only, so
+    // it can only reach that volume having finished every earlier one,
+    // which makes the interaction safe by argument rather than by
+    // construction. Not good enough for a route that exists to skip a
+    // second extraction: decline the pair outright. A ghosted volume
+    // beside a live chase is a rare shape, and it loses nothing it has
+    // today.
+    if recreated > 0 && !chased.is_empty() {
+        return Ok(false);
+    }
     // Anti-preallocation-bomb: refuse counts the repair math could
     // never satisfy anyway (a 64 GiB FileDesc over 4 KiB blocks is 16M
     // slices against a 32768-slice format) BEFORE allocating anything.
@@ -493,19 +726,26 @@ pub(crate) async fn try_mapped_repair(
         let chosen = pick_volumes(&vols, target);
         let dl_bytes: u64 = chosen.iter().map(|&i| vols[i].2).sum();
         let dl_blocks: usize = chosen.iter().map(|&i| vols[i].1).sum();
-        println!(
-            "repair: need {needed} block(s) → fetching {} volume(s), {} block(s), {:.1} MB",
+        info!(
+            target: "repair",
+            "need {needed} block(s) → fetching {} volume(s), {} block(s), {:.1} MB",
             chosen.len(),
             dl_blocks,
             dl_bytes as f64 / 1e6
         );
         fetched_files = chosen.iter().map(|&vi| vols[vi].0).collect();
-        // The failure count is deliberately unused here: this path's
-        // `fetched_files` never feeds an exclusion list (a decline
-        // falls through to `fetch_and_repair`, which recomputes its
-        // candidates), and the mapped catalog below re-proves every
-        // slice it selects against its packet MD5.
-        let _partial_failures = cpu
+        // The mapped catalog below re-proves every slice it selects
+        // against its packet MD5, so a partial volume cannot make this
+        // path repair from bad bytes. The count still matters for what
+        // it BANKS: a decline falls through to `fetch_and_repair`,
+        // which re-plans over these same candidates and would buy the
+        // same volumes a second time (measured 23 Aug 2026 on the
+        // costB2 `loop-comp-silent` arm: 134.6 MB pulled where 67.3 MB
+        // was needed, and on a metered line the second copy is bought
+        // and discarded). Handing the selection over instead costs
+        // nothing and is only sound for a COMPLETE pull - see
+        // `fetched_out`.
+        let partial_failures = cpu
             .without_permit(fetch_volumes(
                 servers,
                 nzb,
@@ -515,6 +755,9 @@ pub(crate) async fn try_mapped_repair(
                 cancel,
             ))
             .await?;
+        if partial_failures == 0 {
+            fetched_out.extend_from_slice(&fetched_files);
+        }
     }
 
     // Catalog every recovery slice on disk (bootstrap + fetched volumes)
@@ -565,22 +808,82 @@ pub(crate) async fn try_mapped_repair(
         slot_of: &slot_of,
         feed: &feed,
     };
+    // Hold every chased decode still for the duration of the patch. The
+    // guard resumes on drop, so a decline, an error or a panic below all
+    // release the engines; taken unconditionally because it is a no-op
+    // when nothing is chased, and taking it inside the `!chased.is_empty()`
+    // branch would put a second exit path on the guard's lifetime.
+    let pause = extractor.pause_chase_reads();
     match repair_mapped_catalog(&files, bs, &mut cat, &set.recovery_set_id, &io, full_verify) {
         Ok(n) => {
+            // Did any rewrite land on bytes a chase had already decoded?
+            // Read once, here, still under the pause: the buffer holds
+            // the CORRECTED copy either way, so declining now leaves the
+            // caller's materialize exactly as byte-exact as it was
+            // before this path existed - and, since `fetched_out` hands
+            // the recovery over, no longer at the price of buying it
+            // again. Structurally unreachable for damage that is
+            // MISSING articles (the decode parks at a hole and cannot
+            // pass it), so this is the poster-side-corruption arm: bytes
+            // that arrived under a valid article CRC and failed PAR2.
+            if let Some(&s) = chased
+                .iter()
+                .find(|&&s| extractor.chase_repair_conflicted(s))
+            {
+                println!(
+                    "⚠ mapped repair declined (slot {s}: the rebuilt bytes differ from \
+                     what the archive decode already consumed) - falling back to volume \
+                     materialization"
+                );
+                return Ok(false);
+            }
+            // ...and the same question one step wider, for the slots the
+            // check above does not cover. A MAPPED slot has no chase to
+            // conflict, but it can still demote mid-patch on a budget
+            // breach or a mapping error - and a demote deletes the
+            // group's partially-extracted inner files, so a repair that
+            // finished onto the materialized volumes and self-proved
+            // clean has no extracted output left to claim. Declining
+            // hands the set to the materialize path, which re-extracts
+            // it; claiming success would ship the job with its payload
+            // deleted.
+            //
+            // Read under the same pause and AFTER the conflict check,
+            // which reads true for a forfeited chase as well and names
+            // the sharper reason when it is the one that fired.
+            if let Some(&s) = in_place.iter().find(|&&s| extractor.demoted_to_disk(s)) {
+                println!(
+                    "⚠ mapped repair declined (slot {s}: the volume demoted to disk while \
+                     the rebuilt blocks were landing, so its extracted output is gone) - \
+                     falling back to volume materialization"
+                );
+                return Ok(false);
+            }
+            drop(pause);
             recreated_names.extend(feed.iter().flatten().map(|(name, _)| name.clone()));
             let parity = if recreated > 0 {
                 format!(", {recreated} file(s) recreated from parity")
             } else {
                 String::new()
             };
-            println!(
+            // `n` is the count the LIVE ledger handed this route: the
+            // `present` vectors above are `r.bad_blocks` inverted, so
+            // every block settle called bad was rebuilt here. The disk
+            // route's "in place: N block(s)" sentence counts something
+            // else entirely - a fresh on-disk PAR2 verify taken at
+            // repair time - so the two do NOT have to agree on the same
+            // damage. Read the note at that report site (the
+            // `RepairStatus::Repaired` arm in `fetch_and_repair`)
+            // before reconciling two leg logs by hand.
+            info!(
+                target: "repair",
                 "repair complete in {:.2?} ✔ (native, mapped: {n} block(s) rebuilt directly into the output{parity})",
                 t0.elapsed(),
             );
             Ok(true)
         }
         Err(e) => {
-            println!("⚠ mapped repair declined ({e}) - falling back to volume materialization");
+            warn!(target: "repair", "mapped repair declined ({e}) - falling back to volume materialization");
             Ok(false)
         }
     }
@@ -588,10 +891,10 @@ pub(crate) async fn try_mapped_repair(
 
 /// Run the external par2 binary over `out_dir` with OUR handles released.
 ///
-/// par2cmdline opens every target and every extra file with no sharing, so a
-/// handle we still hold makes its open fail - and it does not treat that as an
-/// error to report, it treats the file as ABSENT. Measured on Windows before
-/// this parked anything, on a set with one corrupt article:
+/// par2cmdline 0.8.1 opens every target and every extra file with no
+/// sharing, so a handle we still hold makes its open fail - and it does not
+/// treat that as an error to report, it treats the file as ABSENT. Measured
+/// on Windows before this parked anything, on a set with one corrupt article:
 ///
 /// ```text
 /// Could not open ".\testset.par2": ...used by another process.
@@ -605,6 +908,16 @@ pub(crate) async fn try_mapped_repair(
 /// blocks, so the fallback could never repair anything on Windows no matter
 /// how much recovery the poster shipped. Unix does not enforce sharing, which
 /// is why this went unnoticed until the suite first ran on Windows.
+///
+/// The VERSION is part of that claim and the paragraph above used to state
+/// it flat. Measured on x86-64 Windows 11, 22 Aug 2026, holding a reader
+/// handle across a repair: 0.8.1 fails as above, 1.2.0 and 1.3.0 both repair
+/// fine. So the park is no longer load-bearing on a current par2 - and it
+/// stays anyway, because a Windows user runs whatever par2 they installed.
+/// The full matrix is in `nzbfast/tests/integration/stream_repair.rs`,
+/// which drives this function for real. What does NOT vary across those
+/// three: none of them repairs in place, all rename the damaged target
+/// aside (see `purge_par2_backups`).
 ///
 /// The writers are unparked on EVERY path - including a failed park and a
 /// failed spawn - because `finish()` still has to settle groups, verify inner
@@ -626,9 +939,20 @@ pub(crate) fn run_external_par2(
     par2_arg: &std::path::Path,
     extra_args: &[std::path::PathBuf],
     out_dir: &std::path::Path,
+    // (name, length) of every file the recovery set declares - the repair
+    // targets, and so the only names whose `.N` siblings may be purged
+    // below. Read for its names only; the caller already has this vector
+    // for `publish_external_coverage`.
+    targets: &[(String, u64)],
     extractor: &nzbkit::extract::Extractor,
 ) -> Result<std::io::Result<std::process::ExitStatus>> {
-    let parked = extractor.park_outputs();
+    // Taken before the child runs, and the whole reason the purge below
+    // can be safe: it names exactly the backups par2 made THIS run.
+    let before = dir_entry_names(out_dir);
+    if before.is_none() {
+        warn!(target: "repair", "could not snapshot {} before the external repair - its backups stay", out_dir.display());
+    }
+    let parked = extractor.park_outputs_for_repair();
     let status = parked.is_ok().then(|| {
         std::process::Command::new(par2_bin)
             .arg("repair")
@@ -642,13 +966,137 @@ pub(crate) fn run_external_par2(
     let unparked = extractor.unpark_outputs();
     parked.context("releasing our output handles for the external par2")?;
     unparked.context("reopening our output handles after the external par2")?;
-    Ok(status.expect("status is Some whenever the park succeeded"))
+    let status = status.expect("status is Some whenever the park succeeded");
+    if let Some(before) = &before
+        && matches!(&status, Ok(st) if st.success())
+    {
+        purge_par2_backups(out_dir, targets, before);
+    }
+    Ok(status)
+}
+
+/// File names directly in `dir`, or `None` when the directory or ANY
+/// entry could not be read. The purge treats a name absent from this
+/// set as par2's new backup, so a partial snapshot would make every
+/// pre-existing `<target>.N` look new and delete it (22 Aug 2026, Codex
+/// F-06): an incomplete snapshot therefore disables the purge instead.
+fn dir_entry_names(dir: &std::path::Path) -> Option<std::collections::HashSet<std::ffi::OsString>> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<std::io::Result<_>>()
+        .ok()
+}
+
+/// Remove the `<target>.1` backups par2cmdline leaves behind on a
+/// successful repair.
+///
+/// par2 does not repair a damaged target in place: it renames the damaged
+/// file to `<name>.1` (`.2`, `.3`… if that is taken) and writes the
+/// repaired data to a new file under the original name. Nothing cleared
+/// those, and on a multi-volume RAR set one of them FAILS THE WHOLE JOB:
+/// the post-unpack sweep collects candidates by `Rar!` magic rather than
+/// by extension, reads a leftover `r.part3.rar.1` as an obfuscated set of
+/// its own, cannot unpack a middle volume that has no first part, and
+/// reports "an archive in the output directory could not be unpacked" -
+/// with the correct payload sitting beside it. Found 22 Aug 2026 while
+/// verifying sweep 8 M4 on the external path
+/// (`tests/integration/stream_repair.rs`), reproduced on macOS and on
+/// Windows.
+///
+/// **Why not par2's own `-p`.** One flag, and it purges its backups for
+/// us - but it also purges the `.par2` files, which is not ours to
+/// decide: whether those survive the job is the user's `cleanup_exts`
+/// setting, and `-p` would delete them under every setting. It is also a
+/// flag we cannot count on - par2cmdline 0.8.1 is still in the field on
+/// Windows (see the version table in the M4 write-up), and an unknown
+/// switch does not degrade, it fails the repair. Measured against
+/// par2cmdline 1.2.0: `-p` removed the par2 files and its own new backup
+/// and left EARLIER `.1`/`.2` backups exactly where they were, so it does
+/// not even subsume this.
+///
+/// Three guards, because this deletes from a user's output directory:
+///
+///  * **only on a successful repair.** par2 exits 0 only when every
+///    target verifies afterwards, so the backup is then a damaged
+///    duplicate of a file we have just proved good. After a FAILED
+///    repair the backup may be the only copy of the original bytes, and
+///    nothing here touches it.
+///  * **only names that appeared during the run.** A `.1` that predates
+///    the child is not par2's backup and is not ours to delete.
+///  * **only `<target>.<digits>` for a name the recovery set declares**,
+///    and never a name the set declares itself - a set carrying both
+///    `foo.rar` and `foo.rar.1` as targets keeps both.
+///
+/// The delete goes through the sweeps' own `remove_swept_file`, so it
+/// honours the trash-vs-delete setting exactly like the junk and par2
+/// sweeps do. A failure is logged and otherwise ignored: a backup we
+/// could not remove is untidy, never a reason to fail a repaired job.
+fn purge_par2_backups(
+    out_dir: &std::path::Path,
+    targets: &[(String, u64)],
+    before: &std::collections::HashSet<std::ffi::OsString>,
+) {
+    let names: std::collections::HashSet<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+    if names.is_empty() {
+        return;
+    }
+    let recoverable = smart::cleanup_recoverable();
+    let staging = smart::trash_staging_dir(out_dir);
+    let mut purged = 0usize;
+    for entry in std::fs::read_dir(out_dir).into_iter().flatten().flatten() {
+        let raw = entry.file_name();
+        if before.contains(&raw) {
+            continue;
+        }
+        let Some(name) = raw.to_str() else { continue };
+        // A set target is never a backup, whatever it is named.
+        if names.contains(name) {
+            continue;
+        }
+        let Some((stem, ordinal)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if ordinal.is_empty() || !ordinal.bytes().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if !names.contains(stem) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        match smart::remove_swept_file(&entry.path(), recoverable, staging.as_deref()) {
+            Ok(_) => purged += 1,
+            Err(e) => warn!(target: "repair", "leftover par2 backup {name}: {e}"),
+        }
+    }
+    if purged > 0 {
+        info!(target: "repair", "removed {purged} par2 backup file(s) left by the external repair");
+    }
+}
+
+/// Hand a verified external repair's new bytes to the live readers
+/// (sweep 8, M5).
+///
+/// par2cmdline exits 0 only when every file in the set verifies AFTER
+/// the repair, which is the verification this publication is tied to -
+/// never the mere fact that the child exited. The writers' interval map
+/// survives the park/unpark unchanged, so without this the ranges par2
+/// filled in are still holes as far as `/stream` is concerned: a reader
+/// that held its handle across the repair waits out its grace period on
+/// bytes that are already correct on disk, and then zero-fills them.
+fn publish_external_coverage(extractor: &nzbkit::extract::Extractor, verified: &[(String, u64)]) {
+    let n = extractor.publish_repaired_coverage(verified);
+    if n > 0 {
+        info!(
+            target: "repair",
+            "published repaired coverage for {n} live output(s)"
+        );
+    }
 }
 
 /// Damaged path: fetch the cheapest set of recovery volumes covering
 /// `needed` blocks (exact-fit by declared slice counts), then hand the
 /// directory to par2cmdline for Reed-Solomon repair.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn fetch_and_repair(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     nzb: &Nzb,
@@ -658,6 +1106,13 @@ pub(crate) async fn fetch_and_repair(
     main_par2: Option<PathBuf>,
     already_fetched: &[usize],
     sniffed_vols: &[usize],
+    // Recovery volumes a declined [`try_mapped_repair`] already pulled
+    // COMPLETE, in this same tail, against this same `needed` and this
+    // same `already_fetched` - its `fetched_out`. Empty when nothing
+    // was banked (no mapped attempt, a decline before its fetch, or a
+    // pull with failures), which is the whole of this function's
+    // behaviour before 23 Aug 2026.
+    banked: &[usize],
     buf_pool: Arc<nzbkit::pool::BufPool>,
     // Parked around every EXTERNAL par2 invocation - par2cmdline cannot open
     // a file we hold (see `run_external_par2`). Native repair never needs
@@ -678,8 +1133,9 @@ pub(crate) async fn fetch_and_repair(
         let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
         let have: usize = vols.iter().map(|v| v.1).sum();
         if have < needed {
-            println!(
-                "⚠ unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
+            warn!(
+                target: "repair",
+                "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
             );
             *shortfall = Some((needed, have));
             return Ok(false);
@@ -693,35 +1149,66 @@ pub(crate) async fn fetch_and_repair(
         let chosen = pick_volumes(&vols, target);
         let dl_bytes: u64 = chosen.iter().map(|&i| vols[i].2).sum();
         let dl_blocks: usize = chosen.iter().map(|&i| vols[i].1).sum();
-        println!(
-            "repair: need {needed} block(s) → fetching {} volume(s), {} block(s), {:.1} MB",
-            chosen.len(),
-            dl_blocks,
-            dl_bytes as f64 / 1e6
-        );
-
         fetched_files = chosen.iter().map(|&vi| vols[vi].0).collect();
-        let failures = cpu
-            .without_permit(fetch_volumes(
-                servers,
-                nzb,
-                out_dir,
-                &buf_pool,
-                &fetched_files,
-                cancel,
-            ))
-            .await?;
-        if failures > 0 {
-            // At least one chosen volume landed PARTIAL, and the batch
-            // count cannot say which - so none of the batch may enter
-            // the escalation's exclusion list below (only a complete
-            // volume may ever be excluded: sidefetch contract). The
-            // escalation then refetches them in full, rewriting the
-            // files in place - the behavior the resume path documents -
-            // instead of permanently stranding the partial volume's
-            // missing slices and declaring a recoverable job
-            // unrepairable.
-            fetched_files.clear();
+
+        // Did a declined mapped repair already buy exactly this?
+        //
+        // Its plan is this same `pick_volumes` over this same
+        // `recovery_candidates` list for this same `needed`, all pure
+        // of anything that moves between the two calls, so the
+        // selections are equal whenever both ran - and equal means the
+        // volumes are on disk, whole (`banked` is zero-failure only),
+        // and holding the same slices for the same damage. Nothing
+        // about a route decline touches recovery data.
+        //
+        // Compared rather than assumed. If the two ever disagree this
+        // fetches, exactly as it did before, instead of repairing
+        // against a directory it only believes is populated - and the
+        // comparison is over ~64 volumes at most, against the 67.3 MB
+        // the reuse saves (measured 23 Aug 2026, costB2
+        // `loop-comp-silent`).
+        let reuse = !banked.is_empty()
+            && fetched_files.len() == banked.len()
+            && fetched_files.iter().all(|fi| banked.contains(fi));
+        if reuse {
+            info!(
+                target: "repair",
+                "need {needed} block(s) → reusing {} volume(s), {} block(s), {:.1} MB \
+                 already fetched before the in-place repair declined",
+                chosen.len(),
+                dl_blocks,
+                dl_bytes as f64 / 1e6
+            );
+        } else {
+            info!(
+                target: "repair",
+                "need {needed} block(s) → fetching {} volume(s), {} block(s), {:.1} MB",
+                chosen.len(),
+                dl_blocks,
+                dl_bytes as f64 / 1e6
+            );
+            let failures = cpu
+                .without_permit(fetch_volumes(
+                    servers,
+                    nzb,
+                    out_dir,
+                    &buf_pool,
+                    &fetched_files,
+                    cancel,
+                ))
+                .await?;
+            if failures > 0 {
+                // At least one chosen volume landed PARTIAL, and the
+                // batch count cannot say which - so none of the batch
+                // may enter the escalation's exclusion list below (only
+                // a complete volume may ever be excluded: sidefetch
+                // contract). The escalation then refetches them in
+                // full, rewriting the files in place - the behavior the
+                // resume path documents - instead of permanently
+                // stranding the partial volume's missing slices and
+                // declaring a recoverable job unrepairable.
+                fetched_files.clear();
+            }
         }
     }
 
@@ -738,14 +1225,55 @@ pub(crate) async fn fetch_and_repair(
         use nzbkit::par2repair::{RepairStatus, repair_dir};
         match repair_dir(out_dir) {
             Ok(RepairStatus::NoDamage) => {
-                println!(
+                info!(
+                    target: "repair",
                     "repair complete in {:.2?} ✔ (native - set already verifies on disk)",
                     t0.elapsed()
                 );
                 true
             }
             Ok(RepairStatus::Repaired(r)) => {
-                println!(
+                // `r.blocks_rebuilt` is what `repair_dir`'s own verify
+                // found bad ON DISK at this instant. That is NOT the
+                // damage count settle printed, and on a chased set that
+                // declined the mapped route it is reproducibly LOWER -
+                // often zero, in which case this arm does not run at all
+                // and the `NoDamage` line above prints instead. Nothing
+                // is undercounted here: a declined mapped attempt is not
+                // rolled back, so the blocks it already landed are good
+                // on disk by the time this pass looks.
+                //
+                // Measured 23 Aug 2026 (M3 Ultra, costB2
+                // `loop-comp-silent`, 3 reps of 3 identical; same shape
+                // at test scale in
+                // `a_declined_mapped_repair_still_lands_every_rebuilt_block`)
+                // at "3/35 blocks bad", the verify-gated twin saying
+                // "mapped: 3 block(s)" and this line "in place: 2
+                // block(s)". That split was a DEFECT, fixed the same
+                // day: the mapped attempt's first patched block landed
+                // in the chase's frontier buffer, `chase_span` saw it
+                // conflict with bytes the decode had already consumed
+                // and forfeited INSIDE that write, and
+                // `patch_volume_span` then refused the demoted slot -
+                // so the next block's write returned "no backing data"
+                // and two blocks already solved in memory were thrown
+                // away for this pass to solve again. `patch_volume_span`
+                // now admits `RarFallback` and those writes go through
+                // to the volume the demote just materialized, so the
+                // same fixture reaches here with nothing to rebuild.
+                //
+                // What did NOT change is the decline itself: the decode
+                // consumed stale bytes, so the set still materializes
+                // and re-extracts. Only the repair work stopped being
+                // discarded.
+                //
+                // The "need N block(s) →" line just above still names
+                // the LEDGER's N, so this route still plans for blocks
+                // it no longer needs - it reuses the mapped attempt's
+                // volumes rather than buying them twice (see `banked`),
+                // and the surplus is inside the exact-fit margin.
+                info!(
+                    target: "repair",
                     "repair complete in {:.2?} ✔ (native, in place: {} block(s) rebuilt across {} file(s){}{})",
                     t0.elapsed(),
                     r.blocks_rebuilt,
@@ -768,13 +1296,14 @@ pub(crate) async fn fetch_and_repair(
                 true
             }
             Ok(RepairStatus::Unrepairable { needed, have }) => {
-                println!(
-                    "⚠ native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk"
+                warn!(
+                    target: "repair",
+                    "native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk"
                 );
                 false
             }
             Err(e) => {
-                println!("⚠ native repair failed ({e}) - falling back to par2cmdline");
+                warn!(target: "repair", "native repair failed ({e}) - falling back to par2cmdline");
                 false
             }
         }
@@ -842,16 +1371,25 @@ pub(crate) async fn fetch_and_repair(
         (par2_bin, par2_arg, extra_args)
     });
     if external.is_none() {
-        println!("⚠ no main .par2 on disk - cannot invoke par2cmdline");
+        warn!(target: "repair", "no main .par2 on disk - cannot invoke par2cmdline");
     }
+    // (name, length) of every file the recovery set declares - the
+    // targets par2's exit 0 has just verified, and the only writers
+    // whose coverage that verdict licenses us to publish (sweep 8, M5).
+    let verified: Vec<(String, u64)> = set
+        .files
+        .iter()
+        .map(|f| (f.name.clone(), f.length))
+        .collect();
     if let Some((bin, arg, extras)) = external.take() {
-        match run_external_par2(&bin, &arg, &extras, out_dir, extractor)? {
+        match run_external_par2(&bin, &arg, &extras, out_dir, &verified, extractor)? {
             Ok(st) if st.success() => {
-                println!("repair complete in {:.2?} ✔", t0.elapsed());
+                publish_external_coverage(extractor, &verified);
+                info!(target: "repair", "repair complete in {:.2?} ✔", t0.elapsed());
                 return Ok(true);
             }
             Ok(st) => {
-                println!("⚠ par2 repair exited with {st}");
+                warn!(target: "repair", "par2 repair exited with {st}");
                 external = Some((bin, arg, extras));
             }
             Err(e) => {
@@ -860,8 +1398,9 @@ pub(crate) async fn fetch_and_repair(
                 // no external par2 on PATH or next to the executable.
                 // Left as None: a binary that could not be spawned will
                 // not spawn on the second pass either.
-                println!(
-                    "⚠ no external par2 was runnable ({e}) - install par2cmdline \
+                warn!(
+                    target: "repair",
+                    "no external par2 was runnable ({e}) - install par2cmdline \
                      (e.g. brew install par2) or place a par2 binary next to nzbfast; \
                      continuing with native repair alone"
                 );
@@ -879,7 +1418,8 @@ pub(crate) async fn fetch_and_repair(
     if remaining.is_empty() {
         return Ok(false);
     }
-    println!(
+    info!(
+        target: "repair",
         "repair short - fetching all {} remaining volume(s)",
         remaining.len()
     );
@@ -891,13 +1431,14 @@ pub(crate) async fn fetch_and_repair(
         return Ok(true);
     }
     if let Some((bin, arg, extras)) = external
-        && let Ok(st) = run_external_par2(&bin, &arg, &extras, out_dir, extractor)?
+        && let Ok(st) = run_external_par2(&bin, &arg, &extras, out_dir, &verified, extractor)?
         && st.success()
     {
-        println!("repair complete (second pass) ✔");
+        publish_external_coverage(extractor, &verified);
+        info!(target: "repair", "repair complete (second pass) ✔");
         return Ok(true);
     }
-    println!("⚠ repair failed even with every recovery volume");
+    warn!(target: "repair", "repair failed even with every recovery volume");
     Ok(false)
 }
 
@@ -950,8 +1491,23 @@ pub(crate) fn pick_volumes(vols: &[(usize, usize, u64)], needed: usize) -> Vec<u
 #[cfg(test)]
 mod repair_tests;
 
+// Its second child, split off in turn: `repair_tests` reached the
+// gate's own 3,000-line file ceiling when the bomb-refusal cases landed,
+// and the fallback-ROUTING cases were the coherent third of it. Same
+// rule as above - the numbers only go down.
+#[cfg(test)]
+mod ladder_tests;
+
 // Child module file, not inline: repair.rs sits under a size-gate
 // baseline (TODO 106) and test growth belongs beside it, same pattern
 // as pool/unit_tests.rs.
 #[cfg(test)]
 mod side_fetch_tests;
+
+// TODO 205's two follow-up routes - the plain feed branch above and the
+// nested 7z/zip pass - and the shortlist rule that separates
+// `unpackprog::attempt` from `unpackprog::watch`. Out here for the same
+// reason as the three above: `repair_tests` is 2,775 of the gate's
+// 3,000 lines and this subject is its own.
+#[cfg(test)]
+mod unpackprog_tests;

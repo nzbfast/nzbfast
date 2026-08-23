@@ -309,7 +309,12 @@ sekundet. Kortene, oppefra og ned:</p>
 <h3>Header-bjælken</h3>
 <ul>
 <li><b>Hastighedsgrænse</b>-menu - faste lofter, <i>auto · giv plads til LAN</i> (en RTT-styret
-tilstand, der trækker sig, når en anden i huset har brug for linjen) eller ubegrænset.</li>
+tilstand, der trækker sig, når en anden i huset har brug for linjen) eller ubegrænset.
+Forvalgene er runde tal til runde linjer, og et upload på 37&nbsp;Mb/s er ikke et af
+dem: <b>tilpasset…</b> spørger i stedet om tallet og tager alt, hvad API'et tager
+(<code>25M</code>, <code>500K</code>, eller 0 for ingen grænse). Menuen står derefter
+på <b>(brugerdefineret)</b> med hastigheden ved siden af, indtil du vælger et forvalg
+eller <i>auto</i> igen.</li>
 <li><b>Pause i…</b> - sæt alt på pause i 15&nbsp;min/30&nbsp;min/1&nbsp;t/3&nbsp;t med
 automatisk genoptagelse, eller brug Pause-knappen for en tidsubestemt pause. Pause er
 øjeblikkelig: den aktive overførsel stopper inden for få sekunder og genoptager senere fra
@@ -348,6 +353,7 @@ blokke, hvilken server der bidrog med hvor meget til <em>dette</em> job, og en
 app, API'et…). Knappen <b>Hent .nzb-filen</b> gemmer jobbets <code>.nzb</code>-fil - nzbfast
 beholder sin egen kopi, så det virker for hvert job, selv når den originale fil
 for længst er væk.</li>
+<li><b>"Hvorfor er det langsomt?"</b> Mens et job henter, bærer linjen under dets statuslinje en konklusion om <em>det</em> job, ikke om maskinen: <i>dine udbydere er grænsen</i>, <i>denne maskine er ved sin CPU-grænse</i>, <i>lagringen kan ikke følge med</i>, og så videre. Klik på den, og rækken åbner på beviserne: hvad din linje kan, hvad udbyderne leverede, hvad der kommer ind nu, og en tabel per server hvor en struben udbyder ses med det samme. Et job i fuld fart siger ingenting her, og det gør et job, hvis konklusion stadig er ved at danne sig, heller ikke.</li>
 <li>Mærker viser særlige tilstande: <i>udskudt (langsom)</i>, <i>prefetcher</i>,
 <i>på pause</i> (se <a href="#performance">Ydelsesværktøjer</a>).</li>
 <li>Et nedtællingsdiagram følger de samlede GB, der er tilbage i hele køen.</li>
@@ -376,7 +382,7 @@ adgangskoden, og jobbet bliver færdigt på stedet. Verificerings-sundhedsstribe
 blokke pr. download - en stigende hale betyder, at artikler kommer beskadigede frem.
 Hver rækkes skuffe fortæller, hvem der tilføjede jobbet, og har den samme
 <b>Hent .nzb-filen</b>-knap som køen - praktisk til at hente en release igen et andet
-sted, eller til at vedhæfte dens <code>.nzb</code> til en fejlrapport.</p>
+sted, eller til at vedhæfte dens <code>.nzb</code> til en fejlrapport. Ved siden af er <b>Lav rapport</b>, som oftest er det bedre at vedhæfte: se <a href="#troubleshooting">Fejlfinding</a>.</p>
 <p>Kortet viser ti downloads som standard, og resten er ét klik væk, på knappen ▤. Status, placering og årsagen til et fejlet job ligger bag et klik på selve rækken, så det almindelige tilfælde - hvad der blev færdigt, hvor stort, hvornår - forbliver læsbart uden at scrolle. Træk i kortets nederste kant for i stedet at lade listen scrolle i en højde, du selv vælger. <b>History rows</b> under Indstillinger → Grænseflade ændrer de ti; da det er en egenskab ved daemonen og ikke ved din browser, gælder det enhver enhed, der kigger på denne installation. <b>Colour History names</b> ved siden af farver færdige navne grønne og fejlede røde; slået fra forbliver navnene neutrale, og den farvede prik og rækkens egne detaljer siger stadig, hvad der er hvad.</p>
 <p>nzbfast beholder historikken for altid, medmindre du siger andet. <b>Ryd op i
 historikken</b> under Indstillinger → System fjerner gamle poster efter to
@@ -396,10 +402,12 @@ og blok-konti. Blok-konti viser livstidsforbrug mod deres størrelse.</p>
 
 <h3 id="dash-layout">Indret dashboardet</h3>
 <p>Dashboardet er dit at indrette. Fire handlinger, med samme navn hvor du end møder dem:
-<b>Flyt</b> et kort, gør det <b>Kompakt</b>, <b>Skift størrelse</b> på det eller <b>Skjul</b>
-det. Hvert valg husker den browser, du traf det i, så hver enhed beholder sin egen
-indretning, og <b>Nulstil layout</b> under Indstillinger → Grænseflade sætter hvert kort,
-hver størrelse og hver kolonne tilbage, som de blev leveret.</p>
+<b>Flyt</b> et kort, gør det <b>Kompakt</b>, <b>Skift størrelse</b> på det eller
+<b>Skjul</b> det. Hvert valg husker den browserprofil, du traf det i: rækkefølgen af dine
+kort og dem, du har skjult, gælder ved enhver vinduesbredde i den profil, mens kort- og
+diagramstørrelser er forbeholdt skrivebordet. <b>Nulstil layout</b> under Indstillinger →
+Grænseflade sætter hvert kort, hver størrelse og hver kolonne tilbage, som de blev
+leveret.</p>
 <p><b>Tilpas layout</b> er den guidede vej ind og den hurtigste måde at se, hvad et kort
 kan. Åbn det fra det diskrete link lige over det første kort eller fra Indstillinger →
 Grænseflade, hvor det er den første knap i rækken <b>Dashboard-layout</b>. Mens det er slået
@@ -422,12 +430,13 @@ mindre plads. På Historik skifter den mellem de ti seneste downloads og resten 
 historik. <b>Kompakt tilstand</b> under Indstillinger → Grænseflade gør hele dashboardet på
 én gang.</li>
 <li><b>Skift størrelse.</b> Et kort med en liste eller et diagram bærer en linje langs sin
-underkant: træk den til den højde, du vil have. Linjen er svag, indtil du peger på kortet,
-hvor den tegnes som en hårfin streg i fuld bredde med riller i det bageste hjørne; den tager
-også tastaturfokus, hvor pilene op og ned sætter højden, og Skift tager et større skridt.
-Hvilke kort der har en, skifter, efterhånden som kort får og mister egne lister: tag linjen
-som svaret frem for nogen opremsning her. I <b>Tilpas layout</b> siger kortene uden linje det
-selv.</li>
+underkant, hvor du har en mus eller en pegeplade: træk den til den højde, du vil have. En
+berøringsskærm får ingen. Linjen er svag, indtil du peger på kortet, hvor den tegnes som
+en hårfin streg i fuld bredde med riller i det bageste hjørne; den tager også
+tastaturfokus, hvor pilene op og ned sætter højden, og Skift tager et større skridt.
+Hvilke kort der har en, skifter, efterhånden som kort får og mister egne lister: tag
+linjen som svaret frem for nogen opremsning her. I <b>Tilpas layout</b> siger kortene uden
+linje det selv.</li>
 <li><b>Skjul.</b> Den sidste knap i titelrækken skjuler kortet. Skjulte kort samles i en
 bjælke <b>Skjult</b> nederst på dashboardet; klik på et navn dér for at hente et
 tilbage.</li>
@@ -464,11 +473,13 @@ med en pil ændrer bredden.</p>
 <tr><th>Metode</th><th>Hvordan</th></tr>
 <tr><td><b>Træk &amp; slip</b></td><td>Slip en eller flere <code>.nzb</code>-filer hvor som helst på dashboardet.</td></tr>
 <tr><td><b>Watch-mappe</b></td><td>Vælg en mappe under Indstillinger; enhver <code>.nzb</code>, der gemmes i den, opfanges
-inden for 5 sekunder og flyttes til papirkurven, og et åbent dashboard melder hver
+så snart den lander og flyttes til papirkurven, og et åbent dashboard melder hver
 afhentning ved navn ("… hentet fra Downloads"), så en fil, der forlader mappen,
 aldrig er et mysterium. Vil du hellere beholde dine filer? Slå <b>Behold .nzb-filer
 efter afhentning</b> til (se <a href="#settings">§9</a>). Peg din browsers downloadmappe
-mod den for hentninger med ét klik fra indexer-sites.</td></tr>
+mod den for hentninger med ét klik fra indexer-sites. Undermapper, filer der viser sig ikke at være NZB, og det gentjek-interval en
+mappe på et netværksdrev har brug for, har hver sin egen kontakt; se
+<a href="#settings">§9</a>.</td></tr>
 <tr><td><b>Fra en URL</b></td><td>Indsæt et NZB-link (API <code>mode=addurl</code>, eller via en tilsluttet app).</td></tr>
 <tr><td><b>nzblnk:-links</b></td><td>Indsæt et <code>nzblnk:</code>-link hvor som helst på dashboardet, eller træk det ind. Har du installeret fra macOS-DMG'en eller Windows-installationsprogrammet, kan du også klikke på et direkte på et board. Se <a href="#nzblnk">nzblnk-links</a> nedenfor.</td></tr>
 <tr><td><b>Gennemse indeks</b></td><td>Klik på en hvilken som helst komplet release i Gennemse-kortet.</td></tr>
@@ -577,11 +588,28 @@ flere på skærmen, stor færre.</li>
 <li><b>Hover-forhåndsvisning</b>, over Releases-tabellen: hold markøren på en række for
 plakat og handling, alt sammen fra dit eget indeks.</li>
 <li><b>Gruppér efter titel</b>, kontakten ved siden af: én række pr. titel med dens
-releases under. Åbn den med <b>&#9656;</b> eller ved at klikke på rækken; afkrydsningen
-på titlen vælger de viste releases. Gruppering gælder kun <b>Dette indeks</b>.</li>
+releases under. Åbn den med <b>&#9656;</b> eller ved at klikke på rækken;
+afkrydsningen på titlen vælger de viste releases. Gruppering gælder kun <b>Dette
+indeks</b>; vælger du <b>Indeksere</b> eller <b>Begge</b>, bliver tabellen flad igen
+og siger det.</li>
+<li><b>Alle releases af en titel</b> står i dens kort, når du åbner det, med
+opløsning, codec, lydformat og dynamikområde (Dolby Vision, HDR10) læst ud af
+release-navnet, plus størrelse, alder og om hver del stadig ligger hos din udbyder.
+Sæt <b>Foretrukken version</b> under Indstillinger → Organisering → Indeksering, så
+flyder de matchende op øverst, med et <b>bedste match</b>-mærke og de matchende tags
+fremhævet. Intet skjules: release-navne udelader disse tags hele tiden, så en
+præference ændrer kun rækkefølgen. Den afgør også, hvilken encode overvågningen
+opgraderer til.</li>
 <li><b>Faneblade</b> til Film / Serier / Andet, øjeblikkelig søgning og syv
-sorteringer: <b>Til dig</b>, Nyeste poster, Udgivelsesår, Bedst bedømt, Titel A–Z,
-Største og Mest postet.</li>
+sorteringer: <b>Til dig</b>, Nyeste poster, Udgivelsesdato, Bedst bedømt, Titel A–Z,
+Største og Mest postet. Knappen <b>↓</b> ved siden af sorteringen vender den om, så
+hver af dem også kører den anden vej (ældste, mindste, lavest bedømte, Z–A).</li>
+<li><b>Udgivelsesdato</b> er den oprindelige udgivelse eller første udsendelse, på
+dagen hvor metadataleverandøren gav os en: den svarer på »hvad udkom der rent faktisk
+i denne uge«, hvilket Nyeste poster ikke kan (det er uploaddato, og et genopslag af en
+tredive år gammel film lander øverst dér). Titler, der blev beriget før dette fandtes,
+eller hvis leverandør ikke havde en dato, falder tilbage på deres år, indtil du
+opdaterer deres metadata.</li>
 <li><b>Kun matchede</b> er slået til som standard og skjuler uidentificeret skrald; en "+N umatchede"-
 chip viser det.</li>
 <li>Klik på en flise for detaljearket: synopsis, IMDb-bedømmelse og stemmer, medvirkende -
@@ -754,7 +782,7 @@ brugerfladen slår flag på kommandolinjen).</p>
 <h3>Hastighed &amp; planlægning <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Indstilling</th><th>Hvad den gør</th></tr>
-<tr><td>Hastighedsgrænse</td><td>Loft i bytes/sek. (<code>50M</code>, <code>1G</code>, 0 = ubegrænset). Fjern-apps kan sende procenter - sæt <i>Linjehastighed</i>, så de oversættes korrekt.</td></tr>
+<tr><td>Hastighedsgrænse</td><td>Loft i bytes/sek. (<code>50M</code>, <code>1G</code>, 0 = ubegrænset). Fjern-apps kan sende procenter - sæt <i>Linjehastighed</i>, så de oversættes korrekt. Punktet <b>tilpasset…</b> i toplinjen sætter det samme loft uden at åbne Indstillinger.</td></tr>
 <tr><td>Auto-hastighed</td><td>RTT-styret loft, der viger for anden trafik i husstanden og udvider sig igen, når linjen er stille.</td></tr>
 <tr><td>Udskyd langsomme downloads automatisk</td><td>Et job, der hænger på én langsom server, mens andre venter, flyttes bagest i køen (fremgang beholdes). Se <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch på ledige servere</td><td>Servere, der er ubrugelige for det aktive job, starter det næste i køen. Se <a href="#performance">§13</a>.</td></tr>
@@ -799,6 +827,15 @@ arkiv-i-arkiv der pakkes ud automatisk: et RAR-sæt med en 7z indeni, som igen
 indeholder en RAR, er normalt på Usenet, og nzbfast følger kæden uden en ekstra
 omgang. Ved grænsen bliver det dybeste arkiv simpelthen liggende, ikke pakket videre
 ud, og downloadet fuldføres alligevel. Hæv den kun til usædvanligt dybe udgivelser.</p>
+<p><b>Rettigheder på færdige downloads</b> (en avanceret indstilling) er en umask, det samme tal som Docker og
+installationsvejledningerne bruger: <code>002</code> giver mapper 775 og filer 664, <code>022</code> giver 755
+og 644. Tom er standard og ændrer ingenting. Sæt den, når Sonarr eller Radarr kører som en
+anden bruger i samme gruppe og ikke kan læse eller importere det, der lander her: på en
+systemd-installation kan de som regel ikke, fordi unitten holder alt, hvad tjenesten skriver, læsbart kun
+for ejeren for at beskytte API-nøglen. Rettighederne sættes, når et færdigt job er holdt op med
+at flytte sig, på jobbets mappe, alt i den og mapperne mellem den og downloadmappen, fordi import ved
+omdøbning kræver skriverettighed på den mappe, der omdøbes ud af. Ignoreres på Windows,
+som ikke har den slags.</p>
 
 <h3>Auto-omdøbning &amp; oprydning <span class="pill live">live</span></h3>
 <p><b>Omdøb færdige downloads</b> (slået til som standard) giver mappen og hovedfilen
@@ -854,6 +891,27 @@ download driller. En beholdt fil huskes, også på tværs af genstarter, og sæt
 i kø igen; gem den igen for at hente den på ny. Uanset hvad du vælger, har hvert
 jobs skuffe en <b>Hent .nzb-filen</b>-knap, så en kopi af ethvert jobs
 <code>.nzb</code> aldrig er mere end et klik væk.</p>
+<p><b>Gennemsøg også undermapper</b> (slået fra som standard) henter også filer fra
+mapper inde i watch-mappen, og navnet på den første undermappe bliver downloadets
+kategori: en fil lagt i <code>watch/tv</code> havner i kategorien tv. Det er den
+hurtigste måde at sortere hentninger på uden at røre dashboardet - peg ét
+browserbogmærke mod <code>watch/tv</code> og et andet mod <code>watch/movies</code>, så
+er arkiveringen klaret på vejen ind. En mappe med navnet <code>rejected</code> er den
+ene undtagelse og lades altid i fred.</p>
+<p><b>Læg ubrugelige filer til side</b> (slået fra som standard) flytter alt, der ikke
+er en brugbar NZB, over i en mappe ved navn <code>rejected</code> inde i watch-mappen,
+med en lille tekstfil ved siden af, der siger, hvad der var galt. Værd at slå til for en
+mappe, din browser gemmer i, hvor en loginside eller en fejlside kan lande under et
+<code>.nzb</code>-navn. Slået fra bliver filen liggende, hvor du lagde den, og årsagen
+vises i stedet over køen. En fil, der blot ser ufuldstændig ud, bliver liggende i begge
+tilfælde, for den er måske stadig på vej.</p>
+<p><b>Se mappen efter igen hver</b> (en avanceret indstilling) er et sikkerhedsnet og
+ikke andet, så det er ikke den knap, der gør afhentningerne hurtige. En fil, der lægges
+på denne maskine, bliver bemærket i det øjeblik den lander, fordi systemet siger til;
+dette interval dækker kun de mapper, systemet ikke kan melde om, hvilket i praksis vil
+sige et netværksdrev, der skrives til fra en anden computer. I sekunder, 1 til 3600,
+standard 5. Sænk det, hvis afhentninger fra et netværksdrev føles sene, hæv det, hvis
+gentjekkene ikke er trafikken værd på en langsom forbindelse.</p>
 
 <h3 id="set-indexers">Søg på indeksere <span class="pill live">live</span></h3>
 <p>Dine konti hos NZB-indekserwebsteder, én linje hver, så en søgning på væggen også kan
@@ -994,7 +1052,12 @@ fortsætter tilføjelsen urørt, og loggen siger hvorfor.</p>
 <h3>Livscyklushændelser og signerede webhooks</h3>
 <p>Hver jobmilepæl er en versioneret hændelse: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, plus
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(et automatisk nyt forsøg har sat et mislykket download i kø igen) og
+<code>job.delete_kept</code> (en sletning fjernede posten, men kunne ikke fjerne
+dens filer), plus <code>watch.picked</code> (en .nzb blev taget ud af
+overvågningsmappen), <code>watchlist.upgraded</code> (en opgradering fra
+overvågningslisten landede, og den erstattede kopi blev fjernet),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> og <code>quota.reached</code>. Hver bærer
 <code>schema_version</code> (i øjeblikket 1; nye nøgler kan dukke op uden et hop -
@@ -1047,6 +1110,12 @@ opfører sig alle, som *arr-programmerne forventer.</p>
 <li>nzbfast serverer <code>caps</code>-, <code>search</code>-, <code>tvsearch</code>- og
 <code>movie</code>-forespørgsler fra sit eget indeks over dine overvågede grupper, og
 <code>/getnzb/&lt;id&gt;</code> giver NZB'en tilbage.</li>
+<li>Søgninger kan ske på navn eller på id: serier tager et TVDB-, IMDb- eller
+TVmaze-id, film et IMDb- eller TMDB-id, og appen læser i <code>caps</code>, hvilket.
+TVDB-id'er tilbydes først, når indekset har samlet dem, hvilket sker af sig selv i
+baggrunden. Et id, vi ikke har noget for, svarer med et tomt resultat, og et id, vi
+slet ikke kan slå op, afvises ved navn: ingen af dem får nogensinde en liste med
+urelaterede releases.</li>
 </ol>
 <div class="note"><b>Slå den indbyggede indekser til først</b> (Indstillinger →
 Indeksering). Den er slået fra som standard, og så længe den er det, svarer denne facade
@@ -1069,7 +1138,12 @@ mobil-/tablet-apps virker. Vælg den protokol, din app understøtter:</p>
 <tr><td>Adgangskode</td><td>din <b>API-nøgle</b></td></tr>
 </table></div>
 <p>Hele den JSON-RPC-flade, disse apps bruger, serveres: status, kø med
-omorganisér/pause/slet, historik, tilføj-NZB, hastighedsgrænse, pause/genoptag, log.</p>
+omorganisér/omdøb/pause/slet, historik, tilføj-NZB (fil eller URL), hastighedsgrænse,
+pause/genoptag, log. Loginoplysningerne må også ligge i adressen, NZBGets egen
+<code>http://user:apikey@host:6789/</code>-form, som er den, LunaSea sender.</p>
+<p><b>nzb360-brugere:</b> tilføj nzbfast som <b>SABnzbd</b>-server (næste afsnit).
+nzb360 taler med rigtig NZBGet over XML-RPC, som nzbfast ikke serverer, så dens
+NZBGet-tilstand kan ikke forbinde.</p>
 <h3>Apps, der taler SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Felt i app'en</th><th>Værdi</th></tr>
@@ -1364,7 +1438,7 @@ hvor end <code>--config</code> / <code>$NZBFAST_CONFIG</code> peger hen.</td></t
 <h2 id="troubleshooting">18 · Fejlfinding</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Tjek</th></tr>
-<tr><td>Langsomme downloads</td><td>Kør <b>System-benchmark</b> - den udpeger flaskehalsen direkte. Er det netværket: kør <b>Forbindelsestuning</b>, tjek antal forbindelser pr. server, og bekræft, at dine udbydere ikke alle er én backbone (<b>Server-diversitet</b>).</td></tr>
+<tr><td>Langsomme downloads</td><td>Spørg først downloaden selv: mens den kører, navngiver linjen under dens statuslinje det lag, der holder <i>dette</i> job tilbage, og et klik på konklusionen åbner rækken på beviserne (se <a href="#dash-queue">Kø</a>). Kør <b>System-benchmark</b> - den udpeger flaskehalsen direkte. Er det netværket: kør <b>Forbindelsestuning</b>, tjek antal forbindelser pr. server, og bekræft, at dine udbydere ikke alle er én backbone (<b>Server-diversitet</b>).</td></tr>
 <tr><td>Langsom kun på meget store jobs<br>(NAS eller maskine med lidt RAM)</td><td>Forventet og måleligt: et udsultet hukommelsesbudget spiller caches til disk og koster 20–40% efter ~87 GB. Se <a href="#memory">Hukommelsesbudget</a> for tallene og hvor meget RAM, den skal have. Mindre jobs er upåvirkede.</td></tr>
 <tr><td>Download fejler med "articles missing"</td><td>Posten er udløbet eller blev fjernet hos dine udbydere. En anden udbyder på en anden backbone redder de fleste af disse. <code>nzbfast check</code> forudsiger dette før download. Og væggen markerer på forhånd de sandsynligt forsvundne med sin
 tilgængelighedsprik (<a href="#oracle">§13</a>). En første fejl af den type prøver sig
@@ -1382,7 +1456,7 @@ løser sig selv.</td></tr>
 <tr><td>Daemonen vil ikke starte: porten er i brug</td><td>En anden instans kører - eller skift <code>--port</code>.</td></tr>
 <tr><td>Hvor er loggene?</td><td>Log-kortet på dashboardet, eller den terminal/logfil, du startede <code>serve</code> med.</td></tr>
 </table></div>
-<div class="note"><b>Stadig gået i stå?</b>Log-kortet udpeger som regel synderen -
+<div class="note"><b>Stadig gået i stå?</b>Til et problem med én enkelt download, brug <b>Lav rapport</b>: den ligger i det jobs skuffe i køen mens det kører, og bagefter i dets historikskuffe. Den kopierer alt om netop den download, herunder kun dens egne loglinjer i stedet for hele tjenestens. Brugernavne, adgangskoder og API-nøgler læses aldrig, og din hjemmemappe skrives som <code>~</code>. Log-kortet udpeger som regel synderen -
 vedlæg dens hale, når du rapporterer et problem, sammen med din
 <code>nzbfast --version</code>.</div>
 

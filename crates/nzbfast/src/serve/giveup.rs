@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 // For the Daemon impl moved in from daemon.rs (§129 4a paydown).
-use super::{Daemon, Job, JobState, fail_kind, is_arr_origin};
+use super::{Daemon, Job, JobState, fail_kind, is_arr_origin, is_watchlist_origin};
 use crate::MutexExt;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -753,7 +753,12 @@ impl Daemon {
             )
         };
         let from_arr = is_arr_origin(&origin);
-        if !from_arr && origin != "watchlist" {
+        // Both predicates, never a bare `==`: a watchlist grab now records
+        // which item/slot/quality matched after the prefix (§44), so the
+        // literal comparison this used to make silently stopped matching
+        // every grab made from that point on - and a breaker that never
+        // arms reads exactly like a breaker that never had cause to.
+        if !from_arr && !is_watchlist_origin(&origin) {
             return;
         }
         // Only a post-unavailability failure is evidence about the
@@ -814,19 +819,22 @@ impl Daemon {
             if from_arr { "; asking the *arr to unmonitor it" } else { "" }
         );
         // ...and say it somewhere a user actually looks. An open
-        // dashboard toasts this on its next poll and the Watchlist card
+        // dashboard toasts this off the event ring and the Watchlist card
         // lists it from `giveup_status` afterwards, so the moment a show
         // stops being chased is visible and reversible.
-        {
-            let mut ring = self.giveup_tripped.lock_ok();
-            ring.push_back((name.clone(), threshold, now));
-            while ring.len() > 8 {
-                ring.pop_front();
-            }
-        }
-        // §129 4a: the same trip on the event ring, for hooks that want
-        // to act on "this target is being given up" (the audits' answer
-        // to *arr-side cleanup scripts).
+        //
+        // §129 1b(b): this used to ride a second, queue-borne ring
+        // (`giveup_tripped`) that the page diffed against a seen-set of
+        // its own. One event, two transports, and the queue-borne one
+        // was the worse of the two: the payload it rode is only re-sent
+        // when the queue REVISION moves, and a breaker trip moves
+        // nothing - so on an otherwise idle daemon the toast waited for
+        // an unrelated queue mutation. The ring below is delivered by
+        // sequence cursor, so it lands on the very next poll.
+        //
+        // §129 4a: the same event serves hooks that want to act on
+        // "this target is being given up" (the audits' answer to
+        // *arr-side cleanup scripts).
         self.life_emit(
             "giveup.tripped",
             json!({

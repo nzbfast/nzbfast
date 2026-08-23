@@ -62,7 +62,7 @@ fn sliding_scan_serial(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn scan_candidate_serial(
     path: &Path,
     len: u64,

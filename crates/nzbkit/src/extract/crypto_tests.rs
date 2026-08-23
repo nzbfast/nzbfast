@@ -36,15 +36,19 @@ fn encrypted_single_volume_decrypts_in_stream() {
 /// CryptoState commits its output to the ciphertext route AT ENQUEUE,
 /// under the routing lock. The physical pwrites run after the lock
 /// drops, so `written()` lags the commitment - the latch is what a
-/// concurrent router consults in that window. A check-less encrypted
-/// entry (RAR4, or RAR5 posted without its check) takes exactly this
-/// route: unproven key, ciphertext assembled at store offsets.
+/// concurrent router consults in that window.
+///
+/// The `rar a -htb` shape takes that route: a BLAKE2sp digest with no
+/// CRC32 beside it, which nothing in this build can adjudicate, so the
+/// gate refuses to decrypt it in-stream and the group demotes at finish
+/// to the disk path that can. A check-less RAR5 entry stood here until
+/// TODO 27 phase 3 - it now decrypts in-stream like any other.
 #[test]
 fn a_ciphertext_route_is_latched_at_enqueue_not_at_write_time() {
     let plain = payload(120_000, 75);
     let mut f = fixtures::encrypt_file("right", &plain, 47);
-    f.no_check = true;
-    f.with_crc = true;
+    f.with_hash = true;
+    f.with_crc = false;
     let vol =
         fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
     let dir = tmpdir("c1-latch");
@@ -69,11 +73,13 @@ fn a_ciphertext_route_is_latched_at_enqueue_not_at_write_time() {
             "an output owed ciphertext must never latch plaintext-once"
         );
     }
-    // One route for the whole file: finish decrypts the assembled
-    // ciphertext and publishes correct plaintext.
+    // One route for the whole file, and it ends in a demote: the volume
+    // materializes byte-exact for the disk path, and no unadjudicated
+    // plaintext is ever published.
     let rep = ex.finish().unwrap();
-    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
+    assert!(!rep.fallbacks.is_empty(), "the digest set must demote");
+    assert!(rep.decrypted.is_empty(), "{:?}", rep.decrypted);
+    assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -81,7 +87,10 @@ fn a_ciphertext_route_is_latched_at_enqueue_not_at_write_time() {
 /// set satisfies every plaintext-once condition (stored check, right
 /// password, zero bytes written) - the exact state a second span sees
 /// mid-window - and the pre-latched route must still refuse it, or the
-/// output mixes raw ciphertext with decrypted plaintext.
+/// output mixes raw ciphertext with decrypted plaintext. Refusing costs
+/// the set its one-pass ending since TODO 27 phase 3 (nothing decrypts
+/// ciphertext at finish any more), which is the conservative half of
+/// the trade and the reason the latch is only ever set deliberately.
 #[test]
 fn a_latched_ciphertext_output_refuses_plaintext_once() {
     let plain = payload(120_000, 76);
@@ -106,11 +115,15 @@ fn a_latched_ciphertext_output_refuses_plaintext_once() {
             "plaintext-once latched over an output owed ciphertext"
         );
     }
-    // The whole file stays ciphertext and the finish pass adjudicates:
-    // correct plaintext, one route.
+    // The whole file stays ciphertext, so finish demotes it - one
+    // route, and a volume the disk path can still unpack byte-exactly.
     let rep = ex.finish().unwrap();
-    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
+    assert!(
+        !rep.fallbacks.is_empty(),
+        "a latched ciphertext set demotes"
+    );
+    assert!(rep.decrypted.is_empty(), "{:?}", rep.decrypted);
+    assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -544,318 +557,6 @@ fn head_and_tail_disagreeing_about_the_password_check_never_mix_routes() {
     }
 }
 
-/// The decrypt pass shards a file across threads, seeding each shard's
-/// CBC chain from the ciphertext block before it and folding the shard
-/// CRCs back with `crc32_combine`. Every shard count must therefore
-/// produce byte-identical plaintext and an identical CRC to the serial
-/// pass - including when `unp` is not 16-aligned, so the tail shard
-/// carries padding that must stay out of the CRC.
-#[test]
-fn decrypt_shards_match_the_serial_pass() {
-    // Over DECRYPT_PARALLEL_MIN so the sharded path actually engages,
-    // and deliberately not a multiple of 16 or of the shard size.
-    let plain = payload((36 << 20) + 7, 91);
-    let key = rarcrypt::AesKey::Aes256([0x3Cu8; 32]);
-    let iv = [0x5Au8; 16];
-    let mut cipher = plain.clone();
-    cipher.resize(rarcrypt::align16(plain.len() as u64) as usize, 0);
-    rarcrypt::CbcEncStream::new(&key, &iv).encrypt(&mut cipher);
-
-    let dir = tmpdir("decrypt-shards");
-    let src = dir.join("cipher.bin");
-    std::fs::write(&src, &cipher).unwrap();
-    let expect_crc = crc32fast::hash(&plain);
-
-    for threads in [1usize, 2, 3, 5, 8, 64] {
-        let out = dir.join(format!("plain-{threads}.bin"));
-        let wf = File::options()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(&out)
-            .unwrap();
-        decrypt_pass(
-            &src,
-            &wf,
-            &key,
-            &iv,
-            plain.len() as u64,
-            Some(CrcGate {
-                stored: expect_crc,
-                hash_key: None,
-            }),
-            threads,
-        )
-        .unwrap_or_else(|e| panic!("{threads} shards: {e}"));
-        drop(wf);
-        assert_eq!(
-            std::fs::read(&out).unwrap(),
-            plain,
-            "{threads} shards produced different plaintext"
-        );
-    }
-
-    // A wrong stored CRC must still be caught on the sharded path: the
-    // combine has to reproduce the real whole-file CRC, not just agree
-    // with itself.
-    let out = dir.join("bad.bin");
-    let wf = File::options()
-        .create(true)
-        .truncate(true)
-        .read(true)
-        .write(true)
-        .open(&out)
-        .unwrap();
-    let err = decrypt_pass(
-        &src,
-        &wf,
-        &key,
-        &iv,
-        plain.len() as u64,
-        Some(CrcGate {
-            stored: expect_crc ^ 1,
-            hash_key: None,
-        }),
-        8,
-    );
-    assert!(err.is_err(), "sharded pass must still enforce the CRC");
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// Shard scaling of the finish decrypt, for the low-end story. Run it
-/// with `--ignored --nocapture`, and with `--cfg aes_force_soft` to see
-/// the no-AES-hardware case (some budget ARM NAS SoCs omit the crypto
-/// extensions, and the RAR format leaves no cipher to fall back to).
-#[test]
-#[ignore = "timing bench, not a correctness gate"]
-fn decrypt_shard_scaling_bench() {
-    let plain = payload(256 << 20, 13);
-    let key = rarcrypt::AesKey::Aes256([0x11u8; 32]);
-    let iv = [0x22u8; 16];
-    let mut cipher = plain.clone();
-    rarcrypt::CbcEncStream::new(&key, &iv).encrypt(&mut cipher);
-    let dir = tmpdir("decrypt-bench");
-    let src = dir.join("cipher.bin");
-    std::fs::write(&src, &cipher).unwrap();
-    let crc = crc32fast::hash(&plain);
-    println!("256 MiB encrypted store file");
-    for threads in [1usize, 2, 4, 8] {
-        let out = dir.join("plain.bin");
-        let wf = File::options()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(&out)
-            .unwrap();
-        let t = std::time::Instant::now();
-        decrypt_pass(
-            &src,
-            &wf,
-            &key,
-            &iv,
-            plain.len() as u64,
-            Some(CrcGate {
-                stored: crc,
-                hash_key: None,
-            }),
-            threads,
-        )
-        .unwrap();
-        let el = t.elapsed().as_secs_f64();
-        println!(
-            "  {threads} shard(s): {el:6.3}s  {:7.1} MB/s",
-            (plain.len() as f64 / 1e6) / el
-        );
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// Finding A8. The finish decrypt replaces an encrypted store output
-/// with its plaintext, and that output is exactly what the
-/// crash-resume journal's placement records point into. Rewriting it
-/// IN PLACE meant a kill mid-pass left the file half plaintext and
-/// half ciphertext while the journal still vouched for it - the resume
-/// run then copied those poisoned bytes into the volume files and
-/// marked the message ids restored, so they were skipped instead of
-/// refetched and, without PAR2, the retry could never converge.
-///
-/// The guarantee is about ORDERING, so that is what is asserted here:
-/// the publish barrier fires once per output, and at that moment the
-/// output on disk is still byte-exact ciphertext. Every earlier
-/// instant therefore looks identical to a killed process, and the
-/// publish itself is a rename - so no kill can ever observe a mix.
-#[test]
-fn decrypt_publishes_only_after_the_journal_barrier_clears() {
-    let dir = tmpdir("enc-barrier");
-    let plain = payload(200_003, 51);
-    let f = fixtures::encrypt_file("hunter2", &plain, 5);
-    let cipher = f.cipher.clone();
-    let vol =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("hunter2");
-    // This test guards the LEGACY ciphertext+finish-decrypt path
-    // (still shipped behind NZBFAST_NO_INSTREAM_DECRYPT).
-    ex.set_instream_decrypt(false);
-    // The name the old code derived deterministically for its temp. An
-    // archive is free to ship a member called this (finding A13), so
-    // the pass must not go anywhere near it.
-    let decoy = dir.join("movie.mkv.nzbdec.tmp");
-    std::fs::write(&decoy, b"a legitimate archive member").unwrap();
-
-    let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
-    let seen_at_barrier: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    {
-        let (calls, seen, out) = (
-            calls.clone(),
-            seen_at_barrier.clone(),
-            dir.join("movie.mkv"),
-        );
-        ex.set_decrypt_barrier(Arc::new(move |names: &[String]| {
-            calls.lock().unwrap().push(names.to_vec());
-            *seen.lock().unwrap() = std::fs::read(&out).unwrap();
-            Ok(())
-        }));
-    }
-    feed(&ex, 0, "v.rar", &vol, 7000, 3);
-    let rep = ex.finish().unwrap();
-
-    assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec![vec!["movie.mkv".to_string()]],
-        "the journal's claim must be retired for exactly the published output"
-    );
-    let at_barrier = seen_at_barrier.lock().unwrap().clone();
-    assert_eq!(
-        &at_barrier[..cipher.len()],
-        &cipher[..],
-        "the output was mutated before the journal stopped vouching for it"
-    );
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
-    assert_eq!(
-        std::fs::read(&decoy).unwrap(),
-        b"a legitimate archive member",
-        "an archive member must never be mistaken for decrypt scratch"
-    );
-    assert!(
-        leftover_scratch(&dir).is_empty(),
-        "decrypt scratch left behind: {:?}",
-        leftover_scratch(&dir)
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// Finding A8, the other half: when the journal's claim CANNOT be
-/// retired, nothing may be published. The job fails, and the output is
-/// left byte-exact ciphertext - which is what makes a crash here
-/// recoverable, because the journal is still telling the truth and the
-/// resume run rebuilds the volumes from local bytes with no refetch.
-#[test]
-fn decrypt_publishes_nothing_when_the_barrier_refuses() {
-    let dir = tmpdir("enc-barrier-fail");
-    let plain = payload(200_003, 52);
-    let f = fixtures::encrypt_file("hunter2", &plain, 5);
-    let cipher = f.cipher.clone();
-    let vol =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("hunter2");
-    // This test guards the LEGACY ciphertext+finish-decrypt path
-    // (still shipped behind NZBFAST_NO_INSTREAM_DECRYPT).
-    ex.set_instream_decrypt(false);
-    ex.set_decrypt_barrier(Arc::new(|_: &[String]| {
-        Err(io::Error::other("journal is not writable"))
-    }));
-    feed(&ex, 0, "v.rar", &vol, 7000, 3);
-
-    let err = match ex.finish() {
-        Err(e) => e,
-        Ok(_) => panic!("publish went ahead without the journal's permission"),
-    };
-    assert!(err.to_string().contains("journal is not writable"), "{err}");
-    let on_disk = std::fs::read(dir.join("movie.mkv")).unwrap();
-    assert_eq!(
-        &on_disk[..cipher.len()],
-        &cipher[..],
-        "ciphertext must survive byte-exact so the journal stays true"
-    );
-    assert!(
-        !on_disk.starts_with(&plain[..1024]),
-        "plaintext was published without permission"
-    );
-    assert!(
-        leftover_scratch(&dir).is_empty(),
-        "decrypt scratch left behind: {:?}",
-        leftover_scratch(&dir)
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// Decrypt scratch from a killed run is swept, and a failed pass
-/// leaves none of its own - a stale temp must never reach the user's
-/// output directory or the keep-media-only sweep.
-#[test]
-fn stale_decrypt_scratch_is_swept() {
-    let dir = tmpdir("enc-scratch");
-    let stale = dir.join(format!("{DEC_TMP_PREFIX}999999.7.tmp"));
-    std::fs::write(&stale, b"corpse of a killed run").unwrap();
-    let plain = payload(70_001, 53);
-    let f = fixtures::encrypt_file("pw", &plain, 9);
-    let vol = fixtures::rar5_volume_enc(&[("a.bin", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("pw");
-    feed(&ex, 0, "v.rar", &vol, 7000, 4);
-    ex.finish().unwrap();
-    assert!(!stale.exists(), "stale decrypt scratch survived the pass");
-    assert!(leftover_scratch(&dir).is_empty());
-    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), plain);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// The aliasing hazard with the decoy arriving the way it actually
-/// does in the wild: as a genuine member of the same download,
-/// written by this very extraction rather than planted beforehand.
-/// The old deterministic `<output>.nzbdec.tmp` name truncated it and
-/// then renamed it away, so a real file silently became the decrypt
-/// scratch. Ported from the parallel isolated-staging fix, whose
-/// scratch-subdirectory approach this file solves with `create_new`.
-#[test]
-fn decrypt_temp_cannot_alias_an_extracted_member() {
-    let dir = tmpdir("enc-temp-alias");
-    let plain = payload(180_000, 73);
-    let f = fixtures::encrypt_file("pw", &plain, 3);
-    let enc =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    // A second, ordinary volume whose member is named exactly like the
-    // temp the old code would have derived for movie.mkv.
-    let decoy = payload(9_000, 74);
-    let bait = fixtures::rar5_volume(&[(
-        "movie.mkv.nzbdec.tmp",
-        decoy.len() as u64,
-        &decoy,
-        false,
-        false,
-    )]);
-    let ex = Extractor::new(&dir, 2, true);
-    ex.set_password("pw");
-    feed(&ex, 0, "a.rar", &enc, 7000, 4);
-    feed(&ex, 1, "b.rar", &bait, 3000, 5);
-    let rep = ex.finish().unwrap();
-    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
-    assert_eq!(
-        std::fs::read(dir.join("movie.mkv.nzbdec.tmp")).unwrap(),
-        decoy,
-        "the decrypt temp overwrote a legitimate member of the same name"
-    );
-    assert!(leftover_scratch(&dir).is_empty());
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 /// The real multi-volume shape: ONE CBC stream carved at arbitrary
 /// (non-16-aligned) offsets, same crypt record in every volume, fed
 /// interleaved and out of order.
@@ -884,13 +585,16 @@ fn encrypted_split_volumes_decrypt() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Plaintext-once equivalence: the in-stream decrypt path and the
-/// legacy ciphertext+finish-decrypt path must produce byte-identical
-/// output for every arrival order and article size - including
-/// pathological articles smaller than two cipher blocks, where every
-/// span is nothing BUT seams.
+/// Plaintext-once across every arrival order and article size -
+/// including pathological articles smaller than two cipher blocks,
+/// where every span is nothing BUT seams.
+///
+/// This compared the in-stream route against the legacy
+/// ciphertext+finish-decrypt one until TODO 27 phase 3 deleted the
+/// second route; the orders and sizes it swept are what the test was
+/// really for, so they stay.
 #[test]
-fn instream_decrypt_matches_legacy_across_orders_and_sizes() {
+fn instream_decrypt_holds_across_orders_and_sizes() {
     let plain = payload(120_003, 77);
     let mut f = fixtures::encrypt_file("hunter2", &plain, 21);
     f.with_crc = true; // engage the composed-CRC verify too
@@ -899,29 +603,24 @@ fn instream_decrypt_matches_legacy_across_orders_and_sizes() {
         fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
     for art in [17usize, 33, 4096, 7000] {
         for seed in [1u64, 2, 3] {
-            let mut outs: Vec<Vec<u8>> = Vec::new();
-            for instream in [true, false] {
-                let dir = tmpdir(&format!("eqv-{art}-{seed}-{instream}"));
-                let ex = Extractor::new(&dir, 1, true);
-                ex.set_password("hunter2");
-                ex.set_instream_decrypt(instream);
-                feed(&ex, 0, "v.rar", &vol, art, seed);
-                let rep = ex.finish().unwrap();
-                assert!(
-                    rep.fallbacks.is_empty(),
-                    "art={art} seed={seed}: {:?}",
-                    rep.fallbacks
-                );
-                assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
-                outs.push(std::fs::read(dir.join("movie.mkv")).unwrap());
-                assert!(!dir.join("v.rar").exists(), "no volume on disk either way");
-                std::fs::remove_dir_all(&dir).unwrap();
-            }
-            assert_eq!(
-                outs[0], plain,
-                "in-stream output wrong at art={art} seed={seed}"
+            let dir = tmpdir(&format!("eqv-{art}-{seed}"));
+            let ex = Extractor::new(&dir, 1, true);
+            ex.set_password("hunter2");
+            feed(&ex, 0, "v.rar", &vol, art, seed);
+            let rep = ex.finish().unwrap();
+            assert!(
+                rep.fallbacks.is_empty(),
+                "art={art} seed={seed}: {:?}",
+                rep.fallbacks
             );
-            assert_eq!(outs[0], outs[1], "paths diverge at art={art} seed={seed}");
+            assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
+            assert_eq!(
+                std::fs::read(dir.join("movie.mkv")).unwrap(),
+                plain,
+                "output wrong at art={art} seed={seed}"
+            );
+            assert!(!dir.join("v.rar").exists(), "no volume on disk");
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 }
@@ -943,7 +642,6 @@ fn instream_split_volumes_decrypt() {
     ];
     let ex = Extractor::new(&dir, 3, true);
     ex.set_password("s3cret");
-    ex.set_instream_decrypt(true);
     feed(&ex, 2, "x.part3.rar", &vols[2], 4099, 31);
     feed(&ex, 0, "x.part1.rar", &vols[0], 4099, 32);
     feed(&ex, 1, "x.part2.rar", &vols[1], 4099, 33);
@@ -970,7 +668,6 @@ fn instream_read_at_reproduces_posted_volume_bytes() {
         fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
     let ex = Extractor::new(&dir, 1, true);
     ex.set_password("pw");
-    ex.set_instream_decrypt(true);
     feed(&ex, 0, "v.rar", &vol, 7001, 5);
     // Whole-volume round trip.
     let mut got = vec![0u8; vol.len()];
@@ -1011,7 +708,6 @@ fn instream_checkpoints_serve_deep_windows_and_repairs() {
     }
     let ex = Extractor::new(&dir, 1, true);
     ex.set_password("hunter2");
-    ex.set_instream_decrypt(true);
     feed(&ex, 0, "v.rar", &damaged, 65_536, 14);
     // Deep windows chain from checkpoints, not a multi-MB walk.
     for (off, len) in [(3_200_001u64, 8_192usize), (1_048_570, 64), (2_097_140, 40)] {
@@ -1052,7 +748,6 @@ fn instream_patch_heals_damaged_cipher_and_adjacency() {
     }
     let ex = Extractor::new(&dir, 1, true);
     ex.set_password("hunter2");
-    ex.set_instream_decrypt(true);
     feed(&ex, 0, "v.rar", &damaged, 7000, 8);
     // Repair the damaged span with the true posted bytes (unaligned
     // edges on purpose - the patch window logic must round out).
@@ -1082,7 +777,6 @@ fn instream_incomplete_set_materializes_posted_bytes() {
         fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
     let ex = Extractor::new(&dir, 1, true);
     ex.set_password("hunter2");
-    ex.set_instream_decrypt(true);
     // Feed everything except one mid-file article.
     let art = 7000usize;
     let skip = 91_000usize;
@@ -1119,7 +813,7 @@ fn instream_incomplete_set_materializes_posted_bytes() {
 /// holds plaintext, not the posted bytes a restore would copy into
 /// volume files), and /stream serves the output as a plain file.
 #[test]
-fn instream_spans_never_journal_and_stream_is_plain() {
+fn instream_spans_never_journal() {
     let dir = tmpdir("instream-journal");
     let plain = payload(150_001, 81);
     let f = fixtures::encrypt_file("hunter2", &plain, 55);
@@ -1127,7 +821,6 @@ fn instream_spans_never_journal_and_stream_is_plain() {
         fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
     let ex = Extractor::new(&dir, 1, true);
     ex.set_password("hunter2");
-    ex.set_instream_decrypt(true);
     let mut any_placed = false;
     let art = 7000usize;
     let mut i = 0;
@@ -1144,10 +837,6 @@ fn instream_spans_never_journal_and_stream_is_plain() {
     assert!(
         !any_placed,
         "no article of an in-stream-decrypted file may be journaled"
-    );
-    assert!(
-        matches!(ex.open_stream("movie.mkv"), StreamOpen::Plain),
-        "plaintext-once output streams as a plain file"
     );
     let rep = ex.finish().unwrap();
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
@@ -1178,7 +867,6 @@ fn instream_journal_restores_posted_bytes_for_resume() {
     {
         let ex = Extractor::new(&dir, 1, true);
         ex.set_password("hunter2");
-        ex.set_instream_decrypt(true);
         // Mirror main.rs: D records park until their span's seam
         // bytes are physically on disk (usually one article later).
         let mut pending: Vec<(String, Vec<Frag>)> = Vec::new();
@@ -1574,6 +1262,117 @@ fn rar4_wrong_password_demotes_to_a_byte_exact_volume() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// TODO 27 phase 3: a RAR4 `-p` set decrypts in-stream like every other
+/// encrypted store shape, and its volume never touches disk.
+///
+/// It could not before. The gate demanded a stored check that PROVES the
+/// password first, because a wrong one writes plaintext-shaped garbage
+/// into the file the group has to be able to hand back as byte-exact
+/// volumes - and RAR4 stores no check at all, so the set assembled
+/// ciphertext for the finish pass instead. Phase 2's re-encrypt shim
+/// retired that requirement: CBC inverts under ANY key, so E_k(D_k(c))
+/// = c and the garbage rebuilds the same volumes real plaintext does
+/// (`rar4_wrong_password_demotes_to_a_byte_exact_volume` is that half),
+/// leaving the proof to decide only what a checksum MISS means.
+///
+/// Three things are asserted here that were all false before: the file
+/// is PLAINTEXT on disk mid-download, the whole-file CRC32 in the RAR4
+/// header adjudicates it at finish, and the shim still reproduces the
+/// posted volume from it byte for byte.
+#[test]
+fn rar4_encrypted_store_decrypts_in_stream() {
+    let dir = tmpdir("enc4-instream");
+    let plain = payload(300_005, 47);
+    let f = fixtures::encrypt_file_v4("hunter2", &plain, 32);
+    let vol = fixtures::rar4_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)]);
+    let ex = Extractor::new(&dir, 1, true);
+    ex.set_password("hunter2");
+    feed(&ex, 0, "v.rar", &vol, 7000, 6);
+    // Mid-download, before finish has adjudicated anything: the output
+    // already holds the payload, not the ciphertext that was posted.
+    assert_eq!(
+        &std::fs::read(dir.join("movie.mkv")).unwrap()[..4096],
+        &plain[..4096],
+        "a RAR4 encrypted output must hold plaintext while it downloads"
+    );
+    // ...and the posted bytes are still reachable through the shim, so
+    // a demote from here would materialize an exact volume.
+    let mut got = vec![0u8; vol.len()];
+    ex.read_at(0, 0, &mut got).unwrap();
+    assert_eq!(got, vol, "the shim must reproduce the posted volume");
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
+    assert!(!dir.join("v.rar").exists(), "volume must not materialize");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A file whose password no stored check can PROVE journals no resume
+/// facts, and that is deliberate rather than an omission.
+///
+/// The `E` grammar is RAR5-shaped (RAR4's 8-byte salt and SHA-1
+/// schedule do not fit it), and a resume that re-encrypted local
+/// plaintext under a key it could not prove would post bytes nobody
+/// vouched for. So `crypto_for` emits `E` only for a wellformed-check
+/// RAR5 record; a `D` record whose `E` is missing simply refetches its
+/// article (`journal_d_without_e_refetches`), which is exactly what
+/// these files did before they took this route at all.
+///
+/// Both unprovable shapes, against the provable one beside them.
+#[test]
+fn an_unprovable_password_journals_no_resume_facts() {
+    let plain = payload(120_007, 48);
+    // RAR4: no check field exists in the format.
+    let f4 = fixtures::encrypt_file_v4("hunter2", &plain, 33);
+    let v4 = fixtures::rar4_volume_enc(&[("movie.mkv", &f4, 0..f4.cipher.len(), false, false)]);
+    // RAR5 with the check omitted: the record has the field and the
+    // poster left it out.
+    let mut f5 = fixtures::encrypt_file("hunter2", &plain, 34);
+    f5.no_check = true;
+    f5.with_crc = true;
+    let v5 = fixtures::rar5_volume_enc(
+        &[("movie.mkv", &f5, 0..f5.cipher.len(), false, false)],
+        None,
+    );
+    // ...and the ordinary provable set, which must still journal.
+    let mut ok = fixtures::encrypt_file("hunter2", &plain, 35);
+    ok.with_crc = true;
+    let vok = fixtures::rar5_volume_enc(
+        &[("movie.mkv", &ok, 0..ok.cipher.len(), false, false)],
+        None,
+    );
+
+    for (label, vol, want_params) in [
+        ("rar4", &v4, false),
+        ("checkless-rar5", &v5, false),
+        ("checked-rar5", &vok, true),
+    ] {
+        let dir = tmpdir(&format!("enc-facts-{label}"));
+        let ex = Extractor::new(&dir, 1, true);
+        ex.set_password("hunter2");
+        feed(&ex, 0, "v.rar", vol, 7000, 7);
+        let params = ex
+            .drain_crypto_events()
+            .iter()
+            .any(|e| matches!(e, CryptoJournalEvent::Params { .. }));
+        assert_eq!(
+            params, want_params,
+            "{label}: an `E` record may exist only where a resume could prove the password"
+        );
+        // Either way the set still decrypts and publishes: the facts
+        // buy a cheaper RESUME, never correctness of this run.
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{label}: {:?}", rep.fallbacks);
+        assert_eq!(
+            std::fs::read(dir.join("movie.mkv")).unwrap(),
+            plain,
+            "{label}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 /// A RAR4 encrypted entry whose header carries no CRC (a zero field,
 /// which the parser reads as "not computed") has NOTHING to adjudicate
 /// an unverifiable password against, so it must demote before
@@ -1627,94 +1426,6 @@ fn encrypted_without_check_falls_back() {
     );
     // Byte-exact volume kept for unrar / a corrected retry.
     assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// On-the-fly stream decryption: while an encrypted file is still
-/// ciphertext on disk (mid-download), `open_stream` hands back a
-/// `StreamCrypt` whose `decrypt_range` yields the exact plaintext for
-/// arbitrary offsets - the basis of streaming encrypted releases
-/// before the finish decrypt runs.
-#[test]
-fn stream_crypt_decrypts_arbitrary_ranges_before_finish() {
-    let dir = tmpdir("enc-stream");
-    let plain = payload(300_003, 71);
-    let f = fixtures::encrypt_file("pw", &plain, 9);
-    let vol =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("pw");
-    // This test guards the LEGACY ciphertext+finish-decrypt path
-    // (still shipped behind NZBFAST_NO_INSTREAM_DECRYPT).
-    ex.set_instream_decrypt(false);
-    // Feed everything but DON'T finish() - the file is ciphertext.
-    feed(&ex, 0, "v.rar", &vol, 7000, 4);
-    let StreamOpen::Encrypted(file, crypt) = ex.open_stream("movie.mkv") else {
-        panic!("expected an encrypted stream handle");
-    };
-    assert_eq!(crypt.plain_len, plain.len() as u64);
-    // Random-ish ranges, including offset 0, a mid-block start, and
-    // the final partial block.
-    for &(pos, len) in &[
-        (0u64, 100u64),
-        (16, 4096),
-        (12345, 50000),
-        (plain.len() as u64 - 7, 7),
-        (100_000, 200_003),
-    ] {
-        let (lo, clen) = crypt.covered_bounds(pos, len);
-        assert!(lo + clen <= crypt.cipher_len);
-        let mut out = vec![0u8; len as usize];
-        crypt.decrypt_range(&file, pos, &mut out).unwrap();
-        assert_eq!(
-            out,
-            &plain[pos as usize..(pos + len) as usize],
-            "range {pos}+{len}"
-        );
-    }
-    // Dropping the handle releases the reader lease; finish then
-    // decrypts in place (no live reader) to the same plaintext.
-    drop(crypt);
-    drop(file);
-    let rep = ex.finish().unwrap();
-    assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// With a live stream reader attached, finish() must NOT mutate the
-/// file in place: it decrypts to a temp file and renames, so the
-/// reader's captured fd keeps decrypting the intact ciphertext inode
-/// even after the on-disk file becomes plaintext.
-#[test]
-fn finish_temp_renames_while_a_reader_streams() {
-    let dir = tmpdir("enc-stream-finish");
-    let plain = payload(260_000, 72);
-    let f = fixtures::encrypt_file("pw", &plain, 3);
-    let vol =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("pw");
-    // This test guards the LEGACY ciphertext+finish-decrypt path
-    // (still shipped behind NZBFAST_NO_INSTREAM_DECRYPT).
-    ex.set_instream_decrypt(false);
-    feed(&ex, 0, "v.rar", &vol, 7000, 4);
-    let StreamOpen::Encrypted(file, crypt) = ex.open_stream("movie.mkv") else {
-        panic!("expected an encrypted stream handle");
-    };
-    // finish() runs WHILE the reader holds its handle → temp+rename.
-    let rep = ex.finish().unwrap();
-    assert_eq!(rep.decrypted, vec!["movie.mkv".to_string()]);
-    // On-disk file is now plaintext…
-    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
-    // …yet the live reader's fd still reads the ciphertext inode and
-    // decrypts correctly (rename kept it alive).
-    let mut out = vec![0u8; 40_000];
-    crypt.decrypt_range(&file, 90_000, &mut out).unwrap();
-    assert_eq!(out, &plain[90_000..130_000]);
-    // A NEW open now sees plaintext → raw reads (Plain).
-    assert!(matches!(ex.open_stream("movie.mkv"), StreamOpen::Plain));
-    drop(crypt);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1913,15 +1624,17 @@ fn a_failed_rekey_refeed_leaves_no_stashed_span_charged() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// The real 3-volume split fixture through the LEGACY route
-/// (`NZBFAST_NO_INSTREAM_DECRYPT`). The whole-file CRC lives on the
-/// TAIL piece and real `rar` sets the tweaked-checksum flag there
-/// alone: the tail stores the keyed FOLD of the whole-file CRC while
-/// the head's record says "plain". A gate built from the head's record
+/// The real 3-volume split fixture, whose whole-file CRC lives on the
+/// TAIL piece with real `rar`'s tweaked-checksum flag set there alone:
+/// the tail stores the keyed FOLD of the whole-file CRC while the
+/// head's record says "plain". A gate built from the head's record
 /// compared the bare CRC against the fold and false-failed every
 /// intact split set - this is the regression test for that.
+///
+/// It rode the legacy ciphertext route until TODO 27 phase 3 retired
+/// it; the fixture and the gate it exercises are unchanged.
 #[test]
-fn real_rar_split_fixture_legacy_route_verifies() {
+fn real_rar_split_fixture_verifies() {
     let secret = include_bytes!("../../testdata/rar5/secret.bin").to_vec();
     let vols: Vec<(&str, &[u8])> = vec![
         (
@@ -1937,10 +1650,9 @@ fn real_rar_split_fixture_legacy_route_verifies() {
             include_bytes!("../../testdata/rar5/enc-vols.part3.rar"),
         ),
     ];
-    let dir = tmpdir("enc-legacy-split");
+    let dir = tmpdir("enc-split-fixture");
     let ex = Extractor::new(&dir, vols.len(), true);
     ex.set_password("testpw123");
-    ex.set_instream_decrypt(false);
     for (si, (name, bytes)) in vols.iter().enumerate() {
         feed(&ex, si, name, bytes, 1400, 60 + si as u64);
     }
@@ -1951,20 +1663,25 @@ fn real_rar_split_fixture_legacy_route_verifies() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Damaged SPLIT ciphertext must fail its whole-file CRC on BOTH
-/// routes. One flipped byte in the middle volume's data area survives
-/// every other check (the stored password check proves only the key),
-/// so this gate is the only thing standing between wire damage and a
-/// silently corrupt published file - and before the tail-piece CRC was
-/// wired into the in-stream route, that route published this exact
-/// input on completeness alone.
+/// Damaged SPLIT ciphertext must fail its whole-file CRC. One flipped
+/// byte in the middle volume's data area survives every other check
+/// (the stored password check proves only the key), so this gate is
+/// the only thing standing between wire damage and a silently corrupt
+/// published file - and before the tail-piece CRC was wired into the
+/// in-stream route, that route published this exact input on
+/// completeness alone.
+///
+/// A hard error rather than a demote because the password IS proven
+/// here: the key is right, so the plaintext under it is damage. The
+/// unprovable twin of this shape demotes instead - see
+/// `checkless_encrypted_store_set_wrong_password_demotes_not_publishes`.
 #[test]
-fn real_rar_split_damaged_ciphertext_fails_both_routes() {
+fn real_rar_split_damaged_ciphertext_fails() {
     let mut part2 = include_bytes!("../../testdata/rar5/enc-vols.part2.rar").to_vec();
     // Inside part2's data area (data_off 119, data_len 1790) - headers
     // and the stored check stay intact, only ciphertext is damaged.
     part2[119 + 800] ^= 0xff;
-    for instream in [true, false] {
+    {
         let vols: Vec<(&str, &[u8])> = vec![
             (
                 "enc-vols.part1.rar",
@@ -1976,24 +1693,395 @@ fn real_rar_split_damaged_ciphertext_fails_both_routes() {
                 include_bytes!("../../testdata/rar5/enc-vols.part3.rar"),
             ),
         ];
-        let dir = tmpdir(&format!("enc-split-damaged-{instream}"));
+        let dir = tmpdir("enc-split-damaged");
         let ex = Extractor::new(&dir, vols.len(), true);
         ex.set_password("testpw123");
-        ex.set_instream_decrypt(instream);
         for (si, (name, bytes)) in vols.iter().enumerate() {
             feed(&ex, si, name, bytes, 1400, 60 + si as u64);
         }
         let err = match ex.finish() {
             Err(e) => e,
-            Ok(rep) => panic!(
-                "instream={instream}: damaged split ciphertext published: {:?}",
-                rep.decrypted
-            ),
+            Ok(rep) => panic!("damaged split ciphertext published: {:?}", rep.decrypted),
         };
-        assert!(
-            err.to_string().contains("stored CRC"),
-            "instream={instream}: {err}"
-        );
+        assert!(err.to_string().contains("stored CRC"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// One article-by-article run that journals exactly like workers.rs,
+/// over `arts` (index, start, end) of `vol`: an `R` for every plain
+/// placement, a parked `D` flushed once its seam bytes settle. Returns
+/// the ids recorded. Shared by the TODO 158 item 2 restart tests.
+fn run_journaled(
+    ex: &Extractor,
+    journal: &crate::journal::Journal,
+    vol: &[u8],
+    arts: impl Iterator<Item = (usize, usize, usize)>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut pending: Vec<(String, Vec<Frag>)> = Vec::new();
+    for (i, s, e) in arts {
+        let id = format!("<a{i}@t>");
+        match ex
+            .write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+            .unwrap()
+        {
+            Persist::Placed(frags) => {
+                journal.record_placed(
+                    0,
+                    &id,
+                    ex.slot_file_info(0),
+                    "v.rar",
+                    vol.len() as u64,
+                    &frags,
+                );
+                ids.push(id);
+            }
+            Persist::PlacedCrypto(frags) => pending.push((id, frags)),
+            Persist::No | Persist::Held(_) => {}
+        }
+        pending.retain(|(id, frags)| {
+            if ex.crypto_span_on_disk(frags) {
+                journal.record_crypto_events(&ex.drain_crypto_events());
+                journal.record_placed_crypto(
+                    0,
+                    id,
+                    ex.slot_file_info(0),
+                    "v.rar",
+                    vol.len() as u64,
+                    frags,
+                    &ex.crypto_frag_mask(frags),
+                );
+                ids.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+    }
+    ids
+}
+
+/// Replay a restore the way `get/rig.rs` does for a mapped resume: the
+/// head article first (it was never journaled - the mapper consumed
+/// it), then every restored span read from wherever the restore says
+/// its bytes are and fed straight back through `write`. Exactly the
+/// shape that never re-journals.
+fn replay_restored(
+    ex: &Extractor,
+    dir: &std::path::Path,
+    restored: &crate::journal::Restored,
+    vol: &[u8],
+    art: usize,
+) {
+    ex.seed_resumed_routes(&restored.wire_outputs, &restored.plaintext_outputs);
+    for seed in &restored.seeds {
+        ex.preclaim_name(seed.slot, &seed.name);
+        for (file, _) in &seed.sources {
+            if **file != *seed.name {
+                ex.preclaim_name(seed.slot, file);
+            }
+        }
+    }
+    ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art.min(vol.len())])
+        .unwrap();
+    for seed in &restored.seeds {
+        let mut spans: Vec<(u64, u64, std::sync::Arc<str>, u64)> = seed
+            .spans
+            .iter()
+            .enumerate()
+            .map(|(i, &(off, len))| match seed.sources.get(i) {
+                Some((f, fo)) => (off, len, f.clone(), *fo),
+                None => (off, len, std::sync::Arc::from(seed.name.as_str()), off),
+            })
+            .collect();
+        spans.sort_unstable();
+        for (off, len, file, file_off) in spans {
+            let src = std::fs::File::open(dir.join(&*file)).unwrap();
+            let mut buf = vec![0u8; len as usize];
+            crate::disk::read_exact_at(&src, &mut buf, file_off).unwrap();
+            ex.write(0, "v.rar", vol.len() as u64, off, &buf).unwrap();
+        }
+    }
+}
+
+/// TODO 158 item 2 (closed 22 Aug 2026): the CIPHERTEXT route survives
+/// a restart. The set here is `rar a -htb` shaped - a BLAKE2sp digest
+/// and no CRC32 - which is the one shape `instream_decrypt_allowed`
+/// still vetoes, so its output assembles posted ciphertext and journals
+/// `R` records exactly as every encrypted set did before plaintext-once.
+/// Run 1 is killed mid-write, run 2 resumes and is killed too, run 3
+/// resumes and finishes: nothing may decrypt it in-stream on the way,
+/// and the group demotes at finish to the disk path that CAN check a
+/// digest this build cannot compute.
+///
+/// Before the fix run 2 latched plaintext-once over the resumed output
+/// (both halves of rule 2 were empty on a fresh process), decrypted the
+/// replayed spans in place, and re-recorded nothing: the `R` lines then
+/// described plaintext as wire bytes, and run 3 restored them as such -
+/// a mixed output that looked complete. The fix seeds the latch and the
+/// counter from the journal before the first span, so a resumed wire
+/// output can never take the other route, and the demoted volume is the
+/// cold run's byte for byte. Run 1 used to force the route with
+/// `NZBFAST_NO_INSTREAM_DECRYPT`; the digest shape stands in for it now
+/// that the switch is gone, and it is the shape a resumed OLD journal
+/// presents too.
+#[test]
+fn a_ciphertext_output_keeps_its_route_across_a_restart() {
+    let plain = payload(1_200_003, 91);
+    let mut f = fixtures::encrypt_file("hunter2", &plain, 93);
+    f.with_hash = true;
+    f.with_crc = false;
+    let vol =
+        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
+    let art = 50_000usize;
+    let n = vol.len().div_ceil(art);
+    let vlen = vol.len();
+    let arts =
+        move |lo: usize, hi: usize| (lo..hi).map(move |i| (i, i * art, ((i + 1) * art).min(vlen)));
+
+    // The cold run: password from the start, never interrupted. It
+    // demotes at finish (nothing here can adjudicate a BLAKE2sp digest)
+    // and the volume it materializes is what the resumed runs must
+    // reproduce byte for byte.
+    let cold_dir = tmpdir("158-2-cold");
+    let cold = {
+        let ex = Extractor::new(&cold_dir, 1, true);
+        ex.set_password("hunter2");
+        feed(&ex, 0, "v.rar", &vol, art, 91);
+        let rep = ex.finish().unwrap();
+        assert!(!rep.fallbacks.is_empty(), "the digest set must demote");
+        std::fs::read(cold_dir.join("v.rar")).unwrap()
+    };
+    assert_eq!(cold, vol);
+    std::fs::remove_dir_all(&cold_dir).unwrap();
+
+    let dir = tmpdir("158-2-cipher");
+    // Run 1: the ciphertext route, killed after 60% of the articles.
+    let cut1 = n * 6 / 10;
+    let run1_ids = {
+        let (journal, _) = crate::journal::Journal::open(&dir, b"nzb-158").unwrap();
+        let ex = Extractor::new(&dir, 1, true);
+        ex.set_password("hunter2");
+        let ids = run_journaled(&ex, &journal, &vol, arts(0, cut1));
+        assert!(
+            ex.inner.lock_ok().ciphertext_files.contains("movie.mkv"),
+            "run 1 committed the output to the ciphertext route"
+        );
+        ids
+    };
+    assert!(
+        run1_ids.len() > 3,
+        "run 1 journaled R records: {}",
+        run1_ids.len()
+    );
+    let on_disk = std::fs::read(dir.join("movie.mkv")).unwrap();
+    assert_ne!(&on_disk[..art], &plain[..art], "run 1 left ciphertext");
+
+    // Run 2: resume, replay, write 20% more, killed again without
+    // finish.
+    let cut2 = n * 8 / 10;
+    {
+        let (journal, resume) = crate::journal::Journal::open(&dir, b"nzb-158").unwrap();
+        let restored = crate::journal::restore_for(&dir, &resume, Some("hunter2"), false);
+        for id in &run1_ids {
+            assert!(restored.ids.contains(id), "{id} restores");
+        }
+        assert!(
+            restored.wire_outputs.contains_key("movie.mkv"),
+            "the journal derives the wire route: {:?}",
+            restored.wire_outputs
+        );
+        assert!(restored.plaintext_outputs.is_empty());
+        let ex = Extractor::with_resume(&dir, 1, true, true);
+        ex.set_password("hunter2");
+        replay_restored(&ex, &dir, &restored, &vol, art);
+        {
+            let inner = ex.inner.lock_ok();
+            assert!(
+                inner.ciphertext_files.contains("movie.mkv"),
+                "the resumed output is latched ciphertext before its first span"
+            );
+            assert!(
+                !inner.crypto_files.contains_key("movie.mkv"),
+                "plaintext-once must never latch over a resumed wire output"
+            );
+            let w = inner
+                .inner_writers
+                .get("movie.mkv")
+                .expect("resumed inner writer");
+            assert!(w.written() > 0, "the write counter is non-empty on resume");
+        }
+        run_journaled(&ex, &journal, &vol, arts(cut1, cut2));
+    }
+
+    // Run 3: resume and finish.
+    {
+        let (journal, resume) = crate::journal::Journal::open(&dir, b"nzb-158").unwrap();
+        let restored = crate::journal::restore_for(&dir, &resume, Some("hunter2"), false);
+        let ex = Extractor::with_resume(&dir, 1, true, true);
+        ex.set_password("hunter2");
+        replay_restored(&ex, &dir, &restored, &vol, art);
+        run_journaled(&ex, &journal, &vol, arts(cut2, n));
+        let rep = ex.finish().unwrap();
+        assert!(!rep.fallbacks.is_empty(), "the digest set must demote");
+        assert!(rep.decrypted.is_empty(), "{:?}", rep.decrypted);
+    }
+    assert_eq!(
+        std::fs::read(dir.join("v.rar")).unwrap(),
+        cold,
+        "the resumed volume must be byte-identical to the cold run"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The other direction of TODO 158 item 2: a PLAINTEXT-ONCE output
+/// survives a restart. Run 1 decrypts in-stream and journals `D`
+/// records; run 2 resumes and must re-latch plaintext-once on the same
+/// head record - and when it cannot, it must REFUSE the write rather
+/// than put ciphertext under records that say plaintext. The refusal
+/// arm below seeds a head record the journal's `E` fact does not name
+/// (a different salt and IV), which is the gate's own disqualifier and
+/// stands in for any answer that differs; it used to switch in-stream
+/// decrypt off, and that switch is gone.
+#[test]
+fn a_plaintext_once_output_keeps_its_route_across_a_restart() {
+    let plain = payload(1_100_007, 94);
+    let f = fixtures::encrypt_file("hunter2", &plain, 95);
+    let vol =
+        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
+    let art = 50_000usize;
+    let n = vol.len().div_ceil(art);
+    let vlen = vol.len();
+    let arts =
+        move |lo: usize, hi: usize| (lo..hi).map(move |i| (i, i * art, ((i + 1) * art).min(vlen)));
+    let dir = tmpdir("158-2-plain");
+    let cut = n * 6 / 10;
+    let run1_ids = {
+        let (journal, _) = crate::journal::Journal::open(&dir, b"nzb-158p").unwrap();
+        let ex = Extractor::new(&dir, 1, true);
+        ex.set_password("hunter2");
+        let ids = run_journaled(&ex, &journal, &vol, arts(0, cut));
+        assert!(ex.inner.lock_ok().crypto_files.contains_key("movie.mkv"));
+        ids
+    };
+    assert!(run1_ids.len() > 3, "run 1 journaled D records");
+    assert_eq!(
+        &std::fs::read(dir.join("movie.mkv")).unwrap()[..art],
+        &plain[..art]
+    );
+
+    // Derivation: a wrong password admits nothing and pins nothing.
+    {
+        let (_j, resume) = crate::journal::Journal::open(&dir, b"nzb-158p").unwrap();
+        let wrong = crate::journal::restore_for(&dir, &resume, Some("wrong"), false);
+        assert!(wrong.ids.is_empty());
+        assert!(
+            wrong.plaintext_outputs.is_empty(),
+            "an unadmitted D pins no route"
+        );
+        assert!(!wrong.wire_outputs.contains_key("movie.mkv"));
+    }
+
+    // Refusal arm: the resumed run cannot re-establish the route - the
+    // seeded `(salt, iv)` is not this archive's, so the gate refuses to
+    // confirm the recorded route. The first span routed into the output
+    // (the head article carries data past its headers) must be refused,
+    // the plaintext on disk untouched, nothing latched either way.
+    {
+        let (_j, resume) = crate::journal::Journal::open(&dir, b"nzb-158p").unwrap();
+        let restored = crate::journal::restore_for(&dir, &resume, Some("hunter2"), false);
+        assert_eq!(
+            restored.plaintext_outputs.get("movie.mkv"),
+            Some(&(f.salt, f.iv)),
+            "an admitted D pins plaintext-once under the E record's keys"
+        );
+        let ex = Extractor::with_resume(&dir, 1, true, true);
+        ex.set_password("hunter2");
+        let elsewhere = HashMap::from([("movie.mkv".to_string(), ([0xAAu8; 16], [0xBBu8; 16]))]);
+        ex.seed_resumed_routes(&restored.wire_outputs, &elsewhere);
+        let err = match ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art]) {
+            Err(e) => e,
+            Ok(_) => panic!("ciphertext over a resumed plaintext-once output must be refused"),
+        };
+        assert!(
+            err.to_string().contains("refusing to write ciphertext"),
+            "{err}"
+        );
+        let inner = ex.inner.lock_ok();
+        assert!(!inner.ciphertext_files.contains("movie.mkv"));
+        assert!(!inner.crypto_files.contains_key("movie.mkv"));
+    }
+    assert_eq!(
+        &std::fs::read(dir.join("movie.mkv")).unwrap()[..art],
+        &plain[..art],
+        "a refused write lands nothing"
+    );
+
+    // The real resume: re-latches plaintext-once on the journaled head
+    // record, replays, finishes byte-exact.
+    {
+        let (journal, resume) = crate::journal::Journal::open(&dir, b"nzb-158p").unwrap();
+        let restored = crate::journal::restore_for(&dir, &resume, Some("hunter2"), false);
+        for id in &run1_ids {
+            assert!(restored.ids.contains(id), "{id} restores");
+        }
+        let ex = Extractor::with_resume(&dir, 1, true, true);
+        ex.set_password("hunter2");
+        replay_restored(&ex, &dir, &restored, &vol, art);
+        {
+            let inner = ex.inner.lock_ok();
+            assert!(
+                inner.crypto_files.contains_key("movie.mkv"),
+                "re-latched plaintext-once"
+            );
+            assert!(!inner.ciphertext_files.contains("movie.mkv"));
+        }
+        // The frontier articles whose D never settled in run 1 are not
+        // in `completed`, so the pool refetches them; then the rest.
+        let refetch = arts(1, cut).filter(|(i, _, _)| !run1_ids.contains(&format!("<a{i}@t>")));
+        run_journaled(&ex, &journal, &vol, refetch.chain(arts(cut, n)));
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    }
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), plain);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A journal that claims one file under BOTH routes - an `E`+`D` and an
+/// `R` naming it - can only come from a binary without the fix (a run
+/// that wrote ciphertext over plaintext and recorded neither change).
+/// Its bytes may be either domain, so the `D` articles must refuse
+/// admission: re-encrypting ciphertext poisons a volume exactly as
+/// copying plaintext would. The file is then a wire output, never a
+/// plaintext-once one.
+#[test]
+fn a_file_the_journal_claims_under_both_routes_refetches_its_d_articles() {
+    let dir = tmpdir("158-2-contradiction");
+    std::fs::write(dir.join("movie.mkv"), payload(200_000, 5)).unwrap();
+    std::fs::write(dir.join("v.rar"), payload(200_000, 6)).unwrap();
+    let salt = "00".repeat(16);
+    let text = format!(
+        "nzbfast-journal v1 d41d8cd98f00b204e9800998ecf8427e\n\
+         S 0 200000 v.rar\n\
+         F 0 movie.mkv\n\
+         E {salt} 12 {salt} 150000 - movie.mkv\n\
+         D 0 0:0:5000:32768 <a1@t>\n\
+         R 0 0:40000:45000:32768 <a2@t>\n"
+    );
+    std::fs::write(dir.join(".nzbfast.journal"), text).unwrap();
+    let (_j, resume) = crate::journal::Journal::open(&dir, b"").unwrap();
+    assert!(resume.crypto_files.contains_key("movie.mkv"), "E parsed");
+    let restored = crate::journal::restore_for(&dir, &resume, Some("pw"), false);
+    assert!(
+        !restored.ids.contains("<a1@t>"),
+        "the D article must refetch"
+    );
+    assert!(
+        restored.ids.contains("<a2@t>"),
+        "the R article restores as before"
+    );
+    assert!(restored.plaintext_outputs.is_empty());
+    assert_eq!(restored.wire_outputs.get("movie.mkv"), Some(&32768));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

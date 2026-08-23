@@ -10,9 +10,18 @@ mod scratch;
 
 // §123 chip-6 surfaces (bytes-skew and friends) - a sibling-dir child
 // so this file stays inside its size-gate baseline.
+mod e2e_chaserepair;
+mod e2e_chaseresume;
 mod e2e_chip6;
+mod e2e_drop;
+mod e2e_holdstrace;
 mod e2e_repair;
+mod e2e_resume;
 mod e2e_sample;
+mod e2e_split;
+mod e2e_tar;
+mod e2e_vouch;
+mod e2e_zipsplit;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -369,6 +378,22 @@ fn rar_release(tag: &str, with_par2: bool) -> (Fixture, Vec<u8>, Vec<String>) {
 /// 20% covers two damaged articles; a test that damages one article in
 /// EVERY volume needs more, because at this geometry (60 kB articles,
 /// par2's own ~450 byte blocks) a single bad article costs ~134 blocks.
+///
+/// **These volumes carry NO data CRC**, and that is deliberate on both
+/// sides. `fixtures::rar5_volume_n` omits it (`rar5_volume_n_crc` is the
+/// variant that stamps one), so nothing downstream of the extractor
+/// checksums the payload - which is why every damage-and-repair leg over
+/// this fixture ends by comparing `out/movie.mkv` to `inner` byte for
+/// byte rather than resting on the job's exit status. Keep that
+/// assertion in any new leg: without it a repair that produced the wrong
+/// bytes would still exit 0 here.
+///
+/// And do NOT "fix" this by switching to `rar5_volume_n_crc`. The
+/// absence is load-bearing for the e2e_repair leg
+/// `a_missing_external_par2_still_reaches_the_native_escalation`, which
+/// pins the `nothing_done` guard in `try_rar_rr_repair_hinted` - a guard
+/// whose whole job is to stop a set with neither a recovery record nor a
+/// CRC being promoted into an extraction attempt over the damage.
 fn rar_release_r(tag: &str, redundancy: Option<u32>) -> (Fixture, Vec<u8>, Vec<String>) {
     let mut fx = Fixture::new(tag);
     // WinRAR-true geometry: volume 0 (no volume-number field in its main
@@ -1898,6 +1923,17 @@ async fn encrypted_compressed_rar_extracts_one_pass() {
 /// ("materializing volumes for repair"), PAR2 repairs them on disk, and
 /// the re-extract pass must land the correct payload - rc=0 only for
 /// that end state.
+///
+/// **`NZBFAST_NO_CHASE_REPAIR=1` since the 22 Aug 2026 row-26 flip**,
+/// which is what this door now IS. A stock binary repairs this exact
+/// shape in place and never writes a volume, at 2.03x payload of
+/// device I/O against 3.06x for the ladder below - that ending is
+/// pinned in `e2e_chaserepair`. The ladder stays reachable (the kill
+/// switch, and a poster-side conflict that forfeits into it) and this
+/// is the only leg that walks the whole of it at depth 0 on a
+/// compressed set: materialize, repair on disk, re-extract, correct
+/// bytes, spent volumes cleaned up. Without the switch the assertions
+/// below all invert and the ladder goes untested.
 #[tokio::test(flavor = "multi_thread")]
 async fn top_level_compressed_rar_damaged_repairs_and_reextracts() {
     if !have_par2() {
@@ -1931,7 +1967,9 @@ async fn top_level_compressed_rar_damaged_repairs_and_reextracts() {
     // Lose a DATA article inside part2's packed stream: the chase engine
     // blocks at the gap, verification reads the hole back bad, and the
     // mapped-repair gate declines the chased slot - forcing the
-    // materialize + repair_dir + re-extract path this test pins.
+    // materialize + repair_dir + re-extract path this test pins. Since
+    // 22 Aug 2026 that decline is the kill switch's doing rather than
+    // the default's; see the doc comment.
     let victim = fx
         .articles
         .keys()
@@ -1947,11 +1985,16 @@ async fn top_level_compressed_rar_damaged_repairs_and_reextracts() {
     let nzb = fx.write_nzb();
     let out = fx.dir.join("out");
 
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
+    let (log, ok) = tokio::task::spawn_blocking(move || {
+        run_get(&cfg, &nzb, &out, &[("NZBFAST_NO_CHASE_REPAIR", "1")])
+    })
+    .await
+    .unwrap();
     assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("materializing volumes for repair"), "{log}");
+    assert!(
+        log.contains("materializing volumes for repair"),
+        "the kill switch did not disarm the in-place repair:\n{log}"
+    );
     assert!(log.contains("repair complete"), "no repair:\n{log}");
     // The re-extract pass runs in protect-sources mode, which never
     // chases - a compressed set demotes there and exits through its
@@ -3063,7 +3106,10 @@ async fn kill9_resume_completes_without_refetching_everything() {
             .unwrap()
     };
     assert!(ok, "{log}");
-    assert!(log.contains("resuming:"), "no resume banner:\n{log}");
+    assert!(
+        log.contains("article(s) already on disk"),
+        "no resume banner:\n{log}"
+    );
     assert!(
         log.contains("clean download") || log.contains("repair complete"),
         "{log}"
@@ -3084,148 +3130,6 @@ async fn kill9_resume_completes_without_refetching_everything() {
 /// The 2026-07 bench4 "honest loss": kill -9 mid-download of a store-mode
 /// RAR job being DIRECT-EXTRACTED. The bytes land in the extracted inner
 /// file, not in any volume file, so the v1 journal covered nothing and a
-/// §94 A (NZBFAST_RESUME_MAP): the same kill+resume as
-/// `kill9_resume_direct_extract_refetches_little`, but run 2 must resume
-/// INTO mapped mode - restored spans replay through the normal write
-/// path, the mappers re-derive their state from replayed headers, and
-/// the run stays one-pass: shape line says so, and no volume files exist
-/// at exit (nothing materialized, nothing re-extracted from disk).
-#[tokio::test(flavor = "multi_thread")]
-async fn kill9_resume_map_resumes_into_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("resume-map");
-    let inner = payload(3_000_000, 47);
-    let n_vols = 4;
-    let per = inner.len() / n_vols;
-    let mut vol_names: Vec<String> = Vec::new();
-    let mut pos = 0usize;
-    for i in 0..n_vols {
-        let len = if i == 0 {
-            per + 1
-        } else if i < n_vols - 1 {
-            per
-        } else {
-            inner.len() - pos
-        };
-        let part = &inner[pos..pos + len];
-        pos += len;
-        let vol = fixtures::rar5_volume_n(
-            &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
-            i as u64,
-        );
-        let name = format!("r.part{}.rar", i + 1);
-        fx.add_file(&name, &vol, 25_000);
-        vol_names.push(name);
-    }
-    {
-        let names: Vec<&str> = vol_names.iter().map(String::as_str).collect();
-        assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
-    }
-    let total_articles = fx.articles.len() as u64;
-    let srv = MockServer::start(
-        fx.articles.clone(),
-        Chaos {
-            delay_ms: 10,
-            ..Chaos::default()
-        },
-    )
-    .await;
-    let served = srv.served.clone();
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    // Run 1 (flag OFF - the kill can land either side of classification;
-    // what matters is a journal with real placements): kill -9 once ~40%
-    // of the articles are served AND at least one placement is recorded.
-    {
-        let cfg = cfg.clone();
-        let nzb = nzb.clone();
-        let out = out.clone();
-        let served = served.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            let journal = out.join(".nzbfast.journal");
-            while served.load(std::sync::atomic::Ordering::Relaxed) < total_articles * 2 / 5
-                || !std::fs::read_to_string(&journal)
-                    .is_ok_and(|s| s.lines().any(|line| line.starts_with("R ")))
-            {
-                if std::time::Instant::now() > deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            child.kill().unwrap();
-            let _ = child.wait();
-        })
-        .await
-        .unwrap();
-    }
-    let served_run1 = served.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        served_run1 >= total_articles * 2 / 5,
-        "run 1 made no progress ({served_run1}/{total_articles})"
-    );
-
-    // Run 2: replay + map. One-pass all the way to a clean finish.
-    let (log, ok) = {
-        let cfg = cfg.clone();
-        let nzb = nzb.clone();
-        let out = out.clone();
-        tokio::task::spawn_blocking(move || {
-            run_get(&cfg, &nzb, &out, &[("NZBFAST_RESUME_MAP", "1")])
-        })
-        .await
-        .unwrap()
-    };
-    assert!(ok, "{log}");
-    assert!(log.contains("resume: replayed"), "no replay banner:\n{log}");
-    assert!(
-        log.contains("one-pass"),
-        "resumed run did not map in-stream:\n{log}"
-    );
-    // The old resume path's disk re-extraction must NOT have run.
-    assert!(
-        !log.contains("resumed job: the verified volumes"),
-        "took the disk re-extract path:\n{log}"
-    );
-    // Refetch stays bounded to the un-journaled remainder (+1 slack).
-    let journal_txt = std::fs::read_to_string(fx.dir.join("out/.nzbfast.journal")).ok();
-    let refetched = served.load(std::sync::atomic::Ordering::Relaxed) - served_run1;
-    assert!(
-        refetched <= total_articles,
-        "replay refetched more than the whole set ({refetched}); journal: {journal_txt:?}"
-    );
-    // End state: extracted output byte-identical, no volume files (the
-    // replayed sources are removed after the fully-good finish, and the
-    // map never materialized any), journal gone.
-    assert_eq!(std::fs::read(fx.dir.join("out/movie.mkv")).unwrap(), inner);
-    for v in &vol_names {
-        assert!(
-            !fx.dir.join("out").join(v).exists(),
-            "volume {v} left behind under resume replay:\n{log}"
-        );
-    }
-    assert!(!fx.dir.join("out/.nzbfast.journal").exists());
-}
-
 /// resume refetched the whole pre-kill payload (15.3 GB vs NZBGet's
 /// 0.2 GB). The placement journal must record where each article's bytes
 /// physically went, the resume must copy them back into volume files
@@ -3347,10 +3251,13 @@ async fn kill9_resume_direct_extract_refetches_little() {
     };
     assert!(ok, "{log}");
     assert!(
-        log.contains("resume: restored"),
+        log.contains("[resume] restored"),
         "no restore banner:\n{log}"
     );
-    assert!(log.contains("resuming:"), "no resume banner:\n{log}");
+    assert!(
+        log.contains("article(s) already on disk"),
+        "no resume banner:\n{log}"
+    );
     assert!(
         log.contains("clean download") || log.contains("repair complete"),
         "{log}"
@@ -3509,7 +3416,7 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
     };
     assert!(ok, "{log}");
     assert!(
-        log.contains("resume: restored"),
+        log.contains("[resume] restored"),
         "no restore banner:\n{log}"
     );
     let refetched = served.load(std::sync::atomic::Ordering::Relaxed) - served_run1;
@@ -3519,198 +3426,6 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
     );
     assert_eq!(std::fs::read(fx.dir.join("out/movie.mkv")).unwrap(), inner);
     assert!(!fx.dir.join("out/.nzbfast.journal").exists());
-}
-
-/// Finding A8, end to end with the real binary and a real SIGKILL.
-///
-/// An encrypted RAR5 STORE set direct-extracts as ciphertext at plain
-/// store offsets, and the placement journal records the articles as living
-/// in that output file. The finish decrypt then replaces those bytes with
-/// plaintext. When it did so IN PLACE, a kill mid-pass left the file half
-/// plaintext and half ciphertext with the journal still calling it
-/// authoritative - and the resume copied the poisoned bytes into the
-/// volume files and marked the message ids restored, so they were never
-/// refetched. There is no PAR2 here on purpose: that is the shape where
-/// nothing downstream would ever notice, and the retry can loop forever on
-/// local garbage while the provider still holds every original article.
-///
-/// The kill is aimed at the decrypt window (spin until the pass's scratch
-/// file or the journal's retirement line appears), but the assertion does
-/// not depend on hitting it: whatever instant the kill caught, the output
-/// on disk must be wholly one thing or the other, and run 2 must produce
-/// the exact payload.
-#[tokio::test(flavor = "multi_thread")]
-async fn kill9_mid_decrypt_never_resumes_from_poisoned_bytes() {
-    let mut fx = Fixture::new("resume-enc");
-    let inner = payload(6_000_000, 71);
-    let enc = fixtures::encrypt_file("hunter2", &inner, 17);
-    let cipher = enc.cipher.clone();
-    let n_vols = 3;
-    let per = cipher.len() / n_vols;
-    for i in 0..n_vols {
-        let end = if i == n_vols - 1 {
-            cipher.len()
-        } else {
-            (i + 1) * per
-        };
-        let vol = fixtures::rar5_volume_enc(
-            &[("movie.mkv", &enc, i * per..end, i > 0, i < n_vols - 1)],
-            Some(i as u64),
-        );
-        fx.add_file(&format!("e.part{}.rar", i + 1), &vol, 25_000);
-    }
-    let total_articles = fx.articles.len() as u64;
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let served = srv.served.clone();
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-    let journal = out.join(".nzbfast.journal");
-    let movie = out.join("movie.mkv");
-
-    // Run 1: SIGKILL as close to the decrypt as the test can aim.
-    let caught = {
-        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
-        let (served, journal) = (served.clone(), journal.clone());
-        tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                // This test guards the LEGACY finish-decrypt's kill
-                // ordering (temp + barrier + rename). The default
-                // plaintext-once path has no decrypt scratch to catch -
-                // its articles are simply never journaled.
-                .env("NZBFAST_NO_INSTREAM_DECRYPT", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--password")
-                .arg("hunter2")
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            let mut caught = "deadline";
-            loop {
-                if std::time::Instant::now() > deadline {
-                    break;
-                }
-                // Decrypt scratch on disk = the pass is running right now.
-                let scratch = std::fs::read_dir(&out)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .any(|e| e.file_name().to_string_lossy().starts_with(".nzbfast-dec."));
-                if scratch {
-                    caught = "mid-decrypt";
-                    break;
-                }
-                // Retirement line = the barrier cleared, publish imminent.
-                if std::fs::read_to_string(&journal)
-                    .is_ok_and(|t| t.lines().any(|l| l.starts_with("X ")))
-                {
-                    caught = "post-barrier";
-                    break;
-                }
-                if child.try_wait().unwrap().is_some() {
-                    caught = "already exited";
-                    break;
-                }
-                if served.load(std::sync::atomic::Ordering::Relaxed) >= total_articles {
-                    std::thread::yield_now();
-                }
-            }
-            let _ = child.kill(); // SIGKILL
-            let _ = child.wait();
-            caught
-        })
-        .await
-        .unwrap()
-    };
-    eprintln!("kill landed: {caught}");
-
-    // Whatever instant the kill caught, the output is never a mix. Either
-    // it is still the ciphertext the journal describes (so a resume reads
-    // local bytes), or it is the published plaintext and the journal has
-    // stopped claiming it (so those articles refetch).
-    if movie.exists() {
-        let on_disk = std::fs::read(&movie).unwrap();
-        let retired = std::fs::read_to_string(&journal)
-            .is_ok_and(|t| t.lines().any(|l| l.trim() == "X movie.mkv"));
-        let is_cipher = on_disk.len() >= cipher.len() && on_disk[..cipher.len()] == cipher[..];
-        let is_plain = on_disk == inner;
-        assert!(
-            is_cipher || is_plain,
-            "movie.mkv is neither intact ciphertext nor the finished plaintext \
-             (len {}, kill landed {caught}) - a half-decrypted file is exactly \
-             what poisons the resume",
-            on_disk.len()
-        );
-        assert!(
-            !is_cipher || !retired,
-            "the journal retired its claim before the bytes were published"
-        );
-        assert!(
-            !is_plain || retired || !journal.exists(),
-            "plaintext is published but the journal still claims it is the \
-             recorded ciphertext - a resume would restore poisoned bytes"
-        );
-    }
-
-    // Run 2: resume, and land the exact payload. A restore that trusted
-    // half-decrypted bytes would produce a corrupt movie.mkv here (with no
-    // PAR2 to catch it) or spin without ever converging.
-    let (log, ok) = {
-        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
-        tokio::task::spawn_blocking(move || {
-            let o = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .env("NZBFAST_NO_INSTREAM_DECRYPT", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--password")
-                .arg("hunter2")
-                .arg("--connections")
-                .arg("4")
-                .arg("--window")
-                .arg("3")
-                .output()
-                .unwrap();
-            (
-                String::from_utf8_lossy(&o.stdout).to_string()
-                    + &String::from_utf8_lossy(&o.stderr),
-                o.status.success(),
-            )
-        })
-        .await
-        .unwrap()
-    };
-    assert!(ok, "resume after a mid-decrypt kill failed:\n{log}");
-    assert_eq!(
-        std::fs::read(&movie).unwrap(),
-        inner,
-        "resumed output is not the exact payload:\n{log}"
-    );
-    assert!(
-        !journal.exists(),
-        "journal survived a verified finish:\n{log}"
-    );
-    assert!(
-        std::fs::read_dir(&out)
-            .unwrap()
-            .flatten()
-            .all(|e| !e.file_name().to_string_lossy().starts_with(".nzbfast-dec.")),
-        "decrypt scratch left in the output directory"
-    );
 }
 
 /// M14e tiers: a level-1 fill server serves ONLY the articles the
@@ -4009,7 +3724,7 @@ async fn tiny_mem_budget_spills_and_completes() {
     );
     // …verification still passed without repair…
     assert!(log.contains("clean download - no repair"), "{log}");
-    assert!(log.contains("mem: peak RSS"), "{log}");
+    assert!(log.contains("[mem] peak RSS"), "{log}");
     // …and the bytes are perfect.
     assert_eq!(std::fs::read(fx.dir.join("out/big.bin")).unwrap(), data);
 }
@@ -4066,7 +3781,7 @@ async fn tiny_mem_budget_fast_verify_never_spills() {
     // a single article is a block and nothing could be reused. (The
     // counting rules themselves are pinned in nzbkit's live.rs.)
     assert!(
-        log.contains("crc-reuse-geometry: 0/100 articles"),
+        log.contains("[crc-geometry] 0/100 articles"),
         "reuse geometry line missing or miscounted:\n{log}"
     );
     assert_eq!(std::fs::read(fx.dir.join("out/big.bin")).unwrap(), data);
@@ -4310,6 +4025,10 @@ async fn auto_connections_off_lifts_the_conntune_cap() {
 /// byte-identical output. The accuracy trade is bounded, never absent.
 #[tokio::test(flavor = "multi_thread")]
 async fn lean_verify_catches_corruption_at_the_block_layer() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
     let mut fx = Fixture::new("lean");
     let data = payload(600_000, 9);
     fx.add_file("payload.bin", &data, 50_000);
@@ -4353,7 +4072,7 @@ async fn lean_verify_catches_corruption_at_the_block_layer() {
     .await
     .unwrap();
     assert!(ok, "{log}");
-    assert!(log.contains("verify: lean"), "lean banner missing:\n{log}");
+    assert!(log.contains("[verify] lean"), "lean banner missing:\n{log}");
     assert!(
         log.contains("repair complete"),
         "block layer missed the corruption:\n{log}"
@@ -4684,7 +4403,7 @@ async fn nested_inner_par2_repairs_poster_damaged_layer() {
     );
     // The nested pass ran the INNER recovery set on disk.
     assert!(
-        log.contains("nested PAR2: repaired"),
+        log.contains("[par2] nested set: repaired"),
         "inner par2 did not repair:\n{log}"
     );
     let got = std::fs::read(fx.dir.join("out/show.mkv")).expect("payload extracted");
@@ -4830,7 +4549,7 @@ async fn nested_inner_par2_repairs_data_damaged_store_layer() {
     );
     // The nested pass ran the INNER recovery set on disk.
     assert!(
-        log.contains("nested PAR2: repaired"),
+        log.contains("[par2] nested set: repaired"),
         "inner par2 did not repair:\n{log}"
     );
     let got = std::fs::read(fx.dir.join("out/show.mkv")).expect("payload extracted");
@@ -6024,11 +5743,11 @@ async fn top_level_zip_split_set_extracts_one_pass() {
     }
 }
 
-/// A BARE-NUMERIC byte-split set (`release.001`, no `.zip.` infix -
-/// the hjsplit shape) streams the same way: the NZB's file list is the
+/// A BARE-NUMERIC byte-split set (`release.001`, no `.zip.` infix - the
+/// hjsplit shape) streams the same way: the NZB's file list is the
 /// declaration and part 1's magic is the gate, so the ambiguity with
-/// RAR numeric volumes costs nothing. This pins the get.rs declaration
-/// path for the numeric grammar end to end.
+/// RAR numeric volumes costs nothing. This pins the get/vrig.rs
+/// declaration path for the numeric grammar end to end.
 #[tokio::test(flavor = "multi_thread")]
 async fn top_level_bare_numeric_zip_split_extracts_one_pass() {
     if !have_par2() {
@@ -6612,7 +6331,7 @@ async fn an_obfuscated_post_repairs_from_its_own_unnamed_par2() {
         "the magic sniff never reclassified a volume:\n{log}"
     );
     assert!(
-        log.contains("PAR2 set live"),
+        log.contains("[par2] set live"),
         "the sniffed set never activated in-stream:\n{log}"
     );
     // The payload is back, byte-exact, under the name PAR2 knows it by.
@@ -6863,7 +6582,7 @@ async fn a_disk_repair_does_not_certify_files_outside_its_recovery_set() {
     .unwrap();
 
     assert!(
-        log.contains("PAR2 set live"),
+        log.contains("[par2] set live"),
         "the sniffed recovery set never activated, so this pins nothing:\n{log}"
     );
     // #23: furniture the set cannot cover no longer fails the job...
@@ -6983,7 +6702,10 @@ async fn kill9_resume_of_an_obfuscated_post_still_defers_recovery_volumes() {
             .unwrap()
     };
     assert!(ok, "resume of a clean obfuscated post failed:\n{log}");
-    assert!(log.contains("resuming:"), "no resume banner:\n{log}");
+    assert!(
+        log.contains("article(s) already on disk"),
+        "no resume banner:\n{log}"
+    );
     assert!(
         log.contains("recovery volumes by content"),
         "the resume-side disk sniff never recognised the restored volumes:\n{log}"
@@ -7153,7 +6875,7 @@ async fn an_undamaged_obfuscated_post_defers_its_sniffed_recovery_volumes() {
         "the magic sniff never fired:\n{log}"
     );
     assert!(
-        log.contains("PAR2 set live"),
+        log.contains("[par2] set live"),
         "the sniffed set never activated in-stream:\n{log}"
     );
     assert!(
@@ -7776,4 +7498,66 @@ async fn a_missing_nfo_completes_the_job_but_a_missing_payload_file_still_fails(
         log2.contains("download incomplete"),
         "wrong verdict for a short payload:\n{log2}"
     );
+}
+
+/// 22 Aug 2026, tv4-rot1: an NZB whose segment ladder is rotated and
+/// renumbered 1..N (the synthesized-numbering shape obfuscated posts
+/// carry) pulled 2x its payload from five real providers on five
+/// releases, with 0 reconnects and a near-empty dup tally. The TODO 114
+/// part-identity gate compared the DECLARED segment number to the yEnc
+/// part, mismatched on every article, and steered each one to another
+/// server once - an extra BODY per article that no counter showed. The
+/// mock never reproduced it because `crc_steer` auto-detects off for
+/// same-host twins; NZBFAST_CRC_STEER=1 is the real-fleet shape. Pins:
+/// the gate stands down once two servers agree on the undeclared part,
+/// the steers it did issue are printed, and the output is byte-exact.
+#[tokio::test(flavor = "multi_thread")]
+async fn rotated_ladder_does_not_fetch_every_article_twice() {
+    for steer in ["0", "1"] {
+        let mut fx = Fixture::new("rot1census");
+        let data = payload(4_000_000, 5);
+        fx.add_file("payload.bin", &data, 32_000);
+        for (_, segs) in fx.nzb_files.iter_mut() {
+            segs.rotate_left(1);
+            for (i, s) in segs.iter_mut().enumerate() {
+                s.2 = i as u32 + 1;
+            }
+        }
+        let nzb = fx.write_nzb();
+        let a = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+        let b = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+        let cfg = fx.write_config(&[&a, &b]);
+        let out = fx.dir.join("out");
+        let (cfg2, nzb2, out2) = (cfg.clone(), nzb.clone(), out.clone());
+        let (log, ok) = tokio::task::spawn_blocking(move || {
+            run_get(&cfg2, &nzb2, &out2, &[("NZBFAST_CRC_STEER", steer)])
+        })
+        .await
+        .unwrap();
+        assert!(ok, "steer={steer} leg failed:\n{log}");
+        assert_eq!(std::fs::read(out.join("payload.bin")).unwrap(), data);
+        let articles = fx.articles.len() as u64;
+        let requests: u64 = [&a, &b]
+            .iter()
+            .flat_map(|s| s.serve_counts().into_values())
+            .sum();
+        if steer == "0" {
+            assert_eq!(requests, articles, "no steer: one BODY per article");
+            assert!(!log.contains("part steers"), "{log}");
+            continue;
+        }
+        // Before the latch every article steered once (250 of 125).
+        // With it, only the bodies already in flight when the first
+        // refetch reported can steer: 6-19 measured at 4 conns x
+        // window 3 x 2 servers. The bound is the in-flight ceiling
+        // with slack, and well under the 2x it pins against.
+        assert!(
+            requests <= articles + 50,
+            "steer=1: {requests} BODYs for {articles} articles - the part gate is refetching the ladder\n{log}"
+        );
+        assert!(
+            log.contains("part steers (gate stood down)"),
+            "the steers the gate issued must be printed:\n{log}"
+        );
+    }
 }

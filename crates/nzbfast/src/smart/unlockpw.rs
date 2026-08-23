@@ -1,6 +1,7 @@
 //! Spending a password we hold on a locked archive: where the
 //! operator's passwords file lives for code that cannot reach the
-//! daemon, and the non-RAR half of [`super::unlock`].
+//! daemon, and the unlock ladder itself - [`unlock`], its reason-carrying
+//! twin, and the non-RAR shapes underneath both.
 //!
 //! A child module file rather than inline: smart.rs sits under a
 //! size-gate baseline (TODO 106) and the numbers only go down.
@@ -146,4 +147,135 @@ pub(super) fn unlock_non_rar(dir: &Path, password: &str) -> Option<bool> {
     }
     info!(target: "unlock", "{}: zip container unlocked", dir.display());
     Some(true)
+}
+
+/// Unlock a password-protected set: unrar with the password, and on
+/// success delete the volume files (the unpacked content is the
+/// deliverable, matching the engine's post-extraction behavior).
+///
+/// `Err(None)` is the ordinary answer and means what the `bool` this
+/// returned until 22 Aug 2026 meant: this password did not open anything
+/// here. `Err(Some(why))` is a refusal that is about the DISK - today
+/// only a bomb verdict, raised by the two rungs inside
+/// [`crate::rarfix::try_unrar_spent_why`] - and dropping it here was
+/// worse than wrong wording, because the callers are SWEEPS. Every
+/// candidate in the operator's passwords file is another extraction
+/// attempt against the same full disk, so one bomb refused every
+/// password in the file in turn and the job was then reported as having
+/// none that worked (`serve/job_finalize.rs`, `serve/job.rs`). A named
+/// reason therefore STANDS THE SWEEP DOWN at the first candidate as well
+/// as being quoted: there is nothing for a second password to do
+/// differently.
+///
+/// It also stops the fall-through to [`unlock_non_rar`] below, for the
+/// same reason the nested pass stops at its first refusal: that arm
+/// extracts a 7z or a zip, on the disk that has just refused to hold an
+/// extraction.
+///
+/// A `Result` rather than a bool with a `_why` twin beside it, which is
+/// the shape [`crate::rarfix::try_unrar_spent_why`] and
+/// [`crate::repair::reextract_dir_why`] took: those two kept their plain
+/// wrappers for callers that genuinely only ask "did it unpack", and
+/// this function has none left. Every caller composes something the user
+/// reads. A fresh bool wrapper here would be a third place for the
+/// verdict to be dropped, which is the whole defect this closes.
+pub fn unlock(dir: &Path, password: &str) -> std::result::Result<(), Option<String>> {
+    // The non-RAR shapes are decided UP FRONT, not as a fall-through
+    // behind `reextract_dir_why`.
+    //
+    // That ordering is not a style choice. `reextract_dir_why` answers
+    // Ok(Ok(())) for a directory holding no RAR volumes at all ("no
+    // archive volumes on disk - nothing to re-extract"), which is
+    // correct for what it does and fatal as a gate: a directory whose
+    // only lock is a 7z or a zip has no RAR volumes BY DEFINITION, so
+    // the arms below never ran and this function reported the password
+    // as working over a set still packed - the exact failure the
+    // obfuscated-RAR branch inside `reextract_dir_why` was added to prevent,
+    // reproduced one level up. Observed on advP (12 Aug): "unpacked - 0
+    // volume file(s) spent", then "unlocked", with both containers
+    // untouched.
+    //
+    // Precedence matches `encrypted_archive`, which is what named the
+    // archive the caller is unlocking: RAR first claim, so a directory
+    // holding a locked RAR keeps the whole path below and these arms
+    // stay out of it.
+    if encrypted_rar(dir).is_none()
+        && let Some(unlocked) = unlock_non_rar(dir, password)
+    {
+        return unlocked.then_some(()).ok_or(None);
+    }
+    // Native path first: encrypted STORE sets (the obfuscated-release
+    // norm) re-extract and AES-decrypt without unrar, deleting their
+    // volumes on success. Compressed or RAR4-encrypted sets fall through
+    // to unrar inside reextract_dir_why; a wrong password fails both.
+    // Volume deletion belongs to the extraction, not to this function.
+    // `reextract_dir_why` removes exactly what it CONSUMED on every success path
+    // (the streaming pass sweeps the set it fed, the native and unrar paths
+    // sweep against a proof-of-output snapshot), so a RAR-named file still
+    // present afterwards is one of three things, and deleting any of them is
+    // wrong:
+    //
+    //   - a file the extraction just PUBLISHED - an encrypted outer set whose
+    //     payload is the release's own inner RAR set unlocks to
+    //     `inner.partNN.rar`, and sweeping them left a Completed job with no
+    //     payload at all;
+    //   - a volume the spent-proof deliberately refused to delete;
+    //   - the volumes of ANOTHER top-level set in the same directory that
+    //     this password did not unlock. `reextract_dir_why`'s directory-level
+    //     answer is existential - one set unpacking makes it true - so with
+    //     encrypted sets A and B and a password for A only, the sweep deleted
+    //     B's only copy. That is the shape this whole path exists to protect.
+    //
+    // So: count what the extraction removed, delete nothing.
+    let vol_snapshot = |dir: &Path| -> std::collections::HashSet<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        let name = p
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_lowercase();
+                        // .rar plus split continuations (.r00, .r01, …).
+                        name.ends_with(".rar")
+                            || name.rfind('.').is_some_and(|i| {
+                                let t = &name[i + 1..];
+                                t.len() >= 3
+                                    && t.starts_with('r')
+                                    && t[1..].bytes().all(|c| c.is_ascii_digit())
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let before = vol_snapshot(dir);
+    // `reextract_dir_why`, not the bool wrapper: an io error is still
+    // "this password opened nothing" (as `unwrap_or(false)` always read
+    // it), but a bomb verdict is not, and dropping it here is what let
+    // one full disk be reported as a whole passwords file of wrong
+    // guesses.
+    match crate::reextract_dir_why(dir, Some(password)) {
+        Ok(Ok(())) => {}
+        Ok(Err(Some(why))) => return Err(Some(why)),
+        // No RAR set took the password. A directory holding a locked RAR
+        // *and* a locked container of another shape skipped the arms
+        // above (RAR had first claim) - so they get their turn here,
+        // before the password is called wrong.
+        Ok(Err(None)) | Err(_) => {
+            return unlock_non_rar(dir, password)
+                .unwrap_or(false)
+                .then_some(())
+                .ok_or(None);
+        }
+    }
+    let removed = before.difference(&vol_snapshot(dir)).count();
+    info!(
+        target: "unlock",
+        "{} unpacked - {removed} volume file(s) spent",
+        dir.display()
+    );
+    Ok(())
 }

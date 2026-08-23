@@ -436,6 +436,8 @@ pub struct Fetched {
     /// the user's choice, not the responding server's. Kept (and
     /// asserted on) so the header parse stays covered if a future caller
     /// has a legitimate use for it.
+    // Not #[expect]: the assertion named above IS a read, so the
+    // expectation is unfulfilled under cfg(test).
     #[allow(dead_code)]
     pub category: String,
     /// Every address the REQUESTED url's netloc resolved to during this

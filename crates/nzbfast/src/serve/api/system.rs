@@ -192,6 +192,10 @@ fn m_log(
             nzbkit::logtee::active(),
             d.settings_path.parent(),
         );
+        // §163 item 5: scrubbed on the way out, on BOTH sources - the
+        // ring and the daemon.log fallback carry the same lines, and
+        // this is the pane whose contents get pasted into issues.
+        let lines = super::super::logscrub::LogScrub::new(d).tail(lines);
         json!({ "lines": lines, "capturing": capturing })
     })
 }
@@ -460,14 +464,13 @@ fn m_remote_info(
         } else {
             // Reached via localhost - auto-detect a shareable LAN
             // IP (bare metal only; a container would just detect
-            // its own bridge address). No packet is sent.
-            let lan = std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|s| {
-                s.connect("8.8.8.8:53").ok()?;
-                s.local_addr().ok()
-            });
-            if let Some(a) = lan {
+            // its own bridge address). No packet is sent, and the
+            // socket that asks is bound at most once a minute rather
+            // than once a call (TODO 33 - it is a wildcard bind, which
+            // is a macOS firewall dialog).
+            if let Some(a) = crate::serve::lanaddr::route_src("8.8.8.8:53") {
                 urls.push(json!({"kind": "lan",
-                                "url": format!("{scheme}://{}:{port}/", a.ip()),
+                                "url": format!("{scheme}://{a}:{port}/"),
                                 "label": "Wi-Fi / same network"}));
             }
         }
@@ -488,20 +491,18 @@ fn m_remote_info(
         // Tailscale (CGNAT 100.64/10): if present, this URL
         // works from ANYWHERE the phone is on the tailnet -
         // the zero-port-forwarding external answer.
-        let ts = std::net::UdpSocket::bind("0.0.0.0:0")
-            .ok()
-            .and_then(|s| {
-                s.connect("100.100.100.100:53").ok()?;
-                s.local_addr().ok()
-            })
-            .map(|a| a.ip())
-            .filter(|ip| match ip {
-                std::net::IpAddr::V4(v) => {
-                    let o = v.octets();
-                    o[0] == 100 && (64..128).contains(&o[1])
-                }
-                _ => false,
-            });
+        // Cached like the LAN lookup above, and this is the site that
+        // needed it most: the answer is asked for on every call whether
+        // the panel is loopback-reached or not, and on a machine with
+        // no Tailscale - almost all of them - the answer is a miss that
+        // never changes.
+        let ts = crate::serve::lanaddr::route_src("100.100.100.100:53").filter(|ip| match ip {
+            std::net::IpAddr::V4(v) => {
+                let o = v.octets();
+                o[0] == 100 && (64..128).contains(&o[1])
+            }
+            _ => false,
+        });
         if let Some(ip) = ts {
             urls.push(json!({"kind": "tailscale",
                             "url": format!("{scheme}://{ip}:{port}/"),
@@ -765,6 +766,10 @@ fn m_sysbench(
                 d.bench_last.store(now, Ordering::Relaxed);
                 d.bench_append(json!({
                     "ts": now, "source": "manual",
+                    // See the scheduled twin in tasks.rs: history rows are
+                    // only comparable when the probed set matches.
+                    "network_host": v.network_host,
+                    "network_conns": v.network_conns,
                     "network_gbps": v.network_gbps,
                     "compute_gbps": v.compute_gbps,
                     "disk_gbps": v.disk_gbps,
@@ -1013,12 +1018,216 @@ pub(super) fn instrument_counters() -> Value {
     };
     #[cfg(not(feature = "indexer"))]
     let filename_fallback = Value::Null;
-    json!({"crc_reuse": crc_reuse, "filename_fallback": filename_fallback})
+    // Memory-floor gauges (instrument-first, memgauge.rs): per-subsystem
+    // current/peak bytes plus the gauge snapshot taken at the sampled RSS
+    // high-water. The CLI prints the same record as the mem-floor lines.
+    // The record is per job (F-19): `at_peak` reports the NEWEST job's,
+    // the one whose download is (or was last) running, and `jobs` adds
+    // a row per live job so an older job whose tail overlaps it - the
+    // one holding the repair high-water - is reachable here too.
+    let mem_floor = mem_floor_json(nzbkit::memgauge::peak_attribution());
+    json!({
+        "crc_reuse": crc_reuse,
+        "filename_fallback": filename_fallback,
+        "mem_floor": mem_floor,
+    })
+}
+
+/// The `mem_floor` object: every live gauge, `at_peak` (the newest job's
+/// sampled RSS high-water, null until a job has sampled once), `jobs`,
+/// one row per job whose sampler is still alive, and `recent`, the last
+/// few FINISHED jobs.
+///
+/// `jobs` exists because `at_peak` can only name one job and the daemon
+/// routinely runs two: job B's download overlaps job A's repair tail, so
+/// the record `at_peak` follows is B's while the high-water worth
+/// reading is A's. A's own summary prints it (get/tail.rs
+/// `print_mem_floor`); before this it was reachable nowhere else.
+/// `at_peak` keeps its exact previous shape and meaning - the CLI and
+/// every existing reader are untouched - and `jobs` is empty between
+/// jobs, when `at_peak` still answers with the last one.
+///
+/// `recent` covers what neither of those does (TODO 224): a poll that
+/// arrives AFTER a job's sampler retired. `at_peak` by then names the
+/// next job, and A's row has left `jobs`, so a repair that peaked at
+/// 900 MB and finished four seconds before the poll was invisible. Rows
+/// carry the same `{label, at_peak}` shape as `jobs`, oldest first, and
+/// the ring is capped in memgauge - a separate key on purpose, so
+/// neither existing key changes meaning.
+fn mem_floor_json(at_peak: Option<nzbkit::memgauge::PeakAttribution>) -> Value {
+    let names = [
+        nzbkit::memgauge::Sub::RawFree,
+        nzbkit::memgauge::Sub::RawOut,
+        nzbkit::memgauge::Sub::OutFree,
+        nzbkit::memgauge::Sub::OutOut,
+        nzbkit::memgauge::Sub::Channel,
+        nzbkit::memgauge::Sub::WireEst,
+        nzbkit::memgauge::Sub::Par2Capture,
+        nzbkit::memgauge::Sub::JobMeta,
+        nzbkit::memgauge::Sub::VerifierMeta,
+        nzbkit::memgauge::Sub::Holds,
+        nzbkit::memgauge::Sub::RepairScan,
+        nzbkit::memgauge::Sub::RepairWork,
+    ];
+    let gauges = gauges_json(&nzbkit::memgauge::snapshot(), &names);
+    let job_rows = |jobs: Vec<nzbkit::memgauge::JobPeak>| -> Vec<Value> {
+        jobs.into_iter()
+            .map(|j| json!({"label": j.label, "at_peak": at_peak_json(j.at_peak, &names)}))
+            .collect()
+    };
+    json!({
+        "gauges": gauges,
+        "at_peak": at_peak_json(at_peak, &names),
+        "jobs": job_rows(nzbkit::memgauge::live_peak_attributions()),
+        "recent": job_rows(nzbkit::memgauge::recent_peak_attributions()),
+    })
+}
+
+/// One sampled high-water as JSON, null when the job has not yet
+/// completed a sampler tick. Shared by `mem_floor.at_peak` and every
+/// `mem_floor.jobs[].at_peak`, so the two can never drift apart.
+fn at_peak_json(
+    at_peak: Option<nzbkit::memgauge::PeakAttribution>,
+    names: &[nzbkit::memgauge::Sub],
+) -> Value {
+    let Some(p) = at_peak else {
+        return Value::Null;
+    };
+    json!({
+        "rss": p.rss,
+        "footprint": p.footprint,
+        "retained": p.rss.saturating_sub(p.footprint),
+        // The snapshot the record exists to carry: what every gauge
+        // held AT the high-water (bug sweep 22 Aug 2026, F-20 - it used
+        // to be dropped, leaving only the live gauges above, which by
+        // the time of the poll say nothing about the peak).
+        "gauges": gauges_json(&p.gauges, names),
+        "unattributed": p.footprint.saturating_sub(attributed_sum(&p.gauges)),
+    })
+}
+
+/// One `{name: {cur, peak}}` object per gauge, for the live snapshot and
+/// the at-peak record alike.
+fn gauges_json(
+    g: &nzbkit::memgauge::MemGauges,
+    names: &[nzbkit::memgauge::Sub],
+) -> serde_json::Map<String, Value> {
+    names
+        .iter()
+        .map(|&s| {
+            (
+                s.name().to_string(),
+                json!({"cur": g.cur_of(s), "peak": g.peak_of(s)}),
+            )
+        })
+        .collect()
+}
+
+/// The summed attributable gauges, the same list the CLI's mem-floor
+/// block sums (get/tail.rs `print_mem_floor`): `channel` is a subset of
+/// raw outstanding and `wire est` overlaps the raw pool, so both are
+/// excluded from the sum and shown for comparison only.
+fn attributed_sum(g: &nzbkit::memgauge::MemGauges) -> u64 {
+    use nzbkit::memgauge::Sub;
+    [
+        Sub::RawFree,
+        Sub::RawOut,
+        Sub::OutFree,
+        Sub::OutOut,
+        Sub::Par2Capture,
+        Sub::JobMeta,
+        Sub::VerifierMeta,
+        Sub::Holds,
+        Sub::RepairScan,
+        Sub::RepairWork,
+    ]
+    .into_iter()
+    .map(|s| g.cur_of(s))
+    .sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bug sweep 22 Aug 2026, F-20: the at-peak record carries the gauge
+    /// snapshot, not just the three RSS figures. Fed a job-owned record
+    /// (F-19) rather than the process-wide reader, so no other test's
+    /// sampler can swap the record out from under it.
+    #[test]
+    fn mem_floor_at_peak_carries_the_gauge_snapshot() {
+        use nzbkit::memgauge::{self, PeakRecord, Sub};
+        memgauge::add(Sub::Holds, 4096);
+        let record = PeakRecord::new();
+        record.note_rss_sample();
+        let v = json!({"mem_floor": mem_floor_json(record.peak_attribution())});
+        let at = &v["mem_floor"]["at_peak"];
+        assert!(at.is_object(), "one sample is a peak: {v}");
+        assert!(
+            at["gauges"]["holds"]["cur"].as_u64().is_some(),
+            "at_peak.gauges.holds.cur present: {at}"
+        );
+        assert!(at["unattributed"].as_u64().is_some());
+        memgauge::sub(Sub::Holds, 4096);
+    }
+
+    /// The per-job view: a job whose sampler is live shows up in
+    /// `mem_floor.jobs` under its label, carrying the same `at_peak`
+    /// shape as the top-level one - which itself is untouched.
+    #[test]
+    fn mem_floor_jobs_lists_each_live_job() {
+        use nzbkit::memgauge::{self, PeakRecord};
+        let record = std::sync::Arc::new(PeakRecord::new());
+        record.note_rss_sample();
+        memgauge::register_peak_record(4242, "nzo_sys_test", &record);
+        let v = mem_floor_json(None);
+        assert!(v["at_peak"].is_null(), "the top-level record is unchanged");
+        let row = v["jobs"]
+            .as_array()
+            .expect("jobs is an array")
+            .iter()
+            .find(|j| j["label"] == "nzo_sys_test")
+            .cloned()
+            .unwrap_or_else(|| panic!("the live job is listed: {v}"));
+        assert!(
+            row["at_peak"]["gauges"]["holds"]["cur"].as_u64().is_some(),
+            "a job row carries the full at_peak shape: {row}"
+        );
+        memgauge::unregister_peak_record(4242);
+    }
+
+    /// TODO 224: a job that has FINISHED is still readable, under
+    /// `recent` rather than `jobs`, so a poll arriving after the tail
+    /// can still correlate a high-water with the job id that made it.
+    #[test]
+    fn mem_floor_recent_keeps_finished_jobs() {
+        use nzbkit::memgauge::{self, PeakRecord};
+        let record = std::sync::Arc::new(PeakRecord::new());
+        record.note_rss_sample();
+        memgauge::register_peak_record(4243, "nzo_sys_recent", &record);
+        memgauge::unregister_peak_record(4243);
+        drop(record);
+        let v = mem_floor_json(None);
+        assert!(
+            !v["jobs"]
+                .as_array()
+                .expect("jobs is an array")
+                .iter()
+                .any(|j| j["label"] == "nzo_sys_recent"),
+            "the finished job is no longer running: {v}"
+        );
+        let row = v["recent"]
+            .as_array()
+            .expect("recent is an array")
+            .iter()
+            .find(|j| j["label"] == "nzo_sys_recent")
+            .cloned()
+            .unwrap_or_else(|| panic!("the finished job is remembered: {v}"));
+        assert!(
+            row["at_peak"]["gauges"]["holds"]["cur"].as_u64().is_some(),
+            "a recent row carries the full at_peak shape: {row}"
+        );
+    }
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("nzbfast-logtail-{}-{name}", std::process::id()));

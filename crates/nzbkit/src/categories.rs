@@ -8,8 +8,8 @@
 //!
 //! A `CustomCategory` is a user-defined kind: a display name, a slug that
 //! becomes the stored `kind` value, match rules riding the SAME
-//! regex-or-keyword engine as Smart Folders (`pat_match` here is the one
-//! implementation; smart.rs delegates to it), and a declared BASE
+//! regex-or-glob-or-keyword engine as Smart Folders (`pat_match` here is
+//! the one implementation; smart.rs delegates to it), and a declared BASE
 //! BEHAVIOR that answers the finalize_names coupling explicitly: does a
 //! release in this category inherit movie-like cleanup/rename, tv-like
 //! filing, or neither.
@@ -57,8 +57,8 @@ pub struct CustomCategory {
     #[serde(default)]
     pub name: String,
     /// Regex on the release name (case-insensitive), falling back to a
-    /// plain keyword substring when it doesn't compile - identical
-    /// semantics to a Smart Folder rule's `match`.
+    /// `*`/`?` glob or a plain keyword substring when it doesn't compile
+    /// - identical semantics to a Smart Folder rule's `match`.
     #[serde(default, rename = "match")]
     pub pattern: String,
     /// Skip this category when THIS matches (same regex-or-keyword).
@@ -69,7 +69,7 @@ pub struct CustomCategory {
     pub base: BaseBehavior,
 }
 
-/// Case-insensitive regex match, or keyword substring if the pattern
+/// Case-insensitive regex match, or glob/keyword substring if the pattern
 /// isn't a valid regex. Empty pattern matches nothing HERE (a category
 /// with no rule classifies nothing) - note this differs from a Smart
 /// Folder rule, where an empty pattern is a catch-all route; a catch-all
@@ -83,9 +83,11 @@ pub fn cat_match(pattern: &str, name: &str) -> bool {
 }
 
 /// The shared rule-matching primitive (Smart Folders semantics): empty
-/// pattern matches everything, otherwise case-insensitive regex with a
-/// keyword-substring fallback. smart.rs delegates here so there is
-/// exactly one rule engine in the tree.
+/// pattern matches everything, otherwise a case-insensitive regex; a
+/// pattern that will not compile is read as a `*`/`?` glob if it carries
+/// one (see [`glob_match`]) and as a plain keyword substring if it does
+/// not. smart.rs delegates here so there is exactly one rule engine in
+/// the tree.
 pub fn pat_match(pattern: &str, name: &str) -> bool {
     let p = pattern.trim();
     if p.is_empty() {
@@ -96,8 +98,87 @@ pub fn pat_match(pattern: &str, name: &str) -> bool {
         .build()
     {
         Ok(re) => re.is_match(name),
+        Err(_) if is_glob(p) => glob_match(p, name),
         Err(_) => name.to_ascii_lowercase().contains(&p.to_ascii_lowercase()),
     }
+}
+
+/// Does this pattern carry a `*` or `?`, i.e. is the keyword fallback the
+/// wrong reading of it?
+///
+/// Only ever consulted AFTER the regex compile has failed, which is what
+/// keeps every working rule working: `.*anime.*`, `S01E0[1-9]` and `!*`
+/// all contain a metacharacter and all compile, so they stay regexes and
+/// nothing about them moves. The shapes that reach here are the ones that
+/// are doing nothing today.
+fn is_glob(p: &str) -> bool {
+    p.contains(['*', '?'])
+}
+
+/// Case-insensitive `*`/`?` glob, ANCHORED to the whole name.
+///
+/// This is the second reading of a pattern that will not compile as a
+/// regex (#18). `*anime*` is the reported shape: it is not a regex
+/// (nothing to repeat before the first `*`), so it used to become a
+/// literal search for those seven characters and could never match, which
+/// looks exactly like a rule that has not fired yet. It is, however, a
+/// perfectly ordinary glob, and it is what people type - so it is now read
+/// as one.
+///
+/// Anchored, because that is what a glob is: `*anime*` is the substring
+/// search, `anime*` is a prefix, and a bare `*` is the catch-all. The old
+/// fallback was unanchored, but it can only be reached now by a pattern
+/// with no wildcard in it at all, where anchoring is exactly the
+/// difference the user did not ask for.
+///
+/// Chars, not bytes, unlike the group-search twin
+/// (`nzbfast::groups::glob_matches`): that one matches ASCII group names
+/// ~200k times per keystroke and buys its speed by letting `?` span one
+/// byte. Release names are UTF-8 and matched a handful of times per job,
+/// so `?` spans one CHARACTER here and an accented title cannot be split
+/// down the middle.
+///
+/// Greedy two-pointer with a single backtrack point rather than the
+/// recursive form, and consecutive stars are coalesced, so there is never
+/// more than one live decision to undo. Same argument as the group
+/// matcher, where the recursive shape cost 29 s on one pathological
+/// pattern: rules come from a settings field that anyone with the API key
+/// can write, which is not a place to keep an exponential algorithm.
+pub fn glob_match(pat: &str, name: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    // Where to resume the pattern after the most recent `*`, and how much
+    // of the name that star has been given so far. None = no star seen,
+    // so a mismatch is final.
+    let (mut after_star, mut star_ate) = (None, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && p[pi] == '*' {
+            while pi < p.len() && p[pi] == '*' {
+                pi += 1;
+            }
+            if pi == p.len() {
+                return true; // trailing star takes the whole remainder
+            }
+            after_star = Some(pi);
+            star_ate = ni;
+        } else if pi < p.len() && (p[pi] == '?' || p[pi].eq_ignore_ascii_case(&n[ni])) {
+            // `*` and `?` are tested before the literal compare, so a name
+            // containing a literal star can never satisfy one.
+            pi += 1;
+            ni += 1;
+        } else if let Some(resume) = after_star {
+            // Hand the star one more character and try the rest again.
+            star_ate += 1;
+            ni = star_ate;
+            pi = resume;
+        } else {
+            return false;
+        }
+    }
+    // The name is spent, so whatever is left of the pattern has to be able
+    // to match nothing at all.
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 /// What a rule's pattern is actually going to do, for the editor to show.
@@ -108,10 +189,13 @@ pub fn pat_match(pattern: &str, name: &str) -> bool {
 /// ways of getting a rule wrong are silent, and they fail in OPPOSITE
 /// directions, which is why one verdict is not enough:
 ///
-/// - `*anime*` does not compile (nothing to repeat before the first `*`),
-///   so it becomes a literal search for those seven characters and can
-///   never match anything. A rule that quietly does nothing looks exactly
-///   like a rule that has not fired yet, so it can sit broken for weeks.
+/// - `*anime*` does not compile (nothing to repeat before the first `*`).
+///   It USED to become a literal search for those seven characters and so
+///   could never match anything, which looks exactly like a rule that has
+///   not fired yet; it is now read as a glob, which is what it is, so the
+///   Literal verdict no longer covers it. What is left under Literal is a
+///   pattern that is neither a regex nor a glob (`(unclosed`, `[a-`), and
+///   it is still searched for as text.
 /// - `!*` DOES compile - as "zero or more `!`" - so it matches every
 ///   release there is. Smart Folders is first-match-wins and a match
 ///   overrides an *arr's explicit `cat=`, so one rule like that at the top
@@ -144,6 +228,12 @@ pub enum PatternVerdict {
 /// pattern that can match nothing-at-all necessarily also matches every
 /// input that contains it, which is all of them. That catches `!*`, `.*`,
 /// `a?` and anything else of the shape without a list of special cases.
+///
+/// A glob is judged by the same question against [`glob_match`], which is
+/// anchored, so there the answer is only yes for a pattern of nothing but
+/// stars. `*` alone is a real catch-all and is reported as one; `*anime*`
+/// is selective and reports nothing, where before this it was marked as
+/// dead text.
 pub fn pat_verdict(pattern: &str) -> PatternVerdict {
     let p = pattern.trim();
     if p.is_empty() {
@@ -155,6 +245,8 @@ pub fn pat_verdict(pattern: &str) -> PatternVerdict {
     {
         Ok(re) if re.is_match("") => PatternVerdict::MatchesEverything,
         Ok(_) => PatternVerdict::Ok,
+        Err(_) if is_glob(p) && glob_match(p, "") => PatternVerdict::MatchesEverything,
+        Err(_) if is_glob(p) => PatternVerdict::Ok,
         Err(_) => PatternVerdict::Literal,
     }
 }
@@ -168,14 +260,17 @@ pub fn pat_verdict(pattern: &str) -> PatternVerdict {
 /// reported rather than paraphrased - a hand-written summary would drift
 /// from the engine the moment the dependency moved.
 ///
-/// `None` for anything [`pat_match`] will treat as a regex, including an
-/// empty pattern: only the fallback-to-keyword shape has an error to
-/// report. The same builder configuration as `pat_match` on purpose -
-/// judging a different compilation than the one that runs would be worse
-/// than saying nothing.
+/// `None` for anything [`pat_match`] will treat as a regex OR as a glob,
+/// including an empty pattern: only the fallback-to-keyword shape has an
+/// error to report. A glob failing to compile as a regex is not a
+/// mistake, it is the other syntax working, and reporting regex_lite's
+/// complaint about `*anime*` would be a save-time warning on a rule that
+/// does exactly what its author meant. The same builder configuration as
+/// `pat_match` on purpose - judging a different compilation than the one
+/// that runs would be worse than saying nothing.
 pub fn pat_compile_error(pattern: &str) -> Option<String> {
     let p = pattern.trim();
-    if p.is_empty() {
+    if p.is_empty() || is_glob(p) {
         return None;
     }
     regex_lite::RegexBuilder::new(p)
@@ -666,12 +761,13 @@ mod pattern_verdict_tests {
     /// everything one matches a name it has no business matching.
     #[test]
     fn the_two_silent_failures_are_reported_and_still_behave_as_before() {
-        // Will not compile -> searched for as literal text -> never fires.
-        assert_eq!(pat_verdict("*anime*"), PatternVerdict::Literal);
-        assert!(!pat_match("*anime*", "Some.Anime.S01E01.1080p"));
+        // Will not compile, is not a glob either -> searched for as
+        // literal text -> never fires.
+        assert_eq!(pat_verdict("(unclosed"), PatternVerdict::Literal);
+        assert!(!pat_match("(unclosed", "Some.Anime.S01E01.1080p"));
         // ...and the fallback is still a real substring search, which is
         // what makes "plain keywords work too" true.
-        assert!(pat_match("*anime*", "weird [*anime*] release"));
+        assert!(pat_match("(unclosed", "weird [(unclosed] release"));
 
         // Compiles, as "zero or more !", so it matches everything.
         assert_eq!(pat_verdict("!*"), PatternVerdict::MatchesEverything);
@@ -690,7 +786,7 @@ mod pattern_verdict_tests {
     /// warning ships it verbatim (#18).
     #[test]
     fn compile_error_tracks_the_literal_verdict() {
-        for p in ["*anime*", "(unclosed", "[a-"] {
+        for p in ["(unclosed", "[a-"] {
             assert_eq!(pat_verdict(p), PatternVerdict::Literal, "{p}");
             let err = pat_compile_error(p).unwrap_or_else(|| panic!("{p} must carry an error"));
             assert!(!err.trim().is_empty(), "{p}: empty error");
@@ -703,6 +799,12 @@ mod pattern_verdict_tests {
         // including the dangerous-but-valid catch-all and the deliberate
         // empty pattern.
         for p in ["1080p", "!*", ".*", "", "   "] {
+            assert_eq!(pat_compile_error(p), None, "{p:?}");
+        }
+        // Nor has a glob: it does not compile as a regex, and that is not
+        // a mistake to report - it is the other syntax working. A save
+        // warning here would nag about a rule that does what it says.
+        for p in ["*anime*", "*", "Show.S0?E*", "*[a-"] {
             assert_eq!(pat_compile_error(p), None, "{p:?}");
         }
     }
@@ -724,5 +826,139 @@ mod pattern_verdict_tests {
             assert_eq!(pat_verdict(p), PatternVerdict::MatchesEverything, "{p}");
             assert!(pat_match(p, "Completely.Unrelated.Name"), "{p}");
         }
+    }
+}
+
+#[cfg(test)]
+mod glob_pattern_tests {
+    use super::*;
+
+    /// #18's reported shape, from the outside: a pattern made of
+    /// wildcards is now read as wildcards. It used to be searched for as
+    /// its own seven characters and could never fire.
+    #[test]
+    fn a_wildcard_pattern_globs_instead_of_hunting_for_its_own_text() {
+        assert!(pat_match("*anime*", "Some.Anime.S01E01.1080p"));
+        assert!(!pat_match("*anime*", "Some.Show.S01E01.1080p"));
+        // Case-insensitive, like every other arm of the engine.
+        assert!(pat_match("*ANIME*", "some.anime.s01e01"));
+        // Anchored, which is the whole difference between a glob and the
+        // substring fallback: the stars are what make it a search, so a
+        // pattern with one end pinned really is pinned.
+        assert!(pat_match("*1080p", "Some.Anime.S01E01.1080p"));
+        assert!(!pat_match("*1080p", "Some.Anime.1080p.WEB"));
+        assert!(pat_match("*anime", "Some.Anime"));
+        assert!(!pat_match("*anime", "Some.Anime.S01E01"));
+        // `?` is one character.
+        assert!(pat_match("*s??e02*", "Show.S01E02.1080p"));
+        assert!(!pat_match("*s??e02*", "Show.S1E02.1080p"));
+        // And it reaches the category arms, which share the engine.
+        assert!(cat_match("*formula*1*", "Formula.1.2026.Round11.Race"));
+        let c = CustomCategory {
+            slug: "f1".into(),
+            name: "F1".into(),
+            pattern: "*formula*1*".into(),
+            not_match: "*.Qualifying.*".into(),
+            base: BaseBehavior::None,
+        };
+        assert!(c.matches("Formula.1.2026.Round11.Race.1080p"));
+        assert!(!c.matches("Formula.1.2026.Round11.Qualifying.1080p"));
+    }
+
+    /// The other arm, unchanged: a pattern with no wildcard in it that
+    /// will not compile is still an UNANCHORED substring search, which is
+    /// what makes the documented "plain keywords work too" true.
+    #[test]
+    fn a_pattern_with_no_wildcard_is_still_a_plain_substring_search() {
+        for (pat, name) in [
+            ("(unclosed", "weird [(unclosed] release"),
+            ("[a-", "Show [a- thing"),
+            ("a{2,1}", "an a{2,1} name"),
+        ] {
+            assert!(pat_match(pat, name), "{pat:?} vs {name:?}");
+            // Unanchored, and case-insensitive, exactly as before.
+            assert!(
+                pat_match(pat, &format!("PREFIX {} SUFFIX", name.to_uppercase())),
+                "{pat:?} stopped being a substring search"
+            );
+            assert_eq!(pat_verdict(pat), PatternVerdict::Literal, "{pat:?}");
+            assert!(pat_compile_error(pat).is_some(), "{pat:?}");
+        }
+        // A keyword that compiles as a regex never reached the fallback
+        // and still does not.
+        assert!(pat_match("1080p", "Show.S01E02.1080p.WEB"));
+        assert!(!pat_match("1080p", "Show.S01E02.720p.WEB"));
+    }
+
+    /// The compatibility half, and the reason the glob arm sits BEHIND
+    /// the compile rather than in front of it: most real regexes contain
+    /// a `*`, and read as globs they would mean something else entirely.
+    /// Every pattern here would change meaning if `*` alone routed it.
+    #[test]
+    fn a_pattern_that_compiles_is_still_a_regex() {
+        // As a glob, `.*anime.*` demands a literal leading dot.
+        assert!(pat_match(".*anime.*", "Some.Anime.S01E01"));
+        assert!(!glob_match(".*anime.*", "Some.Anime.S01E01"));
+        // As a glob, `S01E0[1-9]` is an anchored name of nine characters.
+        assert!(pat_match("S01E0[1-9]", "Show.S01E02.1080p"));
+        assert!(!glob_match("S01E0[1-9]", "Show.S01E02.1080p"));
+        // The §104 catch-all: `!*` compiles as "zero or more !", so it
+        // still matches everything and is still reported as doing so. As
+        // a glob it would only match a name starting with `!`.
+        assert!(pat_match("!*", "Nothing.To.Do.With.It"));
+        assert_eq!(pat_verdict("!*"), PatternVerdict::MatchesEverything);
+        assert!(!glob_match("!*", "Nothing.To.Do.With.It"));
+        // `(1080|2160)p?` - a regex whose `?` is an optional character.
+        assert!(pat_match("(1080|2160)p?", "Show.2160p.WEB"));
+    }
+
+    /// A glob has nothing wrong with it, so the editor must stop marking
+    /// it - except for the one shape that really does claim the whole
+    /// queue, which is judged by the same question the regex arm asks.
+    #[test]
+    fn a_glob_is_verdicted_by_what_it_matches_not_by_failing_to_compile() {
+        for p in ["*anime*", "*anime", "*s??e02*", "*[a-"] {
+            assert_eq!(pat_verdict(p), PatternVerdict::Ok, "{p}");
+        }
+        // Nothing but stars matches every name there is, first-match-wins
+        // then hands it the whole queue.
+        for p in ["*", "**", "  *  "] {
+            assert_eq!(pat_verdict(p), PatternVerdict::MatchesEverything, "{p}");
+            assert!(pat_match(p, "Completely.Unrelated.Name"), "{p}");
+        }
+        // `?` needs a character, so it is not a catch-all.
+        assert_eq!(pat_verdict("?"), PatternVerdict::Ok);
+        assert!(!pat_match("?", ""));
+    }
+
+    /// The matcher itself, including the corners the recursive form and
+    /// the old rss copy got wrong.
+    #[test]
+    fn the_glob_matcher_holds_its_edges() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "x"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("**", ""));
+        assert!(!glob_match("?", ""));
+        assert!(glob_match("?", "a"));
+        assert!(!glob_match("?", "ab"));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(!glob_match("a*b*c", "acb"));
+        assert!(glob_match("a**b", "ab"));
+        assert!(glob_match("a***b", "aXb"));
+        assert!(glob_match("*.*", "a.b"));
+        assert!(!glob_match("*.*", "ab"));
+        // A star may consume a literal star: the wildcards are tested
+        // before the literal compare, so the pattern's `*` cannot be
+        // eaten as an ordinary character (the shape the rss copy failed).
+        assert!(glob_match("*x", "*ax"));
+        assert!(glob_match("*", "***"));
+        // `?` spans one CHARACTER, not one byte - release names are UTF-8.
+        assert!(glob_match("?", "é"));
+        assert!(!glob_match("??", "é"));
+        assert!(glob_match("Caf?.2026", "café.2026"));
+        // Backtracking is not quadratic-blowup-prone in the shape that
+        // killed the recursive version: this must return, fast.
+        assert!(!glob_match(&"*?".repeat(12), &"a".repeat(8)));
     }
 }

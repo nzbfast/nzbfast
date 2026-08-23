@@ -4,7 +4,9 @@
 //! recovery-data damage ledger. Body is a verbatim move from the
 //! orchestrator; the returned struct's fields keep the inline names.
 
+use super::workers::CauseSplit;
 use crate::*;
+use tracing::{info, warn};
 
 /// Is this slot's name Usenet furniture - metadata a short article must
 /// not fail the job over?
@@ -62,11 +64,18 @@ pub(super) struct Census {
     pub(super) sparse_slots: Vec<String>,
     pub(super) recovery_errs: u64,
     pub(super) derrs: u64,
+    /// Segments never requested for retention, over EVERY slot - what
+    /// the console line reports, because a `.par2` article that went
+    /// unrequested still did.
     pub(super) retention_skipped: u64,
+    /// The payload-only share of it (sweep 8, M7). Diagnosis reads
+    /// this: retention on a parity article says nothing about whether
+    /// the payload is there.
+    pub(super) retention_skipped_payload: u64,
     pub(super) recovery_missing: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn take_census(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     stats: &[nzbkit::pool::PoolStats],
@@ -76,13 +85,14 @@ pub(super) fn take_census(
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
     decode_errors: &Arc<AtomicU64>,
-    retention_excluded: &Arc<AtomicU64>,
+    retention_excluded: &Arc<CauseSplit>,
     decoded_bytes: &Arc<AtomicU64>,
     elapsed: std::time::Duration,
 ) -> Census {
     let total: u64 = stats.iter().map(|s| s.bytes).sum();
-    println!(
-        "\n{:.1} MB raw in {:.2?} → {:.1} MB/s ({:.2} Gbps); {:.1} MB written",
+    info!(
+        target: "get",
+        "{:.1} MB raw in {:.2?} → {:.1} MB/s ({:.2} Gbps); {:.1} MB written",
         total as f64 / 1e6,
         elapsed,
         total as f64 / 1e6 / elapsed.as_secs_f64(),
@@ -135,8 +145,9 @@ pub(super) fn take_census(
             } else {
                 String::new()
             };
-            println!(
-                "  {:<28} {:>8.1} MB · {} conns, {} reconnects{}{}",
+            info!(
+                target: "get",
+                "{:<28} {:>8.1} MB · {} conns, {} reconnects{}{}",
                 s.host,
                 st.bytes as f64 / 1e6,
                 st.connects,
@@ -145,17 +156,17 @@ pub(super) fn take_census(
                 blocked
             );
             if st.left_mid_run {
-                println!(
-                    "  {:<28} ⚠ served for part of the run and then stopped \
-             (refused, out of quota, or unreachable for too long)",
+                warn!(
+                    target: "get",
+                    "{:<28} served for part of the run and then stopped (refused, out of quota, or unreachable for too long)",
                     s.host
                 );
                 left_servers.push(s.host.clone());
             }
         } else {
-            println!(
-                "  {:<28} ⚠ no usable connection for the entire run \
-             (unreachable, or it refused the login)",
+            warn!(
+                target: "get",
+                "{:<28} no usable connection for the entire run (unreachable, or it refused the login)",
                 s.host
             );
             dead_servers.push(s.host.clone());
@@ -170,12 +181,17 @@ pub(super) fn take_census(
         .zip(stats)
         .filter(|(_, st)| st.ever_connected)
         .map(|((s, _), _)| nzbkit::oracle::backbone_of(&s.host))
-        // A server addressed by IP (or any host that reduces to no
-        // letters) names no backbone - `backbone_of("127.0.0.1")` is the
-        // label "0". It cannot support a claim about independent
-        // opinions either way, so it sits the clause out rather than
-        // printing a digit as though it were a provider.
-        .filter(|b| b.chars().any(|c| c.is_ascii_alphabetic()))
+        // A server addressed by IP names no backbone. It cannot support
+        // a claim about independent opinions either way, so it sits the
+        // clause out rather than being printed as though it were a
+        // provider. Both tests are needed: since sweep 8's L9 an
+        // address keys as ITSELF (it used to key as one octet - every
+        // IPv4 host answered with its third), and an IPv6 literal
+        // carries letters, so the no-letters test alone would start
+        // printing `2001:db8::1` as a backbone name.
+        .filter(|b| {
+            b.chars().any(|c| c.is_ascii_alphabetic()) && b.parse::<std::net::IpAddr>().is_err()
+        })
         .collect();
     backbones.sort();
     backbones.dedup();
@@ -216,8 +232,9 @@ pub(super) fn take_census(
     let slot_recovery = |i: usize| slots[i].is_par2();
     let deferred_arts = sniff.deferred_articles.load(Ordering::Relaxed);
     if deferred_arts > 0 {
-        println!(
-            "  ▸ in-stream PAR2 identification deferred {deferred_arts} article(s) - \
+        info!(
+            target: "par2",
+            "in-stream PAR2 identification deferred {deferred_arts} article(s) - \
          {:.1} MB of recovery data not downloaded",
             sniff.deferred_bytes.load(Ordering::Relaxed) as f64 / 1e6
         );
@@ -286,8 +303,9 @@ pub(super) fn take_census(
             let name = nzbkit::disk::sanitize_filename(&slot.hint).to_ascii_lowercase();
             let covered = set_names.as_ref().is_some_and(|n| n.contains(&name));
             if !covered && is_spared_metadata(&slot.hint) {
-                println!(
-                    "  ⚠ {}: {} missing of {} segment(s) - metadata the recovery set \
+                warn!(
+                    target: "get",
+                    "{}: {} missing of {} segment(s) - metadata the recovery set \
                      does not cover, so the download is still complete",
                     slot.hint,
                     miss + unresolved,
@@ -297,8 +315,9 @@ pub(super) fn take_census(
                 continue;
             }
             incomplete += 1;
-            println!(
-                "  ⚠ {}: {} missing, {} unresolved of {} segments",
+            warn!(
+                target: "get",
+                "{}: {} missing, {} unresolved of {} segments",
                 slot.hint, miss, unresolved, slot.total_segments
             );
             continue;
@@ -372,8 +391,9 @@ pub(super) fn take_census(
         {
             incomplete += 1;
             sparse_slots.push(slot.hint.clone());
-            println!(
-                "  ⚠ {}: every article arrived but {:.1} MB of the declared \
+            warn!(
+                target: "get",
+                "{}: every article arrived but {:.1} MB of the declared \
              {:.1} MB was never written - the post's size header and its \
              parts disagree",
                 slot.hint,
@@ -400,7 +420,7 @@ pub(super) fn take_census(
         .load(Ordering::Relaxed)
         .saturating_sub(recovery_errs);
     if derrs > 0 {
-        println!("  ⚠ {derrs} decode/write errors");
+        warn!(target: "get", "{derrs} decode/write errors");
     }
     // What the exclusions above just held back. Not a failure, but not
     // nothing either: it is the whole reason a job can finish with its
@@ -415,10 +435,12 @@ pub(super) fn take_census(
             (s.missing.load(Ordering::Relaxed) + s.remaining.load(Ordering::Relaxed)) as u64
         })
         .sum();
-    let retention_skipped = retention_excluded.load(Ordering::Relaxed);
+    let retention_skipped = retention_excluded.total();
+    let retention_skipped_payload = retention_excluded.payload();
     if retention_skipped > 0 {
-        println!(
-            "  ⚠ {retention_skipped} segment(s) never requested: older than every \
+        warn!(
+            target: "get",
+            "{retention_skipped} segment(s) never requested: older than every \
          server's configured retention (retention_days in the server settings)"
         );
     }
@@ -427,7 +449,8 @@ pub(super) fn take_census(
         // "all 4 files complete" while the 4th is a .par2 that arrived
         // corrupt would be a plain untruth, and now that recovery damage
         // no longer fails the job this line is reachable with one broken.
-        println!(
+        info!(
+            target: "get",
             "all {} files complete ✔",
             slots.iter().filter(|s| !s.is_par2()).count()
         );
@@ -447,6 +470,7 @@ pub(super) fn take_census(
         recovery_errs,
         derrs,
         retention_skipped,
+        retention_skipped_payload,
         recovery_missing,
     }
 }
@@ -601,7 +625,7 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn census(
         servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
         stats: &[nzbkit::pool::PoolStats],
@@ -621,7 +645,13 @@ mod tests {
             &r.verifier,
             &r.extractor,
             &Arc::new(AtomicU64::new(decode_errors)),
-            &Arc::new(AtomicU64::new(retention)),
+            &{
+                let c = CauseSplit::default();
+                for _ in 0..retention {
+                    c.add(false);
+                }
+                Arc::new(c)
+            },
             &Arc::new(AtomicU64::new(0)),
             elapsed,
         )
@@ -737,6 +767,31 @@ mod tests {
         assert_eq!(c.total_segments, 2);
         assert_eq!(c.derrs, 0);
         assert_eq!(c.recovery_missing, 0);
+        // Sweep 8, L9: a server addressed by IP names no backbone, in
+        // either family. An address keys as ITSELF now (it used to key
+        // as one octet), so the no-letters test alone would start
+        // printing an IPv6 literal as a provider name.
+        let ip_servers = [
+            srv("news.alphaprov.com"),
+            srv("127.0.0.1"),
+            srv("[2001:db8::1]:563"),
+        ];
+        let ip_stats = [stat(20, true), stat(20, true), stat(20, true)];
+        let c_ip = census(
+            &ip_servers,
+            &ip_stats,
+            &n,
+            &slots,
+            &r,
+            0,
+            0,
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(
+            c_ip.backbones,
+            ["alphaprov"],
+            "an address cannot support a claim about independent opinions"
+        );
         assert_eq!(c.post_age_days, nzb_age_days(1_710_000_000));
         let _ = std::fs::remove_dir_all(&r.dir);
     }

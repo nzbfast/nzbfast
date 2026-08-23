@@ -56,6 +56,7 @@ fn work(id: &str) -> Work {
     Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: id.into(),
         attempts: 0,
@@ -99,6 +100,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
         !pre_dial_gates(
             &cfg,
             0,
+            &mut None,
             MAX_SESSION_ATTEMPTS,
             &mut armed,
             &mut finished,
@@ -113,25 +115,62 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
         "the bow-out must not pay the backoff on its way out"
     );
 
-    // TODO 112: a slot at or above the live target parks - holding no
-    // connection - until the target admits it again.
+    // TODO 112 / F-22: with the target's one admission already held, a
+    // second worker parks - holding no connection - until the target
+    // rises or the holder gives its admission back.
     let target = ConnTarget::new(1);
     let cfg = PoolConfig {
         live_target: Some(target.clone()),
         ..Default::default()
     };
+    let mut held: Option<Admitted> = None;
+    assert!(pre_dial_gates(&cfg, 0, &mut held, 0, &mut None, &mut finished, &sh).await);
+    assert!(held.is_some(), "the first worker takes the admission");
     let sh2 = sh.clone();
+    let cfg2 = cfg.clone();
     let mut parked_finished = sh.finished.subscribe();
     let parked = tokio::spawn(async move {
-        let mut none = None;
-        pre_dial_gates(&cfg, 1, 0, &mut none, &mut parked_finished, &sh2).await
+        let mut admit = None;
+        let ok = pre_dial_gates(
+            &cfg2,
+            0,
+            &mut admit,
+            0,
+            &mut None,
+            &mut parked_finished,
+            &sh2,
+        )
+        .await;
+        ok && admit.is_some()
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!parked.is_finished(), "slot 1 is over a target of 1");
+    assert!(
+        !parked.is_finished(),
+        "the second worker is over a target of 1"
+    );
     target.set(2);
     assert!(
         parked.await.expect("parked worker"),
-        "raising the target readmits the slot"
+        "raising the target readmits the worker"
+    );
+    // And a retiring holder re-fills its place without the target moving.
+    target.set(1);
+    let sh3 = sh.clone();
+    let cfg3 = cfg.clone();
+    let mut f3 = sh.finished.subscribe();
+    let parked = tokio::spawn(async move {
+        let mut admit = None;
+        pre_dial_gates(&cfg3, 0, &mut admit, 0, &mut None, &mut f3, &sh3).await && admit.is_some()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !parked.is_finished(),
+        "two admissions are out against a target of 1"
+    );
+    drop(held);
+    assert!(
+        parked.await.expect("parked worker"),
+        "a returned admission promotes a parked worker"
     );
 
     // The session backoff: a graceful DRAIN breaks the wait and returns
@@ -142,7 +181,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     sh.draining.store(true, Ordering::Release);
     let mut armed = Some(Duration::from_secs(30));
     let started = tokio::time::Instant::now();
-    assert!(pre_dial_gates(&cfg, 0, 0, &mut armed, &mut finished, &sh).await);
+    assert!(pre_dial_gates(&cfg, 0, &mut None, 0, &mut armed, &mut finished, &sh).await);
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "a drain must not wait out the whole backoff"
@@ -152,7 +191,7 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     let _ = sh.finished.send(true);
     let mut armed = Some(Duration::from_secs(30));
     assert!(
-        !pre_dial_gates(&cfg, 0, 0, &mut armed, &mut finished, &sh).await,
+        !pre_dial_gates(&cfg, 0, &mut None, 0, &mut armed, &mut finished, &sh).await,
         "a finished run ends the worker inside its backoff"
     );
 }
@@ -550,6 +589,89 @@ async fn the_probers_horizon_declares_the_server_dead_and_frees_the_parked() {
         matches!(parked.await.expect("parked worker"), DialStep::Quit),
         "a Dead verdict releases the parked fleet to exit, so the run \
          can seal instead of idling forever"
+    );
+}
+/// F-22's SECOND half, and the one that hangs a default-on job: the
+/// single-prober election must count the workers that can actually
+/// DIAL, not every worker that happens to be alive.
+///
+/// Under a live target most of a fleet is parked in `wait_for_slot`,
+/// upstream of this election, waiting for an admission that only rises
+/// when bytes arrive - and every one of them is still counted in
+/// `alive`. So the sole ADMITTED worker, the only one that can dial at
+/// all, reaches a capacity episode, reads `alive = 8`, and yields:
+/// eight alive workers look like plenty to leave someone behind. Nobody
+/// is left behind. Nothing publishes `Probing`, no verdict is ever
+/// reached, the parked seven never wake, and the run neither recovers
+/// nor seals - `pending > 0`, `workers_live > 0`, `finished` silent,
+/// which is the hang the audit reported against a DEFAULT-ON line cap.
+///
+/// Both directions, because refusing every yield is the opposite bug:
+/// with no live target every alive worker can dial, the electorate is
+/// `alive` again, and a fleet of eight must still be able to park seven
+/// of itself behind one prober.
+///
+/// Draining is set in both halves purely to make the question
+/// terminate: the park loop polls `draining` at the top of every pass,
+/// BEFORE it can ever publish an episode, so a worker that parks leaves
+/// promptly and silently while a worker that probes has already
+/// published `Probing` on its way past.
+#[tokio::test]
+async fn the_prober_election_counts_admitted_workers_not_parked_ones() {
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let ctx = ctx_for(&servers, 0);
+
+    // Eight workers spawned against a live target that admits one.
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    sh.alive[0].store(8, Ordering::SeqCst);
+    sh.admitted[0].store(1, Ordering::SeqCst);
+    sh.draining.store(true, Ordering::Release);
+    let cfg = PoolConfig {
+        live_target: Some(ConnTarget::new(1)),
+        connect_backoff: Duration::from_millis(1),
+        ..Default::default()
+    };
+    let mut finished = sh.finished.subscribe();
+    let (mut bounces, mut fails) = (0u32, 0u32);
+    let _ = park_or_probe(&cfg, ctx, &sh, &mut finished, &mut bounces, &mut fails).await;
+    assert_eq!(
+        sh.auth[0].yielded.load(Ordering::SeqCst),
+        0,
+        "the one worker that can dial must not yield - the other seven \
+         are parked on an admission and can never take the ladder"
+    );
+    assert!(
+        matches!(*sh.auth[0].episode.borrow(), (CapEpisode::Probing, _)),
+        "so it elects itself prober and opens the episode"
+    );
+
+    // The bound. Same eight-strong fleet, same single admission on the
+    // counter, and NO live target: admission is not gating anyone, so
+    // the electorate is `alive` and seven may still park behind one.
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    sh.alive[0].store(8, Ordering::SeqCst);
+    sh.admitted[0].store(1, Ordering::SeqCst);
+    sh.draining.store(true, Ordering::Release);
+    let cfg = PoolConfig {
+        connect_backoff: Duration::from_millis(1),
+        ..Default::default()
+    };
+    let mut finished = sh.finished.subscribe();
+    let (mut bounces, mut fails) = (0u32, 0u32);
+    let step = park_or_probe(&cfg, ctx, &sh, &mut finished, &mut bounces, &mut fails).await;
+    assert!(
+        matches!(step, DialStep::Quit),
+        "the drain releases the parked worker"
+    );
+    assert_eq!(
+        sh.auth[0].yielded.load(Ordering::SeqCst),
+        1,
+        "with no live target a fleet of eight may still park behind \
+         one prober - the admission counter is not the electorate here"
+    );
+    assert!(
+        matches!(*sh.auth[0].episode.borrow(), (CapEpisode::Idle, _)),
+        "and a worker that parked published nothing"
     );
 }
 

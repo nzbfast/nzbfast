@@ -64,24 +64,30 @@ struct Io {
 }
 impl VolumeIo for Io {
     fn read(&self, _file: usize, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.f.read_exact_at(buf, off)
+        nzbkit::disk::read_exact_at(&self.f, buf, off)
     }
     fn write(&self, _file: usize, off: u64, data: &[u8]) -> std::io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.f.write_all_at(data, off)
+        nzbkit::disk::write_all_at(&self.f, data, off)
     }
 }
 
-fn rusage() -> (f64, i64) {
-    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+/// Process CPU seconds and peak RSS in BYTES, both from `nzbkit::mem`.
+///
+/// This called `libc::getrusage` and `std::os::unix::fs::FileExt`
+/// directly, which do not exist on Windows - and `windows-clippy` and
+/// `windows-build` compile `--all-targets`, so an example was enough to
+/// hold both jobs red. The library's own helpers carry the Windows
+/// equivalents (GetProcessTimes / peak working set), so the harness now
+/// builds and measures everywhere rather than being gated off.
+///
+/// `mem::peak_rss` also normalises the one `getrusage` field whose unit
+/// is per-platform: `ru_maxrss` is bytes on Apple and kilobytes on every
+/// other unix, so the raw value this used to print was 1024x low on
+/// Linux.
+fn cpu_rss() -> (f64, u64) {
     (
-        ru.ru_utime.tv_sec as f64
-            + ru.ru_utime.tv_usec as f64 / 1e6
-            + ru.ru_stime.tv_sec as f64
-            + ru.ru_stime.tv_usec as f64 / 1e6,
-        ru.ru_maxrss,
+        nzbkit::mem::cpu_time_secs().unwrap_or(0.0),
+        nzbkit::mem::peak_rss().unwrap_or(0),
     )
 }
 
@@ -198,7 +204,7 @@ fn main() {
                 other => panic!("unknown mode {other}"),
             };
             let wall = t0.elapsed();
-            let (cpu, rss) = rusage();
+            let (cpu, rss) = cpu_rss();
             assert_eq!(rebuilt, missing);
             println!(
                 "mode={mode} missing={missing} rebuilt={rebuilt} wall={:.3}s cpu={:.3}s maxrss={}MB",

@@ -16,8 +16,9 @@
 //! zeroes the CRC field, so the caller must skip the CRC comparison
 //! for it (see `AesSpec::skips_crc`).
 
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::array::Array;
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
+use hmac::digest::KeyInit as MacKeyInit;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
@@ -118,15 +119,15 @@ pub fn zipcrypto_check_byte(flags: u16, crc32: u32, dos_time: u16) -> u8 {
 /// 20-line loop; pinned to the RFC 6070 vectors in the tests.
 pub fn pbkdf2_sha1(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
     for (block, chunk) in (1_u32..).zip(out.chunks_mut(20)) {
-        let mut mac =
-            <HmacSha1 as Mac>::new_from_slice(password).expect("hmac accepts any key length");
+        let mut mac = <HmacSha1 as MacKeyInit>::new_from_slice(password)
+            .expect("hmac accepts any key length");
         mac.update(salt);
         mac.update(&block.to_be_bytes());
         let mut u = mac.finalize().into_bytes();
         let mut t = u;
         for _ in 1..iterations {
-            let mut m =
-                <HmacSha1 as Mac>::new_from_slice(password).expect("hmac accepts any key length");
+            let mut m = <HmacSha1 as MacKeyInit>::new_from_slice(password)
+                .expect("hmac accepts any key length");
             m.update(&u);
             u = m.finalize().into_bytes();
             for (a, b) in t.iter_mut().zip(u.iter()) {
@@ -193,7 +194,7 @@ impl AeCtr {
 
     fn refill(&mut self) {
         self.ks = self.counter.to_le_bytes();
-        let ga = GenericArray::from_mut_slice(&mut self.ks);
+        let ga = <&mut Array<u8, aes::cipher::consts::U16>>::from(&mut self.ks);
         match &self.cipher {
             AnyAes::A128(c) => c.encrypt_block(ga),
             AnyAes::A192(c) => c.encrypt_block(ga),
@@ -242,7 +243,9 @@ pub struct AeMac(HmacSha1);
 
 impl AeMac {
     pub fn new(mac_key: &[u8]) -> AeMac {
-        AeMac(<HmacSha1 as Mac>::new_from_slice(mac_key).expect("hmac accepts any key length"))
+        AeMac(
+            <HmacSha1 as MacKeyInit>::new_from_slice(mac_key).expect("hmac accepts any key length"),
+        )
     }
     pub fn update(&mut self, ciphertext: &[u8]) {
         self.0.update(ciphertext);

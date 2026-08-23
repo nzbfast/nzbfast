@@ -1249,3 +1249,134 @@ fn wikidata_times_are_normalised() {
     assert_eq!(wikidata_iso("+1999-03-31T00:00:00Z"), "1999-03-31");
     assert_eq!(wikidata_iso("-0044-03-15T00:00:00Z"), "");
 }
+
+// ---- TODO 26c: found / not-found / could-not-ask ---------------------
+
+/// One refused HTTP reply, built the way ureq hands one to the fetchers -
+/// headers and all, so the `Retry-After` under test is a real parsed
+/// header rather than a number typed into the assertion.
+fn refused_response(status: u16, headers: &str) -> ureq::Response {
+    format!("HTTP/1.1 {status} Refused\r\n{headers}Content-Length: 0\r\n\r\n")
+        .parse()
+        .expect("a well-formed response")
+}
+
+/// The same reply as the error `note_http_err` classifies.
+fn refusal(status: u16, headers: &str) -> ureq::Error {
+    ureq::Error::Status(status, refused_response(status, headers))
+}
+
+/// A 429 must leave the row RE-ENRICHABLE, and must not be quietly
+/// downgraded to "there is no such film".
+///
+/// This is the whole of TODO 26c in one assertion. `title_fill` writes
+/// the card and `checked` in one statement and every lane query wants
+/// `checked = 0`, so the value the lane reads here decides whether a
+/// rate-limited minute costs a title its metadata permanently.
+#[test]
+fn a_429_is_could_not_ask_and_carries_its_retry_after() {
+    clear_unreachable();
+    // The lane calls this against its own bucket, so use one nothing
+    // else in the BINARY touches - see the AniList note below for why
+    // "in this file" is the wrong scope for a cooldown assertion.
+    let wait = note_refusal(
+        Provider::Srrdb,
+        &refused_response(429, "Retry-After: 900\r\n"),
+        30,
+    );
+    note_unreachable();
+    assert_eq!(wait, 900, "the header the provider sent was not read");
+    assert_eq!(
+        outcome(false),
+        Outcome::Transient {
+            retry_after: Some(900)
+        },
+        "a 429 was recorded as an answer about the title"
+    );
+    // ...and the provider itself is backed off for as long as it asked,
+    // not for the minute the bucket sleeps on. That is what stops the
+    // NEXT row in the batch walking into the same refusal.
+    let cooling = crate::ratelimit::cooling(Provider::Srrdb);
+    assert!(
+        cooling > std::time::Duration::from_secs(800),
+        "the provider is only cooling for {cooling:?} of the 900 s it asked for"
+    );
+    // A provider that was NOT refused is untouched - the limits are
+    // per-service and a mixed batch must only lose the lane that 429'd.
+    //
+    // AniList because the cooldown table is process-global and
+    // `cargo test --bin nzbfast` runs every module's tests in ONE
+    // process, so "a bucket nothing else in this file touches" is not
+    // enough: this read has to name a provider no other TEST IN THE
+    // BINARY penalises. WikidataQlever stood here until 23 Aug 2026 and
+    // `ratelimit::tests::a_long_retry_after_cools_one_provider_and_only_that_one`
+    // leaves it cooling for the clamped hour, which is what this
+    // assertion read - both tests landed together in 84ae50bd7 and
+    // picked the same two providers. See that test for the rule.
+    assert_eq!(
+        crate::ratelimit::cooling(Provider::AniList),
+        std::time::Duration::ZERO,
+        "one provider's 429 backed off an unrelated service"
+    );
+}
+
+/// The other side of the same coin: a 404 is a real answer. Stamping it
+/// is CORRECT, and re-asking on every pass would spend a keyless lane's
+/// whole allowance being told the same thing.
+#[test]
+fn a_404_is_a_verdict_and_is_not_retried() {
+    clear_unreachable();
+    note_http_err(&refusal(404, ""));
+    assert_eq!(
+        outcome(false),
+        Outcome::NotFound,
+        "a 404 was treated as an outage"
+    );
+    assert_eq!(retry_after_hint(), None);
+    // 5xx and the transient 4xx are the opposite verdict, on the same
+    // helper - 408 and 425 say "not now", not "no such thing".
+    for code in [500, 502, 503, 408, 425, 429] {
+        clear_unreachable();
+        note_http_err(&refusal(code, ""));
+        assert_eq!(
+            outcome(false),
+            Outcome::Transient { retry_after: None },
+            "HTTP {code} was counted as a real answer about the title"
+        );
+    }
+}
+
+/// A chain where one provider was refused and another ANSWERED has its
+/// card, and must be stamped. Holding the row open for the service that
+/// declined would re-fetch a complete record on every pass forever.
+#[test]
+fn an_answer_outranks_a_refusal_in_the_same_chain() {
+    clear_unreachable();
+    note_unreachable();
+    note_retry_after(60);
+    assert_eq!(outcome(true), Outcome::Found);
+}
+
+/// A clean chain that simply found nothing is the third state, and the
+/// window must reset between rows or one blip blanks nothing and then
+/// pins everything.
+#[test]
+fn the_window_resets_between_titles() {
+    clear_unreachable();
+    note_unreachable();
+    note_retry_after(120);
+    assert!(matches!(outcome(false), Outcome::Transient { .. }));
+    clear_unreachable();
+    assert_eq!(outcome(false), Outcome::NotFound);
+    assert_eq!(retry_after_hint(), None);
+}
+
+/// The art fetch is on the stamping path too: `title_fill` writes the
+/// poster name and `checked` together, so a poster that merely timed out
+/// must not read like a URL that serves nothing.
+#[test]
+fn an_art_host_that_failed_is_told_apart_from_one_with_no_art() {
+    // Not a URL at all: nothing to ask, and asking again will not help.
+    assert_eq!(fetch_image_res("not a url"), Err(ArtMiss::NoImage));
+    assert_eq!(fetch_image("not a url"), None);
+}

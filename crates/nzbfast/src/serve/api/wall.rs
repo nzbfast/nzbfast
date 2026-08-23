@@ -5,7 +5,7 @@ fn m_wall_search(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
-    ctx: &ApiCtx<'_>,
+    _ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
@@ -22,12 +22,15 @@ fn m_wall_search(
             // bucket before giving up on that provider.
             const SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
             let omdb = d.omdb_key.lock_ok().clone();
+            // §193 d: read per request, not threaded in from startup -
+            // a key pasted into Settings works on the very next search.
+            let tmdb = d.tmdb_key.lock_ok().clone();
             let mut paced_out = false;
             // Movies: prefer OMDb when the user's key is set
             // (exact titles + imdb ids); empty result falls
             // back to the keyless chain.
             let mut cands = match (&omdb, &kind) {
-                (Some(k), crate::wall::Kind::Movie) if ctx.tmdb_key.is_none() => {
+                (Some(k), crate::wall::Kind::Movie) if tmdb.is_none() => {
                     if crate::ratelimit::try_acquire(
                         crate::ratelimit::Provider::Omdb,
                         SEARCH_BUDGET,
@@ -41,14 +44,9 @@ fn m_wall_search(
                 _ => Vec::new(),
             };
             if cands.is_empty() {
-                let p = crate::wall::search_provider(ctx.tmdb_key.as_deref(), &kind);
+                let p = crate::wall::search_provider(tmdb.as_deref(), &kind);
                 if crate::ratelimit::try_acquire(p, SEARCH_BUDGET) {
-                    cands = crate::wall::search_candidates(
-                        ctx.tmdb_key.as_deref(),
-                        &kind,
-                        q.trim(),
-                        year,
-                    );
+                    cands = crate::wall::search_candidates(tmdb.as_deref(), &kind, q.trim(), year);
                 } else {
                     paced_out = true;
                 }
@@ -151,6 +149,112 @@ fn seed_for_key(ix: &nzbkit::index::Index, key: &str) -> Option<nzbkit::index::T
     })
 }
 
+/// Where `m_wall_art` parks an upload until the index row that names it
+/// has landed. Beside the live file, in the art directory, so publishing
+/// is a same-directory rename.
+///
+/// Deliberately UN-SERVABLE: `art_name_ok`, the `/art/` route's filter,
+/// allows only ASCII alphanumerics, `_` and `.`, so the `-` in the
+/// suffix means a half-written or abandoned upload can never be fetched
+/// under this name. The pid and the nanosecond stamp are what keep two
+/// concurrent uploads for one key off each other's staging file - the
+/// live name they both publish to is `art_name`'s, which is a pure
+/// function of the key and therefore identical for both.
+pub(in crate::serve) fn art_staging_name(name: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.subsec_nanos())
+        .unwrap_or(0);
+    format!(".{name}.new-{}-{nanos}", std::process::id())
+}
+
+/// Is `n` a name [`art_staging_name`] produced? Its inverse, and it sits
+/// here so the format and the recogniser can only move together.
+///
+/// Deliberately tighter than "starts with a dot": what this accepts,
+/// `maint::sweep_abandoned_art_staging` DELETES, and the art directory
+/// also holds the live posters, their `thumb_` derivatives, person
+/// headshots and whatever the operating system leaves lying around. Both
+/// trailing fields must be non-empty and all-digits, which is what keeps
+/// a hand-placed `.notes.new-draft-2` out of the sweep.
+///
+/// `rsplit_once`, not `split_once`: the suffix is at the END, and the
+/// live name in the middle is `art_name`'s output for an arbitrary title
+/// key. It cannot contain `.new-` today (that name is alphanumerics,
+/// `_` and one `.jpg`), and a recogniser that would break if it ever
+/// could is not worth the line it saves.
+pub(in crate::serve) fn is_art_staging_name(n: &str) -> bool {
+    let Some(rest) = n.strip_prefix('.') else {
+        return false;
+    };
+    let Some((live, tail)) = rest.rsplit_once(".new-") else {
+        return false;
+    };
+    let Some((pid, nanos)) = tail.split_once('-') else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !live.is_empty() && digits(pid) && digits(nanos)
+}
+
+/// Put `bytes` at `name` in the art directory without ever exposing a
+/// half-written file under that name.
+///
+/// `m_wall_art`'s treatment (Codex F-07) for the OTHER two writers into
+/// this directory, both of which used to write straight over the live
+/// path: stage under [`art_staging_name`], publish by same-directory
+/// rename. A crash mid-write then leaves its bytes on the staging name,
+/// which no index row names, the `/art/` route refuses to serve (the
+/// `-` fails `art_name_ok`) and the hourly sweep in `maint` collects an
+/// hour later - instead of on the exact path a card's `is_file` gate
+/// passes, where it draws as a broken image with nothing to prompt a
+/// re-fix.
+///
+/// Answers whether the bytes are now published, and leaves nothing
+/// behind when they are not. What happens to the LIVE path on a `false`
+/// is the caller's policy and the two callers genuinely differ: the
+/// fixer deletes it ("absent beats stale" - the row it just committed
+/// names this file), the headshot lane leaves it alone because its
+/// `is_file` check already established there is nothing there.
+///
+/// `m_wall_art` itself does not call this and cannot: its write and its
+/// rename straddle the index write, which is the entire reason it
+/// stages.
+pub(in crate::serve) fn publish_art(art: &std::path::Path, name: &str, bytes: &[u8]) -> bool {
+    let tmp = art.join(art_staging_name(name));
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, art.join(name)).is_ok() {
+        return true;
+    }
+    // A failed `write` truncated before it filled and a failed `rename`
+    // left the whole file; either way these are bytes nothing can read,
+    // and on the usual cause (a full disk) they are the space the
+    // caller's next attempt needs back.
+    let _ = std::fs::remove_file(&tmp);
+    false
+}
+
+/// The fixer's art publish: after the identity edit has COMMITTED, the
+/// title key's art name holds `img` whole, or holds nothing at all.
+///
+/// Both halves matter and they are separate failures. Staged, because
+/// this runs after the row write, so the name is the one the card
+/// already draws from and a process that died inside a straight
+/// `fs::write` here left a truncated JPEG on it - which every card
+/// builder's `is_file` gate passes, so the card draws a broken image
+/// with nothing to prompt a re-fix.
+///
+/// Absent beats stale, unchanged: staging moves where a failure LANDS,
+/// not what the live path is left holding. The committed row names this
+/// file, and a card whose named art is missing draws its placeholder, so
+/// a failed publish costs a poster until the next Refresh rather than
+/// showing the previous identity's picture.
+fn republish_title_art(art: &std::path::Path, key: &str, img: Option<Vec<u8>>, backdrop: bool) {
+    let name = crate::wall::art_name(key, backdrop);
+    if !img.is_some_and(|bytes| publish_art(art, &name, &bytes)) {
+        let _ = std::fs::remove_file(art.join(&name));
+    }
+}
+
 fn m_wall_fix(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -239,7 +343,7 @@ fn m_wall_fix(
                 };
                 let (poster, backdrop) = (named(&poster_img, false), named(&backdrop_img, true));
                 let ok = d
-                    .with_index(|ix| {
+                    .index_write_checked(|ix| {
                         ix.title_set_identity_and_fill(
                             &key,
                             kind,
@@ -272,22 +376,10 @@ fn m_wall_fix(
                         )
                         .ok()
                     })
-                    .is_some();
-                if ok {
+                    .map(|w| w.is_some());
+                if ok == Ok(true) {
                     for (img, backdrop) in [(poster_img, false), (backdrop_img, true)] {
-                        let path = art.join(crate::wall::art_name(&key, backdrop));
-                        match img {
-                            Some(bytes) if std::fs::write(&path, &bytes).is_ok() => {}
-                            // Absent beats stale. The row names this
-                            // file, and a card whose named art is not on
-                            // disk draws its placeholder (every card
-                            // builder gates the URL on `is_file`), so a
-                            // failed write costs a poster until the next
-                            // Refresh instead of showing the wrong one.
-                            _ => {
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
+                        republish_title_art(&art, &key, img, backdrop);
                     }
                     // The thumbnails the grid actually loads are cached
                     // per title key, so the new poster is invisible
@@ -298,16 +390,16 @@ fn m_wall_fix(
                 ok
             } else if body["refetch"].as_bool() == Some(true) {
                 let ok = d
-                    .with_index(|ix| {
+                    .index_write_checked(|ix| {
                         ix.title_set_identity_and_reset(&key, kind, &title, year)
                             .ok()
                     })
-                    .is_some();
+                    .map(|w| w.is_some());
                 // Only once the reset is committed. The art belongs to
                 // the row's metadata, and dropping it against an edit
                 // the index refused would blank a card that still holds
                 // the identity that art matches.
-                if ok {
+                if ok == Ok(true) {
                     crate::wall::drop_art(&art, &key);
                 }
                 info!(target: "wall", "fix {key} → {title} ({year}), re-fetching");
@@ -344,7 +436,7 @@ fn m_wall_fix(
                     .unwrap_or(oview);
                 let genres = body["genres"].as_str().map(str::to_string).unwrap_or(ogen);
                 let ok = d
-                    .with_index(|ix| {
+                    .index_write_checked(|ix| {
                         ix.title_set_identity_and_fill(
                             &key,
                             kind,
@@ -366,18 +458,21 @@ fn m_wall_fix(
                         )
                         .ok()
                     })
-                    .is_some();
+                    .map(|w| w.is_some());
                 info!(target: "wall", "fix {key} → {title} ({year}), manual");
                 ok
             };
-            if ok {
-                json!({"status": true})
-            } else {
+            match ok {
+                Ok(true) => json!({"status": true}),
                 // One error for the whole edit, because there is no
                 // longer a state between "nothing happened" and "all of
                 // it did" for the user to be told about: the write was
                 // refused, and pressing Save again is the whole fix.
-                json!({"status": false, "error": "index unavailable"})
+                Ok(false) => json!({"status": false, "error": "index unavailable"}),
+                // TODO 166: the write mutex was held for the whole
+                // budget. Nothing was written and the user is told so -
+                // never `status: true`, and never a silent drop.
+                Err(why) => json!({"status": false, "error": why.message()}),
             }
         }
     })
@@ -483,10 +578,28 @@ fn m_wall_art(
                         let art = d.spool.join("art");
                         let _ = std::fs::create_dir_all(&art);
                         let name = crate::wall::art_name(&key, false);
-                        if std::fs::write(art.join(&name), &b).is_err() {
+                        // F-07: stage beside the live file, publish by
+                        // rename, and only once the row write has
+                        // landed. `art_name` is a pure function of the
+                        // key, so a REPLACEMENT poster lands on exactly
+                        // the path the existing row already names -
+                        // writing it up front meant a busy index mutex
+                        // answered `status: false` over bytes that had
+                        // already changed on the wall, with the old
+                        // image unrecoverable and its thumbnail gone.
+                        let tmp = art.join(art_staging_name(&name));
+                        if std::fs::write(&tmp, &b).is_err() {
+                            // The failure is usually a full disk, and
+                            // `write` truncates before it fills - so the
+                            // partial file is both the thing that has to
+                            // go and the space this needs back. Every
+                            // other arm below already removes its own
+                            // staging file; the hourly sweep in `maint`
+                            // is for the process that never reaches one.
+                            let _ = std::fs::remove_file(&tmp);
                             json!({"status": false, "error": "couldn't write the art cache"})
                         } else {
-                            let ok = d.with_index(|ix| {
+                            let ok = d.index_write_checked(|ix| {
                                 // Seed first when the row is missing:
                                 // `title_fill` is a bare UPDATE, so on a
                                 // card the wall has never drawn it would
@@ -521,18 +634,59 @@ fn m_wall_art(
                                 )
                                 .ok()
                             });
-                            // The grid loads `/art/thumb_<name>`, a
-                            // derivative cached under a name of its own,
-                            // so a hand-picked poster written over the
-                            // old file is invisible on the wall until
-                            // the stale thumbnail goes.
-                            crate::wall::drop_art_thumbs(&art, &key);
-                            info!(
-                                target: "wall",
-                                "custom poster for {key} ({} KB via {src})",
-                                b.len() / 1024
-                            );
-                            json!({"status": ok.is_some()})
+                            match ok {
+                                Ok(Some(_)) => {
+                                    // Same-directory rename, so the live
+                                    // name is either the old bytes or
+                                    // the new ones and never a partial
+                                    // file. A rename that fails leaves
+                                    // the row naming the old image,
+                                    // which is what is still there.
+                                    if std::fs::rename(&tmp, art.join(&name)).is_err() {
+                                        let _ = std::fs::remove_file(&tmp);
+                                        json!({
+                                            "status": false,
+                                            "error": "couldn't write the art cache"
+                                        })
+                                    } else {
+                                        // The grid loads
+                                        // `/art/thumb_<name>`, a
+                                        // derivative cached under a name
+                                        // of its own, so a hand-picked
+                                        // poster written over the old
+                                        // file is invisible on the wall
+                                        // until the stale thumbnail
+                                        // goes. Dropped only here: on a
+                                        // refused edit the old thumbnail
+                                        // still matches the old poster.
+                                        crate::wall::drop_art_thumbs(&art, &key);
+                                        info!(
+                                            target: "wall",
+                                            "custom poster for {key} ({} KB via {src})",
+                                            b.len() / 1024
+                                        );
+                                        json!({"status": true})
+                                    }
+                                }
+                                // `Ok(None)` is the indexer switched off
+                                // between the read and the write, or a
+                                // seed/fill that failed; the `Err` arm
+                                // is TODO 166's held write mutex. No row
+                                // names the new bytes in any of them, so
+                                // the staging file goes and the old
+                                // poster, thumbnail and row stand.
+                                Ok(None) => {
+                                    let _ = std::fs::remove_file(&tmp);
+                                    json!({"status": false})
+                                }
+                                Err(why) => {
+                                    let _ = std::fs::remove_file(&tmp);
+                                    json!({
+                                        "status": false,
+                                        "error": why.message(),
+                                    })
+                                }
+                            }
                         }
                     }
                 },
@@ -599,10 +753,56 @@ fn m_wall_refresh(
             let _ = std::fs::create_dir_all(&art);
             info!(target: "wall", "metadata reset for {n} titles - re-enriching");
             json!({"status": true, "reset": n})
+        } else if target == "blanked" {
+            // TODO 26c: the manual half of the transient-failure sweep.
+            // Deliberately NOT the `all` arm above: these rows have no
+            // metadata and no art to lose, so nothing is wiped - the
+            // stamp that retired them is simply cleared and the enricher
+            // picks them up again.
+            //
+            // Gated like every other maintenance leg. It walks `titles`
+            // under the index write mutex, which is not a thing to start
+            // while a download is using it.
+            if !d.db_maintenance_ok() {
+                return Some(json!({
+                    "status": false,
+                    "error": "busy - try again when nothing is downloading"
+                }));
+            }
+            // F-08 / TODO 166: the bounded write door, NOT `with_index`.
+            // Only `value=all` above is classified as a deliberately
+            // blocking admin reset; this arm was added later and
+            // inherited the wrong door, so an authenticated sweep could
+            // park an HTTP worker on the index mutex for a whole tip
+            // ingest. The 5 s budget inside the closure bounds the SCAN
+            // once the mutex is held and is independent of the wait.
+            let swept = match d.index_write_checked(|ix| {
+                ix.titles_unstamp_rearm().ok()?;
+                ix.titles_unstamp_blanked(std::time::Duration::from_secs(5))
+                    .ok()
+            }) {
+                Ok(w) => w,
+                Err(why) => return Some(json!({"status": false, "error": why.message()})),
+            };
+            match swept {
+                // Whatever the budget did not reach, the maintenance
+                // pass finishes on its own clock - the rearm above is
+                // what re-opens it.
+                Some((n, done)) => {
+                    info!(target: "wall", "re-queued {n} blanked title(s), done={done}");
+                    json!({"status": true, "reset": n, "done": done})
+                }
+                None => json!({"status": false, "error": "the index could not be reset"}),
+            }
         } else if !target.is_empty() {
-            let mut ok = d
-                .with_index(|ix| ix.title_reset(&target).ok())
-                .unwrap_or(false);
+            let mut ok = match d.index_write_checked(|ix| ix.title_reset(&target).ok()) {
+                Ok(w) => w.unwrap_or(false),
+                // TODO 166: the reset is what requeues the title for
+                // enrichment and the art wipe below is gated on it, so
+                // a busy mutex has to stop the whole action rather than
+                // fall through to "unknown title key".
+                Err(why) => return Some(json!({"status": false, "error": why.message()})),
+            };
             // A bare UPDATE matched nothing, which is the ONE case that
             // is not a verdict about the key: a card the wall has never
             // drawn has no row to reset, and refusing it told the user
@@ -628,12 +828,15 @@ fn m_wall_refresh(
                     // key, and still worth saying so.
                     Ok(None) => {}
                     Ok(Some(s)) => {
-                        ok = d
-                            .with_index(|ix| {
-                                ix.title_seed(&s.key, &s.kind, &s.title, s.year).ok()?;
-                                ix.title_reset(&target).ok()
-                            })
-                            .unwrap_or(false);
+                        ok = match d.index_write_checked(|ix| {
+                            ix.title_seed(&s.key, &s.kind, &s.title, s.year).ok()?;
+                            ix.title_reset(&target).ok()
+                        }) {
+                            Ok(w) => w.unwrap_or(false),
+                            Err(why) => {
+                                return Some(json!({"status": false, "error": why.message()}));
+                            }
+                        };
                     }
                 }
             }
@@ -648,7 +851,7 @@ fn m_wall_refresh(
                 json!({"status": false, "error": "unknown title key"})
             }
         } else {
-            json!({"status": false, "error": "wall_refresh needs value=<key>|all"})
+            json!({"status": false, "error": "wall_refresh needs value=<key>|all|blanked"})
         }
     })
 }
@@ -666,9 +869,13 @@ fn m_wall_merge(
         if src.is_empty() || dst.is_empty() || src == dst {
             json!({"status": false, "error": "value=<from key> value2=<into key> required"})
         } else {
-            let n = d
-                .with_index(|ix| ix.merge_title(&src, &dst).ok())
-                .unwrap_or(0);
+            let n = match d.index_write_checked(|ix| ix.merge_title(&src, &dst).ok()) {
+                Ok(n) => n.unwrap_or(0),
+                // TODO 166: nothing moved, so the art below must not be
+                // dropped either - the source card is still there and
+                // still wearing it.
+                Err(why) => return Some(json!({"status": false, "error": why.message()})),
+            };
             // Thumbnails included: the source key is gone, so nothing
             // will ever ask for its derivatives again and a file the
             // headshot eviction pass deliberately never touches would
@@ -694,16 +901,19 @@ fn m_wall_hide(
             json!({"status": false, "error": "value=<title key> required"})
         } else {
             let hide = mode == "wall_hide";
-            let ok = d
-                .with_index(|ix| {
-                    if hide {
-                        ix.hide_title(&key).ok()
-                    } else {
-                        ix.unhide_title(&key).ok()
-                    }
-                })
-                .is_some();
-            json!({"status": ok})
+            match d.index_write_checked(|ix| {
+                if hide {
+                    ix.hide_title(&key).ok()
+                } else {
+                    ix.unhide_title(&key).ok()
+                }
+            }) {
+                Ok(w) => json!({"status": w.is_some()}),
+                // TODO 166: the card is not hidden. Saying so is the
+                // whole point - the grid is about to be repainted from
+                // an index that still has it.
+                Err(why) => json!({"status": false, "error": why.message()}),
+            }
         }
     })
 }
@@ -962,10 +1172,11 @@ fn m_wall_rule_add(
         let field = params.get("name").cloned().unwrap_or_default();
         let value = params.get("value").cloned().unwrap_or_default();
         let auto = params.get("value2").map(String::as_str) == Some("auto");
-        match d.with_index(|ix| Some(ix.rule_add(&field, &value, auto))) {
-            Some(Ok(())) => json!({"status": true}),
-            Some(Err(e)) => json!({"status": false, "error": e.to_string()}),
-            None => json!({"status": false, "error": "index unavailable"}),
+        match d.index_write_checked(|ix| Some(ix.rule_add(&field, &value, auto))) {
+            Ok(Some(Ok(()))) => json!({"status": true}),
+            Ok(Some(Err(e))) => json!({"status": false, "error": e.to_string()}),
+            Ok(None) => json!({"status": false, "error": "index unavailable"}),
+            Err(why) => json!({"status": false, "error": why.message()}),
         }
     })
 }
@@ -982,8 +1193,10 @@ fn m_wall_rule_del(
             .get("value")
             .and_then(|v| v.parse().ok())
             .unwrap_or(-1);
-        let ok = d.with_index(|ix| ix.rule_delete(id).ok()).is_some();
-        json!({"status": ok})
+        match d.index_write_checked(|ix| ix.rule_delete(id).ok()) {
+            Ok(w) => json!({"status": w.is_some()}),
+            Err(why) => json!({"status": false, "error": why.message()}),
+        }
     })
 }
 
@@ -1020,10 +1233,13 @@ fn m_wall_suggest_no(
     Some({
         let field = params.get("name").cloned().unwrap_or_default();
         let value = params.get("value").cloned().unwrap_or_default();
-        let ok = d
-            .with_index(|ix| ix.suggestion_dismiss(&field, &value).ok())
-            .is_some();
-        json!({"status": ok})
+        match d.index_write_checked(|ix| ix.suggestion_dismiss(&field, &value).ok()) {
+            Ok(w) => json!({"status": w.is_some()}),
+            // TODO 166: a dismissal that did not land comes back on the
+            // next poll, so the panel has to be told rather than
+            // clearing itself against a write that never happened.
+            Err(why) => json!({"status": false, "error": why.message()}),
+        }
     })
 }
 
@@ -1163,5 +1379,124 @@ pub(in crate::serve) fn dispatch(
         // treats "For you" as "most posted").
         "taste" => m_taste(d, req, params, ctx, api_body),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// F-07. The staging name `m_wall_art` publishes FROM must be one
+    /// the `/art/` route will not serve, or a half-written upload is
+    /// fetchable under a name of its own while the real poster is still
+    /// the old one. `art_name_ok` allows ASCII alphanumerics, `_` and
+    /// `.` and nothing else, so the `-` in the suffix is what refuses
+    /// it - keep one there.
+    #[test]
+    fn the_art_staging_name_is_never_servable() {
+        let live = crate::wall::art_name("m:the matrix:1999", false);
+        let staged = super::art_staging_name(&live);
+        assert!(crate::serve::apiutil::art_name_ok(&live), "{live}");
+        assert!(
+            !crate::serve::apiutil::art_name_ok(&staged),
+            "the staging file is fetchable: {staged}"
+        );
+        assert_ne!(staged, live);
+        // Same directory, so publishing is a rename and never a copy
+        // across a filesystem boundary.
+        assert!(!staged.contains('/') && !staged.contains('\\'), "{staged}");
+        assert!(!staged.contains(".."), "{staged}");
+    }
+
+    /// An art directory of our own, emptied first so a previous run's
+    /// leftovers cannot decide an assertion.
+    fn art_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nzbfast-artpub-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp art dir");
+        dir
+    }
+
+    /// Make `dir` refuse a NEW file, and answer whether it really did.
+    ///
+    /// It does on POSIX (the write bits go) and does not on Windows,
+    /// where the read-only attribute on a directory is ignored for file
+    /// creation, nor for root anywhere. The probe is the guard rather
+    /// than a `cfg`: what the test needs is not a platform, it is a
+    /// directory that refuses a create, and asking is both cheaper and
+    /// more honest than predicting.
+    fn seal(dir: &std::path::Path) -> bool {
+        let mut perms = std::fs::metadata(dir)
+            .expect("art dir metadata")
+            .permissions();
+        perms.set_readonly(true);
+        if std::fs::set_permissions(dir, perms).is_err() {
+            return false;
+        }
+        std::fs::write(dir.join("probe"), b"x").is_err()
+    }
+
+    fn unseal(dir: &std::path::Path) {
+        if let Ok(md) = std::fs::metadata(dir) {
+            let mut perms = md.permissions();
+            #[expect(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(dir, perms);
+        }
+    }
+
+    /// Site 1, the fixer's candidate arm. The crash window Codex F-07
+    /// closed for the UPLOAD path was still open here: this arm ran
+    /// after the index write committed and wrote the fetched bytes
+    /// straight over the path the committed row names.
+    ///
+    /// A sealed directory is the whole point of the fixture, because it
+    /// separates the two writes the old code conflated: an EXISTING file
+    /// can still be opened for writing in a directory that refuses new
+    /// ones (the write permission is the file's, not the directory's),
+    /// so `fs::write(live)` would have truncated the good poster here
+    /// while `fs::write(staging)` cannot even start. Untouched, never
+    /// truncated - which is what a crash mid-write buys too.
+    #[test]
+    fn the_fixer_never_writes_over_the_live_poster() {
+        let dir = art_dir("fix");
+        let key = "m:the matrix:1999";
+        let live = dir.join(crate::wall::art_name(key, false));
+        std::fs::write(&live, b"the-old-poster-whole").expect("plant");
+
+        // Happy path first: published whole, and nothing staged left.
+        super::republish_title_art(&dir, key, Some(b"the-new-poster".to_vec()), false);
+        assert_eq!(std::fs::read(&live).expect("live"), b"the-new-poster");
+        assert_eq!(staging_files(&dir), 0, "a staging file survived a publish");
+
+        if seal(&dir) {
+            super::republish_title_art(&dir, key, Some(b"XX".to_vec()), false);
+            assert_eq!(
+                std::fs::read(&live).expect("live"),
+                b"the-new-poster",
+                "a failed publish truncated the live poster"
+            );
+            unseal(&dir);
+            assert_eq!(
+                staging_files(&dir),
+                0,
+                "a failed publish left staging bytes"
+            );
+        }
+
+        // Absent beats stale: no image means no file, not the old one.
+        super::republish_title_art(&dir, key, None, false);
+        assert!(!live.exists(), "the previous identity's poster stayed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn staging_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read art dir")
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(super::is_art_staging_name)
+            })
+            .count()
     }
 }

@@ -5,7 +5,12 @@
 //!
 //!   nzbserve build <legdir>              write <legdir>/<leg>.nzb
 //!   nzbserve serve <legdir> [--port N]   serve the leg over NNTP (plain
-//!                                        TCP, no auth) until killed
+//!            [--line-mbps N]             TCP, no auth) until killed
+//!
+//! `--line-mbps` paces the whole server to N MB/s, so a loopback rig can
+//! reproduce a real line rate instead of this host's. Added 21 Aug for a
+//! disk-counter measurement that needed a 1 GbE box's ~110 MB/s rather
+//! than the 700-1300 MB/s loopback runs at unthrottled.
 //!
 //! A leg directory is what generate.sh produces:
 //!   <legdir>/post/   files posted AND served (articles answer 222)
@@ -131,6 +136,7 @@ fn main() {
         }
     };
     let mut port: u16 = 11901;
+    let mut line_mbps: u64 = 0;
     let mut it = args.iter().skip(2);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -139,6 +145,12 @@ fn main() {
                     .next()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or_else(|| panic!("--port needs a number"));
+            }
+            "--line-mbps" => {
+                line_mbps = it
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or_else(|| panic!("--line-mbps needs a number"));
             }
             other => panic!("unknown arg {other:?}\n{usage}"),
         }
@@ -175,10 +187,18 @@ fn main() {
             chaos,
         )
         .await;
+        if line_mbps > 0 {
+            srv.set_line_bps(line_mbps * 1_000_000);
+        }
         println!(
-            "[nzbserve] NNTP ready on {} - point any client at host 127.0.0.1 port {}, TLS off, no auth",
+            "[nzbserve] NNTP ready on {} - point any client at host 127.0.0.1 port {}, TLS off, no auth{}",
             srv.addr,
-            srv.addr.port()
+            srv.addr.port(),
+            if line_mbps > 0 {
+                format!(", paced to {line_mbps} MB/s")
+            } else {
+                String::new()
+            }
         );
         let mut last = 0u64;
         loop {

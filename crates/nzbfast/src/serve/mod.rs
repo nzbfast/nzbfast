@@ -42,6 +42,10 @@ mod busy;
 
 mod daemon;
 use daemon::*;
+// serve/wire.rs: the active download's counters and the drain slot
+// (cross-job hand-over), with `Daemon::wire_counters` on them.
+mod wire;
+use wire::*;
 
 // serve/dupe.rs: inherent methods on `Daemon`, so no glob is needed.
 mod dupe;
@@ -60,6 +64,14 @@ mod mover;
 mod naming;
 mod postproc;
 use postproc::*;
+
+/// §163 item 5: the log tail's scrub, applied on the way out.
+mod logscrub;
+
+/// TODO 33: the route lookup behind remote_info's LAN and Tailscale
+/// URLs, cached so its wildcard UDP bind stops being a per-call macOS
+/// firewall dialog.
+mod lanaddr;
 
 mod api;
 
@@ -263,6 +275,16 @@ mod linkpeak;
 // §129 4b: "Why is this slow?" - live per-job attribution.
 mod whyslow;
 
+// §210: the local link (Wi-Fi / port) that carries traffic to the
+// news servers, so the tune hint can name it when it is the ceiling.
+mod locallink;
+// The module stays private to `serve` - everything else in it is the
+// daemon's (a probe loop, a `Daemon` field, a median window). One
+// function is not: `nzbfast sysbench` runs outside any daemon and needs
+// the same reading for its network row, so it gets that one and nothing
+// else (TODO 210 item (b), CLI side).
+pub(crate) use locallink::probe_local_link;
+
 // §129 3e (§108 decision 4): the chronic slow-storage pause.
 mod slowstore;
 
@@ -293,6 +315,13 @@ pub async fn serve(config: PathBuf, mut opts: ServeOpts) -> Result<()> {
     // Saved settings may have overridden the CLI budget; republish so the
     // repair paths use the same figure the rest of the daemon does.
     nzbkit::mem::set_process_budget(opts.mem_budget);
+    // One holds ledger per daemon process, so the two pipelines a queue
+    // hand-over keeps alive share one holds cap (TODO 219 follow-up).
+    // `NZBFAST_HOLDS_LEDGER=0` leaves it uninstalled: each pipeline then
+    // budgets its holds from the full slice, the 22 Aug shape.
+    if !std::env::var("NZBFAST_HOLDS_LEDGER").is_ok_and(|v| v == "0") {
+        nzbkit::extract::install_process_ledger();
+    }
     // The listener, the single-instance lock and the Daemon itself
     // (startup.rs). The lock guard rides home in `booted` and must stay
     // alive for the whole run - dropping it frees the lock.
@@ -314,9 +343,7 @@ pub async fn serve(config: PathBuf, mut opts: ServeOpts) -> Result<()> {
     )?;
 
     #[cfg(feature = "indexer")]
-    let tmdb_key = config_tmdb_key(&config);
-    #[cfg(feature = "indexer")]
-    tasks::spawn_enrichment_workers(&daemon, &tmdb_key);
+    tasks::spawn_enrichment_workers(&daemon);
     spawn_aux_tasks(&daemon, &config);
 
     announce_ready(
@@ -329,14 +356,6 @@ pub async fn serve(config: PathBuf, mut opts: ServeOpts) -> Result<()> {
         &mut mint_disclosure,
         booted.open,
     );
-    #[cfg(feature = "indexer")]
-    http::spawn_http_workers(
-        booted.server,
-        daemon.clone(),
-        config.clone(),
-        tmdb_key.clone(),
-    );
-    #[cfg(not(feature = "indexer"))]
     http::spawn_http_workers(booted.server, daemon.clone(), config.clone());
 
     park_for_embedded_stop().await;
@@ -390,8 +409,6 @@ static EMBEDDED: AtomicBool = AtomicBool::new(false);
 /// True when an embedded host owns the process. The paths that care are
 /// the ones that would end it: an embedded stop must not take the host
 /// app down with it.
-// dead_code: the bin root never embeds.
-#[allow(dead_code)]
 pub(crate) fn is_embedded() -> bool {
     EMBEDDED.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -404,6 +421,8 @@ pub(crate) fn is_embedded() -> bool {
 /// baseline.
 // dead_code: only the embedded crate root (lib.rs, `ffi` feature) has a
 // caller; see request_stop below.
+// Not #[expect] for that reason: under the ffi root the item is live
+// and the expectation goes unfulfilled.
 #[allow(dead_code)]
 pub fn arm_embedded_stop() {
     EMBEDDED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -503,6 +522,7 @@ impl RunStop {
 /// parks that are not run-scoped (`Daemon::park_if_off`): the caller's
 /// own [`RunStop`] check decides whether the wake means "exit", this
 /// only makes sure a stop is not slept through.
+#[cfg(feature = "indexer")]
 pub(crate) fn sleep_until_stop_bump(dur: std::time::Duration) {
     let epoch = STOP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
     let deadline = Instant::now() + dur;
@@ -570,6 +590,8 @@ pub(crate) fn spawn_aux(name: &'static str, body: impl FnOnce() + Send + 'static
 /// when everything has been reclaimed. Exposed for the embedded host's
 /// reclamation test; nothing in the product reads it.
 // dead_code: test-only reader, and it lives in another crate.
+// Not #[expect] for that reason: under the ffi root the item is live
+// and the expectation goes unfulfilled.
 #[allow(dead_code)]
 pub fn live_aux_threads() -> Vec<(String, usize)> {
     AUX_THREADS
@@ -598,6 +620,8 @@ pub(crate) fn census_daemon(d: &Arc<Daemon>) {
 /// Daemon generations still alive. Exposed for the embedded host's
 /// reclamation test; nothing in the product reads it.
 // dead_code: test-only reader, and it lives in another crate.
+// Not #[expect] for that reason: under the ffi root the item is live
+// and the expectation goes unfulfilled.
 #[allow(dead_code)]
 pub fn live_daemons() -> usize {
     let mut g = DAEMON_CENSUS.lock().unwrap_or_else(|p| p.into_inner());
@@ -620,6 +644,8 @@ pub fn live_daemons() -> usize {
 // dead_code: only the embedded crate root (lib.rs, `ffi` feature) has a
 // caller; the CLI daemon stops by process exit. The module compiles
 // under both roots, so the bin build sees this as dead.
+// Not #[expect] for that reason: the ffi root and the unit tests below
+// both reach it, and the expectation goes unfulfilled there.
 #[allow(dead_code)]
 pub fn request_stop() {
     {
@@ -736,6 +762,10 @@ mod preview;
 use preview::*;
 
 mod httputil;
+
+// Not glob-imported: only the handoff redeem in `bootstrap` asks it, by
+// path. Which local account owns the far end of a loopback connection.
+mod peeracct;
 use httputil::*;
 
 mod sabcompat;
@@ -776,6 +806,10 @@ use reqbody::*;
 mod fsutil;
 use fsutil::*;
 
+// Not glob-imported: only `os_open` calls into it, by path, and only on
+// Windows. The title matcher inside is portable so it can be tested here.
+mod winfront;
+
 mod history;
 use history::*;
 
@@ -792,14 +826,72 @@ use webasset::*;
 /// sweep: recent articles (last few thousand) plus progressively older
 /// ranges, so retention limits and takedowns actually differentiate the
 /// providers. Uses the first reachable server for discovery.
+///
+/// "First" is ranked ENABLED FIRST, in config order, and the walk stops
+/// at the first server that actually yields a sample. Until 23 Aug 2026
+/// this was a bare `servers.first()` with no fallback of any kind, which
+/// is the `servers[0]`-with-no-`enabled`-test shape the disabled-server
+/// sweep of that day went looking for: on an install whose FIRST
+/// configured server is the switched-off one, the sample - and so the
+/// shared basis every provider in the report is scored against - came
+/// off the one account the user had taken out of service. The same line
+/// made a first server that is merely UNREACHABLE fail the whole card,
+/// though the sentence above has promised "first reachable" throughout.
+///
+/// A disabled server is a LAST RESORT here rather than a refusal, and
+/// that arm is load-bearing rather than defensive. `m_diversity` hands
+/// this the ENABLED servers only, so the ranking above is normally the
+/// whole story - but that caller has an opt-in (`value=1`) for the "is
+/// this account worth turning back on?" case, and on that path the list
+/// carries switched-off entries deliberately. They must still be the
+/// last thing tried, and an opt-in run against an all-disabled config
+/// must still discover a sample rather than refuse, or the opt-in does
+/// nothing on the one config that most needs it.
 async fn sample_ids_for_diversity(
     servers: &[nzbkit::config::ServerConfig],
     group: &str,
 ) -> std::result::Result<Vec<String>, String> {
+    let mut last = String::new();
+    for srv in servers
+        .iter()
+        .filter(|s| s.enabled)
+        .chain(servers.iter().filter(|s| !s.enabled))
+    {
+        match sample_ids_from_server(srv, group).await {
+            Ok(ids) => return Ok(ids),
+            // Keep walking: the point of the ranking is that a candidate
+            // that cannot answer costs the next one nothing.
+            Err(e) => last = e,
+        }
+    }
+    Err(if last.is_empty() {
+        "no servers configured".to_string()
+    } else {
+        last
+    })
+}
+
+/// One candidate's half of [`sample_ids_for_diversity`]: connect, walk
+/// five age bands, hang up. Split out so the ranking above reads as a
+/// plain walk over candidates rather than as control flow wrapped around
+/// a connection.
+async fn sample_ids_from_server(
+    srv: &nzbkit::config::ServerConfig,
+    group: &str,
+) -> std::result::Result<Vec<String>, String> {
     use nzbkit::nntp::Connection;
-    let srv = servers.first().ok_or("no servers configured")?;
     let (mut conn, _) = Connection::connect(srv).await.map_err(|e| e.to_string())?;
-    let g = conn.group(group).await.map_err(|e| e.to_string())?;
+    let g = match conn.group(group).await {
+        Ok(g) => g,
+        Err(e) => {
+            // Hang up before moving on. A candidate that greeted us and
+            // then refused the group still holds a session on that
+            // account until it times out, and the next candidate in the
+            // walk may be the same provider under another brand.
+            conn.quit().await;
+            return Err(e.to_string());
+        }
+    };
     let mut ids = Vec::new();
     // Five age bands across the group's article-number range.
     let span = g.high.saturating_sub(g.low).max(1);
@@ -823,6 +915,104 @@ async fn sample_ids_for_diversity(
         return Err("no sample articles found".into());
     }
     Ok(ids)
+}
+
+/// The diversity card's id sample must not be discovered from a server
+/// the user switched off while an enabled one is sitting right there.
+///
+/// Same shape as the disabled-server sweep of 23 Aug 2026, which found a
+/// machine holding live sockets to a provider marked `"enabled": false`
+/// while another machine was using that same shared account: a lane took
+/// `servers[0]` and consulted the flag nowhere. This one is reached by an
+/// explicit click rather than by a background tick, so it is the milder
+/// case - but it is the same line, and the sample it discovers is the
+/// shared basis every provider in the report is scored against.
+///
+/// Both listeners hang up on the greeting, so no sample can succeed and
+/// the call is expected to fail. That is the point: the assertion is on
+/// WHICH accounts the walk reached and in what ORDER, which is the only
+/// thing this ranking decides. The old `servers.first()` line reaches the
+/// disabled listener and nothing else, so it fails here twice over.
+#[cfg(test)]
+mod diversity_sample_prefers_an_enabled_server {
+    use std::sync::mpsc;
+
+    /// A listener that reports the moment it accepts, then hangs up.
+    ///
+    /// Hanging up rather than going silent matters: `Connection::connect`
+    /// has its own multi-second ceiling, and a listener that accepts and
+    /// then says nothing makes every run of this test pay a network
+    /// timeout it is not measuring.
+    fn spy(tx: mpsc::Sender<&'static str>, tag: &'static str) -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((s, _)) = l.accept() {
+                // Send BEFORE the shutdown, so the report is on the
+                // channel before the client can observe the hang-up and
+                // move to the next candidate. That is what makes the
+                // order assertion below deterministic rather than a race.
+                let _ = tx.send(tag);
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        });
+        port
+    }
+
+    fn server(port: u16, enabled: bool) -> nzbkit::config::ServerConfig {
+        serde_json::from_value(serde_json::json!({
+            "host": "127.0.0.1", "port": port, "tls": false,
+            "enabled": enabled, "connections": 1
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_switched_off_server_is_the_last_candidate_not_the_first() {
+        let (tx, rx) = mpsc::channel();
+        // The incident's shape exactly: the DISABLED account is first in
+        // the array, which is the position the old line took outright.
+        let off = spy(tx.clone(), "disabled");
+        let on = spy(tx, "enabled");
+        let servers = [server(off, false), server(on, true)];
+
+        let r = super::sample_ids_for_diversity(&servers, "alt.binaries.test").await;
+        assert!(r.is_err(), "a listener that hangs up cannot yield a sample");
+
+        let reached: Vec<&str> = rx.try_iter().collect();
+        assert_eq!(
+            reached,
+            ["enabled", "disabled"],
+            "the sample walk must try the ENABLED server first and reach a \
+             switched-off one only after every enabled candidate has failed"
+        );
+    }
+
+    /// The fallback is deliberate, so it is pinned: an all-disabled config
+    /// still gets its sample discovered rather than a refusal. Which
+    /// accounts the Analyze button may touch is a decision for its caller,
+    /// not something this helper should settle by erroring.
+    #[tokio::test]
+    async fn an_all_disabled_config_still_walks_its_servers() {
+        let (tx, rx) = mpsc::channel();
+        let only = spy(tx, "disabled");
+        let servers = [server(only, false)];
+
+        let _ = super::sample_ids_for_diversity(&servers, "alt.binaries.test").await;
+
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            ["disabled"],
+            "with nothing enabled the walk must still reach the one \
+             configured server"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_server_list_is_still_an_error() {
+        let r = super::sample_ids_for_diversity(&[], "alt.binaries.test").await;
+        assert_eq!(r.unwrap_err(), "no servers configured");
+    }
 }
 
 #[cfg(test)]

@@ -272,6 +272,31 @@ pub struct SpotVerify {
     pub(crate) title: Option<String>,
 }
 
+/// PKCS#1 v1.5 signature scheme for SHA-1, written out rather than
+/// derived with `Pkcs1v15Sign::new::<Sha1>()`.
+///
+/// `new::<D>()` uses `D` only to read two constants off it - the digest
+/// length and the ASN.1 DigestInfo prefix carrying SHA-1's OID - and
+/// never hashes anything (we hash separately, in `signed_digests`). But
+/// it demands `D` implement `rsa`'s OWN `digest` traits, which welds
+/// this call site to whatever digest major version `rsa` happens to be
+/// on. That weld is the entire reason the RustCrypto digest-0.11 wave
+/// was held: with it, `sha1` cannot move until `rsa` does.
+///
+/// The two constants are frozen by RFC 8017 s9.2 note 1, not by a crate
+/// version, so naming them here is not a copy of an implementation
+/// detail - it is the spec. `pkcs1v15_prefix_matches_rfc8017` pins them.
+fn pkcs1v15_sha1() -> rsa::Pkcs1v15Sign {
+    /// DigestInfo prefix for SHA-1: RFC 8017 s9.2 note 1.
+    const SHA1_DIGESTINFO: [u8; 15] = [
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+    ];
+    rsa::Pkcs1v15Sign {
+        hash_len: Some(20),
+        prefix: Box::new(SHA1_DIGESTINFO),
+    }
+}
+
 /// Verify a spot header: RSA PKCS#1 v1.5 / SHA-1 over
 /// `title + signed_part + poster` (see the module header for the title and
 /// key rules), plus the V2 hashcash check when the key was self-signed:
@@ -280,7 +305,7 @@ pub struct SpotVerify {
 /// `subject` is the raw OVER subject, not a pre-split title.
 pub fn verify_spot(header: &SpotHeader, subject: &str, message_id: &str) -> SpotVerify {
     let digests = signed_digests(header, subject);
-    let scheme = rsa::Pkcs1v15Sign::new::<Sha1>();
+    let scheme = pkcs1v15_sha1();
     let mut key_source = None;
     let mut title = None;
     'search: for (source, key) in candidate_keys(header) {
@@ -1148,10 +1173,38 @@ mod tests {
 
     use crate::mock::{Chaos, MockServer, OverRow};
 
+    /// The DigestInfo prefix `pkcs1v15_sha1` writes out is the one RFC
+    /// 8017 s9.2 note 1 fixes for SHA-1, and its length field agrees with
+    /// SHA-1's 20-byte output. Decoding it rather than comparing bytes is
+    /// the point: a typo in the literal would still match a copy of
+    /// itself, but it cannot survive being parsed as the ASN.1 the spec
+    /// describes.
+    #[test]
+    fn pkcs1v15_prefix_matches_rfc8017() {
+        let s = pkcs1v15_sha1();
+        assert_eq!(s.hash_len, Some(<Sha1 as Digest>::output_size()));
+        // SEQUENCE { SEQUENCE { OID 1.3.14.3.2.26, NULL }, OCTET STRING (20) }
+        assert_eq!(s.prefix[0], 0x30, "outer SEQUENCE");
+        assert_eq!(
+            s.prefix[1] as usize,
+            s.prefix.len() - 2 + 20,
+            "outer length"
+        );
+        assert_eq!(&s.prefix[2..4], &[0x30, 0x09], "AlgorithmIdentifier");
+        assert_eq!(
+            &s.prefix[4..11],
+            &[0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a],
+            "SHA-1 OID"
+        );
+        assert_eq!(&s.prefix[11..13], &[0x05, 0x00], "NULL parameters");
+        assert_eq!(&s.prefix[13..15], &[0x04, 0x14], "OCTET STRING, 20 bytes");
+        assert_eq!(s.prefix.len(), 15);
+    }
+
     /// Fixed small key: 512-bit keygen keeps the suite fast; PKCS#1 v1.5
     /// with SHA-1 needs only 368+ bits.
     fn test_key() -> RsaPrivateKey {
-        RsaPrivateKey::new(&mut rand::thread_rng(), 512).expect("keygen")
+        RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 512).expect("keygen")
     }
 
     /// Spotnet-encode base64: strip padding, `/`→`-s`, `+`→`-p`.
@@ -1183,9 +1236,7 @@ mod tests {
         h.update(signed_part.as_bytes());
         h.update(poster.as_bytes());
         let digest = h.finalize();
-        let sig = key
-            .sign(rsa::Pkcs1v15Sign::new::<Sha1>(), &digest)
-            .expect("sign");
+        let sig = key.sign(pkcs1v15_sha1(), &digest).expect("sign");
         let from = format!(
             "{poster} <{}.{}@{signed_part}.{}>",
             spot_b64_encode(&modulus),

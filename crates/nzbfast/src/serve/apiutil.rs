@@ -83,7 +83,7 @@ pub(super) fn nzo_ids_param(
 /// The caller's start/limit window, SAB semantics: both optional,
 /// absent or unparseable is 0, and limit 0 means "everything from
 /// `start`". ONE parse, because three places now act on the same
-/// answer - `paginate` below, the header's echoed `start`/`limit`, and
+/// answer - `in_window` below, the header's echoed `start`/`limit`, and
 /// `queue_json`'s walk, which skips building the rows outside it. Two
 /// of those disagreeing would page one way and report another.
 pub(super) fn window_of(params: &std::collections::HashMap<String, String>) -> (usize, usize) {

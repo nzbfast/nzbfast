@@ -52,6 +52,7 @@ async fn a_steer_config_side_fetch_still_completes() {
         id: "<vol@wedge>".into(),
         age_days: 0,
         part: 1,
+        file: u32::MAX,
     }];
     let (failures, paths) = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -68,7 +69,11 @@ async fn a_steer_config_side_fetch_still_completes() {
     .await
     .expect("a side-fetch under steer-mode configs must drain and return, not park forever")
     .expect("harvest succeeds");
-    assert_eq!(failures, 0, "the one article was served and decoded");
+    assert_eq!(
+        failures.total(),
+        0,
+        "the one article was served and decoded"
+    );
     assert_eq!(paths.len(), 1, "the volume file was assembled");
     let written = std::fs::read(&paths[0]).unwrap();
     assert_eq!(written, payload, "delivered bytes reached the disk");
@@ -114,6 +119,7 @@ async fn a_cancelled_side_fetch_returns_promptly() {
         id: "<vol@x>".into(),
         age_days: 0,
         part: 1,
+        file: u32::MAX,
     }];
     let t0 = std::time::Instant::now();
     let res = tokio::time::timeout(
@@ -175,6 +181,7 @@ async fn a_pre_cancelled_side_fetch_never_dials() {
             id: "<vol@x>".into(),
             age_days: 0,
             part: 1,
+            file: u32::MAX,
         }],
         idm,
         &dir,

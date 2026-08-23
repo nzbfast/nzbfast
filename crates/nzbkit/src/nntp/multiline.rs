@@ -5,7 +5,7 @@
 //! internals (`idle_bounded_for`, the timeouts) reachable; nntp.rs
 //! glob-re-exports it, so every existing spelling is unchanged.
 
-use super::{MAX_MULTILINE_BYTES, NntpError, STREAM_IDLE_TIMEOUT, idle_bounded_for};
+use super::{MAX_MULTILINE_BYTES, NntpError, STREAM_IDLE_TIMEOUT};
 
 /// Rolling minimum-progress floor for a multiline read (error-detection
 /// audit A6). The idle bound above resets on ANY byte, so a connection
@@ -65,8 +65,8 @@ pub(crate) fn body_rate_floor() -> Option<RateFloor> {
     })
 }
 
-/// See [`Connection::read_multiline_into`]; generic so tests can drive
-/// it with tiny buffer capacities to hit every chunk-boundary case.
+/// See [`super::Connection::read_multiline_into`]; generic so tests can
+/// drive it with tiny buffer capacities to hit every chunk-boundary case.
 pub(crate) async fn read_multiline_generic<R>(
     reader: &mut R,
     out: &mut Vec<u8>,
@@ -75,6 +75,72 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     read_multiline_paced(reader, out, STREAM_IDLE_TIMEOUT).await
+}
+
+/// The mid-body no-progress deadline a paced read holds each socket
+/// wait to. `Fixed` is the historical shape - one figure for the whole
+/// response, armed once per wait. `Live` asks the caller again once a
+/// second DURING a silence (TODO 208.2, the warm-up gap): the pool's
+/// share-aware stall bound is derived from a line gauge that trains
+/// during the first bodies of a run, so a bound sampled once at read
+/// start on a slow line carries the flat 8 s floor for a body that
+/// takes 30 s to arrive - exactly the window in which a 360-way slow
+/// start starves connections hardest - and evidence that lands while
+/// the connection is already quiet could never reach a wait armed
+/// before it. Re-asking costs one wake per idle second per connection
+/// (tokio's `BufReader::fill_buf` is cancel-safe, so a sliced wait
+/// loses nothing), and lets a silence that began under the floor be
+/// judged by the trained bound.
+pub enum StallBound<'a> {
+    Fixed(std::time::Duration),
+    Live(&'a (dyn Fn() -> std::time::Duration + Sync)),
+}
+
+impl From<std::time::Duration> for StallBound<'_> {
+    fn from(d: std::time::Duration) -> Self {
+        StallBound::Fixed(d)
+    }
+}
+
+impl<'a> From<&'a (dyn Fn() -> std::time::Duration + Sync)> for StallBound<'a> {
+    fn from(f: &'a (dyn Fn() -> std::time::Duration + Sync)) -> Self {
+        StallBound::Live(f)
+    }
+}
+
+/// How often a `Live` bound is re-read during one silence.
+const LIVE_SLICE: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl StallBound<'_> {
+    /// Wait for the reader's next chunk under this bound. Returns the
+    /// same [`NntpError::Timeout`] a flat idle expiry does, once the
+    /// silence has outlasted the bound as it reads AT THAT MOMENT.
+    async fn fill<R>(&self, reader: &mut R) -> Result<(), NntpError>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        use tokio::io::AsyncBufReadExt;
+        let quiet_since = tokio::time::Instant::now();
+        loop {
+            let bound = match self {
+                StallBound::Fixed(d) => *d,
+                StallBound::Live(f) => f(),
+            };
+            let left = bound.saturating_sub(quiet_since.elapsed());
+            if left.is_zero() {
+                return Err(NntpError::Timeout);
+            }
+            let slice = match self {
+                StallBound::Fixed(_) => left,
+                StallBound::Live(_) => left.min(LIVE_SLICE),
+            };
+            match tokio::time::timeout(slice, reader.fill_buf()).await {
+                Ok(r) => return r.map(drop).map_err(NntpError::from),
+                Err(_) if matches!(self, StallBound::Live(_)) => continue,
+                Err(_) => return Err(NntpError::Timeout),
+            }
+        }
+    }
 }
 
 /// [`read_multiline_generic`] with a caller-chosen per-read no-progress
@@ -115,16 +181,53 @@ where
 /// finishing the response: a total stall is already the idle bound's to
 /// catch, and a body whose terminator has landed is delivered even if
 /// its final chunk crossed a window boundary under the floor.
-pub(crate) async fn read_multiline_paced_max<R>(
+pub(crate) async fn read_multiline_paced_max<'a, R>(
     reader: &mut R,
     out: &mut Vec<u8>,
-    stall: std::time::Duration,
+    stall: impl Into<StallBound<'a>>,
     max: usize,
     floor: Option<RateFloor>,
 ) -> Result<(), NntpError>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
+    read_multiline_paced_noting(reader, out, stall, max, floor, None).await
+}
+
+/// A sink for the bytes a paced read takes off the wire, called once
+/// per chunk AS IT ARRIVES with the count consumed (payload and
+/// terminator alike - what the line carried, not what the body is
+/// worth). TODO 208.2 over-read: the pool's line gauge used to be fed
+/// once per delivered BODY, so every body in flight at the gauge's
+/// first fold landed in a clump credited to a window that had barely
+/// opened - a trained `line peak` of 695 KB/s for a 400 KB/s line on
+/// the fault rig, +10-35% on the banked shaped legs - and the mirror
+/// artefact would have bitten any earlier origin instead (bytes in
+/// flight at the READING instant are invisible to a per-body fold, so
+/// the peak under-reads until the EWMA forgets, and the §208.1 cap
+/// sheds a CLI fleet on the dip). Crediting bytes when they land
+/// leaves nothing in flight at either instant. `None` = no sink.
+pub type Arrivals<'a> = Option<&'a (dyn Fn(u64) + Sync)>;
+
+/// [`read_multiline_paced_max`] reporting every consumed chunk to
+/// `arrivals` the moment it is taken off the wire.
+pub(crate) async fn read_multiline_paced_noting<'a, R>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    stall: impl Into<StallBound<'a>>,
+    max: usize,
+    floor: Option<RateFloor>,
+    arrivals: Arrivals<'_>,
+) -> Result<(), NntpError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let stall = stall.into();
+    let arrived = |n: usize| {
+        if let Some(f) = arrivals {
+            f(n as u64);
+        }
+    };
     {
         use tokio::io::AsyncBufReadExt;
         let start = out.len();
@@ -134,7 +237,11 @@ where
         let mut win_start: Option<tokio::time::Instant> = None;
         let mut win_bytes: u64 = 0;
         loop {
-            let buf = idle_bounded_for(stall, reader.fill_buf()).await?;
+            // A wait that returns Ok has left the chunk in the reader's
+            // buffer; this second `fill_buf` hands it back without I/O
+            // (and an EOF reads as EOF again).
+            stall.fill(reader).await?;
+            let buf = reader.fill_buf().await?;
             if buf.is_empty() {
                 return Err(NntpError::Closed);
             }
@@ -160,6 +267,7 @@ where
             if let Some((drop, consume)) = strad {
                 out.truncate(out.len() - drop);
                 reader.consume(consume);
+                arrived(consume);
                 return Ok(());
             }
 
@@ -208,12 +316,14 @@ where
                     }
                     out.extend_from_slice(&buf[..dot]);
                     reader.consume(dot + 1 + term);
+                    arrived(dot + 1 + term);
                     return Ok(());
                 }
                 None => {
                     let n = buf.len();
                     out.extend_from_slice(buf);
                     reader.consume(n);
+                    arrived(n);
                     // A6 rate floor - checked ONLY here, on a chunk that
                     // did not finish the response: a body whose
                     // terminator has already arrived is delivered, never

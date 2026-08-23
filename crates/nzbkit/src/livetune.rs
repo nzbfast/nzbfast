@@ -34,7 +34,7 @@
 //! no clocks - so every rule here is pinned by a unit test that cannot
 //! be anything else (the wave-6 lesson: the pure test was right because
 //! it could not assert the noise). The wall-clock rigs in
-//! `tests/live_tune.rs` only ask whether the whole thing hangs together
+//! `tests/integration/live_tune.rs` only ask whether the whole thing hangs together
 //! against a real pool and a mock provider.
 
 /// Minimum relative gain an up-probe must show (median over pairs) to

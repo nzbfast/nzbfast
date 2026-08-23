@@ -164,6 +164,236 @@ pub(super) fn serve_file_range(req: tiny_http::Request, path: &std::path::Path) 
     let _ = req.respond(resp);
 }
 
+/// How long `/stream/<id>` waits for a job's writers to appear before
+/// giving up (M14i). Named because the §16m predicate below has to judge
+/// an armed auto-retry against it: a retry that fires after this request
+/// is already answered is no prospect for THIS request.
+const ADMIT_WAIT_SECS: u64 = 30;
+
+/// TODO 16m: may this `/stream/<id>` answer its 404 immediately, instead
+/// of sitting out the M14i admit wait for writers that are never coming?
+///
+/// The question is "are there writers, and is there any PROSPECT of
+/// any" - deliberately NOT "does the status word say Completed". Both
+/// halves of that distinction are live:
+///
+/// - A `Completed` job can still materialise its media LATE. Its
+///   extractor stays installed after the run for post-completion
+///   playback (`tasks/runner.rs` only clears it when the NEXT job
+///   claims the hub), the disk-unpack ladder outlives the download it
+///   belongs to (§205), and a completion with a move configured still
+///   owes the payload a move to its final home. So the writer registry
+///   and the settle state are asked, and a "yes" from either is enough
+///   to keep waiting.
+/// - A `Queued` job is the opposite error: its status word says nothing
+///   has happened yet, and its writers appear the moment the runner
+///   picks it up. That is the wait working as designed.
+///
+/// Hence: nothing in the queue, a terminal history row that owes
+/// nothing more (no move still owed, and no armed auto-retry that could
+/// bring the job back INSIDE `wait_ends`), no activity or unpack entry
+/// against the id, and no media writer in the extractor that belongs to
+/// it.
+///
+/// `wait_ends` is when this request's admit wait expires, in unix
+/// seconds - the horizon the retry stamp is judged against.
+///
+/// The job snapshot is taken and RELEASED before any hub lock: the
+/// serve/ order is queue -> job, and a job -> hub edge is exactly the
+/// shape issue #38's deadlock was built from.
+fn no_writers_and_no_prospect(
+    d: &Daemon,
+    id: &str,
+    parked: Option<&Arc<Mutex<Job>>>,
+    queued: bool,
+    wait_ends: u64,
+) -> bool {
+    // In the queue at all - being picked, downloading, or running its
+    // tail. Writers are coming or already here.
+    if queued {
+        return false;
+    }
+    // In neither store: `stream_request` has already answered that one
+    // with `unknown nzo_id`, so this arm is unreachable from there.
+    // Refusing rather than answering keeps it right for anyone else.
+    let Some(job) = parked else {
+        return false;
+    };
+    let settled = {
+        let j = job.lock_ok();
+        matches!(j.state, JobState::Completed | JobState::Failed)
+            // M32: an armed automatic retry brings the whole job back -
+            // but only a retry that lands while this request is still
+            // waiting can produce a writer FOR IT. Testing the stamp for
+            // None left the commonest failure of all still hanging: a
+            // partly-propagated post arms the 20-minute "articles
+            // missing" arm, the transport arm is 2 minutes, and neither
+            // can reach a 30 s deadline - so the shape a stale .strm
+            // most often points at sat out the full wait for a 404 that
+            // was knowable on arrival. `auto_retry_at` is an ABSOLUTE
+            // unix-seconds stamp (`unix_now() + secs`, daemon_park.rs /
+            // daemon_retry.rs), so it compares straight against the
+            // wait's own end. `<=` counts as a prospect: a retry due at
+            // the last instant is one the caller may still be given, and
+            // the delay is a user setting that can be shortened.
+            && j.auto_retry_at.is_none_or(|at| at > wait_ends)
+            && !j.move_pending
+    };
+    if !settled {
+        return false;
+    }
+    // Both maps are keyed by owning nzo_id precisely because a tail
+    // outlives its own download, so an entry here means the pipeline
+    // has not finished with this job whatever its row says.
+    if d.hub.activity.lock_ok().contains_key(id) || d.hub.unpack.lock_ok().contains_key(id) {
+        return false;
+    }
+    // And the registry itself, through the same ownership-checked pick
+    // the loop below uses - so "no writers" is the loop's own answer,
+    // not a second opinion that could disagree with it.
+    pick_media(d, Some(id)).is_none()
+}
+
+/// Is this finished job's payload IN FLIGHT to its final folder right
+/// now - moving, or owed a move that has not run yet?
+///
+/// `mover_process` copies first and rewrites `Job::out_dir` only when
+/// the copy is done, so for the whole duration of a move the history
+/// record still names the folder the bytes are leaving. Anything that
+/// resolves a file through that name - `/stream`'s finished-job branch
+/// is the one this was written for - can therefore find nothing, and
+/// "nothing is there" is NOT "the file is gone": the payload is whole,
+/// it is simply somewhere neither name reaches yet.
+///
+/// Both halves are needed and neither implies the other.
+/// `Job::move_pending` is the OWED marker: raised at park, cleared by
+/// `mover_process` under the same hold that rewrites `out_dir` - so for
+/// the completion move it covers the whole window on its own, from the
+/// wait in the mover queue through the copy, with no seam at the end.
+/// `Daemon::moving` is the live fence, and it is the ONLY marker over
+/// the relocations that owe no `move_pending` at all: a recategorize
+/// (`history_change_cat`) and a retry redrive both `move_tree` a
+/// finished payload with the record still naming the source, which is
+/// the same bulk copy to the same NAS and reads identically from here.
+///
+/// Read one lock at a time: the job's is taken and RELEASED before
+/// `moving` is, so this adds no edge to the lock graph.
+pub(super) fn payload_in_flight(d: &Daemon, job: &Arc<Mutex<Job>>) -> bool {
+    let (owed, id) = {
+        let j = job.lock_ok();
+        (j.move_pending, j.nzo_id.clone())
+    };
+    owed || d.moving.lock_ok().contains(&id)
+}
+
+/// The finished-download branch: a job whose bytes are on disk, not in
+/// the pipeline. Answers the request, or hands it back UNANSWERED
+/// (`Some`) when this job is not one - the caller carries on with the
+/// live path. Not a `Result`: a `tiny_http::Request` is 176 bytes and
+/// clippy's `result_large_err` is right that it does not belong in one.
+///
+/// Without it the live path waits 30 s for media that is never coming
+/// and then 404s. That gap was visible in the UI - "play the copy you
+/// have" could only open the file in the daemon's own player, which does
+/// nothing a remote viewer can see.
+///
+/// Byte-serving the LIVE pipeline is deliberately open (players cannot
+/// send API keys, and it only ever carries the download in front of
+/// you). A finished job is different: nzo_ids are enumerable, so this
+/// would hand any LAN host the user's library a guess at a time. It
+/// takes the same key-or-token gate as the library trigger, and the
+/// /m3u handoff already embeds the token. That gate is also why the
+/// admit wait re-asks this question AHEAD of its own `pick_media` and
+/// not after: a job that finishes mid-request has its writers published
+/// away, and a straggling one answered first would serve a finished job
+/// in front of the gate.
+///
+/// `filed` decides which file: a filed job's out_dir is the shared
+/// `Show/Season NN` folder, where "the biggest media file in there" is a
+/// sibling episode as often as not, so only the episode this job filed -
+/// its stem, under the tail it was FILED with - may be served out of one.
+fn serve_finished_from_disk(
+    d: &Daemon,
+    req: tiny_http::Request,
+    job: &Arc<Mutex<Job>>,
+    authed: bool,
+) -> Option<tiny_http::Request> {
+    let (done, dir, filed, stem, tail) = {
+        let j = job.lock_ok();
+        let sfx = delete_tail(&j, || d.job_suffix(filed_stem(&j)));
+        (
+            j.state == JobState::Completed && j.fetched && !j.tombstone,
+            j.out_dir.clone(),
+            j.filed,
+            filed_stem(&j).to_string(),
+            sfx,
+        )
+    };
+    if !done {
+        return Some(req);
+    }
+    if !authed {
+        let blocked = d.note_auth_failure(peer_ip(&req), "stream completed");
+        let _ = req.respond(if blocked {
+            tiny_http::Response::from_string("too many bad keys").with_status_code(429)
+        } else {
+            tiny_http::Response::from_string(
+                "playing a finished download needs an apikey or stream token (?t=)",
+            )
+            .with_status_code(401)
+        });
+        return None;
+    }
+    // A private out_dir is all this job's, so the biggest media file in
+    // it is the feature. A shared season folder is not.
+    let found = if filed {
+        crate::smart::find_filed_episode_media(&dir, &stem, &tail)
+    } else {
+        find_completed_media(&dir)
+    };
+    match found {
+        Some(p) => serve_file_range(req, &p),
+        // Nothing under the name the record carries - but the mover
+        // rewrites that name LAST, so ask whether the payload is simply
+        // in flight before calling it gone. Asked in this order, not
+        // before the pick: the cross-device route stages its copy and
+        // leaves the source whole until it publishes, so most of a long
+        // NAS move still plays out of the old folder, and refusing on
+        // the marker alone would take that away.
+        //
+        // NOT served from the destination. It is derivable
+        // (`move_dest_root`), and what sits there mid-move is a
+        // half-copied file under the payload's own name: a player handed
+        // one plays the head and then hits a wall it cannot tell from a
+        // corrupt release. A refusal that says "later" costs one retry;
+        // a torn file costs the user's trust in the file itself.
+        None if payload_in_flight(d, job) => {
+            let _ = req.respond(
+                tiny_http::Response::from_string(
+                    "this download's files are being moved right now - \
+                     try again when it settles",
+                )
+                .with_status_code(503)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"5"[..])
+                        .expect("static header"),
+                ),
+            );
+        }
+        // Moved away by hand, deleted, or a download with no video in
+        // it. Say which, rather than the live path's "no active media".
+        None => {
+            let _ = req.respond(
+                tiny_http::Response::from_string(
+                    "this download has no playable file on disk any more",
+                )
+                .with_status_code(404),
+            );
+        }
+    }
+    None
+}
+
 /// One /stream request. `want = None` keeps the M11 contract (active
 /// download, single attempt). `want = Some(id)` is M14i on-demand playback:
 /// a parked library job is force-enqueued and we wait (≤30 s) for its
@@ -173,31 +403,45 @@ pub(super) fn serve_file_range(req: tiny_http::Request, path: &std::path::Path) 
 /// host or CSRF page could start downloads past a user pause.
 pub(super) fn stream_request(
     d: Arc<Daemon>,
-    req: tiny_http::Request,
+    mut req: tiny_http::Request,
     want: Option<String>,
     authed: bool,
 ) {
     let mut deadline = Instant::now();
+    // The record this request is about, held across the wait below.
+    // Kept rather than re-found each pass because `activate_parked` and
+    // `park` move the SAME `Arc` between the two stores - a handle taken
+    // from either one stays the live record whichever store it is in.
+    let mut tracked: Option<Arc<Mutex<Job>>> = None;
+    // The instant the admit wait runs out, in unix seconds. An armed
+    // auto-retry is a prospect only if it lands before this.
+    let mut wait_ends = 0u64;
     if let Some(id) = &want {
         let parked = d
             .history
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .find(|j| j.lock_ok().nzo_id == *id)
             .cloned();
-        let queued = d
+        let running = d
             .queue
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
-            .any(|j| j.lock_ok().nzo_id == *id);
+            .find(|j| j.lock_ok().nzo_id == *id)
+            .cloned();
+        let queued = running.is_some();
         if parked.is_none() && !queued {
             let _ = req
                 .respond(tiny_http::Response::from_string("unknown nzo_id").with_status_code(404));
             return;
         }
-        if let Some(job) = parked {
+        tracked = parked.clone().or(running);
+        wait_ends = unix_now() as u64 + ADMIT_WAIT_SECS;
+        // Did this request just PUT the job on the wire? The §16m
+        // early-out below must not fire on a job it force-enqueued one
+        // statement ago, whose writers are on their way.
+        let mut triggered = false;
+        if let Some(job) = &parked {
             // Never-fetched library entry: this play IS the download
             // trigger. Front of the queue, force → starts even if paused.
             let trigger = {
@@ -233,111 +477,84 @@ pub(super) fn stream_request(
                 // with `Daemon::retry` (see `moveseq::activate_parked`) so
                 // the two paths cannot drift apart on the ordering their
                 // durability depends on.
-                d.activate_parked(&job);
+                d.activate_parked(job);
+                triggered = true;
                 info!(target: "library", "/stream/{id} → fetching now");
             } else {
-                // A download that already FINISHED: its bytes are on
-                // disk, not in the pipeline, so the live path below would
-                // wait 30 s for media that is never coming and then 404.
-                // That gap was visible in the UI - "play the copy you
-                // have" could only open the file in the daemon's own
-                // player, which does nothing a remote viewer can see.
-                //
-                // Byte-serving the LIVE pipeline is deliberately open
-                // (players cannot send API keys, and it only ever carries
-                // the download in front of you). A finished job is
-                // different: nzo_ids are enumerable, so this would hand
-                // any LAN host the user's library a guess at a time. It
-                // takes the same key-or-token gate as the library
-                // trigger, and the /m3u handoff already embeds the token.
-                // `filed` + the stem + the tail it was FILED with come
-                // along because a filed job's out_dir is the shared
-                // `Show/Season NN` folder: "the biggest media file in
-                // there" is a sibling episode as often as not.
-                let (done, dir, filed, stem, tail) = {
-                    let j = job.lock_ok();
-                    let sfx = delete_tail(&j, || d.job_suffix(filed_stem(&j)));
-                    (
-                        j.state == JobState::Completed && j.fetched && !j.tombstone,
-                        j.out_dir.clone(),
-                        j.filed,
-                        filed_stem(&j).to_string(),
-                        sfx,
-                    )
-                };
-                if done {
-                    if !authed {
-                        let blocked = d.note_auth_failure(peer_ip(&req), "stream completed");
-                        let _ = req.respond(if blocked {
-                            tiny_http::Response::from_string("too many bad keys")
-                                .with_status_code(429)
-                        } else {
-                            tiny_http::Response::from_string(
-                                "playing a finished download needs an apikey or stream token (?t=)",
-                            )
-                            .with_status_code(401)
-                        });
-                        return;
-                    }
-                    // A private out_dir is all this job's, so the biggest
-                    // media file in it is the feature. A shared season
-                    // folder is not, and only the episode this job filed
-                    // may be served out of it.
-                    let found = if filed {
-                        crate::smart::find_filed_episode_media(&dir, &stem, &tail)
-                    } else {
-                        find_completed_media(&dir)
-                    };
-                    match found {
-                        Some(p) => serve_file_range(req, &p),
-                        // Moved away by hand, deleted, or a download with
-                        // no video in it. Say which, rather than the live
-                        // path's "no active media".
-                        None => {
-                            let _ = req.respond(
-                                tiny_http::Response::from_string(
-                                    "this download has no playable file on disk any more",
-                                )
-                                .with_status_code(404),
-                            );
-                        }
-                    }
+                // Bytes already on disk: answer from there rather than
+                // waiting out an admit deadline for writers that were
+                // published away when the job finished.
+                let Some(back) = serve_finished_from_disk(&d, req, job, authed) else {
                     return;
-                }
+                };
+                req = back;
             }
         }
-        deadline = Instant::now() + std::time::Duration::from_secs(30);
+        // TODO 16m: everything from here down is the wait for writers to
+        // appear. When there are none and none can ever appear, the 404
+        // is knowable NOW, and sitting out the 30 s only makes a player
+        // (and the dashboard's ▶) look hung on an answer we already have.
+        if !triggered && no_writers_and_no_prospect(&d, id, parked.as_ref(), queued, wait_ends) {
+            let _ = req
+                .respond(tiny_http::Response::from_string("no active media").with_status_code(404));
+            return;
+        }
+        deadline = Instant::now() + std::time::Duration::from_secs(ADMIT_WAIT_SECS);
     }
+    // ...and the SECOND half of 16m: that question is asked again on the
+    // way round, because a job can run out of prospect DURING the wait.
+    // A job that was Downloading when the request arrived, and completes
+    // before the deadline, has its writers published away and - asked
+    // only once, before the loop - then sat out the rest of the 30 s for
+    // a 404, with its bytes finished on disk the whole time. Re-asking
+    // converges the wait on whatever the entry path would say to a
+    // request arriving right now, which for that job is "served from the
+    // file".
+    //
+    // Once a second, not once a pass: this re-reads the queue, and the
+    // defect being fixed is measured in tens of seconds, so 1 Hz answers
+    // it inside a second while leaving the 10 Hz writer poll's cost
+    // exactly where it was.
+    let mut next_poll = Instant::now() + std::time::Duration::from_secs(1);
     loop {
+        // Ahead of the live pick below, deliberately: see the gate note
+        // on `serve_finished_from_disk`.
+        if let Some(id) = &want
+            && Instant::now() >= next_poll
+        {
+            next_poll = Instant::now() + std::time::Duration::from_secs(1);
+            let queued = d.queue.lock_ok().iter().any(|j| j.lock_ok().nzo_id == *id);
+            if no_writers_and_no_prospect(&d, id, tracked.as_ref(), queued, wait_ends) {
+                if let Some(job) = &tracked {
+                    let Some(back) = serve_finished_from_disk(&d, req, job, authed) else {
+                        return;
+                    };
+                    req = back;
+                }
+                let _ = req.respond(
+                    tiny_http::Response::from_string("no active media").with_status_code(404),
+                );
+                return;
+            }
+        }
         // Only serve hub bytes that belong to the requested job.
         let owner_ok = match &want {
             None => true,
             Some(id) => d.active_stream.lock_ok().as_deref() == Some(id.as_str()),
         };
         if owner_ok && let Some((name, w)) = pick_media(&d, want.as_deref()) {
-            // Encrypted store outputs are ciphertext on disk until the
-            // finish decrypt - open_stream hands back a decryptor so
-            // they stream mid-download, and the fd it returns stays
-            // valid straight through the decrypt (that pass publishes
-            // by rename and never mutates the inode we hold), so there
-            // is nothing to wait for. Cloning through extractor_for
-            // ties the open to the SAME job that owns `name`, so a job
-            // transition mid-request cannot serve another job's bytes.
-            let opened = d
-                .hub
-                .extractor_for(want.as_deref())
-                .map(|ex| ex.open_stream(&name));
-            let (pre_opened, crypt) = match opened {
-                Some(nzbkit::extract::StreamOpen::Encrypted(f, c)) => (Some(f), Some(c)),
-                _ => (None, None),
-            };
+            // No pre-opened fd and no decryptor: an encrypted store
+            // output holds PLAINTEXT while it downloads, so it serves
+            // exactly like any other file. Until TODO 27 phase 3 it was
+            // ciphertext until the finish decrypt, and `open_stream`
+            // handed back a lock-consistent fd plus a `StreamCrypt` to
+            // decrypt through on the fly.
             let seek = d.hub.seek.lock_ok().clone();
             serve_range(
                 req,
                 &name,
                 w,
-                pre_opened,
-                crypt,
+                None,
                 seek,
                 d.hub.stream_readers.clone(),
                 d.hub.stream_gen.clone(),
@@ -396,10 +613,6 @@ pub(super) fn preview_mode(d: &Daemon) -> String {
 /// has already been published away because the job finished. That last
 /// case is NOT an error: the answer moved to disk, and both callers fall
 /// through to the on-disk path.
-///
-/// Encrypted-store outputs are ciphertext on disk until the finish
-/// decrypt, so this hands back the same decryptor the byte-serving path
-/// uses.
 pub(super) fn open_live_probe(
     d: &Daemon,
     id: &str,
@@ -407,24 +620,26 @@ pub(super) fn open_live_probe(
     String,
     Arc<nzbkit::disk::FileWriter>,
     nzbkit::mediaprobe::LiveProbeReader,
+    // Held for the reader's life - see [`open_live_media`].
+    Option<nzbkit::disk::ReadLease>,
 )> {
-    let (name, w, f, crypt) = open_live_media(d, id)?;
+    // A probe never waits out an external repair: it has a "not yet"
+    // answer, and the 30 s admit wait belongs to the range path only.
+    let (name, w, f, lease) = open_live_media_admit(d, id, false)?;
     let r = nzbkit::mediaprobe::LiveProbeReader {
         w: w.clone(),
         f,
-        crypt,
         pos: 0,
     };
-    Some((name, w, r))
+    Some((name, w, r, lease))
 }
 
-/// The same resolution, one step earlier: the open file and its
-/// decryptor, before either reader wraps them.
+/// The same resolution, one step earlier: the open file, before either
+/// reader wraps it.
 ///
 /// [`open_live_probe`] hands back the non-blocking reader a poll wants;
 /// the remux path needs the same file under a reader that WAITS, so the
-/// step both share lives here rather than being written twice with one
-/// of the two copies eventually forgetting the encrypted-store case.
+/// step both share lives here rather than being written twice.
 pub(super) fn open_live_media(
     d: &Daemon,
     id: &str,
@@ -432,22 +647,42 @@ pub(super) fn open_live_media(
     String,
     Arc<nzbkit::disk::FileWriter>,
     std::fs::File,
-    Option<nzbkit::extract::StreamCrypt>,
+    Option<nzbkit::disk::ReadLease>,
+)> {
+    open_live_media_admit(d, id, true)
+}
+
+/// [`open_live_media`] with the custody wait chosen by the caller:
+/// `wait` = sit out an in-progress external repair (bounded, for a
+/// player that wants its bytes); `!wait` = answer `None` at once, for
+/// the probe paths that have a "not yet" to give instead.
+fn open_live_media_admit(
+    d: &Daemon,
+    id: &str,
+    wait: bool,
+) -> Option<(
+    String,
+    Arc<nzbkit::disk::FileWriter>,
+    std::fs::File,
+    Option<nzbkit::disk::ReadLease>,
 )> {
     let live = d.active_stream.lock_ok().as_deref() == Some(id);
     if !live {
         return None;
     }
     let (name, w) = pick_media(d, Some(id))?;
-    let (f, crypt) = match d
-        .hub
-        .extractor_for(Some(id))
-        .map(|ex| ex.open_stream(&name))
-    {
-        Some(nzbkit::extract::StreamOpen::Encrypted(f, c)) => (f, Some(c)),
-        _ => (std::fs::File::open(&w.path).ok()?, None),
+    // Every output - encrypted store included, since TODO 27 phase 3
+    // put plaintext on disk from the first article - opens through the
+    // writer's custody gate (sweep 8, M4/M6): the lease is what an
+    // external repair can see and, on Windows, revoke, and the open
+    // follows `current_path`, so a verified-name publish under the live
+    // writer does not send this at a path that no longer exists.
+    let (f, lease) = if wait {
+        w.open_read().ok()?
+    } else {
+        w.try_open_read().ok()?
     };
-    Some((name, w, f, crypt))
+    Some((name, w, f, Some(lease)))
 }
 
 /// The finished main video of `job` on disk. A private `out_dir` is all
@@ -521,7 +756,7 @@ pub(super) fn preview_probe_request(d: Arc<Daemon>, req: tiny_http::Request, id:
         "media": serde_json::Value::Null,
     });
 
-    if let Some((name, w, mut r)) = open_live_probe(&d, &id) {
+    if let Some((name, w, mut r, _lease)) = open_live_probe(&d, &id) {
         let need_tail = fill_live_probe(&mut body, &name, &w, || {
             nzbkit::mediaprobe::probe(
                 &mut r,
@@ -552,10 +787,33 @@ pub(super) fn preview_probe_request(d: Arc<Daemon>, req: tiny_http::Request, id:
         return;
     };
     let Some(path) = finished_media_path(&d, &job) else {
-        let _ = req.respond(
-            json_resp(serde_json::json!({"error": "no playable file on disk"}))
-                .with_status_code(404),
-        );
+        // Nothing under the name the record carries. Ask - after the
+        // pick and never before it, for the reason `payload_in_flight`
+        // gives - whether the payload is simply in flight to its final
+        // folder, because the mover rewrites that name LAST. `/stream`
+        // one door down answers this state 503; so does this, with its
+        // own `error` string: a client that reads "no playable file on
+        // disk" gives up on a file that is whole and about to be
+        // readable again.
+        let _ = if payload_in_flight(&d, &job) {
+            req.respond(
+                json_resp(serde_json::json!({
+                    "error": "the files are being moved right now - \
+                              try again when it settles",
+                    "moving": true,
+                }))
+                .with_status_code(503)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"5"[..])
+                        .expect("static header"),
+                ),
+            )
+        } else {
+            req.respond(
+                json_resp(serde_json::json!({"error": "no playable file on disk"}))
+                    .with_status_code(404),
+            )
+        };
         return;
     };
     let name = path
@@ -670,9 +928,20 @@ const DISK_READINESS_TTL_SECS: u64 = 30;
 /// parsing prose: `live` (playable, still downloading), `disk`
 /// (playable, finished), `pending` (downloading, not enough of the
 /// container yet), `not_fetched` (a library entry - playing it IS the
-/// download trigger), `not_started` (queued or paused), `no_media`
-/// (finished with no playable file on disk any more), `failed`,
-/// `unknown`.
+/// download trigger), `not_started` (queued or paused), `moving`
+/// (finished, and the payload is in flight to its final folder - not
+/// playable this second, playable again when the move lands),
+/// `no_media` (finished with no playable file on disk any more),
+/// `failed`, `unknown`.
+///
+/// `moving` is its own token rather than a shade of `no_media` for the
+/// reason [`payload_in_flight`] exists at all: those two want opposite
+/// things from a client. `no_media` is final - stop asking, drop the
+/// Play affordance, the file is gone. `moving` is a wait, and a client
+/// that reads it as `no_media` writes the payload off mid-relocation.
+/// Both keep `ready: false`, so an existing client that branches on
+/// that (both native shells do) is right about the new token without
+/// knowing it: no Play button, because `/stream` would answer 503.
 pub(super) fn playback_readiness(d: &Daemon, id: &str) -> serde_json::Value {
     let mut o = serde_json::json!({
         "ready": false,
@@ -683,7 +952,7 @@ pub(super) fn playback_readiness(d: &Daemon, id: &str) -> serde_json::Value {
         "coverage": serde_json::Value::Null,
         "seekable": false,
     });
-    if let Some((name, w, mut r)) = open_live_probe(d, id) {
+    if let Some((name, w, mut r, _lease)) = open_live_probe(d, id) {
         let mut body = serde_json::json!({});
         fill_live_probe(&mut body, &name, &w, || {
             nzbkit::mediaprobe::probe(
@@ -772,6 +1041,13 @@ pub(super) fn playback_readiness(d: &Daemon, id: &str) -> serde_json::Value {
             });
             o["seekable"] = true.into();
         }
+        // Asked in this order - after the pick, exactly as the
+        // byte-serving path asks it. The cross-device move stages its
+        // copy and leaves the source whole until it publishes, so most
+        // of a long move still resolves out of the old folder and is
+        // honestly `disk`; refusing on the marker alone would take that
+        // away from every job with a move owed.
+        None if payload_in_flight(d, &job) => o["reason"] = "moving".into(),
         None => o["reason"] = "no_media".into(),
     }
     o
@@ -800,6 +1076,21 @@ fn disk_media_memo(d: &Daemon, id: &str, job: &Arc<Mutex<Job>>) -> Option<(Strin
             size,
         )
     });
+    // A miss taken while the payload is in flight is not a fact about
+    // the disk, it is a fact about the instant: the mover rewrites
+    // `out_dir` last, so the walk read a folder the bytes have left.
+    // Memoizing it would outlive the move by up to the TTL and answer
+    // `no_media` - the one sentence the `moving` token exists to keep
+    // off a payload that is whole - about a file that has already
+    // landed. Left uncached instead, so the first poll after the move
+    // publishes walks again and reads `disk`. The opposite staleness is
+    // left alone: a hit cached BEFORE the move began still reads `disk`
+    // for the rest of its TTL, which is the ordinary TTL bargain and
+    // errs towards "try it", where `/stream` answers 503 and the client
+    // retries.
+    if v.is_none() && payload_in_flight(d, job) {
+        return None;
+    }
     let mut memo = d.playback_disk.lock_ok();
     // Drop what has aged out rather than letting a long-lived daemon's
     // whole history sit in here.
@@ -818,10 +1109,6 @@ fn disk_media_memo(d: &Daemon, id: &str, job: &Arc<Mutex<Job>>) -> Option<(Strin
 pub(super) struct LiveRangeReader {
     w: Arc<nzbkit::disk::FileWriter>,
     f: std::fs::File,
-    /// Present iff the backing file is encrypted-store ciphertext:
-    /// reads are CBC-decrypted on the fly (holds a live-reader lease so
-    /// finish() temp+renames rather than mutating this file's inode).
-    crypt: Option<nzbkit::extract::StreamCrypt>,
     pos: u64,
     end: u64,
     /// M11 seek promotion: handle + our output name. `promoted_to` is the
@@ -852,6 +1139,10 @@ pub(super) struct LiveRangeReader {
     /// A2: what this reader has had to do, for the clients' health
     /// overlay. Shared with every other reader on the hub.
     stats: Arc<crate::StreamStats>,
+    /// Custody of the backing file (sweep 8, M4). When it is revoked -
+    /// Windows only - this response ends rather than hold the inode
+    /// against par2cmdline's share-mode-0 open.
+    lease: Option<nzbkit::disk::ReadLease>,
 }
 
 impl LiveRangeReader {
@@ -859,23 +1150,117 @@ impl LiveRangeReader {
         self.alive.lock_ok().iter().next_back() == Some(&self.my_gen)
     }
 
-    /// Is plaintext `[pos, pos+len)` serveable now? For an encrypted
-    /// stream this widens to the ciphertext blocks (plus the CBC IV
-    /// block) that decrypting the range requires.
-    fn covered(&self, pos: u64, len: u64) -> bool {
-        match &self.crypt {
-            Some(c) => {
-                let (lo, clen) = c.covered_bounds(pos, len);
-                self.w.covered(lo, clen)
-            }
-            None => self.w.covered(pos, len),
+    /// The external repair wants this file's inode and our handle is in
+    /// its way (sweep 8, M4). Ending the response drops the handle; the
+    /// player reopens against the repaired file. Always `None` off
+    /// Windows, where sharing is not enforced and a live reader costs
+    /// the repair nothing.
+    fn revoked(&self) -> Option<std::io::Error> {
+        self.lease.as_ref().filter(|l| l.revoked()).map(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the file is being repaired - reopen the stream",
+            )
+        })
+    }
+
+    /// The extractor has disowned the file under this response (sweep 8,
+    /// M4, defect 3). Unlike [`revoked`] this fires on EVERY platform:
+    /// the file is unlinked and no byte will ever be written through
+    /// this writer again, so a read that waits here waits for ever.
+    ///
+    /// The shape is a damaged MULTI-VOLUME set. It demotes to
+    /// "materializing volumes for repair" BEFORE par2 runs, and that
+    /// demote abandons the extracted media file - which is the very file
+    /// a player is holding. Nothing revoked it (par2's targets are the
+    /// volumes, and this output is not even on disk by then), so the
+    /// response used to sit on a frontier that would never move again
+    /// and die of the five-minute span timeout below: a player hung for
+    /// five minutes on a job that repaired fine. Measured on macOS
+    /// arm64 and on an x86-64 Windows 11 laptop, 22 Aug 2026.
+    ///
+    /// Ending the response is the whole answer, and there is nothing to
+    /// rebind onto: the bytes under this handle belong to an unlinked
+    /// inode the job has disowned, and the post-repair re-extract
+    /// rewrites the same NAME from the repaired volumes. See
+    /// [`FileWriter::abandon`] for why this is not custody.
+    ///
+    /// [`revoked`]: LiveRangeReader::revoked
+    /// [`FileWriter::abandon`]: nzbkit::disk::FileWriter::abandon
+    ///
+    /// Logged, not silent, and at most once per response: the first hit
+    /// returns an error out of `read`, tiny_http ends the response and
+    /// nothing reads again. It is also the only trace this leaves - the
+    /// regression test reads for it rather than for a response that
+    /// merely happened to end (`stream_repair.rs` leg 2).
+    fn abandoned(&self) -> Option<std::io::Error> {
+        self.w.is_abandoned().then(|| {
+            info!(
+                target: "stream",
+                "{}: ending the response at {} - the extractor abandoned this output",
+                self.name, self.pos
+            );
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "the file was rebuilt for repair - reopen the stream",
+            )
+        })
+    }
+
+    /// Follow an external repair onto its new inode (sweep 8, M5b).
+    ///
+    /// par2cmdline does not repair in place - it renames the damaged
+    /// target to `<name>.1` and writes the repaired data fresh - so the
+    /// handle this response opened is the DAMAGED file from the moment
+    /// the repair completes. M5's coverage publication then tells us
+    /// those bytes are good and we serve the hole. Reopening at
+    /// `current_path` is the whole fix: same offset, same response, the
+    /// file the repair actually wrote. Windows never gets here (the
+    /// lease is revoked and the response ends before par2 runs).
+    ///
+    /// Called only right before the read that uses the handle: every
+    /// other decision in `read` is taken from the writer's coverage map,
+    /// which survives the repair regardless of which inode holds the
+    /// bytes.
+    ///
+    /// A reopen that FAILS keeps the old handle and plays on. It is the
+    /// wrong file, but it is the file this response was serving a
+    /// moment ago either way, and there is nothing to be gained by
+    /// turning a repair the player never asked for into a dead socket.
+    fn rebind(&mut self) {
+        if !self.lease.as_ref().is_some_and(|l| l.needs_reopen()) {
+            return;
         }
+        let lease = self.lease.as_ref().expect("checked immediately above");
+        match self.w.reopen_read(lease) {
+            Ok(f) => {
+                self.f = f;
+                info!(
+                    target: "stream",
+                    "{}: reopened at {} - an external repair rewrote the file",
+                    self.name, self.pos
+                );
+            }
+            Err(e) => warn!(
+                target: "stream",
+                "{}: still on the pre-repair file - could not reopen: {e}",
+                self.name
+            ),
+        }
+    }
+
+    /// Is plaintext `[pos, pos+len)` serveable now?
+    ///
+    /// One line since TODO 27 phase 3: an encrypted store output holds
+    /// plaintext while it downloads, so there is no ciphertext-block
+    /// widening (`StreamCrypt::covered_bounds`) left to do.
+    fn covered(&self, pos: u64, len: u64) -> bool {
+        self.w.covered(pos, len)
     }
 
     /// Length of the covered prefix at the cursor, up to `n`: 0 when
     /// the cursor byte itself has not landed. Binary search over
-    /// `covered` so the encrypted-store block mapping is honored too.
-    /// Only called at coverage boundaries (a window that is neither
+    /// `covered`. Only called at coverage boundaries (a window that is neither
     /// fully covered nor fully hole), so the ~17 interval probes are
     /// nowhere near any hot path.
     fn covered_prefix(&self, n: u64) -> u64 {
@@ -901,14 +1286,8 @@ impl LiveRangeReader {
     /// covered head as a short read first) - a covered interval AT the
     /// cursor would be clipped to start exactly at `pos` and the
     /// `> pos` filter below would skip it, mistaking real bytes for
-    /// hole. Encrypted streams judge one read's worth at a time
-    /// instead - the ciphertext-block mapping makes the next-covered
-    /// computation fiddly, and the case is rare enough to take the
-    /// slow path.
-    fn uncovered_hole_len(&self, scan: u64, n: u64) -> u64 {
-        if self.crypt.is_some() {
-            return n;
-        }
+    /// hole.
+    fn uncovered_hole_len(&self, scan: u64) -> u64 {
         let next_covered = self
             .w
             .covered_intervals(self.pos, scan)
@@ -1083,6 +1462,9 @@ impl std::io::Read for LiveRangeReader {
         if self.pos >= self.end {
             return Ok(0);
         }
+        if let Some(e) = self.revoked().or_else(|| self.abandoned()) {
+            return Err(e);
+        }
         // Keep the pool's stream mode fresh for as long as the player
         // actually reads - pipelines stay shallow, promotions stay fast.
         if let Some(sc) = &self.seek {
@@ -1134,7 +1516,7 @@ impl std::io::Read for LiveRangeReader {
         // repair) win: the covered check runs first, every read.
         if self.pos < self.dead_until && !self.covered(self.pos, n as u64) {
             let hole = self
-                .uncovered_hole_len(self.dead_until - self.pos, n as u64)
+                .uncovered_hole_len(self.dead_until - self.pos)
                 .min(self.dead_until - self.pos);
             let gap = (hole as usize).min(n);
             if gap > 0 {
@@ -1173,6 +1555,16 @@ impl std::io::Read for LiveRangeReader {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 waited += 50;
+                // A repair that started while this read was parked
+                // needs the inode NOW, not in five minutes (sweep 8,
+                // M4). Windows only - see `disk::ReadCustody`. The
+                // second half is every platform: a demote that abandoned
+                // this output froze the frontier this loop is waiting
+                // on, so waiting out the five minutes below is the one
+                // thing that cannot help.
+                if let Some(e) = self.revoked().or_else(|| self.abandoned()) {
+                    return Err(e);
+                }
                 // Re-issue the promotion occasionally while blocked: the
                 // initial one is best-effort (bounded try_lock) and a new
                 // fetch run may have started since (queue re-attach).
@@ -1204,14 +1596,14 @@ impl std::io::Read for LiveRangeReader {
                     // next covered byte, runway-bounded) so one grace
                     // period condemns it once; the fast path above then
                     // fills it chunk by chunk.
-                    let hole = self.uncovered_hole_len(runway, n as u64);
+                    let hole = self.uncovered_hole_len(runway);
                     let dead = match sc.span_deliverable(&self.name, self.w.size, self.pos, hole) {
                         Some(live) => !live,
                         None => waited >= stream_dead_grace_ms(),
                     };
                     dead_votes = if dead { dead_votes + 1 } else { 0 };
                     if dead_votes >= dead_span_votes() && !self.covered(self.pos, n as u64) {
-                        let gap = (self.uncovered_hole_len(runway, n as u64) as usize).min(n);
+                        let gap = (self.uncovered_hole_len(runway) as usize).min(n);
                         self.dead_until = self.pos + hole;
                         buf[..gap].fill(0);
                         self.stats
@@ -1235,10 +1627,11 @@ impl std::io::Read for LiveRangeReader {
                 }
             }
         }
-        match &self.crypt {
-            Some(c) => c.decrypt_range(&self.f, self.pos, &mut buf[..n])?,
-            None => nzbkit::disk::read_exact_at(&self.f, &mut buf[..n], self.pos)?,
-        }
+        // Last thing before the handle is used: a repair may have
+        // finished under us while this read waited, and if it did our
+        // fd is on the orphaned inode.
+        self.rebind();
+        nzbkit::disk::read_exact_at(&self.f, &mut buf[..n], self.pos)?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -1273,13 +1666,12 @@ pub(super) fn byte_range(v: &str, total: u64) -> Option<(u64, u64)> {
     (start < end).then_some((start, end))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn serve_range(
     req: tiny_http::Request,
     name: &str,
     w: Arc<nzbkit::disk::FileWriter>,
     pre_opened: Option<std::fs::File>,
-    crypt: Option<nzbkit::extract::StreamCrypt>,
     seek: Option<Arc<crate::SeekCtl>>,
     readers: Arc<std::sync::atomic::AtomicUsize>,
     latest_gen: Arc<std::sync::atomic::AtomicU64>,
@@ -1296,13 +1688,15 @@ pub(super) fn serve_range(
         Some((s, e)) => (s, e, 206),
         None => (0, total, 200),
     };
-    // Encrypted streams pass their ciphertext fd in (opened under the
-    // extractor lock so it can't race the finish rename); plain files
-    // open here as before.
-    let f = match pre_opened {
-        Some(f) => f,
-        None => match std::fs::File::open(&w.path) {
-            Ok(f) => f,
+    // A caller that already holds the fd passes it in; otherwise open
+    // through the writer's custody gate (sweep 8, M4/M6) - which also
+    // means `current_path`, so a verified-name publish under the live
+    // writer no longer sends a fresh range request at a removed path
+    // and answers 410.
+    let (f, lease) = match pre_opened {
+        Some(f) => (f, None),
+        None => match w.open_read() {
+            Ok((f, lease)) => (f, Some(lease)),
             Err(_) => {
                 let _ = req.respond(tiny_http::Response::from_string("gone").with_status_code(410));
                 return;
@@ -1337,7 +1731,6 @@ pub(super) fn serve_range(
     let reader = LiveRangeReader {
         w,
         f,
-        crypt,
         pos: start,
         end,
         seek,
@@ -1348,12 +1741,13 @@ pub(super) fn serve_range(
         alive,
         dead_until: 0,
         stats,
+        lease,
     };
     // tiny_http chunks any body over ~1 MB even with a known length -
     // players want identity + exact Content-Length for seeking.
     //
     // Clamped once, for the header and data_length together: see the
-    // note in `serve_file`. A no-op on 64-bit.
+    // note in `serve_file_range`. A no-op on 64-bit.
     let span_len = (end - start).min(usize::MAX as u64);
     let mut resp = tiny_http::Response::new(
         tiny_http::StatusCode(status),
@@ -1413,7 +1807,6 @@ mod preview_probe_tests {
             let mut r = nzbkit::mediaprobe::LiveProbeReader {
                 w: w.clone(),
                 f: std::fs::File::open(&path).unwrap(),
-                crypt: None,
                 pos: 0,
             };
             nzbkit::mediaprobe::probe(
@@ -1466,7 +1859,6 @@ mod dead_span_tests {
         let mut r = LiveRangeReader {
             w: w.clone(),
             f: std::fs::File::open(&path).unwrap(),
-            crypt: None,
             pos: HOLE_START - 4_096,
             end: SIZE,
             seek: None,
@@ -1478,6 +1870,7 @@ mod dead_span_tests {
             // The hole was already condemned (dead-span verdict taken).
             dead_until: HOLE_END,
             stats: Arc::new(Default::default()),
+            lease: None,
         };
         // Straddling read: 4 KB of real bytes remain before the hole.
         // They must come back as data, as a short read - not zeros.
@@ -1606,6 +1999,472 @@ mod strm_tests {
         let body = std::fs::read_to_string(dir.join("Cat.Show.S01E02.strm")).unwrap();
         assert_eq!(body, "http://127.0.0.1:6789/stream/nzo_2?t=tok\n");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod stream_admit_tests {
+    use super::*;
+
+    /// A history record, from the same wire shape the stores replay.
+    fn rec(id: &str, state: &str, extra: serde_json::Value) -> Arc<Mutex<Job>> {
+        let mut v = serde_json::json!({
+            "nzo_id": id, "name": id, "nzb_path": "/tmp/x.nzb",
+            "out_dir": format!("/tmp/out/{id}"), "state": state,
+        });
+        if let Some(m) = extra.as_object() {
+            for (k, val) in m {
+                v[k] = val.clone();
+            }
+        }
+        Arc::new(Mutex::new(job_from_json(&v).expect("job_from_json")))
+    }
+
+    /// The horizon a live request judges an armed retry against: this
+    /// instant plus the admit wait, in unix seconds.
+    fn horizon() -> u64 {
+        unix_now() as u64 + ADMIT_WAIT_SECS
+    }
+
+    /// TODO 16m: the answer is knowable now for a terminal record that
+    /// owes nothing more - whichever way it ended, and with its own
+    /// spent extractor still installed (the hub keeps it for
+    /// post-completion playback until the next job claims the hub, and
+    /// an extractor holding no media writer is not a prospect of one).
+    #[test]
+    fn a_settled_terminal_record_needs_no_wait() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit-{}", std::process::id()));
+        let d = crate::serve::testutil::test_daemon(&dir);
+        for state in ["Completed", "Failed"] {
+            let j = rec("s1", state, serde_json::json!({}));
+            assert!(
+                no_writers_and_no_prospect(&d, "s1", Some(&j), false, horizon()),
+                "{state} with nothing owed should answer at once"
+            );
+        }
+        *d.hub.extractor.lock_ok() = Some((
+            "s1".to_string(),
+            Arc::new(nzbkit::extract::Extractor::new(&dir, 1, false)),
+        ));
+        let j = rec("s1", "Failed", serde_json::json!({}));
+        assert!(
+            no_writers_and_no_prospect(&d, "s1", Some(&j), false, horizon()),
+            "a spent extractor with no media writer is not a writer to wait for"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ...and every way a job can still acquire one waits. Each arm is
+    /// a record a "state is Completed/Failed" test would have answered
+    /// immediately and wrongly.
+    #[test]
+    fn every_remaining_prospect_still_waits() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit2-{}", std::process::id()));
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        // In the queue: about to be picked, or running its tail. The
+        // record itself says nothing useful here, so the terminal one
+        // is used deliberately.
+        let j = rec("p1", "Completed", serde_json::json!({}));
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p1",
+            Some(&j),
+            true,
+            horizon()
+        ));
+
+        // A record that reached history while its pipeline was still
+        // running - a park torn between its prewrite and its filing.
+        // `job_from_json` restores any nonterminal state as Queued.
+        let torn = rec("p2", "Downloading", serde_json::json!({}));
+        assert_eq!(torn.lock_ok().state, JobState::Queued);
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p2",
+            Some(&torn),
+            false,
+            horizon()
+        ));
+
+        // The settle's other half: the payload still owes its move, so
+        // the media file materialises at its destination later.
+        let moving = rec("p3", "Completed", serde_json::json!({"move_pending": true}));
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p3",
+            Some(&moving),
+            false,
+            horizon()
+        ));
+
+        // M32: an armed automatic retry brings the whole job back -
+        // when it lands inside the wait. Five seconds out, so it fires
+        // with most of the deadline still to run.
+        let soon = unix_now() as u64 + 5;
+        let armed = rec("p4", "Failed", serde_json::json!({"auto_retry_at": soon}));
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p4",
+            Some(&armed),
+            false,
+            horizon()
+        ));
+
+        // And one already DUE: the retry worker is about to pick it up.
+        let due = rec(
+            "p4b",
+            "Failed",
+            serde_json::json!({"auto_retry_at": unix_now() as u64 - 1}),
+        );
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p4b",
+            Some(&due),
+            false,
+            horizon()
+        ));
+
+        // The tail outlives the download it belongs to, and both maps
+        // are keyed by owning nzo_id for exactly that reason.
+        let busy = rec("p5", "Completed", serde_json::json!({}));
+        d.hub
+            .activity
+            .lock_ok()
+            .insert("p5".to_string(), "extracting");
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p5",
+            Some(&busy),
+            false,
+            horizon()
+        ));
+
+        // And a record in neither store cannot be judged from here at
+        // all - the caller has its own answer for that one.
+        assert!(!no_writers_and_no_prospect(
+            &d,
+            "p6",
+            None,
+            false,
+            horizon()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TODO 16m, the shape the first pass left behind: a Failed job
+    /// whose automatic retry cannot possibly fire before this request is
+    /// answered.
+    ///
+    /// Both arms `arm_auto_retry` can choose are here, at the values it
+    /// actually uses. Neither is reachable inside a 30 s deadline, and
+    /// the propagation one is armed by the COMMONEST failure there is -
+    /// a post that is only partly propagated - which is also the
+    /// likeliest thing a stale .strm in a media library points at. Under
+    /// the `is_none()` test those both sat out the whole wait for a 404
+    /// that was knowable on arrival.
+    #[test]
+    fn an_auto_retry_that_lands_after_the_deadline_is_no_prospect() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit3-{}", std::process::id()));
+        let d = crate::serve::testutil::test_daemon(&dir);
+        for (secs, what) in [
+            (crate::serve::SHORT_RETRY_SECS, "the transport arm"),
+            (20 * 60, "the propagation arm"),
+        ] {
+            let at = unix_now() as u64 + secs;
+            let j = rec("r1", "Failed", serde_json::json!({ "auto_retry_at": at }));
+            assert!(
+                no_writers_and_no_prospect(&d, "r1", Some(&j), false, horizon()),
+                "{what} ({secs}s) cannot produce a writer inside a {ADMIT_WAIT_SECS}s wait"
+            );
+        }
+
+        // The boundary belongs to the waiting side: a retry due at the
+        // very last instant of the wait is still one this caller may be
+        // given, and the delay is a user setting that can be shortened
+        // to anything.
+        let edge = horizon();
+        let j = rec("r2", "Failed", serde_json::json!({ "auto_retry_at": edge }));
+        assert!(!no_writers_and_no_prospect(&d, "r2", Some(&j), false, edge));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod stream_move_window_tests {
+    use super::*;
+
+    /// A history record, from the same wire shape the stores replay.
+    fn rec(id: &str, extra: serde_json::Value) -> Arc<Mutex<Job>> {
+        let mut v = serde_json::json!({
+            "nzo_id": id, "name": id, "nzb_path": "/tmp/x.nzb",
+            "out_dir": format!("/tmp/out/{id}"), "state": "Completed",
+            "fetched": true,
+        });
+        if let Some(m) = extra.as_object() {
+            for (k, val) in m {
+                v[k] = val.clone();
+            }
+        }
+        Arc::new(Mutex::new(job_from_json(&v).expect("job_from_json")))
+    }
+
+    /// The two markers of a payload in flight, and why BOTH are read.
+    ///
+    /// `mover_process` sets `out_dir` to the destination LAST, so a
+    /// finished job whose bytes are being relocated has a record naming
+    /// a folder they have left. The window that produced this test was
+    /// `/stream` answering "this download has no playable file on disk
+    /// any more" for a file that was whole and in flight.
+    ///
+    /// The completion move raises both markers, so either would answer
+    /// it. The fence is not redundant: a recategorize and a retry
+    /// redrive relocate the same finished payload with no
+    /// `move_pending` anywhere, holding only the fence, and from this
+    /// branch they are the same missing file for the same reason.
+    #[test]
+    fn a_payload_in_flight_is_told_from_a_payload_that_is_gone() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-move-win-{}", std::process::id()));
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        // Settled: whatever the file pick found (or did not), nothing
+        // is moving, so a miss really is "not there any more".
+        let settled = rec("m1", serde_json::json!({}));
+        assert!(!payload_in_flight(&d, &settled));
+
+        // Owed but not started: parked with a destination configured
+        // and still sitting in the mover queue.
+        let owed = rec("m2", serde_json::json!({"move_pending": true}));
+        assert!(payload_in_flight(&d, &owed));
+
+        // Mid-recategorize: a finished payload being relocated by
+        // `history_change_cat`, which owes no move and raises no
+        // marker but the fence.
+        let recat = rec("m3", serde_json::json!({}));
+        d.moving.lock_ok().insert("m3".to_string());
+        assert!(
+            payload_in_flight(&d, &recat),
+            "the fence is the only marker a recategorize's relocation raises"
+        );
+        d.moving.lock_ok().remove("m3");
+        assert!(!payload_in_flight(&d, &recat));
+
+        // And the fence is read per id: somebody else's move is not
+        // this job's excuse for a missing file.
+        d.moving.lock_ok().insert("someone-else".to_string());
+        assert!(!payload_in_flight(&d, &settled));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The window against the REAL mover, with a real destination.
+    ///
+    /// Three moments in one pass, so the claim is the code's rather
+    /// than the test's: owed while the job sits in the mover queue, in
+    /// flight with the source folder emptied under the fence, and
+    /// settled afterwards - `out_dir` naming the destination the file
+    /// actually reached, and the pick resolving there again. The middle
+    /// one is a marker state the completion move does not produce
+    /// (`mover_process` clears `move_pending` and rewrites `out_dir`
+    /// under one hold) but a recategorize holds for its whole copy, and
+    /// it is what a fence-blind fix would answer "gone" to.
+    ///
+    /// The real move here is a same-volume rename, so it is not the
+    /// long window this bug lives in - the last leg pins the far side
+    /// of it: after a genuine relocation the record and the file agree
+    /// again, and nothing is left in flight.
+    #[test]
+    fn a_real_move_reads_owed_then_in_flight_then_settled() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-move-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let dest = dir.join("done");
+        *d.move_completed.write_ok() = Some(dest.clone());
+
+        let job_dir = d.out_dir().join("Some.Show.S01E01");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::write(job_dir.join("ep.mkv"), vec![b'x'; 4096]).unwrap();
+        let job = rec(
+            "SABnzbd_nzo_realmove",
+            serde_json::json!({
+                "out_dir": job_dir.to_string_lossy(),
+                "move_pending": true,
+            }),
+        );
+        d.history.lock_ok().push(job.clone());
+
+        // Before: the file is findable where the record says, so the
+        // handler serves it and never asks. The marker is up all the
+        // same - this is the mover queue's own backlog.
+        assert!(find_completed_media(&job_dir).is_some());
+        assert!(payload_in_flight(&d, &job));
+
+        // During: the state the handler actually meets at the seam,
+        // built from the fence the mover holds and a source folder its
+        // copy has emptied.
+        d.moving
+            .lock_ok()
+            .insert("SABnzbd_nzo_realmove".to_string());
+        std::fs::rename(job_dir.join("ep.mkv"), dir.join("ep.mkv")).unwrap();
+        job.lock_ok().move_pending = false;
+        assert!(find_completed_media(&job_dir).is_none());
+        assert!(
+            payload_in_flight(&d, &job),
+            "an emptied source folder under the fence is in flight, not gone"
+        );
+        std::fs::rename(dir.join("ep.mkv"), job_dir.join("ep.mkv")).unwrap();
+        d.moving.lock_ok().remove("SABnzbd_nzo_realmove");
+        job.lock_ok().move_pending = true;
+
+        // After: the mover's own run, end to end. It publishes the
+        // payload and rewrites the record, so the handler resolves the
+        // file again - and nothing is left in flight.
+        assert!(!d.mover_process(&job));
+        let moved = job.lock_ok().out_dir.clone();
+        assert!(moved.starts_with(&dest), "out_dir still names {moved:?}");
+        assert!(find_completed_media(&moved).is_some());
+        assert!(!payload_in_flight(&d, &job));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 2 of the media chip over that same window: a miss taken
+    /// mid-move is not the settled "no media file" it looks like.
+    ///
+    /// The claim is that the PROBER cannot tell the two apart -
+    /// `probe_disk_facts_checked` answers `Ok(None)` to both, and by
+    /// its own contract that is "a settled answer: no media file of
+    /// ours in the output directory". Under the fence it is nothing of
+    /// the kind: the disk read fine and the payload is whole, it is
+    /// simply not under the name the record still carries. So the
+    /// distinction has to be the caller's, which is what
+    /// `miss_is_in_flight` is.
+    ///
+    /// Worth a test because the arm it guards has no second chance.
+    /// Pass 2 is the ONLY source of a chip for a shape that unpacks
+    /// after the download - pass 1 sees no media file at all for one -
+    /// and those are exactly the jobs that then take a move. Nothing
+    /// re-derives what it drops: the mover owes no final pass when it
+    /// lands, and §188's re-derivation skips a row with no label
+    /// outright, so this arm getting it wrong is a chipless row for the
+    /// life of the record.
+    ///
+    /// Here rather than beside the prober for the reason the sibling
+    /// tests above are: the window wants the real markers and a real
+    /// emptied source folder, and a seeded spool cannot rig it.
+    #[test]
+    fn a_disk_pass_miss_mid_move_is_not_a_row_with_no_chip() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-move-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let id = "SABnzbd_nzo_mediamove";
+        let job_dir = d.out_dir().join("Some.Show.S01E02");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let job = rec(
+            id,
+            serde_json::json!({ "out_dir": job_dir.to_string_lossy() }),
+        );
+
+        // In flight: the mover holds the fence over a source folder its
+        // copy has emptied, and `out_dir` still names it.
+        d.moving.lock_ok().insert(id.to_string());
+        assert!(
+            matches!(
+                crate::serve::tasks::probe_disk_facts_checked(&d, &job),
+                Ok(None)
+            ),
+            "the prober reads the emptied folder as a settled miss"
+        );
+        assert!(
+            crate::serve::tasks::miss_is_in_flight(&d, &job, id),
+            "a miss under the fence is owed another look, not a chipless row"
+        );
+
+        // Settled: the same empty folder and the same `Ok(None)`, with
+        // no marker over it. This one really is the end of it.
+        d.moving.lock_ok().remove(id);
+        assert!(matches!(
+            crate::serve::tasks::probe_disk_facts_checked(&d, &job),
+            Ok(None)
+        ));
+        assert!(!crate::serve::tasks::miss_is_in_flight(&d, &job, id));
+
+        // And the owed marker answers it on its own, with no fence: a
+        // job still sitting in the mover queue has not been read yet.
+        job.lock_ok().move_pending = true;
+        assert!(crate::serve::tasks::miss_is_in_flight(&d, &job, id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The readiness token over that same window: `moving`, and never
+    /// `no_media`.
+    ///
+    /// Those two tokens ask a client for opposite things - `no_media`
+    /// is "stop asking, the file is gone", `moving` is "wait" - so
+    /// answering the move with `no_media` is what writes off a payload
+    /// that is whole and lands seconds later. Four instants in one
+    /// pass, because the interesting claims are about the transitions:
+    /// on disk, in flight, landed, and finally gone for real, which is
+    /// the one case `no_media` is honest about.
+    ///
+    /// `/preview/probe`'s 404-vs-503 arm sits on exactly the same
+    /// predicate one door up; the readiness token is the half a job
+    /// list carries, so it is the half pinned here.
+    #[test]
+    fn readiness_says_moving_rather_than_no_media_while_the_payload_is_in_flight() {
+        const ID: &str = "SABnzbd_nzo_readymove";
+        let dir = std::env::temp_dir().join(format!("nzbfast-move-ready-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        let job_dir = d.out_dir().join("Some.Show.S01E02");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::write(job_dir.join("ep.mkv"), vec![b'x'; 4096]).unwrap();
+        let job = rec(
+            ID,
+            serde_json::json!({"out_dir": job_dir.to_string_lossy()}),
+        );
+        d.history.lock_ok().push(job.clone());
+
+        // Settled and on disk: the answer a player acts on.
+        let r = playback_readiness(&d, ID);
+        assert_eq!(r["reason"], "disk", "{r}");
+        assert_eq!(r["ready"], true, "{r}");
+
+        // In flight: the bytes have left the folder the record names,
+        // and the fence is up. Not ready - `/stream` answers 503 in
+        // this same window - but not gone either.
+        std::fs::rename(job_dir.join("ep.mkv"), dir.join("ep.mkv")).unwrap();
+        d.moving.lock_ok().insert(ID.to_string());
+        // The disk answer is memoized for DISK_READINESS_TTL_SECS and
+        // these four instants are one second apart, so the memo is
+        // dropped between them rather than waited out. What it must NOT
+        // hold is asserted below.
+        d.playback_disk.lock_ok().clear();
+        let r = playback_readiness(&d, ID);
+        assert_eq!(r["reason"], "moving", "{r}");
+        assert_eq!(r["ready"], false, "{r}");
+        assert!(
+            !d.playback_disk.lock_ok().contains_key(ID),
+            "a miss taken mid-move must not be memoized - it would outlive \
+             the move and answer no_media about a payload that has landed"
+        );
+
+        // Landed: the record and the file agree again, and the very
+        // next poll reads it. No TTL to wait out, because the miss
+        // above was never cached.
+        std::fs::rename(dir.join("ep.mkv"), job_dir.join("ep.mkv")).unwrap();
+        d.moving.lock_ok().remove(ID);
+        let r = playback_readiness(&d, ID);
+        assert_eq!(r["reason"], "disk", "{r}");
+
+        // Gone for real: nothing moving, and nothing under the name the
+        // record carries. The token that means stop asking - a fix that
+        // called every miss a move would say "wait" forever.
+        std::fs::remove_file(job_dir.join("ep.mkv")).unwrap();
+        d.playback_disk.lock_ok().clear();
+        let r = playback_readiness(&d, ID);
+        assert_eq!(r["reason"], "no_media", "{r}");
+        assert_eq!(r["ready"], false, "{r}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

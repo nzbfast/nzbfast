@@ -1,8 +1,11 @@
-# The size gate (TODO 106), on EVERY branch instead of only on main.
+# The build-free gates (size, lock, waiver, doc, ref, overflow, bench2j,
+# leg-warn, par2, provenance, iface, windows-portability, flatpak pin,
+# harness, manual parity, site parity, cross-link staleness, nav
+# staleness), on EVERY branch instead of only on main.
 #
-# It already runs in ci-private's `check` job, and that is where it will
-# stay - this workflow does not replace it. What it fixes is WHEN you
-# hear about a breach.
+# They all already run in ci-private's `check` job, and that is where
+# they will stay - this workflow does not replace it. What it fixes is
+# WHEN you hear about a breach.
 #
 # Measured 13 Aug 2026: main sat red on the `size gate` step from 12 Aug
 # to 13 Aug, and in the afternoon of the 13th five more targets crossed
@@ -13,40 +16,333 @@
 #
 # The cause is structural, not bad luck. `pr-check.yml` is gated to the
 # PUBLIC repo, and ci-private's `check` job triggers on push to main
-# alone, so on this repo no branch and no pull request has ever run this
-# gate. A lane can breach a ceiling, pass every check it is shown, merge,
+# alone, so on this repo no branch and no pull request has ever run these
+# gates. A lane can breach a ceiling, pass every check it is shown, merge,
 # and the breach then surfaces on somebody else's push - which is also
 # why the fix is not "run the gate before pushing" advice: the lane that
 # broke it is not the lane that finds out.
 #
 # Two properties make it cheap enough to run on everything:
 #
-#   - No build. It is pure python over the source text - no toolchain, no
-#     cargo cache, no target dir. Checkout plus the script is the whole
-#     job, seconds of runner time, which is what makes running it on
-#     every branch push defensible against the cost rationale in
-#     pr-check.yml.
-#   - Its own concurrency group. In `check` the verdict is behind ~18
+#   - No build. Every gate here is pure python over the source text - no
+#     toolchain, no cargo cache, no target dir. Checkout plus the script
+#     is the whole job, seconds of runner time (measured 22 Aug 2026 on a
+#     laptop: bench2j 0.03 s, provenance 0.05 s, iface 0.06 s, leg-warn
+#     0.07 s, doc 0.2 s, lock 0.6 s, ref 0.8 s, size 3.4 s, flatpak pin
+#     3.6 s, overflow 6.6 s with its selftest - and of the flatpak pin's
+#     3.6 s, 3.5 s is its selftest waiting on the six localhost fixture
+#     servers that stand in for GitHub, with the tree check itself at
+#     0.08 s), which is what makes running it on every branch push
+#     defensible against the cost rationale in pr-check.yml.
+#   - Their own concurrency groups. In `check` the verdict is behind ~18
 #     minutes of toolchain, fmt, clippy and the unit suites, and on a
 #     main taking a push every ~90 seconds that job is usually queued or
 #     superseded (see ci-private.yml's long note - read verdicts per job,
 #     never per run). Here nothing queues behind a build, so a breach is
 #     reported while the lane that caused it is still at the keyboard.
 #
-# `lock-gate.py` and the overflow gate are the same shape - pure python,
-# no build, currently only visible on main - and belong here too. Left
-# out on purpose: this workflow is one change for one measured problem,
-# and adding them is a one-line follow-up if it earns its keep.
+# Until 22 Aug 2026 this file ran the size gate alone and said the lock
+# and overflow gates "belong here too" but were left out on purpose, as
+# one change for one measured problem. That reasoning is retired. The
+# 13 Aug failure mode is a property of ci-private's `push: branches:
+# [main]` trigger, not of the size gate, so every build-free gate that
+# lives only in `check` has exactly the same blind spot - and the family
+# grew to four (doc-gate and ref-gate both landed on 22 Aug) while the
+# follow-up waited, then to five when the bench2j gate landed later the
+# same day, to six when the leg-warn gate landed after it, then to seven
+# with the par2 guard, eight when the provenance gate landed the same
+# evening, and nine when the iface threshold gate landed on 23 Aug 2026 -
+# itself a rule that had been left in the on-box selftest, which is this
+# same blind spot one deploy further out. Ten and eleven followed within
+# the half hour, the lint waiver gate and the windows-portability gate,
+# both wired here at landing rather than backfilled. Twelve is the
+# flatpak pin gate, and it is the clearest case yet for running on every
+# branch: what it refuses is three packaging files disagreeing about one
+# version, a state nothing in the build can see and nobody looks at
+# between releases. The pin sat on v1.1.2 through four releases before a
+# human noticed - eight days in which every branch push was green and the
+# Flatpak bundle would have shipped from the one release its own README
+# calls unusable. A gate against slow rot is worth least on main alone,
+# because on main it tells the lane after the one that stopped looking.
+# Thirteen is the harness gate, landed the same day and the family's
+# first subject under `crates/nzbfast/tests/`: a `pub` item in the shared
+# daemon launcher that nothing calls, which the file-wide
+# `#![allow(dead_code)]` that file has to carry guarantees clippy will
+# never report.
+# Fourteen is `web/i18n/manual-check.py`, and it is the only one here
+# that was not written for CI at all - it is the sibling of
+# `web/i18n/check.py`, which IS a job (ci-private's `i18n-gate`), added
+# by TODO 201 with the reasoning that a hand-run script is one nobody
+# runs. That reasoning was never carried across to the manual half, so
+# for months the structural parity of the 15 translated manuals against
+# docs/MANUAL.html was checked only when somebody thought to check it.
+# On 23 Aug 2026 it was red on ALL 15 locales with one identical drift -
+# the lifecycle-events sentence in docs/MANUAL.html had gained four
+# `<code>` refs (job.retried, job.delete_kept, watch.picked,
+# watchlist.upgraded) and no translation followed - and nothing had
+# turned red when that landed. It was found by a hand run and fixed in
+# cf138f226. Same failure shape as the pin gate above: slow rot in files
+# no build reads, which is worth least on main alone.
+# Fifteen is `web/i18n/site-check.py`, the last script in that directory
+# with nothing turning it red, and the one with the most to lose by it.
+# Half of what it checks is ordinary parity against the English page - id
+# sets, a tag census, byte-identical `<code>` - and that half fails
+# loudly. The other half is an ANONYMITY grep over the pages that cite a
+# measurement, and `website/` is what gets published to gh-pages, so what
+# that arm refuses is not a typo but a disclosure, and a disclosure a
+# revert does not take back. It fires on nothing today, which is exactly
+# what a BROKEN one looks like: a mistyped alternation or a lost
+# case-insensitivity reads as a clean tree forever. That is the argument
+# for running it on every branch rather than on main alone - a leak is
+# worth catching on the push that wrote it, not on somebody else's - and
+# it is also why this one had a `--selftest` written for it before it was
+# wired at all, driving every ban entry at a sample of its own.
+# Sixteen is `web/i18n/site-crosslink.py --selftest && --check`, and it
+# is the first one here whose subject is GENERATED output rather than
+# hand-written source. That script rewrites the cross-page links on the
+# 150 localized pages so a visitor stays in-language, its output is
+# committed, and until now nothing verified that what is committed is
+# still what it would produce. That is the bench2j gate's story exactly,
+# and that gate exists because its subject rotted twice - once two whole
+# guards behind its parent, once the other way, when a hand-added hook
+# made the documented remedy DESTRUCTIVE. A hand patch to one href is the
+# same trap in miniature: the next regeneration undoes it and says
+# nothing. `--check` writes nothing and exits 1 on the first page that
+# differs. The `--selftest` joined it on 23 Aug 2026, after this entry
+# had argued for a day that a fixed point test needs none: one regex
+# drives both the rewrite and that script's leak scan, and breaking its
+# `href="` literal left both arms dead with the job still green - the
+# healthy state being zero matches, a converged tree cannot tell the
+# difference, so the proof has to come from synthetic pages.
+# Seventeen is `web/i18n/nav-regen.py --check`, the sibling generator,
+# which grew its `--check` arm on the same day as the cross-link one and
+# was deliberately left unwired for a day - because measuring it turned
+# up the rot it was meant to catch. One of its three arms was DEAD: it
+# placed a `<span class="langsw">` of locale codes and the regex that
+# placed it looked for one, while every page has carried a `<select
+# class="langsw">` of native language names with a `selected` option for
+# some time. It had matched nothing on all 64 pages of the four core
+# bases, for however long the markup has been a select, and gating on it
+# then would have reported every picker current while checking no picker
+# at all - the rubber stamp this whole family keeps growing to refuse. It
+# is wired now because that arm is live: `web_picker` emits the select,
+# `selected` and all, and a census of all 160 pickers on the site found
+# no page had drifted while the arm was inert. Nothing had CHECKED, which
+# is the argument, and the same one the pin gate and the manual gate
+# above are made of.
+# Eighteen, added 23 Aug 2026, is the first pair here whose subject is not
+# the tree at all - it is the harness. `.claude/tools/memory-gate.py` and
+# `.claude/tools/hooks-gate.py` run as SessionStart hooks on every
+# session, wired in `.claude/settings.json` as `[ -x "$f" ] && python3
+# "$f" --hook 2>/dev/null; true` - silent when clean, by design, so a
+# session is never blocked by its own tooling. The same shape hides a
+# script that has stopped working at all: `2>/dev/null` swallows any
+# traceback and the trailing `; true` forces the line to exit 0 no matter
+# what python3 actually returned, so a syntax error, an import error, or
+# a crash reads exactly like a clean pass. Demonstrated, not assumed: a
+# one-token syntax error dropped into a COPY of hooks-gate.py made the
+# raw invocation exit 1 with a traceback, and the real settings.json line
+# - reproduced verbatim against that same broken copy - still exited 0.
+# Both scripts already carried a `--selftest` (memory-gate: 102 checks;
+# hooks-gate: 11 cases) that nothing had ever run in CI - the same
+# hand-run shape the FIFTH, EIGHTEENTH and NINETEENTH gates in CLAUDE.md
+# all warn decays within days of landing, and two of those three did
+# decay, on shipped releases. Each job below runs the selftest first,
+# same as every gate above, and then a second arm the selftest cannot
+# stand in for: it asserts the script is executable and that a DIRECT
+# `--hook` call - no `2>/dev/null`, no trailing `; true` - exits 0. The
+# selftest drives `audit()`/`report()` in-process and never touches the
+# module's own top-level parse or the settings.json line, so it is blind
+# to exactly the failure demonstrated above; the direct call is not. Both
+# scripts deliberately swallow anything `audit()` itself raises so a
+# session is never blocked - that guarantee stands and this gate does not
+# fight it - but the `hook_report()` call that follows it is NOT wrapped
+# in either script, so a bug there still surfaces here. See the note
+# further down, where the PRIVATE gates are named, for why a `.claude/`
+# path is safe to write into a file that ships.
+# Each gate is its own job with its own concurrency group, so one cannot
+# starve or cancel another, and each verdict shows up under its own name
+# on the commit.
+#
+# The `paths:` filter is the union of what the twenty scripts actually
+# read, worked out from the scripts rather than guessed, because a push
+# the filter skips is a push the gates silently miss:
+#
+#   - `crates/**`: the size, lock, doc and ref gates all walk it.
+#   - `vendor/**`: the ref gate indexes it (INDEX_ROOTS) so that a
+#     comment in crates/ may point at a symbol in the rars fork.
+#   - `**/*.rs`: the ref gate's path arm walks the WHOLE tree for `.rs`
+#     basenames, and bench/ and research/ hold some outside crates/ and
+#     vendor/.
+#   - `website/**`, `docs/MANUAL.html`, `docs/i18n/MANUAL.*.html`,
+#     `web/dashboard.html`, `web/wall.html`: the overflow gate's three
+#     targets (TARGETS in the script), plus the stylesheets they link,
+#     which all live under website/assets/. Three of these entries carry a
+#     second gate each. `docs/MANUAL.html` and `docs/i18n/MANUAL.*.html`
+#     are the manual parity gate's ENTIRE subject - the English manual and
+#     the 15 translations of it, and they are ALSO the nav staleness
+#     gate's manual-switcher arm - and `website/**` is the site parity
+#     gate's, all 150 localized pages and the ten English bases they are
+#     held to - and `website/**` carries the cross-link staleness gate on
+#     top of that, whose subject is 60 of those same pages, and the nav
+#     staleness gate's other two arms, whose subject is those 60 plus
+#     their four English bases. None of the four gates needed anything
+#     added here beyond its own script. Do not narrow any of these entries
+#     on the overflow gate's behalf without re-reading this line:
+#     `website/**` alone now carries FOUR, and narrowing it would leave
+#     the anonymity arm wired to a trigger a leaked city name cannot
+#     fire.
+#   - `**/bench2*.sh`, `**/mkbench2*.py`: the bench2j gate's subject is a
+#     generated bench driver, its parent, and the generator between
+#     them. Nothing else in the filter reaches those - a bench driver is
+#     neither `.rs` nor under crates/ - so without these entries the
+#     gate would be wired to a trigger its own subject can never fire.
+#     Globbed rather than spelled out because the tree they live in is
+#     private vocabulary and this file ships to the public repo
+#     verbatim; tools/bench2j-gate.py carries the same note.
+#   - `**/*.py`: the leg-warn gate reads every python file in the bench
+#     tree, and a seventh LEG-line reader is exactly the thing it exists
+#     to catch, so the filter cannot name the files it has today. Globbed
+#     wider than its subject for the same reason as the two entries above
+#     - that tree is private vocabulary and this file ships to the public
+#     repo verbatim - and it is affordable because the job is a
+#     measured 0.07 s.
+#   - `*.md`: the provenance gate reads the lab notebook at the repo
+#     root. Globbed to root markdown rather than named for the third time
+#     for the same reason as the three entries above - that filename is
+#     private vocabulary and this file ships to the public repo verbatim
+#     - and it is affordable because the job is a measured 0.05 s.
+#   - `**/*.sh`, `**/*.zsh`: the iface threshold gate reads every shell
+#     file in the bench tree, because its whole point is to see a driver
+#     that does not exist yet - a list of the four it has today is a gate
+#     that cannot see the fifth. Globbed wider than its subject for the
+#     fourth time and for the same reason as the three entries above, and
+#     affordable for the same reason: a measured 0.06 s. `**/bench2*.sh`
+#     above is now subsumed by it and kept anyway, so that removing one
+#     gate can never silently unwire another.
+#   - `packaging/flatpak/**`: the flatpak pin gate reads four files in
+#     that directory (the yaml, the metainfo, the README and
+#     cargo-sources.json) and holds them to one version. Spelled out
+#     rather than globbed, unlike the four entries above: `packaging/` is
+#     in PUBLIC_MANIFEST wholesale, so the path is not private vocabulary
+#     and there is nothing to hide from the public copy of this file. The
+#     directory rather than the four names, because a fifth packaging
+#     file that carries the version is exactly what the gate will be
+#     taught next. Its FIFTH read, `crates/nzbfast/Cargo.toml`, is
+#     already covered by `crates/**` at the top of this list. There is
+#     deliberately no `Cargo.lock` entry: the gate reads a Cargo.lock
+#     only from INSIDE the fetched tag tarball, in the `--live` mode that
+#     CI never runs, so a lockfile bump can never change this verdict and
+#     naming it here would be a trigger worked out by guessing rather
+#     than from the script.
+#   - `.claude/tools/memory-gate.py`, `.claude/tools/hooks-gate.py`: the
+#     memory and hooks gates' own subjects, named explicitly rather than
+#     left to `**/*.py` to reach - that pattern's coverage of a
+#     dot-directory was never established here, and even where a glob
+#     above provably reaches its subject the file still names it
+#     separately (see the harness/i18n case just below), so a dot-prefixed
+#     path gets no less.
+#   - the twenty gate scripts and this file. `crates/**` and `**/*.rs`
+#     already carry the harness gate's whole subject, so it adds only its
+#     own script to the list, and `**/*.py` already reaches
+#     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
+#     `web/i18n/site-crosslink.py` and `web/i18n/nav-regen.py` - all four
+#     named anyway, for the same reason `**/bench2*.sh` is kept below a
+#     filter that subsumes it: removing one gate must never silently
+#     unwire another.
+#
+# The doc, ref, overflow, bench2j, leg-warn, par2, provenance, iface,
+# waiver, windows-portability, flatpak pin and harness gates are PRIVATE:
+# `packaging/PUBLIC_MANIFEST` ships only lock-gate.py and size-gate.py of
+# tools/. This file ships verbatim to the public repo with the rest of
+# .github, and every job here is behind `if: github.repository !=
+# 'nzbfast/nzbfast'`, so on the public repo the jobs are skipped rather
+# than failing on a script that is not there - the same arrangement
+# ci-private.yml relies on for the same twelve scripts: eleven of them in
+# `check`, and the flatpak pin in its own job for the same reason it is
+# its own job here. The FOUR i18n gates are the exceptions that change
+# nothing. All four live in web/, and PUBLIC_MANIFEST ships `web` and
+# `docs` wholesale, so their scripts are present publicly; the manual
+# gate's subject ships too, and the two website gates' does NOT -
+# `website/` is not in PUBLIC_MANIFEST, so on the public repo those
+# scripts would have no pages to read. The nav staleness gate is both at
+# once: its manual-switcher arm reads files that ship and its picker and
+# hreflang arms read files that do not. No such case is reached, because
+# all of them are behind the same `if:` as everything else here. The split this file and pr-check.yml keep is
+# about which repo pays for a run, not about which scripts exist.
+#
+# The memory and hooks gates below are PRIVATE the same way, one level
+# further out: `.claude/` is not a PUBLIC_MANIFEST entry AT ALL (the
+# manifest names it only in a comment, to say why - "internal agent
+# skills, name private hosts"), so on the public repo `.claude/tools/`
+# does not exist, full stop, the same as most of tools/ above. The same
+# `if:` skips both jobs there before either script is ever asked for.
+# Checked, not assumed: `./packaging/leak-check.sh
+# .github/workflows/size-gate.yml` is clean on this file with both paths
+# in it, because a PATH is not the private vocabulary the scan looks for
+# and the scripts' actual contents - which is where that vocabulary would
+# live - never ship either way. Unlike every entry above, neither has a
+# ci-private.yml counterpart: nothing has ever run these two selftests
+# anywhere (`grep -rn "claude/tools" .github/workflows/` has exactly one
+# hit, prose in leak-check.yml, not a step), so there is no existing
+# `check` step to leave in place for redundancy - this file is the first
+# and only place either one runs.
 name: size-gate
 on:
   push:
     paths:
       - 'crates/**'
+      - 'vendor/**'
+      - '**/*.rs'
+      - 'website/**'
+      - 'docs/MANUAL.html'
+      - 'docs/i18n/MANUAL.*.html'
+      - 'web/dashboard.html'
+      - 'web/wall.html'
       - 'tools/size-gate.py'
+      - 'tools/lock-gate.py'
+      - 'tools/waiver-gate.py'
+      - 'tools/doc-gate.py'
+      - 'tools/ref-gate.py'
+      - 'tools/overflow-gate.py'
+      - '**/bench2*.sh'
+      - '**/mkbench2*.py'
+      - 'tools/bench2j-gate.py'
+      - 'tools/par2-gate.py'
+      - '**/*.py'
+      - '*.md'
+      - '**/*.sh'
+      - '**/*.zsh'
+      - 'tools/iface-excess-gate.py'
+      - 'tools/win-portability-gate.py'
+      - 'packaging/flatpak/**'
+      - 'tools/flatpak-pin-gate.py'
+      - 'tools/harness-gate.py'
+      - 'web/i18n/manual-check.py'
+      - 'web/i18n/site-check.py'
+      - 'web/i18n/site-crosslink.py'
+      - 'web/i18n/nav-regen.py'
+      - '.claude/tools/memory-gate.py'
+      - '.claude/tools/hooks-gate.py'
       - '.github/workflows/size-gate.yml'
   workflow_dispatch:
 permissions:
   contents: read
+# Every job below is the same shape, deliberately spelled out twenty
+# times rather than as a matrix, so each step's `run:` line is the bare
+# script exactly as ci-private runs it and the two can never disagree
+# about what passes - true of eighteen of the twenty; the memory and
+# hooks gates have no ci-private line to match, see "Eighteen" above.
+#
+# Concurrency is on the JOB, not the workflow, which is ci-private.yml's
+# hard-won lesson written down: a workflow-level group cancels every job
+# in the run, so one slow leg kills the fast one. With twenty jobs that
+# is no longer hypothetical - a per-job group means the overflow gate's
+# selftest can never take the lock gate's verdict down with it.
+#
+# Same rule as `check` otherwise: superseding is what you want on a
+# topic branch, and main must always reach a verdict rather than be
+# cancelled by the next push.
 jobs:
   size-gate:
     # Private repo only. The public repo has pr-check.yml; the cost
@@ -54,21 +350,324 @@ jobs:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # On the JOB, not the workflow, which is ci-private.yml's hard-won
-    # lesson written down: a workflow-level group cancels every job in
-    # the run, so one slow leg kills the fast one. With a single job the
-    # two spellings are identical today - it is spelled this way so that
-    # adding a second gate here later cannot starve this one.
-    #
-    # Same rule as `check` otherwise: superseding is what you want on a
-    # topic branch, and main must always reach a verdict rather than be
-    # cancelled by the next push.
     concurrency:
       group: size-gate-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Deliberately the bare script, exactly as ci-private runs it, so
-      # the two can never disagree about what passes.
+      # `--selftest` first, same reason as the lock gate below: this
+      # gate's `#[cfg(test)]` scope resolver ended a BRACE-LESS item only
+      # on braces, so it ran on to the next `{` and scored the production
+      # function after it as test code - exempt from the ceiling. That hid
+      # `Daemon::enqueue` at 575 lines. The selftest pins the brace-less
+      # shape so nobody simplifies the resolver back.
       - name: size gate
-        run: tools/size-gate.py
+        run: tools/size-gate.py --selftest && tools/size-gate.py
+  lock-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: lock-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: lock gate
+        run: tools/lock-gate.py --selftest && tools/lock-gate.py
+  waiver-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: waiver-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--selftest` first: this gate exempts two shapes (`cfg_attr(..,
+      # allow(..))` and `#[expect]`) by NOT matching them, so a slipped
+      # anchor turns it into a gate that passes everything quietly. The
+      # selftest asserts the exempt fixtures really are exempt and the
+      # noted ones really are seen and judged justified.
+      - name: lint waiver gate
+        run: tools/waiver-gate.py --selftest && tools/waiver-gate.py
+  doc-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: doc-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: doc gate
+        run: tools/doc-gate.py --selftest && tools/doc-gate.py
+  ref-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ref-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: ref gate
+        run: tools/ref-gate.py --selftest && tools/ref-gate.py
+  overflow-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: overflow-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: overflow gate
+        run: tools/overflow-gate.py --selftest && tools/overflow-gate.py
+  bench2j-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: bench2j-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: bench driver generator gate
+        run: tools/bench2j-gate.py
+  leg-warn-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: leg-warn-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: LEG-line WARN gate
+        run: tools/leg-warn-gate.py --selftest && tools/leg-warn-gate.py
+  par2-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: par2-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: par2 guard gate
+        run: tools/par2-gate.py --selftest && tools/par2-gate.py
+  provenance-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: provenance-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: driver provenance gate
+        run: tools/provenance-gate.py --selftest && tools/provenance-gate.py
+  iface-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: iface-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: iface threshold gate
+        run: tools/iface-excess-gate.py --selftest && tools/iface-excess-gate.py
+  win-portability-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: win-portability-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The one gate here whose subject is a platform nobody in this fleet
+      # builds on: unix-only symbols in code Windows also compiles. Four
+      # fix commits over two days of red windows-build / windows-clippy,
+      # 21-23 Aug 2026. `--selftest` first, same reason as the gates above
+      # - the exemption logic is the whole gate, and a refactor that
+      # over-exempts still prints a green line.
+      - name: windows portability gate
+        run: tools/win-portability-gate.py --selftest && tools/win-portability-gate.py
+  flatpak-pin-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: flatpak-pin-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The offline half of the Flatpak release pin: the yaml's
+      # `url`+`sha256`, the metainfo's newest <release> and the README
+      # install example are one version, and it is not ahead of
+      # Cargo.toml. A pin BEHIND Cargo.toml passes on purpose - that is
+      # the normal state between the bump commit and publish-release step
+      # 4d, whose `--live` mode is the other half and is not a CI job.
+      # `python3` in front, unlike the twelve bare paths above, because
+      # the line is byte-identical to ci-private's - the rule at the top
+      # of this file is that the two can never disagree about what
+      # passes, and an invocation this file spells its own way is the
+      # first way they start to.
+      - name: flatpak pin gate
+        run: python3 tools/flatpak-pin-gate.py --selftest && python3 tools/flatpak-pin-gate.py
+  harness-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: harness-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--selftest` first, and here it is the whole gate: the three needle
+      # shapes are what separate this from a bare word grep that passes
+      # everything (`.text(` has 2 hits in that tree where the word `text`
+      # has 62). The selftest pins that a bare-word needle DOES match a
+      # fixture the call-shaped one does not, so nobody widens it back.
+      - name: harness dead-item gate
+        run: tools/harness-gate.py --selftest && tools/harness-gate.py
+  manual-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: manual-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Structural parity of the 15 translated manuals against
+      # docs/MANUAL.html: an 18-tag census whole-file AND per section,
+      # identical id sets, byte-identical `<code>`. The sibling of
+      # `web/i18n/check.py`, which has been ci-private's `i18n-gate`
+      # since TODO 201; this half was left hand-run and drifted on all 15
+      # locales at once (see the note at the top of this file).
+      # `--selftest` first, and the script's own docstring says why it is
+      # the thing to run when the census reads suspiciously quiet: until
+      # 22 Aug 2026 this gate compared five tag counts, so an
+      # English-only block of <p>/<li>/<div> was invisible to it, and it
+      # under-reported three separate shipped drifts without ever going
+      # red. `python3` in front rather than the bare path, to stay
+      # byte-identical to the line ci-private's `i18n-gate` runs.
+      - name: manual parity gate
+        run: python3 web/i18n/manual-check.py --selftest && python3 web/i18n/manual-check.py
+  site-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: site-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The third script in web/i18n/ and the last one that had nothing
+      # turning it red. Two dimensions: structural parity of the 150
+      # localized site pages against their English bases (id sets, a tag
+      # census, byte-identical `<code>`, lang attribute, picker and
+      # hreflang), and an anonymity grep over the pages that cite a
+      # measurement. The second is the reason this job is worth a runner:
+      # those pages are published, so what it refuses is a disclosure
+      # rather than a typo, and it fires on nothing today - which is
+      # indistinguishable from being broken. `--selftest` first, and here
+      # that is the whole gate: it drives every ban entry at a sample of
+      # its own and pins both word anchors, so an alternation that stops
+      # matching is a red job and not a quiet tree. `python3` in front
+      # rather than the bare path, to stay byte-identical to the line
+      # ci-private's `i18n-gate` runs.
+      - name: site parity gate
+        run: python3 web/i18n/site-check.py --selftest && python3 web/i18n/site-check.py
+  crosslink-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: crosslink-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The first of the two gates here whose subject is GENERATED and
+      # committed: site-crosslink.py rewrites the cross-page links on the
+      # 150 localized pages so a visitor stays in-language, and nothing
+      # verified that what is on disk is still what it would produce.
+      # `--check` writes nothing and exits 1 on the first page that
+      # differs. The second is the `nav-gate` job directly below, which
+      # this comment said was "not a job yet" until 23 Aug 2026 - it was
+      # wired a day after this one, once the dead arm that kept it out was
+      # revived, and the sentence pointing at that note outlived the note.
+      #
+      # THE `--selftest` IN FRONT WAS ADDED 23 Aug 2026. This comment used
+      # to say there was none, and that the absence was not an omission:
+      # the arm is a fixed point test, the script run against its own
+      # committed output, so it has no judgement to get wrong. That holds
+      # for the OUTPUT and not for the PATTERN. One regex drives both the
+      # rewrite and the trailing leak scan, and a regex that matches
+      # nothing rewrites nothing - the file equals itself, every page
+      # reads current, and no leak is reported because none can be found.
+      # Measured that day on origin/main: breaking its `href="` literal
+      # left both arms dead and this step green at exit 0, the same shape
+      # that kept nav-regen's picker arm inert on 64 pages for months. The
+      # tree cannot settle it either way, because a converged site
+      # correctly yields zero matches on all 150 pages; the selftest
+      # proves the transform is alive against synthetic pages instead.
+      - name: cross-link staleness gate
+        run: python3 web/i18n/site-crosslink.py --selftest && python3 web/i18n/site-crosslink.py --check
+  nav-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: nav-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The second generator in web/i18n/, and the second gate here whose
+      # subject is GENERATED and committed: nav-regen.py writes the
+      # language picker and the hreflang alternates on the 64 pages of the
+      # four core bases, and the switcher on the 16 manual pages. It grew
+      # `--check` on the same day as the job above and was left unwired
+      # for a day, because measuring it found one of its three arms DEAD -
+      # it placed a `<span class="langsw">` while every page has carried a
+      # `<select class="langsw">` for some time, so it had been checking
+      # no picker at all. Wiring it then would have been the rubber stamp
+      # this file keeps growing to refuse. `web_picker` now emits the
+      # select, `selected` and all, so all three arms are live and this is
+      # a job. No `--selftest`, for the same reason the one above has
+      # none: the script is run against its own committed output, a fixed
+      # point with no judgement to get wrong.
+      - name: nav staleness gate
+        run: python3 web/i18n/nav-regen.py --check
+  memory-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: memory-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--selftest` exercises audit()/report() in-process, same as every
+      # gate above. The executable check and the direct `--hook` call are
+      # the arm neither that nor any prior CI run has ever exercised - see
+      # "Eighteen" at the top of this file for the demonstrated failure a
+      # bare selftest cannot see: the settings.json wrapper silences a
+      # broken script down to exit 0.
+      - name: memory gate
+        run: test -x .claude/tools/memory-gate.py && .claude/tools/memory-gate.py --selftest && .claude/tools/memory-gate.py --hook
+  hooks-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: hooks-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same two arms as the memory gate above.
+      - name: hooks gate
+        run: test -x .claude/tools/hooks-gate.py && .claude/tools/hooks-gate.py --selftest && .claude/tools/hooks-gate.py --hook

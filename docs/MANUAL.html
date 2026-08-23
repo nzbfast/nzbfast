@@ -317,7 +317,11 @@ second. The cards, top to bottom:</p>
 <h3>Header bar</h3>
 <ul>
 <li><b>Speed limit</b> menu: fixed caps, <i>auto · yield to LAN</i> (an RTT-governed
-mode that backs off when someone else in the house needs the line), or unlimited.</li>
+mode that backs off when someone else in the house needs the line), or unlimited.
+The presets are round numbers for round lines, so a 37&nbsp;Mb/s uplink is not one of
+them: <b>custom…</b> asks you for the figure instead and takes anything the API takes
+(<code>25M</code>, <code>500K</code>, or 0 for no limit). The menu then reads
+<b>(custom)</b> with the rate beside it until you pick a preset or <i>auto</i> again.</li>
 <li><b>Pause for…</b> stops everything for 15&nbsp;min/30&nbsp;min/1&nbsp;h/3&nbsp;h with
 automatic resume, or use the Pause button for an open-ended pause. Pause is
 immediate: the active transfer stops within seconds and resumes later from the
@@ -356,6 +360,14 @@ line saying where the job came from (watch folder, a connected app, the API…).
 A <b>Download .nzb</b> button saves you the job's <code>.nzb</code> file - nzbfast
 keeps its own copy, so this works for every job, even when the original file is
 long gone.</li>
+<li><b>"Why is this slow?"</b> While a job downloads, the line under its progress
+bar carries a verdict for <em>that</em> job rather than for the machine:
+<i>your providers are the limit</i>, <i>this machine is at its CPU limit</i>,
+<i>storage is not keeping up</i>, and so on. Click it and the row opens on the
+evidence: what your line can do, what the providers delivered, what is arriving
+now, and a per-server table where a shaped provider is visible by inspection. A
+job running at full speed says nothing here, and neither does one whose verdict
+is still forming.</li>
 <li>Badges show special states: <i>deferred (slow)</i>, <i>prefetching</i>,
 <i>paused</i> (see <a href="#performance">Performance tools</a>).</li>
 <li>A burn-down chart tracks total GB remaining across the queue.</li>
@@ -384,7 +396,9 @@ password and the job finishes in place. The verify-health strip charts bad PAR2
 blocks per download: a rising tail means articles are arriving damaged.
 Each row's drawer says who added the job and has the same <b>Download .nzb</b>
 button as the queue - handy for downloading a release again somewhere else, or
-attaching the <code>.nzb</code> to a problem report.</p>
+attaching the <code>.nzb</code> to a problem report. Beside it is <b>Create
+report</b>, which is usually the better thing to attach: see
+<a href="#troubleshooting">Troubleshooting</a>.</p>
 <p>The card lists ten downloads by default and the rest are one click away, on the
 ▤ button. Status, location and the reason a job failed live behind a click on the
 row itself, so the common case - what finished, how big, when - stays readable
@@ -411,9 +425,10 @@ and block accounts. Block accounts show lifetime usage against their size.</p>
 <h3 id="dash-layout">Arrange the dashboard</h3>
 <p>The dashboard is yours to arrange. Four operations, named the same way wherever you
 meet them: <b>Move</b> a card, <b>Compact</b> it, <b>Resize</b> it or <b>Hide</b> it. Every
-choice is remembered by the browser you made it in, so each device keeps its own
-arrangement, and <b>Reset layout</b> in Settings → Interface puts every card, size and
-column back the way it shipped.</p>
+choice is remembered by the browser profile you made it in: the order your cards run in and
+the ones you have hidden apply at every window size in that profile, while card and chart
+sizes are kept for the desktop alone. <b>Reset layout</b> in Settings → Interface puts every
+card, size and column back the way it shipped.</p>
 <p><b>Customise layout</b> is the guided way in, and the quickest way to see what a card
 can do. Open it from the dim link just above the first card, or from Settings → Interface,
 where it is the first button in the <b>Dashboard layout</b> row. While it is on, every card
@@ -434,8 +449,9 @@ well: focus it and the up and down arrow keys move the card.</li>
 less room. On History it switches between the ten most recent downloads and the rest of
 your history. <b>Compact mode</b> in Settings → Interface does the whole dashboard at
 once.</li>
-<li><b>Resize.</b> A card that holds a list or a chart carries a bar along its bottom edge:
-drag it to the height you want. The bar is faint until you point at the card, when it draws
+<li><b>Resize.</b> A card that holds a list or a chart carries a bar along its bottom edge
+wherever you have a mouse or a trackpad: drag it to the height you want. A touch screen is
+not given one. The bar is faint until you point at the card, when it draws
 as a full-width hairline with ridges at its trailing corner; it takes keyboard focus too,
 where the up and down arrow keys size the card and Shift makes a bigger step. Which cards
 have one changes as cards gain and lose lists of their own, so take the bar as the answer
@@ -475,11 +491,13 @@ arrow resizes it.</p>
 <tr><th>Method</th><th>How</th></tr>
 <tr><td><b>Drag &amp; drop</b></td><td>Drop one or more <code>.nzb</code> files anywhere on the dashboard.</td></tr>
 <tr><td><b>Watch folder</b></td><td>Set a folder in Settings; any <code>.nzb</code> saved into it is
-picked up within 5 seconds and moved to the Trash, and an open dashboard announces
+picked up as soon as it lands and moved to the Trash, and an open dashboard announces
 each pickup by name ("Picked up … from Downloads"), so a file leaving the folder is
 never a mystery. Prefer to keep your files? Turn on <b>Keep .nzb files after
 pickup</b> (see <a href="#settings">§9</a>). Point your browser's download
-directory at it for one-click grabs from indexer sites.</td></tr>
+directory at it for one-click grabs from indexer sites. Subfolders, files that turn
+out not to be NZBs, and the re-check interval a folder on a network share needs all
+have switches of their own; see <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>From a URL</b></td><td>Paste an NZB link (API <code>mode=addurl</code>, or via any connected app).</td></tr>
 <tr><td><b>nzblnk: links</b></td><td>Paste an <code>nzblnk:</code> link anywhere on the dashboard, or drag it in. If you installed from the macOS DMG or the Windows installer you can also click one straight from a board. See <a href="#nzblnk">nzblnk links</a> below.</td></tr>
 <tr><td><b>Browse index</b></td><td>Click any complete release in the Browse card.</td></tr>
@@ -788,7 +806,7 @@ values apply on the next launch. Every change made here is persisted to
 <h3>Speed &amp; scheduling <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Setting</th><th>What it does</th></tr>
-<tr><td>Speed limit</td><td>Cap in bytes/sec (<code>50M</code>, <code>1G</code>, 0 = unlimited). Remote apps may send percentages; set <i>Line speed</i> so they translate correctly.</td></tr>
+<tr><td>Speed limit</td><td>Cap in bytes/sec (<code>50M</code>, <code>1G</code>, 0 = unlimited). Remote apps may send percentages; set <i>Line speed</i> so they translate correctly. The header's <b>custom…</b> entry sets this same cap without opening Settings.</td></tr>
 <tr><td>Auto speed</td><td>RTT-governed cap that yields to other household traffic and re-expands when the line is quiet.</td></tr>
 <tr><td>Auto-defer slow downloads</td><td>A job stuck on one slow server while others wait is moved to the back of the queue (progress kept). See <a href="#performance">§13</a>.</td></tr>
 <tr><td>Prefetch on idle servers</td><td>Servers useless to the active job start the next queued one. See <a href="#performance">§13</a>.</td></tr>
@@ -832,6 +850,16 @@ unpacked automatically: a RAR set containing a 7z containing another RAR is norm
 on Usenet, and nzbfast follows the chain without a second pass. At the limit the
 deepest archive is simply left in place, unpacked no further, and the download still
 completes. Raise it only for unusually deep releases.</p>
+<p><b>Permissions on finished downloads</b> (an advanced setting) is a umask, the same number Docker and
+the setup guides print: <code>002</code> gives folders 775 and files 664, and
+<code>022</code> gives 755 and 644. Empty is the default and changes nothing. Set it
+when Sonarr or Radarr run as a different user in the same group and cannot read or
+import what lands here, which is the usual case on a systemd install, because the
+unit keeps everything the daemon writes owner-only to protect the API key. The modes
+go on once a finished job has stopped moving, and cover the job's folder, everything
+inside it, and the folders between it and the download root, because importing by
+renaming needs write permission on the folder a download is being renamed out of.
+Ignored on Windows, which has no such thing.</p>
 
 <h3>Naming &amp; cleanup <span class="pill live">live</span></h3>
 <p><b>Rename finished downloads</b> (on by default) gives the folder and the main
@@ -885,6 +913,26 @@ misbehaves. A kept file is remembered, across restarts too, and is not queued
 again; re-save it to download it again. Whichever you choose, every job's drawer
 has a <b>Download .nzb</b> button, so a copy of any job's <code>.nzb</code> is
 never more than a click away.</p>
+<p><b>Also scan subfolders</b> (off by default) picks up files from folders inside the
+watch folder too, and the first subfolder's name becomes the download's category: a
+file dropped in <code>watch/tv</code> joins the tv category. That is the quickest way
+to sort grabs without touching the dashboard - point one browser bookmark at
+<code>watch/tv</code> and another at <code>watch/movies</code> and the filing is done
+on the way in. A folder named <code>rejected</code> is the one exception and is always
+left alone.</p>
+<p><b>Move unusable files aside</b> (off by default) moves anything that is not a
+usable NZB into a <code>rejected</code> folder inside the watch folder, with a small
+text file beside it saying what was wrong. Worth having on for a folder your browser
+saves into, where a login page or an error page can arrive under an <code>.nzb</code>
+name. With it off, the file stays where you put it and the reason is shown above the
+queue instead. A file that merely looks incomplete is left in place either way,
+because it may still be arriving.</p>
+<p><b>Re-check the folder every</b> (an advanced setting) is a backstop and nothing
+more, so it is not the knob that makes pickups fast. A file dropped on this machine is
+noticed the moment it lands, because the system says so; this interval covers only the
+folders the system cannot report on, which in practice means a network share written
+from another computer. Seconds, 1 to 3600, default 5. Lower it if pickups from a share
+feel late, raise it if the re-checks are not worth the traffic on a slow link.</p>
 
 <h3 id="set-indexers">Search indexers <span class="pill live">live</span></h3>
 <p>Your accounts at NZB indexer sites, one row each, so a search on the wall can ask them
@@ -1031,9 +1079,14 @@ the add proceeds untouched and the log says why.</p>
 <h3>Lifecycle events and signed webhooks</h3>
 <p>Every job milestone is a versioned event: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, plus
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> and <code>quota.reached</code>. Each carries
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(an automatic retry has re-queued a failed download) and
+<code>job.delete_kept</code> (a delete removed the record but could not remove
+its files), plus <code>watch.picked</code> (a .nzb was taken out of the watch
+folder), <code>watchlist.upgraded</code> (a watchlist upgrade landed and the
+superseded copy was removed), <code>queue.idle</code>,
+<code>giveup.tripped</code>, <code>disk.low</code>, <code>storage.slow</code>
+and <code>quota.reached</code>. Each carries
 <code>schema_version</code> (currently 1; new keys may appear without a bump -
 ignore what you do not know), a monotonic <code>seq</code>, and an
 <code>at</code> timestamp in milliseconds.</p>
@@ -1433,7 +1486,7 @@ wherever <code>--config</code> / <code>$NZBFAST_CONFIG</code> points.</td></tr>
 <h2 id="troubleshooting">18 · Troubleshooting</h2>
 <div class="tblwrap"><table>
 <tr><th>Symptom</th><th>Check</th></tr>
-<tr><td>Slow downloads</td><td>Run <b>System benchmark</b>; it names the bottleneck outright. If it's network: run <b>Connection tuning</b>, check per-server connection counts, and confirm your providers aren't all one backbone (<b>Server diversity</b>).</td></tr>
+<tr><td>Slow downloads</td><td>Ask the download itself first: while it runs, the line under its progress bar names the layer that is holding <i>this</i> job back, and clicking that verdict opens the row on the evidence for it (see <a href="#dash-queue">Queue</a>). Run <b>System benchmark</b> to measure the machine instead; it names the bottleneck outright. If it's network: run <b>Connection tuning</b>, check per-server connection counts, and confirm your providers aren't all one backbone (<b>Server diversity</b>).</td></tr>
 <tr><td>Slow only on very large jobs<br>(NAS or low-RAM machine)</td><td>Expected, and measurable: a starved memory budget spills caches to disk and costs 20–40% past ~87 GB. See <a href="#memory">Memory budget</a> for the figures and how much RAM to give it. Smaller jobs are unaffected.</td></tr>
 <tr><td>Download fails "articles missing"</td><td>The post has expired or was taken down on your providers. A second provider on a different backbone rescues most of these. <code>nzbfast check</code> predicts this before downloading, and the wall's availability dot (<a href="#oracle">§13</a>) flags the likely-gone ones in advance. A first failure of this shape retries itself once after a cooldown, since propagation lag looks identical and clears on its own.</td></tr>
 <tr><td>Finished archive wants a password</td><td>History row shows 🔑: enter the password there; the job completes in place.</td></tr>
@@ -1448,7 +1501,12 @@ wherever <code>--config</code> / <code>$NZBFAST_CONFIG</code> points.</td></tr>
 <tr><td>Daemon won't start: port in use</td><td>Another instance is running, or change <code>--port</code>.</td></tr>
 <tr><td>Where are the logs?</td><td>The Log card on the dashboard, or the terminal/logfile you launched <code>serve</code> with.</td></tr>
 </table></div>
-<div class="note"><b>Still stuck?</b>The Log card usually names the culprit -
+<div class="note"><b>Still stuck?</b>For a problem with one download, use
+<b>Create report</b>: it is in that job's drawer in the queue while it runs, and
+in its History drawer afterwards. It copies everything about that one download,
+including only that job's log lines rather than the whole daemon's. Usernames,
+passwords and API keys are never read, and your home folder is written as
+<code>~</code>. The Log card usually names the culprit -
 include its tail when reporting an issue, along with your
 <code>nzbfast --version</code>.</div>
 

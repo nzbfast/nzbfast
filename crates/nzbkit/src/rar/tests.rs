@@ -708,6 +708,95 @@ fn data_area_past_the_volume_end_is_corrupt() {
     assert_eq!(m.mapped_through(), m.cursor);
 }
 
+/// The bound's OTHER term, which is the one TODO 118 item 2 is about:
+/// the volume length is the POST's declaration, not a measurement, and
+/// a healthy set whose declaration is a few dozen bytes short refuses
+/// on EVERY volume at once.
+///
+/// `volume_size` is `=ybegin size=`, threaded from `yenc::Decoded`
+/// through `Extractor::write*` into `slots[slot].size` and handed to the
+/// mapper at classification. Nothing verifies it - `check_part_geometry`
+/// declines to check `=ypart end=` against it in as many words, on the
+/// grounds that real posters get the field wrong on otherwise perfectly
+/// good articles - so a poster-side error in this one field lands here
+/// as a hard refusal of a set that is not damaged at all.
+///
+/// The measured slack is tiny, which is why a whole set goes at once
+/// rather than one odd volume. On RARLAB rar 7.23 store volumes (`-ma5
+/// -m0 -v100k`, 23 Aug 2026) a NON-final volume tolerates 16 bytes of
+/// understatement and refuses at 17; a final or single volume tolerates
+/// 8 and refuses at 9. The synthetic volumes here have their own tail
+/// block and so their own slack, which is why this asserts a clean map
+/// at the true length and a refusal well past any of it rather than
+/// pinning a byte count the fixture would own.
+#[test]
+fn an_understated_volume_declaration_refuses_every_volume_of_a_healthy_set() {
+    let total = payload(250_000, 9);
+    let vols: Vec<Vec<u8>> = vec![
+        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[..100_000], false, true)], 0),
+        fixtures::rar5_volume_n(
+            &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+            1,
+        ),
+        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[200_000..], true, false)], 2),
+    ];
+    // At the length the volumes really are, every one of them maps.
+    for (i, v) in vols.iter().enumerate() {
+        let mut m = VolumeMapper::new(v.len() as u64);
+        feed_shuffled(&mut m, v, 700, 5);
+        assert!(
+            m.blocker.is_none() && m.complete && m.entries.len() == 1,
+            "vol {i} is healthy: {:?}",
+            m.blocker
+        );
+    }
+    // Same bytes, same order, a declaration 64 bytes short: the whole
+    // set goes, and it goes with the reason the field report carried.
+    for (i, v) in vols.iter().enumerate() {
+        let mut m = VolumeMapper::new(v.len() as u64 - 64);
+        feed_shuffled(&mut m, v, 700, 5);
+        assert!(
+            matches!(
+                m.blocker,
+                Some(MapBlocker::Corrupt("data area exceeds volume"))
+            ),
+            "vol {i} must refuse on the bound, got {:?}",
+            m.blocker
+        );
+        assert!(!m.complete, "a refused volume must never read complete");
+    }
+}
+
+/// And the bound is ONE-SIDED, so the opposite poster error is silent.
+///
+/// A declaration that OVERSTATES the volume - by one byte or by twice
+/// its length - never trips anything: the parse walks the real blocks,
+/// the end-of-archive block sets `complete`, and the surplus is simply
+/// never visited. That asymmetry is worth pinning because it decides
+/// what a field report means: "data area exceeds volume" on a whole set
+/// is evidence of a declaration that is too SMALL (or of a header that
+/// genuinely overruns), and can never be evidence of one too large.
+/// Anything wanting to catch the too-large direction needs a different
+/// check, at settle, against bytes that actually arrived.
+#[test]
+fn the_volume_bound_is_one_sided_so_an_overstated_declaration_is_invisible() {
+    let data = payload(120_000, 4);
+    let vol = fixtures::rar5_volume(&[("film.mkv", 120_000, &data, false, false)]);
+    for over in [1u64, 64, 100_000, vol.len() as u64] {
+        let mut m = VolumeMapper::new(vol.len() as u64 + over);
+        feed_shuffled(&mut m, &vol, 700, 5);
+        assert!(
+            m.blocker.is_none(),
+            "over by {over} must not blocker: {:?}",
+            m.blocker
+        );
+        assert!(
+            m.complete && m.entries.len() == 1,
+            "over by {over} still maps the volume whole"
+        );
+    }
+}
+
 /// ...and a data area declared so large that the cursor arithmetic
 /// WRAPS must be refused by the same bound.
 ///
@@ -1421,4 +1510,59 @@ fn every_v4_crc_coverage_arm_survives_a_header_too_short_for_it() {
     assert!(matches!(v4_header_crc(&h), V4HeaderCrc::Mismatch));
     stamp(&mut h, 26);
     assert!(matches!(v4_header_crc(&h), V4HeaderCrc::Ok));
+}
+
+/// TODO 94 C: a mapper built at a stub's length parses the archive
+/// behind it in FILE coordinates - entries, `map_span`, the cursor all
+/// carry the base - for both dialects, and a mapper built at 0 over the
+/// same bytes says NotRar, which is the disk path's old verdict and the
+/// reason the stub offset has to be found BEFORE the mapper is built.
+#[test]
+fn a_mapper_built_at_the_stub_length_maps_the_archive_behind_it() {
+    let data = payload(4_096, 3);
+    let mut stub = b"MZ".to_vec();
+    stub.extend(payload(1_500, 7));
+    for vol in [
+        fixtures::rar5_volume(&[("a.bin", 0, &data, false, false)]),
+        fixtures::rar4_volume(&[("a.bin", 0, &data, false, false)]),
+    ] {
+        let mut file = stub.clone();
+        file.extend_from_slice(&vol);
+        let base = stub.len() as u64;
+        let data_off = base
+            + vol
+                .windows(data.len())
+                .position(|w| w == &data[..])
+                .unwrap() as u64;
+
+        let mut m = VolumeMapper::with_password_at(file.len() as u64, None, base);
+        assert_eq!(m.archive_base(), base);
+        // Fed in article-sized spans, out of order, like the stream.
+        let spans: Vec<(u64, &[u8])> = file
+            .chunks(700)
+            .enumerate()
+            .map(|(i, c)| ((i * 700) as u64, c))
+            .collect();
+        for (off, c) in spans.iter().rev() {
+            m.feed(*off, c);
+        }
+        assert!(m.complete, "the volume parses to its end");
+        assert!(m.blocker.is_none(), "{:?}", m.blocker);
+        assert_eq!(m.entries.len(), 1);
+        assert_eq!(
+            m.entries[0].data_off, data_off,
+            "entry offsets are file offsets"
+        );
+        // A span straddling the data start maps only its data part
+        // (entry, inner offset, offset WITHIN the span, length).
+        let mapped = m.map_span(data_off - 10, 30);
+        assert_eq!(mapped, vec![(0, 0, 10, 20)]);
+        // The stub itself is below mapped_through and maps to nothing:
+        // exactly what the header stash keeps for a demote.
+        assert!(m.map_span(0, base).is_empty());
+
+        let mut bare = VolumeMapper::new(file.len() as u64);
+        bare.feed(0, &file);
+        assert!(matches!(bare.blocker, Some(MapBlocker::NotRar)));
+    }
 }

@@ -71,8 +71,9 @@ fn de_size<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     d.deserialize_any(V)
 }
 
-/// Case-insensitive regex match, or keyword substring if the pattern
-/// isn't a valid regex. Empty pattern matches everything. The one
+/// Case-insensitive regex match; a pattern that isn't a valid regex is
+/// read as a `*`/`?` glob if it carries one and as a keyword substring
+/// if it does not. Empty pattern matches everything. The one
 /// implementation lives in nzbkit::categories (user categories ride the
 /// same rule syntax - 24D); this delegate keeps every caller here
 /// byte-compatible.
@@ -105,11 +106,41 @@ pub fn first_match<'a>(rules: &'a [Rule], name: &str, size: u64) -> Option<&'a R
 
 /// "par2, sfv, .srr" → ["par2", "sfv", "srr"] (lowercased, dots and
 /// leading wildcards stripped - people paste "*.par2" from other apps).
+///
+/// §163 item 2: an entry that is a real PATTERN keeps its shape instead.
+/// The strip above exists because `*.par2` means "the par2 extension",
+/// and it must go on meaning that - but it also flattened `Subs/*` and
+/// `*sample*.mkv` to a bare extension, which is not what either of those
+/// says. [`is_cleanup_pattern`] is the test, and the two kinds live in
+/// one list because a pattern is self-describing: it carries a separator
+/// or a wildcard, and a bare extension never can.
+///
+/// Backslashes are folded to `/` here so a Windows-shaped `Subs\*`
+/// means the same thing as the posix spelling, and [`cleanup`] has one
+/// separator to match against rather than two.
 pub fn parse_ext_list(v: &str) -> Vec<String> {
     v.split(',')
-        .map(|e| e.trim().trim_start_matches(['*', '.']).to_ascii_lowercase())
+        .map(|e| e.trim().to_ascii_lowercase().replace('\\', "/"))
+        .map(|e| {
+            if is_cleanup_pattern(&e) {
+                e
+            } else {
+                e.trim_start_matches(['*', '.']).to_string()
+            }
+        })
         .filter(|e| !e.is_empty())
         .collect()
+}
+
+/// Is this cleanup-list entry a pattern rather than a bare extension?
+///
+/// Yes when it carries a path separator, or a wildcard that survives the
+/// leading `*.` a pasted `*.par2` starts with. That second half is the
+/// whole subtlety: `*.par2` has a wildcard and is NOT a pattern, because
+/// stripping the lead leaves `par2` with nothing wild in it, while
+/// `*.r??` leaves `r??` and is.
+pub fn is_cleanup_pattern(e: &str) -> bool {
+    e.contains('/') || e.trim_start_matches(['*', '.']).contains(['*', '?'])
 }
 
 /// Archive-password conventions in a submitted NZB name, most explicit
@@ -254,7 +285,7 @@ impl FiledTail {
         }
     }
 
-    fn lowered(&self) -> Self {
+    pub(crate) fn lowered(&self) -> Self {
         Self {
             title: self.title.to_ascii_lowercase(),
             suffix: self.suffix.to_ascii_lowercase(),
@@ -635,7 +666,7 @@ impl Default for FiledDelete {
 /// the one filing would write today, plus the one an older build wrote
 /// for the same release when the show name reshapes (see
 /// [`legacy_tv_path`]). Empty when the stem doesn't name one episode.
-fn filed_bases(stem: &str) -> Vec<String> {
+pub(crate) fn filed_bases(stem: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(2);
     for path in [tv_path(stem), legacy_tv_path(stem)] {
         if let Some((_, Some(base))) = path {
@@ -669,7 +700,7 @@ fn filed_bases(stem: &str) -> Vec<String> {
 /// off) leaves this exactly as it was.
 ///
 /// All arguments arrive ASCII-lowercased.
-fn is_filed_episode_file(name: &str, bases: &[String], tail_lower: &FiledTail) -> bool {
+pub(crate) fn is_filed_episode_file(name: &str, bases: &[String], tail_lower: &FiledTail) -> bool {
     /// An empty part of the tail matches without consuming anything -
     /// which is what makes "no title recorded" mean "as it was before".
     fn strip<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1053,14 +1084,14 @@ fn par2_magic(p: &Path) -> bool {
 /// resolves through the link to `/media/shared/file.nfo`. Native extraction
 /// never materialises a symlink, but an external extractor or pre-existing
 /// filesystem state can, and "we don't create them" is not a boundary.
-fn is_real_dir(path: &Path) -> bool {
+pub(crate) fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
 
 /// A real file - NOT a symlink pointing at one. Same reason as
 /// [`is_real_dir`]: the walkers delete what they classify, and following a
 /// link means deleting outside the job.
-fn is_real_file(path: &Path) -> bool {
+pub(crate) fn is_real_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
@@ -1240,21 +1271,46 @@ fn largest_video(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// Delete files whose extension is in `exts` from `dir` (top level plus
-/// one subdirectory level - where extraction puts things). Logs each
+/// Does this cleanup-list entry select this file?
+///
+/// `ext` and `name` are the file's own, already lowercased; `rel` is its
+/// path relative to the job folder, with `/` separators, which for a
+/// one-level sweep is either `name` or `sub/name`.
+///
+/// The three kinds, and why a pattern is matched against one thing or
+/// the other rather than both: a bare extension is today's rule
+/// unchanged; a pattern WITHOUT a separator is about the filename, so it
+/// applies at every level the sweep reaches (`*sample*` should find a
+/// sample wherever the unpack put it); a pattern WITH one is about
+/// placement, so it is matched against the relative path and `Subs/*`
+/// therefore means the Subs folder rather than anything named Subs.
+fn cleanup_selects(entry: &str, ext: &str, name: &str, rel: &str) -> bool {
+    if !is_cleanup_pattern(entry) {
+        return entry == ext;
+    }
+    crate::rss::glob_match(entry, if entry.contains('/') { rel } else { name })
+}
+
+/// Delete files matching `exts` from `dir` (top level plus one
+/// subdirectory level - where extraction puts things). Logs each
 /// removal; returns `(total, par2)` - how many files went, and how many
 /// of those were `.par2` recovery files. The split exists for the
 /// history drawer's one-line cleanup report: recovery files are deleted
 /// by a default most users never chose (`par_cleanup`), so "12 of those
 /// were par2" is the half of the count that answers "where did my
 /// recovery data go".
+///
+/// An entry is a bare extension or a pattern - see [`parse_ext_list`]
+/// and [`cleanup_selects`]. The par2 half of the count is taken off the
+/// file's own extension either way, so a pattern that happens to sweep
+/// recovery files still reports them as recovery files.
 pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
     let mut removed = 0;
     let mut par2 = 0;
     // Read once, for the whole sweep: see `remove_user_file`.
     let recoverable = cleanup_recoverable();
     let staging = trash_staging_dir(dir);
-    let mut sweep = |d: &Path| {
+    let mut sweep = |d: &Path, prefix: &str| {
         let Ok(rd) = std::fs::read_dir(d) else { return };
         for entry in rd.flatten() {
             let path = entry.path();
@@ -1265,7 +1321,12 @@ pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
                 .extension()
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            if exts.contains(&ext) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let rel = format!("{prefix}{name}");
+            if exts.iter().any(|e| cleanup_selects(e, &ext, &name, &rel)) {
                 match remove_swept_file(&path, recoverable, staging.as_deref()) {
                     Ok(_) => {
                         info!(target: "cleanup", "removed {}", path.display());
@@ -1279,23 +1340,22 @@ pub fn cleanup(dir: &Path, exts: &[String]) -> (usize, usize) {
             }
         }
     };
-    sweep(dir);
+    sweep(dir, "");
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
             let path = entry.path();
             if is_real_dir(&path) {
-                sweep(&path);
+                let sub = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                sweep(&path, &format!("{sub}/"));
             }
         }
     }
     (removed, par2)
 }
 
-/// Auto-rename companion: remove usenet furniture (`.par2`/`.nzb`/`.sfv`/
-/// `.nfo`/…, see `JUNK_EXTS`) and sample/proof clips left beside the media,
-/// top level + one subdir deep. Never deletes a subtitle, and never the
-/// main feature (the largest video) - so a film literally titled "Sample"
-/// survives. Returns how many files went.
 /// Recoverable delete for anything that came out of a user's download.
 ///
 /// The cleanup passes used to call `remove_file` directly, so a file the
@@ -2037,10 +2097,11 @@ pub fn trash_unresponsive() -> bool {
 /// job directory (onto a NAS, into a season folder) the moment the sweep
 /// returns - a parked file must stay put while that happens, or the queued
 /// path goes stale and the junk rides along into the library.
-/// pub(crate): the engine-side sweeps (spent obfuscated volumes,
-/// consumed adoption sources in get.rs/unpack.rs) park the same way the
-/// finalize sweeps do, for the same §64 reason - their deletes run in a
-/// job's tail, and an inline Trash call is a Finder wait the job pays.
+/// pub(crate): the engine-side sweeps (spent obfuscated volumes in
+/// unpack/obfuscated.rs, consumed adoption sources in get/settle.rs and
+/// get/tail.rs) park the same way the finalize sweeps do, for the same
+/// §64 reason - their deletes run in a job's tail, and an inline Trash
+/// call is a Finder wait the job pays.
 pub(crate) fn trash_staging_dir(dir: &Path) -> Option<PathBuf> {
     Some(dir.parent()?.join(".nzbfast-trash"))
 }
@@ -2350,6 +2411,11 @@ fn is_nameless_scrap(p: &Path, ext: &str, feature_len: u64, recoverable: bool) -
     !MAGIC.iter().any(|m| head.starts_with(m))
 }
 
+/// Auto-rename companion: remove usenet furniture (`.par2`/`.nzb`/`.sfv`/
+/// `.nfo`/…, see `JUNK_EXTS`) and sample/proof clips left beside the media,
+/// top level + one subdir deep. Never deletes a subtitle, and never the
+/// main feature (the largest video) - so a film literally titled "Sample"
+/// survives. Returns how many files went.
 pub fn sweep_junk(dir: &Path) -> usize {
     let recoverable = cleanup_recoverable();
     let staging = trash_staging_dir(dir);
@@ -2891,9 +2957,9 @@ fn publish_staged(staging: &Path, dst: &Path) -> std::io::Result<()> {
 /// only one and stays put, exactly as a cross-device move has always left
 /// it.
 ///
-/// `copied` is the manifest [`copy_tree_into`] filled in, and ONLY those
-/// files are deleted. Re-walking the source instead deleted whatever the
-/// walk found, including files that appeared AFTER the copy pass - a
+/// `copied` is the manifest [`copy_tree_into_paced`] filled in, and ONLY
+/// those files are deleted. Re-walking the source instead deleted whatever
+/// the walk found, including files that appeared AFTER the copy pass - a
 /// post-processing script's output, a user's drop-in - which were therefore
 /// deleted having never been copied anywhere, so they existed nowhere
 /// afterwards. Anything not in the manifest stays where it is.
@@ -3111,7 +3177,7 @@ fn sync_written_file(path: &Path) -> std::io::Result<()> {
         // ATTRIBUTE - the entire point of the block - and the original
         // permissions go back on after the flush. std exposes no other
         // stable way to touch that attribute.
-        #[allow(clippy::permissions_set_readonly_false)]
+        #[expect(clippy::permissions_set_readonly_false)]
         relaxed.set_readonly(false);
         std::fs::set_permissions(path, relaxed).map_err(|e| err_at("set permissions", path, e))?;
         let flushed = std::fs::OpenOptions::new()
@@ -3806,108 +3872,16 @@ pub fn read_password_file(path: &Path) -> Vec<String> {
 // Where the operator's passwords file lives for the code that cannot
 // reach the daemon, and the non-RAR half of `unlock`.
 mod unlockpw;
-use unlockpw::unlock_non_rar;
-pub use unlockpw::{
-    encrypted_archive, encrypted_rar, operator_passwords, set_operator_password_file,
-};
+// `encrypted_rar` is not re-exported: its one caller outside the module
+// is `unlock`, which lives down there with it now, and the scan test
+// reaches it by path.
+pub use unlockpw::{encrypted_archive, operator_passwords, set_operator_password_file, unlock};
 
 // §99: the try-order heuristic over that file - remember which
 // password unlocked which site's / poster's downloads and try the
 // likely line first.
 mod pwassoc;
 pub use pwassoc::{dominant_poster, nzb_poster, order_passwords, record_password_assoc};
-
-/// Unlock a password-protected set: unrar with the password, and on
-/// success delete the volume files (the unpacked content is the
-/// deliverable, matching the engine's post-extraction behavior).
-pub fn unlock(dir: &Path, password: &str) -> bool {
-    // The non-RAR shapes are decided UP FRONT, not as a fall-through
-    // behind `reextract_dir`.
-    //
-    // That ordering is not a style choice. `reextract_dir` answers
-    // Ok(true) for a directory holding no RAR volumes at all ("no
-    // archive volumes on disk - nothing to re-extract"), which is
-    // correct for what it does and fatal as a gate: a directory whose
-    // only lock is a 7z or a zip has no RAR volumes BY DEFINITION, so
-    // the arms below never ran and this function reported the password
-    // as working over a set still packed - the exact failure the
-    // obfuscated-RAR branch inside `reextract_dir` was added to prevent,
-    // reproduced one level up. Observed on advP (12 Aug): "unpacked - 0
-    // volume file(s) spent", then "unlocked", with both containers
-    // untouched.
-    //
-    // Precedence matches `encrypted_archive`, which is what named the
-    // archive the caller is unlocking: RAR first claim, so a directory
-    // holding a locked RAR keeps the whole path below and these arms
-    // stay out of it.
-    if encrypted_rar(dir).is_none()
-        && let Some(unlocked) = unlock_non_rar(dir, password)
-    {
-        return unlocked;
-    }
-    // Native path first: encrypted STORE sets (the obfuscated-release
-    // norm) re-extract and AES-decrypt without unrar, deleting their
-    // volumes on success. Compressed or RAR4-encrypted sets fall through
-    // to unrar inside reextract_dir; a wrong password fails both.
-    // Volume deletion belongs to the extraction, not to this function.
-    // `reextract_dir` removes exactly what it CONSUMED on every success path
-    // (the streaming pass sweeps the set it fed, the native and unrar paths
-    // sweep against a proof-of-output snapshot), so a RAR-named file still
-    // present afterwards is one of three things, and deleting any of them is
-    // wrong:
-    //
-    //   - a file the extraction just PUBLISHED - an encrypted outer set whose
-    //     payload is the release's own inner RAR set unlocks to
-    //     `inner.partNN.rar`, and sweeping them left a Completed job with no
-    //     payload at all;
-    //   - a volume the spent-proof deliberately refused to delete;
-    //   - the volumes of ANOTHER top-level set in the same directory that
-    //     this password did not unlock. `reextract_dir`'s directory-level
-    //     answer is existential - one set unpacking makes it true - so with
-    //     encrypted sets A and B and a password for A only, the sweep deleted
-    //     B's only copy. That is the shape this whole path exists to protect.
-    //
-    // So: count what the extraction removed, delete nothing.
-    let vol_snapshot = |dir: &Path| -> std::collections::HashSet<PathBuf> {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        let name = p
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_lowercase();
-                        // .rar plus split continuations (.r00, .r01, …).
-                        name.ends_with(".rar")
-                            || name.rfind('.').is_some_and(|i| {
-                                let t = &name[i + 1..];
-                                t.len() >= 3
-                                    && t.starts_with('r')
-                                    && t[1..].bytes().all(|c| c.is_ascii_digit())
-                            })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let before = vol_snapshot(dir);
-    if !crate::reextract_dir(dir, Some(password)).unwrap_or(false) {
-        // No RAR set took the password. A directory holding a locked RAR
-        // *and* a locked container of another shape skipped the arms
-        // above (RAR had first claim) - so they get their turn here,
-        // before the password is called wrong.
-        return unlock_non_rar(dir, password).unwrap_or(false);
-    }
-    let removed = before.difference(&vol_snapshot(dir)).count();
-    info!(
-        target: "unlock",
-        "{} unpacked - {removed} volume file(s) spent",
-        dir.display()
-    );
-    true
-}
 
 // Child module files, not inline: the cases below were most of this
 // file's length and smart.rs sits under a size-gate baseline (TODO

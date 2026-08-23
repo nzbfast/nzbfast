@@ -186,6 +186,7 @@ async fn a_job_added_with_no_servers_is_held_not_failed() {
     .await
     .unwrap();
 
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -43,6 +43,31 @@ const FRAG_MAX_NS: u64 = 6_000_000_000;
 /// make the session hold an unbounded buffer.
 const FRAG_MAX_BYTES: usize = 64 << 20;
 
+/// Every sample's presentation time, in nanoseconds, from `stts`.
+///
+/// Bounded: `stts` is a run-length table read off the wire, and while
+/// the layout walk already clips the RUN COUNT to the box that holds it,
+/// the counts inside those runs are still the file's own numbers. A
+/// ceiling here keeps a hostile table from turning a playlist request
+/// into an unbounded loop. Ten million samples is over four days of
+/// 30 fps video, so nothing real is truncated.
+fn mp4_sample_times_ns(t: &Mp4Track) -> Vec<u64> {
+    const MAX_SAMPLES: usize = 10_000_000;
+    let ts = u64::from(t.timescale.max(1));
+    let mut out = Vec::new();
+    let mut dts = 0u64;
+    for &(count, dur) in &t.stts {
+        for _ in 0..count {
+            if out.len() >= MAX_SAMPLES {
+                return out;
+            }
+            out.push(dts.saturating_mul(1_000_000_000) / ts);
+            dts = dts.saturating_add(u64::from(dur));
+        }
+    }
+    out
+}
+
 /// Where the fragment boundaries WILL fall, computed from keyframe times
 /// alone - the playlist an HLS client needs, without remuxing the file to
 /// find out.
@@ -72,31 +97,6 @@ const FRAG_MAX_BYTES: usize = 64 << 20;
 /// which a real file never reaches. A segment is therefore defined as
 /// every fragment from one planned start to the next, so a byte-capped
 /// split stays invisible to the client.
-/// Every sample's presentation time, in nanoseconds, from `stts`.
-///
-/// Bounded: `stts` is a run-length table read off the wire, and while
-/// the layout walk already clips the RUN COUNT to the box that holds it,
-/// the counts inside those runs are still the file's own numbers. A
-/// ceiling here keeps a hostile table from turning a playlist request
-/// into an unbounded loop. Ten million samples is over four days of
-/// 30 fps video, so nothing real is truncated.
-fn mp4_sample_times_ns(t: &Mp4Track) -> Vec<u64> {
-    const MAX_SAMPLES: usize = 10_000_000;
-    let ts = u64::from(t.timescale.max(1));
-    let mut out = Vec::new();
-    let mut dts = 0u64;
-    for &(count, dur) in &t.stts {
-        for _ in 0..count {
-            if out.len() >= MAX_SAMPLES {
-                return out;
-            }
-            out.push(dts.saturating_mul(1_000_000_000) / ts);
-            dts = dts.saturating_add(u64::from(dur));
-        }
-    }
-    out
-}
-
 pub fn plan_fragments(keyframes_ns: &[u64], end_ns: u64) -> Vec<(u64, u64)> {
     let mut out: Vec<(u64, u64)> = Vec::new();
     let Some(&first) = keyframes_ns.first() else {

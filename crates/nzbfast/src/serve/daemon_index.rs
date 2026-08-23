@@ -47,6 +47,15 @@ impl IndexBusy {
     }
 }
 
+/// The bound on `index_read_checked`'s pre-migration fallback to the
+/// write mutex (TODO 143). Whoever holds that mutex while
+/// `index_migrated` is still false is opening the database and running
+/// its migrations, so this only has to cover an open - it is not the
+/// budget for waiting out an ingest, which is precisely what this path
+/// refuses to do.
+#[cfg(feature = "indexer")]
+const PREMIGRATION_INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Daemon {
     // -- M34 index size cap ------------------------------------------------
 
@@ -61,11 +70,7 @@ impl Daemon {
     #[cfg(feature = "indexer")]
     pub fn touch_opened_title(&self, title_key: &str) {
         let now = epoch_secs() as i64;
-        let dirty = self
-            .index_opened
-            .lock()
-            .unwrap()
-            .touch_title(title_key, now);
+        let dirty = self.index_opened.lock_ok().touch_title(title_key, now);
         if dirty {
             self.save_opened();
         }
@@ -124,12 +129,13 @@ impl Daemon {
     /// year, and for every custom-category entry - one card query each to
     /// resolve the keys the index actually holds. It is called at most
     /// once per eviction pass.
-    #[cfg(feature = "indexer")]
+    ///
     /// `None` = the set could not be FULLY assembled (index unavailable
     /// or a resolver query failed). The caller must treat that as "do
     /// not evict", never as an empty set: a transient SQLITE_BUSY here
     /// used to shrink the protected set silently, and evict_to then
     /// deleted watchlisted releases irreversibly.
+    #[cfg(feature = "indexer")]
     pub fn protected_set(&self) -> Option<nzbkit::index::Protected> {
         // §151: a synced title is watched, so the size cap must not
         // evict what it is waiting for either.
@@ -538,8 +544,6 @@ impl Daemon {
         None
     }
 
-    /// Run `f` against the shared index, opening it lazily. Returns the
-    /// closure's value, or `None` if the index can't be opened (feature
     /// How long a finished job's tail will wait for the index write
     /// mutex before giving up on its telemetry and finishing anyway.
     ///
@@ -551,12 +555,13 @@ impl Daemon {
     pub(in crate::serve) const TAIL_INDEX_WAIT: std::time::Duration =
         std::time::Duration::from_secs(15);
 
-    /// [`Self::with_index`], but it gives up rather than waiting for
-    /// ever. `None` covers both "the index is switched off" and "it was
-    /// busy for the whole budget" - callers here have nothing to do
+    /// [`Self::with_index`] for a finished job's tail: it gives up
+    /// rather than waiting for ever, and the job's queue row says where
+    /// the time went. `None` covers both "the index is switched off" and
+    /// "it was busy for the whole budget" - callers have nothing to do
     /// differently, and the one that matters says so in the log itself.
     ///
-    /// This exists because of what an unbounded wait cost on 20 Aug
+    /// The bound exists because of what an unbounded wait cost on 20 Aug
     /// 2026. An index scan lane wedged mid-I/O against a provider that
     /// had stopped answering (the same host delivered 0.0 MB to the
     /// download running beside it), and it held this mutex while it sat
@@ -567,47 +572,184 @@ impl Daemon {
     /// with the row reading as a finishing job the whole time. The
     /// runner had been taught to give up and the tail had not.
     ///
+    /// The label exists because of TODO 200: two of Gary's jobs
+    /// downloaded in seconds and then sat 14 and 27 minutes behind this
+    /// mutex while a retention reap held it - and the row said
+    /// "unpacking" the whole time, because the last activity token
+    /// anyone had written was the pipeline's. A bounded wait under a
+    /// stale label still reads as a broken unpacker; so the token flips
+    /// to `indexwait` the first time the mutex is found held, and flips
+    /// back to whatever it was once the wait is over (the stage the
+    /// caller set, or the engine's own word). A wait that never blocks
+    /// never changes the row: the token only moves on contention, so an
+    /// idle index costs the reader nothing.
+    ///
     /// Polled rather than parked: `std::sync::Mutex` has no timed
     /// acquire, and the poll interval only has to be short against a
     /// budget measured in seconds.
     #[cfg(feature = "indexer")]
-    pub(in crate::serve) fn with_index_bounded<T>(
+    pub(in crate::serve) fn with_index_for_tail<T>(
         &self,
+        nzo_id: &str,
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Option<T> {
+        self.with_index_for_tail_within(nzo_id, Self::TAIL_INDEX_WAIT, f)
+    }
+
+    /// [`Self::with_index_for_tail`] with the budget as a parameter, so
+    /// a test can hold the mutex and watch the label without sitting
+    /// through the production wait.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn with_index_for_tail_within<T>(
+        &self,
+        nzo_id: &str,
         wait: std::time::Duration,
         f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
     ) -> Option<T> {
+        let flipped = std::cell::Cell::new(false);
+        let prior = self.hub.activity.lock_ok().get(nzo_id).copied();
+        let out = self.with_index_bounded_on(
+            wait,
+            || {
+                flipped.set(true);
+                self.note_tail_stage(nzo_id, "indexwait");
+            },
+            f,
+        );
+        if flipped.get() {
+            let mut act = self.hub.activity.lock_ok();
+            // Only undo our own write: the job may have parked meanwhile,
+            // and a cleared entry must stay cleared.
+            if act.get(nzo_id).copied() == Some("indexwait") {
+                match prior {
+                    Some(tok) => {
+                        act.insert(nzo_id.to_string(), tok);
+                    }
+                    None => {
+                        act.remove(nzo_id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The loop behind the bounded wait, with the timeout folded into
+    /// `None` - for the callers that have nothing to do differently
+    /// when the budget runs out. `on_block` runs once, the first time
+    /// the mutex is found held - never when the first `try_lock`
+    /// succeeds.
+    #[cfg(feature = "indexer")]
+    fn with_index_bounded_on<T>(
+        &self,
+        wait: std::time::Duration,
+        on_block: impl FnOnce(),
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Option<T> {
+        self.with_index_bounded_checked(wait, on_block, f)
+            .unwrap_or(None)
+    }
+
+    /// The loop itself, with the timeout REPORTED. `Err(Saturated)` is
+    /// "the budget elapsed with somebody else holding the write mutex"
+    /// and nothing else: an index that is switched off is `Ok(None)`,
+    /// exactly as it is on every other door, and a closure that ran and
+    /// found nothing is `Ok(None)` too.
+    ///
+    /// Poison is never fatal here (nzbkit::sync's whole point) and a
+    /// poisoned mutex is not busy - it is taken, run under, and
+    /// answered from, the same as a clean one.
+    #[cfg(feature = "indexer")]
+    fn with_index_bounded_checked<T>(
+        &self,
+        wait: std::time::Duration,
+        on_block: impl FnOnce(),
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Result<Option<T>, IndexBusy> {
         if !self.index_db_wanted() {
-            return None;
+            return Ok(None);
         }
         crate::persist::blocking_db(|| {
             let deadline = Instant::now() + wait;
+            let mut on_block = Some(on_block);
             loop {
-                // Poison is never fatal here (nzbkit::sync's whole
-                // point), and `try_lock` reports it as an error like
-                // any other - so it has to be unpacked rather than
-                // retried. Left as "busy", one panic under this mutex
-                // would make every tail silently drop its samples for
-                // the life of the process.
+                // `try_lock` reports poison as an error like any other,
+                // so it has to be unpacked rather than retried. Left as
+                // "busy", one panic under this mutex would make every
+                // caller of this door fail for the life of the process.
                 match self.index.try_lock() {
                     Ok(mut guard) => {
                         self.open_locked(&mut guard);
-                        return guard.as_mut().and_then(f);
+                        return Ok(guard.as_mut().and_then(f));
                     }
                     Err(std::sync::TryLockError::Poisoned(e)) => {
                         let mut guard = e.into_inner();
                         self.open_locked(&mut guard);
-                        return guard.as_mut().and_then(f);
+                        return Ok(guard.as_mut().and_then(f));
                     }
-                    Err(std::sync::TryLockError::WouldBlock) => {}
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if let Some(cb) = on_block.take() {
+                            cb();
+                        }
+                    }
                 }
                 if Instant::now() >= deadline {
-                    return None;
+                    return Err(IndexBusy::Saturated);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         })
     }
 
+    /// How long a user's index WRITE waits for the write mutex before
+    /// it answers "busy, try again". TODO 166.
+    ///
+    /// The wait is the whole point: every caller is a button somebody
+    /// pressed, and `try_with_index_mut` would turn "succeeded after a
+    /// wait" into "failed" whenever a scan batch happened to hold the
+    /// mutex. Long enough that an ordinary ingest batch - and the 10 s
+    /// SQLite busy_timeout inside it - is usually just waited out;
+    /// short enough that the HTTP worker is back in the pool long
+    /// before a tip ingest's whole transaction (~80 s, measured on the
+    /// live daemon 14 Aug 2026) is done with it. Four workers queued
+    /// behind a 62 s hold is how one dashboard tab wedged the daemon on
+    /// 28 Jul; five seconds each cannot build that queue.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) const HTTP_INDEX_WAIT: std::time::Duration =
+        std::time::Duration::from_secs(5);
+
+    /// Bounded-wait WRITE access, with the timeout reported: the
+    /// write-side sibling of [`Self::index_read_checked`], and the
+    /// remedy TODO 166 asked for.
+    ///
+    /// Three answers, and the caller owes the user a different one for
+    /// each. `Ok(Some(_))` is the write; `Ok(None)` is the index
+    /// switched off or the write itself failing, which every one of
+    /// these handlers already reports as "index unavailable"; and
+    /// `Err(IndexBusy)` is the mutex still held when the budget ran out
+    /// - the edit did NOT happen and the honest reply is
+    /// [`IndexBusy::message`], so the UI can offer the click again.
+    ///
+    /// What it must never become is a `try_`: the user's edit is not a
+    /// sample to be dropped, and losing it silently is worse than a
+    /// wait. What it must never stay is `with_index_mut`: an unbounded
+    /// park on this mutex is the 28 Jul wedge, whichever handler does
+    /// it.
+    ///
+    /// `&mut Index` because the two doors it replaces disagreed -
+    /// `api/wall.rs` wrote through `with_index`'s `&Index` and
+    /// `api/index.rs` through `with_index_mut` - and the mutable form
+    /// accepts both.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn index_write_checked<T>(
+        &self,
+        f: impl FnOnce(&mut nzbkit::index::Index) -> Option<T>,
+    ) -> Result<Option<T>, IndexBusy> {
+        self.with_index_bounded_checked(Self::HTTP_INDEX_WAIT, || {}, f)
+    }
+
+    /// Run `f` against the shared index, opening it lazily. Returns the
+    /// closure's value, or `None` if the index can't be opened (feature
     /// effectively off) - callers treat that as "no results".
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn with_index<T>(
@@ -789,15 +931,16 @@ impl Daemon {
     /// [`Self::index_read_checked`] where the difference is worth showing
     /// the user.
     ///
-    /// Falls back to `with_index` until a read-write open has run the
-    /// migrations - a startup-shaped moment where nothing holds a long
-    /// lock. When the read-only open itself FAILS after migration (the
-    /// file was just wiped, fd exhaustion), the fallback is
-    /// `try_with_index`: post-wipe is not startup-shaped - a chunked
-    /// compaction or ANALYZE can be holding the write mutex for real
-    /// time, and parking every query worker on it is the 2 Aug wedge.
-    /// Saturation deliberately does not fall back at all: that mutex is
-    /// exactly what this path exists to stay off.
+    /// Falls back to the write mutex until a read-write open has run
+    /// the migrations - a startup-shaped moment where nothing holds a
+    /// long lock - but on a BOUNDED wait, never `with_index`'s
+    /// unbounded one (TODO 143). When the read-only open itself FAILS
+    /// after migration (the file was just wiped, fd exhaustion), the
+    /// fallback is `try_with_index`: post-wipe is not startup-shaped -
+    /// a chunked compaction or ANALYZE can be holding the write mutex
+    /// for real time, and parking every query worker on it is the
+    /// 2 Aug wedge. Saturation deliberately does not fall back at all:
+    /// that mutex is exactly what this path exists to stay off.
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn with_index_read<T>(
         &self,
@@ -836,7 +979,17 @@ impl Daemon {
             return Ok(None);
         }
         if !self.index_migrated.load(Ordering::Acquire) {
-            return Ok(self.with_index(f));
+            // TODO 143's second half. This branch is only reachable
+            // before the first read-write open, where "nothing holds a
+            // long lock" is fair - but it was an UNBOUNDED park on the
+            // write mutex, which is the same shape that made the read
+            // pool dead code for two weeks and reopened the 28 Jul and
+            // 2 Aug wedges. Whoever holds the mutex here is doing that
+            // open, so the budget only has to cover an open and its
+            // migrations; past it, a query says "busy" like any other,
+            // which is the answer this whole path exists to give
+            // instead of queueing a worker.
+            return self.with_index_bounded_checked(PREMIGRATION_INDEX_WAIT, || {}, |ix| f(ix));
         }
         if debug_read_budget_spent() {
             return Err(IndexBusy::Saturated);
@@ -991,7 +1144,11 @@ impl Daemon {
             return Some((0, 0, 0, 0));
         }
         let era = self.index_era();
-        {
+        // Sweep 8, L8: the cache generation this flight is answering
+        // for. An explicit refresh bumps it, so a flight that started
+        // before one may not stamp itself fresh over what the refresher
+        // committed.
+        let started_gen = {
             let mut c = self.index_stats_cache.lock_ok();
             if c.era == era
                 && let Some(snap) = c.snap
@@ -1007,7 +1164,8 @@ impl Daemon {
                 return if c.era == era { c.snap } else { None };
             }
             c.refreshing = true;
-        }
+            c.generation
+        };
         let computed = self.index_stats_compute();
         let mut c = self.index_stats_cache.lock_ok();
         c.refreshing = false;
@@ -1016,6 +1174,15 @@ impl Daemon {
             // describe a database that no longer exists. Answer cold
             // and let the next poll recompute under the new era.
             return None;
+        }
+        if c.generation != started_gen {
+            // An explicit refresh landed while this flight was reading.
+            // The figures in hand predate whatever it committed, so
+            // publishing them as fresh is exactly the bug: leave the
+            // cache EXPIRED and answer with what we computed, and the
+            // next caller (or the refresher's own retry) recomputes.
+            c.at = None;
+            return computed.filter(|_| self.index_era() == era);
         }
         match computed {
             Some(snap) => {
@@ -1079,8 +1246,30 @@ impl Daemon {
     /// TTL.
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn refresh_index_stats(&self) {
-        self.index_stats_cache.lock_ok().at = None;
+        {
+            // Sweep 8, L8: expiring `at` is not enough. A flight that
+            // began before this call is reading a database that does
+            // not yet hold what we just committed, and the singleflight
+            // below would hand its pre-commit snapshot straight back -
+            // stamped fresh for the whole TTL, over the one call whose
+            // entire job is to make the cache reflect this write. The
+            // bump makes that flight leave the cache expired instead.
+            self.expire_index_stats();
+        }
         let _ = self.index_stats_snapshot();
+    }
+
+    /// Expire the stats cache AND fence out any flight already in the
+    /// air. Clearing `at` alone is not an invalidation: an in-flight
+    /// `index_stats_snapshot` stamps its pre-event figures fresh unless
+    /// `generation` moved under it, so every site that expires the
+    /// cache after a write (evict, shrink, the scan parking on a
+    /// download) must bump it too (bug sweep 22 Aug 2026, F-18).
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn expire_index_stats(&self) {
+        let mut c = self.index_stats_cache.lock_ok();
+        c.at = None;
+        c.generation = c.generation.wrapping_add(1);
     }
 
     /// Mutable variant for the odd transaction-shaped call (IMDb

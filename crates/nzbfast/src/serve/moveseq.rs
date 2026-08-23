@@ -895,6 +895,79 @@ mod harness {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A compaction must not flatten `move_seq`, or the next torn park
+    /// resolves the wrong way and re-downloads a finished release.
+    ///
+    /// `history_compact` re-serializes every in-memory record from
+    /// scratch, and "Save queue" runs one on a live daemon, so it is the
+    /// one durable write in this story whose counter nothing above
+    /// asserts: every cut test reads a row that `park_gen` or `retry`
+    /// wrote directly. The field survives today only because there is a
+    /// single serializer (`job_wire::job_json`) and compaction goes
+    /// through it - a property, not a decision anybody wrote down.
+    ///
+    /// Trimming the record here is the obvious future edit, history.jsonl
+    /// being the file that grows without bound. It would leave a parked
+    /// row reading 0 beside the stale queue row at seq N that a torn park
+    /// left behind, and `move_winner` reads that as the QUEUE being the
+    /// newer intent - which is the F1 duplicate-and-rerun cut coming back
+    /// through the back door, on a store that had merely been compacted.
+    ///
+    /// MEASURED, not assumed (23 Aug 2026): with `history_compact` forced
+    /// to write `move_seq: 0`, this test fails on its own message and
+    /// `a_newer_terminal_queue_snapshot_beats_stale_history` fails too -
+    /// so the shape was not a blind spot, but the only test that caught
+    /// it caught it INCIDENTALLY, through the compaction `load_queue`
+    /// runs to make a resolution durable, and reported it as a seq 2 that
+    /// read 0 with no mention of compaction. The other ten stay green, so
+    /// what this one adds is naming the cause rather than finding the
+    /// defect.
+    ///
+    /// Asserted twice over: the field off disk, and then the RESOLUTION
+    /// it exists to decide, so the pin survives a rename of the field.
+    #[test]
+    fn a_compaction_preserves_the_move_counter() {
+        let dir = tmp("compact-seq");
+        let d = test_daemon(&dir);
+        let j = job(&d, "nzo_k1", JobState::Finishing);
+        d.queue.lock_ok().push_back(j.clone());
+        assert!(d.save_queue());
+        j.lock_ok().state = JobState::Completed;
+        // A whole park, uncut: both durable writes land.
+        d.park_gen(j, None);
+        assert_eq!(
+            on_disk(&dir, "nzo_k1").1,
+            Some((JobState::Completed, 1)),
+            "precondition: the park stamped its move"
+        );
+
+        // "Save queue" on a live daemon: the whole store rewritten from
+        // the in-memory records.
+        assert!(d.history_compact());
+        assert_eq!(
+            on_disk(&dir, "nzo_k1").1,
+            Some((JobState::Completed, 1)),
+            "the compaction flattened the move counter"
+        );
+
+        // ...and the consequence, stated as a resolution rather than as a
+        // field: the stale seq-0 queue row a torn park leaves behind must
+        // still lose to the compacted history row.
+        let stale = job_from_json(&json!({
+            "nzo_id": "nzo_k1", "name": "Release.nzo_k1", "out_dir": "/tmp/o",
+            "nzb_path": "/tmp/n.nzb", "state": "Queued", "move_seq": 0,
+        }))
+        .expect("job");
+        let (_, _, split) = reconcile_moves(vec![stale], d.history_replay().0);
+        assert_eq!(
+            split.parked,
+            ["nzo_k1"],
+            "a compacted park lost to the stale queue row it tore from - \
+             the release would be downloaded a second time"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Q3 (Codex sweep 13 Aug): a TERMINAL queue snapshot carrying a
     /// higher `move_seq` than the stored history row is the newer
     /// outcome and must win - it used to be discarded on id alone,

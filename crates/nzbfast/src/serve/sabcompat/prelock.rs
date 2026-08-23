@@ -27,6 +27,8 @@ pub(super) struct PreLock {
     pub(super) hold_quota_spent: Option<f64>,
     pub(super) sc: Option<(String, u64)>,
     pub(super) activity_map: std::collections::HashMap<String, &'static str>,
+    pub(super) unpack_map:
+        std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>,
     pub(super) active_id: Option<String>,
     pub(super) stall: Option<(String, Instant)>,
     pub(super) pool_view: Vec<(String, usize, u64)>,
@@ -42,8 +44,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     let live_shape = d
         .hub
         .extractor
-        .lock()
-        .unwrap()
+        .lock_ok()
         .as_ref()
         .and_then(|(owner, ex)| ex.archive_shape().map(|sh| (owner.clone(), sh.tag())));
     // The live "this download wants a password" owner tag (raised by the
@@ -92,8 +93,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     // Prefetch sidecar state, matched by nzo_id per slot below.
     let sc = d
         .sidecar
-        .lock()
-        .unwrap()
+        .lock_ok()
         .as_ref()
         .map(|s| (s.nzo_id.clone(), s.progress.load(Ordering::Relaxed)));
     // Queue-row activity: the pipeline's own token per job, the hub
@@ -111,13 +111,18 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     // good. Nothing here needs the queue's instant anyway: every value
     // is re-matched to its owning slot by nzo_id during the walk.
     let activity_map = d.hub.activity.lock_ok().clone();
+    // TODO 205: and the disk-unpack ladder's live counters beside it,
+    // under the same before-the-queue-lock rule as everything here.
+    // Handles, not a snapshot - the counters advance in place, so the
+    // row reads them at render time and this stays one cheap clone of a
+    // map that holds at most one entry per unpacking job.
+    let unpack_map = d.hub.unpack.lock_ok().clone();
     let active_id = d.active_stream.lock_ok().clone();
     let stall = d.stall_since.lock_ok().clone();
     let pool_view: Vec<(String, usize, u64)> = d
         .hub
         .pool_live
-        .lock()
-        .unwrap()
+        .lock_ok()
         .as_ref()
         .map(|l| {
             l.servers
@@ -146,6 +151,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         hold_quota_spent,
         sc,
         activity_map,
+        unpack_map,
         active_id,
         stall,
         pool_view,

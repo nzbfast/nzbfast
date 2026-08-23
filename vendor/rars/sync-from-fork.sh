@@ -45,7 +45,7 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LAST_SYNC_REV="$(sed -n 's/^last-synced-rev: //p' "$HERE/VENDOR-REV" 2>/dev/null)"
 if [ "$1" != "--force" ]; then
-  DRIFT="$(cd "$HERE" && git log --oneline --since="2026-07-24" -- . | wc -l | tr -d ' ')"
+  DRIFT="$(cd "$HERE" && git log --oneline --since="2026-08-23T05:13:00-04:00" -- src tests/fixtures COPYING | wc -l | tr -d ' ')"
   if [ "${DRIFT:-0}" -gt 0 ]; then
     echo "REFUSING to sync: vendor/rars has $DRIFT local commits since the last"
     echo "recorded sync ($LAST_SYNC_REV, see VENDOR-REV). Push them to the fork"

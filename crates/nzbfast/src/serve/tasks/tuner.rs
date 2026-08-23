@@ -13,6 +13,118 @@
 
 use super::*;
 
+struct HostState {
+    tuner: nzbkit::livetune::ServerTuner,
+    shape: nzbkit::shaping::ShapeDetector,
+    /// Rolling clean-epoch samples for the CURRENT bucket.
+    per_conn: Vec<f64>,
+    rates: Vec<f64>,
+    /// Clean epochs observed since the last write-back.
+    clean_epochs: u64,
+    /// The kept target the store last saw, so unchanged
+    /// targets cost no writes.
+    persisted_target: usize,
+    last_save: Option<std::time::Instant>,
+}
+fn median(xs: &[f64]) -> f64 {
+    let mut v = xs.to_vec();
+    v.sort_by(|a, b| a.total_cmp(b));
+    if v.is_empty() { 0.0 } else { v[v.len() / 2] }
+}
+
+/// Hand the fleet back to the typed number in the same epoch the live-tune
+/// toggle flips off, and leave the cold state a re-enable wants - the seed
+/// store is exactly what makes that cheap.
+///
+/// Hand the fleet back to the typed number in the same
+/// epoch the toggle flips. The handles the pool build
+/// attached keep whatever the walk last wrote, and a
+/// running job reads them live, so without this a fleet
+/// walked down to 6 stays at 6 for the rest of the job
+/// with nothing tuning it and the setting saying 24.
+///
+/// Split out of `spawn_live_tuner` (TODO 106), body verbatim.
+fn stand_down(
+    d: &Arc<Daemon>,
+    config: &std::path::Path,
+    announced: &mut bool,
+    hosts: &mut std::collections::HashMap<String, HostState>,
+) {
+    if *announced {
+        info!("live-tune: epoch controller off");
+        *announced = false;
+    }
+    // Hand the fleet back to the typed number in the same
+    // epoch the toggle flips. The handles the pool build
+    // attached keep whatever the walk last wrote, and a
+    // running job reads them live, so without this a fleet
+    // walked down to 6 stays at 6 for the rest of the job
+    // with nothing tuning it and the setting saying 24.
+    if !hosts.is_empty() {
+        let global = d.connections.load(Ordering::Relaxed).max(1);
+        if let Ok(cfg) = nzbkit::config::Config::load(config) {
+            let targets = d.hub.live_targets.lock_ok();
+            for s in &cfg.servers {
+                if let Some(t) = targets.get(&s.host) {
+                    t.set(crate::conntune::effective_limit(global, s.connections));
+                }
+            }
+        }
+    }
+    // Cold state on re-enable: the seed store is exactly
+    // what makes that cheap.
+    hosts.clear();
+}
+
+/// A bucket boundary mid-download must NOT jump the fleet
+/// (design §5.1): the walk already tracks the live knee,
+/// which outranks any stored seed as evidence, so crossing
+/// only flushes the old bucket's samples and re-aims the
+/// write-back. The new bucket's stored target is adopted
+/// where it belongs - as the seed of the next cold start.
+///
+/// The caller adopts the new bucket after this returns. Split out of
+/// `spawn_live_tuner` (TODO 106), body verbatim.
+fn flush_bucket(
+    d: &Arc<Daemon>,
+    config: &std::path::Path,
+    hosts: &mut std::collections::HashMap<String, HostState>,
+    cur_bucket: u8,
+    now_s: u64,
+) {
+    let global = d.connections.load(Ordering::Relaxed).max(1);
+    let cfg_servers = nzbkit::config::Config::load(config)
+        .map(|c| c.servers)
+        .unwrap_or_default();
+    for (host, st) in hosts.iter_mut() {
+        if st.clean_epochs > 0 {
+            let limit = cfg_servers
+                .iter()
+                .find(|s| s.host == *host)
+                .map(|s| crate::conntune::effective_limit(global, s.connections))
+                .unwrap_or_else(|| st.tuner.ceiling());
+            crate::conntune::update_bucket(
+                config,
+                host,
+                cur_bucket,
+                crate::conntune::BucketUpdate {
+                    target: st.tuner.target(),
+                    per_conn_bps: median(&st.per_conn),
+                    rate_bps: median(&st.rates),
+                    epochs_add: st.clean_epochs,
+                    limit,
+                    now: now_s,
+                },
+            );
+        }
+        st.per_conn.clear();
+        st.rates.clear();
+        st.clean_epochs = 0;
+        st.persisted_target = st.tuner.target();
+        st.last_save = Some(std::time::Instant::now());
+    }
+}
+
 /// TODO 112: the live connection tuner's epoch loop - one `EpochObs`
 /// per server per epoch off the live gauges, fed to the pure
 /// controller in `nzbkit::livetune`, whose verdict moves the per-host
@@ -73,24 +185,6 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
         const BUCKET_REFRESH_SECS: u64 = 3600;
         /// Rolling clean-epoch samples kept per host for the medians.
         const SAMPLE_WINDOW: usize = 30;
-        struct HostState {
-            tuner: nzbkit::livetune::ServerTuner,
-            shape: nzbkit::shaping::ShapeDetector,
-            /// Rolling clean-epoch samples for the CURRENT bucket.
-            per_conn: Vec<f64>,
-            rates: Vec<f64>,
-            /// Clean epochs observed since the last write-back.
-            clean_epochs: u64,
-            /// The kept target the store last saw, so unchanged
-            /// targets cost no writes.
-            persisted_target: usize,
-            last_save: Option<std::time::Instant>,
-        }
-        fn median(xs: &[f64]) -> f64 {
-            let mut v = xs.to_vec();
-            v.sort_by(|a, b| a.total_cmp(b));
-            if v.is_empty() { 0.0 } else { v[v.len() / 2] }
-        }
         let mut announced = false;
         // The shared probe metronome (livetune::EpochObs::cycle_gate):
         // every server may START a cycle only on the same epochs, so
@@ -113,30 +207,7 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
         loop {
             tokio::time::sleep(epoch).await;
             if !(d.live_tune.load(Ordering::Relaxed) || crate::conntune::live_tune_on()) {
-                if announced {
-                    info!("live-tune: epoch controller off");
-                    announced = false;
-                }
-                // Hand the fleet back to the typed number in the same
-                // epoch the toggle flips. The handles the pool build
-                // attached keep whatever the walk last wrote, and a
-                // running job reads them live, so without this a fleet
-                // walked down to 6 stays at 6 for the rest of the job
-                // with nothing tuning it and the setting saying 24.
-                if !hosts.is_empty() {
-                    let global = d.connections.load(Ordering::Relaxed).max(1);
-                    if let Ok(cfg) = nzbkit::config::Config::load(&config) {
-                        let targets = d.hub.live_targets.lock_ok();
-                        for s in &cfg.servers {
-                            if let Some(t) = targets.get(&s.host) {
-                                t.set(crate::conntune::effective_limit(global, s.connections));
-                            }
-                        }
-                    }
-                }
-                // Cold state on re-enable: the seed store is exactly
-                // what makes that cheap.
-                hosts.clear();
+                stand_down(&d, &config, &mut announced, &mut hosts);
                 prev = None;
                 continue;
             }
@@ -149,45 +220,9 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 .map(|t| t.as_millis() as u64)
                 .unwrap_or(0);
             let now_s = now_ms / 1000;
-            // A bucket boundary mid-download must NOT jump the fleet
-            // (design §5.1): the walk already tracks the live knee,
-            // which outranks any stored seed as evidence, so crossing
-            // only flushes the old bucket's samples and re-aims the
-            // write-back. The new bucket's stored target is adopted
-            // where it belongs - as the seed of the next cold start.
             let b_now = crate::conntune::bucket_of(crate::conntune::local_hour());
             if b_now != cur_bucket {
-                let global = d.connections.load(Ordering::Relaxed).max(1);
-                let cfg_servers = nzbkit::config::Config::load(&config)
-                    .map(|c| c.servers)
-                    .unwrap_or_default();
-                for (host, st) in hosts.iter_mut() {
-                    if st.clean_epochs > 0 {
-                        let limit = cfg_servers
-                            .iter()
-                            .find(|s| s.host == *host)
-                            .map(|s| crate::conntune::effective_limit(global, s.connections))
-                            .unwrap_or_else(|| st.tuner.ceiling());
-                        crate::conntune::update_bucket(
-                            &config,
-                            host,
-                            cur_bucket,
-                            crate::conntune::BucketUpdate {
-                                target: st.tuner.target(),
-                                per_conn_bps: median(&st.per_conn),
-                                rate_bps: median(&st.rates),
-                                epochs_add: st.clean_epochs,
-                                limit,
-                                now: now_s,
-                            },
-                        );
-                    }
-                    st.per_conn.clear();
-                    st.rates.clear();
-                    st.clean_epochs = 0;
-                    st.persisted_target = st.tuner.target();
-                    st.last_save = Some(std::time::Instant::now());
-                }
+                flush_bucket(&d, &config, &mut hosts, cur_bucket, now_s);
                 cur_bucket = b_now;
             }
             let live = d.hub.pool_live.lock_ok().clone();
@@ -241,6 +276,15 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
             // permitted one is walked back by the next down cycles.
             let (anchor, _) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
             let line_saturated = anchor > 0 && total_rate >= anchor as f64 * 0.85;
+            // TODO 208 item 1: the walker walks WITHIN the fleet cap,
+            // never owns it - it is per-server and sheds one socket per
+            // ~7 epochs by design, and the cap is a fleet quantity.
+            // Clamped on `desired` below rather than folded into the
+            // controller's ceiling, so a cap that moves between jobs
+            // does not read as a settings change. The cap is a constant
+            // now, so the `anchor` beside it no longer sizes it - that
+            // reading is only the saturation test above.
+            let line_share = crate::conntune::line_cap_share(live.servers.len());
             if line_saturated != announced_saturated {
                 info!(
                     "live-tune: link {} (fleet {:.0} Mbps vs anchor {:.0} Mbps)",
@@ -403,6 +447,9 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 let before = st.tuner.target();
                 st.tuner.on_epoch(obs);
                 let mut desired = st.tuner.desired().min(ceiling);
+                if let Some(share) = line_share {
+                    desired = desired.min(share);
+                }
                 if block {
                     desired = desired.min(st.tuner.target());
                 }
@@ -572,6 +619,22 @@ pub(in crate::serve) fn update_tune_hint(
     tuned: &std::collections::HashMap<String, crate::conntune::Tuned>,
 ) {
     let expected_bps = d.line_speed.load(Ordering::Relaxed);
+    // §210: the local link comes first, because it is the yardstick.
+    // A Wi-Fi link or a port negotiated under the line caps what ANY
+    // provider can show, so the provider verdict below is scored
+    // against the lower of the two - otherwise a 710 Mbit line over a
+    // 1200 Mbps Wi-Fi link reads "providers are short" forever, and
+    // the lever it names (a faster provider) cannot help.
+    let link = d.local_link.lock_ok().clone();
+    let link_verdict = link
+        .as_ref()
+        .map(|l| l.verdict(expected_bps))
+        .unwrap_or_default();
+    let yardstick = link
+        .as_ref()
+        .and_then(|l| l.ceiling_bps())
+        .filter(|c| *c < expected_bps)
+        .unwrap_or(expected_bps);
     let mut hint = String::new();
     let enabled: Vec<_> = servers.iter().filter(|s| s.enabled).collect();
     // Only the servers the prober will ever measure. It skips metered
@@ -597,7 +660,7 @@ pub(in crate::serve) fn update_tune_hint(
     let is_measured = |h: &str| tuned.get(h).is_some_and(|t| t.connections > 0);
     if expected_bps > 0 && !measured.is_empty() && measured.iter().all(|s| is_measured(&s.host)) {
         let cap_bytes: f64 = measured.iter().map(|s| tuned[&s.host].gbps).sum::<f64>() * 1e9 / 8.0;
-        let pct = (100.0 * cap_bytes / expected_bps as f64).round() as u64;
+        let pct = (100.0 * cap_bytes / yardstick as f64).round() as u64;
         if cap_bytes > expected_bps as f64 * 1.1 {
             // The ladder deliberately measures PAST the line speed, so a
             // reading well above it is not an error - it means the number
@@ -611,9 +674,9 @@ pub(in crate::serve) fn update_tune_hint(
                 cap_bytes * 8.0 / 1e6,
                 expected_bps as f64 * 8.0 / 1e6
             );
-        } else if cap_bytes < expected_bps as f64 * 0.8 {
+        } else if cap_bytes < yardstick as f64 * 0.8 {
             let meas = cap_bytes * 8.0 / 1e6;
-            let want = expected_bps as f64 * 8.0 / 1e6;
+            let want = yardstick as f64 * 8.0 / 1e6;
             let mut tips: Vec<String> = Vec::new();
             for s in &measured {
                 let t = &tuned[&s.host];
@@ -648,13 +711,25 @@ pub(in crate::serve) fn update_tune_hint(
             } else if tips.is_empty() {
                 tips.push("a faster provider (or one more) is the likely lever".into());
             }
+            // Name what the figure was scored against: the line the
+            // user typed, or the local link when that is lower.
+            let what = if yardstick < expected_bps {
+                "this machine's link can carry"
+            } else {
+                "line"
+            };
             hint = format!(
                 "providers measured ~{meas:.0} Mbps together, {pct}% of the \
-                 ~{want:.0} Mbps line - well short. {}",
+                 ~{want:.0} Mbps {what} - well short. {}",
                 tips.join("; ")
             );
         }
     }
+    let hint = match (link_verdict.is_empty(), hint.is_empty()) {
+        (true, _) => hint,
+        (false, true) => link_verdict,
+        (false, false) => format!("{link_verdict}. Also: {hint}"),
+    };
     let mut cur = d.tune_hint.lock_ok();
     if *cur != hint {
         if hint.is_empty() {

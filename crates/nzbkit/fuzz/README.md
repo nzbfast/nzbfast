@@ -53,7 +53,16 @@ The corpus is gitignored. Seed it from the in-tree fixtures so the fuzzer
 starts from valid inputs and reaches the decode paths fast:
 
     mkdir -p corpus/rar_extract corpus/par2_parse corpus/rar_recovery_scan
-    cp ../../../vendor/rars/tests/fixtures/rar*/*.rar corpus/rar_extract/
+    # EVERY .rar in the fixture tree, at any depth, under a
+    # path-qualified name. Both halves of that matter and the recipe
+    # here got both wrong until 23 Aug 2026: a `rar*/*.rar` glob is ONE
+    # level deep and reaches 54 of the tree's 141 archives, and a flat
+    # corpus dir silently loses the three basenames that exist in more
+    # than one fixture subdir. rar_extract INITED: 2,685 -> 5,722 edges.
+    find ../../../vendor/rars/tests/fixtures -name '*.rar' -type f \
+    | while read -r f; do
+        cp "$f" "corpus/rar_extract/$(printf '%s' "${f##*fixtures/}" | tr / _)"
+      done
     cp ../tests/fixtures/par2/*.par2                  corpus/par2_parse/
     # mediaprobe's fixtures are generated, not committed - the test
     # suite writes them out on request:
@@ -67,10 +76,12 @@ starts from valid inputs and reaches the decode paths fast:
     # is.
     NZBFAST_WRITE_FUZZ_SEEDS=$PWD/corpus/remux \
       cargo test -p nzbkit --test mediaprobe write_fuzz_seeds
-    # rar_recovery_scan needs CRC-valid headers to get past its first gate,
-    # so seed it with real .rev volumes and RR-bearing archives.
-    cp ../../../vendor/rars/tests/fixtures/rar*/**/*.rev \
-       ../../../vendor/rars/tests/fixtures/rar*/*.rev    corpus/rar_recovery_scan/ 2>/dev/null
+    # rar_recovery_scan's corpus is COMMITTED (seeds/rar_recovery_scan/,
+    # 242 files / 240 KB) rather than recreated by a cp, because every
+    # entry point it has is behind a checksum or a signature and the
+    # recipe that used to sit here was both skippable and wrong - see
+    # seeds/README.md.
+    cp seeds/rar_recovery_scan/* corpus/rar_recovery_scan/
 
 ## Status
 
@@ -97,3 +108,28 @@ flat at 112 MB throughout, which is the property the target exists to
 pin. Coverage was only 95 edges cold: the chunk parser is behind a CRC64
 gate the fuzzer will not guess, so this one genuinely needs its seed
 corpus to reach the plan arithmetic.
+
+23 Aug 2026 - `rar_recovery_scan` seeded for good (TODO 16k). The seed
+corpus is now COMMITTED at `seeds/rar_recovery_scan/`, 242 files / 240 KB,
+so a cold start is not a thing that happens here any more: **INITED 1,686
+edges** against **226** reached by a 60s cold run. First seeded campaign:
+**1,952,069 executions in 3,600s, cov 3,229, ZERO crashes, OOMs or
+timeouts**, peak RSS 354 MB (the 112 MB above was a 6-input corpus; the
+flatness, not the number, is the property - libFuzzer holds the corpus
+resident, and this one is 19 MB by the end).
+
+Two things the old recipe got wrong, both found by measuring it rather
+than reading it:
+
+- It copied SIX `.rev` fixtures and only TWO of them reach anything. The
+  RAR 2/3 `rev_oldstyle` / `rev_newstyle` volumes are headerless parity
+  blobs - no signature at all - so `read_rev5_meta`,
+  `scan_inline_recovery_chunks` and `ArchiveReader::read` each refuse
+  them on their first check. All six together are 296 edges at INITED,
+  of which the four inert ones contribute 14, all on the refusal path.
+- It copied no ARCHIVES, and the archives are where the coverage is: the
+  `{RB}`-bearing RAR5 volumes and the RAR 2/3 protect-record fixtures
+  take it from 296 to 1,434. `fuzz-smoke.yml` did copy `.rar` fixtures,
+  but through a one-level `rar*/*.rar` glob that cannot see
+  `rar15_40/rar300/`, which is where all three legacy RR fixtures live -
+  so CI reached the leg added in `507eef5ed` only by mutation.

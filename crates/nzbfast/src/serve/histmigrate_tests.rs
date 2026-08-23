@@ -333,22 +333,26 @@ fn a_pass_with_nothing_to_report_raises_no_notice() {
     );
 }
 
-/// A row whose label was RIGHT all along still gets its frame size
+/// A row whose labels were RIGHT all along still gets its raw inputs
 /// written, so it never needs the disk again - but it is not a
 /// correction, and the user must not be told it was one. Conflating the
 /// two would inflate the notice's count with rows nothing changed on.
+///
+/// The inputs are the whole set, not just the frame size: §188's second
+/// half gave the audio, codec and HDR labels the same treatment, and
+/// `same_labels` is what keeps each new one out of the count.
 #[test]
-fn gaining_the_frame_size_is_not_reported_as_a_correction() {
+fn gaining_the_raw_inputs_is_not_reported_as_a_correction() {
     let dir = tdir("gain");
     let d = super::super::testutil::test_daemon(&dir);
     let out = dir.join("payload");
     write_payload(&out);
     // Exactly what the probe will read back from `mkv_full` (its
     // strongest audio track is the 6-channel AC3, not the stereo AAC),
-    // but with no frame size: a CORRECT 1.1.3-era row.
+    // but with no raw inputs: a CORRECT 1.1.3-era row.
     let mut facts = stale_facts("1080p");
     facts.audio = Some("DD 5.1".into());
-    let job = hist_row(&d, "Movie.2019.1080p.x264-GRP", &out, facts);
+    let job = hist_row(&d, "Movie.2019.1080p.x264-GRP", &out, facts.clone());
 
     let notice = run_pass(&d);
 
@@ -358,11 +362,19 @@ fn gaining_the_frame_size_is_not_reported_as_a_correction() {
         Some("1080p"),
         "the label was already right"
     );
+    assert!(
+        m.same_labels(&facts),
+        "and every other label must read exactly as before: {m:?}"
+    );
     assert_eq!(
-        m.width,
-        Some(1920),
+        (m.width, m.height),
+        (Some(1920), Some(1080)),
         "and the row still gains its raw inputs"
     );
+    assert_eq!(m.vcodec_canon.as_deref(), Some("h264"));
+    assert_eq!(m.acodec_canon.as_deref(), Some("ac3"));
+    assert_eq!(m.channels, Some(6));
+    assert_eq!(m.channel_layout.as_deref(), Some("5.1"));
     assert_eq!(
         notice.corrected, 0,
         "but nothing the user can see changed, so it is not a correction"

@@ -10,18 +10,6 @@
 
 use super::*;
 
-/// The same guard, but for the window rather than the entry.
-///
-/// `park_gen` checked the generation once, at the top, and then dropped
-/// the job guard to run `remove_job_files` - a recursive delete of a
-/// whole release, unbounded on a hung NAS. A retry landing in THAT gap
-/// bumped the generation after the only test had already passed, so the
-/// rest of park_gen ran against a record it no longer owned: it removed
-/// the live retry's activity row and went on to file or requeue it.
-///
-/// The tombstone two lines below was already re-read live for exactly
-/// this reason. The generation was not. Driven through PARK_GEN_BARRIER
-/// because the window is zero-width without a slow filesystem.
 /// M4c: the same stale tail must not strip the RETRY's custody entries.
 ///
 /// `park_gen`'s generation re-read protects the terminal branches, and
@@ -93,6 +81,18 @@ fn a_stale_lane_tail_leaves_the_retrys_custody_entries_alone() {
     });
 }
 
+/// The same guard, but for the window rather than the entry.
+///
+/// `park_gen` checked the generation once, at the top, and then dropped
+/// the job guard to run `remove_job_files` - a recursive delete of a
+/// whole release, unbounded on a hung NAS. A retry landing in THAT gap
+/// bumped the generation after the only test had already passed, so the
+/// rest of park_gen ran against a record it no longer owned: it removed
+/// the live retry's activity row and went on to file or requeue it.
+///
+/// The tombstone two lines below was already re-read live for exactly
+/// this reason. The generation was not. Driven through PARK_GEN_BARRIER
+/// because the window is zero-width without a slow filesystem.
 #[test]
 fn a_lane_tail_declines_a_retry_that_lands_while_it_is_deleting_files() {
     with_daemon("park-generation-window", |d| {

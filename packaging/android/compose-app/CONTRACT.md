@@ -135,9 +135,22 @@ actually serve, decided by the same two pickers that serve it:
 | `pending` | no | downloading, not enough of the container yet - poll |
 | `not_started` | no | queued, paused or held |
 | `not_fetched` | no | library entry; playing it STARTS the download |
+| `moving` | no | finished; the payload is in flight to its final folder - wait, do not write it off |
 | `no_media` | no | finished, no playable file on disk any more |
 | `failed` | no | the job failed |
 | `unknown` | no | no such nzo_id |
+
+Contract ADDITION (2026-08-23, values may be added to `reason`):
+`moving`. The mover copies a finished payload to its final folder and
+rewrites the job's `out_dir` LAST, so for the whole duration of a move
+(unbounded, on a NAS) the record names the folder the bytes are
+leaving; a recategorize and a retry redrive relocate one the same way.
+That window used to read `no_media`, which tells a client the file is
+gone when it is whole and about to be readable again. `ready` stays
+false for it - `/stream/<id>` answers 503 + `Retry-After` in the same
+window - so a client that branches on `ready` is already right; one
+that branches on the token should say "moving, back shortly" and keep
+polling where it would have dropped the row.
 
 `seekable` is `ready && coverage.tail_ok`: the index at the end of the
 file has arrived, so scrubbing will work. `coverage` is null when

@@ -217,8 +217,10 @@ struct PlaybackCoverage: Codable {
 
 /// Per-file readiness for the file /stream/<id> would actually serve.
 /// `reason` is a closed token set - live, disk, pending, not_started,
-/// not_fetched, no_media, failed, unknown - so the UI branches on it,
-/// never on prose.
+/// not_fetched, moving, no_media, failed, unknown - so the UI branches
+/// on it, never on prose. `moving` is a wait (the payload is being
+/// relocated to its final folder), `no_media` is final; both carry
+/// ready=false, which is what the rows below branch on.
 struct PlaybackInfo: Codable {
     let ready: Bool?
     let reason: String?

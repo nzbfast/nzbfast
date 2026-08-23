@@ -67,46 +67,57 @@ use crate::rarcrypt;
 mod chase;
 mod config;
 mod crypto;
+mod deliver;
 mod frontier;
+mod gate;
 mod holds;
+mod holds_ledger;
+mod names;
+mod park;
+mod prevalence;
 mod reader;
+mod reasons;
+mod routing;
 mod settle;
 mod sevenz;
 mod shape;
+mod split;
+mod tar;
 #[cfg(test)]
 mod testutil;
 mod zip;
+mod zip_split;
 
+pub use chase::DroppedVolume;
 use chase::*;
 use config::*;
 pub use config::{
     nested_depth_cap, prefer_external_unrar, set_nested_depth_cap, set_prefer_external_unrar,
 };
+pub use crypto::CryptoJournalEvent;
 use crypto::*;
-pub use crypto::{CryptoJournalEvent, StreamCrypt, StreamOpen};
 use frontier::*;
 use holds::*;
+pub use holds_ledger::{HoldsLedger, install_process_ledger, process_ledger};
+pub use names::{is_final_file, is_final_name, release_stem, vol_sort_key};
+pub use park::{ParkHook, WireGauge};
+use reasons::*;
+pub use reasons::{
+    SEVENZ_DISK_FALLBACK_PREFIX, SFX_DISK_FALLBACK_PREFIX, TAR_DISK_FALLBACK_PREFIX,
+    ZIP_DISK_FALLBACK_PREFIX,
+};
+mod resume;
+pub use resume::ResumeOutput;
+use routing::Sniffed;
 use settle::*;
 use sevenz::*;
 use shape::*;
 pub use shape::{
-    ArchiveShape, NestedDisposition, NestedPrevalence, nested_prevalence, note_nested_level,
-    reset_nested_prevalence, shape_word,
+    ArchiveShape, DiskArchive, NestedDisposition, NestedPrevalence, nested_prevalence,
+    note_nested_level, reset_nested_prevalence, shape_word,
 };
-
-/// Reason prefix for a demote of a TOP-LEVEL 7z chase. The archive
-/// materializes into the output directory, which is precisely the disk
-/// post-pass's input, so the demote is owned - the caller must keep it
-/// out of the RAR unpack ladder (handing a directory holding one .7z to
-/// unrar fails a job that is fine). The underlying reason, "held-bytes
-/// cap: chase memory" included, stays readable inside the string.
-pub const SEVENZ_DISK_FALLBACK_PREFIX: &str = "7z materialized for the disk pass: ";
-
-/// [`SEVENZ_DISK_FALLBACK_PREFIX`]'s zip twin: a demoted top-level zip
-/// chase leaves a `.zip` the disk post-pass owns (its ladder step 5),
-/// and its reason text must stay out of the RAR unpack ladder for the
-/// same three-arms-all-wrong reason.
-pub const ZIP_DISK_FALLBACK_PREFIX: &str = "zip materialized for the disk pass: ";
+use split::*;
+pub use split::{RAR_SPLIT_MISALIGNED, rar_split_part_name};
 
 /// Article-promotion hook (nested 7z tail prefetch, offset-0 probe):
 /// `(output name, file size, byte spans, urgent)` of a file at THIS
@@ -119,32 +130,6 @@ pub const ZIP_DISK_FALLBACK_PREFIX: &str = "zip materialized for the disk pass: 
 /// many-volume set probes once per slot, and stream mode for the whole
 /// download would cost real throughput on long links.
 pub type PromoteHook = Arc<dyn Fn(&str, u64, &[(u64, u64)], bool) + Send + Sync>;
-
-/// Permission to publish decrypted plaintext over the named outputs.
-///
-/// The finish decrypt turns an encrypted store output from the ciphertext
-/// the crash-resume journal recorded into plaintext. Those two facts -
-/// "this file has been mutated" and "the journal still claims it is a
-/// faithful copy" - must never both be true on disk at once, so the
-/// extractor asks first and publishes nothing until the hook returns `Ok`
-/// (main.rs wires it to `journal::Journal::invalidate`, which is durable
-/// before it returns). Unwired (tests, the CLI re-extract pass), there is
-/// no journal to poison and the publish proceeds.
-pub type DecryptBarrier = Arc<dyn Fn(&[String]) -> io::Result<()> + Send + Sync>;
-
-/// The other half of the [`DecryptBarrier`] handshake: the plaintext for
-/// this output is verified AND renamed into place, and here are its
-/// crypt facts (`E`/`K`/`T` [`CryptoJournalEvent`]s, gathered from the
-/// ciphertext before the rename destroyed it). The daemon wires it to
-/// `Journal::record_decrypted`, which republishes the placements the
-/// barrier retired as `D` records - so a retry after a LATER failure in
-/// the same job re-encrypts the local plaintext instead of refetching
-/// the whole set (TODO 100). Optional and advisory: unwired, or skipped
-/// when the facts cannot be gathered (RAR4's 8-byte salt does not fit an
-/// `E` line, a check-less set cannot prove the password on resume), the
-/// retirement simply stands and the retry refetches - the pre-existing,
-/// always-correct behaviour.
-pub type DecryptPublish = Arc<dyn Fn(&str, &[CryptoJournalEvent]) + Send + Sync>;
 
 /// Slot demoted to a materialized volume: its reconstruction (header
 /// stash + inner-file read-back + held-span drain) has fully landed, so
@@ -166,131 +151,6 @@ pub type DecryptPublish = Arc<dyn Fn(&str, &[CryptoJournalEvent]) + Send + Sync>
 /// that does not exist, so the retry refetched the post it was holding.
 pub type MaterializedHook = Arc<dyn Fn(usize, &str, u64) + Send + Sync>;
 
-/// Strip release-file suffixes down to the shared stem:
-/// `x.part01.rar`/`x.r00`/`x.vol000+01.par2`/`x.par2`/`x.rar` → `x`,
-/// and split-container volumes `x.7z.001`/`x.zip.001` → `x.7z`/`x.zip`
-/// (the container extension stays: it is the shared base every part
-/// and its par2 sidecar reduce to, mirroring `sevenz_part_name`).
-///
-/// The split rule exists because without it a 100-part obfuscated 7z
-/// set indexes as 100 half-GB "releases" - found live 2 Aug 2026 via
-/// the Supergirl acceptance case (122 rows, 67 GB) - which hides the
-/// set's true size from everything that reasons about it.
-pub fn release_stem(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    let mut end = lower.len();
-    let cut = |s: &str, end: usize, f: &dyn Fn(&str) -> Option<usize>| -> usize {
-        f(&s[..end]).unwrap_or(end)
-    };
-    end = cut(&lower, end, &|s| s.strip_suffix(".par2").map(|r| r.len()));
-    end = cut(&lower, end, &|s| {
-        // par2cmdline "vol01+02", range-style "vol001-003", or the
-        // bare-ordinal "vol-01". One rule, shared with the deferral
-        // classifier in nzb::kind() - this cut and that classifier
-        // drifted apart once (both missing `.vol-NN`), which left the
-        // ordinal on the stem and shattered the release in the index.
-        crate::nzb::par2_vol_suffix(s)
-    });
-    end = cut(&lower, end, &|s| {
-        // Split-container volume: 3-4 digit tail (7-Zip names volumes
-        // `%s.%03d`, four digits past 999 - same bounds as
-        // `sevenz_part_name`) directly after a container extension.
-        // One and two digits stay: `Track.01` is somebody's music.
-        let p = s.rfind('.')?;
-        let tail = &s[p + 1..];
-        if tail.len() < 3 || tail.len() > 4 || !tail.bytes().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        let head = &s[..p];
-        (head.ends_with(".7z") || head.ends_with(".zip")).then_some(p)
-    });
-    end = cut(&lower, end, &|s| s.strip_suffix(".rar").map(|r| r.len()));
-    end = cut(&lower, end, &|s| {
-        let p = s.rfind(".part")?;
-        let tail = &s[p + 5..];
-        (!tail.is_empty() && tail.bytes().all(|c| c.is_ascii_digit())).then_some(p)
-    });
-    end = cut(&lower, end, &|s| {
-        let p = s.rfind('.')?;
-        let tail = &s[p + 1..];
-        // Old-style continuations roll past .r99 into .s00 … .z99 (and
-        // vol_sort_key already orders that whole range) - accepting only
-        // r/s here left .t00+ volumes with their extension in the stem,
-        // splitting 200+ volume sets across "releases" and starving the
-        // repair path's stem filter of everything past .s99.
-        (tail.len() >= 2
-            && (b'r'..=b'z').contains(&tail.as_bytes()[0])
-            && tail[1..].bytes().all(|c| c.is_ascii_digit()))
-        .then_some(p)
-    });
-    name[..end].to_string()
-}
-
-/// Extensions whose bytes ARE a RAR or 7z container but whose file is
-/// the deliverable: `.cbr` is a comic wearing a RAR wrapper, `.cb7` its
-/// 7-Zip twin. Unpacking one is data loss, not extraction - the user
-/// asked for the comic, not a folder of loose pages (GitHub issue #40).
-/// The zip family's counterpart list (`.cbz`, `.epub`, office files)
-/// lives in `zip::FINAL_FILE_EXTS`; the same standing rule applies here:
-/// the guard keys on the NAMED extension only, so an obfuscated post
-/// (hash names, no meaningful extension) still earns the magic sniff.
-const FINAL_FILE_EXTS: &[&str] = &["cbr", "cb7"];
-
-/// A RAR/7z-container file whose extension marks it as the payload
-/// itself. Never unpack one - and never let a sweep count it as a spent
-/// volume or nested layer.
-pub fn is_final_file(path: &std::path::Path) -> bool {
-    path.file_name()
-        .is_some_and(|n| is_final_name(&n.to_string_lossy()))
-}
-
-/// [`is_final_file`] over a bare file name (any case).
-pub fn is_final_name(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|e| FINAL_FILE_EXTS.contains(&&*e.to_string_lossy().to_ascii_lowercase()))
-}
-
-/// Natural volume order key: `.rar` < `.r00` < `.r01`; `.part1` < `.part2`.
-pub fn vol_sort_key(name: &str) -> (u64, String) {
-    let lower = name.to_ascii_lowercase();
-    if let Some(p) = lower.rfind(".part") {
-        let tail = &lower[p + 5..];
-        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            return (n, lower.clone());
-        }
-    }
-    if lower.ends_with(".rar") {
-        return (0, lower.clone());
-    }
-    if let Some(p) = lower.rfind('.') {
-        let tail = &lower[p + 1..];
-        // Old-style continuations roll the letter past .r99: .s00 = 101,
-        // .t00 = 201… (each letter is another 10^digits volumes). Keying
-        // only 'r' broke base-resolution at the r→s boundary on 100+
-        // volume sets.
-        if tail.len() >= 2
-            && (b'r'..=b'z').contains(&tail.as_bytes()[0])
-            && let Ok(n) = tail[1..].parse::<u64>()
-        {
-            let span = 10u64.pow((tail.len() - 1) as u32);
-            return (
-                (tail.as_bytes()[0] - b'r') as u64 * span + n + 1,
-                lower.clone(),
-            );
-        }
-        // WinRAR numeric volume naming: .001, .002 …
-        if tail.len() >= 2
-            && tail.bytes().all(|c| c.is_ascii_digit())
-            && let Ok(n) = tail.parse::<u64>()
-        {
-            return (n, lower.clone());
-        }
-    }
-    (u64::MAX, lower)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SlotMode {
     /// Waiting for the offset-0 article to sniff.
@@ -308,6 +168,10 @@ enum SlotMode {
     SevenZ,
     /// RAR volume after fallback - volume file materialized.
     RarFallback,
+    /// TODO 211 (b): continuation part of a declared `.rar.NNN` byte
+    /// split, aliased onto its head - every byte it receives feeds the
+    /// head's mapper at `split_alias`'s logical offset (see `split.rs`).
+    SplitPart,
     /// Source-protected fallback: the slot's bytes already live in a real
     /// file the caller owns (re-extraction reads volumes off disk), so a
     /// fallback must never materialize - writes are dropped instead.
@@ -330,12 +194,14 @@ struct Slot {
     /// fully-obfuscated 9.6 GB single-file post) would otherwise hold the
     /// entire file in RAM waiting for a sniff that may come last.
     pre_bytes: usize,
-    /// The offset-0 probe already went out: the FIRST out-of-order span
-    /// asks the promote hook to front-load the article carrying offset 0
-    /// (see the hold branch in `write_impl_scratched`). Once per slot -
-    /// a wrong guess never re-arms; `spill_unclassified_slot` stays the
-    /// backstop for posts whose offset 0 genuinely never comes early.
-    probe0_sent: bool,
+    /// Lowest offset this slot has ever held, and the estimator the
+    /// rotation guess is derived from ([`Extractor::probe_offset0`]).
+    /// `u64::MAX` until the first out-of-order span arrives.
+    probe0_min: u64,
+    /// Offset-0 promotes fired for this slot, capped at
+    /// [`holds::PROBE0_MAX`]. Nonzero is the old `probe0_sent` latch -
+    /// the late-head grace reads it as "this slot asked for its head".
+    probe0_promotes: u8,
     /// This slot is Plain because the offset-0 sniff LOOKED and found no
     /// archive shape worth mapping or chasing - an ordinary payload file
     /// (or an archive bound for a post-pass, which reads the same file
@@ -388,6 +254,24 @@ struct Slot {
     /// verdict still learn its volume is doomed - see
     /// `Extractor::mark_slot_lost`.
     article_lost: bool,
+    /// Consumed prefix ranges a dropping drop-behind trim released with
+    /// no disk copy, carried here by the demote that materialized the
+    /// rest of the volume: the file on disk has holes exactly here, and
+    /// the caller re-fetches them (`Extractor::dropped_volumes`). Empty
+    /// on every slot that was never demoted after a drop.
+    dropped: Vec<(u64, u64)>,
+    /// The posted name those ranges were dropped under (see
+    /// `ChaseSlot::dropped_as`).
+    dropped_as: String,
+    /// TODO 211 (b): this Unknown slot sniffed headless at offset 0 and
+    /// is a continuation part waiting for its declared set's head.
+    split_wait: bool,
+    /// Mode `SplitPart`: `(head slot, logical offset of this part's byte
+    /// 0)` - the one translation every slot-addressed path applies.
+    split_alias: Option<(usize, u64)>,
+    /// Part 1 of a declared split: the set's base (key into
+    /// `Inner::rar_splits`). Its mapper spans the whole joined volume.
+    split_head: Option<String>,
 }
 
 struct Group {
@@ -439,6 +323,11 @@ struct Group {
     /// Live chasing decompressor over this group's volumes (compressed
     /// RAR5 inner archive). Cleared at finish once the worker is joined.
     chase: Option<Arc<ChaseCtl>>,
+    /// §94 D: lowercased bases of byte-split zip sets this group has
+    /// routed into the child and not yet closed (counted or refused).
+    /// Empty for every ordinary set, which is what keeps the close walk
+    /// off the per-volume `reresolve` path entirely.
+    zip_splits_open: Vec<String>,
 }
 
 pub struct ExtractReport {
@@ -448,9 +337,16 @@ pub struct ExtractReport {
     pub fallbacks: Vec<(String, String)>,
     /// Bytes that went through the direct-extraction path.
     pub extracted_bytes: u64,
-    /// Extracted files that were AES-decrypted in place at finish
-    /// (encrypted RAR5 store sets - no unrar involved).
+    /// Extracted files that were AES-decrypted natively - no unrar
+    /// involved. Decryption happens at article-write time
+    /// (plaintext-once); this is the list finish ADJUDICATED, so a name
+    /// here means its plaintext was checked against what the archive
+    /// stored for it and published.
     pub decrypted: Vec<String>,
+    /// Partial in-stream outputs a budget-forfeited chase LEFT on disk,
+    /// with the byte count each is good to - see [`ResumeOutput`]. Empty
+    /// for every other job shape.
+    pub resume_outputs: Vec<ResumeOutput>,
 }
 
 /// Where one piece of an article's decoded bytes landed on disk: `len`
@@ -468,6 +364,19 @@ pub struct Frag {
 }
 
 impl Frag {
+    /// An identity fragment: `len` bytes of volume-view `[vol_off, ..)`
+    /// sitting at that very offset in `file`. What a materialized
+    /// volume's own coverage vouches for - see
+    /// [`Extractor::materialized_span_on_disk`].
+    pub fn identity(file: &str, vol_off: u64, len: u64) -> Frag {
+        Frag {
+            file: file.to_string(),
+            file_off: vol_off,
+            vol_off,
+            len,
+        }
+    }
+
     /// Rebase this fragment to identity form in `file`: the bytes sit at
     /// their volume offset in the named file itself. The journal writer
     /// uses it for articles that complete after their slot demoted to a
@@ -521,6 +430,30 @@ struct WriteJob {
     /// would copy into volume files).
     crypto: Option<Arc<CryptoState>>,
     repair: bool,
+}
+
+/// §94 A: where the resume journal says a replayed span's bytes already
+/// are, and the running count of bytes the replay left in place. See
+/// [`Extractor::write_in_place`].
+struct InPlace<'a> {
+    /// Output-directory file name, as the journal's `Frag::file` names
+    /// it (the writer path's final component).
+    file: &'a str,
+    /// Offset in `file` of the span's FIRST byte; a job's source offset
+    /// within the span (`src_start`) is added to it.
+    off: u64,
+    covered: u64,
+}
+
+impl InPlace<'_> {
+    /// Does this derived placement land on its own source bytes? The
+    /// file is compared the way the journal recorded it - by the
+    /// writer path's file name - and the offset by `src_start`
+    /// arithmetic that cannot overflow a span that fit in memory.
+    fn matches(&self, j: &WriteJob) -> bool {
+        j.writer.path.file_name().is_some_and(|f| f == self.file)
+            && self.off.checked_add(j.src_start as u64) == Some(j.file_off)
+    }
 }
 
 /// One deferred child forward from the hot write path: `len` bytes of the
@@ -677,6 +610,21 @@ pub struct Extractor {
     /// them without the routing lock.
     pager_armed: AtomicBool,
     pager_active: AtomicBool,
+    /// Held-bytes backpressure (TODO 94 item E): true while the root has
+    /// slots parked at the pool. Outside `inner` for the same reason as
+    /// the pager flags - the chase worker reads it on every progress
+    /// mark, from a thread that must never take the routing lock, to
+    /// decide whether to wake the pager for a park re-evaluation.
+    park_live: AtomicBool,
+    /// Bytes a drop-behind trim spilled through the OFF-LOCK route
+    /// ([`Self::spill_trimmed`]) and then committed. The lock-placement
+    /// oracle for the trim, on the route-counter principle of
+    /// `HoldsScratch::locked_reads`: the under-lock route is
+    /// `plain_span`, which never bumps this, so a spill that advanced
+    /// `base` without advancing this counter ran under the lock.
+    trim_spilled_off_lock: AtomicU64,
+    /// Signalled when `spills_in_flight` drops to zero.
+    spill_settled: Condvar,
     inner: Mutex<Inner>,
 }
 
@@ -700,12 +648,23 @@ struct Inner {
     /// Holds-paging gate (`NZBFAST_NO_HOLDS_PAGE` / runtime setter).
     /// Off: a budget breach demotes exactly as before paging existed.
     holds_page_on: bool,
+    /// Late-head grace gate (`NZBFAST_NO_HEAD_GRACE` / runtime setter).
+    /// Off: an unclassified slot spills at `unclassified_spill` even
+    /// while its offset-0 probe is outstanding. See `head_grace`.
+    head_grace_on: bool,
+    /// One line per chain the first time the grace defers a spill.
+    grace_announced: bool,
     /// §94 B: verified-block watermark handle. Set only on the ROOT
-    /// extractor (nested levels' bytes are outside the PAR2 set, so
-    /// child chases stay ungated), and only when the run opted in
-    /// (env-gated in get.rs while the feature soaks). Chase frontier
-    /// buffers created while this is Some are gated on it.
+    /// extractor (nested levels' bytes are outside the PAR2 set, so child
+    /// chases stay ungated), and only when the run opted in (attached, and
+    /// its WAIT env-gated, in get/vrig.rs). Chase frontier buffers created
+    /// while this is Some are gated on it.
     verify_gate: Option<Arc<crate::live::VerifyGate>>,
+    /// Does the chase DECODE park on the gate (§94 B proper, opt-in while
+    /// it soaks)? The handle is attached unconditionally since 22 Aug 2026
+    /// (the dropping trim reads its watermark, see `rar_trim_volume`).
+    /// Default true for the tests. Inherited by children, see `gate.rs`.
+    verify_gate_waits: bool,
     /// Preallocation ceiling + extracted-byte budget, SHARED down the
     /// child chain (see [`Limits`]).
     limits: Arc<Limits>,
@@ -714,6 +673,13 @@ struct Inner {
     /// collide with a parent-level output). Leaf lock: only ever taken
     /// with no other lock acquired after it.
     names_taken: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// §94 A: names claimed by [`Extractor::preclaim_name`] on behalf of
+    /// a specific slot, keyed exactly like `names_taken`. Deliberately
+    /// NOT shared with the child chain - only the root preclaims (for
+    /// restored files the replay reads as sources), and a child level
+    /// reusing a parent's slot numbering must keep colliding with those
+    /// names, which is the whole point of the preclaim.
+    preclaimed: HashMap<String, usize>,
     /// Whether `names_taken` keys are case-folded, i.e. whether the OUTPUT
     /// VOLUME is case-insensitive. Probed once at the root and threaded down
     /// with `names_taken` so every level keys that shared set the same way.
@@ -730,13 +696,33 @@ struct Inner {
     /// from under one - these are queued here and flushed off-lock. The
     /// bool is the hook's `urgent` flag (see [`PromoteHook`]).
     pending_promote: Vec<(usize, Vec<(u64, u64)>, bool)>,
+    /// Held-bytes backpressure (TODO 94 item E): the pool-side park the
+    /// root raises near its holds cap, see `extract::park`.
+    park: park::ParkState,
+    /// Drop-behind trim spills planned under the routing lock, written
+    /// by [`Extractor::flush_pending_spills`] once it drops. Up to half
+    /// the holds cap each - the pwrite that used to run under the lock.
+    pending_spills: Vec<TrimSpill>,
+    /// Trim spills planned but not yet settled (queued or being written
+    /// by some thread). While non-zero, a holds-cap breach is RELIEF IN
+    /// FLIGHT, not a forfeit: see `defer_breach`.
+    spills_in_flight: usize,
+    /// Set by a chase breach that found `spills_in_flight > 0` and
+    /// stood down instead of forfeiting. Read and cleared by the write
+    /// that carried it, which then waits off-lock for the spills to
+    /// settle - the same arrival throttle the under-lock write imposed
+    /// on EVERY thread, paid only by the one that breached and with the
+    /// routing lock free.
+    defer_breach: bool,
     /// Nested routing gate (env escape hatch / rollout setting). With it
     /// off, level-1 inner files write directly to disk as before the
     /// child path existed.
     nested_on: bool,
-    /// Chasing-decompressor gate (`NZBFAST_NO_NESTED_CHASE` / runtime
-    /// setter). Off: a compressed inner archive demotes to a
-    /// materialized file exactly as before the chase existed.
+    /// RAR chasing-decompressor gate (`NZBFAST_NO_NESTED_CHASE` /
+    /// runtime setter). Off: a compressed inner RAR demotes to a
+    /// materialized file exactly as before the chase existed. The 7z
+    /// and zip chases have their own gates (`sevenz_on`,
+    /// `nested_zip_on`) and are untouched by this one.
     chase_on: bool,
     /// 7z-chase gate (`NZBFAST_NO_NESTED_7Z` / runtime setter). Off: an
     /// inner .7z materializes exactly as before the 7z path existed.
@@ -745,6 +731,11 @@ struct Inner {
     /// zip twin of `sevenz_on`. Off: an inner zip materializes exactly
     /// as it did before the depth guard came off.
     nested_zip_on: bool,
+    /// Tar-chase gate (`NZBFAST_NO_TAR` / runtime setter). One gate at
+    /// EVERY depth, where zip has a nested/top pair - see
+    /// `try_attach_tar` for why. Off: a `.tar` materializes as an
+    /// ordinary file, exactly as it did before the arm existed.
+    tar_on: bool,
     /// Top-level 7z gate (`NZBFAST_NO_TOP_7Z` / runtime setter). Only
     /// depth 0 reads it, so children carry it unused. Off: a posted
     /// `.7z` materializes for the disk post-pass, the pre-TODO-37
@@ -769,16 +760,30 @@ struct Inner {
     /// set over the retention cap demotes to the unrar ladder, as it did
     /// before the incremental split decode existed.
     rar_trim_on: bool,
+    /// Drop-not-spill gate for the RAR trim (`NZBFAST_NO_RAR_DROP` /
+    /// runtime setter). On (default): a healthy top-level chase DROPS
+    /// its consumed prefix instead of spilling it to the volume file,
+    /// and a later demote re-fetches it. Off: every trim spills, as
+    /// before 22 Aug 2026.
+    rar_drop_on: bool,
+    /// Bytes the RAR drop-behind released without a disk copy, a subset
+    /// of `chase_trimmed`.
+    chase_dropped: u64,
     /// Bytes a RAR chase drop-behind trim has spilled out of RAM in this
     /// extractor. Chain-wide totals come from
     /// [`Extractor::chase_trimmed_bytes`].
     chase_trimmed: u64,
+    /// [`ResumeOutput`] records in the making: `chase_teardown` registers
+    /// one per kept partial (member name, and the writer taken out of the
+    /// child slot), and `finish` measures and truncates them. Depth 0
+    /// only. See `extract::resume` for the whole contract.
+    resume_pending: Vec<(String, Arc<FileWriter>)>,
     /// True once the caller reported an article with a TERMINAL verdict
     /// (430 everywhere, out of retention, transport dead) - the job can
     /// no longer complete from the wire alone. Sticky, and SHARED down
     /// the child chain like the budget: a chase wedged on such a gap
     /// holds bytes nothing will decode, and this flag is what arms
-    /// their proactive spill ([`Extractor::page_stalled_chase`]).
+    /// their proactive spill ([`Extractor::run_stalled_page_pass`]).
     lost_articles: Arc<AtomicBool>,
     /// Live split-7z sets, keyed by `sevenz_part_name` base, so a
     /// `.7z.002` classifying later can find the container `.7z.001`
@@ -793,7 +798,27 @@ struct Inner {
     /// part's decoded size is in and the geometry can resolve. A part
     /// whose base is not declared here never chases (it materializes
     /// for the disk pass, the phase-1 behaviour).
-    zip_split_decl: HashMap<String, u32>,
+    ///
+    /// `None` is a set the PARENT level has opened but not yet counted
+    /// (§94 D, nested): a byte-split inside a store RAR has no NZB list
+    /// to declare it, so the parent opens the set as it routes the
+    /// first sibling and closes it with the count once the outer
+    /// archive's entry list has run past the run of siblings - see
+    /// `zip_split.rs`. A part joins an open set on trust and the late
+    /// count resolves it.
+    zip_split_decl: HashMap<String, Option<u32>>,
+    /// §94 D: split-set verdicts for the CHILD, queued under this
+    /// level's lock and delivered off it (`flush_pending_promote`):
+    /// the delivery resolves the child's set and raises its tail
+    /// promote, which walks the chain's locks upward. `Some(n)` closes
+    /// the set with its part count, `None` refuses it.
+    pending_child_decl: Vec<(String, Option<u32>)>,
+    /// TODO 211 (b): declared `.rar.NNN` byte splits by lowercased base
+    /// (`declare_rar_split`), each mapped one-pass as a single volume
+    /// through its part-1 head. See `split.rs`.
+    rar_splits: HashMap<String, RarSplit>,
+    /// One-pass `.rar.NNN` split gate (`NZBFAST_NO_RAR_SPLIT`).
+    rar_split_on: bool,
     /// Nested depth cap for this chain: the child created AT this depth is
     /// disabled, so the deepest layer materializes (never a hard failure).
     /// Resolved from the daemon setting / env at construction and inherited
@@ -830,35 +855,20 @@ struct Inner {
     /// Fallback slots discard instead; the sources are the deliverable.
     protect_sources: bool,
     /// Archive password (M23a plumbing): lets mappers accept RAR5
-    /// encrypted headers / encrypted store entries. The ciphertext is
-    /// assembled at the usual store offsets and decrypted in one pass at
-    /// finish - during the download the inner files hold volume-exact
-    /// bytes, so verifier read-back and fallback reconstruction are
-    /// untouched by encryption.
+    /// encrypted headers / encrypted store entries. Entries decrypt at
+    /// article-write time, so the inner files hold PLAINTEXT during the
+    /// download; verifier read-back and fallback reconstruction go
+    /// through [`CryptoState::read_posted`], which re-encrypts it back
+    /// into the posted bytes.
     password: Option<std::sync::Arc<str>>,
-    /// Per-encrypted-output stream lifecycle (out name → shared state),
-    /// created on first /stream open or at the finish decrypt.
-    stream_states: HashMap<String, Arc<StreamState>>,
-    /// Publish gate for the finish decrypt, inherited by every child (a
-    /// nested level's outputs are journal recovery sources too). See
-    /// [`DecryptBarrier`].
-    decrypt_barrier: Option<DecryptBarrier>,
-    /// Post-rename decrypt publish notification, inherited like the
-    /// barrier. See [`DecryptPublish`].
-    decrypt_publish: Option<DecryptPublish>,
     /// Materialized-volume journal notification, root only (never
     /// inherited). See [`MaterializedHook`].
     materialized: Option<MaterializedHook>,
-    /// Plaintext-once gate (see [`CryptoState`]): encrypted store
-    /// entries decrypt at write time instead of assembling ciphertext
-    /// for the finish pass. `NZBFAST_NO_INSTREAM_DECRYPT=1` restores
-    /// the legacy path.
-    instream_decrypt: bool,
     /// In-stream decrypt state per OUTPUT name (same key space as
     /// `inner_writers`). Presence marks the file plaintext-on-disk:
     /// posted-bytes readers go through [`CryptoState::read_posted`],
     /// its articles journal as `D` records (restorable only by
-    /// re-encryption), and the finish decrypt skips it.
+    /// re-encryption), and the finish verdict adjudicates it.
     crypto_files: HashMap<String, Arc<CryptoState>>,
     /// The OTHER route's latch, same key space: outputs with an
     /// encrypted span COMMITTED to the ciphertext route, stamped at
@@ -866,6 +876,20 @@ struct Inner {
     /// carry this: rule 2 of [`Extractor::instream_decrypt_allowed`].
     /// Never removed for the life of the chain, like `crypto_files`.
     ciphertext_files: std::collections::HashSet<String>,
+    /// The routes a RESUMED run inherits from its journal, seeded by
+    /// [`Extractor::seed_resumed_routes`] before the first span (TODO
+    /// 158 item 2). Wire outputs, with the bytes a prior run left in
+    /// them: stamped into `ciphertext_files` at seed time, and the
+    /// counter half of rule 2 is seeded when the writer opens. Empty
+    /// on a fresh run.
+    resumed_wire: HashMap<String, u64>,
+    /// ...and the plaintext-once outputs the restore admitted `D`
+    /// articles for, with the `(salt, iv)` their `E` fact recorded. Such
+    /// an output may re-latch plaintext-once only on a head record that
+    /// carries the same pair and a password that proves against its
+    /// check; anything else REFUSES the write rather than putting
+    /// ciphertext under records that say plaintext.
+    resumed_plaintext: HashMap<String, ([u8; 16], [u8; 16])>,
     /// Resume-journal events from every [`CryptoState`] in the chain
     /// (children share it like the holds budget); drained by
     /// [`Extractor::drain_crypto_events`].
@@ -925,6 +949,48 @@ impl Extractor {
         Self::with_resume(out_dir, n_slots, enabled, false)
     }
 
+    /// §94 A: can this slot's arriving bytes be PLACED rather than
+    /// held? True once the slot has classified and, if it mapped, every
+    /// parsed entry of it has a resolved base offset - which for a
+    /// split member means the volumes ahead of it have been parsed too.
+    ///
+    /// This is the exact condition the crash-resume replay waits on. A
+    /// restored volume fed before it holds every byte in RAM until
+    /// `reresolve` catches up, and that peak is what the held-bytes cap
+    /// is judged against; fed after it, the same bytes go straight to
+    /// the output. `Unknown` is false (nothing has classified yet);
+    /// a plain slot is true (it places by definition); a discarded or
+    /// materialized slot is true as well, since neither holds.
+    pub fn slot_can_place(&self, slot: usize) -> bool {
+        let inner = self.inner.lock_ok();
+        if slot >= inner.slots.len() {
+            return false;
+        }
+        let (slot, _) = Self::split_target(&inner, slot, 0);
+        match inner.slots[slot].mode {
+            SlotMode::Unknown => false,
+            SlotMode::Rar => {
+                let Some(m) = inner.slots[slot].mapper.as_ref() else {
+                    return false;
+                };
+                (0..m.entries.len())
+                    .filter(|&ei| !m.entries[ei].is_dir)
+                    .all(|ei| Self::base_for(&inner, slot, ei).is_some())
+            }
+            _ => true,
+        }
+    }
+
+    /// §94 A: has this slot not classified yet? The replay uses it to
+    /// tell "waiting on an offset-0 sniff" from "waiting on a base":
+    /// a restored seed that CARRIES offset 0 is its own sniff, and
+    /// nothing else will ever supply one (that article is complete, so
+    /// the pool never refetches it).
+    pub fn slot_unclassified(&self, slot: usize) -> bool {
+        let inner = self.inner.lock_ok();
+        slot < inner.slots.len() && matches!(inner.slots[slot].mode, SlotMode::Unknown)
+    }
+
     /// Test hook: is every parsed piece of each named inner file placed
     /// (a base derived for it)? Distinguishes "resolution reached these
     /// bytes" from "the job happened to succeed".
@@ -962,6 +1028,41 @@ impl Extractor {
             .collect()
     }
 
+    /// Test hook: a depth-1 extractor, the shape a chase sink's CHILD
+    /// has in production. The resume-ledger unit tests need it because
+    /// the prefix hash arms on nested plain writers only
+    /// (`ensure_plain_writer`), and a depth-0 extractor's plain writers
+    /// are downloaded volumes that never hash - so driving the ledger
+    /// seam through one would test a shape `chase_teardown` never makes.
+    #[cfg(test)]
+    pub(super) fn new_nested_for_tests(out_dir: &Path, n_slots: usize) -> Extractor {
+        sweep_holds_scratch(out_dir);
+        Self::build(
+            out_dir,
+            n_slots,
+            true,
+            false,
+            1,
+            Weak::new(),
+            Arc::new(HoldsBudget::new(default_holds_cap())),
+            Arc::new(HoldsScratch::new(out_dir)),
+            Arc::new(Limits::unlimited()),
+            Arc::new(Mutex::new(Default::default())),
+            crate::disk::case_insensitive_dir(out_dir),
+            !nested_env_off(),
+            !chase_env_off(),
+            !sevenz_env_off(),
+            !nested_zip_env_off(),
+            !tar_env_off(),
+            !holds_page_env_off(),
+            !head_grace_env_off(),
+            nested_depth_cap(),
+            !output_crc_env_off(),
+            None,
+            Arc::new(ShapeLatch::default()),
+        )
+    }
+
     pub fn with_resume(out_dir: &Path, n_slots: usize, enabled: bool, resume: bool) -> Extractor {
         // Crash leftovers from a killed run: at most one extractor owns a
         // job dir at a time, so a stale scratch here is provably dead.
@@ -973,7 +1074,7 @@ impl Extractor {
             resume,
             0,
             Weak::new(),
-            Arc::new(HoldsBudget::new(HOLDS_DEFAULT_CAP)),
+            Arc::new(HoldsBudget::new(default_holds_cap())),
             Arc::new(HoldsScratch::new(out_dir)),
             Arc::new(Limits::unlimited()),
             Arc::new(Mutex::new(Default::default())),
@@ -982,7 +1083,9 @@ impl Extractor {
             !chase_env_off(),
             !sevenz_env_off(),
             !nested_zip_env_off(),
+            !tar_env_off(),
             !holds_page_env_off(),
+            !head_grace_env_off(),
             nested_depth_cap(),
             !output_crc_env_off(),
             None,
@@ -992,7 +1095,7 @@ impl Extractor {
 
     /// Full constructor - the public ctors and `ensure_child` both land
     /// here. Children share the parent's holds budget and name claims.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn build(
         out_dir: &Path,
         n_slots: usize,
@@ -1009,7 +1112,9 @@ impl Extractor {
         chase_on: bool,
         sevenz_on: bool,
         nested_zip_on: bool,
+        tar_on: bool,
         holds_page_on: bool,
+        head_grace_on: bool,
         nested_max_depth: usize,
         verify_output_crc: bool,
         password: Option<std::sync::Arc<str>>,
@@ -1024,6 +1129,9 @@ impl Extractor {
             shape,
             pager_armed: AtomicBool::new(false),
             pager_active: AtomicBool::new(false),
+            park_live: AtomicBool::new(false),
+            trim_spilled_off_lock: AtomicU64::new(0),
+            spill_settled: Condvar::new(),
             inner: Mutex::new(Inner {
                 slots: (0..n_slots).map(|_| Self::new_slot()).collect(),
                 groups: HashMap::new(),
@@ -1032,16 +1140,24 @@ impl Extractor {
                 budget,
                 scratch,
                 holds_page_on,
+                head_grace_on,
+                grace_announced: false,
                 limits,
                 names_taken,
+                preclaimed: HashMap::new(),
                 fold_names,
                 child: None,
                 pending_fwd: Vec::new(),
                 pending_promote: Vec::new(),
+                park: park::ParkState::new(),
+                pending_spills: Vec::new(),
+                spills_in_flight: 0,
+                defer_breach: false,
                 nested_on,
                 chase_on,
                 sevenz_on,
                 nested_zip_on,
+                tar_on,
                 // Read here rather than threaded through `build`: only
                 // depth 0 consults it, and depth 0 is exactly what the
                 // public constructors make. Same construction-time
@@ -1055,10 +1171,16 @@ impl Extractor {
                 top_zip_on: !top_zip_env_off(),
                 sevenz_trim_on: !sevenz_trim_env_off(),
                 rar_trim_on: !rar_trim_env_off(),
+                rar_drop_on: !rar_drop_env_off(),
+                chase_dropped: 0,
                 chase_trimmed: 0,
+                resume_pending: Vec::new(),
                 lost_articles: Arc::new(AtomicBool::new(false)),
                 sevenz_sets: HashMap::new(),
                 zip_split_decl: HashMap::new(),
+                rar_splits: HashMap::new(),
+                rar_split_on: !rar_split_env_off(),
+                pending_child_decl: Vec::new(),
                 nested_max_depth: nested_max_depth.max(1),
                 verify_output_crc,
                 promote: None,
@@ -1068,24 +1190,13 @@ impl Extractor {
                 slot_fallbacks: Vec::new(),
                 protect_sources: false,
                 password,
-                stream_states: HashMap::new(),
-                decrypt_barrier: None,
-                decrypt_publish: None,
                 materialized: None,
                 verify_gate: None,
-                // Plaintext-once gate: on for a live (enabled, fresh)
-                // extractor unless the env kill-switch restores the
-                // legacy ciphertext-then-finish-decrypt path. Tied to
-                // `enabled` alone: the old `!resume` term was redundant
-                // (every resume caller passed enabled=false too), and the
-                // §94 A replay path resumes with the extractor ENABLED,
-                // where in-stream decrypt must run - restore() put the
-                // volumes back in ciphertext form, so the replay re-derives
-                // keys from replayed headers exactly as the wire would.
-                instream_decrypt: enabled
-                    && std::env::var("NZBFAST_NO_INSTREAM_DECRYPT").map_or(true, |v| v != "1"),
+                verify_gate_waits: true,
                 crypto_files: HashMap::new(),
                 ciphertext_files: std::collections::HashSet::new(),
+                resumed_wire: HashMap::new(),
+                resumed_plaintext: HashMap::new(),
                 crypto_events: Arc::new(Mutex::new(Vec::new())),
                 pw_probe: None,
                 pw_probe_due: false,
@@ -1111,8 +1222,11 @@ impl Extractor {
     pub fn drain_late_placements(&self) -> Vec<(usize, Frag)> {
         let (mut out, child) = {
             let mut inner = self.inner.lock_ok();
+            let placed = std::mem::take(&mut inner.late_placements);
+            // TODO 211 (b): a split head's placements are in its joined
+            // volume's offsets; the journal wants the part's.
             (
-                std::mem::take(&mut inner.late_placements),
+                Self::split_translate_placements(&inner, placed),
                 inner.child.clone(),
             )
         };
@@ -1179,7 +1293,8 @@ impl Extractor {
             sort_key: None,
             holds: Vec::new(),
             pre_bytes: 0,
-            probe0_sent: false,
+            probe0_min: u64::MAX,
+            probe0_promotes: 0,
             plain_by_sniff: false,
             writer: None,
             mapper: None,
@@ -1191,6 +1306,11 @@ impl Extractor {
             piece_crcs: HashMap::new(),
             pw_await: None,
             article_lost: false,
+            split_wait: false,
+            split_alias: None,
+            split_head: None,
+            dropped: Vec::new(),
+            dropped_as: String::new(),
         }
     }
 
@@ -1225,7 +1345,9 @@ impl Extractor {
                 inner.chase_on,
                 inner.sevenz_on,
                 inner.nested_zip_on,
+                inner.tar_on,
                 inner.holds_page_on,
+                inner.head_grace_on,
                 inner.nested_max_depth,
                 inner.verify_output_crc,
                 inner.password.clone(),
@@ -1238,11 +1360,6 @@ impl Extractor {
                 // The child knows its own Arc (weakly): the chase worker
                 // reaches its extractor through this without pinning it.
                 ci.self_weak = Arc::downgrade(&child);
-                // A nested level decrypts its own encrypted store outputs
-                // at ITS finish, and those files are journal recovery
-                // sources exactly like the parent's - same gate.
-                ci.decrypt_barrier = inner.decrypt_barrier.clone();
-                ci.decrypt_publish = inner.decrypt_publish.clone();
                 // One event sink per chain: a nested encrypted output's
                 // E/K/T records drain through the root exactly like its
                 // placements fold into the root's frags.
@@ -1252,6 +1369,7 @@ impl Extractor {
                 // its stalled-frontier spill off the same report the
                 // root received.
                 ci.lost_articles = inner.lost_articles.clone();
+                ci.verify_gate_waits = inner.verify_gate_waits;
             }
             inner.child = Some(child);
         }
@@ -1278,7 +1396,7 @@ impl Extractor {
         offset: u64,
         data: &[u8],
     ) -> io::Result<Persist> {
-        self.write_impl(slot, name, size, offset, data, false, None)
+        self.write_impl(slot, name, size, offset, data, false, None, None)
     }
 
     /// [`Self::write`] carrying what the decode established about this
@@ -1296,7 +1414,57 @@ impl Extractor {
         data: &[u8],
         article_crc: Option<u32>,
     ) -> io::Result<Persist> {
-        self.write_impl(slot, name, size, offset, data, false, article_crc)
+        self.write_impl(slot, name, size, offset, data, false, article_crc, None)
+    }
+
+    /// [`Self::write`] for a span the §94 A replay READ BACK from this
+    /// job's own output: `src` is `(file name, offset)` where the resume
+    /// journal says these exact bytes already sit, in the output
+    /// directory. The span is routed and mapped precisely as `write`
+    /// routes it - headers parse, entries resolve, piece CRCs compose,
+    /// holds hold - and only then, per derived placement, the pwrite is
+    /// SKIPPED when and only when this run's map puts the piece at the
+    /// very `(file, offset)` the journal read it from; the range is
+    /// marked covered instead ([`FileWriter::note_covered`]). A
+    /// placement anywhere else, a crypto placement (the source is
+    /// ciphertext, the destination plaintext), a repair, a forward to a
+    /// child, a held span - all write, exactly as before.
+    ///
+    /// That is what makes the skip verifiable rather than trusted: the
+    /// journal is never consulted for WHERE the bytes go, only checked
+    /// against where the map derived from headers this run parsed says
+    /// they go. A different derivation (a different password, a
+    /// renamed member, a changed sanitizer) simply fails the match and
+    /// writes, and the PAR2 read-back still hashes the actual bytes on
+    /// disk either way. Returns the `Persist` and how many bytes were
+    /// marked in place without a write.
+    #[expect(clippy::too_many_arguments)]
+    pub fn write_in_place(
+        &self,
+        slot: usize,
+        name: &str,
+        size: u64,
+        offset: u64,
+        data: &[u8],
+        src_file: &str,
+        src_off: u64,
+    ) -> io::Result<(Persist, u64)> {
+        let mut in_place = InPlace {
+            file: src_file,
+            off: src_off,
+            covered: 0,
+        };
+        let p = self.write_impl(
+            slot,
+            name,
+            size,
+            offset,
+            data,
+            false,
+            None,
+            Some(&mut in_place),
+        )?;
+        Ok((p, in_place.covered))
     }
 
     /// [`Self::write`] with the repair marker exposed: parity-as-a-source
@@ -1318,7 +1486,7 @@ impl Extractor {
         offset: u64,
         data: &[u8],
     ) -> io::Result<Persist> {
-        self.write_impl(slot, name, size, offset, data, true, None)
+        self.write_impl(slot, name, size, offset, data, true, None, None)
     }
 
     /// [`Self::write`] with the repair marker: `repair` says this span is
@@ -1328,6 +1496,7 @@ impl Extractor {
     /// consumer that must be told, or it keeps the stale pre-repair
     /// value (first-writer-wins) and the finish gate demotes a job whose
     /// output healed cleanly.
+    #[expect(clippy::too_many_arguments)]
     fn write_impl(
         &self,
         slot: usize,
@@ -1337,7 +1506,14 @@ impl Extractor {
         data: &[u8],
         repair: bool,
         article_crc: Option<u32>,
+        in_place: Option<&mut InPlace<'_>>,
     ) -> io::Result<Persist> {
+        if repair {
+            // A repair rewrite invalidates every kept chase prefix in
+            // this job - see [`Self::drop_resume_ledger`]. Cheap on the
+            // ordinary job: the ledger is empty and this reads one field.
+            self.drop_resume_ledger();
+        }
         // Per-thread scratch for the span's job/forward queues - filled
         // under the routing lock, so their per-article allocation was
         // lock-held. A STACK of pairs, not one pair: a forwarded span
@@ -1360,6 +1536,7 @@ impl Extractor {
             data,
             repair,
             article_crc,
+            in_place,
         );
         jobs.clear();
         fwd.clear();
@@ -1367,7 +1544,7 @@ impl Extractor {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn write_impl_scratched(
         &self,
         jobs: &mut Vec<WriteJob>,
@@ -1379,21 +1556,29 @@ impl Extractor {
         data: &[u8],
         repair: bool,
         article_crc: Option<u32>,
+        in_place: Option<&mut InPlace<'_>>,
     ) -> io::Result<Persist> {
         let mut pending: Vec<FwdJob> = Vec::new();
         let mut routed_rar = false;
         let span_held;
+        let wait_spill;
         {
             let mut g = self.inner.lock_ok();
             let inner = &mut *g;
             inner.span_held = false;
             {
                 let s = &mut inner.slots[slot];
-                if s.name.is_empty() && !name.is_empty() {
+                let fresh = s.name.is_empty() && !name.is_empty();
+                if fresh {
                     s.name = name.to_string();
                 }
                 if s.size == 0 {
                     s.size = size;
+                }
+                if fresh {
+                    // TODO 211 (b): a declared split learns this part's
+                    // exact size here, whichever offset arrived first.
+                    self.split_note_size(inner, slot)?;
                 }
             }
 
@@ -1407,64 +1592,7 @@ impl Extractor {
                         self.plain_job(inner, slot, offset, data, &mut *jobs)?;
                         self.drain_holds(inner, slot)?;
                     } else if offset != 0 {
-                        inner.budget.add(data.len());
-                        inner.slots[slot].pre_bytes += data.len();
-                        inner.slots[slot]
-                            .holds
-                            .push((offset, HoldSpan::Ram(data.to_vec())));
-                        if !inner.slots[slot].probe0_sent {
-                            // The slot's very first span arrived out of
-                            // order, so the M3 head prefetch did NOT
-                            // deliver the offset-0 sniff - front-load it
-                            // instead of waiting (synthesized segment
-                            // numbering can put it anywhere in the
-                            // queue). Two guesses, one promote:
-                            //   (0, 1)  - offset 0 where the NZB ladder
-                            //     says it is; pulls a late/retried head
-                            //     article forward when the ladder is
-                            //     honest.
-                            //   (size-offset, +1) - the rotation guess,
-                            //     root only: if numbering preserved
-                            //     posting order but started mid-sequence
-                            //     (the indexer-synthesized norm), the
-                            //     article at declared byte 0 carrying
-                            //     actual offset X puts actual offset 0
-                            //     at declared byte size-X. The ladder's
-                            //     ±slack absorbs a couple articles of
-                            //     arrival jitter.
-                            // One shot per slot: a one-time promote
-                            // cannot fight the M11 stream reader, whose
-                            // newest-alive generation re-promotes its
-                            // rolling window every few MB (serve.rs
-                            // LiveRangeReader) and so always ends up in
-                            // front; a wrong guess for a genuinely
-                            // shuffled post costs a few articles once,
-                            // and `spill_unclassified_slot` stays the
-                            // backstop.
-                            inner.slots[slot].probe0_sent = true;
-                            let size = inner.slots[slot].size;
-                            let mut spans = vec![(0u64, 1u64)];
-                            if self.parent.upgrade().is_none() && offset < size {
-                                spans.push((size - offset, size - offset + 1));
-                            }
-                            inner.pending_promote.push((slot, spans, false));
-                        }
-                        let spill =
-                            inner.slots[slot].pre_bytes > unclassified_spill(inner.budget.cap());
-                        if inner.budget.over() && !self.page_out_holds(inner) {
-                            self.overflow_to_plain(inner)?;
-                        } else if spill {
-                            // The offset-0 sniff hasn't arrived after this
-                            // much of the slot - synthesized segment
-                            // numbering can put it anywhere in the queue.
-                            // Give up mapping THIS slot: plain writes are
-                            // always correct (a real RAR volume simply
-                            // materializes on disk, the pre-M3 behavior),
-                            // while holding on livelocks the pipeline in
-                            // RAM with nothing on disk, in stats, or in
-                            // the journal.
-                            self.spill_unclassified_slot(inner, slot)?;
-                        }
+                        self.hold_presniff_span(inner, slot, offset, data)?;
                         // This branch returns before the function's
                         // shared off-lock flush, and the next write for
                         // a still-Unknown slot lands right back here -
@@ -1478,91 +1606,28 @@ impl Extractor {
                         // establishes a mode and the drain writes it.
                         return Ok(Persist::Held(Vec::new()));
                     } else {
-                        // A NAMED payload file (`.cbr`, `.cb7`) is the
-                        // deliverable even though its bytes carry an
-                        // archive magic - it must never map, chase, or
-                        // attach. Named extension only: an obfuscated
-                        // post keeps the sniff (the zip side's standing
-                        // trade-off, see `zip::chase_eligible_name`).
-                        let payload_name = is_final_name(&inner.slots[slot].name);
-                        let is_rar = !payload_name
-                            && (data.starts_with(b"Rar!\x1a\x07\x01\x00")
-                                || data.starts_with(b"Rar!\x1a\x07\x00"));
-                        if is_rar {
-                            inner.slots[slot].mode = SlotMode::Rar;
-                            routed_rar = true;
-                            let size = inner.slots[slot].size;
-                            inner.slots[slot].mapper =
-                                Some(VolumeMapper::with_password(size, inner.password.clone()));
-                            self.rar_span(
-                                inner,
-                                slot,
-                                offset,
-                                data,
-                                Some((&mut *jobs, &mut *fwd)),
-                                repair,
-                                article_crc,
-                            )?;
-                        } else if !payload_name && self.try_attach_sevenz(inner, slot, data)? {
-                            // Phase 3: a .7z gets the tail-prefetch chase -
-                            // this span (and everything held) feeds its
-                            // frontier buffer. Only the FORMAT is known
-                            // yet; `one-pass` is claimed in sevenz_finish,
-                            // once the archive actually decoded. Claiming
-                            // it here would badge a top-level archive that
-                            // demoted on the retention cap "partly on
-                            // disk" when every byte of it went to disk.
-                            self.shape.note(self.depth, SH_7Z);
-                            self.chase_span(inner, slot, offset, data)?;
-                        } else if self.try_attach_zip(inner, slot, data)? {
-                            // One-pass zip (phase 2): the same claim
-                            // discipline as 7z - only the FORMAT is
-                            // known yet; `one-pass` is claimed at
-                            // successful finish.
-                            self.shape.note(self.depth, SH_ZIP);
-                            self.chase_span(inner, slot, offset, data)?;
-                        } else if inner.protect_sources {
-                            // A supposed volume that isn't RAR: writing it
-                            // out plain would truncate the source file.
-                            let name = inner.slots[slot].name.clone();
-                            inner
-                                .slot_fallbacks
-                                .push((name, "not a RAR volume".to_string()));
-                            self.discard_slot(inner, slot);
-                            return Ok(Persist::No);
-                        } else {
-                            // No badge for a payload name: a `.cb7` is
-                            // not a 7z the post-pass will (or should)
-                            // open.
-                            if !payload_name && data.starts_with(b"7z\xbc\xaf\x27\x1c") {
-                                // A .7z the chase can't take (top level, a
-                                // multipart .001, gate off): it lands on
-                                // disk for the post-pass, and the badge
-                                // should say so rather than say nothing.
-                                self.shape.note(self.depth, SH_7Z | SH_MATERIALIZED);
-                            } else if self.depth == 0
-                                && data.starts_with(b"PK\x03\x04")
-                                && crate::zip::chase_eligible_name(&inner.slots[slot].name)
-                            {
-                                // Same for a zip the chase can't take
-                                // (gate off, too small). The name gate
-                                // keeps phase 0's rules: a `.cbz` or a
-                                // named non-zip never reads as packaging.
-                                // Still depth-0 only, unlike the 7z arm
-                                // above, because `from_bits` renders the
-                                // nested word as `inner-7z`/`inner-rar`
-                                // and has no zip token - a nested note
-                                // here would set bits nothing reads.
-                                // Giving nested zip a badge means adding
-                                // a persisted wire token plus dashboard
-                                // copy, which is its own piece of work.
-                                self.shape.note(self.depth, SH_ZIP | SH_MATERIALIZED);
+                        // The offset-0 sniff and the routing it picks
+                        // live in `routing::sniff_and_route`; the two
+                        // exits it cannot take under the lock come back
+                        // as `Sniffed` and are taken here.
+                        let sniffed = self.sniff_and_route(
+                            inner,
+                            slot,
+                            offset,
+                            data,
+                            &mut *jobs,
+                            &mut *fwd,
+                            repair,
+                            article_crc,
+                        )?;
+                        match sniffed {
+                            Sniffed::Routed { rar } => routed_rar |= rar,
+                            Sniffed::Parked => {
+                                drop(g);
+                                self.flush_pending_promote();
+                                return Ok(Persist::Held(Vec::new()));
                             }
-                            inner.slots[slot].mode = SlotMode::Plain;
-                            // The sniff LOOKED at offset 0 and found no
-                            // shape to map or chase - see `plain_by_sniff`.
-                            inner.slots[slot].plain_by_sniff = true;
-                            self.plain_job(inner, slot, offset, data, &mut *jobs)?;
+                            Sniffed::Discarded => return Ok(Persist::No),
                         }
                         self.drain_holds(inner, slot)?;
                     }
@@ -1582,6 +1647,23 @@ impl Extractor {
                         article_crc,
                     )?;
                 }
+                // TODO 211 (b): an alias feeds its head at the logical
+                // offset. `slot`/`offset` stay the PART's for everything
+                // below (jobs, forwards, the journal frags), which is
+                // what keeps the article's record in its own file's
+                // address space.
+                SlotMode::SplitPart => {
+                    routed_rar = true;
+                    self.split_forward_span(
+                        inner,
+                        slot,
+                        offset,
+                        data,
+                        Some((&mut *jobs, &mut *fwd)),
+                        repair,
+                        article_crc,
+                    )?;
+                }
                 // Chased slot (RAR or 7z): the span feeds the frontier
                 // buffer (RAM, budget-charged) - not on disk, so never
                 // journalable.
@@ -1590,22 +1672,51 @@ impl Extractor {
                 }
                 SlotMode::Discard => return Ok(Persist::No),
             }
+            // Held-bytes backpressure: one load against the water marks
+            // per article at the root (see `extract::park`).
+            self.park_reeval(inner)?;
             if !fwd.is_empty() || !inner.pending_fwd.is_empty() {
                 pending = std::mem::take(&mut inner.pending_fwd);
             }
             span_held = inner.span_held;
+            wait_spill = std::mem::take(&mut inner.defer_breach);
         }
         // The routing lock is down: a 7z part that joined its set above
         // can have its tail articles front-loaded now (the promote walk
         // takes locks up the chain and must not be called from under
         // one). Cheap and usually empty.
         self.flush_pending_promote();
+        // Drop-behind trim spills the routing above planned (this
+        // span's, or one an earlier error left queued): up to half the
+        // holds cap of pwrite, off the lock like the jobs below. FIRST
+        // among the fallible steps, so an error further down can never
+        // strand a queued spill - `spills_in_flight` counts it until
+        // it runs, and a stranded count would defer every later breach.
+        self.flush_pending_spills()?;
         // Candidate-password probe for parked encrypted slots (Increment
         // A) - KDF work, so off the lock; cadence-gated to a no-op lock
         // peek on the hot path.
         self.flush_pw_probe(false)?;
+        let mut in_place = in_place;
         for j in jobs.iter() {
             let part = &data[j.src_start..j.src_start + j.len];
+            // §94 A in-place replay: the piece's DERIVED destination is
+            // exactly where the journal says these bytes already are.
+            // Plain pwrites only - a crypto job's destination holds the
+            // plaintext of a ciphertext source, and a repair's bytes
+            // may differ from what is on disk - and the match is on the
+            // same (file name, offset) the journal's R frags are
+            // recorded from, below. Anything else falls through and
+            // writes.
+            if let Some(ip) = in_place.as_deref_mut()
+                && j.crypto.is_none()
+                && !j.repair
+                && ip.matches(j)
+            {
+                j.writer.note_covered(j.file_off, j.len as u64)?;
+                ip.covered += j.len as u64;
+                continue;
+            }
             match &j.crypto {
                 // The AES runs here, outside the routing lock, under the
                 // file's own crypto mutex.
@@ -1613,6 +1724,12 @@ impl Extractor {
                 Some(cs) => cs.ingest(&j.writer, j.file_off, part)?,
                 None => j.writer.write_at(j.file_off, part)?,
             }
+        }
+        // This span breached the cap while another thread's spill was
+        // still landing: hold the ARTICLE (not the lock) until it has,
+        // so arrivals cannot run the budget away during the write.
+        if wait_spill {
+            self.await_spills_settled();
         }
         // Owned forwards queued by the re-feed paths inside the lock
         // (drain_holds / reresolve) deliver now, then this span's own
@@ -1623,6 +1740,19 @@ impl Extractor {
         }
         let mut fwd_persist: Vec<Persist> = Vec::with_capacity(fwd.len());
         for f in fwd.iter() {
+            // The in-place source travels with the forward. With nested
+            // routing on, a store member the root maps is WRITTEN by
+            // the child extractor, and a source that stopped here would
+            // make every such resumed member write itself back: measured
+            // 0 of 100,000 bytes left in place on a single-volume store
+            // set before this rode along, 100,000 after. The forwarded
+            // piece starts `src_start` into this span, so its source
+            // offset does too; the child's count folds back in.
+            let mut child_ip = in_place.as_deref().map(|ip| InPlace {
+                file: ip.file,
+                off: ip.off.saturating_add(f.src_start as u64),
+                covered: 0,
+            });
             fwd_persist.push(self.deliver_routed(
                 slot,
                 offset + f.src_start as u64,
@@ -1631,7 +1761,11 @@ impl Extractor {
                 f.file_off,
                 &data[f.src_start..f.src_start + f.len],
                 f.repair,
+                child_ip.as_mut(),
             )?);
+            if let (Some(ip), Some(c)) = (in_place.as_deref_mut(), child_ip) {
+                ip.covered += c.covered;
+            }
         }
         // A child that parked a forwarded piece writes it inside ITS
         // OWN drain later: the article must be parked exactly like a
@@ -1660,6 +1794,31 @@ impl Extractor {
                 return Ok(Persist::No);
             }
         }
+        Ok(Self::compose_persist(
+            jobs,
+            fwd,
+            fwd_persist,
+            offset,
+            data.len() as u64,
+            span_held,
+        ))
+    }
+
+    /// Compose the article's journal verdict from the placements this
+    /// span produced: this level's queued writes, plus the fragments the
+    /// forwards' children reported back, folded into THIS volume's
+    /// address space. Journalable only when the fragments cover the whole
+    /// span; a partially held span returns its plain fragments so the
+    /// caller's drain can complete it later. Pure - no lock, no I/O.
+    /// Split out of `write_impl_scratched` (TODO 106 function ceiling).
+    fn compose_persist(
+        jobs: &[WriteJob],
+        fwd: &[FwdSpan],
+        fwd_persist: Vec<Persist>,
+        offset: u64,
+        span_len: u64,
+        span_held: bool,
+    ) -> Persist {
         // Spans that fed an in-stream-decrypted file journal as `D`
         // records (restore-by-re-encryption), never as `R` - a plain
         // copy of the plaintext into a volume file would rebuild
@@ -1722,11 +1881,11 @@ impl Extractor {
         for (f, p) in fwd.iter().zip(fwd_persist) {
             let (cfrags, child_plain) = match p {
                 Persist::No | Persist::Held(_) => {
-                    return Ok(if span_held {
+                    return if span_held {
                         held(plain_frags)
                     } else {
                         Persist::No
-                    });
+                    };
                 }
                 Persist::Placed(cfrags) => (cfrags, true),
                 // A nested plaintext-once output: the whole article's
@@ -1754,1142 +1913,29 @@ impl Extractor {
         let mut covered_to = offset;
         for f in &frags {
             if f.vol_off > covered_to {
-                return Ok(if span_held {
+                return if span_held {
                     held(plain_frags)
                 } else {
                     Persist::No
-                });
+                };
             }
             covered_to = covered_to.max(f.vol_off + f.len);
         }
-        if !frags.is_empty() && covered_to >= offset + data.len() as u64 {
-            Ok(if crypto_span {
+        if !frags.is_empty() && covered_to >= offset + span_len {
+            if crypto_span {
                 Persist::PlacedCrypto(frags)
             } else {
                 Persist::Placed(frags)
-            })
+            }
         } else if span_held {
-            Ok(held(plain_frags))
+            held(plain_frags)
         } else {
-            Ok(Persist::No)
-        }
-    }
-
-    /// Queue a plain write of the whole span (lock held; write happens
-    /// after it drops).
-    fn plain_job(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        offset: u64,
-        data: &[u8],
-        jobs: &mut Vec<WriteJob>,
-    ) -> io::Result<()> {
-        let w = self.ensure_plain_writer(inner, slot)?;
-        jobs.push(WriteJob {
-            writer: w,
-            file_off: offset,
-            src_start: 0,
-            len: data.len(),
-            crypto: None,
-            repair: false,
-        });
-        Ok(())
-    }
-
-    fn ensure_plain_writer(&self, inner: &mut Inner, slot: usize) -> io::Result<Arc<FileWriter>> {
-        if inner.slots[slot].writer.is_none() {
-            let s = &inner.slots[slot];
-            let base = if s.name.is_empty() {
-                format!("slot{slot:03}")
-            } else {
-                s.name.clone()
-            };
-            let mut fname = sanitize_filename(&base);
-            Self::claim_name(inner, slot, &mut fname);
-            let path = self.out_dir.join(&fname);
-            // The same two bounds as `inner_writer`, and for the same
-            // reason: with nested routing on (the default) a group's inner
-            // files are forwarded to the CHILD, so a non-archive inner
-            // file materializes HERE, at depth > 0, with the slot size the
-            // parent forwarded - i.e. the poster's declared
-            // `unpacked_size`. At level 0 the slot size comes from the NZB
-            // and is below the posted ceiling by construction, so the cap
-            // never binds there and preallocation is untouched.
-            let size = inner.slots[slot].size;
-            let cap = inner.limits.prealloc_cap();
-            let w = if self.resume {
-                FileWriter::create_resume_capped(&path, size, cap)?
-            } else {
-                FileWriter::create_capped(&path, size, cap)?
-            };
-            // Only a NESTED plain file is extraction output. Level 0's
-            // plain files are the downloaded volumes themselves, which the
-            // disk-path `BombGuardWriter` does not count either.
-            let w = if self.depth > 0 {
-                w.with_budget(inner.limits.budget.clone())
-            } else {
-                w
-            };
-            inner.slots[slot].writer = Some(Arc::new(w));
-        }
-        Ok(inner.slots[slot].writer.clone().unwrap())
-    }
-
-    /// Claim an output filename in the chain-shared set, disambiguating
-    /// on collision. Shared with nested children, so a child's plain file
-    /// can never silently overwrite (or be overwritten by) another
-    /// level's output of the same name.
-    fn claim_name(inner: &Inner, slot: usize, out: &mut String) {
-        let fold = inner.fold_names;
-        let mut names = inner.names_taken.lock_ok();
-        if names.insert(name_collision_key(fold, out)) {
-            return;
-        }
-        let mut n = 0usize;
-        loop {
-            let cand = if n == 0 {
-                format!("{slot:03}-{out}")
-            } else {
-                format!("{slot:03}-{n}-{out}")
-            };
-            if names.insert(name_collision_key(fold, &cand)) {
-                *out = cand;
-                return;
-            }
-            n += 1;
-        }
-    }
-
-    /// Plain write-through under the lock (fallback/drain paths where the
-    /// data is locally owned).
-    fn plain_span(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        offset: u64,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let w = self.ensure_plain_writer(inner, slot)?;
-        w.write_at(offset, data)?;
-        // A drained held span landing plain (spill/overflow/fallback
-        // during a drain): file offset == volume offset by definition.
-        // Direct-path fallback rewrites run with refeed_active false and
-        // stay unreported, keeping their deliberate refetch-on-resume.
-        if inner.refeed_active {
-            inner.late_placements.push((
-                slot,
-                Frag {
-                    file: w
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    file_off: offset,
-                    vol_off: offset,
-                    len: data.len() as u64,
-                },
-            ));
-        }
-        Ok(())
-    }
-
-    /// Deliver queued child forwards. Never called with the routing lock
-    /// held - each job re-resolves its destination in
-    /// [`Self::deliver_routed`], so a slot that fell back (or a child
-    /// slot a merge displaced) in any window still gets its bytes.
-    fn deliver_fwd(&self, pending: Vec<FwdJob>) -> io::Result<()> {
-        for j in pending {
-            let p = self.deliver_routed(
-                j.parent_slot,
-                j.vol_off,
-                &j.name,
-                j.size,
-                j.file_off,
-                &j.bytes,
-                j.repair,
-            )?;
-            // A re-fed (drained-hold) forward has no caller composing
-            // its Persist into an article record - surface a Placed
-            // result so the article that parked these bytes can still
-            // journal. PlacedCrypto stays unreported: a held article
-            // must never complete into an `R` record over
-            // plaintext-once bytes.
-            if j.refeed
-                && let Persist::Placed(cfrags) = p
-            {
-                let mut inner = self.inner.lock_ok();
-                for cf in cfrags {
-                    inner.late_placements.push((
-                        j.parent_slot,
-                        Frag {
-                            file: cf.file,
-                            file_off: cf.file_off,
-                            vol_off: j.vol_off + (cf.vol_off - j.file_off),
-                            len: cf.len,
-                        },
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Deliver one routed span to whatever destination the routing map
-    /// names NOW, re-resolving under the lock until the write has landed
-    /// somewhere still live. Between capture and delivery a group merge
-    /// can displace the child slot routing picked and abandon it - a
-    /// write into an abandoned slot is silently swallowed while the
-    /// span's bytes were already composed into the piece CRCs, so
-    /// delivering by stale slot index could let the finish gate vouch
-    /// for a hole. The loop is bounded by the number of merges (each
-    /// retry means the destination changed again), and duplicate
-    /// deliveries land on identical offsets (routing is deterministic),
-    /// so retries are harmless. Never called with the routing lock held.
-    #[allow(clippy::too_many_arguments)]
-    fn deliver_routed(
-        &self,
-        parent_slot: usize,
-        vol_off: u64,
-        name: &str,
-        size: u64,
-        file_off: u64,
-        bytes: &[u8],
-        repair: bool,
-    ) -> io::Result<Persist> {
-        enum Target {
-            Child(Arc<Extractor>, usize),
-            Writer(Arc<FileWriter>),
-            Done,
-        }
-        loop {
-            let tgt = {
-                let mut g = self.inner.lock_ok();
-                let inner = &mut *g;
-                match inner.slots[parent_slot].mode {
-                    SlotMode::Rar => match Self::dest_for(inner, parent_slot, name) {
-                        Some(Dest::Child(c, cs)) => Target::Child(c, cs),
-                        Some(Dest::Writer(w)) => Target::Writer(w),
-                        // The routed entry vanished while the slot still
-                        // maps (structurally unexpected): materialize the
-                        // slot rather than drop bytes the piece CRCs
-                        // already counted.
-                        None => {
-                            self.fallback_slot_or_group(
-                                inner,
-                                parent_slot,
-                                "routed span lost its destination",
-                            )?;
-                            if !matches!(inner.slots[parent_slot].mode, SlotMode::Discard) {
-                                self.plain_span(inner, parent_slot, vol_off, bytes)?;
-                            }
-                            Target::Done
-                        }
-                    },
-                    SlotMode::Plain | SlotMode::RarFallback => {
-                        self.plain_span(inner, parent_slot, vol_off, bytes)?;
-                        Target::Done
-                    }
-                    // A chase-eligible slot blocks on its FIRST entry, so
-                    // it can never have routed a forward while mapped -
-                    // nothing to deliver.
-                    SlotMode::Unknown
-                    | SlotMode::RarChase
-                    | SlotMode::SevenZ
-                    | SlotMode::Discard => Target::Done,
-                }
-            };
-            match tgt {
-                Target::Done => return Ok(Persist::No),
-                Target::Writer(w) => {
-                    w.write_at(file_off, bytes)?;
-                    return Ok(Persist::No);
-                }
-                Target::Child(c, cs) => {
-                    // No article CRC across the boundary: these are mapped
-                    // sub-ranges of OUR span, and the child's own article
-                    // boundaries are its own.
-                    let p = c.write_impl(cs, name, size, file_off, bytes, repair, None)?;
-                    // Promotion probe BEFORE re-taking our lock (child and
-                    // parent locks are never nested, in either order).
-                    let promote = c.stable_plain_writer(cs);
-                    let mut g = self.inner.lock_ok();
-                    let inner = &mut *g;
-                    match inner.slots[parent_slot].mode {
-                        SlotMode::Rar => {
-                            let live = matches!(
-                                Self::dest_for(inner, parent_slot, name),
-                                Some(Dest::Child(ref c2, cs2)) if Arc::ptr_eq(c2, &c) && cs2 == cs
-                            );
-                            if live {
-                                // The route still points at this child and
-                                // its slot is stably Plain: later articles
-                                // skip the whole ladder (Finding 4).
-                                if let Some(w) = promote
-                                    && let Some(gk) = inner.slots[parent_slot].group.clone()
-                                    && let Some(grp) = inner.groups.get_mut(&gk)
-                                    && grp.routed.get(name) == Some(&cs)
-                                {
-                                    grp.routed_plain.insert(name.to_string(), (cs, w));
-                                }
-                                // The child parked (some of) this forward
-                                // and will write it inside ITS drain,
-                                // where only child-space placements
-                                // exist: record the translation window
-                                // now, and surface any partial child
-                                // placements (already on disk) so the
-                                // parked article can complete.
-                                if let Persist::Held(cfrags) = &p {
-                                    inner.fwd_windows.push(FwdWindow {
-                                        parent_slot,
-                                        parent_vol_off: vol_off,
-                                        child_slot: cs,
-                                        child_off: file_off,
-                                        len: bytes.len() as u64,
-                                    });
-                                    for cf in cfrags {
-                                        inner.late_placements.push((
-                                            parent_slot,
-                                            Frag {
-                                                file: cf.file.clone(),
-                                                file_off: cf.file_off,
-                                                vol_off: vol_off + (cf.vol_off - file_off),
-                                                len: cf.len,
-                                            },
-                                        ));
-                                    }
-                                }
-                                return Ok(p);
-                            }
-                            // Displaced mid-delivery - resolve again.
-                        }
-                        SlotMode::Plain | SlotMode::RarFallback => {
-                            self.plain_span(inner, parent_slot, vol_off, bytes)?;
-                            return Ok(Persist::No);
-                        }
-                        _ => return Ok(Persist::No),
-                    }
-                }
-            }
-        }
-    }
-
-    /// Take and deliver any queued child forwards (public entry points
-    /// that may have re-fed holds under the lock call this after it
-    /// drops).
-    /// Run the tail-prefetch promotes queued under the routing lock.
-    /// Off-lock by construction: `promote_file` walks up the chain
-    /// taking one level's lock at a time, so calling it from under this
-    /// level's own lock self-deadlocks.
-    fn flush_pending_promote(&self) {
-        let queued = std::mem::take(&mut self.inner.lock_ok().pending_promote);
-        for (slot, spans, urgent) in queued {
-            self.promote_slot_spans(slot, &spans, urgent);
-        }
-    }
-
-    fn flush_pending_fwd(&self) -> io::Result<()> {
-        self.flush_pending_promote();
-        let pending = std::mem::take(&mut self.inner.lock_ok().pending_fwd);
-        if pending.is_empty() {
-            return Ok(());
-        }
-        self.deliver_fwd(pending)
-    }
-
-    /// Keep the parts of a span not covered by any data area (header/meta
-    /// bytes below the parse cursor) for byte-exact reconstruction.
-    /// Returns the bytes newly stashed; they are charged to the shared
-    /// holds budget here and released wherever the stash is dropped.
-    fn retain_header_bytes(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        offset: u64,
-        data: &[u8],
-    ) -> usize {
-        let s = &mut inner.slots[slot];
-        let Some(m) = s.mapper.as_ref() else { return 0 };
-        let mut covered: Vec<(u64, u64)> = m
-            .map_span(offset, data.len() as u64)
-            .into_iter()
-            .map(|(_, _, span_off, len)| (span_off, span_off + len))
-            .collect();
-        covered.sort_unstable();
-        let mut pos = 0u64;
-        let mut keep: Vec<(u64, u64)> = Vec::new();
-        for (cs, ce) in covered {
-            if cs > pos {
-                keep.push((pos, cs));
-            }
-            pos = pos.max(ce);
-        }
-        if pos < data.len() as u64 {
-            keep.push((pos, data.len() as u64));
-        }
-        let mut stashed = 0usize;
-        for (ks, ke) in keep {
-            let abs_s = offset + ks;
-            if abs_s >= m.mapped_through() {
-                continue; // not header - just not-yet-mapped data
-            }
-            let abs_e = (offset + ke).min(m.mapped_through());
-            if abs_e > abs_s {
-                let part = data[ks as usize..(abs_e - offset) as usize].to_vec();
-                stashed += part.len();
-                s.header_spans.push((abs_s, HoldSpan::Ram(part)));
-            }
-        }
-        inner.budget.add(stashed);
-        stashed
-    }
-
-    /// Unlink a slot's own file and release the name it claimed. Used
-    /// when a trimmed 7z chase SUCCEEDS: the spilled prefix is a
-    /// truncated archive whose payload already shipped by another route.
-    fn drop_slot_file(inner: &mut Inner, slot: usize) {
-        let Some(w) = inner.slots[slot].writer.take() else {
-            return;
-        };
-        let _ = std::fs::remove_file(&w.path);
-        let name = w
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        inner
-            .names_taken
-            .lock()
-            .unwrap()
-            .remove(&name_collision_key(inner.fold_names, &name));
-    }
-
-    /// Ask the chain above to front-load the outer articles carrying
-    /// `spans` of this slot's byte space (7z tail prefetch). A slot's
-    /// byte space IS its level-N file's byte space, and that file is an
-    /// entry of the parent's groups - so the parent handles it as a
-    /// file promote. At the ROOT there is no parent and none is needed:
-    /// the slot is a posted file already, so it goes straight to this
-    /// level's own hook.
-    fn promote_slot_spans(&self, slot: usize, spans: &[(u64, u64)], urgent: bool) {
-        let (name, size) = {
-            let inner = self.inner.lock_ok();
-            (inner.slots[slot].name.clone(), inner.slots[slot].size)
-        };
-        if name.is_empty() || size == 0 {
-            return;
-        }
-        let name = sanitize_filename(&name);
-        match self.parent.upgrade() {
-            Some(p) => p.promote_file(&name, size, spans, urgent),
-            // The ROOT: a slot here is a POSTED file, so its byte space
-            // is already the byte space the installed hook resolves to
-            // articles - no translation left to do, hand it straight
-            // over. This used to be `else { return }`, which silently
-            // no-opped, which is why a top-level 7z never got its tail
-            // front-loaded even after the depth guard came off.
-            None => self.promote_file(&name, size, spans, urgent),
-        }
-    }
-
-    /// Promote byte spans of file `name` (an inner file of one of THIS
-    /// extractor's groups): the root hands them to the installed hook
-    /// (the daemon's seek/promote ladder resolves them to articles);
-    /// a level below the root translates them to its own slot ranges
-    /// via [`Self::map_output_range`] and recurses upward - the §3b
-    /// map_to_root composition. All-store levels only by construction:
-    /// a chased (compressed) level yields no offset mapping, so the
-    /// promote quietly stops there. Never called with any routing lock
-    /// held; each level takes only its own lock, one at a time.
-    fn promote_file(&self, name: &str, size: u64, spans: &[(u64, u64)], urgent: bool) {
-        let hook = self.inner.lock_ok().promote.clone();
-        if let Some(h) = hook {
-            h(name, size, spans, urgent);
-            return;
-        }
-        let Some(p) = self.parent.upgrade() else {
-            return;
-        };
-        let mut per_slot: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
-        for &(s, e) in spans {
-            if s >= e {
-                continue;
-            }
-            for (slot, vs, ve, _) in self.map_output_range(name, s, e) {
-                if vs < ve {
-                    per_slot.entry(slot).or_default().push((vs, ve));
-                }
-            }
-        }
-        for (slot, ranges) in per_slot {
-            let (sname, ssize) = {
-                let inner = self.inner.lock_ok();
-                (inner.slots[slot].name.clone(), inner.slots[slot].size)
-            };
-            if sname.is_empty() {
-                continue;
-            }
-            p.promote_file(&sanitize_filename(&sname), ssize, &ranges, urgent);
-        }
-    }
-
-    /// Base offset of (slot, entry) within its inner file: 0 for pieces
-    /// that start a file; group-resolved for split continuations.
-    fn base_for(inner: &Inner, slot: usize, ei: usize) -> Option<u64> {
-        let m = inner.slots[slot].mapper.as_ref()?;
-        if !m.entries[ei].split_before {
-            return Some(0);
-        }
-        let key = inner.slots[slot].group.as_ref()?;
-        inner.groups.get(key)?.bases.get(&(slot, ei)).copied()
-    }
-
-    /// Route the mapped parts of a span into inner files or the nested
-    /// child (queued when the caller collects a sink, inline/pending
-    /// otherwise); hold the rest.
-    fn extract_span(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        offset: u64,
-        data: &[u8],
-        sink: Option<(&mut Vec<WriteJob>, &mut Vec<FwdSpan>)>,
-        repair: bool,
-        article_crc: Option<u32>,
-    ) -> io::Result<()> {
-        // Reuse the Inner-owned hit buffer: this runs under the routing
-        // lock for every article, and the per-article Vec was measurable
-        // allocator traffic. A re-entrant call (fallback re-feed) takes
-        // an empty fresh vector and simply allocates like before.
-        let mut hits = std::mem::take(&mut inner.map_scratch);
-        {
-            let m = inner.slots[slot].mapper.as_ref().unwrap();
-            m.map_span_into(offset, data.len() as u64, &mut hits);
-        }
-        let result =
-            self.extract_span_hits(inner, slot, offset, data, sink, repair, article_crc, &hits);
-        hits.clear();
-        inner.map_scratch = hits;
-        result
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn extract_span_hits(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        offset: u64,
-        data: &[u8],
-        mut sink: Option<(&mut Vec<WriteJob>, &mut Vec<FwdSpan>)>,
-        repair: bool,
-        article_crc: Option<u32>,
-        hits: &[(usize, u64, u64, u64)],
-    ) -> io::Result<()> {
-        // The yEnc decode already computed and CHECKED this article's
-        // CRC32 over exactly these bytes. When the article maps to a
-        // single STORE data range covering the whole buffer, that value
-        // IS the CRC the stored-file composition needs, so the second
-        // scan over ~700 KiB is pure waste (measured on a real corpus:
-        // 98.75% of STORE payload bytes qualify; the exceptions are the
-        // header-bearing first article, the trailing article, volume and
-        // member boundaries, and multi-entry spans).
-        //
-        // Every reuse condition is checked, not assumed: the CRC exists
-        // and matched (`article_crc` is None otherwise, including on the
-        // bare-LF scalar path and under delegated verification), this is
-        // not a repair rewrite (its bytes deliberately DIFFER from what
-        // composed earlier), the entry is `checkable` (unencrypted store,
-        // not a directory) at the use site, and the range is untouched -
-        // `add_run` refuses an overlap and the hash path takes over. A
-        // single hit spanning the whole buffer is what makes the mapped
-        // range byte-for-byte the decoded output.
-        let single_whole_hit = matches!(
-            hits,
-            [(_, _, 0, len)] if *len == data.len() as u64
-        );
-        let whole_article = single_whole_hit && !repair && article_crc.is_some();
-        let mut covered_end = offset;
-        for &(ei, piece_off, span_off, len) in hits {
-            covered_end = covered_end.max(offset + span_off + len);
-            let base = match Self::base_for(inner, slot, ei) {
-                Some(b) => b,
-                None => {
-                    let part = data[span_off as usize..(span_off + len) as usize].to_vec();
-                    inner.budget.add(part.len());
-                    if !inner.refeed_active {
-                        inner.span_held = true;
-                    }
-                    inner.slots[slot]
-                        .holds
-                        .push((offset + span_off, HoldSpan::Ram(part)));
-                    if inner.budget.over() && !self.page_out_holds(inner) {
-                        // Write the whole article through after the
-                        // demote, exactly as the sibling demote routes do
-                        // (header-stash, blocker, joined-fallen-group).
-                        // This `return` is from INSIDE the hits loop, so
-                        // every remaining hit of a multi-entry span was
-                        // otherwise never queued, forwarded or held - and
-                        // the compensating whole-span rewrite in
-                        // write_impl_scratched is gated on there being
-                        // queued work, which there is not. The volume
-                        // then materialized with a sparse hole that
-                        // preads as zeros and failed the inner file's
-                        // CRC. "A lost span is silent corruption" is
-                        // stated a few hundred lines up; this was the one
-                        // route that broke it. plain_span writes at the
-                        // volume offset, which is what a materialized
-                        // volume wants; the already-drained holds rewrite
-                        // identical bytes, which the other routes accept
-                        // too. The Discard check keeps protect_sources
-                        // from opening a writer over a source file.
-                        self.fallback_slot_or_group(inner, slot, "held-bytes cap")?;
-                        if matches!(inner.slots[slot].mode, SlotMode::Discard) {
-                            return Ok(());
-                        }
-                        return self.plain_span(inner, slot, offset, data);
-                    }
-                    continue;
-                }
-            };
-            // POD fields only - the entry NAME stays in the mapper and the
-            // routing lookups borrow it in place (route_dest/crypto_for key
-            // by (slot, ei)). Cloning it here cost a String per article
-            // under the routing lock; only the child-forward arms, which
-            // queue owned work, still materialize one.
-            let (total, encrypted, checkable) = {
-                let m = inner.slots[slot].mapper.as_ref().unwrap();
-                let e = &m.entries[ei];
-                (
-                    e.unpacked_size,
-                    e.encrypted,
-                    matches!(e.method, Method::Store) && !e.encrypted && !e.is_dir,
-                )
-            };
-            // Compose the routed bytes' CRC32 per piece for the
-            // finish-time check against the header CRC (encrypted
-            // entries have their own post-decrypt check). Nested levels
-            // always compose; level 0's PAR2 only vouches for the outer
-            // bytes AS POSTED, so the final store payload gets the same
-            // treatment under the verify_output_crc gate (default on;
-            // `NZBFAST_NO_OUTPUT_CRC=1` restores the skip). A repair
-            // span overwrites: its bytes REPLACE a range that may have
-            // composed wire-damaged bytes earlier, and clipping it as a
-            // duplicate would keep the stale CRC while the file heals.
-            if (self.depth > 0 || inner.verify_output_crc) && checkable {
-                let part = &data[span_off as usize..(span_off + len) as usize];
-                let runs = inner.slots[slot].piece_crcs.entry(ei).or_default();
-                if repair {
-                    runs.overwrite(piece_off, part);
-                } else if !(whole_article && runs.add_run(piece_off, len, article_crc.unwrap())) {
-                    // Not the exact-article case, or the range was already
-                    // (partly) composed: hash the routed bytes as before.
-                    runs.add(piece_off, part);
-                }
-            }
-            match self.route_dest(inner, slot, ei, total, encrypted)? {
-                Dest::Writer(w) => {
-                    // Plaintext-once: an encrypted store span decrypts at
-                    // write time instead of assembling ciphertext for the
-                    // finish pass. The state needs the HEAD entry's crypt
-                    // parameters; a continuation piece racing its head
-                    // volume's headers holds like an unresolved base.
-                    // An output that is already plaintext-once must STAY
-                    // plaintext-once, whatever the live password cell now
-                    // holds. The gate re-reads `inner.password` per span,
-                    // so a mid-download re-key - `apply_probed_password`
-                    // overwrites it unconditionally, and the probe is
-                    // installed on every job - flipped it false for a
-                    // file already being decrypted in-stream (one job may
-                    // legitimately carry two encrypted sets with
-                    // different passwords). Later spans then took the
-                    // `crypto == None` path and pwrote RAW CIPHERTEXT at
-                    // the offsets plaintext belonged at. Consulting the
-                    // writer-keyed state FIRST is strictly narrowing: it
-                    // changes behaviour only for a writer whose password
-                    // was already check-verified before its first byte
-                    // was written.
-                    let existing = Self::crypto_of(inner, &w);
-                    let crypto = if existing.is_some() {
-                        existing
-                    } else if encrypted
-                        && inner.instream_decrypt
-                        && Self::instream_decrypt_allowed(inner, slot, ei, &w)
-                    {
-                        match Self::crypto_for(inner, slot, ei, &w) {
-                            Some(cs) => {
-                                // Plaintext-once is live for this set:
-                                // the badge says "one-pass", not
-                                // "unlocked at the end".
-                                self.shape.note(self.depth, SH_ENC_INSTREAM);
-                                Some(cs)
-                            }
-                            None => {
-                                let part =
-                                    data[span_off as usize..(span_off + len) as usize].to_vec();
-                                inner.budget.add(part.len());
-                                if !inner.refeed_active {
-                                    inner.span_held = true;
-                                }
-                                inner.slots[slot]
-                                    .holds
-                                    .push((offset + span_off, HoldSpan::Ram(part)));
-                                if inner.budget.over() && !self.page_out_holds(inner) {
-                                    // Same write-through as the hold arm
-                                    // above - this return also leaves the
-                                    // rest of a multi-entry span
-                                    // unwritten. See the comment there.
-                                    self.fallback_slot_or_group(inner, slot, "held-bytes cap")?;
-                                    if matches!(inner.slots[slot].mode, SlotMode::Discard) {
-                                        return Ok(());
-                                    }
-                                    return self.plain_span(inner, slot, offset, data);
-                                }
-                                continue;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    // C1: an encrypted span routing WITHOUT CryptoState
-                    // is the ciphertext route, decided HERE, under the
-                    // lock - the pwrite runs after it drops, so
-                    // `written()` lags the commitment. Latch at enqueue
-                    // or a racing sibling span latches plaintext-once
-                    // over it (instream_decrypt_allowed rule 2).
-                    if encrypted
-                        && crypto.is_none()
-                        && let Some(k) = w.path.file_name()
-                    {
-                        inner
-                            .ciphertext_files
-                            .insert(k.to_string_lossy().into_owned());
-                    }
-                    match sink.as_mut() {
-                        Some((jobs, _)) => jobs.push(WriteJob {
-                            writer: w,
-                            file_off: base + piece_off,
-                            src_start: span_off as usize,
-                            len: len as usize,
-                            crypto,
-                            repair,
-                        }),
-                        // Under-the-lock re-feed (drain_holds/reresolve):
-                        // cold path, so the AES here is acceptable.
-                        None => {
-                            let part = &data[span_off as usize..(span_off + len) as usize];
-                            match &crypto {
-                                Some(cs) if repair => cs.patch(&w, base + piece_off, part)?,
-                                Some(cs) => cs.ingest(&w, base + piece_off, part)?,
-                                None => {
-                                    w.write_at(base + piece_off, part)?;
-                                    // A drained held span landing in an
-                                    // inner file: report it, so the
-                                    // article that parked these bytes
-                                    // (Persist::Held) still journals.
-                                    // Plain writes only - a crypto
-                                    // placement must never complete
-                                    // into an `R` record.
-                                    if inner.refeed_active {
-                                        inner.late_placements.push((
-                                            slot,
-                                            Frag {
-                                                file: w
-                                                    .path
-                                                    .file_name()
-                                                    .unwrap_or_default()
-                                                    .to_string_lossy()
-                                                    .into_owned(),
-                                                file_off: base + piece_off,
-                                                vol_off: offset + span_off,
-                                                len,
-                                            },
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Dest::Child(..) => {
-                    let name = Self::entry_name(inner, slot, ei).to_string();
-                    match sink.as_mut() {
-                        Some((_, fwd)) => fwd.push(FwdSpan {
-                            name,
-                            size: total,
-                            file_off: base + piece_off,
-                            src_start: span_off as usize,
-                            len: len as usize,
-                            repair,
-                        }),
-                        // Under-the-lock re-feed: the child cannot be called
-                        // here (it defers pwrites behind its own lock), so
-                        // queue an owned copy for flush_pending_fwd. Cold
-                        // paths only - the hot write path always has a sink.
-                        None => inner.pending_fwd.push(FwdJob {
-                            parent_slot: slot,
-                            vol_off: offset + span_off,
-                            name,
-                            size: total,
-                            file_off: base + piece_off,
-                            bytes: data[span_off as usize..(span_off + len) as usize].to_vec(),
-                            repair,
-                            refeed: inner.refeed_active,
-                        }),
-                    }
-                }
-            }
-            inner.extracted_bytes += len;
-        }
-        // Anything past the mapped region: hold until headers advance.
-        let m = inner.slots[slot].mapper.as_ref().unwrap();
-        let span_end = offset + data.len() as u64;
-        let unmapped_from = covered_end.max(m.mapped_through()).max(offset);
-        if unmapped_from < span_end && !m.complete {
-            let part = data[(unmapped_from - offset) as usize..].to_vec();
-            inner.budget.add(part.len());
-            if !inner.refeed_active {
-                inner.span_held = true;
-            }
-            inner.slots[slot]
-                .holds
-                .push((unmapped_from, HoldSpan::Ram(part)));
-            if inner.budget.over() && !self.page_out_holds(inner) {
-                return self.fallback_slot_or_group(inner, slot, "held-bytes cap");
-            }
-        }
-        Ok(())
-    }
-
-    /// The in-stream decrypt state for entry `name`'s output (keyed by
-    /// the writer's on-disk filename), created on first touch from the
-    /// HEAD entry's crypt parameters. None while the head volume's
-    /// headers have not been seen (the caller holds the span) or when no
-    /// usable key exists - the latter cannot normally happen, because an
-    /// encrypted entry only maps after the stored password check passed.
-    /// The RAW entry name behind `(slot, ei)` - the routing key. Borrowed
-    /// in place: the article hot path must not clone a String per span.
-    fn entry_name(inner: &Inner, slot: usize, ei: usize) -> &str {
-        &inner.slots[slot].mapper.as_ref().unwrap().entries[ei].name
-    }
-
-    /// The destination for `slot`'s view of inner file `name` - decided
-    /// once per (group, name) and sticky thereafter, so write-side routing
-    /// and read-side delegation always agree. Non-encrypted files route
-    /// into the nested child (whose offset-0 sniff classifies them: RAR
-    /// store maps on, everything else lands as a plain file, exactly the
-    /// single-level output). Encrypted entries stay on the direct writer
-    /// path - the ciphertext-at-store-offsets assembly and the finish
-    /// decrypt own that lifecycle.
-    fn route_dest(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        ei: usize,
-        total: u64,
-        encrypted: bool,
-    ) -> io::Result<Dest> {
-        // Group identity is the RAW entry name, not its sanitized form: two
-        // distinct archive entries whose names sanitize alike (e.g. "a/b.txt"
-        // and "a_b.txt" both -> "a_b.txt") must get SEPARATE child slots and
-        // writers, or the second silently overwrites/interleaves the first at
-        // offset 0. The same raw name across split volumes still maps to one
-        // output (the intended "one inner file, many pieces" case). The
-        // sanitized form is used only to derive the on-disk filename, in
-        // inner_writer/claim_name.
-        // Reaching here means the fast path owns this inner file - its
-        // bytes go straight to their destination and the volumes never
-        // land. That is what "one-pass" on the badge means.
-        //
-        // This runs per span under the routing lock: the lookups below
-        // borrow the group key and entry name in place (cloning them cost
-        // two Strings per article); only the once-per-file route insert
-        // owns anything.
-        self.shape.note(self.depth, SH_ONE_PASS);
-        let mut route_new = None;
-        if let Some(gk) = inner.slots[slot].group.as_ref() {
-            let key = Self::entry_name(inner, slot, ei);
-            // Promoted plain child: write straight to its file. The route
-            // still exists in `routed` for fallback/finish; only the hot
-            // path skips the child extractor.
-            // `!encrypted` is load-bearing, not belt-and-braces. Under the
-            // pre-promotion ladder a name in `routed` returned Dest::Child,
-            // and the Child arm has no crypto handling at all, so an
-            // encrypted span could never reach a decrypt path through a
-            // routed name. Promotion turns the same name into Dest::Writer,
-            // which DOES run the in-stream decrypt arm (instream_decrypt
-            // defaults on). An archive where one raw name appears as a plain
-            // STORE piece in one volume and an encrypted one in another would
-            // then have the parent create a CryptoState keyed by a
-            // child-owned filename, journal E/K/T records for a file it does
-            // not own, and AES-decrypt into the child's plain output. Falling
-            // through to the Child arm keeps the old structural exclusion.
-            if !encrypted
-                && let Some((_, w)) = inner.groups.get(gk).and_then(|g| g.routed_plain.get(key))
-            {
-                return Ok(Dest::Writer(Arc::clone(w)));
-            }
-            if let Some(&cs) = inner.groups.get(gk).and_then(|g| g.routed.get(key)) {
-                let c = inner.child.clone().expect("routed name without a child");
-                return Ok(Dest::Child(c, cs));
-            }
-            let already_written = inner
-                .groups
-                .get(gk)
-                .is_some_and(|g| g.out_names.contains_key(key));
-            if !already_written && inner.nested_on && !encrypted {
-                route_new = Some((gk.clone(), key.to_string()));
-            }
-        }
-        if let Some((gk, key)) = route_new {
-            let child = self.ensure_child(inner);
-            let cs = child.alloc_slot();
-            inner.groups.get_mut(&gk).unwrap().routed.insert(key, cs);
-            // §156.1: a member routed AFTER a terminal verdict on one of
-            // its group's volumes still inherits the loss mark - the
-            // hole lives inside this archive, wherever it routes.
-            if inner.groups[&gk]
-                .slots
-                .iter()
-                .any(|&s| inner.slots[s].article_lost)
-            {
-                child.mark_child_slot_lost(cs);
-            }
-            return Ok(Dest::Child(child, cs));
-        }
-        Ok(Dest::Writer(self.inner_writer(inner, slot, ei, total)?))
-    }
-
-    /// The output writer for `name` as seen by `slot`'s group. Output
-    /// files are group-owned: two archives in one NZB that reuse an inner
-    /// filename each get their own file (the second is disambiguated),
-    /// instead of interleaving writes into one writer at conflicting
-    /// offsets - inner files are not PAR2-covered, so that corruption was
-    /// silent and deterministic.
-    fn inner_writer(
-        &self,
-        inner: &mut Inner,
-        slot: usize,
-        ei: usize,
-        total: u64,
-    ) -> io::Result<Arc<FileWriter>> {
-        // Keyed on the RAW name (see route_dest); the sanitized form is only
-        // the on-disk filename. Distinct raw names that sanitize alike get
-        // distinct writers (claim_name disambiguates the on-disk name).
-        //
-        // The existing-writer lookups run per span under the routing lock
-        // (encrypted sets never route to a child, so THIS is their hot
-        // path) and borrow the key and group in place; only the
-        // once-per-file creation below owns strings.
-        let key = Self::entry_name(inner, slot, ei);
-        match inner.slots[slot].group.as_ref() {
-            Some(gk) => {
-                if let Some(out) = inner.groups.get(gk).and_then(|g| g.out_names.get(key))
-                    && let Some(w) = inner.inner_writers.get(out)
-                {
-                    return Ok(w.clone());
-                }
-            }
-            None => {
-                if let Some(w) = inner.inner_writers.get(sanitize_filename(key).as_str()) {
-                    return Ok(w.clone());
-                }
-            }
-        }
-        let key = key.to_string();
-        let fname = sanitize_filename(&key);
-        let gkey = inner.slots[slot].group.clone();
-        let mut out = fname;
-        Self::claim_name(inner, slot, &mut out);
-        let path = self.out_dir.join(&out);
-        // `total` is the entry's declared `unpacked_size` - an untrusted
-        // header vint. It stays the writer's `size` (resume truncation and
-        // the reported extracted size both depend on it) but it does NOT
-        // get to reserve the disk: the reservation is capped at the
-        // chain's ceiling, and the extracted bytes are charged against the
-        // chain's bomb budget. See [`Limits`].
-        let cap = inner.limits.prealloc_cap();
-        let budget = inner.limits.budget.clone();
-        let w = Arc::new(
-            if self.resume {
-                FileWriter::create_resume_capped(&path, total, cap)?
-            } else {
-                FileWriter::create_capped(&path, total, cap)?
-            }
-            .with_budget(budget),
-        );
-        inner.inner_writers.insert(out.clone(), w.clone());
-        if let Some(gk) = gkey
-            && let Some(g) = inner.groups.get_mut(&gk)
-        {
-            g.out_names.insert(key, out);
-        }
-        Ok(w)
-    }
-
-    /// Resolve `slot`'s view of an inner-file name to its destination -
-    /// the read-side mirror of `route_dest`, consulting the group's
-    /// routed map first so delegation always agrees with routing.
-    fn dest_for(inner: &Inner, slot: usize, entry_name: &str) -> Option<Dest> {
-        // Keyed on the RAW name, matching route_dest/inner_writer.
-        if let Some(gk) = inner.slots[slot].group.as_ref()
-            && let Some(g) = inner.groups.get(gk)
-        {
-            if let Some(&cs) = g.routed.get(entry_name) {
-                return inner.child.clone().map(|c| Dest::Child(c, cs));
-            }
-            if let Some(out) = g.out_names.get(entry_name) {
-                return inner.inner_writers.get(out).cloned().map(Dest::Writer);
-            }
-        }
-        inner
-            .inner_writers
-            .get(&sanitize_filename(entry_name))
-            .cloned()
-            .map(Dest::Writer)
-    }
-
-    /// Unlink and forget every output file a group owns (fallback: the
-    /// bytes were reconstructed into the volume files, and a sparse
-    /// half-written "extracted" file would masquerade as output). Only
-    /// files in the group's own `out_names` are touched - a file another
-    /// group is still extracting is structurally unreachable from here.
-    /// Routed inner files are abandoned in the child by the same
-    /// ownership argument: the child slots drained here belong to this
-    /// group alone.
-    fn delete_group_out_files(inner: &mut Inner, key: &str) {
-        let (outs, routed): (Vec<String>, Vec<usize>) = match inner.groups.get_mut(key) {
-            Some(g) => {
-                g.routed_plain.clear();
-                (
-                    g.out_names.drain().map(|(_, v)| v).collect(),
-                    g.routed.drain().map(|(_, v)| v).collect(),
-                )
-            }
-            None => return,
-        };
-        for out in outs {
-            if let Some(w) = inner.inner_writers.remove(&out) {
-                let _ = std::fs::remove_file(&w.path);
-                inner
-                    .names_taken
-                    .lock()
-                    .unwrap()
-                    .remove(&name_collision_key(inner.fold_names, &out));
-            }
-        }
-        if let Some(c) = inner.child.clone() {
-            for cs in routed {
-                c.abandon_slot(cs);
-            }
-        }
-    }
-
-    /// Parent-group fallback support: this routed slot's bytes were (or
-    /// will be) reconstructed into the parent's materialized volumes, so
-    /// drop everything it produced - holds, its own file, and the group
-    /// outputs once every member slot is abandoned - and swallow all
-    /// future spans. Silent by design: the parent already reported the
-    /// fallback, a child-side entry would double-count it.
-    fn abandon_slot(&self, slot: usize) {
-        let mut g = self.inner.lock_ok();
-        let inner = &mut *g;
-        if matches!(inner.slots[slot].mode, SlotMode::Discard) {
-            return;
-        }
-        let holds = std::mem::take(&mut inner.slots[slot].holds);
-        for (_, span) in &holds {
-            Self::uncharge_span(inner, span);
-        }
-        inner.slots[slot].pre_bytes = 0;
-        let headers = std::mem::take(&mut inner.slots[slot].header_spans);
-        for (_, span) in &headers {
-            Self::uncharge_span(inner, span);
-        }
-        inner.slots[slot].piece_crcs = HashMap::new();
-        if let Some(ch) = inner.slots[slot].chase.take() {
-            inner.budget.sub(ch.charged);
-            ch.buf.abort("slot abandoned");
-        }
-        // An abandoned 7z chase dies with the slot: buffer already
-        // aborted above (the worker exits on its next read), and its
-        // partial sink outputs go too. The sink-open path re-checks the
-        // slot's mode under this lock, so no NEW sink can appear after.
-        // The ctl stays in the slot so sevenz_finish / Drop still find
-        // and join the worker.
-        if let Some(ctl) = inner.slots[slot].sevenz.clone() {
-            self.sevenz_abandon_sinks(inner, &ctl);
-        }
-        // No mapper means finish() sees neither holds nor an incomplete
-        // parse here - an abandoned slot must not read as a fallback.
-        inner.slots[slot].mapper = None;
-        if let Some(w) = inner.slots[slot].writer.take() {
-            let _ = std::fs::remove_file(&w.path);
-            let name = w
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            inner
-                .names_taken
-                .lock()
-                .unwrap()
-                .remove(&name_collision_key(inner.fold_names, &name));
-        }
-        inner.slots[slot].mode = SlotMode::Discard;
-        if let Some(key) = inner.slots[slot].group.clone() {
-            let all_gone = inner.groups.get(&key).is_some_and(|g| {
-                g.slots
-                    .iter()
-                    .all(|&si| matches!(inner.slots[si].mode, SlotMode::Discard))
-            });
-            if all_gone {
-                // The group's chase (if any) dies with its last slot -
-                // the worker stops, partial sink outputs go too.
-                if let Some(ctl) = inner.groups.get(&key).and_then(|g| g.chase.clone()) {
-                    self.chase_teardown(inner, &ctl, "group abandoned");
-                }
-                Self::delete_group_out_files(inner, &key);
-            }
-        }
-    }
-
-    /// Follow the alias chain from an inner-file name to the canonical
-    /// group key that owns it (itself when unlinked).
-    fn canon_key(inner: &Inner, name: &str) -> String {
-        let mut k = name;
-        for _ in 0..64 {
-            match inner.alias.get(k) {
-                Some(next) if next != k => k = next,
-                _ => break,
-            }
-        }
-        k.to_string()
-    }
-
-    /// The slot's writer, if it has stably classified as a plain file:
-    /// mode Plain, writer created, no held spans, no chase or 7z engine.
-    /// Plain is terminal for a slot, so a caller may cache the writer
-    /// (Finding 4); takes only OUR lock, so callers must not hold any
-    /// other extractor's lock (parent<->child nesting deadlocks).
-    fn stable_plain_writer(&self, slot: usize) -> Option<Arc<FileWriter>> {
-        let inner = self.inner.lock_ok();
-        let s = inner.slots.get(slot)?;
-        if s.mode == SlotMode::Plain
-            && s.holds.is_empty()
-            && s.chase.is_none()
-            && s.sevenz.is_none()
-        {
-            s.writer.clone()
-        } else {
-            None
+            Persist::No
         }
     }
 
     /// Poison-tolerant lock acquisition for the READ-ONLY accessors
-    /// (`read_at` / `covered` / `covered_intervals` / `open_stream` /
+    /// (`read_at` / `covered` / `covered_intervals` /
     /// `writers_snapshot` / `map_output_range`). The daemon's stream
     /// server and verifier call these concurrently with the decode
     /// threads, so a single panic on a thread holding the routing lock
@@ -2922,14 +1968,14 @@ impl Extractor {
     /// `Repair is not possible`). Nested levels wrote into the same tree and
     /// pin it too, hence the recursion.
     ///
-    /// Needed because [`finish`] syncs the writers but KEEPS them: the
+    /// Needed because [`Self::finish`] syncs the writers but KEEPS them: the
     /// extractor holds output handles for the streaming endpoint's benefit,
-    /// and it stays alive well past completion (the daemon leaves it installed
-    /// for post-completion streaming, and the fetch task holds its own `Arc`
-    /// until it returns). So the handles are still there at repair time, which
-    /// runs BEFORE `finish` - and that ordering is why these park rather than
-    /// close: `finish` has yet to settle groups, verify inner CRCs and run the
-    /// decrypt pass, all of which need live writers.
+    /// and it stays alive well past completion (the daemon leaves it
+    /// installed for post-completion streaming, and the fetch task holds its
+    /// own `Arc` until it returns). So the handles are still there at repair
+    /// time, which runs BEFORE `finish` - and that ordering is why these park
+    /// rather than close: `finish` has yet to settle groups, verify inner
+    /// CRCs and run the decrypt pass, all of which need live writers.
     ///
     /// Deliberately NOT used for the Windows folder rename that first
     /// motivated closing handles at all: that went in as
@@ -2943,6 +1989,34 @@ impl Extractor {
     /// [`FileWriter::park`]: crate::disk::FileWriter::park
     pub fn park_outputs(&self) -> io::Result<()> {
         self.each_output(&|w| w.park())
+    }
+
+    /// [`park_outputs`] plus the live-reader custody an EXTERNAL tool
+    /// needs (sweep 8, M4): new by-path reader opens are held off, and
+    /// on Windows the responses already holding a handle are revoked
+    /// and drained, because par2cmdline opens its targets with share
+    /// mode 0 and one reading player is enough to make it report a
+    /// repairable file as missing. [`unpark_outputs`] hands the files
+    /// back, and repair.rs calls it on every path.
+    ///
+    /// What this does NOT reach, measured 22 Aug 2026 on the shape that
+    /// motivated the question (`stream_repair.rs` leg 2): an output the
+    /// set has already DEMOTED away. A damaged multi-volume RAR set
+    /// materializes its volumes for repair first, and that demote runs
+    /// `fallback_group` -> `abandon_slot` over the extracted media file,
+    /// which takes the writer out of its slot and unlinks it. So by the
+    /// time this walks the tree there is no writer to claim and no file
+    /// to claim it over - par2's targets here are the VOLUMES, and the
+    /// extracted output is not even in the directory (the probe showed
+    /// `r.part1-3.rar` + the par2 set, and nothing else). Custody is not
+    /// the mechanism that speaks for those files; [`FileWriter::abandon`]
+    /// is, and it is set on that same demote path.
+    ///
+    /// [`park_outputs`]: Extractor::park_outputs
+    /// [`unpark_outputs`]: Extractor::unpark_outputs
+    /// [`FileWriter::abandon`]: crate::disk::FileWriter::abandon
+    pub fn park_outputs_for_repair(&self) -> io::Result<()> {
+        self.each_output(&|w| w.park_for_repair())
     }
 
     /// Reopen everything [`park_outputs`] closed, at this level and every
@@ -3012,10 +2086,14 @@ impl Extractor {
         // must still materialize exact volume bytes) and before the
         // child finishes (the demote abandons its routed child slots).
         self.verify_inner_crcs()?;
-        // The decrypt pass does its own phased locking: the in-place AES
-        // I/O over multi-GB files must not hold the routing lock (the
-        // daemon's stats/stream calls read through it).
-        let mut decrypted = self.decrypt_finished()?;
+        // The finish verdict on the encrypted outputs: their plaintext
+        // is already on disk, so this only adjudicates it and demotes
+        // the groups that fail.
+        let mut decrypted = self.verify_encrypted_outputs()?;
+        // §94 D: every byte is in, so a nested split set the entry walk
+        // could not close (the archive ends on it) closes on what it
+        // has, before the child's own finish judges the set.
+        self.close_zip_splits_at_finish();
         let child = self.inner.lock_ok().child.clone();
         let child_fold = match &child {
             Some(c) => Some((c.finish()?, c.slot_output_files())),
@@ -3084,102 +2162,12 @@ impl Extractor {
             fallbacks,
             extracted_bytes: inner.extracted_bytes,
             decrypted,
+            // Root only, and nothing folds up from the child: a nested
+            // chase's partial is a member of a member, and the pass that
+            // would resume it works another directory (see
+            // `chase_resume_ok`, which refuses below depth 0).
+            resume_outputs: Self::settle_resume_ledger(inner),
         })
-    }
-
-    /// Phase 0(b) prevalence: emit one line per inner archive this level
-    /// handled in-stream, with its type and disposition. Nested levels
-    /// only (`self.depth > 0`) - a single-layer job's outer archives are
-    /// depth 0 and never counted. RAR inners live in `groups` (store and
-    /// chase alike; the kind reads off the mapper's first entry, which
-    /// survives a demote); an in-stream 7z is a group-less slot in
-    /// `SevenZ` mode. A demoted inner is logged `demoted` (with the
-    /// reason) and left for the disk post-pass to tally under `disk`, so
-    /// it is never counted twice.
-    fn report_nested_prevalence(&self, inner: &Inner) {
-        if self.depth == 0 {
-            return;
-        }
-        for grp in inner.groups.values() {
-            let kind = Self::group_inner_kind(inner, grp);
-            match (grp.fallback, grp.fallback_reason.as_deref()) {
-                (true, reason) => note_nested_level(
-                    self.depth,
-                    kind,
-                    NestedDisposition::Demoted(reason.unwrap_or("demoted")),
-                ),
-                (false, _) => note_nested_level(self.depth, kind, NestedDisposition::InStream),
-            }
-        }
-        // In-stream 7z inners are slot-level (not in `groups`): a slot
-        // still in `SevenZ` mode at finish streamed successfully. A
-        // demoted 7z is `RarFallback` by now - its `demoted` diagnostic
-        // was emitted at the demote site (fallback_slot_or_group, which
-        // still sees the `SevenZ` mode), and the materialized volume is
-        // tallied under `disk` by the post-pass.
-        for s in &inner.slots {
-            if matches!(s.mode, SlotMode::SevenZ) && s.group.is_none() {
-                note_nested_level(
-                    self.depth,
-                    s.container_fmt.noun(),
-                    NestedDisposition::InStream,
-                );
-            }
-        }
-    }
-
-    /// Classify a single group-less slot for a demote-site prevalence
-    /// line, or `None` when it is not a nested archive. Only the three
-    /// nested-archive modes count: a plain file, an unclassified span, or
-    /// an already-demoted slot returns `None` and stays silent, so a
-    /// demoting non-archive never biases the tally. Must be read BEFORE
-    /// `fallback_slot` flips the slot to `RarFallback`. `RarChase` slots
-    /// always own a group (handled at finish), so a group-less chase mode
-    /// is defensive only.
-    fn slot_inner_kind(inner: &Inner, slot: usize) -> Option<&'static str> {
-        match inner.slots[slot].mode {
-            SlotMode::SevenZ => Some(inner.slots[slot].container_fmt.noun()),
-            SlotMode::RarChase => Some("rar-compressed"),
-            SlotMode::Rar => Some(
-                match inner.slots[slot]
-                    .mapper
-                    .as_ref()
-                    .and_then(|m| m.entries.first())
-                {
-                    Some(e) if e.encrypted || e.crypt.is_some() => "rar-encrypted",
-                    Some(e) => match e.method {
-                        Method::Store => "rar-store",
-                        Method::Compressed => "rar-compressed",
-                    },
-                    // Mode Rar means it mapped as a store RAR, so this is
-                    // effectively unreachable; classify as store rather than
-                    // guess a sub-type.
-                    None => "rar-store",
-                },
-            ),
-            SlotMode::Unknown | SlotMode::Plain | SlotMode::RarFallback | SlotMode::Discard => None,
-        }
-    }
-
-    /// Classify a RAR group for the prevalence line from its first mapped
-    /// entry - encryption wins (it is the salient blocker), then the
-    /// compression method. Reads the mapper, which outlives a demote, so a
-    /// fallen-back group still classifies correctly.
-    fn group_inner_kind(inner: &Inner, grp: &Group) -> &'static str {
-        for si in &grp.slots {
-            if let Some(m) = inner.slots[*si].mapper.as_ref()
-                && let Some(e) = m.entries.first()
-            {
-                if e.encrypted || e.crypt.is_some() {
-                    return "rar-encrypted";
-                }
-                return match e.method {
-                    Method::Store => "rar-store",
-                    Method::Compressed => "rar-compressed",
-                };
-            }
-        }
-        "other"
     }
 }
 
@@ -3229,69 +2217,6 @@ impl Drop for Extractor {
     }
 }
 
-fn nofile() -> io::Error {
-    io::Error::new(io::ErrorKind::NotFound, "no backing data")
-}
-
-/// Collision key for the chain-shared output-name set. On a case-insensitive
-/// volume `README` and `readme` name ONE object, so claiming both would let
-/// the second `FileWriter::create` (truncating) clobber the first; folding to
-/// lowercase makes the second name disambiguate instead. On a case-sensitive
-/// volume they are genuinely distinct files, so the exact name is kept and
-/// neither gets needlessly renamed.
-///
-/// `fold` is PROBED from the output volume (`disk::case_insensitive_dir`) and
-/// threaded down the chain next to `names_taken`, so every level keys that
-/// shared set identically. It is deliberately not `cfg!(target_os)`: the
-/// Linux container/NAS build writing to a CIFS/SMB or exFAT share is
-/// case-insensitive, and that is precisely the deployment where losing an
-/// output file hurts most.
-fn name_collision_key(fold: bool, name: &str) -> String {
-    if fold {
-        name.to_lowercase()
-    } else {
-        name.to_string()
-    }
-}
-
-/// Reword a child-level fallback reason for the parent's report. The
-/// caller keys VOLUME-level remediation (unrar passes, loose-volume job
-/// failure) off substrings of top-level reasons ("compressed",
-/// "encrypted"/"password", "held-bytes cap", "incomplete mapping"); a
-/// nested demotion has already materialized the level-1 file - exactly
-/// the single-level output, which the disk post-pass handles - so its
-/// reason must never pattern-match those branches.
-fn nested_reason(why: &str) -> String {
-    let safe: String = if why.contains("compressed") {
-        "inner archive is not store-mode".to_string()
-    } else if why.contains("password") || why.contains("encrypted") {
-        "inner archive is protected".to_string()
-    } else if why.contains("held-bytes cap") {
-        "inner holds budget exceeded".to_string()
-    } else if why.contains("incomplete mapping") {
-        "inner mapping unfinished at end of download".to_string()
-    } else {
-        why.to_string()
-    };
-    format!("nested fallback: {safe}")
-}
-
-fn blocker_reason(b: &MapBlocker) -> &'static str {
-    match b {
-        MapBlocker::NotRar => "not a RAR volume",
-        MapBlocker::EncryptedHeaders => "encrypted headers (password required)",
-        MapBlocker::NotStore => "compressed or encrypted entries",
-        // Deliberately free of "compressed": the finish ladder's first arm
-        // keys on that substring and would run an unrar attempt that cannot
-        // succeed without a password, failing a job whose volumes are fine.
-        // "encrypted"/"password" route it to the locked-no-password arm
-        // (volumes kept, 🔒 prompt), matching EncryptedHeaders sets.
-        MapBlocker::EncryptedNoPassword => "encrypted entries (password required)",
-        MapBlocker::BadPassword => "wrong archive password",
-        MapBlocker::Corrupt(w) => w,
-    }
-}
-
 // The inline `mod tests` was 3,018 lines - moved out bodily (TODO 106) and
 // split at its own nested-one-pass banner, since either half alone would
 // otherwise want a size-gate entry.
@@ -3300,3 +2225,12 @@ mod mod_tests;
 
 #[cfg(test)]
 mod nested_tests;
+
+#[cfg(test)]
+mod sfx_tests;
+
+#[cfg(test)]
+mod zip_split_tests;
+
+#[cfg(test)]
+mod trim_spill_tests;

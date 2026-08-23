@@ -20,7 +20,7 @@ const CORR_WINDOW: usize = 200;
 /// release per evaluation.
 #[derive(Debug, Clone)]
 struct CorrRelFacts {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     stem: String,
     first_posted: i64,
     grp_kind: crate::predb_corr::GroupKind,
@@ -951,7 +951,7 @@ impl Index {
         // segment id.
         let rows: Vec<(String, String)> = {
             let mut stmt = self.db.prepare_cached(
-                "SELECT filename, COALESCE(json_extract(segments,'$[0][1]'),'')
+                "SELECT filename, COALESCE(seg_first(segments),'')
                    FROM files WHERE release_id=?1 LIMIT 4",
             )?;
             stmt.query_map([rid], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1162,8 +1162,8 @@ impl Index {
             .collect::<rusqlite::Result<_>>()
     }
 
-    /// Did [`corr_forward_ids`] return everything in the window, or did
-    /// it stop at the cap?
+    /// Did [`Self::corr_forward_ids`] return everything in the window, or
+    /// did it stop at the cap?
     ///
     /// The distinction is a correctness one, not a cosmetic one. The
     /// mutual-best gate compares our score against the best COMPETITOR,

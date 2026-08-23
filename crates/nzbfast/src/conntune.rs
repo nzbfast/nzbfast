@@ -1,12 +1,12 @@
 //! M7b.1 - per-provider connection auto-tuning state.
 //!
-//! Measured 21 Jul 2026 (BENCHMARKS/PLAN §M7b): asking a provider for
-//! more sockets than it wants to grant is 3-4× SLOWER than asking for
-//! the knee (connect-flood defense) - connection count is the sharpest
-//! single knob in the product, and it punishes the intuitive "more is
-//! faster" direction. The daemon probes each provider's ladder while
-//! idle (serve.rs) and stores the knee here; every job build then caps
-//! each server's connections at min(configured, knee).
+//! Measured 21 Jul 2026 (BENCHMARKS/PLAN §M7b): asking a provider for more
+//! sockets than it wants to grant is 3-4× SLOWER than asking for the knee
+//! (connect-flood defense) - connection count is the sharpest single knob
+//! in the product, and it punishes the intuitive "more is faster"
+//! direction. The daemon probes each provider's ladder while idle
+//! (serve/tasks/tuner.rs) and stores the knee here; every job build then
+//! caps each server's connections at min(configured, knee).
 //!
 //! State lives in `conntune.json` NEXT TO the config file (like
 //! settings.json), so plain CLI `nzbfast get` runs benefit from the
@@ -571,6 +571,37 @@ pub fn effective_limit(global: usize, server_connections: u32) -> usize {
     global.max(1).min((server_connections.max(1)) as usize)
 }
 
+/// TODO 208 item 1: the whole fleet's connection budget for the fleet
+/// cap (`nzbkit::pool::linecap`), read from `NZBFAST_LINE_CAP`. Unset =
+/// the measured constant; `0` (or anything that is not a whole number)
+/// = off, which is the bench drivers' A/B arm. Read once per job build,
+/// not per epoch, so an arm is one whole leg.
+///
+/// The UNIT changed with the rule on 23 Aug 2026: this was connections
+/// per Mbit of the measured line, so a box still exporting the old
+/// `0.5` no longer parses and reads as OFF - the control arm, which is
+/// the safe direction, and it shows as an empty `line cap` in the
+/// `[pool]` line rather than as a fleet of one.
+pub fn line_cap_fleet() -> usize {
+    match std::env::var("NZBFAST_LINE_CAP") {
+        Err(_) => nzbkit::pool::linecap::LINE_CAP_DEFAULT_FLEET,
+        Ok(v) => v.trim().parse::<usize>().unwrap_or(0),
+    }
+}
+
+/// The per-server share of the fleet cap for a fleet of `n_servers`.
+/// `None` = nothing to cap with, i.e. the rule is off. Callers `min`
+/// this into the server's own ceiling; a pinned server is theirs to
+/// skip.
+///
+/// It takes no line rate: since the cap became a constant the seed
+/// binds on every install, including a CLI run and a daemon's first
+/// job, which used to escape it for want of a link anchor.
+pub fn line_cap_share(n_servers: usize) -> Option<usize> {
+    nzbkit::pool::linecap::fleet_cap(line_cap_fleet())
+        .map(|f| nzbkit::pool::linecap::server_share(f, n_servers))
+}
+
 /// TODO 112: the live epoch controller's dev override. The real gate
 /// is the `live_tune` setting (default OFF until the §129 real-line
 /// gate passes); this env var force-enables it for rigs and bench
@@ -637,7 +668,6 @@ fn save(config: &Path, map: &HashMap<String, Tuned>) {
     }
 }
 
-/// Merge one host's probe result in and persist.
 /// Does a fresh reading agree with the one already on file?
 ///
 /// Against `pending` when there is one. That is the whole point of
@@ -661,6 +691,7 @@ pub fn corroborates(prev: Option<&Tuned>, best: usize) -> bool {
     })
 }
 
+/// Merge one host's probe result in and persist.
 pub fn record(config: &Path, host: &str, t: Tuned) {
     record_at(config, host, t, bucket_of(local_hour()));
 }

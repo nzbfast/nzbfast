@@ -72,13 +72,14 @@ impl Gates {
                 .ok_or_else(|| anyhow::anyhow!("gates: can't parse size {s:?}"))?;
             // REJECT rather than clamp, because there is no safe value to
             // clamp to: pushing `max` down to MAX_SIZE_BYTES is harmless,
-            // but pushing `min` up to it means "prune every release under
-            // 8 EiB" - the same index wipe by the other door. Telling the
+            // but pushing `min` up to it means "prune every release under 8
+            // EiB" - the same index wipe by the other door. Telling the
             // user is the only answer that can't destroy anything, and it
             // is cheap here: the settings API returns the message
-            // (serve.rs `index_gates`), a saved setting that somehow holds
-            // one is logged and ignored rather than fatal, and `index
-            // --gates FILE` fails the command with the file named.
+            // (`set_index_gates`, in serve/settings_index.rs), a saved
+            // setting that somehow holds one is logged and ignored rather
+            // than fatal, and `index --gates FILE` fails the command with
+            // the file named.
             if n > MAX_SIZE_BYTES {
                 anyhow::bail!(
                     "gates: size {s:?} is out of range ({n} bytes; the limit is \

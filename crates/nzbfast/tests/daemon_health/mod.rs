@@ -250,6 +250,7 @@ async fn health_giveup_needs_every_server_to_confirm() {
     })
     .await
     .unwrap();
-    drop(d);
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

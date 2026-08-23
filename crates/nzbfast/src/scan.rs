@@ -170,7 +170,7 @@ fn arm_arrival_watch(
 /// `deep` = one-off backfill override: rescan the last n articles even
 /// below the high-water mark (ingest is idempotent - message-id keyed).
 /// `progress`, when given, is kept at the pass's fetched-header count.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn index_scan_into(
     config: &Path,
     group: &str,
@@ -779,7 +779,7 @@ pub(crate) fn scan_idle_timeout() -> std::time::Duration {
 /// resumes without holes). None = a backward deepen slice - no marks
 /// are touched here; the caller moves the low-water once the whole
 /// slice has landed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn scan_article_range(
     server: &nzbkit::config::ServerConfig,
     group: &str,
@@ -826,11 +826,18 @@ pub(crate) async fn scan_article_range(
     // connection with it instead of leaving it running for the life of
     // the process (see `scan_idle_timeout`).
     let mut workers = tokio::task::JoinSet::new();
+    // Bytes every worker has taken off the wire, so the collector's
+    // deadline can be a no-progress one rather than a whole-chunk one
+    // (see `collect_scan_pass`). One counter for the whole fan-out: the
+    // question it answers is "is ANY OVER still moving", which is
+    // exactly the question the deadline asks.
+    let wire = Arc::new(AtomicU64::new(0));
     for _ in 0..nconn {
         let server = server.clone();
         let group_s = group.to_string();
         let next = next.clone();
         let tx = tx.clone();
+        let wire = wire.clone();
         let mut conn: Option<Connection> = None;
         // `tx` is moved into the task, so it drops on every exit path -
         // normal return, early `break`, and panic-unwind alike (tokio
@@ -867,7 +874,10 @@ pub(crate) async fn scan_article_range(
                         };
                         match fresh {
                             Ok(mut c) => match c.group(&group_s).await {
-                                Ok(_) => conn = Some(c),
+                                Ok(_) => {
+                                    c.note_over_progress(wire.clone());
+                                    conn = Some(c);
+                                }
                                 Err(e) if retried => break Err(anyhow::Error::from(e)),
                                 Err(_) => {
                                     retried = true;
@@ -918,6 +928,7 @@ pub(crate) async fn scan_article_range(
         chunk,
         t0,
         scan_idle_timeout(),
+        &wire,
     )
     .await;
     // Dropping `workers` here aborts anything still running - including
@@ -928,7 +939,7 @@ pub(crate) async fn scan_article_range(
 
 /// The collect half of [`scan_article_range`], split out so the abandon
 /// path is reachable from a test without an NNTP server.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn collect_scan_pass(
     rx: &mut tokio::sync::mpsc::Receiver<Result<(u64, u64, Vec<nzbkit::nntp::OverEntry>)>>,
     ix: &mut nzbkit::index::Index,
@@ -942,9 +953,14 @@ pub(crate) async fn collect_scan_pass(
     progress_base: u64,
     chunk: u64,
     t0: Instant,
-    // How long to wait for ANY worker before abandoning (a parameter so
-    // the abandon path is testable without a 5-minute test).
+    // How long to wait without PROGRESS before abandoning (a parameter
+    // so the abandon path is testable without a 5-minute test).
     idle: std::time::Duration,
+    // Bytes the workers have taken off the wire, cumulative across the
+    // whole fan-out. A chunk landing is progress; so is this number
+    // moving, which is what makes the deadline below no-progress rather
+    // than whole-chunk. See the abandon arm.
+    wire: &AtomicU64,
 ) -> Result<ScanPass> {
     let mut scanned = 0u64;
     let mut completed = 0u32;
@@ -954,6 +970,7 @@ pub(crate) async fn collect_scan_pass(
     let mut pending: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
     let mut failure: Option<anyhow::Error> = None;
     let mut complete = true;
+    let mut seen_wire = wire.load(Ordering::Relaxed);
     loop {
         let msg = match tokio::time::timeout(idle, rx.recv()).await {
             Ok(Some(m)) => m,
@@ -961,7 +978,21 @@ pub(crate) async fn collect_scan_pass(
             // covered the range.
             Ok(None) => break,
             Err(_) => {
-                // Nothing from ANY worker for the whole deadline. Abandon
+                // Nothing DELIVERED for the whole deadline - but a chunk
+                // is a whole OVER range, and a 100k-row range on a slow
+                // link is minutes of perfectly healthy transfer that
+                // delivers nothing until it finishes. Judging on delivery
+                // alone abandoned a live stream mid-transfer, and the
+                // articles it had already paid for were refetched next
+                // pass. The wire counter is the difference: any byte off
+                // any worker's socket since the last look is progress,
+                // and the deadline re-arms.
+                let now_wire = wire.load(Ordering::Relaxed);
+                if now_wire != seen_wire {
+                    seen_wire = now_wire;
+                    continue;
+                }
+                // Nothing delivered AND nothing on the wire. Abandon
                 // the pass rather than block the scan loop forever. What
                 // has been ingested stays (ingest is idempotent and the
                 // marks below only ever advanced over the CONTIGUOUS
@@ -973,7 +1004,7 @@ pub(crate) async fn collect_scan_pass(
                     .saturating_sub(scanned);
                 info!(
                     target: "scan",
-                    "{group}: no chunk for {}s - abandoning this pass \
+                    "{group}: nothing on the wire for {}s - abandoning this pass \
                      ({scanned} headers in, ~{dropped} articles of {low}..{g_high} not scanned; \
                      they are retried next pass)",
                     idle.as_secs()
@@ -1781,11 +1812,31 @@ pub(crate) fn release_stem(name: &str) -> String {
     name[..end].to_string()
 }
 
+/// Does this release member put a RAR extractor in the job's path?
+/// Suffix-only, so a `.rar` in the middle of a name does not count:
+/// `x.rar` and `x.part01.rar` both end `.rar`, and the old split
+/// shapes are `x.r00` / `x.s00`. Same spellings `release_stem` above
+/// strips, asked as a question rather than as a cut.
+pub(crate) fn is_rar_member(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".rar") {
+        return true;
+    }
+    let Some(dot) = lower.rfind('.') else {
+        return false;
+    };
+    let tail = &lower[dot + 1..];
+    tail.len() >= 2
+        && (tail.starts_with('r') || tail.starts_with('s'))
+        && tail[1..].bytes().all(|c| c.is_ascii_digit())
+}
+
 pub(crate) async fn make_release_nzb(
     config: &Path,
     group: &str,
     min_gb: f64,
     max_gb: f64,
+    require_rar: bool,
     out: &Path,
 ) -> Result<()> {
     use std::collections::BTreeMap;
@@ -1845,6 +1896,17 @@ pub(crate) async fn make_release_nzb(
             let has_data = rel
                 .keys()
                 .any(|n| !n.to_ascii_lowercase().ends_with(".par2"));
+            // `--require-rar` keeps the DESCENT going past a release
+            // that qualifies on every other count, rather than
+            // returning it and making the caller re-scan a different
+            // group. Sourcing class F's fixtures on 23 Aug 2026 found
+            // the newest complete par2-bearing release was RAR-shaped
+            // in 2 of 20 groups, so one-sample-per-group roulette is
+            // the wrong instrument for a corpus that has moved: see
+            // `research/NOTE-2026-08-23-class-F-fixture-sourcing-measured.md`.
+            if require_rar && !rel.keys().any(|n| is_rar_member(n)) {
+                continue;
+            }
             let size: u64 = rel
                 .values()
                 .flat_map(|(_, p)| p.values())
@@ -1871,7 +1933,8 @@ pub(crate) async fn make_release_nzb(
     conn.quit().await;
 
     let Some(((poster, _stem), rel)) = winner else {
-        anyhow::bail!("no complete release with par2 found in {scanned} headers");
+        let want = if require_rar { " with rar members" } else { "" };
+        anyhow::bail!("no complete release{want} with par2 found in {scanned} headers");
     };
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
@@ -2045,6 +2108,36 @@ mod scan_pass_tests {
         );
     }
 
+    /// The screen `--require-rar` applies, and the reason class F's
+    /// fixture sourcing needed it: on 23 Aug 2026 the newest complete
+    /// par2-bearing release was a bare payload plus a par2 ladder in
+    /// 12 of the 14 groups that yielded anything, so a job sourced
+    /// without this runs with no extractor in path. The negatives are
+    /// what stop it: a par2 member and an `.mkv` are not rar members,
+    /// and neither is a name that merely contains "rar".
+    #[test]
+    fn rar_members_are_recognised_by_suffix_only() {
+        for n in [
+            "Rel.rar",
+            "Rel.part01.rar",
+            "Rel.PART01.RAR",
+            "Rel.r00",
+            "Rel.s01",
+        ] {
+            assert!(is_rar_member(n), "{n} puts an extractor in path");
+        }
+        for n in [
+            "Rel.par2",
+            "Rel.vol000+01.par2",
+            "Show.S01E05.1080p.WEB-DL.mkv",
+            "Rel.rar.txt",
+            "Rel.nfo",
+            "rar",
+        ] {
+            assert!(!is_rar_member(n), "{n} is not a rar member");
+        }
+    }
+
     fn tmp_index(tag: &str) -> (PathBuf, nzbkit::index::Index) {
         let dir =
             std::env::temp_dir().join(format!("nzbfast-scanpass-{tag}-{}", std::process::id()));
@@ -2105,6 +2198,7 @@ mod scan_pass_tests {
                 100,
                 Instant::now(),
                 Duration::from_millis(50),
+                &AtomicU64::new(0),
             ),
         )
         .await
@@ -2148,6 +2242,7 @@ mod scan_pass_tests {
                 100,
                 Instant::now(),
                 Duration::from_millis(50),
+                &AtomicU64::new(0),
             ),
         )
         .await
@@ -2157,6 +2252,124 @@ mod scan_pass_tests {
         assert!(pass.complete);
         assert_eq!(pass.scanned, 200);
         assert_eq!(ix.high_water("alt.test", "srv1"), 299);
+        teardown(dir, ix);
+    }
+
+    /// TODO 23: the collector's deadline is a NO-PROGRESS one, not a
+    /// whole-chunk one.
+    ///
+    /// A chunk is a whole OVER range - up to 100,000 rows - and nothing
+    /// reaches the channel until it is finished. So a slow-but-live
+    /// stream delivered nothing for minutes and the collector, which
+    /// only ever looked at deliveries, abandoned the pass mid-transfer.
+    /// The articles already paid for were thrown away and refetched next
+    /// pass, and on a link slow enough the group could never finish a
+    /// pass at all.
+    ///
+    /// The wire counter is what tells a slow OVER from a dead one. Here
+    /// it moves across four whole idle windows with NOTHING delivered,
+    /// which under the old rule was four abandons; the pass must survive
+    /// all of them and then complete on the chunk that finally lands.
+    #[tokio::test]
+    async fn a_slow_but_live_over_stream_is_not_abandoned_mid_transfer() {
+        let (dir, mut ix) = tmp_index("slowwire");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let idle = Duration::from_millis(50);
+        let wire = Arc::new(AtomicU64::new(0));
+
+        // The worker: silent on the channel for 4 x idle while bytes
+        // keep landing, then it finishes its one chunk and goes away.
+        let w = wire.clone();
+        let feeder = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(idle / 2).await;
+                w.fetch_add(4096, Ordering::Relaxed);
+            }
+            tx.send(Ok((100, 199, Vec::new()))).await.unwrap();
+        });
+
+        let pass = tokio::time::timeout(
+            Duration::from_secs(10),
+            collect_scan_pass(
+                &mut rx,
+                &mut ix,
+                "alt.test",
+                "srv1",
+                100,
+                199,
+                0,
+                Some(0),
+                None,
+                0,
+                100,
+                Instant::now(),
+                idle,
+                &wire,
+            ),
+        )
+        .await
+        .expect("the collector must not block")
+        .unwrap();
+
+        feeder.await.unwrap();
+        assert!(
+            pass.complete,
+            "a stream that was moving the whole time was abandoned - the \
+             deadline is still whole-chunk, not no-progress"
+        );
+        assert_eq!(pass.scanned, 100);
+        assert_eq!(ix.high_water("alt.test", "srv1"), 199);
+        teardown(dir, ix);
+    }
+
+    /// The other half of the same rule: a wire that is NOT moving is
+    /// still abandoned on time. Without this, "re-arm on progress" could
+    /// be satisfied by never abandoning at all, which is the freeze the
+    /// deadline exists to prevent.
+    #[tokio::test]
+    async fn a_silent_wire_is_still_abandoned_on_the_deadline() {
+        let (dir, mut ix) = tmp_index("deadwire");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let wedged = tx.clone();
+        tx.send(Ok((100, 199, Vec::new()))).await.unwrap();
+        drop(tx);
+        // Non-zero from the start: the collector must compare against
+        // what it last SAW, not against zero.
+        let wire = Arc::new(AtomicU64::new(9_000_000));
+
+        let t0 = Instant::now();
+        let pass = tokio::time::timeout(
+            Duration::from_secs(10),
+            collect_scan_pass(
+                &mut rx,
+                &mut ix,
+                "alt.test",
+                "srv1",
+                100,
+                999,
+                0,
+                Some(0),
+                None,
+                0,
+                100,
+                Instant::now(),
+                Duration::from_millis(50),
+                &wire,
+            ),
+        )
+        .await
+        .expect("a silent wire must not hold the collector open")
+        .unwrap();
+
+        assert!(!pass.complete, "an abandoned pass must not report complete");
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "abandoning took {:?} - a static counter must not re-arm the \
+             deadline",
+            t0.elapsed()
+        );
+        assert_eq!(ix.high_water("alt.test", "srv1"), 199);
+        drop(wedged);
         teardown(dir, ix);
     }
 
@@ -2188,6 +2401,7 @@ mod scan_pass_tests {
                 100,
                 Instant::now(),
                 Duration::from_millis(50),
+                &AtomicU64::new(0),
             ),
         )
         .await

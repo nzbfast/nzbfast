@@ -254,7 +254,7 @@ pub(super) fn fresh_secret() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     h.update(now.as_nanos().to_le_bytes());
-    format!("{:x}", h.finalize())[..32].to_string()
+    hex::encode(h.finalize())[..32].to_string()
 }
 
 /// M29: JSON verdict for one release - "ok"/"maybe"/"gone", or null when
@@ -366,7 +366,7 @@ pub(super) fn save_setting(path: &std::path::Path, key: &str, v: Value) {
 /// the whole control API.
 pub(super) fn random_apikey() -> Option<String> {
     let mut buf = [0u8; 24];
-    getrandom::getrandom(&mut buf).ok()?;
+    getrandom::fill(&mut buf).ok()?;
     Some(hex::encode(buf))
 }
 
@@ -508,7 +508,8 @@ pub(super) fn launcher_proof(token: &str, nonce: Option<&str>) -> Option<String>
 /// "stopped unexpectedly, try Restart" it used to show was worse than
 /// nothing: restarting fails identically every time, forever.
 ///
-/// `MARKER` is what the tray greps the log for. Keep them in step.
+/// `KEYLESS_MARKER` is what the tray greps the log for, through its own
+/// copy of the same string in nzbtray. Keep the two in step.
 pub const KEYLESS_MARKER: &str = "nzbfast cannot start: API key file";
 
 pub(super) fn keyless_help(keyfile: &std::path::Path, what: &str) -> String {
@@ -671,6 +672,367 @@ pub(super) fn is_kind_slug(k: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// A one-time, short-lived stand-in for the API key, handed to the
+/// browser this daemon opens for itself.
+///
+/// The key used to ride the launch URL as `?apikey=`, and that URL is the
+/// child process's ARGV. On Linux `/proc/<pid>/cmdline` is world-readable,
+/// so every other local account could read the credential straight out of
+/// the `xdg-open` we had just spawned - and with it `mode=server_secret`,
+/// which is the Usenet password in cleartext. macOS `ps` shows other
+/// users' arguments too, and the Windows `cmd /C start` line is readable
+/// through WMI, so this was never only a Linux problem.
+///
+/// The token below goes in the URL instead. It is worth exactly one
+/// exchange, from any caller, for the length of a browser cold start, and
+/// the page trades it for the key over the loopback socket - a channel
+/// only this process is on either end of.
+///
+/// One exchange is a race, not a fence: the token is still in argv for
+/// the whole window, and a local reader quicker than the browser wins
+/// it. So the slot does not forget the token when it is spent. It keeps
+/// a hash until the TTL, and a SECOND presentation of the right token
+/// is then known for what it is - exactly one of the two presenters was
+/// the browser this daemon spawned, and the other one holds the key -
+/// and `route_handoff` says so and rotates the key. (A `file://`
+/// bootstrap page, so that only a path is in argv, was weighed and
+/// rejected: `open` / `start` / `xdg-open` dispatch a file on its TYPE
+/// handler, which on many boxes is an editor, not the browser.)
+pub(super) struct Handoff {
+    /// sha256 of the token, hex. Never the token itself, so a spent slot
+    /// holds nothing a reader of process memory could present.
+    token_hash: String,
+    /// The key while the token is still worth one exchange; `None` once
+    /// it has been traded, or once a request authenticated with the
+    /// full key before any trade (`disarm_handoff_in`).
+    key: Option<String>,
+    born: std::time::Instant,
+}
+
+/// How long a handoff stays redeemable, and how long a spent one is
+/// remembered so a second presentation can be recognised.
+///
+/// Was 300 s, sized for a cold browser behind a "choose your default
+/// browser" dialog. That is also how long the token in argv stayed
+/// worth a key, so it is now the high end of what such a launch takes;
+/// a slower one costs the key prompt this path exists to avoid, which
+/// is what every launch cost before the token existed.
+const HANDOFF_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// What presenting a token to the slot came to.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Redeem {
+    /// The right token, first time: here is the key.
+    Key(String),
+    /// The right token, but it has been traded already. Somebody else
+    /// has the key.
+    Replay,
+    /// The right token, over loopback, but from a socket another local
+    /// account owns: the token was read off the launch argv. Nothing is
+    /// burned and the log names the account.
+    Foreign(String),
+    /// Nothing armed, expired, or a wrong token.
+    Refused,
+}
+
+impl Handoff {
+    /// True once the slot is only a mark: nothing left to hand over.
+    #[cfg(test)]
+    pub(super) fn holds_no_key(&self) -> bool {
+        self.key.is_none()
+    }
+}
+
+fn handoff_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The armed handoff, if any.
+///
+/// Process-wide rather than a `Daemon` field because there is at most one
+/// per process: it is armed on the single run that both minted a key and
+/// opened a browser, before that browser has made its first request, and
+/// it is gone again after one exchange. The functions below all take the
+/// slot as an argument (the `note_auth_failure_in` shape) so the rule
+/// they carry can be tested without standing up a daemon.
+static HANDOFF: Mutex<Option<Handoff>> = Mutex::new(None);
+
+/// Arm `slot` with a fresh handoff for `key`, returning the token to put
+/// in the launch URL.
+///
+/// `None` if the system RNG refused, which is the same answer the key
+/// mint gives in that case: no token, no `?handoff=`, and the page asks
+/// for a key like any other browser would.
+pub(super) fn arm_handoff_in(slot: &Mutex<Option<Handoff>>, key: &str) -> Option<String> {
+    let token = random_apikey()?;
+    *slot.lock_ok() = Some(Handoff {
+        token_hash: handoff_hash(&token),
+        key: Some(key.to_string()),
+        born: std::time::Instant::now(),
+    });
+    HANDOFF_ARMED.store(true, Ordering::Relaxed);
+    Some(token)
+}
+
+/// Process-wide "is there a key waiting in the slot", so the per-request
+/// hook below costs one relaxed load on every run that armed nothing,
+/// which is every run but the first.
+static HANDOFF_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// A request has authenticated with the full key. Whoever sent it
+/// already has what the token was minted to deliver, so the token stops
+/// being worth a key from here on. The hash stays, so a later
+/// presentation is still recognised, and a slot that was already
+/// traded is left exactly as it is - in the sequence where a reader
+/// traded first, that reader's own authenticated requests must not
+/// erase the mark the browser's late arrival is judged against.
+pub(super) fn disarm_handoff_in(slot: &Mutex<Option<Handoff>>) {
+    if let Some(h) = slot.lock_ok().as_mut() {
+        h.key = None;
+    }
+}
+
+/// The hook `/api` calls once it has decided a request carries the full
+/// key. See `disarm_handoff_in`.
+pub(super) fn note_full_key_request() {
+    if HANDOFF_ARMED.swap(false, Ordering::Relaxed) {
+        disarm_handoff_in(&HANDOFF);
+    }
+}
+
+/// Trade `token` for the key it stands in for, once.
+///
+/// A WRONG token does not burn the right one. The token is 192 bits, so
+/// guessing is not the threat here, and burning on a miss would let any
+/// local process disarm the handoff by posting a single byte - which
+/// costs the user the launch they are in the middle of. A RIGHT one has
+/// its key taken out of the slot before it is returned, so a second
+/// caller (or a replayed request) gets `Replay`, never a key.
+///
+/// The presenter's account is taken as ours here; this is the shape the
+/// tests of the slot rule use. Production goes through
+/// `redeem_handoff_from`, which asks the kernel.
+#[cfg(test)]
+pub(super) fn redeem_handoff_in(slot: &Mutex<Option<Handoff>>, token: &str) -> Redeem {
+    redeem_handoff_as(slot, token, || super::peeracct::PeerAccount::Ours)
+}
+
+/// `redeem_handoff_in` with the presenter's account judged by `account`,
+/// which is asked only once the token has matched (so a process spraying
+/// tokens never makes us walk the kernel's connection table) and BEFORE
+/// the key is taken, so a presenter from another account burns nothing:
+/// the browser this daemon spawned, arriving later, still trades. That
+/// presenter is the argv reader every earlier step could only race or
+/// report after the fact, and this is the step that refuses it outright
+/// - including on the launch where the browser never arrives, which was
+/// the one sequence nothing reported. `Unknown` (no table on this box,
+/// or no row) keeps the loopback-only rule that held before.
+pub(super) fn redeem_handoff_as(
+    slot: &Mutex<Option<Handoff>>,
+    token: &str,
+    account: impl FnOnce() -> super::peeracct::PeerAccount,
+) -> Redeem {
+    use super::peeracct::PeerAccount;
+    let mut slot = slot.lock_ok();
+    let Some(h) = slot.as_mut() else {
+        return Redeem::Refused;
+    };
+    if h.born.elapsed() > HANDOFF_TTL {
+        *slot = None;
+        HANDOFF_ARMED.store(false, Ordering::Relaxed);
+        return Redeem::Refused;
+    }
+    if !ct_eq(&handoff_hash(token), &h.token_hash) {
+        return Redeem::Refused;
+    }
+    if let PeerAccount::Other(who) = account() {
+        return Redeem::Foreign(who);
+    }
+    match h.key.take() {
+        Some(k) => {
+            HANDOFF_ARMED.store(false, Ordering::Relaxed);
+            Redeem::Key(k)
+        }
+        None => Redeem::Replay,
+    }
+}
+
+/// Trade `token` for its key, but only for a caller on this machine.
+///
+/// The token exists in exactly one place: the argv of the browser this
+/// daemon just spawned, on this box. A caller arriving from anywhere
+/// else is by construction not that browser, so an install bound to
+/// `0.0.0.0` must not put the redemption door on the network. The peer
+/// is judged BEFORE the redeem, so a remote caller who somehow holds
+/// the token cannot burn the launch the local browser is still on its
+/// way to complete. An unknown peer address is refused for the same
+/// reason: nothing about it says "this machine".
+///
+/// Loopback is necessary and not sufficient: every local account can
+/// reach it, and the one that read the token off the launch argv is a
+/// different account from ours (a process of our own account could read
+/// the key file and needs no token). So the peer's SOCKET OWNER is asked
+/// of the kernel too - `peeracct`, which needs the peer's port as well as
+/// its address, hence the full `SocketAddr` - and a socket another
+/// account owns is `Foreign`.
+pub(super) fn redeem_handoff_from(
+    slot: &Mutex<Option<Handoff>>,
+    peer: Option<std::net::SocketAddr>,
+    local_port: u16,
+    token: &str,
+) -> Redeem {
+    let Some(peer) = peer.filter(|p| p.ip().to_canonical().is_loopback()) else {
+        return Redeem::Refused;
+    };
+    redeem_handoff_as(slot, token, || {
+        super::peeracct::peer_account(peer, local_port)
+    })
+}
+
+/// The exact command line [`open_dashboard`] spawns.
+///
+/// Split out from the spawn, and given the key rather than a token, so a
+/// test can read the argv the child would have been handed and assert the
+/// thing that is invisible at the call site: the key is not in it. The
+/// key is turned into a handoff token HERE, at the last moment before it
+/// would have become a URL, so there is no route by which a caller's copy
+/// reaches a process argument.
+pub(super) fn dashboard_argv_in(
+    slot: &Mutex<Option<Handoff>>,
+    port: u16,
+    tls: bool,
+    key: Option<&str>,
+) -> (&'static str, Vec<String>) {
+    let q = key
+        .and_then(|k| arm_handoff_in(slot, k))
+        .map(|t| format!("?handoff={}", super::http::query_escape(&t)))
+        .unwrap_or_default();
+    let scheme = if tls { "https" } else { "http" };
+    let url = format!("{scheme}://localhost:{port}/{q}");
+    #[cfg(target_os = "macos")]
+    let argv = ("open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let argv = (
+        "cmd",
+        vec!["/C".to_string(), "start".to_string(), String::new(), url],
+    );
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let argv = ("xdg-open", vec![url]);
+    argv
+}
+
+/// `POST /handoff`: trade the one-time token from the launch URL for the
+/// API key, over loopback where argv-reading neighbours cannot see it.
+///
+/// Unauthenticated by necessity - the token is what the page has INSTEAD
+/// of a credential - and safe on the token's own terms: 192 bits of
+/// randomness, dead after one exchange, expired minutes after the launch
+/// that minted it, and armed at all only on the run that minted the
+/// key. Every other run answers the refusal below.
+///
+/// No CORS headers, deliberately. A page on another origin can POST here
+/// (a text body is a simple request, so nothing preflights), but it can
+/// neither guess the token nor read the answer.
+///
+/// Loopback only, whatever the daemon is bound to - see
+/// `redeem_handoff_from`.
+///
+/// A `Replay` is the one answer that is not about this request at all:
+/// the right token has been traded once already, so somebody other
+/// than the presenter holds the key that was minted for the browser.
+/// Whichever of the two was the browser, the key is no longer only the
+/// owner's, so it is rotated on the spot (the same three-store
+/// transaction `config name=apikey` runs) and the log says where the
+/// new one is.
+pub(super) fn route_handoff(mut req: tiny_http::Request, d: &Arc<Daemon>) {
+    use std::io::Read as _;
+    if req.method() != &tiny_http::Method::Post {
+        let _ = req.respond(tiny_http::Response::from_string("").with_status_code(405));
+        return;
+    }
+    // A token is 48 hex characters. The cap is what stops an unauthorized
+    // caller from making us buffer anything.
+    let mut token = String::new();
+    let _ = req.as_reader().take(256).read_to_string(&mut token);
+    let peer = peer_ip(&req);
+    match redeem_handoff_from(&HANDOFF, req.remote_addr().copied(), d.port, token.trim()) {
+        Redeem::Key(key) => {
+            let _ = req.respond(json_resp(json!({ "apikey": key })));
+        }
+        Redeem::Replay => {
+            rotate_key_after_replay(d);
+            let _ = req.respond(
+                json_resp(json!({"status": false, "error": "API Key Required"}))
+                    .with_status_code(403),
+            );
+        }
+        Redeem::Foreign(who) => {
+            // The token was right and it came over loopback, and the
+            // socket it came over belongs to another local account: that
+            // account read it off the launch argv. Refused without
+            // burning it, so the browser still trades; said here, because
+            // this is the only place the attempt is visible at all.
+            warn!(
+                target: "auth",
+                "the first-run handoff token was presented from a loopback socket owned by \
+                 another local account ({who}): that account read it off the browser launch \
+                 command line. Refused; the token is still good for the browser. Other \
+                 accounts on this machine can see process arguments, so consider a key of \
+                 your own in Settings."
+            );
+            let _ = d.note_auth_failure(peer, "handoff");
+            let _ = req.respond(
+                json_resp(json!({"status": false, "error": "API Key Required"}))
+                    .with_status_code(403),
+            );
+        }
+        Redeem::Refused => {
+            // Accounted like every other credentialed door, so a local
+            // process spraying tokens leaves a trace and meets the same
+            // per-IP limiter.
+            let _ = d.note_auth_failure(peer, "handoff");
+            let _ = req.respond(
+                json_resp(json!({"status": false, "error": "API Key Required"}))
+                    .with_status_code(403),
+            );
+        }
+    }
+}
+
+/// The first-run token was presented twice, so the key it stood for is
+/// in two hands. Mint a fresh one and make it the key everywhere at
+/// once; the holder of the old one is locked out from the next request.
+/// The browser that lost the race lands on the key modal either way,
+/// and the warning below is what tells the user where to look.
+fn rotate_key_after_replay(d: &Arc<Daemon>) {
+    let keyfile = d.settings_path.with_file_name("apikey");
+    let Some(fresh) = random_apikey() else {
+        warn!(
+            target: "auth",
+            "the first-run handoff token was presented a second time, so another local \
+             process traded it before the browser did and holds the API key - and the \
+             system RNG refused a replacement. Set a new key in Settings now."
+        );
+        return;
+    };
+    match super::settings::apply_and_save(d, "apikey", &fresh) {
+        Ok(_) => warn!(
+            target: "auth",
+            "the first-run handoff token was presented a second time, so another local \
+             process traded it before the browser did and held the API key. The key has \
+             been replaced; the new one is in {}",
+            keyfile.display()
+        ),
+        Err(e) => warn!(
+            target: "auth",
+            "the first-run handoff token was presented a second time, so another local \
+             process holds the API key, and replacing it failed ({e}). Set a new key in \
+             Settings now."
+        ),
+    }
+}
+
 /// Open the dashboard in the user's default browser, shortly after the
 /// listener is up (a small delay lets the accept loop start so the first
 /// request doesn't race the bind). Best-effort - failures are ignored.
@@ -680,33 +1042,18 @@ pub(super) fn is_kind_slug(k: &str) -> bool {
 /// for a credential the user has never seen (the .app and the Windows
 /// installer send the banner to a log file nobody opens). A key already
 /// in the browser needs no help, so it is never re-sent.
+///
+/// What actually travels is a [`Handoff`] token, never the key itself -
+/// see [`dashboard_argv_in`], which is where that rule lives and where it
+/// is tested.
 pub(super) fn open_dashboard(port: u16, tls: bool, key: Option<String>) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let q = key
-            .map(|k| format!("?apikey={}", super::http::query_escape(&k)))
-            .unwrap_or_default();
-        let scheme = if tls { "https" } else { "http" };
-        let url = format!("{scheme}://localhost:{port}/{q}");
-        #[cfg(target_os = "macos")]
-        let mut cmd = {
-            let mut c = std::process::Command::new("open");
-            c.arg(&url);
-            c
-        };
-        #[cfg(target_os = "windows")]
-        let mut cmd = {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "start", "", &url]);
-            c
-        };
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let mut cmd = {
-            let mut c = std::process::Command::new("xdg-open");
-            c.arg(&url);
-            c
-        };
-        let _ = cmd
+        // Armed here rather than at the call site so the TTL clock starts
+        // when the browser is actually being launched.
+        let (prog, args) = dashboard_argv_in(&HANDOFF, port, tls, key.as_deref());
+        let _ = std::process::Command::new(prog)
+            .args(args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();

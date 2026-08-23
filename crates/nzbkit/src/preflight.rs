@@ -630,7 +630,6 @@ pub async fn stat_sweep_with(
 ///
 /// Where the threshold sits, and why it is not simply the budget, is
 /// [`AbortRule`]'s - the two provenances round differently.
-#[allow(clippy::too_many_arguments)]
 fn charge_deficit(
     cells: &[Arc<Vec<AtomicU8>>],
     charged: &[AtomicBool],

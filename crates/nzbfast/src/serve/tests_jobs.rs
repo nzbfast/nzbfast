@@ -13,10 +13,13 @@ pub(super) fn no_causes() -> crate::LossCauses<'static> {
         takedown_430: 0,
         retention_excluded: 0,
         transport_failed: 0,
+        missing_430_recovery: 0,
+        takedown_430_recovery: 0,
+        retention_excluded_recovery: 0,
+        transport_failed_recovery: 0,
         transport_sample: None,
         decode_sample: None,
         recovery_errs: 0,
-        recovery_lost: 0,
         dead_servers: &[],
         left_servers: &[],
         par2_slots: 1,
@@ -97,18 +100,18 @@ fn fetch_progress_reaches_a_hundred_and_never_passes_it() {
     // No plan published yet: every caller must fall back rather than
     // divide by a plan belonging to nobody.
     assert_eq!(hub.fetch_left(), None);
-    hub.fetch_plan.store(1_000, Ordering::Relaxed);
+    hub.fetch_counters().plan.store(1_000, Ordering::Relaxed);
     assert_eq!(hub.fetch_left(), Some((0, 1_000, 1_000)));
     // A resume seeds `done` with what is already in hand, so the bar
     // starts where the bytes are.
-    hub.fetch_done.store(600, Ordering::Relaxed);
+    hub.fetch_counters().done.store(600, Ordering::Relaxed);
     assert_eq!(hub.fetch_left(), Some((600, 1_000, 400)));
     // Drained: exactly 100%, exactly nothing left.
-    hub.fetch_done.store(1_000, Ordering::Relaxed);
+    hub.fetch_counters().done.store(1_000, Ordering::Relaxed);
     assert_eq!(hub.fetch_left(), Some((1_000, 1_000, 0)));
     // Two independent atomics, so a reader can land past the plan.
     // Clamped, never an overshoot or an underflowed remainder.
-    hub.fetch_done.store(1_200, Ordering::Relaxed);
+    hub.fetch_counters().done.store(1_200, Ordering::Relaxed);
     assert_eq!(hub.fetch_left(), Some((1_000, 1_000, 0)));
 }
 

@@ -1,8 +1,9 @@
 //! `SQLITE_SCHEMA` on a pooled reader: retry once, and make a failure
 //! that survives the retry TELLABLE from "no rows".
 //!
-//! The failure this exists for is documented on
-//! [`schema::tests::repeat_opens_do_not_churn_the_schema`]. A writer that
+//! The failure this exists for is documented on the
+//! `repeat_opens_do_not_churn_the_schema` test in [`super::schema`] (a
+//! `cfg(test)` module, so nothing rendered links to it). A writer that
 //! changes the schema invalidates every pooled read-only connection's
 //! prepared statements. SQLite's `prepare_v2` re-prepares transparently,
 //! so an ordinary statement never surfaces the change at all - but

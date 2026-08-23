@@ -104,3 +104,59 @@ fn the_container_default_reproduces_todays_modes() {
     assert_eq!(mode(&job), 0o755);
     assert_eq!(mode(&job.join("a.mkv")), 0o644);
 }
+
+/// A symlink inside the job is not followed, and its target keeps its
+/// own mode.
+///
+/// The walk uses `symlink_metadata` for exactly this: `set_permissions`
+/// follows links, so a link planted in an archive would otherwise hand
+/// whatever it points at the output tree's modes - a file outside the
+/// download root entirely, chmodded by a setting about downloads. A link
+/// to a DIRECTORY is the sharper half: followed, it would also be pushed
+/// onto the walk stack and re-mode everything beneath it.
+#[test]
+fn a_symlink_is_neither_followed_nor_re_moded() {
+    let root = scratch("symlink");
+    let out = root.join("downloads");
+    let job = out.join("Job");
+    std::fs::create_dir_all(&job).unwrap();
+
+    // Two targets outside the job tree, both deliberately tight.
+    let outsider = root.join("outsider.conf");
+    std::fs::write(&outsider, b"x").unwrap();
+    std::fs::set_permissions(&outsider, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("inner")).unwrap();
+    std::fs::write(elsewhere.join("inner").join("f"), b"x").unwrap();
+    for p in [&elsewhere, &elsewhere.join("inner")] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::set_permissions(
+        elsewhere.join("inner").join("f"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+
+    std::os::unix::fs::symlink(&outsider, job.join("link-to-file")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, job.join("link-to-dir")).unwrap();
+
+    super::apply_out_umask(&job, Some(&out), 0o002);
+
+    assert_eq!(mode(&job), 0o775, "the job's own directory");
+    assert_eq!(mode(&outsider), 0o600, "a linked file outside the tree");
+    assert_eq!(
+        mode(&elsewhere),
+        0o700,
+        "a linked directory outside the tree"
+    );
+    assert_eq!(
+        mode(&elsewhere.join("inner")),
+        0o700,
+        "the walk descended THROUGH a symlink"
+    );
+    assert_eq!(
+        mode(&elsewhere.join("inner").join("f")),
+        0o600,
+        "a file two levels outside the tree was re-moded"
+    );
+}

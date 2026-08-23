@@ -170,6 +170,42 @@ fn the_packet_file_ceiling_binds_by_size_not_by_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The SAME rule on the path that actually reads packet bytes today.
+///
+/// `collect_packet_files_bounded` above is still live (it is what
+/// `sniffed_packet_files` walks), but the repair pass moved to
+/// `PacketCatalog` on 20 Aug 2026, and the catalog carries its own copy of
+/// the by-name/by-sniff ceiling in `relist`. `build_lazy_bounded` was
+/// added as the test seam for it and no test ever used it, so the M4 rule
+/// was pinned on one of the two sites while the other - the one whose
+/// `scan_file` does the whole-file `std::fs::read` - was pinned nowhere
+/// (23 Aug 2026, dispositioning the 3 Aug "named `.par2` whole-file
+/// reads" item).
+#[test]
+fn the_catalogs_packet_file_ceiling_binds_by_size_not_by_name() {
+    let dir = tmpdir("catalog-ceiling");
+    let a = payload(200, 1);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a)];
+    let index = par2_index(SET, BS, files);
+    let vol = par2_volume(SET, BS, files, &[0]);
+    std::fs::write(dir.join("set.par2"), &index).unwrap();
+    std::fs::write(dir.join("big.par2"), &vol).unwrap();
+    std::fs::write(dir.join("bigbare"), &vol).unwrap();
+    let cap = (index.len().min(vol.len()) - 1) as u64;
+    assert!(cap >= 64, "the sniff floor still has to be clearable");
+    let cat = PacketCatalog::build_lazy_bounded(&dir, cap).expect("list");
+    assert_eq!(
+        cat.packet_paths().count(),
+        0,
+        "an oversized file was cataloged: {:?}",
+        cat.packet_paths().collect::<Vec<_>>()
+    );
+    // The bound talking, not a name or a parse failure.
+    let cat = PacketCatalog::build_lazy_bounded(&dir, u64::MAX).expect("list");
+    assert_eq!(cat.packet_paths().count(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn clean_set_reads_no_damage_and_names_its_files() {
     let dir = tmpdir("clean");

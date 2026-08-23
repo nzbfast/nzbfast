@@ -41,6 +41,16 @@ RestartSec=5
 # Hardening - the daemon only needs its own data dirs.
 # The spool holds the API key, provider credentials and job state, so keep
 # anything the daemon creates owner-only rather than inheriting 0022.
+#
+# This reaches --out as well, and systemd has no per-path umask: finished
+# downloads come out 0700/0600, so a Sonarr or Radarr running as another
+# user cannot read them, nor rename them out of the folder holding them
+# (issue #20). Do NOT relax this line to fix that - it also protects the
+# generated API key. Set "Permissions on finished downloads" in Settings ->
+# Disk & quota instead (`out_umask` in settings.json): 002 gives the output
+# tree 775/664 and leaves everything else owner-only. Add the importing
+# user to the nzbfast group, or run both under one group, and the import
+# becomes a rename rather than a copy.
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict

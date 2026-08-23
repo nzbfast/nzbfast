@@ -8,12 +8,60 @@
 
 use super::*;
 use crate::sync::MutexExt;
+use std::sync::OnceLock;
+use tracing::info;
 
 /// Default total bytes of held (not-yet-mappable) spans before a group
-/// falls back to materialized volumes. Memory is the cache tier and the
-/// header-first scheduling keeps real holds small; this is the safety
-/// net. Overridden by the MemBudget slice (`set_holds_cap`).
+/// falls back to materialized volumes, used when NOTHING published a
+/// process budget. Memory is the cache tier and the header-first
+/// scheduling keeps real holds small; this is the safety net. Overridden
+/// by the MemBudget slice (`set_holds_cap`), and by
+/// [`default_holds_cap`] whenever an entry point sized the process.
 pub(super) const HOLDS_DEFAULT_CAP: usize = 2 << 30;
+
+/// Floor under any holds cap, raw (`set_holds_cap`) or ledger-reduced.
+pub(super) const HOLDS_CAP_FLOOR: usize = 8 << 20;
+
+/// The cap a freshly-built [`Extractor`] starts with: the published
+/// budget's 45% slice if an entry point sized this process, else the flat
+/// [`HOLDS_DEFAULT_CAP`] (TODO 260).
+///
+/// The asymmetry this closes cost a measurement day. `set_process_budget`
+/// is read implicitly by the repair paths, `rar_read_options` and the
+/// LZMA gauge, so it LOOKS like the way to size a pipeline - but the
+/// extractor took its cap only from `set_holds_cap`, which lives on the
+/// download path alone (`crates/nzbfast/src/get/vrig.rs`). The TODO 209
+/// dict-window rig pinned 256 MiB, built a bare `Extractor::new`, and
+/// actually chased against 2 GiB; the unbounded container buffering that
+/// produced was written up as an untracked allocation wanting a new
+/// budget tier or a disk spill. It was neither - wiring the production
+/// cap let the existing trim/forfeit ladder bound it, 315 -> 187 MiB peak
+/// with one demote (TODO 256,
+/// `research/NOTE-2026-08-22-nested-container-buffer-rss.md`).
+///
+/// Reading [`crate::mem::published_budget`] rather than
+/// [`crate::mem::process_budget`] is the whole design. `process_budget`
+/// falls back to `MemBudget::auto` - RAM/4, clamped to [256 MiB, 16 GiB] -
+/// so a default routed through it would hand a 4 GB CI runner a 460 MiB
+/// cap and this dev box a 7.2 GiB one, and every holds-sensitive extract
+/// test would pass or demote according to the host it ran on. Nothing
+/// publishes a budget in a unit test, so `None` keeps the whole existing
+/// suite byte-identical to the flat 2 GiB it was written against, while
+/// every real entry point (`serve`, the CLI's `run`, `embedded_init`) and
+/// any rig that says `set_process_budget` gets the honest slice.
+///
+/// Considered and rejected: making the omission loud instead (a
+/// `debug_assert` on the download path, or a `new_with_budget` ctor). The
+/// download path is the ONE site that already sets the cap, so an assert
+/// there guards the case that was never wrong; and a second constructor
+/// only moves the choice, leaving `Extractor::new` still silently
+/// generous for the next rig that reaches for it.
+pub(super) fn default_holds_cap() -> usize {
+    crate::mem::published_budget()
+        .map(|b| b.holds_cap())
+        .unwrap_or(HOLDS_DEFAULT_CAP)
+        .max(HOLDS_CAP_FLOOR)
+}
 
 /// Held-span accounting shared across the whole extractor CHAIN: a child
 /// extractor's holds charge the same budget as its parent's, so a nested
@@ -24,6 +72,10 @@ pub(super) struct HoldsBudget {
     pub(super) bytes: AtomicUsize,
     pub(super) cap: AtomicUsize,
     pub(super) peak: AtomicUsize,
+    /// Process-wide sharing seat ([`HoldsLedger`]): set once when the
+    /// root extractor joins the daemon's ledger, never for `get`, the
+    /// repair path or unit tests. Unset, `cap()` is the raw cap.
+    pub(super) seat: OnceLock<(Arc<HoldsLedger>, u64)>,
 }
 
 impl HoldsBudget {
@@ -32,24 +84,40 @@ impl HoldsBudget {
             bytes: AtomicUsize::new(0),
             cap: AtomicUsize::new(cap),
             peak: AtomicUsize::new(0),
+            seat: OnceLock::new(),
         }
     }
 
     pub(super) fn add(&self, n: usize) {
         let now = self.bytes.fetch_add(n, Ordering::Relaxed) + n;
         self.peak.fetch_max(now, Ordering::Relaxed);
+        // Memory-floor gauge mirror (instrument-first): process-wide twin
+        // of this budget's charge, sampled beside the untracked tiers.
+        crate::memgauge::add(crate::memgauge::Sub::Holds, n as u64);
     }
 
     pub(super) fn sub(&self, n: usize) {
         self.bytes.fetch_sub(n, Ordering::Relaxed);
+        crate::memgauge::sub(crate::memgauge::Sub::Holds, n as u64);
     }
 
     pub(super) fn over(&self) -> bool {
-        self.bytes.load(Ordering::Relaxed) > self.cap.load(Ordering::Relaxed)
+        self.bytes.load(Ordering::Relaxed) > self.cap()
     }
 
+    /// The EFFECTIVE cap: the raw cap, less whatever the pipelines
+    /// senior to this one on the process ledger currently hold, floored
+    /// at the 8 MB `set_holds_cap` floors at. Unseated (no ledger, or
+    /// the eldest seat) this is the raw cap exactly - the single-job
+    /// behaviour is byte-identical to before the ledger existed.
     pub(super) fn cap(&self) -> usize {
-        self.cap.load(Ordering::Relaxed)
+        let raw = self.cap.load(Ordering::Relaxed);
+        match self.seat.get() {
+            None => raw,
+            Some((ledger, id)) => raw
+                .saturating_sub(ledger.senior_bytes(*id))
+                .max(HOLDS_CAP_FLOOR),
+        }
     }
 
     pub(super) fn peak(&self) -> usize {
@@ -81,10 +149,12 @@ impl HoldSpan {
     }
 }
 
-/// Same-directory scratch prefix for paged held spans. Like
-/// [`DEC_TMP_PREFIX`], the leading `.nzbfast` keeps the cleanup walkers
-/// and the keep-media-only sweep off it, and pid + counter make each name
-/// unique to one run of one process.
+/// Same-directory scratch prefix for paged held spans. The leading
+/// `.nzbfast` is the established internal-scratch marker - it keeps the
+/// cleanup walkers and the keep-media-only sweep off the file - and pid +
+/// counter make each name unique to one run of one process. The finish
+/// decrypt's `DEC_TMP_PREFIX` was the other user of the convention until
+/// TODO 27 phase 3 deleted that pass.
 pub(super) const HOLDS_TMP_PREFIX: &str = ".nzbfast-holds.";
 
 /// Remove holds scratch left behind by a killed run. Root construction
@@ -358,6 +428,36 @@ pub(super) fn holds_page_env_off() -> bool {
     holds_page_env_off_value(std::env::var("NZBFAST_NO_HOLDS_PAGE").ok().as_deref())
 }
 
+/// How many offset-0 probes ONE slot may fire (see
+/// [`Extractor::probe_offset0`]). One is the old one-shot; the rest are
+/// re-issues, each paid for by a strictly lower arrived offset.
+pub(super) const PROBE0_MAX: u8 = 4;
+
+/// How deep into a slot a re-issue may still fire, in held spans. The
+/// correction a re-issue is chasing is the slot's own `head_ids`
+/// article arriving late, which is a first-round-trips event; past this
+/// many of the slot's articles, a lower offset is likelier the ladder
+/// WRAPPING - under a rot-k ladder the declared positions PAST the head
+/// carry offsets `0..(k-1)*A`, below the head_ids article's `k*A`, so
+/// re-aiming on one walks the guess PAST the head instead of onto it
+/// (`map_span_ids` allows only 2 articles of backward slack). A real
+/// volume is hundreds of articles, so its wrap can never reach this
+/// window; a file small enough that it can is a couple of articles of
+/// misfetch either way.
+pub(super) const PROBE0_WINDOW: usize = 16;
+
+/// `NZBFAST_NO_HEAD_GRACE=1` restores the pre-grace behaviour: a slot
+/// still waiting for its offset-0 sniff spills at [`unclassified_spill`]
+/// even when the holds slice has room for it. Split for testability like
+/// the paging gate above.
+pub(super) fn head_grace_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+pub(super) fn head_grace_env_off() -> bool {
+    head_grace_env_off_value(std::env::var("NZBFAST_NO_HEAD_GRACE").ok().as_deref())
+}
+
 /// Per-slot budget for spans held while a slot is still unclassified
 /// (waiting for its offset-0 sniff). Honest posts fetch each file's first
 /// segment within the first round-trips (M3 scheduling), so real holds
@@ -404,13 +504,27 @@ pub(super) fn pw_await_spill(holds_cap: usize) -> usize {
 /// 45% of a big box's budget let a damaged 3.5 GB compressed set sit
 /// fully resident for the whole download (the 11 Aug 2026 soak's RSS
 /// stair). Beyond this window the cold spans page to the holds scratch
-/// ([`Extractor::page_stalled_chase`]); a gap that later fills (retry,
+/// ([`Extractor::page_wedged_chase`]); a gap that later fills (retry,
 /// PAR2 repair) reads them back through the frontier buffer's paged
 /// serving, and a demote materializes volumes from scratch byte-exact.
 /// Same deliberate non-scaling ceiling as [`pw_await_spill`], for the
 /// same reason: paging cold chase bytes never costs the set anything
 /// but preads on the rescue path, so a bigger budget buys no reason to
 /// keep more of them resident.
+/// Is this posted name shaped like an archive volume - one of a
+/// numbered set ([`vol_sort_key`] ranks everything except `u64::MAX`),
+/// or a bare `.zip`/`.7z` container? The late-head grace's population:
+/// these are the slots whose sniff is worth waiting for, because losing
+/// it costs the set its in-place extraction rather than just deferring
+/// a plain file's writes.
+pub(super) fn volume_shaped_name(name: &str) -> bool {
+    if vol_sort_key(name).0 != u64::MAX {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".zip") || lower.ends_with(".7z")
+}
+
 pub(super) fn chase_stall_spill(holds_cap: usize) -> usize {
     (holds_cap / 4).clamp(4 << 20, 64 << 20)
 }
@@ -420,11 +534,28 @@ impl Extractor {
     /// The budget is shared with any nested children.
     pub fn set_holds_cap(&self, cap: usize) {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_ok()
             .budget
             .cap
-            .store(cap.max(8 << 20), Ordering::Relaxed);
+            .store(cap.max(HOLDS_CAP_FLOOR), Ordering::Relaxed);
+    }
+
+    /// Seat this extractor's holds budget on a process-wide
+    /// [`HoldsLedger`] so pipelines alive at once share ONE cap (TODO
+    /// 219 follow-up). Root only, once; a nested child shares the
+    /// parent's budget and so its seat. Joining twice keeps the first
+    /// seat.
+    pub fn join_holds_ledger(&self, ledger: &Arc<HoldsLedger>) {
+        let budget = self.inner.lock_ok().budget.clone();
+        let _ = budget
+            .seat
+            .get_or_init(|| (ledger.clone(), ledger.join(&budget)));
+    }
+
+    /// The chain's holds budget - ledger tests only.
+    #[cfg(test)]
+    pub(super) fn holds_budget_for_tests(&self) -> Arc<HoldsBudget> {
+        self.inner.lock_ok().budget.clone()
     }
 
     /// Holds-paging gate (see `NZBFAST_NO_HOLDS_PAGE`, latched at
@@ -435,6 +566,14 @@ impl Extractor {
         self.inner.lock_ok().holds_page_on = on;
     }
 
+    /// Late-head grace gate (see `NZBFAST_NO_HEAD_GRACE`, latched at
+    /// construction; default on). Off: a slot whose offset-0 sniff has
+    /// not arrived spills at [`unclassified_spill`] exactly as it did
+    /// before the grace existed.
+    pub fn set_head_grace(&self, on: bool) {
+        self.inner.lock_ok().head_grace_on = on;
+    }
+
     /// Hard ceiling on the held-span scratch file, shared down the chain
     /// like the RAM cap it relieves. Unset (0) means auto: 4x the holds
     /// RAM cap, resolved at page time. The daemon wires a free-space-
@@ -443,8 +582,7 @@ impl Extractor {
     /// breach with paging off.
     pub fn set_holds_scratch_cap(&self, bytes: u64) {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_ok()
             .scratch
             .cap
             .store(bytes, Ordering::Relaxed);
@@ -454,8 +592,7 @@ impl Extractor {
     /// Test/diagnostic hook.
     pub fn holds_paged_total(&self) -> u64 {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_ok()
             .scratch
             .paged_total
             .load(Ordering::Relaxed)
@@ -472,6 +609,15 @@ impl Extractor {
     /// mem summary (M15).
     pub fn holds_peak(&self) -> usize {
         self.inner.lock_ok().budget.peak()
+    }
+
+    /// The chain's EFFECTIVE held-span cap right now: what
+    /// [`Self::set_holds_cap`] last stored (or [`default_holds_cap`] at
+    /// construction), less any senior ledger seat's charge. The figure a
+    /// memory rig should print beside its peak so a run that never got
+    /// the production cap says so out loud (TODO 260).
+    pub fn holds_cap(&self) -> usize {
+        self.inner.lock_ok().budget.cap()
     }
 
     /// Budget-breach relief: move RAM-held spans - holds and header
@@ -520,7 +666,10 @@ impl Extractor {
             }
         }
         if paged_any && !scratch.announced.swap(true, Ordering::Relaxed) {
-            println!("💾 held spans over the RAM cap - paging to scratch, set stays one-pass");
+            info!(
+                target: "extract",
+                "💾 held spans over the RAM cap - paging to scratch, set stays one-pass"
+            );
         }
         !budget.over()
     }
@@ -579,7 +728,7 @@ impl Extractor {
             }
         }
         if paged_any && !scratch.announced.swap(true, Ordering::Relaxed) {
-            println!("🔒 spans parked for a password are paging to scratch");
+            info!(target: "extract", "🔒 spans parked for a password are paging to scratch");
         }
     }
 
@@ -678,6 +827,14 @@ impl Extractor {
                 // article's bytes, re-fed later, so that article's CRC does
                 // not describe it.
                 SlotMode::Rar => self.rar_span(inner, slot, off, &bytes, None, false, None),
+                // TODO 211 (b): an alias's holds feed its head; any
+                // re-hold lands on the head (so `rebind_subranges`
+                // below finds nothing here and the bytes stay in RAM
+                // until the next breach, the documented benign case).
+                SlotMode::SplitPart => {
+                    let (head, logical) = Self::split_target(inner, slot, off);
+                    self.rar_span(inner, head, logical, &bytes, None, false, None)
+                }
                 SlotMode::RarChase | SlotMode::SevenZ => self.chase_span(inner, slot, off, &bytes),
                 SlotMode::Discard => Ok(()),
                 _ => self.plain_span(inner, slot, off, &bytes),
@@ -760,6 +917,193 @@ impl Extractor {
         }
     }
 
+    /// A span for a slot that has not sniffed yet, arriving at some
+    /// offset other than 0: park it, ask for the head, and decide
+    /// whether this slot has held enough to give up on mapping it.
+    /// Hoisted out of `write_impl_scratched` (size gate, 22 Aug 2026);
+    /// the caller still owns the off-lock promote flush and the `Held`
+    /// return.
+    pub(super) fn hold_presniff_span(
+        &self,
+        inner: &mut Inner,
+        slot: usize,
+        offset: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
+        inner.budget.add(data.len());
+        inner.slots[slot].pre_bytes += data.len();
+        inner.slots[slot]
+            .holds
+            .push((offset, HoldSpan::Ram(data.to_vec())));
+        self.probe_offset0(inner, slot, offset);
+        let spill = inner.slots[slot].pre_bytes > unclassified_spill(inner.budget.cap());
+        // The chase ladder BEFORE the shotgun below, and this is the
+        // call site TODO 251 was filed for. `overflow_to_plain` flips
+        // EVERY Unknown slot holding bytes to Plain, and an unsniffed
+        // volume of a live chased set is exactly that: flipped, it can
+        // never join the set, the engine reaches it and the whole chase
+        // dies - twenty volumes on disk and no payload, for one 7 KB
+        // pre-sniff span (`relieve_by_own_chase`). The trim rung
+        // releases what the engine has already consumed, which is what
+        // the arrival order that CAUSES these holds keeps producing.
+        if inner.budget.over() && !self.page_out_holds(inner) && !self.relieve_by_chase(inner, slot)
+        {
+            self.overflow_to_plain(inner)?;
+        } else if spill && !Self::split_waiting(inner, slot) && !self.head_grace(inner, slot) {
+            // The offset-0 sniff hasn't arrived after this much of the
+            // slot, and the grace above has run out - synthesized
+            // segment numbering can put it anywhere in the queue. Give
+            // up mapping THIS slot: plain writes are always correct (a
+            // real RAR volume simply materializes on disk, the pre-M3
+            // behavior), while holding on livelocks the pipeline in RAM
+            // with nothing on disk, in stats, or in the journal.
+            self.spill_unclassified_slot(inner, slot)?;
+        }
+        Ok(())
+    }
+
+    /// Front-load the article carrying this slot's offset 0, from a span
+    /// that arrived while the slot is still Unknown. Two guesses ride
+    /// every promote, re-issues included - the honest one costs a single
+    /// id that is either already fetched or exactly what we want
+    /// re-fronted, and a probe keeps one recognisable shape:
+    ///   `(0, 1)` - offset 0 where the NZB ladder says it is; pulls a
+    ///     late/retried head article forward when the ladder is honest.
+    ///   `(size-min, +1)` - the rotation guess, root only: if numbering
+    ///     preserved posting order but started mid-sequence (the
+    ///     indexer-synthesized norm), the article at declared byte 0
+    ///     carrying actual offset X puts actual offset 0 at declared
+    ///     byte `size-X`. The ladder's ±slack absorbs a couple of
+    ///     articles of arrival jitter.
+    ///
+    /// The estimator is the MINIMUM offset the slot has held, not the
+    /// first one it saw, and the promote RE-ISSUES whenever that minimum
+    /// strictly falls. A span arriving at declared position p under a
+    /// rot-k ladder carries offset `(k+p)*A`, so `size-offset`
+    /// undershoots the head's declared byte by `p*A` - and
+    /// `map_span_ids` allows only +3 articles of forward slack. p is
+    /// normally 0 (`plan.rs` puts every file's `si == 0` segment in the
+    /// `head_ids` burst, so that article is normally the slot's first
+    /// arrival); when it is late or retried and four of the slot's own
+    /// articles beat it in, the first guess misses. Its eventual arrival
+    /// carries a LOWER offset than everything that beat it, which is
+    /// exactly the correction - so re-aim on it rather than latching on
+    /// the first sighting (2026-08-22 late-head-grace note, section 1).
+    ///
+    /// Bounded at [`PROBE0_MAX`] promotes per slot, because a promote
+    /// must not fight the M11 stream reader, whose newest-alive
+    /// generation re-promotes its rolling window every few MB
+    /// (`LiveRangeReader`, in nzbfast's serve/stream.rs) and so always
+    /// ends up in front. A handful of monotonically-improving re-issues
+    /// keeps that property; a per-article promote would not. Honest
+    /// ladders pay nothing: their arrivals climb, so the minimum never
+    /// falls and the first probe is the only one.
+    /// `spill_unclassified_slot` stays the backstop.
+    ///
+    /// The minimum is tracked incrementally rather than scanned off
+    /// `Slot.holds` - every held span passes through here, so the two
+    /// agree, and the scan would be quadratic over a slot's articles.
+    pub(super) fn probe_offset0(&self, inner: &mut Inner, slot: usize, offset: u64) {
+        let s = &mut inner.slots[slot];
+        if offset >= s.probe0_min || s.probe0_promotes >= PROBE0_MAX {
+            return;
+        }
+        let (first, size) = (s.probe0_promotes == 0, s.size);
+        // Keep the estimator honest either way - the guards below only
+        // decide whether this fall is worth a promote.
+        s.probe0_min = offset;
+        if !first && s.holds.len() > PROBE0_WINDOW {
+            return;
+        }
+        // Rotation is a posting-layer phenomenon: below the root a
+        // slot's byte space is an archive's, not a poster's ladder. No
+        // rotation guess there, so nothing to re-aim - the first probe
+        // is the only one, exactly as before.
+        let root = self.parent.upgrade().is_none();
+        if !first && !root {
+            return;
+        }
+        let mut spans = vec![(0u64, 1u64)];
+        if root && offset < size {
+            spans.push((size - offset, size - offset + 1));
+        }
+        inner.slots[slot].probe0_promotes += 1;
+        inner.pending_promote.push((slot, spans, false));
+    }
+
+    /// May slot `slot` WAIT for the offset-0 article its probe
+    /// front-loaded, instead of spilling at [`unclassified_spill`]?
+    ///
+    /// The race this arbitrates (measured 22 Aug 2026 on a 1 GbE line,
+    /// five releases x three reps on a rotated-ladder fixture, 4 legs
+    /// one-pass and 11 partly on disk with the SAME binaries): when a
+    /// slot's first span arrives out of order, [`Self::probe_offset0`]
+    /// promotes the article carrying byte 0. `promote()`
+    /// only reorders the PENDING queue - an article already dispatched
+    /// is untouched - and the plan queues each file's declared segments
+    /// contiguously, so for the handful of volumes that fit inside the
+    /// opening in-flight window (connections x pipeline depth) the
+    /// offset-0 article is ALREADY on the wire when its own promote
+    /// runs. The promote is then a no-op and the head arrives at a
+    /// uniformly random point in that volume's own arrival generation.
+    /// Whether it beats `unclassified_spill` - a QUARTER of the slice -
+    /// is a coin flip the wire decides, and losing it costs the whole
+    /// set its in-place extraction.
+    ///
+    /// So a slot that is still expecting a head gets the rest of the
+    /// slice rather than a quarter of it. The bound is the existing
+    /// budget, not a timer and not a new constant: at `budget.cap()` the
+    /// grace ends and the spill fires exactly as before, so one slot can
+    /// never hold more than the whole chain-wide slice, and the global
+    /// arbiter above (page to scratch, else demote every Unknown slot)
+    /// is untouched. A head that never arrives therefore costs a bounded
+    /// four-fold-larger hold and then degrades on the same path.
+    ///
+    /// Only for a slot whose NAME is volume-shaped ([`vol_sort_key`]
+    /// ranks it, or it is a bare container). That is the whole point of
+    /// waiting: a late head on a volume costs the SET its in-place
+    /// extraction, while a late head on an ordinary payload file costs
+    /// nothing but incremental writes - its bytes go to disk either way.
+    /// The 2026-07-20 live case the per-slot spill was written for (an
+    /// obfuscated single file, subject and numbering both lying, nothing
+    /// on disk or in the journal for the whole run) is a payload slot,
+    /// and it keeps today's early spill. Pre-sniff the name is all there
+    /// is to go on, which is the same trade the sniff branch itself
+    /// makes with `is_final_name`.
+    ///
+    /// Denied outright when paging is off (the relief valve the extra
+    /// holds lean on is gone, so keep the early spill), and below the
+    /// root (a nested level's spans come from its parent's mapper, not
+    /// from a fetch queue - there is no in-flight article to wait for).
+    /// The root test is `depth`, not `parent.upgrade()`: an extractor
+    /// nobody anchored into an `Arc` has an empty parent Weak at EVERY
+    /// level, so the upgrade test the rotation guess uses reads a
+    /// depth-1 child as the root.
+    pub(super) fn head_grace(&self, inner: &mut Inner, slot: usize) -> bool {
+        if !inner.head_grace_on || !inner.holds_page_on {
+            return false;
+        }
+        if self.depth != 0 {
+            return false;
+        }
+        let s = &inner.slots[slot];
+        if s.probe0_promotes == 0 || s.pre_bytes > inner.budget.cap() {
+            return false;
+        }
+        if !volume_shaped_name(&s.name) {
+            return false;
+        }
+        if !inner.grace_announced {
+            inner.grace_announced = true;
+            info!(
+                target: "extract",
+                "⏳ offset-0 article late - holding for the sniff rather than \
+                 materializing the volume"
+            );
+        }
+        true
+    }
+
     /// One Unknown slot exceeded the per-slot pre-classification budget -
     /// flip just that slot to Plain and flush its holds to disk. Same
     /// safety argument as [`Self::overflow_to_plain`], applied before the
@@ -777,6 +1121,7 @@ impl Extractor {
             return Ok(());
         }
         inner.slots[slot].mode = SlotMode::Plain;
+        self.split_slot_plain(inner, slot)?;
         self.drain_holds(inner, slot)
     }
 
@@ -796,6 +1141,7 @@ impl Extractor {
                     continue;
                 }
                 inner.slots[si].mode = SlotMode::Plain;
+                self.split_slot_plain(inner, si)?;
                 self.drain_holds(inner, si)?;
             }
         }
@@ -1201,6 +1547,10 @@ mod tests {
         let data = payload(6_000_000, 9);
         let ex = Extractor::new(&dir, 1, true);
         ex.set_holds_cap(8 << 20); // spill budget = clamp(2M, 4M..) = 4 MB
+        // No `set_head_grace(false)` on purpose: `video.bin` is not a
+        // volume-shaped name, so the late-head grace never covers this
+        // slot and the early spill stands. That is half of what the
+        // grace's name rule is for, pinned here.
         let art = 40_000;
         // Everything EXCEPT the offset-0 article, in scrambled order.
         let mut offs: Vec<usize> = (1..data.len().div_ceil(art)).map(|i| i * art).collect();
@@ -1243,6 +1593,11 @@ mod tests {
         let vol = fixtures::rar5_volume(&[("movie.mkv", 6_000_000, &data, false, false)]);
         let ex = Extractor::new(&dir, 1, true);
         ex.set_holds_cap(8 << 20);
+        // `v.rar` IS volume-shaped, and 6 MB fits inside an 8 MB slice,
+        // so the grace would ride this out. Gate off: this test pins the
+        // spill, `a_late_head_inside_the_slice_waits_for_it` pins the
+        // grace that now precedes it.
+        ex.set_head_grace(false);
         let art = 40_000;
         let mut offs: Vec<usize> = (1..vol.len().div_ceil(art)).map(|i| i * art).collect();
         let mut state = 78u64;
@@ -1314,6 +1669,186 @@ mod tests {
             "volume materialized despite the late sniff arriving"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The late-head grace, wire-free, in the shape the 21 Aug hold lab
+    /// drove over the wire: one RAR volume whose declared ladder is
+    /// ROTATED, so every article except the one carrying byte 0 arrives
+    /// first and the whole volume piles into pre-classification holds.
+    ///
+    /// The volume is bigger than `unclassified_spill` (a quarter of the
+    /// slice) and smaller than the slice itself, which is exactly the
+    /// 22 Aug wire fixture's shape (~108 MB volumes against a 231 MB
+    /// holds slice). Before the grace, whether this set kept its
+    /// in-place extraction was a race between the spill and an offset-0
+    /// article the promote could not reach because it was already on the
+    /// wire; the same binary went one-pass on 4 legs of 15 and to disk on
+    /// the other 11. Now it is decided by the budget, so both arms below
+    /// are deterministic: grace on rides it out, grace off materializes.
+    #[test]
+    fn a_late_head_inside_the_slice_waits_for_it() {
+        for grace in [true, false] {
+            let dir = tmpdir(&format!("headgrace-{grace}"));
+            let inner = "movie.mkv";
+            let payload_len = 24 << 20;
+            let data = payload(payload_len, 12);
+            let vol = fixtures::rar5_volume(&[(inner, payload_len as u64, &data, false, false)]);
+            let ex = Extractor::new(&dir, 1, true);
+            // Slice 64 MB: spill window 16 MB, grace ceiling 64 MB, and
+            // the volume sits between them.
+            ex.set_holds_cap(64 << 20);
+            ex.set_head_grace(grace);
+            assert!(
+                vol.len() > (16 << 20) && vol.len() < (64 << 20),
+                "fixture must sit between the spill window and the slice: {}",
+                vol.len()
+            );
+            let art = 512 * 1024;
+            let n = vol.len().div_ceil(art);
+            // The rotated ladder: declared segment 1 carries byte `art`,
+            // and byte 0 is announced last.
+            for i in 1..n {
+                let s = i * art;
+                let e = (s + art).min(vol.len());
+                ex.write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+                    .unwrap();
+            }
+            assert_eq!(
+                dir.join("v.rar").exists(),
+                !grace,
+                "grace={grace}: spill decision flipped"
+            );
+            // The head, dead last.
+            ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art])
+                .unwrap();
+            let rep = ex.finish().unwrap();
+            assert!(
+                rep.fallbacks.is_empty(),
+                "grace={grace}: {:?}",
+                rep.fallbacks
+            );
+            if grace {
+                // Rode the late head out: extracted in place, and the
+                // volume never touched disk.
+                assert_eq!(std::fs::read(dir.join(inner)).unwrap(), data);
+                assert!(!dir.join("v.rar").exists(), "volume materialized");
+            } else {
+                // Spilled, and a spill is still CORRECT - the volume is
+                // byte-identical on disk for the post-pass to extract.
+                assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
+                assert!(!dir.join(inner).exists(), "spilled slot extracted");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// The grace's bound is the budget, not patience: a volume LARGER
+    /// than the whole holds slice still spills, so one unsniffable slot
+    /// can never hold more than the slice and the global arbiter above
+    /// it keeps its arithmetic. Same fixture as the test above with the
+    /// slice moved under the volume rather than over it.
+    #[test]
+    fn a_late_head_past_the_slice_spills_anyway() {
+        let dir = tmpdir("headgrace-past-slice");
+        let payload_len = 24 << 20;
+        let data = payload(payload_len, 13);
+        let vol = fixtures::rar5_volume(&[("movie.mkv", payload_len as u64, &data, false, false)]);
+        let ex = Extractor::new(&dir, 1, true);
+        // Slice 8 MB (the setter's floor) against a ~24 MB volume.
+        ex.set_holds_cap(8 << 20);
+        let art = 512 * 1024;
+        let n = vol.len().div_ceil(art);
+        for i in 1..n {
+            let s = i * art;
+            let e = (s + art).min(vol.len());
+            ex.write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+                .unwrap();
+        }
+        assert!(
+            dir.join("v.rar").exists(),
+            "the grace outlasted the holds slice - it must end at the cap"
+        );
+        assert!(
+            ex.holds_peak() <= (8 << 20) + art,
+            "holds peaked at {} - past the slice the grace must stop",
+            ex.holds_peak()
+        );
+        ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art])
+            .unwrap();
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+        assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The grace needs the relief valve it leans on: with paging off a
+    /// breach demotes instead of spilling to scratch, so the early
+    /// per-slot spill must stay exactly where it was.
+    #[test]
+    fn head_grace_stands_down_when_paging_is_off() {
+        let dir = tmpdir("headgrace-nopaging");
+        let payload_len = 24 << 20;
+        let data = payload(payload_len, 14);
+        let vol = fixtures::rar5_volume(&[("movie.mkv", payload_len as u64, &data, false, false)]);
+        let ex = Extractor::new(&dir, 1, true);
+        ex.set_holds_cap(64 << 20);
+        ex.set_holds_paging(false);
+        let art = 512 * 1024;
+        let n = vol.len().div_ceil(art);
+        for i in 1..n {
+            let s = i * art;
+            let e = (s + art).min(vol.len());
+            ex.write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+                .unwrap();
+        }
+        assert!(
+            dir.join("v.rar").exists(),
+            "the grace ran with no paging behind it"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The grace's population, pinned directly: every volume naming the
+    /// extractor already sorts sets by, plus the two bare containers -
+    /// and nothing that is merely a posted payload file. The last case
+    /// is the 2026-07-20 live regression the per-slot spill exists for,
+    /// which must keep its early spill.
+    #[test]
+    fn volume_shaped_names_are_the_graces_population() {
+        for n in [
+            "movie.mkv.part07.rar",
+            "v.rar",
+            "abcdef0123456789.42",
+            "set.7z.001",
+            "old.r09",
+            "big.s00",
+            "x.zip",
+            "x.7z",
+        ] {
+            assert!(volume_shaped_name(n), "{n} should be volume-shaped");
+        }
+        for n in [
+            "video.bin",
+            "movie.mkv",
+            "comic.cbr",
+            "comic.cb7",
+            "notes.txt",
+            "file000",
+            "",
+        ] {
+            assert!(!volume_shaped_name(n), "{n} should NOT be volume-shaped");
+        }
+    }
+
+    /// The grace gate: NZBFAST_NO_HEAD_GRACE=1 parses as off, on the
+    /// pure helper for the same parallel-runner reason as the paging
+    /// gate above; the runtime setter is exercised by both arms of
+    /// `a_late_head_inside_the_slice_waits_for_it`.
+    #[test]
+    fn head_grace_env_parse() {
+        assert!(head_grace_env_off_value(Some("1")));
+        assert!(!head_grace_env_off_value(Some("0")));
+        assert!(!head_grace_env_off_value(None));
     }
 
     /// The spill budget's shape, pinned directly: floor for small

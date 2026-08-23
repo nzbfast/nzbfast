@@ -50,7 +50,8 @@ use std::time::Duration;
 /// One elementary-stream sample: where its bytes are and when it plays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
-    /// OUR fMP4 track id, 1-based, assigned by [`select_tracks`].
+    /// OUR fMP4 track id, 1-based, assigned by [`select_mkv`] /
+    /// [`select_mp4`].
     pub(crate) track: u32,
     /// Decode timestamp in this track's timescale.
     pub(crate) dts: u64,

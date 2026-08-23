@@ -67,6 +67,31 @@ pub struct Archive {
     pub main: MainHeader,
     pub blocks: Vec<Block>,
     source: ArchiveSource,
+    /// Where the header walk stopped because the next block header sat
+    /// beyond the bytes that had arrived, or `None` when `blocks` is the
+    /// whole archive. Only [`Archive::parse_stream_incremental`] ever
+    /// sets it; [`Archive::enumerate_rest`] clears it.
+    pending: Option<PendingWalk>,
+}
+
+/// A header walk stopped at the arrival frontier, with what resuming it
+/// needs. The walk RESUMES at `from` rather than starting over: on a
+/// chased volume the caller has, by the time the rest is wanted, released
+/// every byte behind the engine's watermark (that release is the whole
+/// point of the incremental parse), so a re-walk from the signature reads
+/// into bytes that are gone - measured 23 Aug 2026 as `chase source read
+/// 8 behind the trim point` on every leg of the set the parse was built
+/// for, 2.002x -> 3.001x. The stop offset is the end of the last block's
+/// data area, which is at or above any watermark the engine can have
+/// published for that block, so a resumed read never crosses the trim.
+/// The header-encryption keys are the one piece of walk state a resume
+/// cannot re-derive, because the HEAD_CRYPT block that carries their salt
+/// sits at offset 8 - behind the trim. Boxed for the reason the key cache
+/// gives: moving the archive must not memcpy AES keys around the heap.
+#[derive(Debug, Clone)]
+struct PendingWalk {
+    from: usize,
+    header_keys: Option<Box<Rar50Keys>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +294,17 @@ pub struct ExtractedEntryMeta {
     pub attr: u64,
     pub host_os: u64,
     pub is_directory: bool,
+    /// The entry's declared unpacked size, 0 for a directory. Every
+    /// fragment of a split member repeats the member's total, so a
+    /// caller that opens the sink at the Start fragment still learns the
+    /// whole size.
+    ///
+    /// Carried here rather than left to the caller to read off the parsed
+    /// headers, because a chasing caller may not have it to read: a
+    /// volume parsed by [`Archive::parse_stream_incremental`] enumerates
+    /// only as far as its bytes had arrived, so the entry the engine asks
+    /// to open can be one that caller has never seen.
+    pub unpacked_size: u64,
 }
 
 impl FileHeader {
@@ -550,7 +586,7 @@ impl Archive {
 
         let archive_len = input.len();
         let mut key_cache = Rar50KeyCache::default();
-        let (main, blocks) = parse_archive_blocks(
+        let (main, blocks, _) = parse_archive_blocks(
             archive_len,
             password,
             &mut key_cache,
@@ -558,6 +594,7 @@ impl Archive {
             |offset, keys| {
                 parse_encrypted_block_header_bytes(input, offset, archive_len, sfx_offset, keys)
             },
+            None,
         )?;
 
         Ok(Self {
@@ -565,6 +602,7 @@ impl Archive {
             main,
             blocks,
             source,
+            pending: None,
         })
     }
 
@@ -587,7 +625,12 @@ impl Archive {
     /// is complete, and chasing happens at volume granularity. A caller
     /// feeding a multivolume set parses volume k+1 (blocking on its arrival)
     /// while members of volumes 1..=k, already parsed, extract through the
-    /// same blocking sources - see `extract_volume_sequence_to`. Sources
+    /// same blocking sources - see `extract_volume_sequence_to`. **A caller
+    /// that holds the arrivals in memory should not use this**: waiting for
+    /// the tail pins the whole volume before the engine reads a byte, which
+    /// is a hard floor on retention of one volume and was measured costing a
+    /// chase its whole set. [`Self::parse_stream_incremental`] is that
+    /// caller's entry point. Sources
     /// that expose header ranges ahead of a not-yet-complete data area
     /// (e.g. a hole awaiting repair) additionally block the member DATA
     /// reads at the hole while parse and other members proceed.
@@ -599,8 +642,53 @@ impl Archive {
         expected_len: u64,
         options: crate::ArchiveReadOptions<'_>,
     ) -> Result<Self> {
+        Self::parse_stream_impl(source, expected_len, options, false)
+    }
+
+    /// [`Self::parse_stream`] that does NOT wait for the volume's tail.
+    ///
+    /// The blocking parse above completes only once the END header at the
+    /// archive tail is readable, because the walk skips each member's data
+    /// area arithmetically and the next header therefore sits a whole
+    /// member ahead. On a volume still arriving that means the WHOLE
+    /// volume: a caller holding the arrivals in RAM pins every byte of it
+    /// before the engine reads one. Measured 22 Aug 2026 on a compressed
+    /// set whose volumes were larger than the caller's retention budget,
+    /// the budget broke during that wait, with no packed byte read and so
+    /// no consumption watermark published at all - the set could not be
+    /// chased at any budget under the volume size, at any arrival rate,
+    /// and quartering the line rate changed nothing.
+    ///
+    /// So this stops the header walk where the arrived bytes stop and
+    /// reports the archive PARTIALLY ENUMERATED
+    /// ([`Self::is_partially_enumerated`]). What comes back is every
+    /// entry that could be read without waiting - on a chased volume,
+    /// the split fragment the engine is about to decode.
+    /// [`Self::enumerate_rest`] finishes the walk, blocking, and is what
+    /// a caller must call before treating `files()` as the whole volume.
+    /// [`extract_volume_sequence_to_with_progress`] does exactly that, at
+    /// the point its walk runs past the entries it has - by which time
+    /// the fragment has decoded and the caller has released its bytes, so
+    /// the deferred wait costs no retention.
+    ///
+    /// [`extract_volume_sequence_to_with_progress`]: crate::rar50::extract_volume_sequence_to_with_progress
+    pub fn parse_stream_incremental(
+        source: std::sync::Arc<dyn crate::source::BlockingRangeSource>,
+        expected_len: u64,
+        options: crate::ArchiveReadOptions<'_>,
+    ) -> Result<Self> {
+        Self::parse_stream_impl(source, expected_len, options, true)
+    }
+
+    fn parse_stream_impl(
+        source: std::sync::Arc<dyn crate::source::BlockingRangeSource>,
+        expected_len: u64,
+        options: crate::ArchiveReadOptions<'_>,
+        incremental: bool,
+    ) -> Result<Self> {
         let archive_len = usize::try_from(expected_len)
             .map_err(|_| Error::InvalidHeader("RAR 5 archive size overflows host address size"))?;
+        let frontier = source.clone();
         let source = ArchiveSource::Stream {
             source,
             len: archive_len,
@@ -611,7 +699,11 @@ impl Archive {
         }
         let password = options.password;
         let mut key_cache = Rar50KeyCache::default();
-        let (main, blocks) = parse_archive_blocks(
+        // Clamped to the declared length: a source reporting more arrived
+        // than the volume holds must not lift the stop above the walk's
+        // own bound.
+        let arrived = move || frontier.known_len().min(expected_len) as usize;
+        let (main, blocks, pending) = parse_archive_blocks(
             archive_len,
             password,
             &mut key_cache,
@@ -619,6 +711,7 @@ impl Archive {
             |offset, keys| {
                 read_encrypted_block_header_from_source(&source, offset, archive_len, 0, keys)
             },
+            incremental.then_some(&arrived as &dyn Fn() -> usize),
         )?;
 
         Ok(Self {
@@ -626,7 +719,94 @@ impl Archive {
             main,
             blocks,
             source,
+            pending,
         })
+    }
+
+    /// Has the header walk stopped short of the archive's end because the
+    /// bytes it would have to read had not arrived? See
+    /// [`Self::parse_stream_incremental`]; false for every other parse.
+    pub fn is_partially_enumerated(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Finish a walk [`Self::parse_stream_incremental`] stopped early,
+    /// BLOCKING on the bytes it needs, and leave the archive fully
+    /// enumerated. A no-op on any other archive.
+    ///
+    /// Resumes at the stop offset and APPENDS to `blocks`, so the entries
+    /// already enumerated keep their indices and a caller's
+    /// `(volume, file_index)` pairs stay valid - and nothing behind the
+    /// stop is read again, which is what lets a caller that has released
+    /// those bytes call this at all (see [`PendingWalk`]).
+    pub fn enumerate_rest(&mut self, password: Option<&[u8]>) -> Result<()> {
+        self.resume_walk(password, None)
+    }
+
+    /// Walk ONE step past the stop: read the header at the stop offset,
+    /// blocking on it, then carry on up to the arrival frontier exactly
+    /// as the incremental parse does. For a caller that needs the NEXT
+    /// entry of a still-arriving volume (a split continuation) without
+    /// waiting for the volume's tail - which [`Self::enumerate_rest`]
+    /// would, pinning the whole volume, the wait the incremental parse
+    /// exists to avoid. A no-op on a fully enumerated archive.
+    pub fn enumerate_next(&mut self, password: Option<&[u8]>) -> Result<()> {
+        let frontier = match &self.source {
+            ArchiveSource::Stream { source, len } => {
+                let len = *len;
+                let source = source.clone();
+                move || (source.known_len() as usize).min(len)
+            }
+            // Unreachable: only the streaming parse stops early.
+            _ => return Ok(()),
+        };
+        self.resume_walk(password, Some(&frontier as &dyn Fn() -> usize))
+    }
+
+    fn resume_walk(
+        &mut self,
+        password: Option<&[u8]>,
+        arrived: Option<&dyn Fn() -> usize>,
+    ) -> Result<()> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let archive_len = match &self.source {
+            ArchiveSource::Stream { len, .. } => *len,
+            // Unreachable: only the streaming parse stops early.
+            _ => return Ok(()),
+        };
+        let source = &self.source;
+        let mut key_cache = Rar50KeyCache::default();
+        let mut blocks = std::mem::take(&mut self.blocks);
+        let walked = walk_archive_blocks(
+            pending.from,
+            archive_len,
+            password,
+            &mut key_cache,
+            pending.header_keys.as_deref(),
+            |offset| read_block_header_from_source(source, offset, archive_len, 0),
+            |offset, keys| {
+                read_encrypted_block_header_from_source(source, offset, archive_len, 0, keys)
+            },
+            arrived,
+            &mut blocks,
+            // The header at the stop offset is what the caller came for:
+            // a bounded resume reads it unconditionally and lets the
+            // frontier stop the walk only after it.
+            arrived.is_some(),
+        );
+        self.blocks = blocks;
+        let stopped = walked?;
+        debug_assert!(
+            arrived.is_some() || stopped.is_none(),
+            "an unbounded walk cannot stop short"
+        );
+        self.pending = stopped.map(|from| PendingWalk {
+            from,
+            header_keys: pending.header_keys,
+        });
+        Ok(())
     }
 
     fn parse_file_backed(
@@ -643,7 +823,7 @@ impl Archive {
         }
 
         let file_cell = std::cell::RefCell::new(file);
-        let (main, blocks) = parse_archive_blocks(
+        let (main, blocks, _) = parse_archive_blocks(
             archive_len,
             password,
             key_cache,
@@ -659,6 +839,7 @@ impl Archive {
                     keys,
                 )
             },
+            None,
         )?;
 
         Ok(Self {
@@ -666,6 +847,7 @@ impl Archive {
             main,
             blocks,
             source,
+            pending: None,
         })
     }
 
@@ -885,12 +1067,10 @@ impl Archive {
             ArchiveSource::File(path) => stream::clone_prefill(path, dest)?,
             _ => false,
         };
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create(true)
-            .truncate(false)
-            .open(dest)?;
+        // O_NOFOLLOW (sweep 8, M10): a prefill that DECLINED leaves
+        // whatever is at `dest` alone, so a plain open would hand the
+        // streaming path the symlink escape the clone no longer has.
+        let mut out = stream::open_repair_dest(dest)?;
         if !prefilled {
             out.set_len(0)?;
         }
@@ -1526,12 +1706,8 @@ pub fn repair_inline_recovery_path(
     let scan = stream::scan_inline_recovery_chunks(&source, budget)?;
     let repaired = {
         let prefilled = stream::clone_prefill(src, dest)?;
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create(true)
-            .truncate(false)
-            .open(dest)?;
+        // O_NOFOLLOW - see `repair_recovery_to_path`.
+        let mut out = stream::open_repair_dest(dest)?;
         let repaired = if prefilled {
             stream::repair_prefix_streaming_prefilled(&source, 0, &scan, &source, &mut out, budget)?
         } else {
@@ -1915,13 +2091,22 @@ fn read_array_at<const N: usize>(input: &[u8], pos: &mut usize, end: usize) -> R
     Ok(out)
 }
 
+/// Walks an archive's header chain.
+///
+/// `arrived`, when given, is the source's contiguous arrival frontier,
+/// re-read before every block header: a walk that would have to read
+/// past it STOPS and hands the offset back as the third return value,
+/// instead of blocking there. That is the whole of what makes a chase
+/// over a volume larger than its retention budget possible - see
+/// [`Archive::parse_stream_incremental`], the only caller that passes it.
 fn parse_archive_blocks<F, G>(
     archive_len: usize,
     password: Option<&[u8]>,
     key_cache: &mut Rar50KeyCache,
     mut read_block: F,
     mut read_encrypted_block: G,
-) -> Result<(MainHeader, Vec<Block>)>
+    arrived: Option<&dyn Fn() -> usize>,
+) -> Result<(MainHeader, Vec<Block>, Option<PendingWalk>)>
 where
     F: FnMut(usize) -> Result<ParsedBlockHeader>,
     G: FnMut(usize, &Rar50Keys) -> Result<ParsedBlockHeader>,
@@ -1951,8 +2136,63 @@ where
     pos = first.next_offset;
 
     let mut blocks = Vec::new();
+    let stopped = walk_archive_blocks(
+        pos,
+        archive_len,
+        password,
+        key_cache,
+        header_keys.as_ref(),
+        read_block,
+        read_encrypted_block,
+        arrived,
+        &mut blocks,
+        false,
+    )?;
+    let pending = stopped.map(|from| PendingWalk {
+        from,
+        header_keys: header_keys.map(Box::new),
+    });
+    Ok((main, blocks, pending))
+}
+
+/// The block walk behind [`parse_archive_blocks`], from `pos` (the first
+/// block after the main header, or wherever an earlier walk stopped) to
+/// the END record, appending to `blocks`. With `arrived` it stops short
+/// at the first header the source has not delivered and returns that
+/// offset; `read_first` makes it read the header at `pos` regardless, so
+/// a resumed walk can be asked for one more entry without waiting for
+/// the volume's tail.
+#[allow(clippy::too_many_arguments)]
+fn walk_archive_blocks<F, G>(
+    mut pos: usize,
+    archive_len: usize,
+    password: Option<&[u8]>,
+    key_cache: &mut Rar50KeyCache,
+    header_keys: Option<&Rar50Keys>,
+    mut read_block: F,
+    mut read_encrypted_block: G,
+    arrived: Option<&dyn Fn() -> usize>,
+    blocks: &mut Vec<Block>,
+    read_first: bool,
+) -> Result<Option<usize>>
+where
+    F: FnMut(usize) -> Result<ParsedBlockHeader>,
+    G: FnMut(usize, &Rar50Keys) -> Result<ParsedBlockHeader>,
+{
+    let mut first = read_first;
     while pos < archive_len {
-        let parsed = if let Some(keys) = &header_keys {
+        // The header at `pos` has not arrived: stop rather than block on
+        // it. A file block's data area is skipped arithmetically, so the
+        // next header sits a whole member's packed length ahead - on a
+        // chased volume that is the rest of the volume, which is exactly
+        // the wait this exists to avoid.
+        if let Some(arrived) = arrived {
+            if !first && pos >= arrived() {
+                return Ok(Some(pos));
+            }
+        }
+        first = false;
+        let parsed = if let Some(keys) = header_keys {
             read_encrypted_block(pos, keys).map_err(|error| error.at_archive_offset(pos))?
         } else {
             read_block(pos).map_err(|error| error.at_archive_offset(pos))?
@@ -1988,7 +2228,7 @@ where
         pos = next;
     }
 
-    Ok((main, blocks))
+    Ok(None)
 }
 
 fn parse_extra_records<F>(input: &[u8], range: Range<usize>, mut handle: F) -> Result<()>

@@ -489,7 +489,9 @@ pub enum Sort {
     Name,
     /// Estimated bytes held, from the sampled mean article size. Groups
     /// with no sample yet sort last whichever direction is asked for -
-    /// see `stat_key`.
+    /// see the sample-derived `key` closure in `Catalog::query`, which
+    /// returns None for them, and the test that pins both directions,
+    /// `unprofiled_groups_sort_last_in_both_directions`.
     Size,
     /// Articles per day, from the sample's own time span.
     Activity,

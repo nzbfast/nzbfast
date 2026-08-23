@@ -316,7 +316,13 @@ async fn a_451_takedown_on_body_is_a_miss_not_a_protocol_error() {
     let id_echoed = std::sync::atomic::AtomicBool::new(false);
     let takedown = std::sync::atomic::AtomicBool::new(false);
     let got = conn
-        .read_body_into(&mut raw, Some("<gone@example>"), &id_echoed, &takedown)
+        .read_body_into(
+            &mut raw,
+            Some("<gone@example>"),
+            None,
+            &id_echoed,
+            &takedown,
+        )
         .await;
     assert!(
         matches!(got, Ok(false)),
@@ -342,7 +348,7 @@ async fn a_451_takedown_on_body_is_a_miss_not_a_protocol_error() {
     let id_echoed2 = std::sync::atomic::AtomicBool::new(false);
     let takedown2 = std::sync::atomic::AtomicBool::new(false);
     assert!(matches!(
-        conn.read_body_into(&mut raw2, None, &id_echoed2, &takedown2)
+        conn.read_body_into(&mut raw2, None, None, &id_echoed2, &takedown2)
             .await,
         Ok(false)
     ));
@@ -420,7 +426,7 @@ async fn a_hit_reports_its_echoed_id_as_well_as_a_miss() {
     let id_echoed = std::sync::atomic::AtomicBool::new(false);
     let takedown = std::sync::atomic::AtomicBool::new(false);
     let got = conn
-        .read_body_into(&mut raw, Some("<a@example>"), &id_echoed, &takedown)
+        .read_body_into(&mut raw, Some("<a@example>"), None, &id_echoed, &takedown)
         .await;
     assert!(matches!(got, Ok(true)), "222 must read as a hit: {got:?}");
     assert!(

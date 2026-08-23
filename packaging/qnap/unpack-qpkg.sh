@@ -1,11 +1,26 @@
 #!/bin/sh
 # Take a .qpkg apart, without QDK.
 #
-#   packaging/qnap/unpack-qpkg.sh <file.qpkg> <outdir>
+#   packaging/qnap/unpack-qpkg.sh [--parts] <file.qpkg> <outdir>
 #
 # Writes <outdir>/control/ (qpkg.cfg, package_routines, qinstall.sh,
 # icons) and <outdir>/data/ (everything that lands in the installed
 # package directory).
+#
+# With --parts it writes the two inner archives THEMSELVES -
+# <outdir>/control.tar and <outdir>/data.tar.gz - and extracts nothing.
+# A gate that reads what a member header STORES has to have that, because
+# extracting destroys the two fields such gates look at:
+#
+#   - bsdtar CONSUMES AppleDouble `._name` members on read, so a
+#     junk-carrying archive unpacked on the release Mac leaves no trace of
+#     them in the tree. That asymmetry is why v1.1.2 shipped five of them
+#     in each Linux tarball with every inspection reporting clean.
+#   - a non-root tar cannot restore uid/gid, so the builder identity in
+#     the headers is gone from anything unpacked from them.
+#
+# packaging/upload-release-assets.sh's macOS-metadata gate is the caller:
+# it hands both parts to python's tarfile, which reads stored headers.
 #
 # A .qpkg is three things concatenated:
 #     [ installer shell script ][ control tar ][ data tar.gz ]
@@ -31,8 +46,14 @@
 # must never report it clean.
 set -eu
 
-QPKG="${1:?usage: unpack-qpkg.sh <file.qpkg> <outdir>}"
-OUT="${2:?usage: unpack-qpkg.sh <file.qpkg> <outdir>}"
+MODE=extract
+if [ "${1:-}" = "--parts" ]; then
+    MODE=parts
+    shift
+fi
+
+QPKG="${1:?usage: unpack-qpkg.sh [--parts] <file.qpkg> <outdir>}"
+OUT="${2:?usage: unpack-qpkg.sh [--parts] <file.qpkg> <outdir>}"
 [ -f "$QPKG" ] || { echo "✗ no such file: $QPKG" >&2; exit 1; }
 
 # Read only the head of the file: the lengths are in the generated
@@ -57,17 +78,16 @@ if [ -z "$SCRIPT_LEN" ] || [ -z "$CTRL_LEN" ]; then
     exit 1
 fi
 
-mkdir -p "$OUT/control" "$OUT/data"
-
-# tail -c +N is 1-based, so the byte after a header of length N is N+1.
-tail -c "+$((SCRIPT_LEN + 1))" "$QPKG" | tar -xO 2>/dev/null \
-    | tar -xz -C "$OUT/control" 2>/dev/null \
-    || { echo "✗ could not read the control archive of $QPKG" >&2; boundaries; exit 1; }
-
 # What is at each computed boundary, for when one of them is wrong. A
 # .qpkg is three concatenated parts and a byte offset that is off by
 # anything at all fails as "not an archive", which says nothing about
 # which of the three lengths was misread.
+#
+# Defined BEFORE the first caller, which it was not until 23 Aug 2026:
+# the control-archive failure below called it while the definition was
+# still eleven lines further down the file, so sh had never executed it
+# and the one path most likely to need the dump printed "boundaries: not
+# found" instead.
 boundaries() {
     echo "  size=$(wc -c < "$QPKG") script_len=$SCRIPT_LEN ctrl_len=$CTRL_LEN data_kib=${DATA_KIB:-?}" >&2
     for _o in "$SCRIPT_LEN" "$((SCRIPT_LEN + CTRL_LEN))"; do
@@ -97,6 +117,32 @@ if [ "$DATA_LEN" -le 0 ]; then
     boundaries
     exit 1
 fi
+
+if [ "$MODE" = parts ]; then
+    mkdir -p "$OUT"
+    tail -c "+$((SCRIPT_LEN + 1))" "$QPKG" | head -c "$CTRL_LEN" > "$OUT/control.tar"
+    tail -c "+$((SCRIPT_LEN + CTRL_LEN + 1))" "$QPKG" | head -c "$DATA_LEN" \
+        > "$OUT/data.tar.gz"
+    # The same "it untarred is not proof" check the extract path makes
+    # below, one level earlier and all this mode can make: a misread
+    # length yields a short or empty part, and a caller handed an empty
+    # archive would find no junk in it and call the package clean.
+    for _p in "$OUT/control.tar" "$OUT/data.tar.gz"; do
+        if [ ! -s "$_p" ]; then
+            echo "✗ $QPKG: $_p came out empty." >&2
+            boundaries
+            exit 1
+        fi
+    done
+    exit 0
+fi
+
+mkdir -p "$OUT/control" "$OUT/data"
+
+# tail -c +N is 1-based, so the byte after a header of length N is N+1.
+tail -c "+$((SCRIPT_LEN + 1))" "$QPKG" | tar -xO 2>/dev/null \
+    | tar -xz -C "$OUT/control" 2>/dev/null \
+    || { echo "✗ could not read the control archive of $QPKG" >&2; boundaries; exit 1; }
 
 tail -c "+$((SCRIPT_LEN + CTRL_LEN + 1))" "$QPKG" | head -c "$DATA_LEN" \
     | tar -xz -C "$OUT/data" 2>/dev/null || {

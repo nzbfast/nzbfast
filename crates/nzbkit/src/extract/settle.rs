@@ -373,6 +373,11 @@ impl Extractor {
             if let Some(why) = self.reresolve_recompute(inner, key, &slots, stamp) {
                 return self.fallback_group(inner, key, why);
             }
+            // §94 D: the entry list just advanced - a nested zip split
+            // this group routed may now have a non-sibling entry (and no
+            // unparsed gap) behind its run, which is what counts it.
+            // A no-op lookup on a group with no open set.
+            self.close_zip_splits(inner, key);
         }
 
         for si in slots {
@@ -573,6 +578,106 @@ impl Extractor {
         None
     }
 
+    /// Parent-group fallback support: this routed slot's bytes were (or
+    /// will be) reconstructed into the parent's materialized volumes, so
+    /// drop everything it produced - holds, its own file, and the group
+    /// outputs once every member slot is abandoned - and swallow all
+    /// future spans. Silent by design: the parent already reported the
+    /// fallback, a child-side entry would double-count it.
+    pub(super) fn abandon_slot(&self, slot: usize) {
+        let mut g = self.inner.lock_ok();
+        let inner = &mut *g;
+        if matches!(inner.slots[slot].mode, SlotMode::Discard) {
+            return;
+        }
+        let holds = std::mem::take(&mut inner.slots[slot].holds);
+        for (_, span) in &holds {
+            Self::uncharge_span(inner, span);
+        }
+        inner.slots[slot].pre_bytes = 0;
+        let headers = std::mem::take(&mut inner.slots[slot].header_spans);
+        for (_, span) in &headers {
+            Self::uncharge_span(inner, span);
+        }
+        inner.slots[slot].piece_crcs = HashMap::new();
+        if let Some(ch) = inner.slots[slot].chase.take() {
+            inner.budget.sub(ch.charged);
+            ch.buf.abort("slot abandoned");
+        }
+        // An abandoned 7z chase dies with the slot: buffer already
+        // aborted above (the worker exits on its next read), and its
+        // partial sink outputs go too. The sink-open path re-checks the
+        // slot's mode under this lock, so no NEW sink can appear after.
+        // The ctl stays in the slot so sevenz_finish / Drop still find
+        // and join the worker.
+        if let Some(ctl) = inner.slots[slot].sevenz.clone() {
+            self.sevenz_abandon_sinks(inner, &ctl);
+        }
+        // No mapper means finish() sees neither holds nor an incomplete
+        // parse here - an abandoned slot must not read as a fallback.
+        inner.slots[slot].mapper = None;
+        if let Some(w) = inner.slots[slot].writer.take() {
+            // The writer leaves the slot here, so nothing downstream can
+            // reach it - not finish(), and not
+            // `park_outputs_for_repair`'s walk. A live /stream response
+            // still holds its own Arc and would park on this frontier
+            // for ever; `abandon` is the only thing that ever tells it
+            // otherwise (see [`FileWriter::abandon`]).
+            w.abandon();
+            let _ = std::fs::remove_file(&w.path);
+            let name = w
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            inner
+                .names_taken
+                .lock_ok()
+                .remove(&name_collision_key(inner.fold_names, &name));
+        }
+        inner.slots[slot].mode = SlotMode::Discard;
+        if let Some(key) = inner.slots[slot].group.clone() {
+            let all_gone = inner.groups.get(&key).is_some_and(|g| {
+                g.slots
+                    .iter()
+                    .all(|&si| matches!(inner.slots[si].mode, SlotMode::Discard))
+            });
+            if all_gone {
+                // The group's chase (if any) dies with its last slot -
+                // the worker stops, partial sink outputs go too.
+                if let Some(ctl) = inner.groups.get(&key).and_then(|g| g.chase.clone()) {
+                    self.chase_teardown(inner, &ctl, "group abandoned");
+                }
+                Self::delete_group_out_files(inner, &key);
+            }
+        }
+    }
+
+    /// Is this slot a volume the offset-0 sniff started INSIDE a
+    /// self-extractor's launcher stub (TODO 94 C)? The mapper's archive
+    /// base is the stub's length, and it is the one durable tell: it
+    /// survives a re-key, and unlike the slot's name it cannot be
+    /// spoofed by an ordinary `.exe` that was never mapped at all.
+    fn slot_is_sfx(inner: &Inner, slot: usize) -> bool {
+        inner.slots[slot]
+            .mapper
+            .as_ref()
+            .is_some_and(|m| m.archive_base() > 0)
+    }
+
+    /// Mark a demote the get tail's SFX arm owns - see
+    /// [`SFX_DISK_FALLBACK_PREFIX`] for what goes wrong unmarked. Idempotent,
+    /// so a group that demotes and is then merged into another keeps one
+    /// prefix rather than a stack of them.
+    fn mark_sfx_demote(is_sfx: bool, reason: &str) -> String {
+        if is_sfx && !reason.starts_with(SFX_DISK_FALLBACK_PREFIX) {
+            format!("{SFX_DISK_FALLBACK_PREFIX}{reason}")
+        } else {
+            reason.to_string()
+        }
+    }
+
     pub(super) fn fallback_slot_or_group(
         &self,
         inner: &mut Inner,
@@ -615,9 +720,15 @@ impl Extractor {
                                     format!("{SEVENZ_DISK_FALLBACK_PREFIX}{reason}")
                                 }
                                 ChaseFormat::Zip => format!("{ZIP_DISK_FALLBACK_PREFIX}{reason}"),
+                                ChaseFormat::Tar => format!("{TAR_DISK_FALLBACK_PREFIX}{reason}"),
                             }
                         } else {
-                            reason.to_string()
+                            // ...and the RAR twin: a volume the offset-0
+                            // sniff started inside a launcher stub
+                            // materializes as the posted `.exe`, which
+                            // the SFX arm owns. See
+                            // [`SFX_DISK_FALLBACK_PREFIX`].
+                            Self::mark_sfx_demote(Self::slot_is_sfx(inner, slot), reason)
                         };
                     inner.slot_fallbacks.push((name, why));
                 }
@@ -641,8 +752,17 @@ impl Extractor {
             return Ok(());
         }
         grp.fallback = true;
-        grp.fallback_reason = Some(reason.to_string());
         let members = grp.slots.clone();
+        // A group whose volumes are self-extractors is the SFX arm's, in
+        // the same way and for the same reason as the slot-level marking
+        // in [`Self::fallback_slot_or_group`]. Marked here rather than
+        // there because a group demotes from a dozen other sites too (an
+        // incomplete mapping at end of download, a stored CRC that did
+        // not hold), and every one of them leaves the same `.exe` on
+        // disk. The re-entry guard above means a group is marked once.
+        let why =
+            Self::mark_sfx_demote(members.iter().any(|&s| Self::slot_is_sfx(inner, s)), reason);
+        inner.groups.get_mut(key).unwrap().fallback_reason = Some(why);
         // A chased group tears its chase down FIRST: the worker stops
         // producing and its partial outputs are abandoned, then each
         // member's frontier buffer materializes below.
@@ -682,6 +802,13 @@ impl Extractor {
         ) {
             return Ok(());
         }
+        // TODO 211 (b): an alias has no bytes of its own - demoting it
+        // is demoting its head, whose reconstruction writes this part's
+        // file and flips it.
+        if matches!(inner.slots[slot].mode, SlotMode::SplitPart) {
+            let (head, _) = Self::split_target(inner, slot, 0);
+            return self.fallback_slot_or_group(inner, head, "split part demoted");
+        }
         // Every demote route funnels through here (group fallbacks call
         // this per member), so it is the one place the badge has to learn
         // that some of this set is going to disk after all.
@@ -718,6 +845,10 @@ impl Extractor {
         inner.refeed_active = prev;
         r?;
         self.note_slot_materialized(inner, slot);
+        // TODO 211 (b): the reconstruction above wrote a split head's
+        // logical volume back into its part files; the aliases are
+        // materialized parts now.
+        self.split_after_fallback(inner, slot);
         Ok(())
     }
 
@@ -743,6 +874,14 @@ impl Extractor {
         if let Some(ch) = inner.slots[slot].chase.take() {
             inner.slots[slot].mode = SlotMode::RarFallback;
             ch.buf.abort("demoted to materialized volume");
+            // A dropping trim released this prefix with no disk copy,
+            // so the file materialized below has holes there. Hand the
+            // ranges to the slot: the caller re-fetches the volume
+            // before anything reads it back (`dropped_volumes`).
+            if !ch.dropped.is_empty() {
+                inner.slots[slot].dropped = ch.dropped.clone();
+                inner.slots[slot].dropped_as = ch.dropped_as.clone();
+            }
             // Released UP FRONT, like the header stash below and for the
             // same reason: the whole record leaves RAM here either way,
             // and the loop can exit early on a scratch read or a write
@@ -894,7 +1033,7 @@ impl Extractor {
     /// the safe direction. Depth-gated as a second belt beside the
     /// root-only hook install: a nested slot index must never reach the
     /// journal's root slot space.
-    fn note_slot_materialized(&self, inner: &Inner, slot: usize) {
+    pub(super) fn note_slot_materialized(&self, inner: &Inner, slot: usize) {
         if self.depth == 0
             && let Some(h) = inner.materialized.as_ref()
         {
@@ -968,9 +1107,9 @@ impl Extractor {
         // in `routed` AND also appears as an encrypted entry describes a
         // set whose same inner file is both plain and encrypted. That
         // shape slipped through everything: the Child forward arm carries
-        // no crypto, `decrypt_finished` keys its jobs off `inner_writers`
-        // which never holds a child-owned output (so it silently found no
-        // work and returned success), and the per-name CRC gate below
+        // no crypto, the finish verdict keys off `inner_writers` which
+        // never holds a child-owned output (so it silently found no work
+        // and returned success), and the per-name CRC gate below
         // skips any bucket with a non-checkable member - the encrypted
         // twin disabling a check that is a pure header property. The
         // published file could be raw ciphertext, with the source volumes
@@ -1283,6 +1422,9 @@ impl Extractor {
     pub(super) fn settle_groups(&self) -> io::Result<()> {
         let mut g = self.inner.lock_ok();
         let inner = &mut *g;
+        // TODO 211 (b): close a lone-head split to its own size before
+        // its group is judged complete or not.
+        self.split_settle(inner)?;
         let keys: Vec<String> = inner.groups.keys().cloned().collect();
         for key in &keys {
             let has_holds = inner.groups[key]
@@ -1360,6 +1502,7 @@ impl Extractor {
                         continue;
                     }
                     inner.slots[si].mode = SlotMode::Plain;
+                    self.split_slot_plain(inner, si)?;
                 }
                 self.drain_holds(inner, si)?;
             }
@@ -1375,6 +1518,91 @@ mod tests {
     use crate::rar::fixtures;
 
     use crate::extract::testutil::*;
+
+    /// Sweep 8 M4, defect 3: the demote that materializes a volume set
+    /// for repair must ABANDON the extracted output it is throwing away,
+    /// because nothing else ever speaks for that file again.
+    ///
+    /// `materialize` -> `fallback_group` -> `delete_group_out_files`
+    /// drains the group's ROUTED members and `abandon_slot` takes the
+    /// child slot's writer out of its slot and unlinks the file. From
+    /// that moment `Extractor::each_output` cannot reach it - so
+    /// `park_outputs_for_repair` never claims it, no lease is revoked
+    /// and no custody generation moves. A live `/stream` response still
+    /// holds its own `Arc` and used to park on this frozen frontier
+    /// until `LiveRangeReader`'s five-minute span timeout: a player hung
+    /// for five minutes on a job that repaired fine.
+    ///
+    /// The end-to-end proof is `nzbfast`'s
+    /// `tests/integration/stream_repair.rs` leg 2, but that whole file
+    /// skips green on a box with no par2 - so the
+    /// mechanism is pinned here too, where it needs neither par2 nor a
+    /// daemon.
+    #[test]
+    fn materializing_for_repair_abandons_the_extracted_output() {
+        let dir = tmpdir("demoteabandon");
+        let total = payload(600_000, 5);
+        let vols: Vec<Vec<u8>> = vec![
+            fixtures::rar5_volume_n(&[("movie.mkv", 600_000, &total[..200_000], false, true)], 0),
+            fixtures::rar5_volume_n(
+                &[("movie.mkv", 600_000, &total[200_000..400_000], true, true)],
+                1,
+            ),
+            fixtures::rar5_volume_n(&[("movie.mkv", 600_000, &total[400_000..], true, false)], 2),
+        ];
+        let ex = Extractor::new(&dir, 3, true);
+        for (i, vol) in vols.iter().enumerate() {
+            feed(
+                &ex,
+                i,
+                &format!("r.part{}.rar", i + 1),
+                vol,
+                9000,
+                21 + i as u64,
+            );
+        }
+
+        // The file a player would be holding. It lives in the CHILD
+        // chain - `writers_snapshot` recurses, which is exactly why the
+        // streaming server can see it and `each_output` cannot once the
+        // slot lets go.
+        let snap = ex.writers_snapshot();
+        let (_, media) = snap
+            .iter()
+            .find(|(n, _)| n == "movie.mkv")
+            .expect("the set extracted a media file to hold open")
+            .clone();
+        assert!(!media.is_abandoned(), "nothing has demoted anything yet");
+        assert!(media.path.exists());
+
+        // What `get::settle` does when par2 has to repair the VOLUMES.
+        ex.materialize(0).unwrap();
+
+        assert!(
+            media.is_abandoned(),
+            "the demote unlinked the extracted output and dropped its writer, \
+             so a live reader on it has nothing left to wait for"
+        );
+        assert!(
+            !media.path.exists(),
+            "the extracted output survived the demote - then this test is no \
+             longer standing in for the shipped shape"
+        );
+        // And the claim an external repair takes really does miss it.
+        // `writers_snapshot` walks the same three sources as
+        // `each_output` - this level's `inner_writers`, its slot
+        // writers, and the child - so what it can no longer name is
+        // what `park_outputs_for_repair` can no longer claim. What is
+        // left is par2's actual targets: the materialized volumes.
+        ex.park_outputs_for_repair().unwrap();
+        let reachable: Vec<String> = ex.writers_snapshot().into_iter().map(|(n, _)| n).collect();
+        assert!(
+            !reachable.iter().any(|n| n == "movie.mkv"),
+            "the abandoned output is still reachable: {reachable:?}"
+        );
+        ex.unpark_outputs().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Fallback read-back must skip sparse holes: an unwritten inner-file
     /// region reads back as zeros, and stamping those into the
@@ -1543,6 +1771,127 @@ mod tests {
             vec![(0, "verified.mkv".to_string(), data.len() as u64)],
             "a plain slot's verified rename must retarget its journal identity"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sweep 8, M6: the live media pick names writers from the file's
+    /// CURRENT path.
+    ///
+    /// A verified-name publish renames an obfuscated slot's file under
+    /// its open writer while the job is still finishing. Naming the
+    /// snapshot from the immutable creation path made the pick judge it
+    /// by a name that no longer existed: an extensionless creation name
+    /// dropped the writer out of the media pick entirely, and when both
+    /// names looked like media the pick succeeded while the fresh open
+    /// behind it went to the removed path and returned 410.
+    #[test]
+    fn the_writer_snapshot_names_a_published_file_by_its_new_name() {
+        let dir = tmpdir("snaprename");
+        let data = payload(200_000, 26); // no archive magic: sniffs Plain
+        let ex = Extractor::new(&dir, 1, true);
+        ex.write(0, "0Bf3qZ", data.len() as u64, 0, &data).unwrap();
+        assert_eq!(
+            ex.writers_snapshot()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+            vec!["0Bf3qZ".to_string()],
+            "before the publish it is the creation name"
+        );
+
+        std::fs::rename(dir.join("0Bf3qZ"), dir.join("verified.mkv")).unwrap();
+        ex.note_slot_renamed(0, dir.join("verified.mkv"));
+        let snap = ex.writers_snapshot();
+        assert_eq!(
+            snap.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            vec!["verified.mkv".to_string()],
+            "an extensionless creation name must not hide a published media file"
+        );
+        // And the fresh open behind the pick lands on the file that is
+        // actually there - the 410 half of the same finding.
+        let (_f, _lease) = snap[0].1.open_read().expect("no 410 on a published name");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sweep 8, M5: a verified external repair publishes the coverage
+    /// it added, for the set's files and no others.
+    ///
+    /// `unpark` keeps the writer's interval map, which is right for the
+    /// bytes we wrote and silent about the sparse ranges par2cmdline
+    /// filled in outside the writer. A reader gated on that map goes on
+    /// waiting for bytes that are already correct on disk, then
+    /// zero-fills over them. Matching is by name AND length: par2's
+    /// exit status says nothing about a file the recovery set does not
+    /// list, and marking one covered would serve its holes as data.
+    #[test]
+    fn a_verified_external_repair_publishes_only_the_sets_coverage() {
+        let dir = tmpdir("extcov");
+        let data = payload(300_000, 11);
+        let ex = Extractor::new(&dir, 2, true);
+        // Two plain outputs; each keeps a hole its own writer never
+        // filled - the shape external par2 repairs.
+        ex.write(0, "in.set.bin", 300_000, 0, &data[..100_000])
+            .unwrap();
+        ex.write(1, "outside.bin", 300_000, 0, &data[..100_000])
+            .unwrap();
+        let snap = ex.writers_snapshot();
+        let of = |n: &str| {
+            snap.iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, w)| w.clone())
+                .unwrap()
+        };
+        assert!(!of("in.set.bin").covered(0, 300_000));
+        assert!(!of("outside.bin").covered(0, 300_000));
+
+        // A reader that holds its handle straight through the repair -
+        // the trigger shape. On Unix nothing revokes it, which is the
+        // point: it has to end up serving the repaired bytes.
+        let target = of("in.set.bin");
+        let (rf, _lease) = target.open_read().unwrap();
+
+        // The external tool: park, fill the hole by path, unpark.
+        ex.park_outputs_for_repair().unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join("in.set.bin"))
+                .unwrap();
+            f.seek(SeekFrom::Start(100_000)).unwrap();
+            f.write_all(&data[100_000..]).unwrap();
+        }
+        ex.unpark_outputs().unwrap();
+        assert!(
+            !target.covered(0, 300_000),
+            "unpark alone republishes nothing - that IS the finding"
+        );
+
+        // par2 verified the set and exited 0. Only its files.
+        let published = ex.publish_repaired_coverage(&[("in.set.bin".to_string(), 300_000)]);
+        assert_eq!(published, 1);
+        assert!(
+            target.covered(0, 300_000),
+            "the reader must see the repaired bytes without a wait"
+        );
+        let mut got = vec![0u8; 200_000];
+        crate::disk::read_exact_at(&rf, &mut got, 100_000).unwrap();
+        assert_eq!(
+            got,
+            data[100_000..],
+            "and the handle it held across the repair reads them"
+        );
+        assert!(
+            !of("outside.bin").covered(0, 300_000),
+            "a file outside the recovery set was never verified"
+        );
+
+        // A length we disagree about is not our file.
+        assert_eq!(
+            ex.publish_repaired_coverage(&[("outside.bin".to_string(), 299_999)]),
+            0
+        );
+        assert!(!of("outside.bin").covered(0, 300_000));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

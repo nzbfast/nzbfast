@@ -808,6 +808,61 @@ fn the_shared_enrich_agent_reuses_one_connection() {
     );
 }
 
+/// ...and no call site may quietly go back to a throwaway agent.
+///
+/// The pooling above is a property of the CALL SITES, not of
+/// `shared_enrich_agent`: one `ureq::get(url)` anywhere in the crate
+/// re-does a handshake, and nothing about it looks wrong in review -
+/// which is how the two `ureq::post` sites (AniList's GraphQL lookup
+/// and the OMDb key signup's postbacks) survived the first C2 pass
+/// while every GET beside them moved. ureq's free functions each build
+/// their own agent, so this refuses them by name in production source.
+///
+/// Deliberate exceptions say so on the line with `// fresh-agent:
+/// <reason>`; a genuinely unpooled fetch is welcome to exist, it just
+/// may not be silent. Building an `AgentBuilder` is untouched - that is
+/// how [`ssrf_safe_agent`] and the per-indexer agents are made.
+#[test]
+fn no_call_site_builds_a_throwaway_http_agent() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let free_fns = ["get", "post", "head", "put", "delete", "patch", "request"];
+    let mut offenders = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim_start();
+                // Prose about the trap is not the trap.
+                if t.starts_with("//") || line.contains("fresh-agent:") {
+                    continue;
+                }
+                if free_fns
+                    .iter()
+                    .any(|f| line.contains(&format!("ureq::{f}(")))
+                {
+                    let rel = p.strip_prefix(&src).unwrap_or(&p).display().to_string();
+                    offenders.push(format!("{rel}:{}: {}", i + 1, t.trim_end()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these build a fresh agent (and so a fresh TLS handshake) per \
+         request - use crate::serve::shared_enrich_agent():\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 /// A crash between publish_over_previous's two renames used to leave
 /// the superseded download under a pid-suffixed name that nothing in
 /// the tree ever looked at again, with no canonical directory at all:
@@ -2085,8 +2140,10 @@ fn an_arr_grabbed_row_stays_completed_when_the_arr_cleaned_up_its_folder() {
 /// U8: the compact history row draws the disk-space state for a `space`
 /// failure without opening the drawer, so the summary shape must carry
 /// the same verdict and space figure the full record does - and the
-/// figure must be the RETRY's need (payload, doubled for an encrypted
-/// set), not the set size, or the row lights Retry a payload too early.
+/// figure must be the RETRY's need, not the set size, or the row lights
+/// Retry a payload too early. Encryption used to double it, for the
+/// finish decrypt's temp copy; TODO 27 phase 3 deleted that pass, so an
+/// encrypted set now needs exactly what a plain one does.
 #[test]
 fn summary_row_carries_the_disk_full_verdict_and_space_figure() {
     use crate::serve::job::job_from_json;
@@ -2124,8 +2181,9 @@ fn summary_row_carries_the_disk_full_verdict_and_space_figure() {
     let s = summary_row(&d);
     assert_eq!(s["fail_action"], "space", "{s}");
     assert_eq!(s["disk_full"], true, "{s}");
-    // Encrypted: payload twice over, exactly the full record's figure.
-    assert_eq!(s["space_needed"], 10_000_000_000u64, "{s}");
+    // Nothing left to fetch, and encryption costs no extra copy: the
+    // payload once, exactly the full record's figure.
+    assert_eq!(s["space_needed"], 5_000_000_000u64, "{s}");
 
     // A failure that was not the disk keeps the verdict false, so the
     // row cannot dress a transport error in the space copy.

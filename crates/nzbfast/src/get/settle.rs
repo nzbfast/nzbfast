@@ -8,7 +8,7 @@ use crate::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// What the extraction tail and the failure summary need to know about
 /// how verification and repair ended. Field names match the local
@@ -19,6 +19,12 @@ pub(super) struct SettleVerdict {
     pub(super) reextract_failed: Option<String>,
     pub(super) repair_shortfall: Option<(usize, usize)>,
     pub(super) deferred_renames: Vec<(usize, String)>,
+    /// The on-disk names this job's verified-name publishes have already
+    /// taken, carried past `extractor.finish()` so the deferred renames in
+    /// `report_extraction` claim out of the SAME set the settle pass did -
+    /// two publish loops, one job, one namespace. See
+    /// [`crate::unpack::PublishedNames`].
+    pub(super) published_names: crate::unpack::PublishedNames,
     pub(super) sniff_covered: Option<std::collections::HashSet<String>>,
     /// TODO 159 item 1: the slots - BY INDEX - that are the whole reason
     /// this job failed, when that is a claim the pass can honestly make.
@@ -34,6 +40,23 @@ pub(super) struct SettleVerdict {
     /// perfectly healthy, so a damage-counter test would withhold the
     /// whole job again.
     pub(super) unhealed_slots: Option<Vec<usize>>,
+    /// A repair pass ran that may have REWRITTEN bytes on disk.
+    ///
+    /// One consumer: the chase's resume ledger (`crate::resumeout`). A
+    /// forfeited chase leaves in-stream output whose prefix is only
+    /// trustworthy while the volumes it decoded from are the volumes it
+    /// decoded from. The extractor catches a repair that comes back
+    /// through it, but the DISK-side repairs on both settle paths
+    /// (`repair_present_or_renamed_sets`, `repair_dir`,
+    /// `try_rar_rr_repair`) write to the volume files directly and it
+    /// never sees them - so the ladder asks here instead, and declines
+    /// to resume anything at all when the answer is yes.
+    ///
+    /// Deliberately over-approximate: a pass that ran and found nothing
+    /// still counts. A repair is rare and the ledger is an I/O
+    /// optimisation, so the cost of saying yes too often is one job's
+    /// re-extraction, where saying no too often is the payload.
+    pub(super) repaired: bool,
 }
 
 struct RepairOutcome {
@@ -55,7 +78,7 @@ fn slot_by_hint(slots: &[Arc<FileSlot>], hint: &str) -> Option<usize> {
     hits.next().is_none().then_some(i)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn settle_verify_repair(
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
@@ -103,6 +126,13 @@ pub(super) async fn settle_verify_repair(
     // read-back and PAR2 repair see the bytes on disk.
     note_activity("verifying");
     extractor.settle_unclassified()?;
+    // A chased set that demoted mid-download after a DROPPING trim has
+    // holes where the dropped prefix was: re-fetch those volumes before
+    // the read-back below sees them (see get/dropped.rs).
+    super::dropped::refetch_dropped_volumes(
+        extractor, slot_file, servers, nzb, out_dir, buf_pool, cancel,
+    )
+    .await?;
 
     match verifier.set() {
         Some(set) => {
@@ -157,67 +187,44 @@ pub(super) async fn settle_verify_repair(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn settle_with_set(
-    set: Arc<nzbkit::par2::Par2Set>,
+/// Settle every slot in parallel - read-back hashing (MD5) is
+/// single-thread ~0.6 GB/s, and a big-block set can push
+/// gigabytes through this path.
+///
+/// Returns the per-slot reports, whether a MAPPED slot reported bad blocks,
+/// and the deobfuscated names a CHASED slot could not take while its writer
+/// was live - applied after `extractor.finish()`, when nothing holds an fd on
+/// the partial file any more; otherwise the slot keeps the posted name for
+/// good and an obfuscated `hash.bin` is what the user is left looking at.
+///
+/// Split out of `settle_with_set` (TODO 106), body verbatim.
+#[expect(clippy::type_complexity)]
+fn settle_slots(
+    slots: &[Arc<FileSlot>],
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
-    journal: &Arc<nzbkit::journal::Journal>,
-    slots: &[Arc<FileSlot>],
-    slot_file: &[usize],
-    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
-    nzb: &Arc<Nzb>,
     out_dir: &Path,
-    buf_pool: &Arc<nzbkit::pool::BufPool>,
-    sniff: &Arc<SniffCtl>,
-    sniff_bootstrap: Option<usize>,
-    bootstrap_vol: Option<usize>,
-    resume_vols: &HashMap<usize, PathBuf>,
-    prefetched: &Arc<std::sync::Mutex<Vec<(usize, Vec<PathBuf>)>>>,
-    fast_verify: bool,
-    password: Option<&str>,
-    incomplete: usize,
-    derrs: u64,
-    sparse_slots: &[String],
-    note_activity: &(dyn Fn(&'static str) + Sync),
-    // §129: the owner's recovery-fetch cancel handle, threaded the
-    // same way `note_activity` is and for a sibling reason - the
-    // repair paths below reach the network, and the tail they run in
-    // now outlives the download slot, so a deleted job must be able
-    // to stop them. `crate::repair::SideCancel`; None on the CLI.
-    cancel: Option<&crate::repair::SideCancel>,
-) -> Result<SettleVerdict> {
-    // --- settle verification (in-stream results; read-back only for gaps) ---
+) -> (
+    Vec<(usize, nzbkit::live::SlotReport)>,
+    bool,
+    Vec<(usize, String)>,
+    crate::unpack::PublishedNames,
+) {
     let mut damage_in_mapped = false;
-    let all_good;
-    // The bytes on disk are fine but turning them into the output file
-    // failed - a distinct failure from an incomplete or unrepaired
-    // download. Holds WHICH extraction path gave up: several reach here
-    // on jobs that never needed (or ran) a PAR2 repair at all, so the
-    // reason travels with the flag rather than being assumed at the end.
-    // A String rather than a &'static str: the nested-archive arms below
-    // know WHICH archive stopped them, and "the log above names the
-    // archive" asked the user to go and find in a log ring what the
-    // sentence could simply have said.
-    let mut reextract_failed: Option<String> = None;
-    // (needed, have) when repair died on recovery-block arithmetic - the
-    // counts belong in the fail message, not just the console log.
-    let mut repair_shortfall: Option<(usize, usize)> = None;
-    // TODO 159 item 1 - see `SettleVerdict::unhealed_slots`. Only the
-    // repair pass ever gets to claim this: the clean-download arm below
-    // fails on `incomplete`/`derrs` alone, which name no slot and prove
-    // nothing about the rest of the job.
-    let mut unhealed_slots: Option<Vec<usize>> = None;
-    // Deobfuscated names a CHASED slot could not take while its writer was
-    // live (see the rename below). Applied after `extractor.finish()`,
-    // when nothing holds an fd on the partial file any more - otherwise
-    // the slot keeps the posted name for good, and an obfuscated
-    // `hash.bin` is what the user is left looking at.
     let mut deferred_renames: Vec<(usize, String)> = Vec::new();
-    let vt0 = Instant::now();
-    // Settle every slot in parallel - read-back hashing (MD5) is
-    // single-thread ~0.6 GB/s, and a big-block set can push
-    // gigabytes through this path.
+    // Seeded from the live slot paths BEFORE the first publish: a slot
+    // that simply kept its posted name owns that name, so another slot's
+    // verified name is pushed off it instead of renaming over it. Both
+    // payloads then survive under two names, which is the whole point -
+    // one of them wearing a `{slot:03}-` prefix beats one of them gone.
+    let mut published_names = crate::unpack::PublishedNames::for_dir(out_dir);
+    for sidx in 0..slots.len() {
+        if let Some(p) = extractor.slot_path(sidx)
+            && let Some(n) = p.file_name().and_then(|n| n.to_str())
+        {
+            published_names.seed(sidx, n);
+        }
+    }
     let settled: Vec<(usize, Option<nzbkit::live::SlotReport>)> = {
         let verifier = &verifier;
         let extractor = &extractor;
@@ -291,8 +298,9 @@ async fn settle_with_set(
         let mapped = extractor.is_mapped(sidx);
         if let Some(r) = r {
             if !r.bad_blocks.is_empty() {
-                println!(
-                    "  ✘ {} - {}/{} blocks bad",
+                warn!(
+                    target: "verify",
+                    "✘ {} - {}/{} blocks bad",
                     r.par2_name.as_deref().unwrap_or(&slot.hint),
                     r.bad_blocks.len(),
                     r.total_blocks
@@ -324,7 +332,8 @@ async fn settle_with_set(
                     if extractor.is_chased(sidx) {
                         deferred_renames.push((sidx, pname.clone()));
                     } else if let Some(path) = extractor.slot_path(sidx)
-                        && let Some(new) = publish_verified_name(&path, pname, out_dir)
+                        && let Some(new) =
+                            publish_verified_name(&path, pname, out_dir, sidx, &mut published_names)
                     {
                         extractor.note_slot_renamed(sidx, new);
                     }
@@ -333,6 +342,62 @@ async fn settle_with_set(
             reports.push((sidx, r));
         }
     }
+    (reports, damage_in_mapped, deferred_renames, published_names)
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn settle_with_set(
+    set: Arc<nzbkit::par2::Par2Set>,
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    journal: &Arc<nzbkit::journal::Journal>,
+    slots: &[Arc<FileSlot>],
+    slot_file: &[usize],
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    nzb: &Arc<Nzb>,
+    out_dir: &Path,
+    buf_pool: &Arc<nzbkit::pool::BufPool>,
+    sniff: &Arc<SniffCtl>,
+    sniff_bootstrap: Option<usize>,
+    bootstrap_vol: Option<usize>,
+    resume_vols: &HashMap<usize, PathBuf>,
+    prefetched: &Arc<std::sync::Mutex<Vec<(usize, Vec<PathBuf>)>>>,
+    fast_verify: bool,
+    password: Option<&str>,
+    incomplete: usize,
+    derrs: u64,
+    sparse_slots: &[String],
+    note_activity: &(dyn Fn(&'static str) + Sync),
+    // §129: the owner's recovery-fetch cancel handle, threaded the
+    // same way `note_activity` is and for a sibling reason - the
+    // repair paths below reach the network, and the tail they run in
+    // now outlives the download slot, so a deleted job must be able
+    // to stop them. `crate::repair::SideCancel`; None on the CLI.
+    cancel: Option<&crate::repair::SideCancel>,
+) -> Result<SettleVerdict> {
+    // --- settle verification (in-stream results; read-back only for gaps) ---
+    let all_good;
+    // The bytes on disk are fine but turning them into the output file
+    // failed - a distinct failure from an incomplete or unrepaired
+    // download. Holds WHICH extraction path gave up: several reach here
+    // on jobs that never needed (or ran) a PAR2 repair at all, so the
+    // reason travels with the flag rather than being assumed at the end.
+    // A String rather than a &'static str: the nested-archive arms below
+    // know WHICH archive stopped them, and "the log above names the
+    // archive" asked the user to go and find in a log ring what the
+    // sentence could simply have said.
+    let mut reextract_failed: Option<String> = None;
+    // (needed, have) when repair died on recovery-block arithmetic - the
+    // counts belong in the fail message, not just the console log.
+    let mut repair_shortfall: Option<(usize, usize)> = None;
+    // TODO 159 item 1 - see `SettleVerdict::unhealed_slots`. Only the
+    // repair pass ever gets to claim this: the clean-download arm below
+    // fails on `incomplete`/`derrs` alone, which name no slot and prove
+    // nothing about the rest of the job.
+    let mut unhealed_slots: Option<Vec<usize>> = None;
+    let vt0 = Instant::now();
+    let (reports, damage_in_mapped, deferred_renames, published_names) =
+        settle_slots(slots, verifier, extractor, out_dir);
     let live: u64 = reports.iter().map(|(_, r)| r.live_blocks).sum();
     let readback: u64 = reports.iter().map(|(_, r)| r.readback_blocks).sum();
     let bad: usize = reports.iter().map(|(_, r)| r.bad_blocks.len()).sum();
@@ -364,7 +429,7 @@ async fn settle_with_set(
             .filter(|n| {
                 let keep = !skipped.contains(&nzbkit::disk::sanitize_filename(n).to_lowercase());
                 if !keep {
-                    println!("  ▸ {n} - sample skipped on request, so not repaired either");
+                    info!(target: "verify", "{n} - sample skipped on request, so not repaired either");
                 }
                 keep
             })
@@ -380,7 +445,7 @@ async fn settle_with_set(
     for name in &missing_files {
         if let Some(f) = set.files.iter().find(|f| f.name == *name) {
             damage += f.length.div_ceil(set.block_size.max(1)) as usize;
-            println!("  ✘ {} - file missing entirely", f.name);
+            warn!(target: "verify", "✘ {} - file missing entirely", f.name);
         }
     }
     // Slices already on hand: seen while building the set (the
@@ -498,7 +563,8 @@ async fn settle_with_set(
     //
     // Split rather than merged, because only a repair that verified
     // the whole set OFF DISK proves the files it names - see
-    // `set_proven_on_disk` below.
+    // `set_files_proven` below, and the `unproven_bad` check that
+    // fails the job for an in-set file no such re-read vouched for.
     // Slot index carried alongside the hint: the obfuscated-alias
     // reconciliation below needs the slot's declared size, which
     // only the NZB file behind it knows.
@@ -539,7 +605,8 @@ async fn settle_with_set(
             })
     };
     let in_set_bad: Vec<&str> = in_set_pairs.iter().map(|(_, h)| *h).collect();
-    println!(
+    info!(
+        target: "verify",
         "verified {} file(s): {} blocks in-stream, {} by read-back, {} bad - settled in {:.0} ms",
         reports.len(),
         live,
@@ -579,7 +646,6 @@ async fn settle_with_set(
         repair_shortfall = o.repair_shortfall;
         unhealed_slots = o.unhealed_slots;
     } else {
-        println!("clean download - no repair, no post-verify pass ✔");
         // PAR2 verifying clean is NOT the same as the download being
         // whole: `damage` only ever counts files the recovery set
         // covers (`unclaimed_files` walks `set.files`), and the
@@ -590,8 +656,46 @@ async fn settle_with_set(
         // with damage == 0. Reporting success then deletes the
         // journal - the only record of what is still missing - and
         // hands an *arr an incomplete directory to import. Same test
-        // the no-PAR2 branch below already applies.
-        all_good = incomplete == 0 && derrs == 0;
+        // the no-PAR2 branch below already applies - and, since sweep
+        // 8's L5, the same spare rule the REPAIRED branch has always
+        // applied: furniture the set does not cover is optional on
+        // every path, not only on the one that happened to run a
+        // repair.
+        let set_names: std::collections::HashSet<String> = set
+            .files
+            .iter()
+            .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+            .collect();
+        let spared = spared_metadata_errors(slots, &set_names);
+        if spared > 0 {
+            warn!(
+                target: "verify",
+                "{spared} decode/write error(s) on optional file(s) the recovery \
+                 set does not cover - dropped, not repaired"
+            );
+        }
+        all_good = incomplete == 0 && derrs.saturating_sub(spared) == 0;
+        // The verdict line comes AFTER the verdict. It used to be the
+        // first thing this branch printed, so a run that then failed on
+        // `derrs` announced "clean download ✔" and went on to quarantine
+        // the payload and exit 1 - the contradiction reported off the
+        // 22 Aug 2026 class E floor leg. `damage == 0` says the recovery
+        // set found nothing wrong with the bytes it was shown; it does
+        // not say the download is whole, which is the very distinction
+        // the comment above draws and the reason `all_good` is not just
+        // `damage == 0`. Say the narrower thing when only the narrower
+        // thing is true.
+        if all_good {
+            info!(target: "verify", "clean download - no repair, no post-verify pass ✔");
+        } else {
+            warn!(
+                target: "verify",
+                "the recovery set found no damage, but {} decode/write error(s) and \
+                 {incomplete} incomplete file(s) are unaccounted for - the set only \
+                 vouches for bytes it was shown, so this is not a clean download",
+                derrs.saturating_sub(spared)
+            );
+        }
     }
     // The end-of-job sniffed-leftover sweep (below, after
     // extractor.finish()) needs the set's FileDesc names to spare
@@ -608,12 +712,53 @@ async fn settle_with_set(
         reextract_failed,
         repair_shortfall,
         deferred_renames,
+        published_names,
         sniff_covered,
         unhealed_slots,
+        // `damage` is what decides whether `run_set_repair` is called at
+        // all, so it is exactly the "a repair pass ran" test.
+        repaired: damage > 0,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Decode/write errors charged to OPTIONAL FURNITURE the recovery set
+/// does not cover, and which every branch of settle therefore has to
+/// spare (sweep 8, L5).
+///
+/// Issue #23's spare rule is the contract: a `.nfo`, `.sfv` or sample
+/// the set does not name cannot be healed by any repair, so an absent
+/// one does not fail the job - it is dropped at finish instead. The
+/// REPAIRED branch has always applied it (`uncovered_pairs` filters
+/// `is_spared_metadata` out before it can fail anything), and the clean
+/// and no-set branches did not: they test `derrs == 0` flat, so the
+/// same corrupt `.nfo` failed the job when the payload was clean and
+/// passed green when an unrelated RAR happened to need PAR2 repair.
+/// One file, one fault, and the verdict decided by a branch it has
+/// nothing to do with.
+///
+/// The rule is applied here, before the branch, so all three agree.
+/// Spared means spared: absent, corrupt and sparse alike, and dropped
+/// rather than shipped.
+///
+/// `set_names` is the sanitized lowercase file list of the recovery set
+/// - empty when the post carries no set at all, which makes every slot
+/// out-of-set, exactly as that branch already treats them.
+fn spared_metadata_errors(
+    slots: &[Arc<FileSlot>],
+    set_names: &std::collections::HashSet<String>,
+) -> u64 {
+    slots
+        .iter()
+        .filter(|s| {
+            !s.is_par2()
+                && !set_names.contains(&nzbkit::disk::sanitize_filename(&s.hint).to_lowercase())
+                && crate::get::census::is_spared_metadata(&s.hint)
+        })
+        .map(|s| s.errors.load(Ordering::Relaxed) as u64)
+        .sum()
+}
+
+#[expect(clippy::too_many_arguments)]
 async fn run_set_repair(
     set: &nzbkit::par2::Par2Set,
     extractor: &Arc<nzbkit::extract::Extractor>,
@@ -665,6 +810,12 @@ async fn run_set_repair(
     // whole-file MD5, so they answer the "still short" verdict
     // below.
     let mut recreated_names: Vec<String> = Vec::new();
+    // Recovery volumes the mapped attempt pulls off the wire before it
+    // can know whether its route survives. A decline hands them to
+    // `fetch_and_repair` rather than dropping them on the floor: they
+    // are the same blocks for the same damage, already on disk, and
+    // re-planning would only buy them again (23 Aug 2026).
+    let mut mapped_fetched: Vec<usize> = Vec::new();
     let mapped_ok = if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_none() {
         try_mapped_repair(
             servers,
@@ -679,6 +830,7 @@ async fn run_set_repair(
             reports,
             missing_files,
             &mut recreated_names,
+            &mut mapped_fetched,
             // Fast verify is the default and CRC32 is what the
             // in-stream path trusts too; an operator who turned
             // it off is asking for MD5 everywhere, including
@@ -713,6 +865,15 @@ async fn run_set_repair(
     let mut set_files_proven: Vec<String> = Vec::new();
     if mapped_ok {
         set_files_proven = std::mem::take(&mut recreated_names);
+        // §94 B / row 27: the repair's self-prove (below) vouches for
+        // every block of the set, including the ones it just rebuilt,
+        // but the verifier's block states were taken before it and
+        // never move again. A gated chase parked at a rebuilt block -
+        // a routed child decode, gated through the parent's cells - is
+        // waiting for exactly this, and without it would sit until
+        // `finish()` released it and then run its whole decode in the
+        // tail. Release now, so the decode runs behind the repair.
+        extractor.release_verify_gate();
         // A mapped repair proves ITSELF: `repair_mapped`
         // re-reads every file of the set back through the same
         // block→payload view it wrote through - whole-file MD5
@@ -760,7 +921,7 @@ async fn run_set_repair(
         let any_rar_chased = reports.iter().any(|(s, _)| extractor.is_rar_chased(*s));
         if any_mapped || any_chased {
             note_activity("repairing");
-            println!("materializing volumes for repair…");
+            info!(target: "repair", "materializing volumes for repair…");
             damage_in_mapped |= any_mapped || any_rar_chased;
             for (sidx, r) in reports {
                 if extractor.is_mapped(*sidx) || extractor.is_chased(*sidx) {
@@ -768,10 +929,18 @@ async fn run_set_repair(
                         extractor.rename(*sidx, pname);
                     }
                     if let Err(e) = extractor.materialize(*sidx) {
-                        eprintln!("materialize slot {sidx}: {e}");
+                        warn!(target: "repair", "materialize slot {sidx}: {e}");
                     }
                 }
             }
+            // A chase that had been DROPPING its consumed prefix just
+            // materialized with holes there; the repair below could
+            // never cover them from parity, so they come back off the
+            // wire first (see get/dropped.rs).
+            super::dropped::refetch_dropped_volumes(
+                extractor, slot_file, servers, nzb, out_dir, buf_pool, cancel,
+            )
+            .await?;
         }
         let main_par2 = {
             let mut p = None;
@@ -798,6 +967,7 @@ async fn run_set_repair(
             main_par2,
             already,
             sniffed_vols,
+            &mapped_fetched,
             buf_pool.clone(),
             extractor,
             &mut repair_shortfall,
@@ -828,19 +998,55 @@ async fn run_set_repair(
         // ...`, which read the .nfo's report as proof nothing
         // was recreated and greened the mixed job still packed
         // (Codex H2, 2 Aug). A recreated bare payload passes
-        // through reextract_dir untouched (no volumes → Ok(true)).
+        // through the re-extract untouched (no volumes → success).
         let recreated_set = !missing_files.is_empty();
         if repaired && (damage_in_mapped || recreated_set) {
-            all_good = reextract_dir(out_dir, password)?;
-            if !all_good {
-                reextract_failed = Some("PAR2 repair succeeded but re-extraction failed".into());
-            }
+            // The ladder's own reason where it has one - a bomb
+            // verdict names the DISK, and this sentence names the
+            // repair. See [`reextract_dir_why`].
+            all_good = match reextract_dir_why(out_dir, password)? {
+                Ok(()) => true,
+                Err(why) => {
+                    reextract_failed = Some(unpack_failure(
+                        why,
+                        "PAR2 repair succeeded but re-extraction failed",
+                    ));
+                    false
+                }
+            };
         } else {
             all_good = repaired;
             if !all_good {
                 // PAR2 could not repair - the volumes' own embedded
                 // recovery records are the last remaining redundancy.
-                all_good = try_rar_rr_repair(out_dir, password);
+                //
+                // TODO §11 (b): the verifier's block verdicts ride along.
+                // A failed repair never rewrote an intact file (native
+                // patches damaged blocks in place, par2cmdline rewrites
+                // only damaged files), so a slot whose every block
+                // verified is still the file the verifier proved - and
+                // the RR pass can leave it unopened. Slots the set never
+                // claimed are absent from `reports` and get the full
+                // pass.
+                let hint = crate::rarfix::DamageHint::from_reports(reports, set.block_size);
+                // The rung's own reason where it has one, on the same
+                // terms as the re-extract arm above: a bomb verdict
+                // names the DISK and must be quoted, and an ordinary
+                // failure is left to the arms below to word, which is
+                // what this site has always done (TODO §249 item 1).
+                all_good = match crate::rarfix::try_rar_rr_repair_hinted_why(
+                    out_dir,
+                    password,
+                    Some(&hint),
+                ) {
+                    Ok(()) => true,
+                    Err(why) => {
+                        if let Some(why) = why {
+                            reextract_failed = Some(why);
+                        }
+                        false
+                    }
+                };
             }
         }
     } // mapped_ok else
@@ -889,8 +1095,9 @@ async fn run_set_repair(
                 return true;
             };
             let f = spare.remove(k);
-            println!(
-                "  ✔ {} never arrived under its posted name, and the set rebuilt \
+            info!(
+                target: "repair",
+                "✔ {} never arrived under its posted name, and the set rebuilt \
                  it as {} ({} bytes, MD5-proved)",
                 s.hint, f.name, f.length
             );
@@ -932,8 +1139,9 @@ async fn run_set_repair(
     // Whatever the repair did, it did it inside the recovery set.
     if all_good && !uncovered_bad.is_empty() {
         all_good = false;
-        println!(
-            "  ✘ repair succeeded, but {} file(s) outside the PAR2 set are still \
+        warn!(
+            target: "repair",
+            "✘ repair succeeded, but {} file(s) outside the PAR2 set are still \
              incomplete: {}",
             uncovered_bad.len(),
             uncovered_bad.join(", ")
@@ -959,8 +1167,9 @@ async fn run_set_repair(
     };
     if all_good && !unproven_bad.is_empty() {
         all_good = false;
-        println!(
-            "  ✘ repaired in place, but {} file(s) the PAR2 set covers are still \
+        warn!(
+            target: "repair",
+            "✘ repaired in place, but {} file(s) the PAR2 set covers are still \
              short and were never proved against the set: {}",
             unproven_bad.len(),
             unproven_bad.join(", ")
@@ -972,8 +1181,9 @@ async fn run_set_repair(
     // whole-file MD5, so the census stays and this line settles
     // what became of it.
     if all_good && !in_set_bad.is_empty() {
-        println!(
-            "  ✔ {} file(s) that never arrived were rebuilt in full from PAR2 \
+        info!(
+            target: "repair",
+            "✔ {} file(s) that never arrived were rebuilt in full from PAR2 \
              recovery data: {}",
             in_set_bad.len(),
             in_set_bad.join(", ")
@@ -1021,7 +1231,325 @@ async fn run_set_repair(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The disk-side PAR2 fallback: no set came from the NZB, but the downloaded
+/// files include one, so every set whose data files are on disk is repaired in
+/// place and the slots it does not cover are collected for the caller's guard.
+///
+/// A no-op when the output directory holds no PAR2 at all - the guard the
+/// caller used to spell out - so the three pieces of state it owns come in and
+/// go back out unchanged in that case. Split out of `settle_without_set`
+/// (TODO 106), body verbatim.
+#[expect(clippy::too_many_arguments)]
+async fn disk_par2_fallback(
+    out_dir: &Path,
+    slots: &[Arc<FileSlot>],
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    sparse_slots: &[String],
+    note_activity: &(dyn Fn(&'static str) + Sync),
+    par_cleanup: bool,
+    mut all_good: bool,
+    mut repaired: bool,
+    mut uncovered_after_par2: Vec<String>,
+    mut repair_shortfall: Option<(usize, usize)>,
+) -> (bool, bool, Vec<String>, Option<(usize, usize)>) {
+    if !dir_has_par2(out_dir).unwrap_or(false) {
+        return (all_good, repaired, uncovered_after_par2, repair_shortfall);
+    }
+    use nzbkit::par2repair::{PacketCatalog, RepairStatus};
+    let t0 = Instant::now();
+    // Everything below this line may rewrite a data file in
+    // place, and none of it goes through the extractor.
+    repaired = true;
+    note_activity("repairing");
+    // §129: same one-repair-at-a-time permit as the set-repair
+    // path; released when this directory pass ends. Taken AFTER
+    // the deferred-volume fetch above on purpose - everything
+    // from here down is CPU and local disk, so this pass needs
+    // no `without_permit` seam of its own (§137.2).
+    let _cpu = crate::lanegate::HeavyCpu::acquire().await;
+    info!(
+        target: "par2",
+        "no PAR2 set came from the NZB, but the downloaded files \
+         include one - repairing from disk…"
+    );
+    // Every set whose data files are on disk, not just the
+    // first in packet-sorted order (`repair_dir`'s rule).
+    // A season pack posted with a set per episode had one
+    // arbitrary set decide the whole job: that set
+    // verifying clean reported success while the damaged
+    // episode's set was never looked at.
+    // The `or_renamed` entry point: on a wholly renamed
+    // post no FileDesc name is on disk, and the plain
+    // presence gate would skip a complete recovery set
+    // sitting right there. Safe HERE because this arm
+    // owns a directory where every downloaded byte has
+    // already landed; the nested post-pass keeps the
+    // name-only gate for the opposite reason.
+    // One validated packet catalog for the whole pass: the
+    // repairs, `covered_names` and the sniffed-volume sweep
+    // below all consult it instead of rescanning the corpus
+    // (B2, 20 Aug perf audit).
+    let mut cat = match PacketCatalog::build(out_dir) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            warn!(target: "par2", "repair error - {e}");
+            None
+        }
+    };
+    let results = match cat
+        .as_mut()
+        .map(PacketCatalog::repair_present_or_renamed_sets)
+    {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            warn!(target: "par2", "repair error - {e}");
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    // Vacuous truth is not success: no set qualifying (no
+    // packets, or no set whose files are here) means no
+    // repair happened at all.
+    let mut every_set_ok = !results.is_empty();
+    // Obfuscated copies the adoption scan read the payload
+    // out of, gathered across every set and acted on only
+    // once ALL of them have verified: with a set per
+    // episode, one repaired set is no licence to delete
+    // anything another set may still need.
+    let mut consumed: Vec<PathBuf> = Vec::new();
+    // Names a set actually VERIFIED. A set with no data
+    // file on disk is skipped and reports nothing, so
+    // its declared names are not evidence about
+    // anything - see the hole scan below.
+    let mut healed: Vec<String> = Vec::new();
+    for r in results {
+        match r.status {
+            Ok(RepairStatus::NoDamage) => {
+                info!(target: "par2", "no damage, set verifies on disk ✔");
+                healed.extend(r.names);
+            }
+            Ok(RepairStatus::Repaired(rep)) => {
+                info!(
+                    target: "par2",
+                    "repaired ✔ ({} block(s) rebuilt across {} file(s))",
+                    rep.blocks_rebuilt,
+                    rep.files_patched.len(),
+                );
+                consumed.extend(rep.consumed_sources);
+                healed.extend(r.names);
+            }
+            Ok(RepairStatus::Unrepairable { needed, have }) => {
+                warn!(
+                    target: "par2",
+                    "UNREPAIRABLE - need {needed} recovery block(s), have {have}"
+                );
+                repair_shortfall = Some((needed, have));
+                every_set_ok = false;
+            }
+            Err(e) => {
+                warn!(target: "par2", "repair error - {e}");
+                every_set_ok = false;
+            }
+        }
+    }
+    if every_set_ok {
+        // A repair proves the files in its own recovery
+        // set and says nothing whatever about the rest -
+        // the invariant the in-stream arm above spells out
+        // and tests for. NoDamage is the sharper case: it
+        // means the fallback healed NOTHING, on a path only
+        // reached because something was already bad.
+        // Two different questions, two different sets.
+        //
+        // `named` is every name ANY set in the directory
+        // speaks for - the right answer to "is this file
+        // somebody's payload", which is what the
+        // recovery-volume sweep below asks before it
+        // deletes anything.
+        //
+        // `covered` is only what a set that actually
+        // REPORTED verified. A set whose data files are
+        // all absent is skipped and never runs, so
+        // counting its declared names as healed let a
+        // wholly missing file - one file of a season
+        // pack taken down, every article 430 - read as
+        // covered in the hole scan. The job reached
+        // Completed, and deleted the journal that was
+        // the only record of what was still missing.
+        let named: std::collections::HashSet<String> = cat
+            .as_mut()
+            .and_then(|c| c.covered_names().ok())
+            .unwrap_or_default()
+            .iter()
+            .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
+            .collect();
+        let covered: std::collections::HashSet<String> = healed
+            .iter()
+            .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
+            .collect();
+        // Issue #9, second half. The payload now exists
+        // under the name the PAR2 set gives it, so the
+        // obfuscated file its bytes were read out of is a
+        // byte-for-byte duplicate - 8.2 GB of one on the
+        // report that raised this, beside the 8.2 GB that
+        // was wanted. The engine will not remove a source
+        // (it does not own this directory) and the job
+        // tail's sweep goes by extension, which a hash
+        // name has none of, so the duplicate outlived
+        // every existing cleanup.
+        //
+        // BEFORE the uncovered-hole scan below, and that
+        // ordering is load-bearing in both directions.
+        // `covered` is already computed, so the packets
+        // have been read. And the scan asks whether each
+        // damaged slot's file is a hole: a consumed source
+        // still sitting there under a hash name matches no
+        // covered name and is not par2 magic, so it reads
+        // as an uncovered hole and fails the whole job.
+        // Deleted, it takes the `!had_writer` branch -
+        // "the extractor opened a file and it is gone,
+        // adopted or renamed under its FileDesc name" -
+        // which is exactly what happened.
+        //
+        // Only files that provably served as adoption
+        // sources, and only once every set verified. Never
+        // a sweep by shape: "extensionless in a finished
+        // directory" describes real payload too.
+        let mut freed: u64 = 0;
+        let mut gone: usize = 0;
+        // Trash-aware: a consumed adoption source is the
+        // obfuscated post's own downloaded volume - the
+        // set a user might want to keep or re-share -
+        // and the sniffed recovery files go "under the
+        // setting that governs named .par2", which since
+        // §64 has meant a recoverable delete. Parked for
+        // the deferred worker like every other sweep in
+        // a job's tail, and the flag read once here at
+        // the sweep's entry (remove_user_file's
+        // contract).
+        let recoverable = crate::smart::cleanup_recoverable();
+        let staging = crate::smart::trash_staging_dir(out_dir);
+        let mut remove = |p: &std::path::Path| {
+            let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            match crate::smart::remove_swept_file(p, recoverable, staging.as_deref()) {
+                Ok(_) => {
+                    freed += len;
+                    gone += 1;
+                }
+                Err(e) => {
+                    // warn!, not println: the log ring is
+                    // where "why is this file still
+                    // here" gets answered.
+                    warn!(
+                        target: "cleanup",
+                        "could not remove {} - {e}",
+                        p.display()
+                    )
+                }
+            }
+        };
+        consumed.sort();
+        consumed.dedup();
+        for p in &consumed {
+            remove(p);
+        }
+        // The spent recovery volumes go the same way, under
+        // the setting that governs named `.par2` - these are
+        // simply the ones no extension rule can match. The
+        // sniff is directory-wide and says nothing about
+        // which set a volume served, which is the other
+        // reason this waits for every set to have verified.
+        //
+        // A sniffed file that is ITSELF recovery-set payload
+        // (a post whose content is par2 files) is excluded
+        // by name: `named` is exactly the set of names the
+        // packets speak for, skipped sets included - a
+        // set that never ran still owns its files.
+        if par_cleanup {
+            let sniffed = cat
+                .as_mut()
+                .and_then(|c| c.sniffed_packet_files().ok())
+                .unwrap_or_default();
+            for p in sniffed {
+                let is_payload = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .is_some_and(|n| named.contains(&n));
+                if !is_payload {
+                    remove(&p);
+                }
+            }
+        }
+        if gone > 0 {
+            // "freed" only when the bytes actually left
+            // the disk - a recoverable delete parks them
+            // in the Trash on the same volume.
+            info!(
+                target: "cleanup",
+                "cleaned up {gone} obfuscated leftover(s), {:.1} MB {}",
+                freed as f64 / 1e6,
+                if recoverable { "to the Trash" } else { "freed" }
+            );
+        }
+        uncovered_after_par2 = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                // is_par2(): a sniffed volume's deferred
+                // (or 430'd) articles are not payload holes.
+                !s.is_par2()
+                    && (s.missing.load(Ordering::Relaxed) > 0
+                        || s.remaining.load(Ordering::Relaxed) > 0
+                        || s.errors.load(Ordering::Relaxed) > 0
+                        || s.abandoned.load(Ordering::Relaxed) > 0)
+            })
+            // A mapped or chased slot has no standalone
+            // file by design (its bytes went straight
+            // into extracted output), so the name test
+            // below cannot speak for it either way.
+            .filter(|(i, _)| {
+                !extractor.is_mapped(*i) && !extractor.is_chased(*i) && !extractor.is_rar_chased(*i)
+            })
+            .filter(|(i, s)| {
+                slot_is_uncovered_hole(out_dir, extractor.slot_path(*i), &s.hint, &covered)
+            })
+            // Issue #23's spare rule again - `slot_is_uncovered_hole`
+            // has already established the set does not cover this
+            // file, which is exactly when furniture cannot be
+            // healed and must not fail the job.
+            .filter(|(_, s)| !crate::get::census::is_spared_metadata(&s.hint))
+            .map(|(_, s)| s.hint.clone())
+            .collect();
+        // The census's own out-of-set findings belong
+        // here too (Codex sweep 2, 3 Aug M2). A slot
+        // whose articles ALL arrived and still does not
+        // cover its declared range has every counter at
+        // zero, so the scan above cannot see it - and
+        // it was exempted from the set by construction,
+        // so the repair that just succeeded says
+        // nothing about it.
+        for hint in sparse_slots {
+            if !uncovered_after_par2.contains(hint) {
+                uncovered_after_par2.push(hint.clone());
+            }
+        }
+        if uncovered_after_par2.is_empty() {
+            info!(target: "repair", "repair complete in {:.2?} ✔", t0.elapsed());
+            all_good = true;
+        } else {
+            warn!(
+                target: "repair",
+                "✘ repair succeeded, but {} file(s) outside the PAR2 set \
+                 are still incomplete: {}",
+                uncovered_after_par2.len(),
+                uncovered_after_par2.join(", ")
+            );
+        }
+    }
+    (all_good, repaired, uncovered_after_par2, repair_shortfall)
+}
+
+#[expect(clippy::too_many_arguments)]
 async fn settle_without_set(
     extractor: &Arc<nzbkit::extract::Extractor>,
     slots: &[Arc<FileSlot>],
@@ -1047,11 +1575,31 @@ async fn settle_without_set(
     cancel: Option<&crate::repair::SideCancel>,
 ) -> Result<SettleVerdict> {
     let mut all_good;
+    // The ladder's reason where a rung named one; see the recovery-record
+    // rung at the end of this function. `None` on every other path, which
+    // is what this arm returned unconditionally before §249 item 1.
+    let mut reextract_failed: Option<String> = None;
     let mut repair_shortfall: Option<(usize, usize)> = None;
+    // See [`SettleVerdict::repaired`]. Raised at each of this path's two
+    // in-place rewriters, rather than set unconditionally: this is the
+    // arm a post with NO recovery data at all takes, and on that post
+    // nothing here writes a byte, so there is nothing to declare.
+    let mut repaired = false;
     // No PAR2 set in the NZB (or activation failed): best-effort
     // post-download verify against whatever par2 files landed.
     let disk_verified = verify_dir(out_dir)?;
-    all_good = incomplete == 0 && derrs == 0;
+    // Sweep 8, L5: no set means every payload slot is out-of-set, so
+    // the spare rule covers all of the optional furniture here. Same
+    // contract as the clean and repaired branches.
+    let spared = spared_metadata_errors(slots, &std::collections::HashSet::new());
+    if spared > 0 {
+        warn!(
+            target: "verify",
+            "{spared} decode/write error(s) on optional file(s) no recovery set \
+             covers - dropped, not repaired"
+        );
+    }
+    all_good = incomplete == 0 && derrs.saturating_sub(spared) == 0;
     // Succeeding here with the post's recovery data damaged means
     // shipping output nothing ever checked. The payload is whole -
     // every article arrived and decoded, which is why this is not a
@@ -1076,12 +1624,14 @@ async fn settle_without_set(
                 format!("{recovery_missing} never arrived")
             });
         }
-        println!(
-            "  ⚠ the PAR2 recovery data this post carries did not survive ({})",
+        warn!(
+            target: "par2",
+            "the PAR2 recovery data this post carries did not survive ({})",
             how.join(", ")
         );
-        println!(
-            "    the download itself is complete: every payload article arrived and \
+        info!(
+            target: "par2",
+            "the download itself is complete: every payload article arrived and \
              decoded, and the files are in place. There was just no usable recovery \
              set left to check them against, so this download is unverified."
         );
@@ -1136,304 +1686,31 @@ async fn settle_without_set(
                 .map(|s| slot_file[s])
                 .collect();
             if !deferred_vols.is_empty() {
-                println!(
+                info!(
+                    target: "repair",
                     "fetching {} deferred recovery volume(s) for disk repair…",
                     deferred_vols.len()
                 );
                 if let Err(e) =
                     fetch_volumes(servers, nzb, out_dir, buf_pool, &deferred_vols, cancel).await
                 {
-                    println!("  ⚠ deferred volume fetch failed: {e}");
+                    warn!(target: "repair", "deferred volume fetch failed: {e}");
                 }
             }
         }
-        if dir_has_par2(out_dir).unwrap_or(false) {
-            use nzbkit::par2repair::{PacketCatalog, RepairStatus};
-            let t0 = Instant::now();
-            note_activity("repairing");
-            // §129: same one-repair-at-a-time permit as the set-repair
-            // path; released when this directory pass ends. Taken AFTER
-            // the deferred-volume fetch above on purpose - everything
-            // from here down is CPU and local disk, so this pass needs
-            // no `without_permit` seam of its own (§137.2).
-            let _cpu = crate::lanegate::HeavyCpu::acquire().await;
-            println!(
-                "no PAR2 set came from the NZB, but the downloaded files \
-                 include one - repairing from disk…"
-            );
-            // Every set whose data files are on disk, not just the
-            // first in packet-sorted order (`repair_dir`'s rule).
-            // A season pack posted with a set per episode had one
-            // arbitrary set decide the whole job: that set
-            // verifying clean reported success while the damaged
-            // episode's set was never looked at.
-            // The `or_renamed` entry point: on a wholly renamed
-            // post no FileDesc name is on disk, and the plain
-            // presence gate would skip a complete recovery set
-            // sitting right there. Safe HERE because this arm
-            // owns a directory where every downloaded byte has
-            // already landed; the nested post-pass keeps the
-            // name-only gate for the opposite reason.
-            // One validated packet catalog for the whole pass: the
-            // repairs, `covered_names` and the sniffed-volume sweep
-            // below all consult it instead of rescanning the corpus
-            // (B2, 20 Aug perf audit).
-            let mut cat = match PacketCatalog::build(out_dir) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    println!("PAR2: repair error - {e}");
-                    None
-                }
-            };
-            let results = match cat
-                .as_mut()
-                .map(PacketCatalog::repair_present_or_renamed_sets)
-            {
-                Some(Ok(r)) => r,
-                Some(Err(e)) => {
-                    println!("PAR2: repair error - {e}");
-                    Vec::new()
-                }
-                None => Vec::new(),
-            };
-            // Vacuous truth is not success: no set qualifying (no
-            // packets, or no set whose files are here) means no
-            // repair happened at all.
-            let mut every_set_ok = !results.is_empty();
-            // Obfuscated copies the adoption scan read the payload
-            // out of, gathered across every set and acted on only
-            // once ALL of them have verified: with a set per
-            // episode, one repaired set is no licence to delete
-            // anything another set may still need.
-            let mut consumed: Vec<PathBuf> = Vec::new();
-            // Names a set actually VERIFIED. A set with no data
-            // file on disk is skipped and reports nothing, so
-            // its declared names are not evidence about
-            // anything - see the hole scan below.
-            let mut healed: Vec<String> = Vec::new();
-            for r in results {
-                match r.status {
-                    Ok(RepairStatus::NoDamage) => {
-                        println!("PAR2: no damage, set verifies on disk ✔");
-                        healed.extend(r.names);
-                    }
-                    Ok(RepairStatus::Repaired(rep)) => {
-                        println!(
-                            "PAR2: repaired ✔ ({} block(s) rebuilt across {} file(s))",
-                            rep.blocks_rebuilt,
-                            rep.files_patched.len(),
-                        );
-                        consumed.extend(rep.consumed_sources);
-                        healed.extend(r.names);
-                    }
-                    Ok(RepairStatus::Unrepairable { needed, have }) => {
-                        println!(
-                            "PAR2: UNREPAIRABLE - need {needed} recovery block(s), have {have}"
-                        );
-                        repair_shortfall = Some((needed, have));
-                        every_set_ok = false;
-                    }
-                    Err(e) => {
-                        println!("PAR2: repair error - {e}");
-                        every_set_ok = false;
-                    }
-                }
-            }
-            if every_set_ok {
-                // A repair proves the files in its own recovery
-                // set and says nothing whatever about the rest -
-                // the invariant the in-stream arm above spells out
-                // and tests for. NoDamage is the sharper case: it
-                // means the fallback healed NOTHING, on a path only
-                // reached because something was already bad.
-                // Two different questions, two different sets.
-                //
-                // `named` is every name ANY set in the directory
-                // speaks for - the right answer to "is this file
-                // somebody's payload", which is what the
-                // recovery-volume sweep below asks before it
-                // deletes anything.
-                //
-                // `covered` is only what a set that actually
-                // REPORTED verified. A set whose data files are
-                // all absent is skipped and never runs, so
-                // counting its declared names as healed let a
-                // wholly missing file - one file of a season
-                // pack taken down, every article 430 - read as
-                // covered in the hole scan. The job reached
-                // Completed, and deleted the journal that was
-                // the only record of what was still missing.
-                let named: std::collections::HashSet<String> = cat
-                    .as_mut()
-                    .and_then(|c| c.covered_names().ok())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
-                    .collect();
-                let covered: std::collections::HashSet<String> = healed
-                    .iter()
-                    .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
-                    .collect();
-                // Issue #9, second half. The payload now exists
-                // under the name the PAR2 set gives it, so the
-                // obfuscated file its bytes were read out of is a
-                // byte-for-byte duplicate - 8.2 GB of one on the
-                // report that raised this, beside the 8.2 GB that
-                // was wanted. The engine will not remove a source
-                // (it does not own this directory) and the job
-                // tail's sweep goes by extension, which a hash
-                // name has none of, so the duplicate outlived
-                // every existing cleanup.
-                //
-                // BEFORE the uncovered-hole scan below, and that
-                // ordering is load-bearing in both directions.
-                // `covered` is already computed, so the packets
-                // have been read. And the scan asks whether each
-                // damaged slot's file is a hole: a consumed source
-                // still sitting there under a hash name matches no
-                // covered name and is not par2 magic, so it reads
-                // as an uncovered hole and fails the whole job.
-                // Deleted, it takes the `!had_writer` branch -
-                // "the extractor opened a file and it is gone,
-                // adopted or renamed under its FileDesc name" -
-                // which is exactly what happened.
-                //
-                // Only files that provably served as adoption
-                // sources, and only once every set verified. Never
-                // a sweep by shape: "extensionless in a finished
-                // directory" describes real payload too.
-                let mut freed: u64 = 0;
-                let mut gone: usize = 0;
-                // Trash-aware: a consumed adoption source is the
-                // obfuscated post's own downloaded volume - the
-                // set a user might want to keep or re-share -
-                // and the sniffed recovery files go "under the
-                // setting that governs named .par2", which since
-                // §64 has meant a recoverable delete. Parked for
-                // the deferred worker like every other sweep in
-                // a job's tail, and the flag read once here at
-                // the sweep's entry (remove_user_file's
-                // contract).
-                let recoverable = crate::smart::cleanup_recoverable();
-                let staging = crate::smart::trash_staging_dir(out_dir);
-                let mut remove = |p: &std::path::Path| {
-                    let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                    match crate::smart::remove_swept_file(p, recoverable, staging.as_deref()) {
-                        Ok(_) => {
-                            freed += len;
-                            gone += 1;
-                        }
-                        Err(e) => {
-                            // warn!, not println: the log ring is
-                            // where "why is this file still
-                            // here" gets answered.
-                            warn!(
-                                target: "cleanup",
-                                "could not remove {} - {e}",
-                                p.display()
-                            )
-                        }
-                    }
-                };
-                consumed.sort();
-                consumed.dedup();
-                for p in &consumed {
-                    remove(p);
-                }
-                // The spent recovery volumes go the same way, under
-                // the setting that governs named `.par2` - these are
-                // simply the ones no extension rule can match. The
-                // sniff is directory-wide and says nothing about
-                // which set a volume served, which is the other
-                // reason this waits for every set to have verified.
-                //
-                // A sniffed file that is ITSELF recovery-set payload
-                // (a post whose content is par2 files) is excluded
-                // by name: `named` is exactly the set of names the
-                // packets speak for, skipped sets included - a
-                // set that never ran still owns its files.
-                if par_cleanup {
-                    let sniffed = cat
-                        .as_mut()
-                        .and_then(|c| c.sniffed_packet_files().ok())
-                        .unwrap_or_default();
-                    for p in sniffed {
-                        let is_payload = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_lowercase())
-                            .is_some_and(|n| named.contains(&n));
-                        if !is_payload {
-                            remove(&p);
-                        }
-                    }
-                }
-                if gone > 0 {
-                    // "freed" only when the bytes actually left
-                    // the disk - a recoverable delete parks them
-                    // in the Trash on the same volume.
-                    println!(
-                        "  cleaned up {gone} obfuscated leftover(s), {:.1} MB {}",
-                        freed as f64 / 1e6,
-                        if recoverable { "to the Trash" } else { "freed" }
-                    );
-                }
-                uncovered_after_par2 = slots
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| {
-                        // is_par2(): a sniffed volume's deferred
-                        // (or 430'd) articles are not payload holes.
-                        !s.is_par2()
-                            && (s.missing.load(Ordering::Relaxed) > 0
-                                || s.remaining.load(Ordering::Relaxed) > 0
-                                || s.errors.load(Ordering::Relaxed) > 0
-                                || s.abandoned.load(Ordering::Relaxed) > 0)
-                    })
-                    // A mapped or chased slot has no standalone
-                    // file by design (its bytes went straight
-                    // into extracted output), so the name test
-                    // below cannot speak for it either way.
-                    .filter(|(i, _)| {
-                        !extractor.is_mapped(*i)
-                            && !extractor.is_chased(*i)
-                            && !extractor.is_rar_chased(*i)
-                    })
-                    .filter(|(i, s)| {
-                        slot_is_uncovered_hole(out_dir, extractor.slot_path(*i), &s.hint, &covered)
-                    })
-                    // Issue #23's spare rule again - `slot_is_uncovered_hole`
-                    // has already established the set does not cover this
-                    // file, which is exactly when furniture cannot be
-                    // healed and must not fail the job.
-                    .filter(|(_, s)| !crate::get::census::is_spared_metadata(&s.hint))
-                    .map(|(_, s)| s.hint.clone())
-                    .collect();
-                // The census's own out-of-set findings belong
-                // here too (Codex sweep 2, 3 Aug M2). A slot
-                // whose articles ALL arrived and still does not
-                // cover its declared range has every counter at
-                // zero, so the scan above cannot see it - and
-                // it was exempted from the set by construction,
-                // so the repair that just succeeded says
-                // nothing about it.
-                for hint in sparse_slots {
-                    if !uncovered_after_par2.contains(hint) {
-                        uncovered_after_par2.push(hint.clone());
-                    }
-                }
-                if uncovered_after_par2.is_empty() {
-                    println!("repair complete in {:.2?} ✔", t0.elapsed());
-                    all_good = true;
-                } else {
-                    println!(
-                        "  ✘ repair succeeded, but {} file(s) outside the PAR2 set \
-                         are still incomplete: {}",
-                        uncovered_after_par2.len(),
-                        uncovered_after_par2.join(", ")
-                    );
-                }
-            }
-        }
+        (all_good, repaired, uncovered_after_par2, repair_shortfall) = disk_par2_fallback(
+            out_dir,
+            slots,
+            extractor,
+            sparse_slots,
+            note_activity,
+            par_cleanup,
+            all_good,
+            repaired,
+            uncovered_after_par2,
+            repair_shortfall,
+        )
+        .await;
     }
     if !all_good {
         // The census's findings have to reach THIS arm too, and
@@ -1454,14 +1731,30 @@ async fn settle_without_set(
         }
         // Missing articles left zero-filled holes and no PAR2
         // filled them - embedded RAR recovery records can.
-        all_good = try_rar_rr_repair(out_dir, password);
+        repaired = true;
+        // And the rung's own reason where it has one. This arm composed
+        // its whole failure from a bare bool, so a bomb verdict raised
+        // by the post-repair extraction was dropped and the job blamed
+        // the archive for a full disk (TODO §249 item 1). Only a NAMED
+        // reason is taken: the ordinary failure is worded by the arms
+        // below exactly as before.
+        all_good = match try_rar_rr_repair_why(out_dir, password) {
+            Ok(()) => true,
+            Err(why) => {
+                if let Some(why) = why {
+                    reextract_failed = Some(why);
+                }
+                false
+            }
+        };
         // Recovery records heal the RAR set they live in. A file
         // the PAR2 pass already found outside every recovery set
         // is still a hole, whatever the volumes did.
         if all_good && !uncovered_after_par2.is_empty() {
             all_good = false;
-            println!(
-                "  ✘ RAR recovery records cannot speak for {} file(s) outside \
+            warn!(
+                target: "repair",
+                "✘ RAR recovery records cannot speak for {} file(s) outside \
                  the PAR2 set: {}",
                 uncovered_after_par2.len(),
                 uncovered_after_par2.join(", ")
@@ -1470,9 +1763,10 @@ async fn settle_without_set(
     }
     Ok(SettleVerdict {
         all_good,
-        reextract_failed: None,
+        reextract_failed,
         repair_shortfall,
         deferred_renames: Vec::new(),
+        published_names: crate::unpack::PublishedNames::for_dir(out_dir),
         sniff_covered: None,
         // No per-file claim from the disk-side fallback. It is reached
         // only where no set activated, and its repair works on volume
@@ -1481,6 +1775,7 @@ async fn settle_without_set(
         // quarantine nothing to discriminate between. Whole-job stays
         // right here, and it stays honest.
         unhealed_slots: None,
+        repaired,
     })
 }
 
@@ -1491,7 +1786,7 @@ async fn settle_without_set(
 // whatever is still deferred-and-matched is fetched here on the side
 // machinery and fed to the verifier off disk - delivered and
 // verified, never recreated from recovery blocks.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn fetch_matched_deferred(
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     sniff: &Arc<SniffCtl>,
@@ -1506,13 +1801,14 @@ pub(super) async fn fetch_matched_deferred(
 ) {
     if let Some(set) = verifier.set() {
         for (sidx, file_size) in sniff.matched_deferred(&set) {
-            println!(
-                "  ▸ {} is payload the recovery set covers - fetching it now",
+            info!(
+                target: "par2",
+                "{} is payload the recovery set covers - fetching it now",
                 slots[sidx].hint
             );
             let fi = slot_file[sidx];
             if let Err(e) = fetch_volumes(servers, nzb, out_dir, buf_pool, &[fi], cancel).await {
-                println!("  ⚠ fetching it failed ({e}) - leaving it to the repair pass");
+                warn!(target: "par2", "fetching it failed ({e}) - leaving it to the repair pass");
                 continue;
             }
             // Deferral ledger: these bytes were downloaded after all.
@@ -1562,14 +1858,81 @@ pub(super) async fn fetch_matched_deferred(
                                 off += n as u64;
                             }
                             Err(e) => {
-                                println!("  ⚠ reading {} back failed: {e}", path.display());
+                                warn!(target: "par2", "reading {} back failed: {e}", path.display());
                                 break;
                             }
                         }
                     }
                 }
-                Err(e) => println!("  ⚠ {} not readable after fetch: {e}", path.display()),
+                Err(e) => warn!(target: "par2", "{} not readable after fetch: {e}", path.display()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod spare_contract_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    fn slot(hint: &str, par2: bool, errors: usize) -> Arc<FileSlot> {
+        Arc::new(FileSlot {
+            hint: hint.into(),
+            is_par2_main: par2,
+            sample_skipped: false,
+            par2_sniffed: AtomicBool::new(false),
+            total_segments: 1,
+            remaining: AtomicUsize::new(0),
+            missing: AtomicUsize::new(0),
+            errors: AtomicUsize::new(errors),
+            deferred: AtomicUsize::new(0),
+            abandoned: AtomicUsize::new(0),
+            capture: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Sweep 8, L5: one contract for out-of-set furniture, applied
+    /// before the branch.
+    ///
+    /// The repaired branch has always spared it (issue #23: the set
+    /// does not cover it, so no repair could heal it, so it is dropped
+    /// rather than failing the job). The clean and no-set branches
+    /// tested `derrs == 0` flat, so the SAME corrupt `.nfo` failed the
+    /// job when the payload was clean and passed green when an
+    /// unrelated RAR happened to need repair - the verdict decided by a
+    /// branch the file has nothing to do with.
+    #[test]
+    fn out_of_set_furniture_is_spared_whatever_branch_settles_the_job() {
+        let slots = vec![
+            slot("movie.part01.rar", false, 0),
+            slot("movie.nfo", false, 1),
+            slot("movie.par2", true, 3),
+        ];
+        let covers_rar: HashSet<String> = ["movie.part01.rar".to_string()].into_iter().collect();
+
+        // The `.nfo` the set does not cover: optional, so its error may
+        // not decide the job on any branch.
+        assert_eq!(spared_metadata_errors(&slots, &covers_rar), 1);
+        // No set at all - everything is out-of-set, and the answer is
+        // the same one.
+        assert_eq!(spared_metadata_errors(&slots, &HashSet::new()), 1);
+        // A set that DOES name the `.nfo` covers it: repair speaks for
+        // it, so it is not spared and its damage still counts.
+        let covers_nfo: HashSet<String> = ["movie.nfo".to_string()].into_iter().collect();
+        assert_eq!(spared_metadata_errors(&slots, &covers_nfo), 0);
+        // Recovery slots are never furniture - they have their own
+        // exclusion (`recovery_errs`) and double-counting them here
+        // would spare real parity damage.
+        assert_eq!(
+            spared_metadata_errors(&[slot("movie.par2", true, 3)], &HashSet::new()),
+            0
+        );
+        // And payload is payload: a damaged RAR outside the set fails
+        // the job exactly as before.
+        assert_eq!(
+            spared_metadata_errors(&[slot("extra.part02.rar", false, 2)], &HashSet::new()),
+            0
+        );
     }
 }

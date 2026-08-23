@@ -81,8 +81,8 @@ pub struct MediaFacts {
     /// The main video's coded frame size - the RAW INPUT [`res_label`]
     /// reduces to [`MediaFacts::res`], kept beside its own conclusion.
     ///
-    /// Every other field here is a derived label and this pair is not,
-    /// which is the whole reason it exists. A bucketing rule is a
+    /// The fields above are derived labels and this one is not, which
+    /// is the whole reason it exists. A bucketing rule is a
     /// judgement call that gets corrected: 67f212a4 fixed `res_label`
     /// promoting a full-height scope encode (2592x1080) to 1440p, and
     /// every row already written was then stuck with the wrong word
@@ -100,16 +100,75 @@ pub struct MediaFacts {
     /// than zero: "not recorded" and "a zero-width frame" are different
     /// answers, and only the first one means fall back to the file.
     ///
-    /// Only the resolution family is covered. The audio and codec labels
-    /// reduce their own raw inputs (channel counts, layouts, codec ids)
-    /// and keep none of them, so a future fix THERE wants the same
-    /// treatment applied to those inputs - this field is the pattern,
-    /// not the whole of it.
+    /// This pair was the first of the raw inputs and is no longer the
+    /// only one: [`MediaFacts::vcodec_canon`] and the four fields after
+    /// it give the audio, codec and HDR labels the same treatment, for
+    /// the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     /// The coded frame height. See [`MediaFacts::width`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The main video's canonical codec id - the RAW INPUT
+    /// [`vcodec_label`] reduces to [`MediaFacts::vcodec`].
+    ///
+    /// This is the probe's own short name ("hevc", "h264", "av1"), NOT
+    /// the container's CodecID (`V_MPEGH/ISO/HEVC`), which is a
+    /// different field on the track and is not kept: the label never
+    /// sees it. Where the probe did not recognise the container id it
+    /// hands back that id lowercased, and that is what lands here -
+    /// still the input the label read.
+    ///
+    /// `None` on every row written before this field existed, and on a
+    /// container whose video track has not been read yet. Absent rather
+    /// than empty, for the reason [`MediaFacts::width`] gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcodec_canon: Option<String>,
+    /// The strongest audio track's canonical codec id ("eac3", "dts"),
+    /// which [`acodec_label`] reduces to the first half of
+    /// [`MediaFacts::audio`]. See [`MediaFacts::vcodec_canon`] for why
+    /// it is the canonical name and not the container's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acodec_canon: Option<String>,
+    /// That track's channel COUNT, which [`channels_label`] reduces to
+    /// the second half of [`MediaFacts::audio`] ("5.1").
+    ///
+    /// The count and the label are not the same fact and the difference
+    /// is exactly why this is stored: 7 channels print as "6.1" by a
+    /// table this codebase wrote, and a table is a judgement that gets
+    /// corrected. Zero means the container stated a track and no count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u32>,
+    /// That track's layout string ("stereo", "5.1", "7 ch"), the OTHER
+    /// input [`channels_label`] reads - it is what the label falls back
+    /// to when the count is zero.
+    ///
+    /// Today every prober derives this from the count itself, so it
+    /// carries nothing the count does not. It is stored anyway because
+    /// the rule here is "keep what the reducer read", not "keep what is
+    /// currently independent": a container that does state a layout of
+    /// its own (an MP4 `chnl` box) would make it the only witness, and
+    /// a row written before that day would be the one that could not be
+    /// re-derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_layout: Option<String>,
+    /// The video's colour transfer characteristic ("pq", "hlg",
+    /// "bt709"), one of the two RAW INPUTS `codec::hdr_format` reduces
+    /// to [`MediaFacts::hdr`].
+    ///
+    /// This pair recovers a distinction the label alone destroys.
+    /// [`MediaFacts::hdr`] is `None` both for a file the container
+    /// positively described as SDR and for one it said nothing about.
+    /// The chip treats those alike; [`hdr_mismatch`] very much does
+    /// not, because only the first is grounds for contradicting a name.
+    /// With these stored, a row can still tell them apart: both absent
+    /// means the container was silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_transfer: Option<String>,
+    /// The video's colour primaries ("bt2020", "bt709"). See
+    /// [`MediaFacts::hdr_transfer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_primaries: Option<String>,
 }
 
 /// One contradiction, as two statements the UI can put in a sentence.
@@ -138,6 +197,81 @@ impl MediaFacts {
     /// the container but read no track yet has nothing to show.
     pub fn any(&self) -> bool {
         self.res.is_some() || self.vcodec.is_some() || self.audio.is_some()
+    }
+
+    /// Do these two say the same thing to a READER - same labels, same
+    /// contradictions - whatever raw inputs they happen to carry?
+    ///
+    /// The distinction is what lets a re-derivation pass tell "this row
+    /// was labelled wrong" from "this row merely gained the inputs its
+    /// label was read from". Conflating them tells the user a number of
+    /// corrections that is mostly rows that were right all along, to
+    /// the one person in a position to check it.
+    ///
+    /// Both halves are destructured EXHAUSTIVELY on purpose: a field
+    /// added to this struct does not compile until it has been
+    /// classified here as a label or as a raw input, so the two methods
+    /// cannot silently stop covering it between them.
+    pub fn same_labels(&self, other: &Self) -> bool {
+        let Self {
+            res,
+            vcodec,
+            audio,
+            hdr,
+            duration_ms,
+            container,
+            mismatch,
+            complete,
+            width: _,
+            height: _,
+            vcodec_canon: _,
+            acodec_canon: _,
+            channels: _,
+            channel_layout: _,
+            hdr_transfer: _,
+            hdr_primaries: _,
+        } = self;
+        *res == other.res
+            && *vcodec == other.vcodec
+            && *audio == other.audio
+            && *hdr == other.hdr
+            && *duration_ms == other.duration_ms
+            && *container == other.container
+            && *mismatch == other.mismatch
+            && *complete == other.complete
+    }
+
+    /// Do these two carry the same raw inputs? The other half of
+    /// [`MediaFacts::same_labels`], and the test for whether a row is
+    /// worth re-writing when nothing a reader can see has changed: one
+    /// that gains its inputs never needs the file again.
+    pub fn same_raw_inputs(&self, other: &Self) -> bool {
+        let Self {
+            res: _,
+            vcodec: _,
+            audio: _,
+            hdr: _,
+            duration_ms: _,
+            container: _,
+            mismatch: _,
+            complete: _,
+            width,
+            height,
+            vcodec_canon,
+            acodec_canon,
+            channels,
+            channel_layout,
+            hdr_transfer,
+            hdr_primaries,
+        } = self;
+        *width == other.width
+            && *height == other.height
+            && *vcodec_canon == other.vcodec_canon
+            && *acodec_canon == other.acodec_canon
+            && *channels == other.channels
+            && *channel_layout == other.channel_layout
+            && *hdr_transfer == other.hdr_transfer
+            && *hdr_primaries == other.hdr_primaries
     }
 }
 
@@ -329,6 +463,19 @@ pub fn summarise(info: &MediaInfo) -> MediaFacts {
         complete: info.complete,
         width: v.map(|v| v.width),
         height: v.map(|v| v.height),
+        vcodec_canon: v.map(|v| v.codec.clone()),
+        acodec_canon: a.map(|a| a.codec.clone()),
+        channels: a.map(|a| a.channels),
+        channel_layout: a.map(|a| a.channel_layout.clone()),
+        // Read off the track's colour block rather than off `hdr` above:
+        // that one drops "SDR", and an SDR file's tags are precisely
+        // what tells a later reader the container was not silent.
+        hdr_transfer: v
+            .and_then(|v| v.hdr.as_ref())
+            .and_then(|h| h.transfer.clone()),
+        hdr_primaries: v
+            .and_then(|v| v.hdr.as_ref())
+            .and_then(|h| h.primaries.clone()),
     }
 }
 
@@ -347,9 +494,15 @@ pub fn summarise(info: &MediaInfo) -> MediaFacts {
 /// one wrong statement for a worse one. The claim is re-parsed from
 /// `name` and the same stand-down `check` applies.
 ///
-/// Nothing else is touched. The audio, codec and HDR labels keep no raw
-/// inputs, so this cannot second-guess them, and their mismatches are
-/// left exactly as the probe recorded them.
+/// Nothing else is touched, and the reason is no longer that the other
+/// families have nothing to work from - since §188 they keep their own
+/// raw inputs, so a fix in one of them can re-derive its LABEL by the
+/// same arithmetic. Their MISMATCHES still cannot follow: the audio rule
+/// asserts an absence over the WHOLE track list and the codec rule reads
+/// the container's own CodecID, and a row stores neither. A fix there
+/// re-derives the label and restates the `actual` half of an existing
+/// mismatch; it must not re-judge whether that mismatch fires, which is
+/// the one thing the stored inputs cannot answer.
 pub fn rederive_res(facts: &mut MediaFacts, name: &str) -> bool {
     let (Some(w), Some(h)) = (facts.width, facts.height) else {
         return false;
@@ -846,6 +999,219 @@ mod tests {
                 .all(|m| m.field != Field::Audio),
             "an incomplete track list is not evidence of absence"
         );
+    }
+
+    /// §188: every label this module derives keeps the inputs it was
+    /// derived FROM, so the next fix in one of these families is
+    /// arithmetic over a stored row rather than a re-probe of a file
+    /// that may not exist any more.
+    #[test]
+    fn every_label_keeps_the_inputs_it_was_reduced_from() {
+        let f = summarise(&probed(&testmux::mkv_full()));
+        // Resolution, the pair that came first.
+        assert_eq!((f.width, f.height), (Some(1920), Some(1080)));
+        // Video codec: the probe's canonical id, not "H.264" back again
+        // and not the container's V_MPEG4/ISO/AVC either.
+        assert_eq!(f.vcodec_canon.as_deref(), Some("h264"));
+        // Audio: the AC3 5.1 track wins, and both halves of "DD 5.1"
+        // are recoverable from what is stored beside it.
+        assert_eq!(f.acodec_canon.as_deref(), Some("ac3"));
+        assert_eq!(f.channels, Some(6));
+        assert_eq!(f.channel_layout.as_deref(), Some("5.1"));
+        // This fixture carries no Colour element at all.
+        assert_eq!(
+            (f.hdr_transfer.as_deref(), f.hdr_primaries.as_deref()),
+            (None, None)
+        );
+
+        let h = summarise(&probed(&testmux::mkv_hdr()));
+        assert_eq!(h.vcodec_canon.as_deref(), Some("hevc"));
+        assert_eq!(h.acodec_canon.as_deref(), Some("eac3"));
+        assert_eq!(h.channels, Some(6));
+        assert_eq!(h.hdr_transfer.as_deref(), Some("pq"));
+        assert_eq!(h.hdr_primaries.as_deref(), Some("bt2020"));
+    }
+
+    /// The property the storage exists for: each label is a pure
+    /// function of the fields stored beside it, so re-running the
+    /// derivation over a ROW reproduces the row - no file, no probe.
+    /// A future fix in any of these families is then a change to one of
+    /// these functions plus a walk over stored rows.
+    #[test]
+    fn every_label_rebuilds_from_the_stored_inputs_alone() {
+        for fixture in [
+            testmux::mkv_full(),
+            testmux::mkv_hdr(),
+            testmux::mkv_disabled_track(),
+            testmux::mkv_vfw_xvid(),
+        ] {
+            let f = summarise(&probed(&fixture));
+            assert_eq!(
+                f.res,
+                f.width.zip(f.height).and_then(|(w, h)| res_label(w, h)),
+                "resolution"
+            );
+            assert_eq!(
+                f.vcodec,
+                f.vcodec_canon.as_deref().map(vcodec_label),
+                "video codec"
+            );
+            let audio = f.acodec_canon.as_deref().map(|c| {
+                format!(
+                    "{} {}",
+                    acodec_label(c),
+                    channels_label(
+                        f.channels.unwrap_or(0),
+                        f.channel_layout.as_deref().unwrap_or_default()
+                    )
+                )
+            });
+            assert_eq!(f.audio, audio, "audio");
+            let hdr = super::super::codec::hdr_format(
+                f.hdr_transfer.as_deref(),
+                f.hdr_primaries.as_deref(),
+            );
+            // The label drops "SDR" and the absence of colour tags
+            // alike; both spell `None` on the row.
+            let hdr = (hdr != "SDR").then_some(hdr);
+            assert_eq!(f.hdr, hdr, "dynamic range");
+        }
+    }
+
+    /// The one thing [`MediaFacts::hdr`] alone cannot say: whether the
+    /// container was SILENT about colour or positively said SDR. Only
+    /// the second is grounds for contradicting an HDR name, and the
+    /// label spells both `None`.
+    #[test]
+    fn a_stored_row_still_tells_sdr_from_a_silent_container() {
+        let silent = summarise(&probed(&testmux::mkv_full()));
+        assert_eq!(silent.hdr, None);
+        assert!(silent.hdr_transfer.is_none() && silent.hdr_primaries.is_none());
+
+        let info = probed(&testmux::mkv_full());
+        let mut v = main_video(&info).unwrap().clone();
+        v.hdr = Some(super::super::Hdr {
+            matrix: Some("bt709".into()),
+            transfer: Some("bt709".into()),
+            primaries: Some("bt709".into()),
+            max_cll: None,
+            max_fall: None,
+            format: "SDR".into(),
+        });
+        let mut sdr = info.clone();
+        sdr.video = vec![v];
+        let sdr = summarise(&sdr);
+        assert_eq!(sdr.hdr, None, "SDR is not a badge");
+        assert_eq!(sdr.hdr_transfer.as_deref(), Some("bt709"));
+        assert_eq!(sdr.hdr_primaries.as_deref(), Some("bt709"));
+        assert!(!silent.same_raw_inputs(&sdr));
+        assert!(
+            silent.same_labels(&sdr),
+            "the chip reads the same either way"
+        );
+    }
+
+    /// A row written by any build before these fields existed still
+    /// loads, and loses nothing it did carry. This is the whole of the
+    /// wire compatibility promise: `history.jsonl` is append-only and
+    /// its oldest rows outlive every schema they were written under.
+    #[test]
+    fn a_row_written_before_the_raw_inputs_existed_still_loads() {
+        // Verbatim from the live daemon's history.jsonl, §188.
+        let old = r#"{"audio":"DDP 5.1","complete":true,"container":"mkv",
+            "res":"2160p","vcodec":"HEVC","hdr":"HDR10","duration_ms":60000,
+            "mismatch":[{"field":"resolution","claimed":"2160p","actual":"1080p"}]}"#;
+        let f: MediaFacts = serde_json::from_str(old).expect("an old row must still load");
+        assert_eq!(f.res.as_deref(), Some("2160p"));
+        assert_eq!(f.audio.as_deref(), Some("DDP 5.1"));
+        assert_eq!(f.mismatch.len(), 1);
+        // Absent, not zeroed: "not recorded" and "the container said
+        // zero channels" must not read alike, or a re-derivation over
+        // stored rows would invent a mono track.
+        assert_eq!(f.channels, None);
+        assert_eq!(f.vcodec_canon, None);
+        assert_eq!(f.acodec_canon, None);
+        assert_eq!(f.channel_layout, None);
+        assert_eq!(f.hdr_transfer, None);
+        assert_eq!(f.hdr_primaries, None);
+        assert_eq!((f.width, f.height), (None, None));
+    }
+
+    /// And the other direction: a row with no raw inputs serialises to
+    /// exactly the JSON the old build wrote, so a downgrade - or an
+    /// older reader of the same file - sees nothing new.
+    #[test]
+    fn an_input_less_row_serialises_to_the_old_shape() {
+        let f = MediaFacts {
+            res: Some("1080p".into()),
+            complete: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        for absent in [
+            "width",
+            "height",
+            "vcodec_canon",
+            "acodec_canon",
+            "channels",
+            "channel_layout",
+            "hdr_transfer",
+            "hdr_primaries",
+        ] {
+            assert!(!json.contains(absent), "{absent} must not appear in {json}");
+        }
+        // A probed row does carry them, and round-trips unchanged.
+        let probed = summarise(&probed(&testmux::mkv_hdr()));
+        let json = serde_json::to_string(&probed).unwrap();
+        assert!(json.contains("\"channels\":6"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<MediaFacts>(&json).unwrap(),
+            probed,
+            "a raw-input row must survive the wire"
+        );
+    }
+
+    /// The split the history re-derivation pass counts on: raw inputs
+    /// are invisible to a reader, and everything else is not.
+    #[test]
+    fn same_labels_masks_the_raw_inputs_and_nothing_else() {
+        let f = summarise(&probed(&testmux::mkv_full()));
+        // The shape of an old row: same chip, no inputs behind it.
+        let mut bare = f.clone();
+        bare.width = None;
+        bare.height = None;
+        bare.vcodec_canon = None;
+        bare.acodec_canon = None;
+        bare.channels = None;
+        bare.channel_layout = None;
+        bare.hdr_transfer = None;
+        bare.hdr_primaries = None;
+        assert!(f.same_labels(&bare), "gaining inputs is not a correction");
+        assert!(!f.same_raw_inputs(&bare));
+        assert!(f.same_labels(&f) && f.same_raw_inputs(&f));
+
+        // Every visible field is visible.
+        for mutate in [
+            (|m: &mut MediaFacts| m.res = Some("2160p".into())) as fn(&mut MediaFacts),
+            |m| m.vcodec = Some("AV1".into()),
+            |m| m.audio = Some("DTS 7.1".into()),
+            |m| m.hdr = Some("HDR10".into()),
+            |m| m.duration_ms = Some(1),
+            |m| m.container = Some("mp4".into()),
+            |m| m.complete = !m.complete,
+            |m| {
+                m.mismatch.push(Mismatch {
+                    field: Field::Audio,
+                    claimed: "Atmos".into(),
+                    actual: "DD 5.1".into(),
+                })
+            },
+        ] {
+            let mut other = f.clone();
+            mutate(&mut other);
+            assert!(!f.same_labels(&other), "{other:?} reads the same as {f:?}");
+            assert!(f.same_raw_inputs(&other), "no raw input was touched");
+        }
     }
 
     #[test]

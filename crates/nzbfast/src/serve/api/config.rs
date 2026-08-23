@@ -139,6 +139,41 @@ fn m_apikey_show(
     })
 }
 
+// Lives here rather than beside `cat_list` in daemon.rs because both
+// callers are in this file and daemon.rs is on the size-gate
+// burn-down list (TODO 106) with no room left.
+impl Daemon {
+    /// Every category a client may be configured against: the filing
+    /// list plus each user category's slug (TODO 46).
+    ///
+    /// The two lists were disjoint until now, which is what made "Your
+    /// categories" and "Categories" read as the same feature twice while
+    /// only one of them reached Sonarr: a user category classified the
+    /// wall and the index, and then an *arr configured against it met
+    /// "Category does not exist". The slug is what is offered, not the
+    /// display name, because the slug is the category's stable identity
+    /// (renaming the display name deliberately keeps it) and is by
+    /// construction a single legal path component.
+    ///
+    /// Deliberately NOT folded into [`Daemon::cat_list`]: that is the
+    /// `categories` setting's round-trip value, and `register_cat` writes
+    /// it back to settings.json. A slug leaking in there would become a
+    /// filing category of its own and outlive the user category it came
+    /// from, which is a silent edit of a setting nobody touched.
+    pub(in crate::serve) fn client_cats(&self) -> std::collections::BTreeSet<String> {
+        // Cloned and dropped before the second lock: these two are only
+        // ever taken together here, and a held pair is a lock-order edge
+        // that every future caller would have to know about.
+        let mut set = self.cats.lock_ok().clone();
+        for c in self.custom_categories.read_ok().iter() {
+            if !c.slug.is_empty() {
+                set.insert(c.slug.clone());
+            }
+        }
+        set
+    }
+}
+
 fn m_get_config(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -153,8 +188,9 @@ fn m_get_config(
         // to report (decision 5's documented mapping).
         let cats: Vec<Value> = {
             let meta = d.cat_meta.lock_ok();
-            d.cats
-                .lock_ok()
+            // client_cats, not `cats`: a user category (TODO 24D) is a
+            // category an *arr may be configured against too.
+            d.client_cats()
                 .iter()
                 .map(|c| {
                     let m = meta.get(c).cloned().unwrap_or_default();
@@ -264,9 +300,14 @@ fn m_get_config(
         {
             pending.insert("port".into(), v.clone());
         }
-        // §129 2a: the TLS pair is bind-time too. A cleared value ("")
-        // pending against a serving pair matters as much as a set one.
+        // §193 c: the listener address is bind-time in exactly the same
+        // way. Compared against the string THIS run bound with, so a
+        // saved 127.0.0.1 against a daemon serving 0.0.0.0 shows as
+        // pending rather than reading back as already applied.
         for (k, active) in [
+            ("bind", d.bind.clone()),
+            // §129 2a: the TLS pair is bind-time too. A cleared value ("")
+            // pending against a serving pair matters as much as a set one.
             ("tls_cert", crate::serve::settings::path_str(&d.tls_cert)),
             ("tls_key", crate::serve::settings::path_str(&d.tls_key)),
         ] {
@@ -475,11 +516,13 @@ fn m_config(
                     // rules pattern that will not compile, say so NOW -
                     // by rule name, with the engine's compile error -
                     // rather than leaving it to the row annotation the
-                    // user may never scroll back to. Null when there is
+                    // user may never scroll back to. TODO 60a rides the
+                    // same field: `prefer_external_unrar` turned on with
+                    // no unrar to turn it on for. Null when there is
                     // nothing to say, so every other setting's answer is
                     // unchanged.
                     json!({"status": true, "live": live, "saved": saved,
-                    "warning": rules_save_warning(name, v),
+                    "warning": save_warning(name, v),
                     "path": if saved { Value::Null } else {
                         json!(d.settings_path.to_string_lossy())
                     }})
@@ -892,7 +935,7 @@ pub(in crate::serve) fn dispatch(
         },
         "get_config" => return m_get_config(d, req, params, ctx, api_body),
         "get_cats" => {
-            json!({"categories": d.cats.lock_ok().iter().cloned().collect::<Vec<_>>()})
+            json!({"categories": d.client_cats().into_iter().collect::<Vec<_>>()})
         }
         // The post-processing script list a remote app fills its
         // per-job dropdown from. We run one global script, so the
@@ -1053,8 +1096,6 @@ mod tests {
             base: "",
             ua_hdr: "",
             key_q: "",
-            #[cfg(feature = "indexer")]
-            tmdb_key: &None,
             bootstrap_apikey: false,
             via_add_only: false,
         };

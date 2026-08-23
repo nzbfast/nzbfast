@@ -124,7 +124,7 @@ fn fold_chunk_tiled_matches_naive() {
 /// Reference recovery-slice generator: R_e = Σ_i g_i^e · D_i, the
 /// same formula par2cmdline uses to CREATE recovery data. Tests
 /// build sets with it and reconstruct after synthetic damage; the
-/// real-par2cmdline fixture test (tests/par2repair_reference.rs)
+/// real-par2cmdline fixture test (tests/integration/par2repair_reference.rs)
 /// pins the formula itself against reference-tool output.
 fn generate_recovery(slices: &[Vec<u8>], block_size: usize, e: u32) -> Vec<u8> {
     let logs = input_base_logs(slices.len()).unwrap();
@@ -157,7 +157,7 @@ fn ntt_gates_route_field_shapes_correctly() {
     // a 32-bit `usize`, and the largest corpus asserted here is
     // 16381 x 64 KiB (~1 GiB), so usize::MAX serves the same purpose on
     // armv7. `ntt_default_budget`'s own 32-bit ceiling is pinned
-    // separately in `ntt_budget_ceiling_survives_a_32_bit_usize`.
+    // separately in `ntt_default_budget_scales_to_the_machine`.
     #[cfg(target_pointer_width = "32")]
     let budget = usize::MAX;
     #[cfg(not(target_pointer_width = "32"))]

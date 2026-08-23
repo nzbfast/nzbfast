@@ -118,12 +118,17 @@ impl Daemon {
     /// and files the job exactly as it would have before.
     pub(super) fn resolve_identity(
         &self,
+        nzo_id: &str,
         out_dir: &std::path::Path,
         posted: &str,
         inner_crc: u32,
     ) -> crate::identity::Identity {
         use nzbkit::release;
         let mut id = crate::identity::Identity::default();
+        // Slim build: the only reader of `nzo_id` is the phase-3
+        // correlation verdict below, which needs the index.
+        #[cfg(not(feature = "indexer"))]
+        let _ = nzo_id;
         if !self.identity_lookup.load(Ordering::Relaxed) {
             return id;
         }
@@ -189,8 +194,8 @@ impl Daemon {
             // Bounded like the tail's other index work: this runs on a
             // finished job's post-processing thread, and a wedged index
             // lane must not hold a completion behind a correlation
-            // verdict. See `with_index_bounded`.
-            let verdict = self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
+            // verdict. See `with_index_for_tail`.
+            let verdict = self.with_index_for_tail(nzo_id, |ix| {
                 ix.pre_corr_verdict(posted, &id.name, now).ok().flatten()
             });
             match verdict {
@@ -244,7 +249,7 @@ impl Daemon {
                     key: sc.set_id.clone(),
                     source: "srrdb".into(),
                 });
-            let applied = self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
+            let applied = self.with_index_for_tail(nzo_id, |ix| {
                 let rids = ix.release_ids_by_stem(posted).unwrap_or_default();
                 let [rid] = rids[..] else { return None };
                 let out = ix.apply_proven_name(rid, &claim, now).ok()?;
@@ -297,7 +302,7 @@ impl Daemon {
         // future repost of these bytes the same non-answer, permanently.
         #[cfg(feature = "indexer")]
         if !prints.is_empty() && release::stem_is_a_name(best) {
-            self.with_index_bounded(Self::TAIL_INDEX_WAIT, |ix| {
+            self.with_index_for_tail(nzo_id, |ix| {
                 ix.par_hash_remember(&prints, best, &parsed.key, unix_now())
                     .ok()
             });

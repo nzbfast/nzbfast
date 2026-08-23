@@ -131,8 +131,8 @@ fn a_failure_link_may_not_downgrade_https_to_http() {
 /// dead over a gap propagation was expected to fill.
 ///
 /// The retry decision has to be answerable BEFORE the hooks run:
-/// `park` arms `auto_retry_at` after `run_post_job_hooks` has already
-/// spawned, so a guard that reads the field is a race.
+/// `park` arms `auto_retry_at` after `run_post_job_hooks_gen` has
+/// already spawned, so a guard that reads the field is a race.
 #[test]
 fn a_failure_awaiting_its_automatic_retry_is_not_reported_dead() {
     let base = json!({
@@ -558,7 +558,16 @@ fn the_dashboard_says_when_a_change_is_live_but_not_durable() {
 /// bearing on its own.
 #[test]
 fn a_stale_refusal_can_never_ask_for_a_key() {
-    for (name, src) in [("dashboard", DASHBOARD_HTML), ("wall", WALL_HTML)] {
+    // The dashboard half of this holds in a slim build too, so the test
+    // stays ungated (unlike its two wall-only neighbours below) and the
+    // wall - which ships only with the indexer stack, and so is gated
+    // with it - is pushed rather than listed. As a plain array this did
+    // not compile under `--no-default-features` at all.
+    #[cfg_attr(not(feature = "indexer"), expect(unused_mut))]
+    let mut pages: Vec<(&str, &str)> = vec![("dashboard", DASHBOARD_HTML)];
+    #[cfg(feature = "indexer")]
+    pages.push(("wall", WALL_HTML));
+    for (name, src) in pages {
         // Every adoption bumps an epoch, and every request records the
         // epoch it goes out under. Without the pair there is nothing to
         // tell "this key is wrong" from "this key is old".
@@ -889,33 +898,38 @@ fn a_token_is_never_carried_onto_a_second_target_of_the_same_name() {
     );
 }
 
-/// The unpack-space forecast has to count the decrypt's temp copy.
+/// The unpack-space forecast counts every copy that coexists at the
+/// peak, and no more.
 ///
-/// Real case (a tester, 2 Aug): a 13.85 GB RAR5 ENCRYPTED set on a
-/// disk with 15.6 GB free. The volumes fit, so the download ran to
-/// completion and the unpack then died with the disk full. Counting
-/// "volumes + payload" would have told them to free ~12 GB, they
-/// would have freed it, and the finish decrypt - which writes the
-/// plaintext into a temp beside the ciphertext before renaming -
-/// would have failed them a second time.
+/// Real case (a tester, 2 Aug): a 13.85 GB RAR5 ENCRYPTED set on a disk
+/// with 15.6 GB free. The volumes fit, so the download ran to completion
+/// and the unpack then died with the disk full. Counting "volumes +
+/// payload" would have told them to free ~12 GB, they would have freed
+/// it, and the finish decrypt - which wrote the plaintext into a temp
+/// beside the ciphertext before renaming - would have failed them a
+/// second time. TODO 27 phase 3 deleted that pass, so encryption costs
+/// no extra copy any more and the arm went with it; a NESTED set still
+/// pays one, for its own reason.
 #[test]
-fn an_encrypted_set_is_forecast_a_copy_higher_than_a_plain_one() {
+fn a_nested_set_is_forecast_a_copy_higher_than_a_flat_one() {
     const GB: u64 = 1_000_000_000;
     // Nothing fetched yet: parts + payload.
     assert_eq!(
         unpack_space_needed(10 * GB, 10 * GB, "rar5 store on-disk"),
         20 * GB
     );
-    // Same set, encrypted: the decrypt's temp is a third copy.
+    // Same set, encrypted: no temp to pay for any more, so it forecasts
+    // exactly what the plain one does.
     assert_eq!(
         unpack_space_needed(10 * GB, 10 * GB, "rar5 store encrypted on-disk"),
-        30 * GB
+        20 * GB
     );
-    // The tester's job, fully downloaded (nothing left to fetch):
-    // the honest answer is two more copies, not one.
+    // The tester's job, fully downloaded (nothing left to fetch). The
+    // tag is one an older run persisted - the token is no longer
+    // emitted, and it must still forecast rather than read as unknown.
     assert_eq!(
         unpack_space_needed(0, 13_850 * 1_000_000, "rar5 encrypted unlock-at-end"),
-        27_700 * 1_000_000
+        13_850 * 1_000_000
     );
     // A NESTED set materializes one more layer than it looks: the
     // outer volumes stay on disk, level 0's output IS the inner
@@ -931,10 +945,10 @@ fn an_encrypted_set_is_forecast_a_copy_higher_than_a_plain_one() {
         unpack_space_needed(0, 20 * GB, "rar5 store on-disk inner-7z"),
         40 * GB
     );
-    // Encrypted AND nested pays for both.
+    // Encrypted AND nested pays for the nesting alone.
     assert_eq!(
         unpack_space_needed(0, 10 * GB, "rar5 encrypted on-disk inner-rar"),
-        30 * GB
+        20 * GB
     );
     // The plain set beside them is untouched: whole tokens only.
     assert_eq!(

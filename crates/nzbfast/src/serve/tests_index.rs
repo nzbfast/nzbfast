@@ -403,6 +403,56 @@ fn the_wall_nav_pill_keeps_a_selector_across_the_catalogue() {
     );
 }
 
+/// Every copy in a cross-indexer group shows its own name.
+///
+/// Grouping (issue #44) folds the same release from several indexers
+/// into one row whose children are the losing copies. Those children
+/// printed a name only where it DIFFERED from the headline's, to avoid
+/// repeating one identical string down the group - but indexers
+/// scraping the same scene pre usually spell it identically, so the
+/// common child was a name cell holding nothing but an indexer badge,
+/// and `esc()` maps a missing name to '' without complaint. KarkaLT
+/// reported the blank rows on #44 the day v1.2.0 shipped. Source-scanned
+/// for the same reason as the guards above: the HTML lives in the
+/// binary, so nothing else here would notice it regress.
+#[cfg(feature = "indexer")]
+#[test]
+fn every_grouped_indexer_copy_renders_its_own_name() {
+    let f = WALL_HTML
+        .split("function extSrcRow(")
+        .nth(1)
+        .and_then(|s| s.split("\nfunction ").next())
+        .expect("wall.html no longer has extSrcRow");
+    // The name a child renders may not be conditional on differing.
+    assert!(
+        !f.contains("s.title!==headTitle\n") && !f.contains("s.title!==headTitle?"),
+        "a copy's name must not be rendered only when it differs from \
+         the headline's - that is what left the cell empty: {f}"
+    );
+    // It falls back to the headline rather than to nothing, so a copy
+    // that somehow arrives without a title still names its release.
+    assert!(
+        f.contains("s.title||headTitle"),
+        "a titleless copy must fall back to the headline's name: {f}"
+    );
+    // And the name reaches the cell.
+    assert!(
+        f.contains("esc(nm)"),
+        "the copy's name must be written into the row: {f}"
+    );
+    // Truncation at 520px is why the cell is titled: the tooltip is the
+    // only way to read a long name in full.
+    let cell = f
+        .split("<td class=\"name\"")
+        .nth(1)
+        .expect("the name cell moved");
+    assert!(
+        cell.starts_with(" title="),
+        "the name cell must carry a tooltip, or a clipped name is \
+         unreadable and a blank one is unexplained: {cell}"
+    );
+}
+
 /// `compact_verdict` only answers "is a download running?" once, a
 /// moment before the rewrite starts - and the rewrite then holds the
 /// very gate a starting download waits on. A job arriving one moment

@@ -144,3 +144,74 @@ fn the_fallback_is_untouched_when_nobody_names_themselves() {
     assert_eq!(api_origin("", "arr"), "arr");
     assert_eq!(api_origin("nzb360/17.4 (Android 14)", "arr"), "arr:nzb360");
 }
+
+// ---- watchlist provenance (TODO 44's follow-up) ------------------------
+
+/// The shape the dashboard parses: three `|`-separated fields, in the
+/// order slot, quality, title.
+#[test]
+fn a_watchlist_origin_carries_slot_quality_and_item() {
+    assert_eq!(
+        watchlist_origin("s01e02", "1080p WEB", "Breaking Bad"),
+        "watchlist:s01e02|1080p WEB|Breaking Bad"
+    );
+    // Every other slot shape the watcher can produce rides the same
+    // field, unaltered - the dashboard is what decides which of them is
+    // worth showing a person.
+    assert_eq!(
+        watchlist_origin("movie", "2160p REMUX", "Blade Runner 2049"),
+        "watchlist:movie|2160p REMUX|Blade Runner 2049"
+    );
+    assert_eq!(
+        watchlist_origin("d:20260721", "", "The Daily Show"),
+        "watchlist:d:20260721||The Daily Show"
+    );
+}
+
+/// An item with nothing to say reads exactly as it did before the
+/// detail existed, rather than as `watchlist:||`.
+#[test]
+fn an_empty_detail_falls_back_to_the_bare_token() {
+    assert_eq!(watchlist_origin("", "", ""), "watchlist");
+    // Whitespace-only is empty too, or a blank title would leave a
+    // trailing space nobody can see and the fallback would not fire.
+    assert_eq!(watchlist_origin("  ", "\t", " "), "watchlist");
+}
+
+/// The title comes from the user's watchlist, or from a Plex/Trakt sync,
+/// and is persisted and rendered - so the separator and the control
+/// characters are stripped HERE, where the string is built, exactly as
+/// `api_client` sanitises a user-agent at the point of classification.
+#[test]
+fn the_detail_fields_cannot_forge_a_separator_or_run_long() {
+    let o = watchlist_origin("s01", "720p", "A|B");
+    assert_eq!(o, "watchlist:s01|720p|AB");
+    assert_eq!(o.split('|').count(), 3, "still exactly three fields: {o}");
+
+    let o = watchlist_origin("s01", "720p", "line\nbreak\u{7}");
+    assert_eq!(o, "watchlist:s01|720p|linebreak");
+
+    // Per FIELD, not per string: a long title must not push the slot
+    // and the quality out of the record.
+    let o = watchlist_origin("s01e02", "1080p", &"x".repeat(500));
+    let f: Vec<&str> = o.strip_prefix("watchlist:").unwrap().split('|').collect();
+    assert_eq!(f[0], "s01e02");
+    assert_eq!(f[1], "1080p");
+    assert_eq!(f[2].chars().count(), 60);
+}
+
+/// Both spellings, or the give-up breaker stops arming for every grab
+/// made after the detail landed - and a breaker that never arms reads
+/// exactly like one that never had cause to.
+#[test]
+fn both_watchlist_spellings_answer_yes() {
+    assert!(is_watchlist_origin("watchlist"));
+    assert!(is_watchlist_origin("watchlist:s01e02|1080p|Breaking Bad"));
+    assert!(is_watchlist_origin(&watchlist_origin(
+        "movie", "2160p", "Dune"
+    )));
+    assert!(!is_watchlist_origin("watch"));
+    assert!(!is_watchlist_origin("rss:https://example.com/feed"));
+    // Not a prefix match on the bare word: `watchlisted` is not ours.
+    assert!(!is_watchlist_origin("watchlisted"));
+}

@@ -32,17 +32,13 @@ use super::*;
 /// movie crawl - and MusicBrainz's hard 1 request/second would have put
 /// an album backlog in front of every new episode had it shared a lane.
 #[cfg(feature = "indexer")]
-pub(in crate::serve) fn wall_enricher(
-    d: Arc<Daemon>,
-    api_key: Option<String>,
-    stop: crate::serve::RunStop,
-) {
+pub(in crate::serve) fn wall_enricher(d: Arc<Daemon>, stop: crate::serve::RunStop) {
     use nzbkit::index::Lane;
     for lane in [Lane::Movies, Lane::MusicBooks] {
-        let (d2, k2) = (d.clone(), api_key.clone());
-        crate::serve::spawn_aux("wall-enrich", move || wall_enrich_lane(d2, k2, lane, stop));
+        let d2 = d.clone();
+        crate::serve::spawn_aux("wall-enrich", move || wall_enrich_lane(d2, lane, stop));
     }
-    wall_enrich_lane(d, api_key, Lane::Shows, stop);
+    wall_enrich_lane(d, Lane::Shows, stop);
 }
 
 /// The `titles.kind` string as the wall's enum. Music and books used to
@@ -109,10 +105,141 @@ fn eligible<T>(
         .collect()
 }
 
+/// First and last rung of the per-title retry ladder.
+#[cfg(feature = "indexer")]
+const BACKOFF_MIN: u64 = 60;
+#[cfg(feature = "indexer")]
+const BACKOFF_MAX: u64 = 6 * 3600;
+
+/// How long to leave a transiently-failed title alone.
+///
+/// Exponential from [`BACKOFF_MIN`], doubling per consecutive failure to
+/// the [`BACKOFF_MAX`] ceiling - but never SOONER than a `Retry-After`
+/// the provider actually named (TODO 26c). The header used to be parsed,
+/// spent on `ratelimit::penalise`, and dropped: a service asking for
+/// fifteen minutes got asked again in one, which draws the same refusal
+/// and costs the row another rung of the ladder for nothing.
+///
+/// A named wait never EXTENDS past the ceiling either. Six hours is
+/// already the point at which the lane has better things to do than
+/// remember one title, and the map is in-memory - a restart forgets it.
+#[cfg(feature = "indexer")]
+fn backoff_secs(fails: u32, retry_after: Option<u64>) -> u64 {
+    BACKOFF_MIN
+        .saturating_mul(1u64 << fails.saturating_sub(1).min(9))
+        .max(retry_after.unwrap_or(0))
+        .min(BACKOFF_MAX)
+}
+
+/// Put a row back in the queue after a failure that was NOT an answer,
+/// and remember it so the retry waits.
+///
+/// Four sites in the lane do this - the metadata chain, the artwork
+/// fetch, the release-date backfill and the TVDB id pass - and they have
+/// to agree, because each writes a stamp that is permanent (`checked`,
+/// `air_tried`, `tvdb_tried`). The three parts that must not drift are
+/// counting the row's consecutive failures, deriving the wait from that
+/// count AND from what the provider asked for, and saying so once rather
+/// than on every pass. `what` names the thing that could not be reached,
+/// so the log line still tells a reader which leg deferred the row.
+#[cfg(feature = "indexer")]
+fn defer(
+    unreached: &mut std::collections::HashMap<String, (u32, std::time::Instant)>,
+    key: &str,
+    retry_after: Option<u64>,
+    what: &str,
+) {
+    let fails = unreached.get(key).map_or(0, |(n, _)| *n) + 1;
+    let wait = backoff_secs(fails, retry_after);
+    if !what.is_empty() {
+        info!(
+            target: "enrich",
+            "{key}: {what} could not be reached, leaving the title for a later \
+             pass rather than recording an empty card (next try in {} min)",
+            wait.div_ceil(60)
+        );
+    }
+    unreached.insert(
+        key.to_string(),
+        (
+            fails,
+            std::time::Instant::now() + std::time::Duration::from_secs(wait),
+        ),
+    );
+}
+
+#[cfg(feature = "indexer")]
+/// TODO 187: idle time also fills the TVDB ids the newznab
+/// facade's `tvdbid` search resolves through. Shows lane
+/// only - nothing else has one - and one exact
+/// `/shows/<tvmaze id>` GET per row rather than a search,
+/// because the row already carries the id that names the
+/// show. It retires itself once every show has been asked,
+/// and until it has run at least once the facade does not
+/// advertise the parameter at all.
+///
+/// Answers whether it found any row to ask about - the caller's idle sleep
+/// is shorter while this lane still has work. Split out of
+/// `wall_enrich_lane` (TODO 106), body verbatim.
+fn tvdb_backfill(
+    d: &Arc<Daemon>,
+    lane: nzbkit::index::Lane,
+    unreached: &mut std::collections::HashMap<String, (u32, std::time::Instant)>,
+    now_i: std::time::Instant,
+) -> bool {
+    let mut did_tvdb = false;
+    if lane == nzbkit::index::Lane::Shows {
+        // Over-fetched then filtered, like its sibling lanes -
+        // it used to be the one queue that took its six rows
+        // first and skipped them afterwards, so six shows TVmaze
+        // permanently 404s on pinned the lane for good (Codex
+        // sweep 7, M2).
+        let tv = eligible_batch(
+            6,
+            unreached,
+            now_i,
+            |r: &nzbkit::index::TitleRow| r.key.as_str(),
+            |n| {
+                d.with_index(|ix| ix.titles_missing_tvdb(n).ok())
+                    .unwrap_or_default()
+            },
+        );
+        did_tvdb = !tv.is_empty();
+        let _busy = d.busy.hold("enriching");
+        for row in tv {
+            crate::wall::clear_unreachable();
+            match crate::wall::tvmaze_tvdb_id(row.tmdb_id) {
+                // An answer, id or no id. Recorded either way:
+                // "TVmaze publishes none for this show" is what
+                // stops the lane returning to it forever.
+                Some(id) => {
+                    unreached.remove(&row.key);
+                    let _ = d.with_index(|ix| ix.title_set_tvdb(&row.key, id).ok());
+                }
+                // Not an answer. tvdb_tried is as permanent as
+                // the enricher's checked stamp, so a row we
+                // could not reach a provider for must stay
+                // eligible rather than be retired unasked.
+                None => defer(
+                    unreached,
+                    &row.key,
+                    crate::wall::retry_after_hint(),
+                    // Silent: `tvmaze_tvdb_id` answers None for a
+                    // show TVmaze has simply dropped as well as
+                    // for one it could not serve, and a line per
+                    // pass per 404 is the log this lane used to
+                    // fill overnight.
+                    "",
+                ),
+            }
+        }
+    }
+    did_tvdb
+}
+
 #[cfg(feature = "indexer")]
 pub(in crate::serve) fn wall_enrich_lane(
     d: Arc<Daemon>,
-    api_key: Option<String>,
     lane: nzbkit::index::Lane,
     stop: crate::serve::RunStop,
 ) {
@@ -131,18 +258,8 @@ pub(in crate::serve) fn wall_enrich_lane(
     // fetcher's failed set: a restart retrying at once is fine, the
     // tight loop is not. Keyed per title, so one unreachable title
     // never delays the rest of the queue.
-    const BACKOFF_MIN: u64 = 60;
-    const BACKOFF_MAX: u64 = 6 * 3600;
     let mut unreached: std::collections::HashMap<String, (u32, std::time::Instant)> =
         std::collections::HashMap::new();
-    let backoff_after = |fails: u32| {
-        std::time::Instant::now()
-            + std::time::Duration::from_secs(
-                BACKOFF_MIN
-                    .saturating_mul(1u64 << fails.saturating_sub(1).min(9))
-                    .min(BACKOFF_MAX),
-            )
-    };
     loop {
         // This lane holds a strong `Arc<Daemon>` throughout - it reads
         // the daemon on nearly every line - so returning here is what
@@ -202,54 +319,7 @@ pub(in crate::serve) fn wall_enrich_lane(
             )
         };
         if batch.is_empty() {
-            // TODO 187: idle time also fills the TVDB ids the newznab
-            // facade's `tvdbid` search resolves through. Shows lane
-            // only - nothing else has one - and one exact
-            // `/shows/<tvmaze id>` GET per row rather than a search,
-            // because the row already carries the id that names the
-            // show. It retires itself once every show has been asked,
-            // and until it has run at least once the facade does not
-            // advertise the parameter at all.
-            let mut did_tvdb = false;
-            if lane == nzbkit::index::Lane::Shows {
-                // Over-fetched then filtered, like its sibling lanes -
-                // it used to be the one queue that took its six rows
-                // first and skipped them afterwards, so six shows TVmaze
-                // permanently 404s on pinned the lane for good (Codex
-                // sweep 7, M2).
-                let tv = eligible_batch(
-                    6,
-                    &unreached,
-                    now_i,
-                    |r: &nzbkit::index::TitleRow| r.key.as_str(),
-                    |n| {
-                        d.with_index(|ix| ix.titles_missing_tvdb(n).ok())
-                            .unwrap_or_default()
-                    },
-                );
-                did_tvdb = !tv.is_empty();
-                let _busy = d.busy.hold("enriching");
-                for row in tv {
-                    crate::wall::clear_unreachable();
-                    match crate::wall::tvmaze_tvdb_id(row.tmdb_id) {
-                        // An answer, id or no id. Recorded either way:
-                        // "TVmaze publishes none for this show" is what
-                        // stops the lane returning to it forever.
-                        Some(id) => {
-                            unreached.remove(&row.key);
-                            let _ = d.with_index(|ix| ix.title_set_tvdb(&row.key, id).ok());
-                        }
-                        // Not an answer. tvdb_tried is as permanent as
-                        // the enricher's checked stamp, so a row we
-                        // could not reach a provider for must stay
-                        // eligible rather than be retired unasked.
-                        None => {
-                            let fails = unreached.get(&row.key).map_or(0, |(n, _)| *n) + 1;
-                            unreached.insert(row.key.clone(), (fails, backoff_after(fails)));
-                        }
-                    }
-                }
-            }
+            let did_tvdb = tvdb_backfill(&d, lane, &mut unreached, now_i);
             // Idle time goes on backfilling release dates onto titles
             // enriched before we stored them - otherwise the wall's
             // release-date sort would only ever work for titles indexed
@@ -295,6 +365,9 @@ pub(in crate::serve) fn wall_enrich_lane(
             for row in back {
                 let kind = lane_kind(&row.kind);
                 crate::wall::clear_unreachable();
+                // §193 d: per row, so a TMDB key added in Settings is
+                // picked up by the lane already running.
+                let api_key = d.tmdb_key.lock_ok().clone();
                 let date = crate::wall::lookup(api_key.as_deref(), &kind, &row.title, row.year)
                     .map(|m| m.air_date)
                     .unwrap_or_default();
@@ -303,19 +376,15 @@ pub(in crate::serve) fn wall_enrich_lane(
                 // But only when it really was ASKED - air_tried=1 is just
                 // as permanent as the enricher's checked stamp, so a
                 // provider we could not reach must leave the row alone.
-                if date.is_empty() && crate::wall::saw_unreachable() {
-                    let fails = unreached.get(&row.key).map_or(0, |(n, _)| *n) + 1;
-                    let next = backoff_after(fails);
-                    info!(
-                        target: "wall",
-                        "{}: date backfill could not reach a provider, retrying \
-                         in {} min",
-                        row.key,
-                        next.saturating_duration_since(std::time::Instant::now())
-                            .as_secs()
-                            .div_ceil(60)
+                if let crate::wall::Outcome::Transient { retry_after } =
+                    crate::wall::outcome(!date.is_empty())
+                {
+                    defer(
+                        &mut unreached,
+                        &row.key,
+                        retry_after,
+                        "the date backfill's provider",
                     );
-                    unreached.insert(row.key.clone(), (fails, next));
                 } else {
                     unreached.remove(&row.key);
                     let _ = d.with_index(|ix| ix.title_set_air_date(&row.key, &date).ok());
@@ -348,6 +417,7 @@ pub(in crate::serve) fn wall_enrich_lane(
             // provider has nothing", never "we could not reach it", or
             // the stamp below retires the row for good.
             wall::clear_unreachable();
+            let api_key = d.tmdb_key.lock_ok().clone();
             let mut meta = match (&api_key, &kind) {
                 _ if kind == Kind::Other => None,
                 // Music and books before the TMDB arm, not after: TMDB
@@ -477,22 +547,62 @@ pub(in crate::serve) fn wall_enrich_lane(
                 let _ = d.with_index(|ix| ix.title_fill(&row.key, &Default::default(), now).ok());
                 continue;
             }
+            // Read the chain's verdict BEFORE the art fetch below: the
+            // flags it reads are thread-local and per row, and an image
+            // read would otherwise fold a CDN's failure into what the
+            // METADATA providers said.
+            let verdict = wall::outcome(meta.is_some());
             match meta {
                 Some(m) => {
-                    // A provider answered: whatever backoff this key
-                    // accrued is over.
-                    unreached.remove(&row.key);
-                    let save = |url: &str, backdrop: bool| -> String {
+                    // The art fetch is on the stamping path, so it needs
+                    // the same three-way answer the metadata chain has:
+                    // `title_fill` writes the card and `checked` in one
+                    // statement, and no lane offers a checked row again.
+                    // A poster that merely timed out used to come back
+                    // indistinguishable from a URL serving nothing, and
+                    // the card kept the hole for good.
+                    let save = |url: &str, backdrop: bool| -> (String, bool) {
+                        if url.is_empty() {
+                            return (String::new(), false);
+                        }
                         let name = wall::art_name(&row.key, backdrop);
-                        match wall::fetch_image(url) {
-                            Some(bytes) if std::fs::write(art.join(&name), &bytes).is_ok() => name,
-                            _ => String::new(),
+                        match wall::fetch_image_res(url) {
+                            Ok(bytes) if std::fs::write(art.join(&name), &bytes).is_ok() => {
+                                (name, false)
+                            }
+                            // A local write failure is OUR disk, not the
+                            // provider's fault, and holding the row open
+                            // for it would re-fetch the whole chain every
+                            // pass while the volume stayed full.
+                            Ok(_) | Err(wall::ArtMiss::NoImage) => (String::new(), false),
+                            Err(wall::ArtMiss::Transient) => (String::new(), true),
                         }
                     };
-                    let (poster, backdrop) = std::thread::scope(|s| {
-                        let bd = s.spawn(|| save(&m.backdrop_url, true));
-                        (save(&m.poster_url, false), bd.join().unwrap_or_default())
-                    });
+                    // Returned rather than noted in the thread-local:
+                    // the backdrop is fetched on a SCOPED THREAD, which
+                    // has its own copy of every thread-local the wall
+                    // keeps, so anything it noted there would be dropped
+                    // on the floor when it joined.
+                    let ((poster, poster_late), (backdrop, backdrop_late)) =
+                        std::thread::scope(|s| {
+                            let bd = s.spawn(|| save(&m.backdrop_url, true));
+                            (
+                                save(&m.poster_url, false),
+                                bd.join().unwrap_or((String::new(), false)),
+                            )
+                        });
+                    if poster_late || backdrop_late {
+                        defer(
+                            &mut unreached,
+                            &row.key,
+                            wall::retry_after_hint(),
+                            "the artwork host",
+                        );
+                        continue;
+                    }
+                    // A provider answered and the card is whole:
+                    // whatever backoff this key accrued is over.
+                    unreached.remove(&row.key);
                     // Credits go in BEFORE the fill, because the fill is
                     // what stamps `checked` and that stamp is final: no
                     // lane ever offers a checked row again. The credits
@@ -547,29 +657,19 @@ pub(in crate::serve) fn wall_enrich_lane(
                 None => {
                     // Only stamp when the providers actually ANSWERED and
                     // had nothing. If any of them could not be reached -
-                    // DNS, timeout, TLS, a 5xx, or retries exhausted -
-                    // this row is unknown, not empty, and stamping it
-                    // here would retire it permanently: title_fill sets
-                    // checked=now and air_tried=1, and every lane query
-                    // requires checked=0. A brief uplink blip used to
-                    // blank every title the lane touched while it lasted.
-                    if wall::saw_unreachable() {
+                    // DNS, timeout, TLS, a 5xx, a 429, or retries
+                    // exhausted - this row is unknown, not empty, and
+                    // stamping it here would retire it permanently:
+                    // title_fill sets checked=now and air_tried=1, and
+                    // every lane query requires checked=0. A brief uplink
+                    // blip used to blank every title the lane touched
+                    // while it lasted.
+                    if let wall::Outcome::Transient { retry_after } = verdict {
                         // Remembered, so the retry waits out an
                         // exponential backoff instead of burning a
-                        // batch slot (and this log line) every pass.
-                        let fails = unreached.get(&row.key).map_or(0, |(n, _)| *n) + 1;
-                        let next = backoff_after(fails);
-                        info!(
-                            target: "enrich",
-                            "{}: no provider could be reached, leaving it for a \
-                             later pass rather than recording an empty card \
-                             (next try in {} min)",
-                            row.key,
-                            next.saturating_duration_since(std::time::Instant::now())
-                                .as_secs()
-                                .div_ceil(60)
-                        );
-                        unreached.insert(row.key.clone(), (fails, next));
+                        // batch slot (and this log line) every pass -
+                        // and never sooner than the provider asked.
+                        defer(&mut unreached, &row.key, retry_after, "any provider");
                     } else {
                         // Providers answered and had nothing: the stamp
                         // below retires the row, so its backoff entry
@@ -654,13 +754,21 @@ pub(in crate::serve) fn person_photo_fetcher(d: Arc<Daemon>, stop: crate::serve:
                 continue;
             }
             let name = crate::wall::person_art_name(id);
-            let path = art.join(&name);
-            if path.is_file() {
+            if art.join(&name).is_file() {
                 continue;
             }
             match crate::wall::fetch_image(&url) {
                 Some(bytes) => {
-                    let _ = std::fs::write(&path, &bytes);
+                    // Staged and renamed, never written over the live
+                    // name (`publish_art` carries why). This lane needs
+                    // it more than the poster writers do: the `is_file`
+                    // skip above means a headshot truncated by a crash
+                    // mid-write reads as already-fetched forever, so the
+                    // broken portrait is permanent rather than one
+                    // refresh deep. A failed publish leaves the live
+                    // name ABSENT, which is what that check wants - the
+                    // next walk of the table asks for it again.
+                    let _ = crate::serve::api::wall::publish_art(&art, &name, &bytes);
                     got_any = true;
                 }
                 None => {
@@ -1157,9 +1265,61 @@ pub(in crate::serve) fn spawn_predb_feed(daemon: &Arc<Daemon>) {
 
 #[cfg(all(test, feature = "indexer"))]
 mod eligibility_tests {
-    use super::{eligible, eligible_batch};
+    use super::{BACKOFF_MAX, BACKOFF_MIN, backoff_secs, eligible, eligible_batch};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    /// TODO 26c: a provider that names a wait gets that wait.
+    ///
+    /// The header was read at every 429 site, spent on the rate
+    /// limiter's bucket - which clamps to a minute so no lane thread
+    /// parks longer than that - and then dropped. So a service asking
+    /// for fifteen minutes was asked again in one, drew the identical
+    /// refusal, and charged the row another rung of the ladder for it.
+    #[test]
+    fn a_named_retry_after_outranks_the_ladder() {
+        // First failure: the ladder would say a minute.
+        assert_eq!(backoff_secs(1, None), BACKOFF_MIN);
+        // ...but not when the provider asked for fifteen.
+        assert_eq!(backoff_secs(1, Some(900)), 900);
+        // A wait SHORTER than the rung we are already on does not pull
+        // the retry forward: four consecutive failures mean something
+        // is wrong beyond one refusal.
+        assert_eq!(backoff_secs(4, Some(5)), BACKOFF_MIN * 8);
+        // Neither source may exceed the ceiling - the map is in-memory,
+        // and past six hours the lane has better things to remember.
+        assert_eq!(backoff_secs(1, Some(30 * 3600)), BACKOFF_MAX);
+        assert_eq!(backoff_secs(99, None), BACKOFF_MAX);
+    }
+
+    /// The other half of "retried after the backoff": a key waiting one
+    /// out is skipped, and offered again the moment it is due. Without
+    /// this the lane re-asks the same title every ~7 seconds, which is
+    /// what the live daemon spent a whole night doing.
+    #[test]
+    fn a_backed_off_key_is_skipped_until_it_is_due_and_then_offered() {
+        let rows = || vec!["m:dune:2021".to_string()];
+        let mut map: HashMap<String, (u32, Instant)> = HashMap::new();
+        let at = Instant::now();
+        map.insert("m:dune:2021".into(), (1, at + Duration::from_secs(60)));
+        assert!(
+            eligible(rows(), &map, at, |r: &String| r.as_str(), 12).is_empty(),
+            "a title inside its backoff was offered again"
+        );
+        // One second past the wait it is a candidate like any other.
+        assert_eq!(
+            eligible(
+                rows(),
+                &map,
+                at + Duration::from_secs(61),
+                |r: &String| r.as_str(),
+                12
+            )
+            .len(),
+            1,
+            "the title never came back after its backoff expired"
+        );
+    }
 
     /// A backoff map holding `keys`, none of them due for a long while.
     fn backing_off(keys: &[&str]) -> HashMap<String, (u32, Instant)> {
@@ -1260,5 +1420,73 @@ mod eligibility_tests {
         let rows = vec!["t:a".to_string(), "t:b".to_string(), "t:c".to_string()];
         let got = eligible(rows, &unreached, Instant::now(), |r: &String| r.as_str(), 9);
         assert_eq!(got, ["t:b", "t:c"]);
+    }
+}
+
+/// The headshot lane's disk contract, at the fixture level.
+#[cfg(all(test, feature = "indexer"))]
+mod headshot_art_tests {
+    /// Site 2. `person_photo_fetcher` skips a person whose file is
+    /// already on disk, so this lane is the one where a crash mid-write
+    /// is PERMANENT: a truncated portrait reads as already-fetched for
+    /// the life of the cache, and no refresh ever asks again. Staging
+    /// makes that impossible for future writes - the live name is only
+    /// ever the whole file or nothing, and nothing is what the skip
+    /// wants, because the next walk of the table re-asks.
+    ///
+    /// Staging alone is the fix, deliberately: nothing here inspects an
+    /// EXISTING headshot for validity. One truncated before this landed
+    /// still reads as fetched, and heals only when the LRU prune evicts
+    /// it (a portrait that never draws is never touched, so it sorts
+    /// early) or the art cache is cleared wholesale.
+    #[test]
+    fn a_failed_headshot_publish_leaves_no_file_to_be_skipped() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-headshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp art dir");
+        let name = crate::wall::person_art_name(4207);
+        let live = dir.join(&name);
+
+        assert!(crate::serve::api::wall::publish_art(
+            &dir,
+            &name,
+            b"a-whole-portrait"
+        ));
+        assert_eq!(std::fs::read(&live).expect("live"), b"a-whole-portrait");
+
+        // A directory the lane cannot create a file in: the publish
+        // fails where it can do no harm, and the live name stays
+        // ABSENT, which is what re-queues the person next walk. Skipped
+        // where the platform ignores a read-only directory.
+        std::fs::remove_file(&live).expect("clear");
+        let mut perms = std::fs::metadata(&dir).expect("md").permissions();
+        perms.set_readonly(true);
+        let sealed = std::fs::set_permissions(&dir, perms).is_ok()
+            && std::fs::write(dir.join("probe"), b"x").is_err();
+        if sealed {
+            assert!(!crate::serve::api::wall::publish_art(&dir, &name, b"XX"));
+            assert!(
+                !live.is_file(),
+                "a failed publish left a file to be skipped"
+            );
+            let mut perms = std::fs::metadata(&dir).expect("md").permissions();
+            #[expect(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(&dir, perms);
+        }
+
+        // And the staging name this lane leaves behind on a crash is
+        // one the hourly sweep collects, while the LRU prune - which
+        // walks this same directory - cannot see it. A prune that
+        // counted an in-flight staging file would evict a live portrait
+        // to make room for bytes that are about to be renamed away.
+        let staged = format!(".{name}.new-1234-56789");
+        assert!(
+            crate::serve::api::wall::is_art_staging_name(&staged),
+            "{staged}"
+        );
+        assert!(!crate::wall::is_person_art_name(&staged), "{staged}");
+        assert!(crate::wall::is_person_art_name(&name), "{name}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

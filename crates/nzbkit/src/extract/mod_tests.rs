@@ -90,9 +90,10 @@ fn single_volume_direct_extract() {
 /// A slot fed strictly out of order (offset 0 dead LAST - the
 /// synthesized-segment-numbering shape) must ask the installed
 /// promote hook to front-load the offset-0 article on its FIRST held
-/// span, and exactly once: the honest-ladder span (0, 1) plus the
-/// rotation guess (size-X, +1) derived from that first span's offset
-/// X. Later out-of-order spans must not re-arm it. The set still
+/// span: the honest-ladder span (0, 1) plus the rotation guess
+/// (size-X, +1) derived from that first span's offset X. Exactly once
+/// HERE, because these arrivals climb - `probe_offset0` re-aims only
+/// on a falling minimum, and the test below covers that. The set still
 /// classifies when offset 0 lands and extracts one-pass.
 #[test]
 fn out_of_order_slot_probes_offset0_promote_once() {
@@ -120,7 +121,8 @@ fn out_of_order_slot_probes_offset0_promote_once() {
     }
     // Asked once, on the first hold: offset 0 where the ladder says
     // it is, and where a posting-order rotation would put it given
-    // that the first arrival carried offset `art`. The second call
+    // that the first arrival carried offset `art` - which is also the
+    // lowest offset this slot ever holds, so nothing re-aims. The second call
     // is the inner file's own one-shot probe: drain_holds re-feeds
     // the held spans BEFORE the classifying span's own forward, so
     // the child slot also starts out of order (no rotation guess
@@ -142,6 +144,150 @@ fn out_of_order_slot_probes_offset0_promote_once() {
     );
     let rep = ex.finish().unwrap();
     assert_eq!(rep.extracted, vec![("movie.mkv".to_string(), 200_000)]);
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
+    assert!(!dir.join("v.rar").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The one-shot probe's blind spot. Under a rotated ladder the
+/// rotation guess is `size - offset` for the FIRST span that arrives,
+/// which lands on the head's declared byte only when that first span
+/// is the `head_ids` article (declared position 0). If ordinary
+/// payload beats it into the decoder - a delayed or retried head - the
+/// guess undershoots by one article per declared position it missed,
+/// and `map_span_ids` gives it only +3 articles of forward slack.
+///
+/// So the estimator must be the MINIMUM arrived offset, not the first,
+/// and the probe must re-issue as that minimum falls: the late
+/// `head_ids` article carries a lower offset than everything that beat
+/// it, and its arrival is exactly the correction. Bounded re-issues
+/// (`PROBE0_MAX`), so this still cannot fight the M11 stream reader's
+/// rolling re-promote.
+#[test]
+fn a_late_head_ids_article_re_aims_the_rotation_guess() {
+    let dir = tmpdir("probe0-reissue");
+    let data = payload(200_000, 11);
+    let vol = fixtures::rar5_volume(&[("movie.mkv", 200_000, &data, false, false)]);
+    let ex = Arc::new(Extractor::new(&dir, 1, true));
+    type Calls = Arc<Mutex<Vec<(String, u64, Vec<(u64, u64)>, bool)>>>;
+    let calls: Calls = Default::default();
+    let sink = calls.clone();
+    ex.set_promote_hook(Arc::new(
+        move |n: &str, s: u64, sp: &[(u64, u64)], u: bool| {
+            sink.lock()
+                .unwrap()
+                .push((n.to_string(), s, sp.to_vec(), u));
+        },
+    ));
+    let art = 7000usize;
+    let n = vol.len().div_ceil(art);
+    let size = vol.len() as u64;
+    // A rot-3 ladder: declared position p announces the article whose
+    // actual yEnc offset is `((p + 3) % n) * art`, so the head sits at
+    // declared position n-3 and declared 0 carries byte 3*art.
+    const K: usize = 3;
+    let actual = |p: usize| (p + K) % n;
+    let len_of = |i: usize| ((i + 1) * art).min(vol.len()) - i * art;
+    // Declared byte position of declared slot p - what a promote span
+    // has to name for `map_span_ids` to resolve it to that article.
+    let declared_byte = |p: usize| (0..p).map(|q| len_of(actual(q))).sum::<usize>() as u64;
+    let head_byte = declared_byte(n - K);
+
+    // Arrival order, by DECLARED position: four ordinary articles beat
+    // the head_ids article (declared 0) into the decoder, then it
+    // lands, then the rest, with the real head dead last.
+    let lead = [4usize, 5, 6, 7, 0];
+    assert!(!lead.contains(&(n - K)), "fixture: head is in the lead run");
+    let mut order: Vec<usize> = lead.to_vec();
+    order.extend((1..n).filter(|p| !lead.contains(p) && *p != n - K));
+    order.push(n - K);
+    for p in order {
+        let i = actual(p);
+        let s = i * art;
+        let e = (s + art).min(vol.len());
+        ex.write(0, "v.rar", size, s as u64, &vol[s..e]).unwrap();
+    }
+
+    // Every rotation guess this slot asked for, in order.
+    let guesses: Vec<u64> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, ..)| name == "v.rar")
+        .filter_map(|(_, _, sp, _)| sp.iter().find(|(s, _)| *s != 0).map(|(s, _)| *s))
+        .collect();
+    // Exactly two, and both exact. The first is the blind spot: taken
+    // from the first arrival (declared 4), it undershoots the head by
+    // four articles - past `map_span_ids`'s +3 slack, so it front-loads
+    // the wrong articles and, with the old latch, that was final. The
+    // second is the correction the late head_ids article paid for.
+    //
+    // Nothing after it: the ladder's WRAP (declared 27 and 28 carry
+    // bytes 7000 and 14000, BELOW the head_ids article's 21000) lands
+    // past `PROBE0_WINDOW` held spans and must not re-aim, or the guess
+    // walks past the head instead of onto it.
+    assert_eq!(
+        guesses,
+        vec![head_byte - 4 * art as u64, head_byte],
+        "head byte {head_byte}, art {art}"
+    );
+    assert!(guesses.len() <= PROBE0_MAX as usize, "{guesses:?}");
+    // And the set still extracts in place.
+    let rep = ex.finish().unwrap();
+    assert_eq!(rep.extracted, vec![("movie.mkv".to_string(), 200_000)]);
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
+    assert!(!dir.join("v.rar").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The re-issue's bound, pinned directly. A promote must not fight the
+/// M11 stream reader's rolling re-promote, so a slot whose minimum
+/// keeps falling gets a handful of monotonically-improving guesses and
+/// then stops - never a promote per article. Ten strictly falling
+/// arrivals, `PROBE0_MAX` promotes.
+#[test]
+fn the_offset0_reprobe_stops_at_the_bound() {
+    let dir = tmpdir("probe0-bound");
+    let data = payload(200_000, 11);
+    let vol = fixtures::rar5_volume(&[("movie.mkv", 200_000, &data, false, false)]);
+    let ex = Arc::new(Extractor::new(&dir, 1, true));
+    type Calls = Arc<Mutex<Vec<(String, u64, Vec<(u64, u64)>, bool)>>>;
+    let calls: Calls = Default::default();
+    let sink = calls.clone();
+    ex.set_promote_hook(Arc::new(
+        move |n: &str, s: u64, sp: &[(u64, u64)], u: bool| {
+            sink.lock()
+                .unwrap()
+                .push((n.to_string(), s, sp.to_vec(), u));
+        },
+    ));
+    let art = 7000usize;
+    let n = vol.len().div_ceil(art);
+    let size = vol.len() as u64;
+    // Ten arrivals walking DOWN the file, then the rest, then the head.
+    let order: Vec<usize> = (1..=10).rev().chain(11..n).chain([0]).collect();
+    for i in order {
+        let s = i * art;
+        let e = (s + art).min(vol.len());
+        ex.write(0, "v.rar", size, s as u64, &vol[s..e]).unwrap();
+    }
+    let guesses: Vec<u64> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, ..)| name == "v.rar")
+        .filter_map(|(_, _, sp, _)| sp.iter().find(|(s, _)| *s != 0).map(|(s, _)| *s))
+        .collect();
+    let a = art as u64;
+    assert_eq!(
+        guesses,
+        vec![size - 10 * a, size - 9 * a, size - 8 * a, size - 7 * a]
+    );
+    assert_eq!(guesses.len(), PROBE0_MAX as usize);
+    // Still one-pass with the head dead last.
+    let rep = ex.finish().unwrap();
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
     assert!(!dir.join("v.rar").exists());
@@ -328,6 +474,83 @@ fn oversized_data_area_never_ships_a_sparse_file() {
     // The volume itself materialized for the disk path, byte-exact,
     // so unrar gets to fail the job honestly.
     assert_eq!(std::fs::read(dir.join("v.rar")).unwrap(), vol);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// TODO 118 item 2, reproduced at the layer the field report came from:
+/// a set that is not damaged in any way demotes on EVERY volume because
+/// the length the POST declared is short.
+///
+/// The reason `advance_to` refuses on is `volume_size`, and the
+/// extractor's `volume_size` is the `size` argument to `write*` - which
+/// in `nzbfast`'s download path is `yenc::Decoded::file_size`, i.e.
+/// `=ybegin size=`, a poster-written field `check_part_geometry`
+/// explicitly declines to verify. Feed the identical bytes twice, once
+/// at the length they really are and once 64 bytes short, and the
+/// second run demotes all three volumes with "data area exceeds
+/// volume". That is the shape of the 60-of-60 report: not one odd
+/// volume, but the whole set at once, because one poster's field is
+/// wrong the same way on every article of every volume.
+///
+/// It stays SAFE, which is the other half of the report: the volumes
+/// materialize byte-exact for the disk path and no sparse member ships.
+/// The cost is the one-pass property, and it is real.
+#[test]
+fn an_understated_posted_size_demotes_a_healthy_set_on_every_volume() {
+    let total = payload(250_000, 11);
+    let vols = [
+        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[..100_000], false, true)], 0),
+        fixtures::rar5_volume_n(
+            &[("film.mkv", 250_000, &total[100_000..200_000], true, true)],
+            1,
+        ),
+        fixtures::rar5_volume_n(&[("film.mkv", 250_000, &total[200_000..], true, false)], 2),
+    ];
+    let names = ["v.part1.rar", "v.part2.rar", "v.part3.rar"];
+
+    // Control: the same bytes at their true declared length extract
+    // one-pass, so anything the short run does is the declaration's
+    // doing and not the fixture's.
+    let dir = tmpdir("declared-true");
+    let ex = Extractor::new(&dir, 3, true);
+    for (i, v) in vols.iter().enumerate() {
+        feed(&ex, i, names[i], v, 700, 7);
+    }
+    let rep = ex.finish().unwrap();
+    assert!(
+        rep.fallbacks.is_empty(),
+        "the set is healthy: {:?}",
+        rep.fallbacks
+    );
+    assert_eq!(std::fs::read(dir.join("film.mkv")).unwrap(), total);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // The same feed with a declaration 64 bytes short on every volume.
+    let dir = tmpdir("declared-short");
+    let ex = Extractor::new(&dir, 3, true);
+    for (i, v) in vols.iter().enumerate() {
+        let short = v.len() as u64 - 64;
+        for s in (0..v.len()).step_by(700) {
+            let e = (s + 700).min(v.len());
+            ex.write(i, names[i], short, s as u64, &v[s..e]).unwrap();
+        }
+    }
+    let rep = ex.finish().unwrap();
+    assert!(
+        !rep.fallbacks.is_empty()
+            && rep
+                .fallbacks
+                .iter()
+                .all(|(_, why)| why.contains("data area exceeds volume")),
+        "every volume must demote on the bound, got {:?}",
+        rep.fallbacks
+    );
+    // Safe, just slower: the volumes are on disk byte-exact and no
+    // half-mapped member was written.
+    for (i, v) in vols.iter().enumerate() {
+        assert_eq!(&std::fs::read(dir.join(names[i])).unwrap(), v);
+    }
+    assert!(!dir.join("film.mkv").exists());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1734,6 +1957,67 @@ fn shape_reports_rar5_store_one_pass() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The badge for a set the mappers never saw: nzbfast's disk SFX arm
+/// latches the family it is about to unpack, so a self-extractor whose
+/// stub outruns the offset-0 sniff stops finishing with an EMPTY shape
+/// while the other two SFX routes fill theirs.
+///
+/// Only existing tokens, deliberately - the dashboard translates the
+/// token list and a new word would need all 27 i18n catalogues.
+#[test]
+fn a_disk_pass_can_name_the_family_it_unpacked() {
+    for (what, tag, english) in [
+        (
+            DiskArchive::Rar5,
+            "rar5 on-disk",
+            "RAR5 · unpacked after download",
+        ),
+        (
+            DiskArchive::Rar4,
+            "rar4 on-disk",
+            "RAR4 · unpacked after download",
+        ),
+        (
+            DiskArchive::SevenZ,
+            "7z on-disk",
+            "7z · unpacked after download",
+        ),
+        (
+            DiskArchive::Zip,
+            "zip on-disk",
+            "zip · unpacked after download",
+        ),
+    ] {
+        let dir = tmpdir("shape-disk");
+        let ex = Extractor::new(&dir, 1, true);
+        // A plain data file is all this route's slot ever was.
+        let data = payload(50_000, 9);
+        feed(&ex, 0, "release.exe", &data, 7000, 3);
+        assert!(ex.archive_shape().is_none(), "the sniff saw a data file");
+        ex.note_disk_archive(what);
+        assert_eq!(ex.archive_shape().unwrap().tag(), tag);
+        assert_eq!(ex.archive_shape().unwrap().display(), english);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Latched, not overwritten - the same rule every other shape bit
+/// follows. A set that streamed something out AND had an SFX unpacked
+/// off disk beside it reads as "partly on disk", which is what happened.
+#[test]
+fn a_disk_family_joins_the_latch_rather_than_replacing_it() {
+    let dir = tmpdir("shape-disk-latch");
+    let data = payload(200_000, 1);
+    let vol = fixtures::rar5_volume(&[("movie.mkv", 200_000, &data, false, false)]);
+    let ex = Extractor::new(&dir, 1, true);
+    feed(&ex, 0, "v.rar", &vol, 7000, 3);
+    assert_eq!(shape_of(&ex), ["rar5", "store", "one-pass"]);
+    ex.note_disk_archive(DiskArchive::SevenZ);
+    assert_eq!(shape_of(&ex), ["rar5", "store", "mixed-pass"]);
+    ex.finish().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The naming oracle's key (Tier C item 4): the inner file's stated
 /// CRC32, latched off the same header parse the shape badge uses.
 /// Available DURING the download for the same reason the badge is.
@@ -1822,36 +2106,15 @@ fn shape_says_one_pass_when_an_encrypted_set_decrypts_in_stream() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The badge a RAR4 encrypted set earns. It read "unlock-at-end" until
+/// TODO 27 phase 3: RAR4 stores no password check, and the route gate
+/// demanded one, so the set assembled ciphertext and unlocked in the
+/// finish pass. The re-encrypt shim retired that requirement - a wrong
+/// key still rebuilds byte-exact volumes for the demote - so RAR4 now
+/// decrypts as its bytes arrive like every other encrypted set, and the
+/// badge says so.
 #[test]
-fn shape_says_unlocked_at_the_end_on_the_legacy_encrypted_path() {
-    let dir = tmpdir("shape-enc-legacy");
-    let plain = payload(200_003, 41);
-    let f = fixtures::encrypt_file("hunter2", &plain, 5);
-    let vol =
-        fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..f.cipher.len(), false, false)], None);
-    let ex = Extractor::new(&dir, 1, true);
-    ex.set_password("hunter2");
-    // Ciphertext assembled at store offsets, unlocked by the finish
-    // pass - the shape must distinguish it from plaintext-once.
-    ex.set_instream_decrypt(false);
-    feed(&ex, 0, "v.rar", &vol, 7000, 3);
-    let rep = ex.finish().unwrap();
-    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(
-        shape_of(&ex),
-        ["rar5", "store", "encrypted", "unlock-at-end"]
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// The badge a RAR4 encrypted set earns. "unlock-at-end" is the
-/// honest token for it and always will be: RAR4 can never take the
-/// plaintext-once route (no password check to gate on), so it always
-/// assembles ciphertext and unlocks in the finish pass. The user-facing
-/// difference from before this landed is "one-pass at all" - it used to
-/// materialize every volume and read "on-disk".
-#[test]
-fn shape_says_rar4_encrypted_unlocks_at_the_end() {
+fn shape_says_rar4_encrypted_goes_one_pass() {
     let dir = tmpdir("shape-enc4");
     let plain = payload(120_007, 43);
     let f = fixtures::encrypt_file_v4("hunter2", &plain, 51);
@@ -1863,7 +2126,7 @@ fn shape_says_rar4_encrypted_unlocks_at_the_end() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(
         shape_of(&ex),
-        ["rar4", "store", "encrypted", "unlock-at-end"],
+        ["rar4", "store", "encrypted", "one-pass"],
         "RAR4 must not be badged as materialized any more"
     );
     std::fs::remove_dir_all(&dir).unwrap();
@@ -1969,6 +2232,488 @@ fn payload_sources_name_every_volume_of_a_split_file() {
         src.get("big.bin"),
         Some(&vec![0usize, 1]),
         "a split file is only whole if every volume carrying it is"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// §94 A: the crash-resume replay preclaims a restored file's name so an
+/// inner member cannot open the same inode as a live source (Codex sweep
+/// 3 Aug H3) - but the claim must not lock the SLOT'S OWN plain writer
+/// out of the file it is replaying.
+///
+/// Without the slot half of the claim, `claim_name` disambiguated the
+/// slot away from its own restored file to `000-<name>`. A resumed plain
+/// payload then finished byte-perfect under the mangled name while the
+/// orphaned restored stub kept the real one, which is what PAR2 read
+/// back and condemned (1947 of 2000 blocks bad on the obfuscated resume
+/// pin), and the cleanup swept the stub as a leftover.
+///
+/// Both halves asserted: the owning slot adopts, a different slot does
+/// not.
+#[test]
+fn a_preclaimed_name_is_adoptable_by_its_own_slot_only() {
+    let dir = tmpdir("preclaim");
+    let data = payload(50_000, 5);
+    let ex = Extractor::new(&dir, 2, true);
+    ex.preclaim_name(0, "payload.bin");
+    // Slot 0 owns the claim: its plain writer must land on that exact
+    // path, which is the restored file the replay is feeding back.
+    ex.write(0, "payload.bin", data.len() as u64, 0, &data)
+        .unwrap();
+    // Slot 1 is a different file that happens to sanitize the same way:
+    // it must be pushed off the claimed name, as an inner member is.
+    ex.write(1, "payload.bin", data.len() as u64, 0, &data)
+        .unwrap();
+    ex.finish().unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("payload.bin")).unwrap(),
+        data,
+        "the preclaiming slot did not adopt its own restored file"
+    );
+    assert!(
+        dir.join("001-payload.bin").exists(),
+        "a non-owning slot took the preclaimed name: {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect::<Vec<_>>()
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// §94 A map mode (Codex F-03): the replay preclaims the SOURCE file
+/// it reads (the earlier run's extracted member) under the volume's
+/// slot. The archive re-creating that very member must adopt the name
+/// - the inner writer is made by whichever slot's bytes reach it, not
+/// necessarily the preclaiming slot, so the grant is by archive group -
+/// while a plain file of a different slot is still pushed off it.
+#[test]
+fn a_preclaimed_source_is_adoptable_by_its_own_archive_group() {
+    let dir = tmpdir("preclaim-group");
+    let inner = "movie.mkv";
+    let data = payload(300_000, 17);
+    let vol = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data, false, false)], 0);
+    let ex = Arc::new(Extractor::with_resume(&dir, 2, true, true));
+    ex.anchor();
+    // What the replay does: the volume's own name and its source.
+    ex.preclaim_name(0, "v.part01.rar");
+    ex.preclaim_name(0, inner);
+    // A stranger plain file with the member's name must not take it.
+    let other = payload(10_000, 3);
+    ex.write(1, inner, other.len() as u64, 0, &other).unwrap();
+    ex.write(0, "v.part01.rar", vol.len() as u64, 0, &vol)
+        .unwrap();
+    ex.finish().unwrap();
+    assert_eq!(
+        std::fs::read(dir.join(inner)).unwrap(),
+        data,
+        "the archive did not adopt its own preclaimed member name"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("001-movie.mkv")).unwrap(),
+        other,
+        "the stranger was not pushed off the preclaimed name"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// §94 A: the replay's ORDER is what decides whether it costs memory.
+///
+/// A resumed job feeds its restored spans back through `write` before
+/// the pool opens. Fed in volume order, each volume's base offset is
+/// already resolvable when its data arrives and every byte places
+/// straight into the output: holds stay at zero. Fed out of order, a
+/// volume whose predecessors have not been seen has no base yet, so
+/// every byte of it parks in `holds` until `reresolve` catches up and
+/// drains it - and the PEAK is what the held-bytes cap is judged
+/// against, so an out-of-order replay demotes (or pages) sets that an
+/// ordered one streams.
+///
+/// This is the measurement behind `get/rig.rs` sorting its seeds:
+/// `journal::restore` returns them from a `HashMap`, i.e. in a
+/// different arbitrary order every process run, which is why the F4
+/// disk round saw a held peak of 100% of the replayed bytes and why two
+/// runs of the same leg differed by 2.6x.
+#[test]
+fn a_replayed_store_set_places_only_in_volume_order_and_only_with_its_head() {
+    let inner = "movie.mkv";
+    let n_vols = 8usize;
+    let per = 200_000usize;
+    let total = per * n_vols;
+    let data = payload(total, 41);
+    let vols: Vec<Vec<u8>> = (0..n_vols)
+        .map(|k| {
+            fixtures::rar5_volume_n(
+                &[(
+                    inner,
+                    total as u64,
+                    &data[k * per..(k + 1) * per],
+                    k > 0,
+                    k < n_vols - 1,
+                )],
+                k as u64,
+            )
+        })
+        .collect();
+    // Half the articles of each volume are missing, head always present:
+    // roughly what a killed run leaves behind.
+    let art = 25_000usize;
+    let replay = |tag: &str, order: Vec<usize>, skip_head: bool| -> usize {
+        let dir = tmpdir(&format!("replayorder-{tag}"));
+        let ex = Arc::new(Extractor::with_resume(&dir, n_vols, true, true));
+        ex.anchor();
+        for k in order {
+            let name = format!("v.part{:02}.rar", k + 1);
+            ex.preclaim_name(k, &name);
+            for i in 0..vols[k].len().div_ceil(art) {
+                if i % 2 == 1 || (skip_head && i == 0) {
+                    continue;
+                }
+                let s = i * art;
+                let e = (s + art).min(vols[k].len());
+                ex.write(k, &name, vols[k].len() as u64, s as u64, &vols[k][s..e])
+                    .unwrap();
+            }
+        }
+        let peak = ex.holds_peak();
+        std::fs::remove_dir_all(&dir).unwrap();
+        peak
+    };
+    let replayed = n_vols * (vols[0].len().div_ceil(art).div_ceil(2)) * art;
+    let ordered = replay("fwd", (0..n_vols).collect(), false);
+    let reversed = replay("rev", (0..n_vols).rev().collect(), false);
+    let headless = replay("nohead", (0..n_vols).collect(), true);
+    assert!(
+        ordered < 64 << 10,
+        "volume-order replay held {ordered} bytes of ~{replayed} - it should place them all"
+    );
+    assert!(
+        reversed > replayed / 2,
+        "reverse-order replay held only {reversed} bytes of ~{replayed}; if that is no longer \
+         true the driver's sort in get/rig.rs may have stopped being load-bearing"
+    );
+    // And the half nothing can sort its way out of: a resume never has
+    // the offset-0 article. That article carries the RAR headers, whose
+    // bytes land nowhere on disk (the mapper consumes them), so it never
+    // completes into an `R` record and every restored volume starts at
+    // its SECOND article - a hole exactly where the header is. Fed then,
+    // the mapper cannot parse the volume at all and holds all of it,
+    // whatever the order. This is why `ReplayPending` waits for the head
+    // to refetch instead of replaying before the pool opens.
+    assert!(
+        headless > replayed / 2,
+        "a headless replay held only {headless} bytes of ~{replayed} - if the mapper can now \
+         start a volume without its offset-0 bytes, the deferral in get/rig.rs is free to go"
+    );
+}
+
+/// A volume whose recovery record (a multi-MB service block) sits
+/// between the file data and the end-of-archive block, with the tail
+/// articles arriving BEFORE the article that carries the record's
+/// header. Measured in the field 22 Aug 2026 (DISKSHAPE-ROUND
+/// 2026-08-21 §2.1b): a `-rr10p` store set demoted on 2 of 13 legs
+/// with `incomplete mapping at end of download`, always on the
+/// slowest legs, i.e. the most reordered tails.
+///
+/// The mapper's window only keeps bytes near its cursor, so the end
+/// block's article is dropped from the window and parked in holds.
+/// When the record's header lands, the parse SKIPS the record - the
+/// cursor moves past it, but no new entry appears, and the extractor
+/// used to re-drain holds only on a new entry. The end block then sat
+/// in holds with nothing left to wake it, and settle demoted a
+/// healthy set. Every cursor advance must count as progress.
+#[test]
+fn service_block_skip_redrains_tail_holds() {
+    let dir = tmpdir("rr_skip");
+    let data = payload(300_000, 5);
+    let rr = payload(5 << 20, 6);
+    let vol =
+        fixtures::rar5_volume_n_service(&[("movie.mkv", 300_000, &data, false, false)], 0, &rr);
+    let art = 256 << 10;
+    let n_arts = vol.len().div_ceil(art);
+    // The service header lives in the article holding the end of the
+    // file data; the end block is in the last article, more than the
+    // 4 MiB window past it.
+    let hdr_art = (vol.len() - rr.len() - 64) / art;
+    assert!(hdr_art >= 1 && hdr_art + 16 < n_arts, "fixture layout");
+    let order: Vec<usize> = [0, n_arts - 1, n_arts - 2, hdr_art]
+        .into_iter()
+        .chain((1..n_arts).filter(|&i| i != hdr_art && i < n_arts - 2))
+        .collect();
+    let ex = Extractor::new(&dir, 1, true);
+    let size = vol.len() as u64;
+    for i in order {
+        let s = i * art;
+        let e = (s + art).min(vol.len());
+        ex.write(0, "v.rar", size, s as u64, &vol[s..e]).unwrap();
+    }
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(rep.extracted, vec![("movie.mkv".to_string(), 300_000)]);
+    assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
+    assert!(!dir.join("v.rar").exists(), "volume landed: not one-pass");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// §94 A residual (22 Aug 2026): the replay's WRITE half is skipped
+/// only when this run's derived placement is the very (file, offset)
+/// the journal read the bytes from, and on any mismatch the span is
+/// written - never "covered" on the journal's say-so.
+///
+/// Run 1 writes a store volume's second article through the ordinary
+/// path and keeps its `Placed` frag, which is byte-for-byte what the
+/// journal's `R` record would carry. Run 2 (a resume on the same
+/// directory) re-derives the map from the head article, then is handed
+/// the same span with the frag's coordinates. The output range is
+/// first poisoned with a sentinel, so the two outcomes are
+/// distinguishable on disk: a skip leaves the sentinel (the mechanism
+/// really did not write), a write replaces it with the posted bytes.
+#[test]
+fn a_replayed_span_is_left_in_place_only_where_the_derived_map_agrees() {
+    let inner = "movie.mkv";
+    let data = payload(300_000, 23);
+    let vol = fixtures::rar5_volume_n(&[(inner, data.len() as u64, &data, false, false)], 0);
+    let name = "v.part01.rar";
+    let art = 25_000usize;
+    let head = &vol[..art];
+    let span = &vol[art..2 * art];
+
+    // Run 1: the ordinary path, and the frag the journal would record.
+    let dir = tmpdir("inplace");
+    let frag = {
+        let ex = Arc::new(Extractor::with_resume(&dir, 1, true, true));
+        ex.anchor();
+        ex.write(0, name, vol.len() as u64, 0, head).unwrap();
+        match ex
+            .write(0, name, vol.len() as u64, art as u64, span)
+            .unwrap()
+        {
+            Persist::Placed(f) => f,
+            _ => panic!("second article did not place"),
+        }
+    };
+    assert_eq!(frag.len(), 1, "one contiguous placement expected: {frag:?}");
+    let (file, file_off) = (frag[0].file.clone(), frag[0].file_off);
+    assert_eq!(file, inner);
+    let expect = std::fs::read(dir.join(inner)).unwrap();
+
+    // Run 2, three times over, from the state run 1 left: a resume
+    // extractor re-parses the head, then meets the replayed span.
+    let resume = |src_file: &str, src_off: u64| -> (u64, Vec<u8>) {
+        // Poison the range the span maps to, so a skip is visible.
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(inner))
+                .unwrap();
+            crate::disk::write_all_at(&f, &vec![0xEEu8; art], file_off).unwrap();
+        }
+        let ex = Arc::new(Extractor::with_resume(&dir, 1, true, true));
+        ex.anchor();
+        ex.preclaim_name(0, name);
+        ex.preclaim_name(0, inner);
+        ex.write(0, name, vol.len() as u64, 0, head).unwrap();
+        let (_, covered) = ex
+            .write_in_place(
+                0,
+                name,
+                vol.len() as u64,
+                art as u64,
+                span,
+                src_file,
+                src_off,
+            )
+            .unwrap();
+        (covered, std::fs::read(dir.join(inner)).unwrap())
+    };
+
+    // The match: derived placement == journal placement, so no write.
+    let (covered, got) = resume(&file, file_off);
+    assert_eq!(
+        covered, art as u64,
+        "the matching span was not left in place"
+    );
+    assert!(
+        got[file_off as usize..file_off as usize + art]
+            .iter()
+            .all(|&b| b == 0xEE),
+        "a matching span was written anyway - the skip is not reaching the pwrite"
+    );
+    // Off by one byte: the journal disagrees with the map, so WRITE.
+    let (covered, got) = resume(&file, file_off + 1);
+    assert_eq!(covered, 0, "an offset mismatch was marked covered");
+    assert_eq!(got, expect, "an offset-mismatched span was not written");
+    // A different file of the same name shape: WRITE.
+    let (covered, got) = resume("other.mkv", file_off);
+    assert_eq!(covered, 0, "a file mismatch was marked covered");
+    assert_eq!(got, expect, "a file-mismatched span was not written");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// §94 A in-place replay through a CHILD forward. With nested routing on
+/// (the default) a store member the root maps is written by the child
+/// extractor, and before the source rode along with the forward this
+/// exact scenario left 0 bytes in place - every resumed byte of the
+/// member wrote itself back. Marker bytes the span does not carry prove
+/// the skip reaches the child's pwrite; an off-by-one source offset and
+/// a different source file both fail the match and write.
+#[test]
+fn a_child_forwarded_replay_span_is_left_in_place_only_where_the_map_agrees() {
+    let dir = tmpdir("inplace-child");
+    let data = payload(200_000, 5);
+    let vol = fixtures::rar5_volume(&[("movie.mkv", 200_000, &data, false, false)]);
+    let data_off = vol
+        .windows(64)
+        .position(|w| w == &data[..64])
+        .expect("store payload sits verbatim in the volume");
+    let marker: Vec<u8> = vec![0xEE; 200_000];
+    std::fs::write(dir.join("movie.mkv"), &marker).unwrap();
+
+    let ex = Extractor::with_resume(&dir, 1, true, true);
+    ex.preclaim_name(0, "movie.mkv");
+    ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..data_off])
+        .unwrap();
+
+    let span = &vol[data_off..data_off + 100_000];
+    let (_, covered) = ex
+        .write_in_place(
+            0,
+            "v.rar",
+            vol.len() as u64,
+            data_off as u64,
+            span,
+            "movie.mkv",
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        covered, 100_000,
+        "the child forward lost the in-place source"
+    );
+    assert!(ex.covered(0, data_off as u64, 100_000));
+    let on_disk = std::fs::read(dir.join("movie.mkv")).unwrap();
+    assert_eq!(
+        &on_disk[..100_000],
+        &marker[..100_000],
+        "a covered span was rewritten"
+    );
+
+    let span = &vol[data_off + 100_000..data_off + 150_000];
+    let (_, covered) = ex
+        .write_in_place(
+            0,
+            "v.rar",
+            vol.len() as u64,
+            (data_off + 100_000) as u64,
+            span,
+            "movie.mkv",
+            100_001,
+        )
+        .unwrap();
+    assert_eq!(covered, 0, "an off-by-one source was left in place");
+    let on_disk = std::fs::read(dir.join("movie.mkv")).unwrap();
+    assert_eq!(&on_disk[100_000..150_000], &data[100_000..150_000]);
+
+    let span = &vol[data_off + 150_000..];
+    let (_, covered) = ex
+        .write_in_place(
+            0,
+            "v.rar",
+            vol.len() as u64,
+            (data_off + 150_000) as u64,
+            span,
+            "other.bin",
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(covered, 0, "a different source file was left in place");
+    let on_disk = std::fs::read(dir.join("movie.mkv")).unwrap();
+    assert_eq!(&on_disk[150_000..], &data[150_000..]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// TODO 252 (23 Aug 2026): the widened parked-article claim rests on
+/// `materialized_span_on_disk`, so pin what it will and will not vouch
+/// for. The advG shape: a two-volume store set whose second volume
+/// never gets its offset-0 header article. That volume can map nothing,
+/// so the group demotes at `finish` and volume 1 - which mapped and
+/// extracted - is reconstructed on disk, carrying exactly the articles
+/// that arrived. A mid-volume article held back from it is a sparse
+/// hole that preads as zeros, and a wrong `Some` there is a journal
+/// record that hands a later resume zeros in place of the posted
+/// bytes.
+#[test]
+fn materialized_span_on_disk_vouches_for_written_ranges_only() {
+    let dir = tmpdir("matspan");
+    let inner = payload(600_000, 88);
+    let half = inner.len() / 2;
+    let vols: Vec<Vec<u8>> = (0..2)
+        .map(|i| {
+            let part = if i == 0 {
+                &inner[..half]
+            } else {
+                &inner[half..]
+            };
+            fixtures::rar5_volume_n(
+                &[("F.mkv", inner.len() as u64, part, i > 0, i == 0)],
+                i as u64,
+            )
+        })
+        .collect();
+    let ex = Extractor::new(&dir, 2, true);
+    let art = 25_000usize;
+    // A slot still waiting on its sniff owns no file, so it vouches for
+    // nothing whatever its holds carry.
+    assert_eq!(
+        ex.materialized_span_on_disk(0, art as u64, art as u64),
+        None
+    );
+    // Volume 2's header article never arrives, which is what demotes the
+    // group; volume 1 loses a mid-volume payload article, which is the
+    // hole under test.
+    let gap = 4usize;
+    for (slot, vol) in vols.iter().enumerate() {
+        for i in 0..vol.len().div_ceil(art) {
+            if (slot == 1 && i == 0) || (slot == 0 && i == gap) {
+                continue;
+            }
+            let (s, e) = (i * art, ((i + 1) * art).min(vol.len()));
+            ex.write(
+                slot,
+                &format!("r.part{}.rar", slot + 1),
+                vol.len() as u64,
+                s as u64,
+                &vol[s..e],
+            )
+            .unwrap();
+        }
+    }
+    let rep = ex.finish().unwrap();
+    assert!(!rep.fallbacks.is_empty(), "the group must demote");
+    assert!(
+        ex.slot_materialized(0),
+        "the mapped volume must materialize"
+    );
+    let vol = &vols[0];
+    for i in 0..vol.len().div_ceil(art) {
+        let (s, e) = (i * art, ((i + 1) * art).min(vol.len()));
+        let got = ex.materialized_span_on_disk(0, s as u64, (e - s) as u64);
+        if i == gap {
+            assert_eq!(got, None, "vouched for the hole a lost article left");
+        } else {
+            assert_eq!(
+                got.as_ref().map(|(f, _)| f.as_str()),
+                Some("r.part1.rar"),
+                "article {i} is on disk and unvouched"
+            );
+        }
+    }
+    // A span STRADDLING the hole is refused too - the coverage is
+    // gap-free or it is nothing.
+    assert_eq!(
+        ex.materialized_span_on_disk(0, ((gap - 1) * art) as u64, (art * 3) as u64),
+        None,
+        "vouched for a span straddling the hole"
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -76,8 +76,9 @@ pub(crate) fn config_write_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Read the `servers` array out of an existing config (if any). Anything
 /// else in the file (e.g. `tmdb_key`) is preserved separately on write.
-/// pub(crate): the dashboard's server editor (serve.rs) shares these so
-/// both write the exact same config.local.json shape.
+/// pub(crate): the dashboard's server editor shares these (serve/servers.rs
+/// reads, serve/api/servers.rs writes) so both write the exact same
+/// config.local.json shape.
 pub(crate) fn read_servers(config_path: &Path) -> Vec<Value> {
     // Non-destructive: the path may be a SABnzbd .ini (a supported runtime
     // config). load_json_with_backup would quarantine a non-JSON file to
@@ -361,10 +362,10 @@ Enter the numbers you want, separated by commas (e.g. 1,3)."
     // Through `write_atomic`, like every other writer of this file: the
     // wizard rewrites the WHOLE settings map, apikey included, and a plain
     // `fs::write` truncates in place. A crash mid-write leaves a truncated
-    // settings.json, which `json_store_unreadable` (serve.rs) sees on the
-    // next start - the daemon mints a FRESH apikey and every *arr
-    // connection stops working. It also gets the 0600 creation mode the
-    // credential-bearing stores are supposed to have.
+    // settings.json, which `json_store_unreadable` (called from
+    // serve/bootstrap.rs) sees on the next start - the daemon mints a FRESH
+    // apikey and every *arr connection stops working. It also gets the 0600
+    // creation mode the credential-bearing stores are supposed to have.
     crate::persist::write_atomic(&settings, text.as_bytes())?;
     if chosen.is_empty() {
         println!(

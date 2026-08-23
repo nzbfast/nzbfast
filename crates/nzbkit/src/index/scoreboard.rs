@@ -75,7 +75,7 @@ pub enum StemEvidence {
 }
 
 /// Classify a stem for the two identity lookups. Public because the
-/// before/after ruler (`tests/scoreboard_parity_measure.rs`) reports
+/// before/after ruler (`tests/integration/scoreboard_parity_measure.rs`) reports
 /// the census this rule was chosen from.
 ///
 /// Length is the floor against triviality; the token count is what

@@ -164,8 +164,7 @@ impl Daemon {
         let per: Vec<(String, u64)> = self
             .hub
             .pool_live
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .map(|l| {
                 l.servers

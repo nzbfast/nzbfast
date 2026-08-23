@@ -345,8 +345,7 @@ impl Daemon {
         // destination is unset.
         let cat_root = self
             .move_completed_cats
-            .read()
-            .unwrap()
+            .read_ok()
             .iter()
             .find(|(c, _)| *c == cat)
             .map(|(_, p)| p.clone());
@@ -527,7 +526,10 @@ impl Daemon {
         let Some(facts) = nzbkit::media::probe(&video) else {
             return String::new();
         };
-        let tmdb = self.tmdb_key();
+        // §193 d: the user's TMDB key, when they configured one. Read
+        // per call rather than cached - it is a setting they may add at
+        // any time, and this is not a hot path (once per obfuscated job).
+        let tmdb = self.tmdb_key.lock_ok().clone();
         let outcome = crate::identify::identify(&facts, job.post_year, tmdb.as_deref());
         let line = outcome.log_line();
         match outcome.accepted_name() {
@@ -550,16 +552,6 @@ impl Daemon {
             note.push_str(c);
         }
         note
-    }
-
-    /// The user's TMDB key, when they configured one. Read per call
-    /// rather than cached: it is a config-file value the user may add at
-    /// any time, and this is not a hot path (once per obfuscated job).
-    pub(super) fn tmdb_key(&self) -> Option<String> {
-        nzbkit::config::Config::load(&self.cfg_path)
-            .ok()?
-            .tmdb_key
-            .filter(|k| !k.is_empty())
     }
 
     /// Why a move destination could not be reached, when the OS error

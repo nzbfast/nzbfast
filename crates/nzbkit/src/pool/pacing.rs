@@ -15,6 +15,17 @@ use std::time::Duration;
 pub(super) const ADAPTIVE_FIRST_BYTE_MIN: Duration = Duration::from_secs(4);
 pub(super) const ADAPTIVE_FIRST_BYTE_MAX: Duration = Duration::from_secs(10);
 pub(super) const ADAPTIVE_STALL: Duration = Duration::from_secs(8);
+/// TODO 208.2: ceiling of the share-aware stall bound (see
+/// [`share_aware_stall_ms`]). What one genuinely dead connection can
+/// hold its slot for on the slowest line this stretches to; the tail
+/// fan-out dup-races a straggler long before it, and on any line fast
+/// enough for the bound to matter a connection is worth little.
+pub(super) const ADAPTIVE_STALL_MAX: Duration = Duration::from_secs(60);
+/// TODO 208.2: the share-aware bound is this many expected
+/// per-connection body times. One share is the MEAN; a connection on
+/// the losing side of TCP's fairness gets less than its share for a
+/// while, and the deadline exists to catch dead peers, not unlucky ones.
+pub(super) const STALL_SHARE_MULT: u64 = 2;
 /// TODO 121.1: hard ceiling of the PER-ARTICLE pre-byte escalation
 /// ladder. Cold-storage lookups answer at 12-25 s first byte, so the
 /// ladder must be able to pass the 10 s adaptive ceiling; 30 s bounds
@@ -96,8 +107,8 @@ pub(super) fn backoff_immediate() -> bool {
 /// [2 s, 10 s], with 0 ("unmeasured") budgeting at the ceiling.
 ///
 /// Free function rather than a method so the escalation ladder in
-/// [`Shared::note_ttfb_timeout`] can be walked in a unit test without
-/// standing up a pool and a server.
+/// [`super::Shared::note_ttfb_timeout`] can be walked in a unit test
+/// without standing up a pool and a server.
 pub(super) fn ttfb_budget_ms(ewma_ms: u64) -> u64 {
     if ewma_ms == 0 {
         return adaptive_first_byte_max_ms();
@@ -208,8 +219,8 @@ pub(super) fn ttfb_suspect_ms(ewma_ms: u64) -> u64 {
 
 /// The EWMA a pre-byte timeout leaves behind, given the current one.
 ///
-/// See [`Shared::note_ttfb_timeout`] for why this escalates from the
-/// budget that expired rather than from `ewma_ms` itself.
+/// See [`super::Shared::note_ttfb_timeout`] for why this escalates from
+/// the budget that expired rather than from `ewma_ms` itself.
 pub(super) fn escalated_ttfb_ms(ewma_ms: u64) -> u64 {
     // The env-lifted ceiling, so the escalation ladder can actually
     // reach a raised NZBFAST_READ_TIMEOUT_SECS instead of stalling at
@@ -221,4 +232,58 @@ pub(super) fn escalated_ttfb_ms(ewma_ms: u64) -> u64 {
     // that is the ceiling already: there is nothing to double.
     let implied = ttfb_budget_ms(ewma_ms) / 4;
     (ewma_ms.max(implied) * 2).clamp(1, ceiling)
+}
+
+/// TODO 208.2: the mid-body stall bound, made share-aware.
+///
+/// [`ADAPTIVE_STALL`] is a no-progress deadline: any byte resets it, so
+/// a slow-but-alive body was never meant to trip it. Measured on the
+/// shaped 1 GbE rig (21 Aug 2026, release-tv4, 360 connections,
+/// window 4) it trips anyway once the line is slow: "our stall
+/// deadline" events per job were 0 at 1 Gbps, ~55 at 250 Mbit and 311
+/// at 100 Mbit (157 reconnects). At 100 Mbit each of 360 sockets owns
+/// ~33 KB/s, a ~750 KB body legitimately takes 20-30 s, and a socket
+/// on the losing end of that many-way share sees TCP retransmit
+/// backoff open gaps past 8 s with nothing wrong on either end. Each
+/// trip discards the partial body and re-dials, which on a slow line
+/// is the one thing the pool can least afford.
+///
+/// The bound is therefore the expected per-connection body time -
+/// `article_bytes / (fleet_bps / live_conns)` - times
+/// [`STALL_SHARE_MULT`], clamped to `[ADAPTIVE_STALL, ADAPTIVE_STALL_MAX]`:
+///
+/// - The floor makes it never fire SOONER than the flat bound. On a
+///   fast line one share moves a body in a second or two, the product
+///   sits under 8 s, and the floor is what runs (the 1 Gbps and
+///   10 GbE legs had 0 events and keep them).
+/// - The ceiling is what a dead connection costs at worst.
+/// - `fleet_bps` is the run's trained LINE PEAK (`pool/saturation.rs`),
+///   not the now-rate, on purpose: a provider going dead drags the
+///   now-rate down, and a bound fed by it would stretch exactly when
+///   it should bite. The peak only grows, so the bound can only
+///   tighten as the run learns the line.
+/// - Untrained (no line figure, no body yet, no live count) = the
+///   flat bound. The line figure is the caller's: `Shared::stall_bound`
+///   fills the gap before the peak trains with the daemon's link
+///   anchor or the gauge's provisional reading (the warm-up fix,
+///   `PoolConfig::stall_live`), so "untrained" is now the stretch
+///   before the FIRST body lands rather than the first 7 s after it.
+pub(super) fn share_aware_stall_ms(article_bytes: u64, fleet_bps: u64, live_conns: usize) -> u64 {
+    let floor = ADAPTIVE_STALL.as_millis() as u64;
+    if article_bytes == 0 || fleet_bps == 0 || live_conns == 0 || !stall_share_aware() {
+        return floor;
+    }
+    let share_bps = (fleet_bps / live_conns as u64).max(1);
+    // bytes * 1000 / B/s = ms; u128 so a pathological body size times
+    // the multiplier cannot wrap.
+    let expected_ms = (article_bytes as u128 * 1000 / share_bps as u128) * STALL_SHARE_MULT as u128;
+    let ceiling = ADAPTIVE_STALL_MAX.as_millis() as u64;
+    (expected_ms.min(u64::MAX as u128) as u64).clamp(floor, ceiling)
+}
+
+/// `NZBFAST_STALL_SHARE_AWARE=0` pins the flat [`ADAPTIVE_STALL`] for
+/// A/B legs; on by default.
+pub(super) fn stall_share_aware() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("NZBFAST_STALL_SHARE_AWARE").is_ok_and(|v| v == "0"))
 }

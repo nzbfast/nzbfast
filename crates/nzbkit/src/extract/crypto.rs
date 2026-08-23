@@ -1,110 +1,18 @@
 //! Encrypted-store crypto: the per-entry AES state machine, the
-//! in-stream (plaintext-once) decrypt path with its journal events
-//! and chain checkpoints, the legacy finish()-time decrypt pass with
-//! its scratch temps and shards, password probing/awaits, and the
-//! /stream ciphertext reader.
+//! plaintext-once decrypt path with its journal events and chain
+//! checkpoints, the finish-time verdict that adjudicates each decrypted
+//! output, and password probing/awaits.
 //!
 //! Split out of the 19,920-line `extract.rs` under the TODO 43
-//! recipe: a verbatim move, not a redesign.
+//! recipe: a verbatim move, not a redesign. The legacy finish()-time
+//! decrypt pass it also carried - scratch temps, shards, the publish
+//! barrier and the /stream ciphertext reader - was deleted under TODO 27
+//! phase 3 on 23 Aug 2026, once every encrypted store shape took the
+//! plaintext-once route.
 
 use super::*;
 use crate::sync::MutexExt;
-
-// ---------------------------------------------------------------------------
-// Encrypted-store streaming: decrypt on the fly while the file is still
-// ciphertext, and flip to raw reads once finish() has decrypted it.
-// ---------------------------------------------------------------------------
-
-/// Lifecycle of one encrypted output file, shared between the finish()
-/// decrypt pass and any live /stream readers.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum DecState {
-    /// On-disk bytes are AES-CBC ciphertext (during/after download,
-    /// before the finish decrypt) - readers decrypt on the fly.
-    Ciphertext,
-    /// A plaintext file has been renamed over the name - readers read raw.
-    ///
-    /// There is deliberately no third "being decrypted right now" state:
-    /// the finish decrypt always writes to its own scratch file and
-    /// publishes by rename, so the ciphertext inode is whole and readable
-    /// for the entire pass and a reader never has to wait one out.
-    Decrypted,
-}
-
-pub(super) struct StreamState {
-    pub(super) state: Mutex<DecState>,
-    /// Live on-the-fly-decrypting readers. Their fds stay on the
-    /// ciphertext inode across the finish decrypt's publish rename, so
-    /// they keep serving correct bytes until the last one drops.
-    pub(super) readers: AtomicUsize,
-}
-
-/// Random-access CBC decryptor handed to a /stream reader for an
-/// encrypted output file. Holds a live-reader lease (released on drop);
-/// while it exists, finish() will temp+rename rather than decrypt the
-/// file in place, so the reader's captured fd stays valid.
-pub struct StreamCrypt {
-    pub(super) key: rarcrypt::AesKey,
-    pub(super) iv: [u8; 16],
-    /// On-disk ciphertext length = align16(plain_len).
-    pub(crate) cipher_len: u64,
-    /// Plaintext length the reader exposes (Content-Length).
-    pub plain_len: u64,
-    pub(super) st: Arc<StreamState>,
-}
-
-impl Drop for StreamCrypt {
-    fn drop(&mut self) {
-        self.st.readers.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-impl StreamCrypt {
-    /// The ciphertext byte range that must be on disk to decrypt
-    /// plaintext `[pos, pos+n)` - includes the preceding cipher block
-    /// (the CBC IV for the first plaintext block, unless at offset 0).
-    pub fn covered_bounds(&self, pos: u64, n: u64) -> (u64, u64) {
-        let s0 = pos & !15;
-        let lo = if s0 == 0 { 0 } else { s0 - 16 };
-        let hi = rarcrypt::align16(pos + n).min(self.cipher_len);
-        (lo, hi.saturating_sub(lo))
-    }
-
-    /// Decrypt plaintext `[pos, pos+out.len())` from the open ciphertext
-    /// file. Reads the covering cipher blocks (plus the IV block) itself.
-    pub fn decrypt_range(&self, f: &std::fs::File, pos: u64, out: &mut [u8]) -> io::Result<()> {
-        use crate::disk::read_exact_at;
-        let end = pos + out.len() as u64;
-        let s0 = pos & !15;
-        let e1 = rarcrypt::align16(end).min(self.cipher_len);
-        let iv;
-        let mut cipher = vec![0u8; (e1 - s0) as usize];
-        if s0 == 0 {
-            iv = self.iv;
-            read_exact_at(f, &mut cipher, 0)?;
-        } else {
-            // IV block + range in one pread (contiguous on disk).
-            let mut buf = vec![0u8; (e1 - (s0 - 16)) as usize];
-            read_exact_at(f, &mut buf, s0 - 16)?;
-            iv = buf[..16].try_into().unwrap();
-            cipher.copy_from_slice(&buf[16..]);
-        }
-        rarcrypt::cbc_decrypt(&self.key, &iv, &mut cipher);
-        let a = (pos - s0) as usize;
-        out.copy_from_slice(&cipher[a..a + out.len()]);
-        Ok(())
-    }
-}
-
-/// Result of [`Extractor::open_stream`].
-pub enum StreamOpen {
-    /// Not an encrypted output (or already decrypted) - the caller opens
-    /// and serves the file raw, exactly as before.
-    Plain,
-    /// Encrypted output still on disk as ciphertext: serve via `crypt`
-    /// over the pre-opened (lock-consistent) `file`.
-    Encrypted(std::fs::File, StreamCrypt),
-}
+use tracing::info;
 
 /// Chain-checkpoint stride for in-stream decrypted files (multiple of
 /// 16). One 16-byte cipher block is kept per stride, bounding the
@@ -235,14 +143,23 @@ pub(super) struct CryptoState {
     /// entry); verified at finish from the composed runs, through the
     /// keyed fold when the entry's checksum is tweaked. A SPLIT entry's
     /// whole-file CRC lives on its tail piece, which may not have arrived
-    /// when this state is created - `None` here, and `decrypt_finished`
-    /// resolves the gate then and adjudicates via [`Self::crc_verdict_with`].
+    /// when this state is created - `None` here, and
+    /// `verify_encrypted_outputs` resolves the gate then and adjudicates
+    /// via [`Self::crc_verdict_with`].
     pub(super) expect_crc: Option<CrcGate>,
     /// Maintain the plaintext CRC runs. True when `expect_crc` is set OR
     /// the entry is split (its tail piece's stored CRC becomes checkable
     /// at finish); false only when no whole-file value can ever exist,
     /// where the composition would be a pure extra pass.
     pub(super) track_plain: bool,
+    /// Did the entry's stored check PROVE this password before a byte
+    /// was decrypted? False for RAR4 (the format stores no check) and
+    /// for a check-less or malformed-check RAR5 set. Such a file still
+    /// decrypts in-stream - the shim rebuilds byte-exact volumes under a
+    /// wrong key - but its finish verdict DEMOTES on a checksum miss
+    /// where a verified file's miss is a hard error: an unprovable set
+    /// that fails its checksum is the wrong password, not damage.
+    pub(super) pw_verified: bool,
     /// Output name + shared sink for the resume-journal events.
     pub(super) out_name: String,
     pub(super) events: CryptoEventSink,
@@ -300,6 +217,7 @@ impl CryptoState {
         unp: u64,
         expect_crc: Option<CrcGate>,
         track_plain: bool,
+        pw_verified: bool,
         out_name: String,
         events: CryptoEventSink,
     ) -> CryptoState {
@@ -310,6 +228,7 @@ impl CryptoState {
             cipher_len: rarcrypt::align16(unp),
             track_plain: track_plain || expect_crc.is_some(),
             expect_crc,
+            pw_verified,
             out_name,
             events,
             st: Mutex::new(CryptoSt::default()),
@@ -340,14 +259,11 @@ impl CryptoState {
         // decrypted region then begins at a journaled K, which is what
         // lets a resume's re-encrypt walk stay inside known-good
         // plaintext instead of marching through a coverage hole.
-        self.events
-            .lock()
-            .unwrap()
-            .push(CryptoJournalEvent::Checkpoint {
-                name: self.out_name.clone(),
-                off: at,
-                block: chain,
-            });
+        self.events.lock_ok().push(CryptoJournalEvent::Checkpoint {
+            name: self.out_name.clone(),
+            off: at,
+            block: chain,
+        });
         // Checkpoints come from the ciphertext itself, before decrypt-in-
         // place destroys it.
         let mut c = at.next_multiple_of(CRYPTO_CHUNK).max(CRYPTO_CHUNK);
@@ -360,14 +276,11 @@ impl CryptoState {
                 None => chain,
             };
             st.checkpoints.insert(c, block);
-            self.events
-                .lock()
-                .unwrap()
-                .push(CryptoJournalEvent::Checkpoint {
-                    name: self.out_name.clone(),
-                    off: c,
-                    block,
-                });
+            self.events.lock_ok().push(CryptoJournalEvent::Checkpoint {
+                name: self.out_name.clone(),
+                off: c,
+                block,
+            });
             c += CRYPTO_CHUNK;
         }
         let mut buf = cipher[..full].to_vec();
@@ -389,13 +302,10 @@ impl CryptoState {
         if at + full as u64 == self.cipher_len {
             st.tail_pad = buf[(self.unp - at) as usize..].to_vec();
             st.tail_done = true;
-            self.events
-                .lock()
-                .unwrap()
-                .push(CryptoJournalEvent::TailPad {
-                    name: self.out_name.clone(),
-                    pad: st.tail_pad.clone(),
-                });
+            self.events.lock_ok().push(CryptoJournalEvent::TailPad {
+                name: self.out_name.clone(),
+                pad: st.tail_pad.clone(),
+            });
         }
         Ok(full as u64)
     }
@@ -684,8 +594,9 @@ impl CryptoState {
         cur >= end
     }
 
-    /// [`Self::available`] clipped to `[at, at+len)` - the coverage
-    /// answer for verification read-back, in POSTED-byte terms.
+    /// The arrived runs clipped to `[at, at+len)`, in POSTED-byte
+    /// terms - the coverage answer for verification read-back, as
+    /// intervals rather than the yes/no [`Self::covers`] gives.
     pub(super) fn intervals(&self, at: u64, len: u64) -> Vec<(u64, u64)> {
         let st = self.st.lock_ok();
         let end = at + len;
@@ -969,15 +880,19 @@ impl CryptoState {
 // Plaintext-once (in-stream decrypt): encrypted store entries decrypt at
 // article-write time and the ciphertext never touches disk. 1x disk, no
 // finish pass, no temp/barrier - see research/encrypted-store-plaintext-
-// once-scope-2026-07-26.md. The legacy path (ciphertext at store offsets
-// + decrypt_finished) remains selectable via NZBFAST_NO_INSTREAM_DECRYPT.
+// once-scope-2026-07-26.md. Since TODO 27 phase 3 there is no other
+// route: an output that cannot take this one assembles posted ciphertext
+// and DEMOTES at finish, exactly where the mapper used to send it.
 //
 // Every consumer of posted bytes is served without ciphertext on disk
 // because CBC is invertible per block: the plaintext on disk is always
 // D(wire cipher) - even for wire-DAMAGED regions - so re-encrypting it
-// reproduces the posted bytes exactly, damage included. Chain state is
-// one 16-byte cipher block, so periodic checkpoints captured from the
-// wire make re-encryption seekable.
+// reproduces the posted bytes exactly, damage included. That is also why
+// an UNVERIFIED password may decrypt in-stream (TODO 27 phase 3): a wrong
+// key makes the plaintext garbage, but E_k(D_k(c)) = c for any k, so the
+// shim still rebuilds byte-exact volumes for the demote that garbage
+// earns. Chain state is one 16-byte cipher block, so periodic
+// checkpoints captured from the wire make re-encryption seekable.
 // ---------------------------------------------------------------------------
 
 /// Increment A: how often the candidate-password probe re-runs while
@@ -989,273 +904,6 @@ impl CryptoState {
 /// repeated KDFs.
 pub(super) const PW_REPROBE_EVERY: std::time::Duration = std::time::Duration::from_millis(750);
 
-/// Same-directory scratch prefix for the finish decrypt. The leading
-/// `.nzbfast` is the established internal-scratch marker (the cleanup
-/// walkers and the keep-media-only sweep already skip those names), and
-/// pid + counter make each name unique to one pass of one process.
-pub(super) const DEC_TMP_PREFIX: &str = ".nzbfast-dec.";
-
-/// Create the decrypt scratch file for one output. `create_new` is what
-/// makes the name provably OURS: it can never adopt a stale file's bytes
-/// and never be shared with another process. The reason it matters here is
-/// the third one - it can never alias a legitimate archive member, which a
-/// deterministic sibling name like `movie.mkv.nzbdec.tmp` could (an archive
-/// is free to contain that name, and truncating it would destroy real
-/// output). A taken name just bumps the counter.
-pub(super) fn create_decrypt_temp(dir: &Path) -> io::Result<(PathBuf, File)> {
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let pid = std::process::id();
-    for _ in 0..4096 {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = dir.join(format!("{DEC_TMP_PREFIX}{pid}.{n}.tmp"));
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(f) => return Ok((path, f)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no free decrypt scratch name in the output directory",
-    ))
-}
-
-/// Gather the resume-journal facts for one finish-decrypted output while
-/// `src` still holds the ciphertext (the rename destroys it): the `E`
-/// params from the entry's crypt record, a `K` chain checkpoint per
-/// [`CRYPTO_CHUNK`] stride read straight off the posted bytes, and the
-/// `T` tail pad - the final block's plaintext beyond `unp`, without
-/// which that block can never re-encrypt byte-exactly.
-///
-/// `None` is always safe: the publish notification is simply skipped and
-/// a retry refetches, the pre-existing behaviour. That covers RAR4 (its
-/// 8-byte salt and SHA-1 schedule do not fit the `E` grammar), a
-/// check-less RAR5 set (a resume could never PROVE the password before
-/// re-encrypting, so it would refuse these records anyway), and any
-/// read error here.
-fn collect_decrypt_facts(
-    src: &Path,
-    crypt: &crate::rar::EntryCrypt,
-    out: &str,
-    unp: u64,
-    key: &rarcrypt::AesKey,
-) -> Option<Vec<CryptoJournalEvent>> {
-    let c5 = crypt.rar5()?;
-    c5.check?;
-    let rf = File::open(src).ok()?;
-    let cipher_len = rarcrypt::align16(unp);
-    let mut evs = vec![CryptoJournalEvent::Params {
-        name: out.to_string(),
-        salt: c5.salt,
-        lg2: c5.lg2_count,
-        iv: c5.iv,
-        unp,
-        check: c5.check,
-    }];
-    // CBC decryption of a block needs only the cipher block before it,
-    // so a checkpoint is a plain 16-byte read - no chain walk.
-    let mut off = CRYPTO_CHUNK;
-    while off <= cipher_len {
-        let mut block = [0u8; 16];
-        crate::disk::read_exact_at(&rf, &mut block, off - 16).ok()?;
-        evs.push(CryptoJournalEvent::Checkpoint {
-            name: out.to_string(),
-            off,
-            block,
-        });
-        off += CRYPTO_CHUNK;
-    }
-    let pad = if unp == cipher_len {
-        Vec::new()
-    } else {
-        // Decrypt the final block once more: the scratch was truncated
-        // to `unp`, so its beyond-`unp` plaintext exists nowhere else.
-        let mut prev = c5.iv;
-        if cipher_len >= 32 {
-            crate::disk::read_exact_at(&rf, &mut prev, cipher_len - 32).ok()?;
-        }
-        let mut last = [0u8; 16];
-        crate::disk::read_exact_at(&rf, &mut last, cipher_len - 16).ok()?;
-        rarcrypt::CbcStream::new(key, &prev).decrypt(&mut last);
-        last[(unp % 16) as usize..].to_vec()
-    };
-    evs.push(CryptoJournalEvent::TailPad {
-        name: out.to_string(),
-        pad,
-    });
-    Some(evs)
-}
-
-/// TODO 100 test rig: `NZBFAST_DECRYPT_ENOSPC_ONCE=pre|post` makes the
-/// finish decrypt fail ONCE per process with a disk-full error - before
-/// any ciphertext is touched (`pre`), or after every publish landed
-/// (`post`, the exact journal state an unpack-stage failure after a
-/// successful decrypt leaves behind). The daemon retry e2e asserts the
-/// second attempt refetches ~nothing.
-fn injected_decrypt_enospc(stage: &str) -> Option<io::Error> {
-    use std::sync::atomic::AtomicBool;
-    static FIRED: AtomicBool = AtomicBool::new(false);
-    if std::env::var("NZBFAST_DECRYPT_ENOSPC_ONCE").ok().as_deref() == Some(stage)
-        && !FIRED.swap(true, Ordering::Relaxed)
-    {
-        return Some(io::Error::new(
-            io::ErrorKind::StorageFull,
-            "injected decrypt disk-full (NZBFAST_DECRYPT_ENOSPC_ONCE)",
-        ));
-    }
-    None
-}
-
-/// Remove decrypt scratch left behind by a killed run.
-pub(super) fn sweep_decrypt_temps(dir: &Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        if e.file_name().to_string_lossy().starts_with(DEC_TMP_PREFIX) {
-            let _ = std::fs::remove_file(e.path());
-        }
-    }
-}
-
-/// One AES-CBC pass over the ciphertext at `src` (length =
-/// align16(`unp`)): decrypt into the caller's scratch handle `wf` and
-/// truncate it to `unp`. `src` is only ever READ - see
-/// [`Extractor::decrypt_finished`] for why nothing may mutate it before
-/// the journal has stopped vouching for it.
-///
-/// When `expect_crc` is set, the decrypted bytes are CRC32'd as they
-/// stream past and checked at the end - directly against a plain stored
-/// CRC32, or through the keyed fold for a tweaked checksum.
-/// This catches ciphertext that was damaged before posting - the outer
-/// yEnc/PAR2 verify the archive as-posted and the password-check only
-/// proves the key, so without this the corrupt plaintext would be written
-/// out as success. A mismatch is a hard error, and since it is raised
-/// before the scratch is ever published, the ciphertext output survives
-/// intact for a fallback or a resume.
-pub(super) fn decrypt_pass(
-    src: &Path,
-    wf: &File,
-    key: &rarcrypt::AesKey,
-    iv: &[u8; 16],
-    unp: u64,
-    expect_crc: Option<CrcGate>,
-    threads: usize,
-) -> io::Result<()> {
-    let rf = std::fs::File::open(src)?;
-    let cipher_len = rarcrypt::align16(unp);
-    // One shard per thread, 16-aligned so every shard starts on a cipher
-    // block boundary. Below the threshold the extra seeks and the per-shard
-    // IV read cost more than the parallelism buys.
-    let shards = if cipher_len < DECRYPT_PARALLEL_MIN {
-        1
-    } else {
-        threads.clamp(1, DECRYPT_MAX_SHARDS)
-    };
-    let crc = if shards <= 1 {
-        decrypt_shard(&rf, wf, key, iv, 0, cipher_len, unp, expect_crc.is_some())?
-    } else {
-        let shard_len = rarcrypt::align16(cipher_len.div_ceil(shards as u64));
-        let rf = &rf;
-        let parts: Vec<io::Result<(u32, u64)>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..shards)
-                .map(|i| {
-                    let start = shard_len * i as u64;
-                    let end = (start + shard_len).min(cipher_len);
-                    scope.spawn(move || {
-                        if start >= end {
-                            return Ok((0, 0));
-                        }
-                        // CBC decryption of a block needs only the
-                        // ciphertext block before it, so a shard seeds its
-                        // chain from the 16 bytes it starts after.
-                        let seed = if start == 0 {
-                            *iv
-                        } else {
-                            let mut prev = [0u8; 16];
-                            crate::disk::read_exact_at(rf, &mut prev, start - 16)?;
-                            prev
-                        };
-                        decrypt_shard(rf, wf, key, &seed, start, end, unp, expect_crc.is_some())
-                            .map(|c| (c, unp.min(end).saturating_sub(unp.min(start))))
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        // CRC32 composes over concatenation, so the shards fold back into
-        // the whole-file CRC in order.
-        let mut acc = 0u32;
-        for part in parts {
-            let (c, plain_len) = part?;
-            acc = if plain_len == 0 {
-                acc
-            } else {
-                crate::yenc_simd::crc32_combine(acc, c, plain_len)
-            };
-        }
-        acc
-    };
-    wf.set_len(unp)?;
-    wf.sync_data()?;
-    if expect_crc.is_some_and(|gate| !gate.accepts(crc)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "encrypted RAR file failed its stored CRC after decryption",
-        ));
-    }
-    Ok(())
-}
-
-/// Ciphertext below this stays on one thread: the shard IV reads and the
-/// scattered writes cost more than the parallelism returns.
-pub(super) const DECRYPT_PARALLEL_MIN: u64 = 32 << 20;
-
-/// Ceiling on shards per file. Each holds a 4 MiB scratch buffer, and the
-/// pass is read/write bound well before this on any disk a NAS ships with.
-pub(super) const DECRYPT_MAX_SHARDS: usize = 8;
-
-/// Decrypt `[start, end)` of the ciphertext into the same offsets of `wf`,
-/// seeded from `iv`. Returns the CRC32 of the plaintext bytes it wrote that
-/// lie below `unp` (the 16-byte alignment padding beyond `unp` is not part
-/// of the file and never enters the CRC).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn decrypt_shard(
-    rf: &File,
-    wf: &File,
-    key: &rarcrypt::AesKey,
-    iv: &[u8; 16],
-    start: u64,
-    end: u64,
-    unp: u64,
-    want_crc: bool,
-) -> io::Result<u32> {
-    use crate::disk::{read_exact_at, write_all_at};
-    let mut stream = rarcrypt::CbcStream::new(key, iv);
-    let mut hasher = want_crc.then(crc32fast::Hasher::new);
-    let mut buf = vec![0u8; 4 << 20]; // 16-aligned chunks
-    let mut off = start;
-    while off < end {
-        let n = (end - off).min(buf.len() as u64) as usize;
-        read_exact_at(rf, &mut buf[..n], off)?;
-        stream.decrypt(&mut buf[..n]);
-        write_all_at(wf, &buf[..n], off)?;
-        if let Some(h) = hasher.as_mut() {
-            let plain = (unp.saturating_sub(off)).min(n as u64) as usize;
-            if plain > 0 {
-                h.update(&buf[..plain]);
-            }
-        }
-        off += n as u64;
-    }
-    Ok(hasher.map_or(0, |h| h.finalize()))
-}
-
 /// Every check field the plaintext-once route decision reads, resolved
 /// across a whole inner FILE.
 ///
@@ -1265,10 +913,17 @@ pub(super) fn decrypt_shard(
 /// its own tail. See [`Extractor::instream_decrypt_allowed`].
 struct FileChecks {
     /// Some piece of the file refuses the plaintext-once route: it is
-    /// unencrypted, or its crypt record is RAR4 or check-less (nothing
-    /// proves the password before a byte is decrypted), or it states a
-    /// plaintext digest this build cannot compute with no CRC32 beside
-    /// it (`rar a -htb`, whose output nothing here could adjudicate).
+    /// unencrypted, or it states a plaintext digest this build cannot
+    /// compute with no CRC32 beside it (`rar a -htb`, whose output
+    /// nothing here could adjudicate).
+    ///
+    /// An UNPROVABLE password - RAR4, or a check-less or malformed-check
+    /// RAR5 record - is deliberately NOT a veto since TODO 27 phase 3.
+    /// It was one while a finish pass existed to adjudicate the
+    /// ciphertext; with that pass gone, vetoing would only strand the
+    /// file. Such a set decrypts in-stream and is adjudicated at finish
+    /// against the whole-file checksum instead, demoting rather than
+    /// failing when it misses - see [`CryptoState::pw_verified`].
     vetoed: bool,
     /// (slot, entry) of the head piece - `split_before` clear, the record
     /// whose IV starts the stream and which [`Extractor::crypto_for`]
@@ -1491,9 +1146,24 @@ impl Extractor {
                 continue;
             }
             inner.slots[slot].pw_await = None;
-            let size = inner.slots[slot].size;
-            inner.slots[slot].mapper =
-                Some(VolumeMapper::with_password(size, inner.password.clone()));
+            // TODO 211 (b): a split head's mapper spans the joined
+            // volume - re-key it at the size it already knows, not
+            // the part's.
+            let size = match inner.slots[slot].mapper.as_ref() {
+                Some(m) if inner.slots[slot].split_head.is_some() => m.volume_size(),
+                _ => inner.slots[slot].size,
+            };
+            // Same base as the mapper being replaced: an SFX volume's
+            // archive still starts behind its stub once keyed.
+            let base = inner.slots[slot]
+                .mapper
+                .as_ref()
+                .map_or(0, |m| m.archive_base());
+            inner.slots[slot].mapper = Some(VolumeMapper::with_password_at(
+                size,
+                inner.password.clone(),
+                base,
+            ));
             // Feed the stash back through the keyed mapper. Uncharge
             // first: the re-parse re-stashes whatever is still header
             // (and maps the rest), so leaving the old charge would
@@ -1524,7 +1194,8 @@ impl Extractor {
                 return Err(e);
             }
             self.drain_holds(inner, slot)?;
-            println!(
+            info!(
+                target: "password",
                 "🔑 candidate password unlocked {} in-stream",
                 inner.slots[slot].name
             );
@@ -1551,17 +1222,23 @@ impl Extractor {
     }
 
     /// May this encrypted entry decrypt at WRITE time (plaintext-once),
-    /// or must it assemble ciphertext for the finish pass?
+    /// or must it assemble ciphertext and demote at finish?
     ///
-    /// Only when the file's stored check verifies the password. Without
-    /// that proof (a check-less set, or one whose check is malformed and
-    /// so vetoes nothing) a wrong password would write plaintext-shaped
-    /// garbage straight into the output file, and the group could no
-    /// longer materialize its volumes - the inner file is supposed to BE
-    /// the volume bytes, and it would hold decrypted-with-the-wrong-key
-    /// noise instead. Assembling ciphertext keeps the bytes identical to
-    /// the posted volumes, so `decrypt_finished` can adjudicate against
-    /// the whole-file checksum and, on a miss, demote with nothing lost.
+    /// A wrong password writes plaintext-shaped garbage into the output
+    /// file, and that file is supposed to BE the posted volume bytes -
+    /// so this used to demand a stored check that PROVES the password
+    /// first, and sent a check-less (or malformed-check, or RAR4) set
+    /// down the ciphertext route for the finish pass to adjudicate.
+    /// Phase 2's re-encrypt shim retired that requirement: CBC is
+    /// invertible under ANY key, so E_k(D_k(c)) = c and the garbage
+    /// re-encrypts to byte-exact volumes just as real plaintext does.
+    /// The proof therefore only decides what a checksum MISS means -
+    /// damage, or the wrong password - which is
+    /// [`CryptoState::pw_verified`] and `verify_encrypted_outputs`'s
+    /// job, not this gate's. What still vetoes is an output nothing can
+    /// adjudicate at all (`rar a -htb`: a digest this build cannot
+    /// compute, with no CRC32 beside it); that one assembles ciphertext
+    /// and its group demotes to the disk path, which can check it.
     ///
     /// ONE ANSWER PER FILE, and never veto-then-allow. `crypto_files`
     /// caches the route by OUTPUT name and the first fragment to ask
@@ -1590,11 +1267,28 @@ impl Extractor {
     /// order: a fact that has not arrived cannot veto, so a head mapped
     /// alone may latch plaintext-once for a file whose tail would have
     /// refused, and the same set fed tail-first assembles ciphertext.
-    /// Both routes are whole-file, both are adjudicated by
-    /// `decrypt_finished`, and both reach the same published bytes.
+    /// Both routes are whole-file, both are adjudicated at finish, and
+    /// both reach the same published bytes.
     /// Route identity would mean holding every encrypted span until the
     /// last volume mapped, which is not a trade this path can make
     /// (TODO 158 item 2).
+    ///
+    /// Across a RESTART the route must not move either, and there the
+    /// reason is the journal rather than the fallback: a resumed run
+    /// rewrites every byte a prior run left (replay or refetch), but the
+    /// replay never re-records, so an output whose route flipped holds
+    /// bytes of one domain under records describing the other, and the
+    /// resume after that restores garbage (TODO 158 item 2, closed 22
+    /// Aug 2026). Both halves of rule 2 were empty on a resume - the
+    /// latch is per process and the counter started at zero - so the
+    /// journal's own records now seed them: a wire output is latched
+    /// ciphertext before any span arrives (`seed_resumed_routes`), and a
+    /// plaintext-once output with live `D` records is held to
+    /// plaintext-once, re-latched only on the head record its `E` fact
+    /// was taken from and a password that proves against its check;
+    /// short of that the write is refused outright (`route_dest`'s
+    /// stamp site), which is what "the route cannot be established"
+    /// has to mean when guessing either way corrupts.
     pub(super) fn instream_decrypt_allowed(
         inner: &Inner,
         slot: usize,
@@ -1616,14 +1310,26 @@ impl Extractor {
         // C1). The counter stays as the belt - it is what covers
         // resume, where bytes from a prior run sit under an output the
         // latch never saw.
-        if w.path.file_name().is_some_and(|k| {
-            inner
-                .ciphertext_files
-                .contains(k.to_string_lossy().as_ref())
-        }) {
+        let out_name = w.path.file_name().map(|k| k.to_string_lossy());
+        if out_name
+            .as_deref()
+            .is_some_and(|k| inner.ciphertext_files.contains(k))
+        {
             return false;
         }
-        if w.written() > 0 {
+        // A resumed plaintext-once output: the decision was made by the
+        // run that wrote it, and this run may only confirm it. The
+        // arrival-order veto below is skipped on purpose - a tail that
+        // would have refused the route cannot un-write the plaintext
+        // already on disk, and the only alternative is the mix the
+        // stamp site refuses. The HEAD record still has to be the one
+        // the `E` fact names and the password still has to prove
+        // against it, or the stream would be keyed differently from the
+        // bytes the restore re-encrypted.
+        let resumed = out_name
+            .as_deref()
+            .and_then(|k| inner.resumed_plaintext.get(k).copied());
+        if w.written() > 0 && resumed.is_none() {
             return false;
         }
         let Some(pw) = inner.password.as_ref() else {
@@ -1636,7 +1342,7 @@ impl Extractor {
             return false;
         };
         let f = Self::file_checks(inner, slot, &e.name);
-        if f.vetoed {
+        if f.vetoed && resumed.is_none() {
             return false;
         }
         // The head piece's record is what `crypto_for` keys the whole
@@ -1656,15 +1362,58 @@ impl Extractor {
         else {
             return false;
         };
+        if let Some((salt, iv)) = resumed
+            && !c.rar5().is_some_and(|r| r.salt == salt && r.iv == iv)
+        {
+            return false;
+        }
         // One derive, for the head alone, because this runs per SPAN:
         // RAR4's schedule is 0x40000 SHA-1 rounds, and while the cache
         // makes a repeat cheap, an archive with a fresh salt per piece
-        // would pay it again and again under the routing lock. RAR4 never
-        // reaches this line - the format stores no check value, so
-        // `file_checks` vetoes it and `decrypt_finished` adjudicates the
-        // set against the header's plaintext CRC32, the recoverable route
-        // a check-less RAR5 set takes for exactly the same reason.
-        c.derive(pw).is_some_and(|keys| c.check_verifies(&keys))
+        // would pay it again and again under the routing lock. A derive
+        // that fails at all is a hostile RAR5 iteration count - no key,
+        // so nothing to decrypt with either way.
+        let Some(keys) = c.derive(pw) else {
+            return false;
+        };
+        // A RESUMED plaintext-once file must still prove the password:
+        // the restore re-encrypted local plaintext with it, and a
+        // different password would have keyed those bytes differently
+        // from this run's. Only a provable file is ever recorded as one
+        // (`crypto_for` journals no `E` without a wellformed check), so
+        // this is a belt on the seed rather than a new rule.
+        if resumed.is_some() {
+            return c.check_verifies(&keys);
+        }
+        // Fresh: a check that CAN prove the password must prove it - the
+        // mapper already refuses one that rejects, so reaching here with
+        // a wellformed check and no match would mean the two disagree.
+        // No usable check just means the verdict waits for finish.
+        !c.rar5()
+            .and_then(|r| r.check)
+            .is_some_and(|chk| crate::rarcrypt::check_is_wellformed(&chk))
+            || c.check_verifies(&keys)
+    }
+
+    /// Seed the routes a resumed run inherits from its journal - see
+    /// `Restored::wire_outputs` / `plaintext_outputs` in `journal.rs` and
+    /// the restart paragraph on [`Self::instream_decrypt_allowed`]. Must
+    /// run before the first span is fed: the wire latch is consulted at
+    /// every encrypted span's enqueue, and a span that routed first would
+    /// have decided the route on its own.
+    pub fn seed_resumed_routes(
+        &self,
+        wire: &HashMap<String, u64>,
+        plaintext: &HashMap<String, ([u8; 16], [u8; 16])>,
+    ) {
+        let mut inner = self.inner.lock_ok();
+        for (name, &bytes) in wire {
+            inner.ciphertext_files.insert(name.clone());
+            *inner.resumed_wire.entry(name.clone()).or_default() += bytes;
+        }
+        for (name, &keys) in plaintext {
+            inner.resumed_plaintext.insert(name.clone(), keys);
+        }
     }
 
     /// Resolve [`FileChecks`] for inner file `name` over `slot`'s group.
@@ -1672,16 +1421,22 @@ impl Extractor {
     /// Every mapped piece is consulted, because the whole-file checks
     /// live on the tail piece alone and the answer has to be the same for
     /// every fragment of the file - see the caller. Pieces that have not
-    /// arrived yet cannot contribute, which is why `decrypt_finished`
-    /// re-asks once the set is complete.
+    /// arrived yet cannot contribute, which is why
+    /// `verify_encrypted_outputs` re-asks once the set is complete.
     ///
-    /// The digest veto is per PIECE (a piece stating a digest and no
-    /// CRC32 of its own), not `any digest && no CRC32 anywhere`: the
-    /// group-wide form let a head's CRC32 excuse a tail that says
-    /// "BLAKE2sp, no CRC32", which is the disagreement this whole walk
-    /// exists to refuse. A piece carrying both - the `rar a -htb` set
-    /// that also stores a CRC32 - is fully adjudicable and still routes
-    /// one-pass.
+    /// The digest veto reads the TAIL piece (`split_after` clear) and
+    /// only it, because that is the piece whose stored value covers the
+    /// whole plaintext - an earlier piece's CRC32 describes its own
+    /// volume alone. `any digest && no CRC32 anywhere` was wrong for
+    /// that reason (a head's CRC32 excused a tail saying "BLAKE2sp, no
+    /// CRC32"); so was per-PIECE, which it was until TODO 27 phase 3 -
+    /// that form vetoed a file whose HEAD states a digest and whose tail
+    /// states a CRC32, and while a finish decrypt existed to adjudicate
+    /// the ciphertext that cost nothing but a route. With the finish
+    /// pass gone a veto is a DEMOTE, so vetoing an adjudicable file
+    /// sends a perfectly good set to the disk path. A tail carrying both
+    /// - the `rar a -htb` set that also stores a CRC32 - is fully
+    /// adjudicable and routes one-pass either way.
     fn file_checks(inner: &Inner, slot: usize, name: &str) -> FileChecks {
         let mut out = FileChecks {
             vetoed: false,
@@ -1692,11 +1447,6 @@ impl Extractor {
                 if e.name != name || e.is_dir {
                     continue;
                 }
-                let checked = e.encrypted
-                    && e.crypt
-                        .as_ref()
-                        .and_then(|c| c.rar5())
-                        .is_some_and(|r5| r5.check.is_some());
                 // An FHEXTRA_HASH digest (BLAKE2sp, `rar a -htb`) with no
                 // CRC32 beside it has nothing the finish pass can
                 // adjudicate: `crc_gate` returns None, so `crc_verdict` is
@@ -1710,8 +1460,8 @@ impl Extractor {
                 // path verifies the BLAKE2sp properly
                 // (`verify_integrity_with_keys`). nzbkit has no BLAKE2sp of
                 // its own, so verifying in place is not an option here.
-                let uncheckable = e.hash.is_some() && e.file_crc.is_none();
-                out.vetoed |= !checked || uncheckable;
+                let uncheckable = !e.split_after && e.hash.is_some() && e.file_crc.is_none();
+                out.vetoed |= !e.encrypted || uncheckable;
                 if !e.split_before && out.head.is_none() {
                     out.head = Some((si, ei));
                 }
@@ -1767,19 +1517,20 @@ impl Extractor {
                 })?;
         let pw = inner.password.as_ref()?;
         let keys = c.derive(pw)?;
-        // Plaintext-once requires a pre-decrypt password proof, which only
-        // RAR5's stored check can give (`instream_decrypt_allowed` gates
-        // every caller on it), so the resume journal's `E` record can
-        // safely assume RAR5 parameters here.
-        let r5 = c.rar5()?;
+        // Whether the stored check PROVED this password before a byte was
+        // decrypted. Not a precondition since TODO 27 phase 3 (RAR4 and
+        // check-less RAR5 sets take this route too) - it decides what a
+        // finish checksum miss means, and whether the run may journal
+        // resume facts at all.
+        let pw_verified = c.check_verifies(&keys);
         // Only a single-piece entry's stored CRC covers the whole
         // plaintext. A tweaked checksum is keyed rather than useless -
         // the gate folds the computed CRC before comparing (Increment
-        // B), same rules as the legacy finish pass. A SPLIT entry's
-        // whole-file CRC lives on its tail piece, which may not be
-        // mapped yet - no gate here, but the plain runs still compose
-        // (`track_plain`) so `decrypt_finished` can adjudicate against
-        // the tail's stored value once every volume is in.
+        // B). A SPLIT entry's whole-file CRC lives on its tail piece,
+        // which may not be mapped yet - no gate here, but the plain runs
+        // still compose (`track_plain`) so the finish verdict can
+        // adjudicate against the tail's stored value once every volume
+        // is in.
         let expect_crc = crc_gate(file_crc.filter(|_| !split_after), &c, &keys);
         let cs = Arc::new(CryptoState::new(
             keys.aes.clone(),
@@ -1787,21 +1538,32 @@ impl Extractor {
             unp,
             expect_crc,
             split_after,
+            pw_verified,
             key.clone(),
             inner.crypto_events.clone(),
         ));
-        inner
-            .crypto_events
-            .lock()
-            .unwrap()
-            .push(CryptoJournalEvent::Params {
-                name: key.clone(),
-                salt: r5.salt,
-                lg2: r5.lg2_count,
-                iv: r5.iv,
-                unp,
-                check: r5.check,
-            });
+        // Resume facts, and ONLY for a file a resumed run could prove the
+        // password of: the `E` grammar is RAR5-shaped (RAR4's 8-byte salt
+        // and SHA-1 schedule do not fit it), and a restore that
+        // re-encrypted local plaintext under an unproven key would post
+        // bytes nobody vouched for. Journalling nothing is the safe
+        // answer, not a lossy one: the `D` records still ride along, and
+        // a `D` whose `E` is missing simply refetches its article
+        // (`journal_d_without_e_refetches`), which is what this file
+        // would have done before it took this route at all.
+        if pw_verified && let Some(r5) = c.rar5() {
+            inner
+                .crypto_events
+                .lock_ok()
+                .push(CryptoJournalEvent::Params {
+                    name: key.clone(),
+                    salt: r5.salt,
+                    lg2: r5.lg2_count,
+                    iv: r5.iv,
+                    unp,
+                    check: r5.check,
+                });
+        }
         inner.crypto_files.insert(key, cs.clone());
         Some(cs)
     }
@@ -1812,603 +1574,13 @@ impl Extractor {
         let key = w.path.file_name()?.to_string_lossy();
         inner.crypto_files.get(key.as_ref()).cloned()
     }
-
-    /// (path, crypt params, unpacked size) of an encrypted head-piece
-    /// output file by its output name, in a non-fallback group.
-    pub(super) fn locate_encrypted_output(
-        inner: &Inner,
-        out_name: &str,
-    ) -> Option<(PathBuf, EntryCrypt, u64)> {
-        for grp in inner.groups.values() {
-            if grp.fallback {
-                continue;
-            }
-            for &si in &grp.slots {
-                let Some(m) = inner.slots[si].mapper.as_ref() else {
-                    continue;
-                };
-                for e in &m.entries {
-                    if e.is_dir || !e.encrypted || e.split_before {
-                        continue;
-                    }
-                    let Some(c) = &e.crypt else { continue };
-                    // out_names is keyed on the RAW name; the sanitized form
-                    // is the on-disk fallback (route_dest/inner_writer key).
-                    let out = grp
-                        .out_names
-                        .get(&e.name)
-                        .cloned()
-                        .unwrap_or_else(|| sanitize_filename(&e.name));
-                    if out != out_name {
-                        continue;
-                    }
-                    if let Some(w) = inner.inner_writers.get(&out) {
-                        return Some((w.path.clone(), c.clone(), e.unpacked_size));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Decrypt every encrypted store file of the healthy groups. During
-    /// the download those files accumulated the archive's AES-CBC
-    /// ciphertext at plain store offsets (both formats encrypt each inner
-    /// file as ONE stream across all volumes, so the assembled ciphertext
-    /// is contiguous); one sequential CBC pass + truncate to the unpacked
-    /// size turns each into the real output, and the plaintext CRC32 is
-    /// checked against the header CRC when it isn't tweaked.
-    ///
-    /// For RAR4 that CRC check is not belt-and-braces but the ONLY
-    /// adjudicator there is: the format stores no password check, so every
-    /// RAR4 job arrives here `verified: false` and publishes nothing the
-    /// checksum has not accepted.
-    ///
-    /// NOTHING is decrypted in place. Every file is written to a fresh
-    /// same-directory temp that this pass created with `create_new` (so
-    /// the name is provably ours and no archive member can alias it),
-    /// sync'd, CRC-checked, cleared by the [`DecryptBarrier`], and only
-    /// then published by rename.
-    ///
-    /// That ordering is the point, not the temp file. These outputs are
-    /// what the crash-resume journal's placement records point INTO: a
-    /// file that holds plaintext is no longer the ciphertext the journal
-    /// describes, and a resume run would copy fragments out of it into
-    /// volume files and mark those message ids restored - skipping the
-    /// refetch, so without PAR2 the retry grinds on poisoned local bytes
-    /// forever while the provider still has every original article. In
-    /// place, a kill mid-pass produced exactly that, half plaintext and
-    /// half ciphertext, with the journal still vouching for it. So:
-    ///
-    /// - a failure before a file's barrier call drops its temp and leaves
-    ///   its ciphertext byte-exact - the journal is still true for it, so
-    ///   resume reads local bytes and fallback can still rebuild volumes;
-    /// - the barrier retires that file's claim, durably, before its
-    ///   rename - after it the file's articles refetch whether or not the
-    ///   rename ever landed;
-    /// - a rename either happened or did not; no file is ever a mix;
-    /// - after a LANDED rename the [`DecryptPublish`] notification hands
-    ///   the journal this file's crypt facts, so its retired placements
-    ///   republish as plaintext-restorable `D` records - a later failure
-    ///   in the same job (another file, the nested pass) then costs the
-    ///   retry a local re-encrypt, not a refetch of a finished file
-    ///   (TODO 100).
-    ///
-    /// Files are independent here, so a mid-batch failure leaves each one
-    /// in whichever of those two consistent states it reached; the job
-    /// still fails, and the retry does the right thing for both.
-    ///
-    /// Phased locking: job gathering + pre-flight (coverage, key
-    /// derivation) and the per-file ciphertext→plaintext state flip run
-    /// under the routing lock; the multi-GB read+write passes run WITHOUT
-    /// it (the daemon's stats/stream calls read through that lock -
-    /// holding it for a disk pass froze them) and in parallel across
-    /// files. Temps also make a live /stream reader free: its fd stays on
-    /// the intact ciphertext inode across the publish, so it keeps
-    /// decrypting on the fly and never has to wait out the pass.
-    ///
-    /// Cost of never mutating in place: while this level's extractor is
-    /// alive the set is on disk twice. The plaintext replaces the name,
-    /// but the ciphertext inode it displaced stays allocated because the
-    /// inner `FileWriter` still holds an open fd on it (that writer is the
-    /// daemon's live handle for /stream, so it is not ours to close here),
-    /// and the blocks come back when the extractor drops at end of job.
-    /// The old in-place pass paid 1x. Correctness is worth it - a file
-    /// that is half plaintext under a journal that vouches for it is
-    /// unrecoverable without PAR2 - but on a tight volume this is the
-    /// headroom an encrypted store set now needs.
-    pub(super) fn decrypt_finished(&self) -> io::Result<Vec<String>> {
-        struct Job {
-            key: String,
-            out: String,
-            path: PathBuf,
-            unp: u64,
-            key_bytes: Option<rarcrypt::AesKey>,
-            iv: [u8; 16],
-            covered: bool,
-            /// Stored plaintext checksum to check after decryption -
-            /// plain, or folded through the entry's keyed MAC when the
-            /// crypt record set the tweaked-checksum flag.
-            expect_crc: Option<CrcGate>,
-            /// The entry's crypt record, kept whole for the publish
-            /// notification: the resume journal's `E` line needs the
-            /// RAR5-shaped KDF inputs, not just the derived key.
-            crypt: EntryCrypt,
-            /// Did the entry's stored check VERIFY the password before
-            /// any byte was decrypted? False for a check-less (or
-            /// malformed-check) set, which the mapper now admits on the
-            /// promise that this pass adjudicates it: such a job must
-            /// carry a checksum gate, and a gate it fails demotes the
-            /// group instead of failing the whole download - the
-            /// password is simply the wrong one, and the ciphertext (=
-            /// the volume bytes) is untouched.
-            verified: bool,
-            /// The entry states a plaintext digest (FHEXTRA_HASH) and NO
-            /// CRC32 - `rar a -htb`. There is nothing this pass can check
-            /// such an output against, so it never publishes one; see the
-            /// demotion filter below.
-            hash_only: bool,
-        }
-        // Scratch from a killed earlier run. This pass is the only thing
-        // that creates these names and every write of the job has landed
-        // by now, so anything still matching the prefix is dead. Swept
-        // before the early returns below: a retry whose group falls back
-        // decrypts nothing, and the corpse would otherwise sit in the
-        // user's output directory forever (the cleanup walkers skip
-        // `.nzbfast*` by design, so nothing else would ever collect it).
-        sweep_decrypt_temps(&self.out_dir);
-        let mut jobs: Vec<Job> = Vec::new();
-        // Plaintext-once files whose posted cipher never fully arrived:
-        // their groups fall back exactly like a legacy coverage hole.
-        let mut instream_failed: std::collections::HashSet<String> = Default::default();
-        // ...and the ones that verified complete: already decrypted on
-        // disk, reported alongside the legacy pass's output.
-        let mut instream_done: Vec<String> = Vec::new();
-        {
-            let g = self.inner.lock_ok();
-            let inner = &*g;
-            for (key, grp) in &inner.groups {
-                if grp.fallback {
-                    continue;
-                }
-                // One decrypt job per inner file, keyed off its head piece
-                // (split_before == false - whose IV starts the stream).
-                let mut heads: HashMap<String, (EntryCrypt, u64, String, Option<u32>, bool)> =
-                    HashMap::new();
-                // The WHOLE-FILE checksum lives on the entry's LAST piece
-                // (`split_after == false`) - per the RAR5 spec, earlier
-                // pieces carry only their own volume's bytes. The head
-                // loop below therefore cannot see it for a split file,
-                // which is why a multi-volume encrypted set used to have
-                // no verifiable checksum at all. By finish every volume
-                // has arrived, so the tail is simply here to be read.
-                // The tail's own crypt record rides along: it owns the
-                // stored value, so ITS tweaked-checksum flag (and salt)
-                // decide the comparison - real `rar` sets the flag on
-                // the tail alone, and a gate built from the head's
-                // record false-failed every intact split set.
-                let mut tail_crcs: HashMap<&str, (u32, Option<&EntryCrypt>)> = HashMap::new();
-                // ...and, from the same piece, whether the entry states a
-                // digest instead of a CRC32. Read off the TAIL for the same
-                // reason: the whole-file checks live there.
-                let mut tail_hash_only: std::collections::HashSet<&str> = Default::default();
-                for &si in &grp.slots {
-                    let Some(m) = inner.slots[si].mapper.as_ref() else {
-                        continue;
-                    };
-                    for e in &m.entries {
-                        if e.is_dir || !e.encrypted {
-                            continue;
-                        }
-                        if !e.split_after {
-                            match e.file_crc {
-                                Some(crc) => {
-                                    tail_crcs.insert(e.name.as_str(), (crc, e.crypt.as_ref()));
-                                }
-                                None if e.hash.is_some() => {
-                                    tail_hash_only.insert(e.name.as_str());
-                                }
-                                None => {}
-                            }
-                        }
-                    }
-                }
-                for &si in &grp.slots {
-                    let Some(m) = inner.slots[si].mapper.as_ref() else {
-                        continue;
-                    };
-                    for e in &m.entries {
-                        if e.is_dir || !e.encrypted || e.split_before {
-                            continue;
-                        }
-                        if let Some(c) = &e.crypt {
-                            // out_names is keyed on the RAW name; sanitized is
-                            // the on-disk fallback. Key `heads` by raw name too
-                            // so distinct raw names get distinct decrypt jobs.
-                            let out = grp
-                                .out_names
-                                .get(&e.name)
-                                .cloned()
-                                .unwrap_or_else(|| sanitize_filename(&e.name));
-                            // The checksum that covers the whole plaintext
-                            // this pass produces: the entry's own when it is
-                            // unsplit, else its tail piece's (collected
-                            // above). Using the head's value on a split file
-                            // would false-fail - it describes only that
-                            // volume's bytes.
-                            let whole_crc = tail_crcs.get(e.name.as_str()).map(|&(c, _)| c);
-                            let hash_only =
-                                whole_crc.is_none() && tail_hash_only.contains(e.name.as_str());
-                            heads.entry(e.name.clone()).or_insert((
-                                c.clone(),
-                                e.unpacked_size,
-                                out,
-                                whole_crc,
-                                hash_only,
-                            ));
-                        }
-                    }
-                }
-                for (fname, (c, unp, out, file_crc, hash_only)) in heads {
-                    let Some(w) = inner.inner_writers.get(&out) else {
-                        continue;
-                    };
-                    // The record that OWNS the stored whole-file CRC (the
-                    // tail piece's, for a split entry) - the one whose
-                    // tweaked flag and salt the gate must use.
-                    let crc_owner = tail_crcs.get(fname.as_str()).and_then(|&(_, c)| c);
-                    // Plaintext-once file: already decrypted in-stream.
-                    // Verify instead of building a decrypt job - an
-                    // incomplete cipher record condemns the group like a
-                    // coverage hole would, and a stored-CRC mismatch is
-                    // the same hard error the legacy pass raises (posted
-                    // archive damaged before posting; the posted bytes
-                    // remain reproducible through the shim for fallback).
-                    if let Some(cs) = inner.crypto_files.get(&out) {
-                        // Unsplit: the state's own gate. Split: the gate
-                        // could not exist at state creation (the tail may
-                        // not have been mapped) - resolve it NOW from the
-                        // tail's stored CRC; the plain runs composed all
-                        // along (`track_plain`).
-                        let verdict = if cs.expect_crc.is_some() {
-                            cs.crc_verdict()
-                        } else {
-                            crc_gate_from(file_crc, crc_owner, inner.password.as_deref())
-                                .and_then(|gate| cs.crc_verdict_with(&gate))
-                        };
-                        if verdict == Some(false) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "encrypted RAR file failed its stored CRC after decryption",
-                            ));
-                        }
-                        // The hash-only backstop, and the only ORDER-
-                        // INDEPENDENT place to put it.
-                        // `instream_decrypt_allowed` resolves its check
-                        // fields across the whole file, but a fact that has
-                        // not arrived cannot veto: only the TAIL fragment
-                        // carries the whole-file checks, so a head mapped
-                        // alone reads `hash: None, file_crc: None`, answers
-                        // "allowed" and latches the plaintext-once route
-                        // for the whole file (`crypto_files` caches by
-                        // output name, first decision wins). Whether that
-                        // happens therefore depends on which volume is
-                        // mapped first, and without this the head-first
-                        // order published plaintext with no integrity
-                        // verdict at all. By finish every volume is mapped,
-                        // so `hash_only` is the truth: demote exactly as an
-                        // incomplete cipher record does, and the shim
-                        // reproduces the posted bytes for the fallback
-                        // (Codex sweep 12 Aug F2). The route may still
-                        // differ by arrival order; what it may never be is
-                        // MIXED, which is the gate's own contract.
-                        if unp > 0 && hash_only {
-                            instream_failed.insert(key.clone());
-                        } else if unp == 0 || cs.complete() {
-                            instream_done.push(out);
-                        } else {
-                            instream_failed.insert(key.clone());
-                        }
-                        continue;
-                    }
-                    let aes = inner.password.as_ref().and_then(|pw| c.derive(pw));
-                    jobs.push(Job {
-                        key: key.clone(),
-                        out,
-                        path: w.path.clone(),
-                        unp,
-                        key_bytes: aes.as_ref().map(|k| k.aes.clone()),
-                        // RAR5 stores the IV in the header; RAR4 derives it
-                        // with the key, so it comes off the key material.
-                        iv: aes.as_ref().map(|k| k.iv).unwrap_or([0; 16]),
-                        covered: unp == 0 || w.covered(0, rarcrypt::align16(unp)),
-                        // Verify the plaintext after decryption: a clear
-                        // tweaked flag stores a plain CRC32 (WinRAR's -hp
-                        // default), a set one stores its keyed fold, and the
-                        // gate handles both. Password-check proves the KEY,
-                        // not that every ciphertext block survived the wire.
-                        // Built from the record that OWNS the stored value
-                        // (the tail piece's, for a split entry): its
-                        // tweaked flag and salt decide the comparison, and
-                        // the head's record disagreeing with them is
-                        // exactly the real-`rar` split shape.
-                        expect_crc: crc_gate_from(file_crc, crc_owner, inner.password.as_deref()),
-                        verified: aes.as_ref().is_some_and(|k| c.check_verifies(k)),
-                        hash_only,
-                        crypt: c,
-                    });
-                }
-            }
-        }
-        if jobs.is_empty() && instream_failed.is_empty() {
-            instream_done.sort();
-            return Ok(instream_done);
-        }
-        if let Some(e) = injected_decrypt_enospc("pre") {
-            return Err(e);
-        }
-        // A group decrypts ALL of its files or NONE: once one file is
-        // plaintext, a fallback (which reads inner files back to
-        // materialize volumes) would rebuild silently-corrupt volumes -
-        // so any pre-flight failure (ciphertext holes, vanished password)
-        // condemns the whole group BEFORE any byte changes.
-        let mut failed_groups: std::collections::HashSet<String> = jobs
-            .iter()
-            // An unverified password with nothing to check the plaintext
-            // against can never be adjudicated: decrypting would publish
-            // bytes no one has vouched for. Demote instead - the volumes
-            // materialize and the disk path (which validates the password
-            // itself) takes over, exactly where the mapper used to send
-            // this set the moment it saw a missing check.
-            //
-            // `hash_only` is the same rule for the shape that DOES have a
-            // plaintext check we cannot compute. `instream_decrypt_allowed`
-            // diverts a `rar a -htb` entry (BLAKE2sp, no CRC32) here
-            // explicitly so "the disk path verifies the BLAKE2sp properly"
-            // - but nothing demoted it, so it arrived `verified = true,
-            // expect_crc = None`, sailed past the filter above, and
-            // published plaintext with NO integrity check. A verified RAR5
-            // password proves the KEY, never that every ciphertext block
-            // survived the wire: damage one before the yEnc/PAR2 pass and
-            // every outer check agrees while the payload is corrupt (Codex
-            // sweep 12 Aug F2). rars checks the keyed digest on the disk
-            // path (`verify_integrity_with_keys`), which is the verdict
-            // this pass has no BLAKE2sp of its own to reach. A zero-length
-            // entry has no plaintext to check and must not drag its group
-            // to disk over it.
-            .filter(|j| {
-                j.key_bytes.is_none()
-                    || !j.covered
-                    || (!j.verified && j.expect_crc.is_none())
-                    || (j.hash_only && j.unp > 0)
-            })
-            .map(|j| j.key.clone())
-            .collect();
-        failed_groups.extend(instream_failed);
-        let live: Vec<&Job> = jobs
-            .iter()
-            .filter(|j| !failed_groups.contains(&j.key))
-            .collect();
-        let total: u64 = live.iter().map(|j| j.unp).sum();
-        if !live.is_empty() {
-            println!(
-                "🔓 decrypting {} file(s) ({:.1} MB)…",
-                live.len(),
-                total as f64 / 1e6
-            );
-        }
-        // Per-output stream state, under the lock. No file flips to
-        // `Decrypting`: the ciphertext inode stays whole and readable for
-        // the entire pass, so a reader arriving mid-pass keeps decrypting
-        // on the fly and the rename is what moves it to plaintext.
-        let states: Vec<Arc<StreamState>> = {
-            let mut g = self.inner.lock_ok();
-            let inner = &mut *g;
-            live.iter()
-                .map(|j| {
-                    inner
-                        .stream_states
-                        .entry(j.out.clone())
-                        .or_insert_with(|| {
-                            Arc::new(StreamState {
-                                state: Mutex::new(DecState::Ciphertext),
-                                readers: AtomicUsize::new(0),
-                            })
-                        })
-                        .clone()
-                })
-                .collect()
-        };
-        let (barrier, publish) = {
-            let g = self.inner.lock_ok();
-            (g.decrypt_barrier.clone(), g.decrypt_publish.clone())
-        };
-        // Reserve every temp up front, outside the lock: a name we cannot
-        // claim must abort before any ciphertext is touched, not halfway
-        // through the set.
-        let mut plans: Vec<(&Job, PathBuf, File, Arc<StreamState>)> = Vec::new();
-        let mut reserve_err = None;
-        for (j, st) in live.iter().copied().zip(states) {
-            match create_decrypt_temp(&self.out_dir) {
-                Ok((path, file)) => plans.push((j, path, file, st)),
-                Err(e) => {
-                    reserve_err = Some(e);
-                    break;
-                }
-            }
-        }
-        if let Some(e) = reserve_err {
-            for (_, tmp, _, _) in &plans {
-                let _ = std::fs::remove_file(tmp);
-            }
-            return Err(e);
-        }
-        // The disk passes, in parallel (bounded), lock-free.
-        let workers = plans.len().clamp(1, 4);
-        // Files run concurrently and each file shards internally, so the two
-        // share one budget. An encrypted set is usually ONE file, which is
-        // exactly the case that needs the shards: without them a 60 GB
-        // release decrypts on a single core after the download has finished.
-        let shards_per_file =
-            (std::thread::available_parallelism().map_or(1, |n| n.get()) / workers).max(1);
-        let next = AtomicUsize::new(0);
-        let done: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
-        // Groups an unverified password turned out to be wrong for (a
-        // checksum miss after the decrypt pass) - demoted below rather
-        // than failing the job. See the outcome match.
-        let late_failed: Mutex<std::collections::HashSet<String>> = Default::default();
-        let plans_ref = &plans;
-        let barrier_ref = &barrier;
-        let publish_ref = &publish;
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((j, tmp, wf, st)) = plans_ref.get(i) else {
-                            break;
-                        };
-                        // One file's failure condemns the job, so don't burn
-                        // disk passes on the rest of the set.
-                        if first_err.lock_ok().is_some() {
-                            let _ = std::fs::remove_file(tmp);
-                            continue;
-                        }
-                        let mut facts: Option<Vec<CryptoJournalEvent>> = None;
-                        let outcome = decrypt_pass(
-                            &j.path,
-                            wf,
-                            j.key_bytes
-                                .as_ref()
-                                .expect("pre-flight dropped keyless jobs"),
-                            &j.iv,
-                            j.unp,
-                            j.expect_crc,
-                            shards_per_file,
-                        )
-                        // Plaintext is on disk and verified; now buy the right
-                        // to publish it. Until this returns Ok the journal
-                        // still describes `j.path` truthfully and must keep
-                        // doing so, which is why nothing has touched it yet.
-                        .and_then(|()| {
-                            // The resume facts come off `j.path` NOW - it
-                            // still holds the ciphertext, and the rename
-                            // below destroys it. Soft-fail by design: no
-                            // facts just means the retirement stands and a
-                            // retry refetches this file.
-                            if publish_ref.is_some() {
-                                facts = collect_decrypt_facts(
-                                    &j.path,
-                                    &j.crypt,
-                                    &j.out,
-                                    j.unp,
-                                    j.key_bytes
-                                        .as_ref()
-                                        .expect("pre-flight dropped keyless jobs"),
-                                );
-                            }
-                            match barrier_ref {
-                                Some(b) => b(std::slice::from_ref(&j.out)),
-                                None => Ok(()),
-                            }
-                        })
-                        .and_then(|()| {
-                            // Publish under the lock, ordered against
-                            // open_stream's ciphertext/plaintext choice.
-                            let _g = self.inner.lock_ok();
-                            let r = std::fs::rename(tmp, &j.path);
-                            if r.is_ok() {
-                                *st.state.lock_ok() = DecState::Decrypted;
-                            }
-                            r
-                        });
-                        match outcome {
-                            Ok(()) => {
-                                // Published: hand the resume facts over so
-                                // the journal can republish this file's
-                                // placements as plaintext-restorable `D`
-                                // records (TODO 100 - a LATER failure in
-                                // this job must not cost the retry a
-                                // refetch of a file that is already done).
-                                if let (Some(p), Some(evs)) = (publish_ref, &facts) {
-                                    p(&j.out, evs);
-                                }
-                                done.lock_ok().push(j.out.clone())
-                            }
-                            Err(e) => {
-                                // Nothing was published, so the ciphertext is
-                                // byte-exact whichever step failed - drop the
-                                // scratch and leave it that way. If the rename
-                                // was the failure the claim is already retired,
-                                // which just costs the retry a refetch.
-                                let _ = std::fs::remove_file(tmp);
-                                // A checksum miss on an UNVERIFIED password is
-                                // not a damaged download - it is the wrong
-                                // password, on a set whose header offered no way
-                                // to say so earlier. Demote that group (volumes
-                                // materialize, the disk path re-tries with the
-                                // password itself) rather than failing the whole
-                                // job, which is what a verified set's mismatch
-                                // still means: bytes that were damaged before
-                                // posting.
-                                if !j.verified && e.kind() == io::ErrorKind::InvalidData {
-                                    late_failed.lock_ok().insert(j.key.clone());
-                                } else {
-                                    let mut fe = first_err.lock_ok();
-                                    if fe.is_none() {
-                                        *fe = Some(e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(e) = first_err.into_inner().unwrap() {
-            return Err(e);
-        }
-        // Wrong-password groups join the demotion set before it is applied.
-        let late_failed = late_failed.into_inner().unwrap();
-        failed_groups.extend(late_failed.iter().cloned());
-        // Renames are metadata: fsync the directory so a power cut can't
-        // undo a publish the journal has already stopped vouching for.
-        // Best-effort by design - the correctness guarantee comes from the
-        // barrier ordering above (after a lost rename the articles refetch
-        // either way), and SMB/CIFS NAS mounts reject a directory fsync
-        // outright, where failing the job would be pure harm.
-        crate::disk::sync_dir(&self.out_dir);
-        if !failed_groups.is_empty() {
-            let mut g = self.inner.lock_ok();
-            let inner = &mut *g;
-            for key in failed_groups {
-                if inner.groups.contains_key(&key) {
-                    // Two very different demotes reach here, and the reason
-                    // is what the user reads. A late CRC miss on a password
-                    // nothing could verify up front (every RAR4 set, and a
-                    // check-less RAR5 one) is a WRONG PASSWORD on a complete
-                    // download - "incomplete" would send the reader hunting
-                    // for articles that all arrived. Both keep the
-                    // "encrypted" substring the finish ladder routes on.
-                    let why = if late_failed.contains(&key) {
-                        "encrypted data failed its checksum (wrong password)"
-                    } else {
-                        "encrypted data incomplete"
-                    };
-                    self.fallback_group(inner, &key, why)?;
-                }
-            }
-        }
-        let mut decrypted = done.into_inner().unwrap();
-        decrypted.extend(instream_done);
-        decrypted.sort();
-        if let Some(e) = injected_decrypt_enospc("post") {
-            return Err(e);
-        }
-        Ok(decrypted)
-    }
 }
+
+// The finish-time verdict on every encrypted output, hoisted out when the
+// legacy decrypt pass it was gathered for reached the size gate's
+// 500-line function ceiling.
+#[path = "crypto_decrypt.rs"]
+mod crypto_decrypt;
 
 #[cfg(test)]
 #[path = "crypto_tests.rs"]

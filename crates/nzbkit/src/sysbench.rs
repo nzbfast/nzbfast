@@ -70,6 +70,26 @@ pub fn tls_aead_seal(p: &[u8]) {
         std::hint::black_box(&buf);
     }
 }
+/// Run AES-256-CBC decryption over `p.len()` bytes through the same
+/// `rarcrypt` decryptor the encrypted-RAR path uses, so the number
+/// reflects whichever AES backend this BUILD selected. That is the
+/// point: RustCrypto's `cpufeatures` cannot detect AES at runtime on
+/// every OS (ARM64 Windows in particular), so targets it is blind to
+/// need `-C target-feature=+aes` in `.cargo/config.toml` or this runs
+/// fixsliced soft AES - ~230 MB/s against ~13 GB/s hardware, measured
+/// on M-series. `rarcrypt` is crate-private by design; this is the one
+/// public window onto it, like `tls_aead_seal` above.
+pub fn rar_aes_decrypt(p: &[u8]) {
+    use crate::rarcrypt::{AesKey, cbc_decrypt};
+    let key = AesKey::Aes256([7u8; 32]);
+    let mut buf = vec![0u8; (4 << 20).min(p.len().max(16) & !15)];
+    let iters = p.len() / buf.len();
+    for _ in 0..iters.max(1) {
+        cbc_decrypt(&key, &[3u8; 16], &mut buf);
+        std::hint::black_box(&buf);
+    }
+}
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -77,6 +97,7 @@ use md5::{Digest, Md5};
 
 use crate::config::ServerConfig;
 use crate::nntp::Connection;
+use tracing::info;
 
 /// OVER returns message-ids already angle-bracketed; NZB segments do not.
 /// Normalize to exactly one bracket pair for STAT/BODY.
@@ -1114,6 +1135,17 @@ pub struct SystemReport {
     pub network_host: String,
     #[serde(skip_serializing_if = "is_zero")]
     pub network_conns: usize,
+    /// TODO 210 item (b): the machine's own network link, named when it
+    /// is what the network figure ran into. The row is a download over
+    /// N connections and cannot say WHICH network is short, so on a
+    /// Wi-Fi machine at its access point's ceiling the advice below
+    /// ("more connections or another provider may raise it") sends the
+    /// reader somewhere that cannot help. Empty unless the caller holds
+    /// a link observation AND the measurement reached its ceiling -
+    /// filled in by the daemon, which is the side that probes the link
+    /// (`measured_note` in `crates/nzbfast/src/serve/locallink.rs`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub network_link: String,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1128,9 +1160,27 @@ pub fn verdict(network_gbps: f64, compute: &ComputeReport, disk_gbps: f64) -> Sy
     let (bottleneck, advice) = if expected == n {
         (
             "network",
-            "The network is your limit. Add Usenet connections/providers, \
-             move to a faster link (2.5/10 GbE), or check for an upstream \
-             switch/uplink cap. Compute and disk have headroom."
+            // Name NO hardware here. "Move to a faster link (2.5/10 GbE)"
+            // shipped until 20 Aug 2026 and it is bad advice twice over: on
+            // many streets that service cannot be bought at any price, and
+            // where it can it is a real expense to raise a number that is not
+            // broken. Saying a faster connection is the ceiling is true and
+            // worth saying; naming the product is what makes it useless.
+            // Do not reintroduce a speed, a standard, or a price - and do not
+            // add "if you can afford it" either, which only makes the same
+            // suggestion sound worse.
+            //
+            // The order is load-bearing. This row is a real Usenet download
+            // over N connections, not a line-speed test, so a low figure has
+            // two causes and the reader cannot tell them apart from the bar:
+            // the line, or too few connections to fill it. Connections and
+            // providers come first because they are free and because trying
+            // them is what DISTINGUISHES the two cases. Only once they fail
+            // to move it has the line been shown to be the ceiling.
+            "The network is your limit. More connections or another provider \
+             may raise it. If they do not, this is what your connection \
+             delivers, and only a faster one will beat it. Compute and disk \
+             have headroom."
                 .to_string(),
         )
     } else if expected == c {
@@ -1161,9 +1211,10 @@ pub fn verdict(network_gbps: f64, compute: &ComputeReport, disk_gbps: f64) -> Sy
         expected_gbps: expected,
         advice,
         // Filled in by the caller, which is the one that knows what it
-        // pointed the probe at.
+        // pointed the probe at - and, for the link, what carries it.
         network_host: String::new(),
         network_conns: 0,
+        network_link: String::new(),
     }
 }
 
@@ -1324,8 +1375,9 @@ pub async fn diversity(
                 .unwrap_or((false, 0.0, 0, vec![false; sample_ids.len()], 0)),
         );
     }
-    println!(
-        "[diversity] STAT sweeps done in {:.1}s ({} servers × {} ids)",
+    info!(
+        target: "diversity",
+        "STAT sweeps done in {:.1}s ({} servers × {} ids)",
         t_sweeps.elapsed().as_secs_f64(),
         servers.len(),
         sample_ids.len()
@@ -1371,8 +1423,9 @@ pub async fn diversity(
         present.push(vec);
         answered.push(got);
     }
-    println!(
-        "[diversity] speed probes done in {:.1}s",
+    info!(
+        target: "diversity",
+        "speed probes done in {:.1}s",
         t_probes.elapsed().as_secs_f64()
     );
 

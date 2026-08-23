@@ -42,6 +42,7 @@ fn work(id: &str) -> Work {
     Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: id.into(),
         attempts: 0,
@@ -77,6 +78,7 @@ fn a_suspect_race_dup_inherits_the_originals_age_and_part() {
             id: "<aged@x>".into(),
             age_days: 30,
             part: 2,
+            file: u32::MAX,
         }],
         &[(server("p"), hedge_cfg.clone()), (server("q"), hedge_cfg)],
     );
@@ -126,6 +128,7 @@ fn a_dup_delivered_wrong_part_body_still_trips_the_part_gate() {
                 id: "<sb@x>".into(),
                 age_days: 0,
                 part: 2,
+                file: u32::MAX,
             },
             ArticleReq::fresh("<nopart@x>"),
         ],
@@ -139,7 +142,7 @@ fn a_dup_delivered_wrong_part_body_still_trips_the_part_gate() {
         w.ord = if id == "<sb@x>" { 0 } else { 1 };
         w.dup = dup;
         w.part = part;
-        sh.stash_handed(&w, ctx_for(&servers, 0));
+        sh.stash_handed(&w, ctx_for(&servers, 0), 0);
     };
     // A dup-delivered body with a mismatched part steers: the requeue
     // is an original that keeps the gate armed for the refetch.
@@ -182,6 +185,231 @@ fn a_dup_delivered_wrong_part_body_still_trips_the_part_gate() {
     ));
 }
 
+/// Synthesized segment numbering (22 Aug 2026, tv4-rot1): an NZB whose
+/// declared segment numbers are not the yEnc parts trips the part gate
+/// on EVERY article, and each trip is a full extra BODY that no dup or
+/// hedge tally shows - 2x the payload on the wire, identically on five
+/// releases. The tell that separates it from a split-brain: a second,
+/// independent server agreeing on the "wrong" part. One server lying
+/// is steered and its refetch comes back RIGHT (gate stays armed); two
+/// servers agreeing stands the gate down for the run.
+#[test]
+fn two_servers_agreeing_on_an_undeclared_part_stand_the_gate_down() {
+    let servers = vec![
+        (server("p"), PoolConfig::default()),
+        (server("q"), PoolConfig::default()),
+    ];
+    let (sh, _) = Shared::new(
+        vec![
+            ArticleReq {
+                id: "<a@x>".into(),
+                age_days: 0,
+                part: 1,
+                file: u32::MAX,
+            },
+            ArticleReq {
+                id: "<b@x>".into(),
+                age_days: 0,
+                part: 2,
+                file: u32::MAX,
+            },
+            ArticleReq {
+                id: "<c@x>".into(),
+                age_days: 0,
+                part: 3,
+                file: u32::MAX,
+            },
+        ],
+        &servers,
+    );
+    sh.workers_live.store(2, Ordering::Release);
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let deliver = |id: &str, ord: u32, part: u32, from: usize| {
+        let mut w = work(id);
+        w.ord = ord;
+        w.part = part;
+        sh.stash_handed(&w, ctx_for(&servers, from), 0);
+    };
+    // A split-brain shape first: server p hands a wrong part, the steer
+    // fires, and the refetch from q carries the DECLARED part. Owned,
+    // and the gate stays armed - this is the case the gate exists for.
+    deliver("<a@x>", 0, 1, 0);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(2) }),
+        DecodeAck::Steered
+    ));
+    sh.steer_inbox.lock_ok().clear();
+    deliver("<a@x>", 0, 1, 1);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(1) }),
+        DecodeAck::Owned
+    ));
+    assert!(
+        !sh.part_latch.any_off(),
+        "a refetch that comes back RIGHT is a split-brain, not a numbering tell"
+    );
+    // Now the rotated-ladder shape: the refetch from the other server
+    // repeats the first copy's part. Two backbones agree - the NZB's
+    // numbers are the lie. Owned, gate off, and logged as one steer.
+    deliver("<b@x>", 1, 2, 0);
+    assert!(matches!(
+        ctl.note_decoded("<b@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Steered
+    ));
+    sh.steer_inbox.lock_ok().clear();
+    deliver("<b@x>", 1, 2, 1);
+    assert!(matches!(
+        ctl.note_decoded("<b@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Owned
+    ));
+    assert!(
+        sh.part_latch.any_off(),
+        "two servers agreeing latch the gate off"
+    );
+    assert_eq!(sh.part_latch.steers.load(Ordering::Relaxed), 2);
+    // Every later mismatch is owned outright: no steer, no extra BODY.
+    deliver("<c@x>", 2, 3, 0);
+    assert!(matches!(
+        ctl.note_decoded("<c@x>", DecodeReport::Clean { part: Some(1) }),
+        DecodeAck::Owned
+    ));
+    assert!(
+        sh.steer_inbox.lock_ok().is_empty(),
+        "a latched gate issues no refetch"
+    );
+    assert_eq!(sh.part_latch.steers.load(Ordering::Relaxed), 2);
+}
+
+/// F-09: the stand-down is scoped to the FILE whose numbering proved
+/// synthesized. A job mixes files from different posters; one file's
+/// latch must not switch off the wrong-part check for the next file,
+/// whose mismatch may be a genuine split-brain worth a steer.
+#[test]
+fn a_latched_file_does_not_stand_the_gate_down_for_another_file() {
+    let servers = vec![
+        (server("p"), PoolConfig::default()),
+        (server("q"), PoolConfig::default()),
+    ];
+    let req = |id: &str, part: u32, file: u32| ArticleReq {
+        id: id.into(),
+        age_days: 0,
+        part,
+        file,
+    };
+    let (sh, _) = Shared::new(
+        vec![req("<a@x>", 1, 0), req("<b@x>", 2, 0), req("<c@x>", 1, 1)],
+        &servers,
+    );
+    sh.workers_live.store(2, Ordering::Release);
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let deliver = |id: &str, ord: u32, part: u32, file: u32, from: usize| {
+        let mut w = work(id);
+        w.ord = ord;
+        w.part = part;
+        w.file = file;
+        sh.stash_handed(&w, ctx_for(&servers, from), 0);
+    };
+    // File 0: two backbones agree on the undeclared part - latched.
+    deliver("<a@x>", 0, 1, 0, 0);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(5) }),
+        DecodeAck::Steered
+    ));
+    sh.steer_inbox.lock_ok().clear();
+    deliver("<a@x>", 0, 1, 0, 1);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(5) }),
+        DecodeAck::Owned
+    ));
+    assert!(sh.part_latch.is_off(0), "file 0 latched");
+    assert!(!sh.part_latch.is_off(1), "file 1 must still be gated");
+    // File 0's next mismatch is owned outright, no steer.
+    deliver("<b@x>", 1, 2, 0, 0);
+    assert!(matches!(
+        ctl.note_decoded("<b@x>", DecodeReport::Clean { part: Some(9) }),
+        DecodeAck::Owned
+    ));
+    assert!(sh.steer_inbox.lock_ok().is_empty());
+    // File 1's wrong part is still steered: the latch was not run-wide.
+    deliver("<c@x>", 2, 1, 1, 0);
+    assert!(matches!(
+        ctl.note_decoded("<c@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Steered
+    ));
+    assert!(
+        !sh.steer_inbox.lock_ok().is_empty(),
+        "file 1's mismatch must still issue a refetch"
+    );
+    assert_eq!(sh.part_latch.steers.load(Ordering::Relaxed), 2);
+}
+
+/// Bug sweep 22 Aug 2026: the "two servers agree" tell has to check the
+/// second deliverer's backbone, not assume it. A tail fan-out dup on the
+/// FIRST server (or a sibling on its backbone) can win the re-claim
+/// after the un-claim and repeat the same wrong part - one backbone
+/// talking twice. That must steer again, not stand the gate down for the
+/// run; a genuinely different backbone repeating it still latches.
+#[test]
+fn a_same_backbone_repeat_of_the_wrong_part_does_not_latch() {
+    let servers = vec![
+        (server("p"), PoolConfig::default()),
+        (server("q"), PoolConfig::default()),
+    ];
+    let (sh, _) = Shared::new(
+        vec![ArticleReq {
+            id: "<a@x>".into(),
+            age_days: 0,
+            part: 1,
+            file: u32::MAX,
+        }],
+        &servers,
+    );
+    sh.workers_live.store(2, Ordering::Release);
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let deliver = |from: usize, dup: bool| {
+        let mut w = work("<a@x>");
+        w.ord = 0;
+        w.part = 1;
+        w.dup = dup;
+        sh.stash_handed(&w, ctx_for(&servers, from), 0);
+    };
+    deliver(0, false);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Steered
+    ));
+    sh.steer_inbox.lock_ok().clear();
+    // Server p's own in-flight fan-out dup wins the re-claim and
+    // repeats p's wrong part: not agreement. A dup's bad copy skips the
+    // once-per-id budget, so it is steered again rather than owned.
+    deliver(0, true);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Steered
+    ));
+    assert!(
+        !sh.part_latch.any_off(),
+        "one backbone repeating itself is not two backbones agreeing"
+    );
+    sh.steer_inbox.lock_ok().clear();
+    // Server q repeating it IS.
+    deliver(1, true);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(3) }),
+        DecodeAck::Owned
+    ));
+    assert!(sh.part_latch.any_off());
+}
+
 /// The borrowed-id dedup prepass (A2's construction rider) keeps the
 /// FIRST occurrence of a repeated id, in request order, with the first
 /// occurrence's metadata - exactly what the owned HashSet did, minus
@@ -193,12 +421,14 @@ fn duplicate_requests_keep_the_first_occurrence_in_order() {
             id: "<a@x>".into(),
             age_days: 5,
             part: 1,
+            file: u32::MAX,
         },
         ArticleReq::fresh("<b@x>"),
         ArticleReq {
             id: "<a@x>".into(),
             age_days: 9,
             part: 7,
+            file: u32::MAX,
         },
         ArticleReq::fresh("<c@x>"),
     ];

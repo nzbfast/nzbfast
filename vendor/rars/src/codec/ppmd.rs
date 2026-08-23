@@ -303,18 +303,28 @@ impl Suballocator {
     //   3. Fill split: runs are emitted as repeated 128-unit blocks, then the
     //      <=128 remainder via Ppmd7_SplitBlock's exact-or-two-piece rule —
     //      not "largest bucket fitting" greedily.
-    fn glue_inner(&mut self) {
-        use std::collections::HashMap;
-        // Step 1: thread free blocks into the reference's list order.
-        // list[k] = (offset, nu). Reference prepends; we emulate with a
-        // front-growing build then it is naturally bucket-37-first.
-        // Reference walks each bucket list head-first (recent->oldest) and
-        // prepends each node, which lands every bucket back in its own
-        // insertion order with later buckets in front. Building by walking
-        // the buckets in REVERSE and appending produces the identical
-        // sequence in O(n) - the old literal emulation front-inserted per
-        // node, and its quadratic memmove was ~90% of PPMd decode wall time
-        // on multi-MB streams (the glue pass runs from the ALLOC hot path).
+    // Step 1 of Ppmd7_GlueFreeBlocks: thread every free block into the
+    // reference's single glue list (offset, nu) and empty the buckets.
+    //
+    // The reference walks free_list[0..38] and, for each list, walks it
+    // head-first (most recent first) PREPENDING every node to the glue
+    // list. Prepending reverses the visit order, so the finished list runs
+    // bucket 37 first down to bucket 0, and within a bucket runs
+    // oldest->newest. Our buckets are Vecs pushed at the back, so the head
+    // is the last element and `iter()` is already oldest->newest: walking
+    // the buckets in REVERSE and appending reproduces that exact sequence
+    // in O(n). The old literal emulation front-inserted node by node, and
+    // its quadratic memmove was ~90% of PPMd decode wall time on multi-MB
+    // streams (the glue pass runs from the ALLOC hot path).
+    //
+    // The order is load-bearing, not cosmetic: step 3 re-buckets runs in
+    // this sequence, so a different order leaves a different per-bucket
+    // LIFO, which changes which cell the next allocation gets and
+    // therefore the timing of the model restart. `glue_threading_*` pins
+    // this against a literal front-insertion reference.
+    // (nzbfast-local change, 22 Aug 2026 - re-apply on the next rars
+    // re-sync, see vendor/rars/VENDORING.md.)
+    fn thread_free_blocks(&mut self) -> Vec<(u32, u32)> {
         let mut list: Vec<(u32, u32)> =
             Vec::with_capacity(self.free_lists.iter().map(Vec::len).sum());
         for bucket in (0..N_BUCKETS).rev() {
@@ -322,6 +332,13 @@ impl Suballocator {
             list.extend(self.free_lists[bucket].iter().map(|&off| (off, nu)));
             self.free_lists[bucket].clear();
         }
+        list
+    }
+
+    fn glue_inner(&mut self) {
+        use std::collections::HashMap;
+        // Step 1: thread free blocks into the reference's list order.
+        let list = self.thread_free_blocks();
         if list.is_empty() {
             return;
         }
@@ -1865,6 +1882,75 @@ mod tests {
         // glue_count == 0 so glue fires, merging into one 2-unit block at
         // held[0]. Retry pop succeeds.
         assert_eq!(s.alloc(2, AllocSide::Lo, 0), Some(held[0]));
+    }
+
+    // The literal Ppmd7_GlueFreeBlocks step 1, node by node: buckets in
+    // ascending order, each walked head-first (a Vec pushed at the back
+    // holds its head at the end), every node PREPENDED to one list.
+    // Quadratic by construction - it is the reference the shipped O(n)
+    // build has to reproduce, not something to ship.
+    fn reference_threading(free_lists: &[Vec<u32>; N_BUCKETS]) -> Vec<(u32, u32)> {
+        let mut list: Vec<(u32, u32)> = Vec::new();
+        for (bucket, offsets) in free_lists.iter().enumerate() {
+            let nu = Suballocator::bucket_units(bucket) as u32;
+            for &offset in offsets.iter().rev() {
+                list.insert(0, (offset, nu));
+            }
+        }
+        list
+    }
+
+    // Free-list fixture: the O(n) threading must produce the reference's
+    // list, entry for entry, or the fill pass leaves a different per-bucket
+    // LIFO and the next allocation takes a different cell.
+    #[test]
+    fn glue_threading_matches_reference_prepend() {
+        let mut s = Suballocator::default();
+        // Several buckets with several blocks each, freed interleaved so
+        // both the per-bucket order and the cross-bucket order are visible.
+        for &(offset, units) in &[
+            (500u32, 1usize),
+            (900, 4),
+            (512, 1),
+            (30, 2),
+            (1_400, 128),
+            (700, 4),
+            (44, 2),
+            (600, 1),
+            (1_600, 128),
+            (58, 2),
+            (2_000, 24),
+        ] {
+            s.free(offset, units);
+        }
+        let expected = reference_threading(&s.free_lists);
+        assert_eq!(expected.len(), 11);
+
+        let threaded = s.thread_free_blocks();
+
+        assert_eq!(threaded, expected);
+        assert!(s.free_lists.iter().all(Vec::is_empty));
+    }
+
+    // And the order survives into the fill pass: two runs that both land in
+    // the 4-unit bucket are pushed in threading order, so the one whose
+    // first block sat in the higher bucket comes first.
+    #[test]
+    fn glue_emits_runs_in_reference_threading_order() {
+        let mut s = Suballocator::default();
+        s.free(1_000, 4);
+        s.free(2_001, 3);
+        s.free(2_000, 1);
+
+        s.glue();
+
+        let bucket_1 = Suballocator::bucket_for(1).unwrap();
+        let bucket_3 = Suballocator::bucket_for(3).unwrap();
+        let bucket_4 = Suballocator::bucket_for(4).unwrap();
+        // 2_000 absorbed 2_001, so only the merged 4-unit runs remain.
+        assert!(s.free_lists[bucket_1].is_empty());
+        assert!(s.free_lists[bucket_3].is_empty());
+        assert_eq!(s.free_lists[bucket_4], vec![1_000, 2_000]);
     }
 
     #[test]

@@ -8,6 +8,33 @@
 
 use super::*;
 
+/// Rename a deleted LIVE job's spooled `.nzb` out of the shape
+/// `recover_orphaned_spool` adopts, and point the record at the new
+/// name.
+///
+/// This delete files no history row, so it drops the queue row durably
+/// right here while the spool copy is unlinked much later, in
+/// `spend_deferred_delete`, once the fetch has drained. A kill in that
+/// window left a spool file no record named - which is exactly what
+/// `recover_orphaned_spool` re-adopts, so the release an *arr had just
+/// cancelled came back and downloaded again at the next start. The
+/// suffix defeats that matcher (it takes only
+/// `SABnzbd_nzo_nzbfast*.nzb`), and because the path is written back to
+/// the record, park's own unlink and any kept-files notice still name
+/// the real file.
+///
+/// A spool copy under any other name is not adoptable in the first
+/// place, so it is left alone rather than renamed for nothing - the rule
+/// and the rename both live in `job::mask_spool_path`. The JSON-RPC
+/// facade's GroupFinalDelete keeps a wrapper of its own in
+/// `sabcompat::editqueue_delete` (the two arms share no module), but
+/// only the wrapper: since 23 Aug 2026 both go through that one helper.
+pub(super) fn mask_spool_from_recovery(g: &mut Job) {
+    if let Some(masked) = mask_spool_path(&g.nzb_path, ".deleting") {
+        g.nzb_path = masked;
+    }
+}
+
 pub(super) fn m_queue(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -109,6 +136,13 @@ pub(super) fn m_queue(
                             g.tombstone = true;
                             stopped_active = true;
                             stopped_ids.push(g.nzo_id.clone());
+                            // ...and park is a long way off, while the
+                            // row leaves the queue durably here. Set
+                            // the spool copy aside so a kill in that
+                            // window cannot have it re-adopted.
+                            if g.delete_status.is_empty() {
+                                mask_spool_from_recovery(&mut g);
+                            }
                         } else {
                             // Non-active: the record is gone for
                             // good, so its spooled NZB is dead
@@ -457,8 +491,7 @@ pub(super) fn m_history(
         let value = params.get("value").cloned().unwrap_or_default();
         let find = |id: &str| {
             d.history
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .find(|j| j.lock_ok().nzo_id == id)
                 .cloned()
@@ -513,8 +546,7 @@ pub(super) fn m_history(
                 // is what keeps them from deadlocking.
                 let queue_dirs: Vec<PathBuf> = d
                     .queue
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .iter()
                     .map(|j| j.lock_ok().out_dir.clone())
                     .collect();

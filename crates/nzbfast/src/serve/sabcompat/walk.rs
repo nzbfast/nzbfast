@@ -67,37 +67,7 @@ pub(super) fn queue_walk(
     // The owner is re-read here with the counters, under the one lock
     // the writer sets both in, so no reader can pair a stale owner with
     // the next job's zeroes.
-    let active_left = |nzo_id: &str| {
-        let owner = d.active_dl.lock_ok();
-        if owner.as_deref() != Some(nzo_id) {
-            return None;
-        }
-        // UX §15, preferred whenever the pipeline has published one: both
-        // halves are declared NZB bytes of this run's article set, so the
-        // fraction reaches exactly 100% at net-drain and cannot pass it,
-        // and the seed already includes everything a resume had in hand.
-        //
-        // The arithmetic below is the fallback, and it is why the plan
-        // exists: decoded payload (every slot, PAR2 included) over the
-        // NZB's encoded bytes minus recovery volumes stalls near 97% on a
-        // clean set - the "1.5 GB left" that is not really left - and
-        // tops out early on a damaged one, where the extra recovery bytes
-        // land on its numerator alone.
-        if let Some(honest) = d.hub.fetch_left() {
-            return Some(honest);
-        }
-        let done = d
-            .progress
-            .load(Ordering::Relaxed)
-            // Bytes a resume never had to fetch. Counted here rather
-            // than in the shared counter so that everything measuring
-            // the WIRE (quota, average speed, best_rate_bps, the CLI
-            // ticker, the rolling speed window) goes on seeing only what
-            // this run actually moved. See StreamHub::resume_seeded.
-            .saturating_add(d.hub.resume_seeded.load(Ordering::Relaxed));
-        let total = d.active_total.load(Ordering::Relaxed).max(1);
-        Some((done.min(total), total, total.saturating_sub(done)))
-    };
+    let active_left = |nzo_id: &str| d.wire_counters(nzo_id);
     // Whole-queue bytes still to fetch, for the top-level sizeleft /
     // timeleft SAB carries - accumulated from the very number each row
     // reports, so the header and its rows are the same arithmetic on

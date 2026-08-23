@@ -304,8 +304,7 @@ pub(super) fn spawn_sidecar(
     let refused: std::collections::HashSet<String> = d
         .hub
         .pool_live
-        .lock()
-        .unwrap()
+        .lock_ok()
         .as_ref()
         .map(|l| {
             l.servers
@@ -483,8 +482,7 @@ pub(super) fn spawn_sidecar(
             // (block accounts must see every byte).
             let per: Vec<(String, u64)> = hub
                 .pool_live
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .as_ref()
                 .map(|l| {
                     l.servers
@@ -510,9 +508,7 @@ pub(super) fn spawn_sidecar(
                     // before starting its next pick, so an unbounded
                     // wait here parks the whole picker behind a wedged
                     // scan lane (the 20 Aug 8m46s hold).
-                    d.with_index_bounded(Daemon::TAIL_INDEX_WAIT, |ix| {
-                        ix.oracle_ingest(&samples, now).ok()
-                    });
+                    d.with_index_for_tail(&nzo_id, |ix| ix.oracle_ingest(&samples, now).ok());
                 }
             }
             match res {

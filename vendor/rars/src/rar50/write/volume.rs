@@ -48,14 +48,21 @@ pub(super) fn write_stored_volumes_impl(
             |out, start, end, _split_before, _split_after| {
                 debug_assert_eq!(start, 0);
                 debug_assert_eq!(end, chunk.len());
+                // The whole-file CRC rides the LAST fragment, as the
+                // compressed branch already does: a split stored member
+                // with no checksum anywhere extracts corrupt bytes as a
+                // success, which made every fixture built here over
+                // incompressible data unverifiable. (nzbfast-local
+                // change, 22 Aug 2026 - see vendor/rars/VENDORING.md.)
+                let last = index + 1 >= chunks.len();
                 write_stored_entry_fragment(
                     out,
                     &entry,
                     chunk,
                     entry.data.len() as u64,
-                    None,
+                    last.then_some(crc32(entry.data)),
                     index > 0,
-                    index + 1 < chunks.len(),
+                    !last,
                 )
             },
         )?;
@@ -168,12 +175,14 @@ pub(super) fn write_compressed_volume_set_impl(
                 writer.write_member(
                     entry.data.len(),
                     |out, start, end, split_before, split_after| {
+                        // Whole-file CRC on the last fragment (nzbfast-local
+                        // change, 22 Aug 2026 - see the stored writer above).
                         write_stored_entry_fragment(
                             out,
                             &entry,
                             &entry.data[start..end],
                             entry.data.len() as u64,
-                            None,
+                            (!split_after).then_some(crc32(entry.data)),
                             split_before,
                             split_after,
                         )

@@ -71,7 +71,7 @@ async fn a_download_shorter_than_one_tick_still_gets_its_chip() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     tokio::task::spawn_blocking(move || {
         let boundary = "----mediafast";

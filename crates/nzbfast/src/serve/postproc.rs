@@ -97,6 +97,9 @@ pub(super) struct PostprocLane {
     /// lane slot frees. Admission order is submission order.
     slots: Arc<tokio::sync::Semaphore>,
     /// Tickets submitted and not yet parked (running + waiting).
+    /// Shared with the daemon (`Daemon::postproc_backlog`), which is
+    /// where `note_queue_idle` reads it: the lane belongs to the runner,
+    /// so a counter owned here would be unreachable from the emit.
     backlog: Arc<AtomicUsize>,
 }
 
@@ -116,16 +119,38 @@ impl PostprocLane {
             );
         }
         PostprocLane {
+            backlog: d.postproc_backlog.clone(),
             d,
             width,
             inline,
             slots: Arc::new(tokio::sync::Semaphore::new(width)),
-            backlog: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub(super) fn backlog(&self) -> usize {
         self.backlog.load(Ordering::Relaxed)
+    }
+
+    /// Take the lane's custody of a job BEFORE its terminal state is
+    /// stamped, for the three runner arms that end a job without ever
+    /// starting the pipeline.
+    ///
+    /// [`Self::submit`] needs no such thing: the row it takes is
+    /// `Downloading` right up to the hold that marks it `Finishing`, so
+    /// the queue walk in `note_queue_idle` covers the hand-over with no
+    /// gap. Those arms stamp `Failed` (or `Completed`) on a row that is
+    /// then neither busy in that walk nor yet counted here, and a
+    /// concurrent park landing in between would announce the drain over
+    /// a job whose `job.failed` is still owed. Small window, same defect
+    /// as the two the counter exists for; reserving first removes it
+    /// rather than narrowing it.
+    pub(in crate::serve) fn reserve(&self) -> BacklogTicket {
+        self.backlog.fetch_add(1, Ordering::Relaxed);
+        BacklogTicket {
+            backlog: self.backlog.clone(),
+            cap: self.cap(),
+            d: self.d.clone(),
+        }
     }
 
     /// The backpressure bound: running + waiting at twice the width.
@@ -279,7 +304,11 @@ impl PostprocLane {
     /// is terminal, and `restore_records` routes a terminal queue row
     /// into history on the next start (losing the hooks, which it
     /// says).
-    pub(super) async fn submit_hooks_only(&self, job: Arc<Mutex<Job>>) {
+    ///
+    /// The unit of backlog is the caller's to take, through
+    /// [`Self::reserve`], and it must be taken BEFORE the terminal
+    /// state is stamped - see there.
+    pub(super) async fn submit_hooks_only(&self, job: Arc<Mutex<Job>>, ticket: BacklogTicket) {
         // The fence, taken at the handoff. These arms used to park on
         // the very next statement, where nothing could get between
         // them and no fence was needed; a tail that can now run for an
@@ -288,14 +317,8 @@ impl PostprocLane {
         // under it, a retry re-queues the same Arc, and an unfenced
         // park would consume the button the user just pressed.
         let gen0 = Some(Daemon::record_generation(&job.lock_ok()));
-        self.backlog.fetch_add(1, Ordering::Relaxed);
         let d = self.d.clone();
         let slots = self.slots.clone();
-        let ticket = BacklogTicket {
-            backlog: self.backlog.clone(),
-            cap: self.cap(),
-            d: self.d.clone(),
-        };
         let supervisor = tokio::spawn(async move {
             let _ticket = ticket;
             let _slot = slots
@@ -346,7 +369,17 @@ impl PostprocLane {
 /// return: a submit may have raced in behind us, and the fresher number
 /// is the honest one. `clear_postproc_hold` checks the KIND, so a disk
 /// or quota hold raised in between survives.
-struct BacklogTicket {
+///
+/// §129 4a: and the `queue.idle` edge, for the same reason and off the
+/// same re-read. `note_queue_idle` refuses to announce a drain while
+/// this counter is up (see `Daemon::postproc_backlog`), so the call
+/// `park_gen` makes at the end of the LAST tail is always suppressed -
+/// by that tail's own ticket, which is still held. This is the retry
+/// that gets it said. Drop-based, so a supervisor that panicked or was
+/// dropped at shutdown gives the edge back too; a hand-placed call
+/// after `park_gen` would not, and a lost edge is a queue-finished
+/// action that never fires.
+pub(in crate::serve) struct BacklogTicket {
     backlog: Arc<AtomicUsize>,
     cap: usize,
     d: Arc<Daemon>,
@@ -355,8 +388,20 @@ struct BacklogTicket {
 impl Drop for BacklogTicket {
     fn drop(&mut self) {
         self.backlog.fetch_sub(1, Ordering::Relaxed);
-        if self.backlog.load(Ordering::Relaxed) < self.cap {
+        let left = self.backlog.load(Ordering::Relaxed);
+        if left < self.cap {
             self.d.clear_postproc_hold();
+        }
+        // Only the ticket that leaves the lane empty can unblock the
+        // scan, so the others would take the queue lock to learn
+        // nothing. Two tickets dropping together may both read 0 and
+        // both call, which the latch answers; what cannot happen is
+        // nobody calling, because the LAST decrement of a lane that
+        // stays empty reads 0 by construction, and a submit racing in
+        // to spoil the read brings its own ticket - and its own drop -
+        // with it.
+        if left == 0 {
+            self.d.note_queue_idle();
         }
     }
 }
@@ -477,6 +522,10 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
             .unwrap_or(0);
         let d3 = d2.clone();
         let n = oracle_samples.len();
+        // Read into a local so the job lock is not held across the
+        // activity lock inside `with_index_for_tail` (see `tail_id`
+        // below for the ordering rule).
+        let fold_id = job2.lock_ok().nzo_id.clone();
         // A blocking SQLite fold does not belong on an async worker,
         // and this one has a whole tail waiting behind it either way.
         //
@@ -494,10 +543,8 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         // sampled telemetry and the cheapest thing in this function.
         // The job's own completion is not negotiable against it.
         let folded = tokio::task::spawn_blocking(move || {
-            d3.with_index_bounded(Daemon::TAIL_INDEX_WAIT, |ix| {
-                ix.oracle_ingest(&oracle_samples, now).ok()
-            })
-            .is_some()
+            d3.with_index_for_tail(&fold_id, |ix| ix.oracle_ingest(&oracle_samples, now).ok())
+                .is_some()
         })
         .await
         .unwrap_or(false);
@@ -610,6 +657,10 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
             let mut j = job2.lock_ok();
             j.state = JobState::Queued;
             j.suspended = false;
+            // The abort still ran whyslow::stamp at network-drain; that
+            // verdict describes the stint that was cut short, not the
+            // job, and the resumed run captures its own.
+            j.clear_attempt_verdicts();
             // What is on disk, not what this run fetched:
             // the queue row reports its percentage from this
             // while paused, and a job paused twice would
@@ -1092,7 +1143,12 @@ mod tests {
             width: 1,
             inline: true,
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            backlog: Arc::new(AtomicUsize::new(0)),
+            // The DAEMON's counter, exactly as `new` takes it. A private
+            // one here would compile and would quietly take the
+            // `queue.idle` suppression out of every lane test - the
+            // counter is only worth anything because `note_queue_idle`
+            // reads the same cell the tickets move.
+            backlog: d.postproc_backlog.clone(),
         }
     }
 
@@ -1238,6 +1294,99 @@ mod tests {
                 .count(),
             1,
             "and the lane still files it into history"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `queue.idle` must never be said while a tail still owes its
+    /// `job.completed` - including a tail that is, at that instant, in
+    /// neither the queue nor history.
+    ///
+    /// The lane runs tails concurrently (`postproc_jobs`, default 2), so
+    /// two jobs' parks overlap. `park_gen` retains the row out of the
+    /// queue a hundred lines before it pushes the record into history,
+    /// and it ends with `note_queue_idle`, whose scan asks only the
+    /// QUEUE. Job A's park landing inside job B's window therefore saw
+    /// an empty queue, won the latch CAS and announced the drain between
+    /// the two `job.completed`s - with B in neither list for a
+    /// subscriber that reacted by reading history for what had just
+    /// finished (23 Aug 2026, off the `queue_handoff` ring dump).
+    ///
+    /// Driven by moving the tickets by hand rather than by racing two
+    /// real tails: the ordering under test is an INVARIANT of the
+    /// counter, and the two tails on the fixture that found this park
+    /// about 16 ms apart, either way round on a loaded box. The events
+    /// this asserts on are the real ones - `park_gen` emits them.
+    #[test]
+    fn an_overlapping_tail_holds_the_idle_edge_until_it_has_completed() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-lane-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let lane = inline_lane(&d);
+
+        let park_me = |id: &str, name: &str| {
+            let out = d.out_dir().join(name);
+            let job = Arc::new(Mutex::new(
+                job_from_json(&json!({
+                    "nzo_id": id,
+                    "name": name,
+                    "nzb_path": dir.join("x.nzb").to_string_lossy(),
+                    "out_dir": out.to_string_lossy(),
+                    "state": "Completed",
+                    "finished_unix": 1,
+                }))
+                .expect("job"),
+            ));
+            d.queue.lock_ok().push_back(job.clone());
+            job
+        };
+        let a = park_me("nzo-laneidle-a", "Overlap.A");
+        let b = park_me("nzo-laneidle-b", "Overlap.B");
+        // Armed the way an add arms it: both tails are in the lane's
+        // custody, which is the state two overlapping parks start from.
+        d.queue_idle_latch.store(false, Ordering::Relaxed);
+        let seat_a = lane.reserve();
+        let seat_b = lane.reserve();
+
+        // A parks first and finds an empty queue - B's row is still in
+        // it here, but B's own park will take it out long before B's
+        // record reaches history, and this is the emit that used to run
+        // in that window.
+        d.park_gen(a, None);
+        d.queue.lock_ok().clear();
+        d.park_gen(b, None);
+        let kinds = |d: &Arc<Daemon>| -> Vec<String> {
+            d.life_since(0)
+                .0
+                .iter()
+                .filter_map(|e| e["kind"].as_str())
+                .filter(|k| k.starts_with("job.completed") || *k == "queue.idle")
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            kinds(&d),
+            vec!["job.completed", "job.completed"],
+            "the drain was announced while a tail was still in the lane"
+        );
+
+        // The tails leave. Only the LAST ticket may say it, and it must:
+        // every `note_queue_idle` the parks made was suppressed, so a
+        // ticket that stayed silent would lose the edge altogether and
+        // with it the queue-finished action.
+        drop(seat_a);
+        assert_eq!(
+            kinds(&d),
+            vec!["job.completed", "job.completed"],
+            "a lane that is still busy has not drained"
+        );
+        drop(seat_b);
+        assert_eq!(
+            kinds(&d),
+            vec!["job.completed", "job.completed", "queue.idle"],
+            "the last ticket out owes the edge its parks could not say"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

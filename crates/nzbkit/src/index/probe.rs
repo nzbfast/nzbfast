@@ -9,7 +9,7 @@
 
 use rusqlite::OptionalExtension;
 
-use super::Index;
+use super::{Index, SegList};
 
 /// Attempts after which a row is left to the post-grab naming path.
 /// Two extra head fetches cover the pilot's ~1/29 scrambled-order case;
@@ -166,14 +166,13 @@ impl Index {
         let mut stmt = self.db.prepare_cached(
             "SELECT filename, bytes, segments FROM files WHERE release_id=?1 ORDER BY filename",
         )?;
-        let rows: Vec<(String, i64, String)> = stmt
+        let rows: Vec<(String, i64, SegList)> = stmt
             .query_map([release_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows
             .into_iter()
             .map(|(filename, bytes, segs)| {
-                let mut segments: Vec<(u32, String, u64)> =
-                    serde_json::from_str(&segs).unwrap_or_default();
+                let mut segments = segs.0;
                 for (_, id, _) in &mut segments {
                     if !id.starts_with('<') {
                         *id = format!("<{id}>");
@@ -475,7 +474,7 @@ mod tests {
                         name,
                         segs.len() as i64,
                         *bytes as i64,
-                        serde_json::to_string(&segs).unwrap(),
+                        crate::index::segcodec::encode(&segs),
                         segs.len() as i64
                     ],
                 )

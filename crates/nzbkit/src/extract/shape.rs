@@ -9,6 +9,7 @@
 //! redesign.
 
 use super::*;
+use tracing::info;
 
 // ---- Phase 0(b): nested-archive prevalence instrumentation ----
 //
@@ -65,9 +66,6 @@ pub(super) const SH_7Z: u32 = 1 << 2;
 pub(super) const SH_STORE: u32 = 1 << 3;
 pub(super) const SH_COMPRESSED: u32 = 1 << 4;
 pub(super) const SH_ENCRYPTED: u32 = 1 << 5;
-/// Encrypted content that decrypts at write time (plaintext-once) rather
-/// than being assembled as ciphertext for the finish pass.
-pub(super) const SH_ENC_INSTREAM: u32 = 1 << 6;
 /// At least one inner file was routed to direct extraction.
 pub(super) const SH_ONE_PASS: u32 = 1 << 7;
 /// At least one group/slot fell back to volumes on disk.
@@ -165,14 +163,14 @@ impl ArchiveShape {
         } else if on_disk {
             t.push("on-disk");
         } else if one_pass {
-            // Legacy encrypted sets assemble ciphertext and unlock in the
-            // finish pass; plaintext-once unlocks as the bytes arrive, so
-            // it is a plain one-pass set like any other.
-            if outer & SH_ENCRYPTED != 0 && outer & SH_ENC_INSTREAM == 0 {
-                t.push("unlock-at-end");
-            } else {
-                t.push("one-pass");
-            }
+            // No encrypted special case since TODO 27 phase 3. Every
+            // encrypted set that stays one-pass now unlocks as its bytes
+            // arrive (plaintext-once), and the one shape that still
+            // assembles ciphertext always demotes at finish, so it is
+            // caught by `on_disk` above and never reaches here. The
+            // "unlock-at-end" token it used to earn survives in
+            // [`shape_word`] alone, for tags older runs persisted.
+            t.push("one-pass");
         }
         if nested & SH_7Z != 0 {
             t.push("inner-7z");
@@ -214,12 +212,67 @@ pub fn shape_word(token: &str) -> &str {
         "mixed" => "mixed",
         "encrypted" => "encrypted",
         "one-pass" => "one-pass",
+        // No longer emitted (TODO 27 phase 3 retired the route that
+        // earned it); kept so a tag an older run persisted still reads.
         "unlock-at-end" => "unlocked at the end",
         "on-disk" => "unpacked after download",
         "mixed-pass" => "partly on disk",
         "inner-7z" => "7z inside",
         "inner-rar" => "RAR inside",
         other => other,
+    }
+}
+
+/// An archive family that a pass OUTSIDE the extractor unpacked from the
+/// output directory, for [`Extractor::note_disk_archive`].
+///
+/// Only the FAMILY, not how it was packed: the disk arms find their
+/// archive by signature and hand the whole thing to a reader, so nothing
+/// on that route ever parses a per-entry method the way the mappers do.
+/// A missing store/compressed token is what [`ArchiveShape::from_bits`]
+/// already renders for an unknown packing, so the badge simply says less
+/// rather than guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskArchive {
+    Rar4,
+    Rar5,
+    SevenZ,
+    Zip,
+}
+
+impl DiskArchive {
+    fn bits(self) -> u32 {
+        match self {
+            DiskArchive::Rar4 => SH_RAR4,
+            DiskArchive::Rar5 => SH_RAR5,
+            DiskArchive::SevenZ => SH_7Z,
+            DiskArchive::Zip => SH_ZIP,
+        }
+    }
+}
+
+impl Extractor {
+    /// Latch an archive family that a DISK pass unpacked after the
+    /// download finished, so a job the mappers never classified still
+    /// reports what its payload turned out to be.
+    ///
+    /// The one caller is nzbfast's SFX arm. A self-extractor whose stub
+    /// runs past the first article is a plain data file to the in-stream
+    /// sniff, so nothing archive-shaped is ever recognized for it and
+    /// [`Self::archive_shape`] answered `None` for the whole job - the
+    /// queue row, the history entry and the download report all said
+    /// nothing about a payload that was demonstrably an archive. The two
+    /// other SFX routes (the offset-0 sniff, and a mapped volume that
+    /// demotes) latch through the mappers and always did.
+    ///
+    /// [`SH_MATERIALIZED`] rides along because it is the same fact: these
+    /// bytes were written to disk and unpacked afterwards, which is
+    /// exactly what that bit means and what "unpacked after download"
+    /// renders it as. Latched like every other shape bit, so a set that
+    /// ALSO streamed something reads as "partly on disk" rather than
+    /// overwriting the one-pass half.
+    pub fn note_disk_archive(&self, what: DiskArchive) {
+        self.shape.note(self.depth, what.bits() | SH_MATERIALIZED);
     }
 }
 
@@ -270,19 +323,20 @@ pub fn note_nested_level(depth: usize, kind: &str, disposition: NestedDispositio
             NESTED_LEVELS.fetch_add(1, Ordering::Relaxed);
             NESTED_IN_STREAM.fetch_add(1, Ordering::Relaxed);
             bump_kind();
-            println!("nested-prevalence: depth={depth} type={kind} stream=in-stream");
+            info!(target: "extract", "nested-prevalence: depth={depth} type={kind} stream=in-stream");
         }
         NestedDisposition::Disk => {
             NESTED_LEVELS.fetch_add(1, Ordering::Relaxed);
             NESTED_DISK.fetch_add(1, Ordering::Relaxed);
             bump_kind();
-            println!("nested-prevalence: depth={depth} type={kind} stream=disk");
+            info!(target: "extract", "nested-prevalence: depth={depth} type={kind} stream=disk");
         }
         NestedDisposition::Demoted(reason) => {
             // Diagnostic only - the archive is tallied under `disk` when
             // the post-pass re-extracts the volumes this demote produced.
             NESTED_DEMOTED.fetch_add(1, Ordering::Relaxed);
-            println!(
+            info!(
+                target: "extract",
                 "nested-prevalence: depth={depth} type={kind} stream=demoted reason=\"{reason}\""
             );
         }

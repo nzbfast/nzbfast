@@ -5,8 +5,8 @@
 //! We keep the model deliberately close to the wire format; scheduling
 //! concepts (server tiers, block accounting) live elsewhere.
 
-use quick_xml::Reader;
 use quick_xml::events::Event;
+use quick_xml::{Reader, XmlVersion};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NzbError {
@@ -212,13 +212,18 @@ fn html_latin1_entity(name: &str) -> Option<&'static str> {
 }
 
 impl Nzb {
-    // quick_xml deprecated `unescape_value` in favour of
-    // `normalized_value`, which ALSO applies XML attribute-value
-    // normalization (tabs and newlines become spaces). Subjects are
-    // matched byte-for-byte downstream, so rewriting whitespace inside
-    // them is a behaviour change this parser must not make; we keep the
-    // unescape-only call on purpose.
-    #[allow(deprecated)]
+    // Attribute values go through XML attribute-value normalization, on
+    // purpose. A comment here used to claim the opposite - that the
+    // deprecated `unescape_value_with` skipped it - and that was never
+    // true: in quick-xml 0.41 that name is a thin alias for exactly the
+    // `normalized_value_with(Implicit1_0, 128, ..)` call below, so a
+    // LITERAL tab/CR/LF inside a `subject=` has always arrived as a
+    // space and no downstream matcher has ever seen one. That is what
+    // the XML spec requires and what every other NZB reader does, so
+    // the call is now spelled honestly rather than the behaviour
+    // changed. A producer that really means a tab writes `&#9;`, which
+    // normalization leaves alone - both halves are pinned by
+    // `subject_whitespace_is_normalized_per_xml_spec`.
     pub fn parse(xml: &[u8]) -> Result<Nzb, NzbError> {
         let mut reader = Reader::from_reader(xml);
         // NOT trim_text(true): quick-xml would trim each text EVENT, and
@@ -254,7 +259,11 @@ impl Nzb {
                             let mut f = NzbFile::default();
                             for attr in e.attributes() {
                                 let attr = attr?;
-                                let val = attr.unescape_value_with(html_latin1_entity)?;
+                                let val = attr.normalized_value_with(
+                                    XmlVersion::Implicit1_0,
+                                    128,
+                                    html_latin1_entity,
+                                )?;
                                 match attr.key.local_name().as_ref() {
                                     b"subject" => f.subject = val.into_owned(),
                                     b"poster" => f.poster = val.into_owned(),
@@ -271,7 +280,11 @@ impl Nzb {
                                 let attr = attr?;
                                 if attr.key.local_name().as_ref() == b"type" {
                                     ty = attr
-                                        .unescape_value_with(html_latin1_entity)?
+                                        .normalized_value_with(
+                                            XmlVersion::Implicit1_0,
+                                            128,
+                                            html_latin1_entity,
+                                        )?
                                         .trim()
                                         .to_lowercase();
                                 }
@@ -286,7 +299,11 @@ impl Nzb {
                             };
                             for attr in e.attributes() {
                                 let attr = attr?;
-                                let val = attr.unescape_value_with(html_latin1_entity)?;
+                                let val = attr.normalized_value_with(
+                                    XmlVersion::Implicit1_0,
+                                    128,
+                                    html_latin1_entity,
+                                )?;
                                 match attr.key.local_name().as_ref() {
                                     b"bytes" => seg.bytes = val.trim().parse().unwrap_or(0),
                                     b"number" => seg.number = val.trim().parse().unwrap_or(0),
@@ -1335,6 +1352,41 @@ POST]]></segment>
 
         let plain = Nzb::parse(sample()).unwrap();
         assert_eq!(plain.password(), None);
+    }
+
+    /// The parser applies XML attribute-value normalization, and a
+    /// comment claimed for months that it did not. Both halves are
+    /// pinned here so the next reader can see the rule rather than the
+    /// claim: a LITERAL tab (or CR, or LF) inside an attribute is a
+    /// space by the time we see it, and a numeric character reference
+    /// survives untouched - that is the escape hatch a producer who
+    /// really means a tab has to use. Covers `subject` and `poster`
+    /// (one `<file>` attribute route) and `<meta type=>` (the other).
+    #[test]
+    fn subject_whitespace_is_normalized_per_xml_spec() {
+        let xml = b"<?xml version=\"1.0\"?>
+<nzb>
+  <head><meta type=\"pass\tword\">hunter2</meta></head>
+  <file subject=\"a\tb\r\nc\" poster=\"p\tq\" date=\"1700000000\">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes=\"1\" number=\"1\">a@b</segment></segments>
+  </file>
+  <file subject=\"a&#9;b\" poster=\"p\" date=\"1700000000\">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes=\"1\" number=\"1\">c@d</segment></segments>
+  </file>
+</nzb>";
+        let nzb = Nzb::parse(xml).expect("parses");
+        // Literal tab -> space; CRLF is one space, not two.
+        assert_eq!(nzb.files[0].subject, "a b c");
+        assert_eq!(nzb.files[0].poster, "p q");
+        // A character reference is NOT normalization input, so it lands
+        // as the byte the producer asked for.
+        assert_eq!(nzb.files[1].subject, "a\tb");
+        // The meta `type=` attribute takes the same route (and is
+        // lowercased and trimmed after, which does not touch interior
+        // whitespace).
+        assert_eq!(nzb.meta[0].0, "pass word");
     }
 
     #[test]

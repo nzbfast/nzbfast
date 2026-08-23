@@ -1150,7 +1150,7 @@ mod tests {
     // download and CLI paths actually run, so every verdict it reaches has
     // to be the reference's verdict, byte for byte. The fixture-driven
     // half of this differential - real par2cmdline output, choked reads,
-    // corrupt/short/empty inputs - lives in tests/par2_parse.rs; this half
+    // corrupt/short/empty inputs - lives in tests/integration/par2_parse.rs; this half
     // covers what a 33 KiB fixture cannot reach: a file several read
     // windows long, whose blocks straddle those windows at an offset that
     // never repeats.

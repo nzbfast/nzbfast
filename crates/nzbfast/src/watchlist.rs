@@ -11,7 +11,8 @@
 //!
 //! This module is the pure half - item model, quality ranking over
 //! `wall::Parsed`, matching, and the grab/upgrade/skip decision - so it
-//! is unit-testable without a daemon. The loop lives in serve.rs.
+//! is unit-testable without a daemon. The loop (`watchlist_pass`) lives
+//! in serve/watchlist.rs.
 //!
 //! What a "slot" is - the unit the watcher tracks one grab against - is
 //! the other half of the model: a film, an episode, a whole season when

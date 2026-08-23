@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.2.1"
+version = "1.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -50,17 +50,17 @@ ureq = "2"
 # Update-manifest binary verification (auto-update): sha256 for payload
 # integrity, ed25519 for manifest authenticity (a signature the update
 # origin cannot forge without the offline signing key).
-sha2 = "0.10"
+sha2 = "0.11"
 # §129 4a webhook signing (X-NzbFast-Signature). Already in the lockfile
 # via nzbkit's RAR5 crypto - no new dependency tree.
-hmac = "0.12"
-ed25519-dalek = "2"
+hmac = "0.13"
+ed25519-dalek = "3"
 hex = "0.4"
 # OS entropy for the first-run API key. That key is the only thing
 # standing between a LAN and the daemon's full control API, so it must
 # come from the platform CSPRNG - not from RandomState (see fresh_secret,
 # which is fine for a capability URL and is NOT used here).
-getrandom = "0.2"
+getrandom = "0.4"
 # IMDb datasets ratings file is gzip'd TSV (keyless nightly download),
 # and serve/webasset.rs gzips the embedded pages at respond time - so
 # this is unconditional now (nzbkit already depends on it regardless,
@@ -129,6 +129,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     # GetLocalTime, for the quota ledger's local-midnight rollover.
     "Win32_System_SystemInformation",
+    # serve/peeracct.rs: which account owns the far end of a loopback
+    # connection (GetExtendedTcpTable -> pid -> token user SID), the
+    # second factor on the first-run handoff token.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }
 
 # Kernel TLS, Linux only and off by default - see nzbkit's `ktls`
@@ -166,7 +173,7 @@ flate2 = "1"
 # in examples/update_sign.rs so the daemon and the release pipeline use
 # the exact same ed25519 implementation. getrandom seeds keygen.
 [dev-dependencies]
-getrandom = "0.2"
+getrandom = "0.4"
 # TLS daemon tests (§129 2a): rcgen mints the test certificate (end-entity,
 # basicConstraints CA:FALSE by construction - the CaUsedAsEndEntity trap a
 # hand-run `openssl req -x509` falls into), and rustls is the verifying

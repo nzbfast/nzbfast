@@ -136,12 +136,27 @@ fn inflict(dir: &Path, sets: usize) {
     }
 }
 
-fn rusage() -> (f64, f64, i64) {
-    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
-    let s = ru.ru_utime.tv_sec as f64 + ru.ru_utime.tv_usec as f64 / 1e6;
-    let y = ru.ru_stime.tv_sec as f64 + ru.ru_stime.tv_usec as f64 / 1e6;
-    (s, y, ru.ru_maxrss)
+/// Process CPU seconds (user + system) and peak RSS in BYTES, both from
+/// `nzbkit::mem`.
+///
+/// This called `libc::getrusage` directly, which does not exist on
+/// Windows - and `windows-clippy` and `windows-build` compile
+/// `--all-targets`, so an example was enough to hold both jobs red. The
+/// library's own helpers carry the Windows equivalents (GetProcessTimes
+/// / peak working set), so the harness now builds and measures
+/// everywhere rather than being gated off.
+///
+/// The user/system split goes with it - `cpu_time_secs` reports the sum,
+/// which is the number the B2/B3 results were quoted in anyway - and
+/// `mem::peak_rss` normalises the one `getrusage` field whose unit is
+/// per-platform: `ru_maxrss` is bytes on Apple and kilobytes on every
+/// other unix, so the raw value this used to print was 1024x low on
+/// Linux.
+fn cpu_rss() -> (f64, u64) {
+    (
+        nzbkit::mem::cpu_time_secs().unwrap_or(0.0),
+        nzbkit::mem::peak_rss().unwrap_or(0),
+    )
 }
 
 fn main() {
@@ -188,7 +203,7 @@ fn main() {
         "run" => {
             let sets: usize = args[3].parse().unwrap();
             inflict(&dir, sets);
-            let (u0, s0, _) = rusage();
+            let (cpu0, _) = cpu_rss();
             let t0 = std::time::Instant::now();
             let results = nzbkit::par2repair::repair_present_sets(&dir).unwrap();
             let repaired = results
@@ -198,16 +213,15 @@ fn main() {
             let names = nzbkit::par2repair::covered_names(&dir).unwrap();
             let sniffed = nzbkit::par2repair::sniffed_packet_files(&dir).unwrap();
             let wall = t0.elapsed();
-            let (u1, s1, rss) = rusage();
+            let (cpu1, rss) = cpu_rss();
             assert_eq!(results.len(), sets, "every set qualifies");
             assert_eq!(repaired, sets, "every set repaired");
             println!(
-                "sets={sets} repaired={repaired} names={} sniffed={} wall={:.3}s user={:.3}s sys={:.3}s maxrss={}MB",
+                "sets={sets} repaired={repaired} names={} sniffed={} wall={:.3}s cpu={:.3}s maxrss={}MB",
                 names.len(),
                 sniffed.len(),
                 wall.as_secs_f64(),
-                u1 - u0,
-                s1 - s0,
+                cpu1 - cpu0,
                 rss / (1 << 20),
             );
         }

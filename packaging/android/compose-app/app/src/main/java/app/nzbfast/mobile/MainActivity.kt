@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
      *  in a PiP window instead of stopping. Only the player earns it -
      *  minimizing a queue screen should just minimize. */
     override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
         if (screen is Screen.Player) {
             enterPictureInPictureMode(
                 android.app.PictureInPictureParams.Builder().build()

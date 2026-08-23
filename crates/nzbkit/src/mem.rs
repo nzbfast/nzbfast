@@ -180,6 +180,21 @@ pub fn cgroup_mem_limit() -> Option<u64> {
     None
 }
 
+/// `123`, `700M`, `2400M`, `2G` - DECIMAL suffixes, the same units
+/// `--mem-limit` takes (`serve::parse_size`: M = 1e6, not 1 MiB). Local
+/// rather than shared with that parser because nzbkit does not depend on
+/// the nzbfast crate, and the only caller is a bench override.
+fn parse_decimal_size(v: &str) -> Option<usize> {
+    let (digits, mult) = match v.as_bytes().last()? {
+        b'k' | b'K' => (&v[..v.len() - 1], 1_000u64),
+        b'm' | b'M' => (&v[..v.len() - 1], 1_000_000),
+        b'g' | b'G' => (&v[..v.len() - 1], 1_000_000_000),
+        _ => (v, 1),
+    };
+    let n: u64 = digits.trim().parse().ok()?;
+    usize::try_from(n.checked_mul(mult)?).ok()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MemBudget {
     pub total: u64,
@@ -259,7 +274,27 @@ impl MemBudget {
         // `fit_address_space` already keeps the total in range, so this
         // is the belt: a cap that saturates is merely generous, a cap
         // that wraps is arbitrary.
-        usize::try_from(self.total / 100 * 45).unwrap_or(usize::MAX)
+        let natural = usize::try_from(self.total / 100 * 45).unwrap_or(usize::MAX);
+        // Bench override only (TODO 219 follow-up, 23 Aug 2026), and
+        // REDUCE-only so every budget invariant above still holds. The
+        // A/B that prices the in-stream chase against the disk route
+        // needs the holds cap on one side of the chain and the other,
+        // with NOTHING else moved: `--mem-limit` also moves
+        // `bufpool_bufs`, `channel_depth`, `inflight_cap`,
+        // `partials_cap`, `repair_cap` and the rars execution policy,
+        // so a ladder rung is five confounds wide. This is the same
+        // reduction the holds LEDGER applies to a successor pipeline
+        // (`set_holds_cap`), reachable from a single-job `get` leg.
+        // Parsed like `--mem-limit`: decimal K/M/G suffixes.
+        static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        match OVERRIDE.get_or_init(|| {
+            std::env::var("NZBFAST_HOLDS_CAP")
+                .ok()
+                .and_then(|v| parse_decimal_size(v.trim()))
+        }) {
+            Some(cap) => (*cap).min(natural),
+            None => natural,
+        }
     }
 
     /// Verifier partial-block ceiling, GLOBAL across all slots (spill:
@@ -271,6 +306,17 @@ impl MemBudget {
     /// Body-buffer pool retention count (~800 KB each; spill: plain
     /// allocate/free, the allocator absorbs the churn).
     pub fn bufpool_bufs(&self) -> usize {
+        // Bench override only (memfloor levers, 22 Aug 2026): 0 disables
+        // retention entirely (plain allocate/free per article).
+        static OVERRIDE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        if let Some(d) = OVERRIDE.get_or_init(|| {
+            std::env::var("NZBFAST_BUFPOOL_BUFS")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map(|d| d.min(8192))
+        }) {
+            return *d;
+        }
         ((self.total / 100 * 15) / (800 * 1024)).clamp(32, 512) as usize
     }
 
@@ -345,9 +391,27 @@ impl MemBudget {
 /// entry point goes through this so a memory-constrained host never selects
 /// a flat plan it cannot afford and a big host may exceed rars' built-in
 /// flat cap.
+///
+/// It also picks the split-member BLAKE2sp seeding. The in-stream chase
+/// decodes a split member through a growing chain, so it has to decide
+/// whether to hash before it has read the finish fragment that says whether
+/// any digest was ever recorded - and the safe answer, hashing regardless,
+/// costs a whole-payload BLAKE2sp that is then thrown away on every set
+/// written with `rar`'s DEFAULT switches (`Pack-CRC32`, no hash line), which
+/// is what a posted set normally is. Measured on an Apple M3 at +4.22 G
+/// instructions per GB unpacked and +5.83 G paced, against ~42 G for the
+/// decode itself; it is the whole of the gap between the chase and the
+/// volumes-on-disk route, which holds the finish fragment and so never
+/// hashes an unstamped set. `FirstFragment` takes the first fragment's
+/// header as the set's answer, which is exact for every WinRAR 7.21 and
+/// rar 7.23 set measured (both stamp EVERY fragment of a `-htb` set and
+/// none without it) and inexact only for the rars writer's own split sets,
+/// which stamp the finish fragment alone - those keep their CRC32 check and
+/// lose the BLAKE2sp one. Posted archives do not come from the rars writer.
 pub fn rar_read_options(password: Option<&[u8]>) -> rars::ArchiveReadOptions<'_> {
     rars::ArchiveReadOptions::with_optional_password(password)
         .with_rar50_execution_policy(process_budget().rar_execution_policy())
+        .with_rar50_split_hash_seeding(rars::Rar50SplitHashSeeding::FirstFragment)
 }
 
 /// The budget this process resolved at startup, in bytes; 0 until set.
@@ -371,6 +435,187 @@ pub fn process_budget() -> MemBudget {
         0 => MemBudget::auto(),
         total => MemBudget { total },
     }
+}
+
+/// The budget an entry point actually PUBLISHED, or `None` when none has.
+///
+/// [`process_budget`] substitutes [`MemBudget::auto`] for the unpublished
+/// case, which is right for a leaf consumer that must pick SOME figure.
+/// This is for the one consumer that must tell the two apart: a default
+/// that reads `auto` is host-derived, so the same code would demote on a
+/// 4 GB CI runner and not on a 128 GB dev box - see the extractor's
+/// `default_holds_cap` (TODO 260) for why that distinction is load-bearing.
+pub fn published_budget() -> Option<MemBudget> {
+    match PROCESS_BUDGET.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        total => Some(MemBudget { total }),
+    }
+}
+
+/// Outstanding LZMA decode-window bytes, process-wide. An LZMA (zip
+/// method 14) decoder allocates its whole dictionary window in one
+/// `try_reserve_exact` - up to `LZMA_DICT_MAX` (256 MiB) per legitimate
+/// `-mx=9` entry - and that allocation lives inside the decoder, entirely
+/// outside `MemBudget`. A one-pass NESTED chase decodes each level on its
+/// own thread while feeding the level below, so N method-14 levels hold N
+/// windows LIVE AT ONCE: measured 22 Aug 2026 as EXACTLY 5 x 256 MiB =
+/// 1.25 GiB against a pinned 256 MiB budget, with zero refusals
+/// (`research/NOTE-2026-08-22-lzma-dict-window-rss.md`, the tracking-
+/// allocator rig `tests/lzma_dict_window_rss.rs`, TODO 209 items 2 & 3).
+/// This gauge makes those windows visible and bounds their sum.
+static LZMA_DICT_OUTSTANDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// High-water mark of [`LZMA_DICT_OUTSTANDING`], for observability - the
+/// peak simultaneous dictionary-window bytes this process has held. The
+/// pre-fix rig peaked here at 5 x 256 MiB; the budget now holds it to one
+/// window under a floor-sized budget (TODO 209).
+static LZMA_DICT_PEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Live LZMA dictionary-window bytes charged against the process budget.
+/// The window is otherwise invisible to `MemBudget`; this is the answer to
+/// TODO 209 item 3 ("should the window be visible to `MemBudget`?").
+pub fn lzma_dict_outstanding() -> u64 {
+    LZMA_DICT_OUTSTANDING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Peak simultaneous LZMA dictionary-window bytes since process start.
+pub fn lzma_dict_peak() -> u64 {
+    LZMA_DICT_PEAK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A reserved slice of the LZMA dictionary budget; releases on drop.
+#[derive(Debug)]
+pub struct LzmaDictCharge(u64);
+
+impl Drop for LzmaDictCharge {
+    fn drop(&mut self) {
+        LZMA_DICT_OUTSTANDING.fetch_sub(self.0, std::sync::atomic::Ordering::Relaxed);
+        // Take the wakeup lock before notifying. A waiter re-tests
+        // admission while holding it, so a release can never land in the
+        // gap between that failed test and the wait that follows.
+        {
+            use crate::sync::MutexExt;
+            drop(LZMA_DICT_FREED.0.lock_ok());
+        }
+        LZMA_DICT_FREED.1.notify_all();
+    }
+}
+
+/// Wakeup for [`charge_lzma_dict_waiting`], signalled when a charge is
+/// released. The mutex guards nothing - the gauge is atomic - it exists
+/// only so a waiter cannot miss a notification.
+static LZMA_DICT_FREED: (std::sync::Mutex<()>, std::sync::Condvar) =
+    (std::sync::Mutex::new(()), std::sync::Condvar::new());
+
+/// How long a materialized disk decode waits for the window before it
+/// charges anyway. The wait exists so a valid archive is not filed as a
+/// gap because some other decode held the budget at that instant; the
+/// deadline exists so a stream of speculative chase windows can never
+/// starve that disk pass outright. One extra window is strictly cheaper
+/// than failing an extraction that would otherwise succeed.
+const LZMA_DICT_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Reserve `need` bytes of window for a decode that has NO lower rung,
+/// waiting for the budget rather than refusing.
+///
+/// This is the disk reader's admission mode. The chase can demote a
+/// refusal to the sequential disk pass; the disk pass has nowhere to
+/// demote to, and `rarfix`'s entry pool (up to four workers) plus the
+/// queue hand-over (an older job's post-processing overlaps the newer
+/// job's chase) both put a second window against the gauge while it
+/// decodes. Refusing there turns a structurally valid method-14 zip into
+/// a `ZipGap`, which is what this waits to avoid.
+///
+/// Never called from a decode that already holds a charge - each disk
+/// level is materialized before the next is opened - so the wait cannot
+/// be on itself; the deadline bounds it regardless.
+pub fn charge_lzma_dict_waiting(need: u64) -> LzmaDictCharge {
+    use crate::sync::MutexExt;
+    if let Some(c) = charge_lzma_dict(need) {
+        return c;
+    }
+    let deadline = std::time::Instant::now() + LZMA_DICT_WAIT_MAX;
+    let mut g = LZMA_DICT_FREED.0.lock_ok();
+    loop {
+        if let Some(c) = charge_lzma_dict(need) {
+            return c;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        g = LZMA_DICT_FREED
+            .1
+            .wait_timeout(g, deadline - now)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    drop(g);
+    tracing::warn!(
+        target: "unpack",
+        "lzma dictionary budget still held after {}s - decoding anyway rather \
+         than failing a valid archive",
+        LZMA_DICT_WAIT_MAX.as_secs()
+    );
+    force_lzma_dict(need)
+}
+
+/// Charge `need` past the admission rule, for the deadline arm above.
+fn force_lzma_dict(need: u64) -> LzmaDictCharge {
+    use std::sync::atomic::Ordering::Relaxed;
+    let cur = LZMA_DICT_OUTSTANDING
+        .fetch_add(need, Relaxed)
+        .saturating_add(need);
+    LZMA_DICT_PEAK.fetch_max(cur, Relaxed);
+    LzmaDictCharge(need)
+}
+
+/// Reserve `need` bytes of LZMA dictionary window against the process
+/// budget, or return `None` when it will not fit.
+///
+/// The FIRST outstanding window is always admitted: a single `-mx=9`
+/// entry needs its full 256 MiB and cannot decode in less, so refusing it
+/// would fail a legitimate archive. Only an ADDITIONAL, concurrent window
+/// - the nested one-pass chase's stacking - is refused once the sum would
+/// exceed the budget; that caller demotes the container to the sequential
+/// disk pass, which produces identical output.
+///
+/// This is the TRY-ONCE mode, and it is for callers that HAVE that lower
+/// rung. The gauge is process-global, not per-job, so the disk pass does
+/// NOT observe a zero gauge: `rarfix` runs an archive's entries on a pool
+/// of up to four workers, and the queue hand-over overlaps an older job's
+/// post-processing with the newer job's chase. A caller with nowhere to
+/// demote to takes [`charge_lzma_dict_waiting`] instead.
+pub fn charge_lzma_dict(need: u64) -> Option<LzmaDictCharge> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let cap = process_budget().total;
+    let mut cur = LZMA_DICT_OUTSTANDING.load(Relaxed);
+    loop {
+        if !dict_charge_admits(cur, need, cap) {
+            return None;
+        }
+        match LZMA_DICT_OUTSTANDING.compare_exchange_weak(
+            cur,
+            cur.saturating_add(need),
+            Relaxed,
+            Relaxed,
+        ) {
+            Ok(_) => {
+                LZMA_DICT_PEAK.fetch_max(cur.saturating_add(need), Relaxed);
+                return Some(LzmaDictCharge(need));
+            }
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
+/// Admission predicate for [`charge_lzma_dict`], factored out so the rule
+/// is testable without the process-global gauge. `cur == 0` always admits
+/// - a single window must decode on any box, and it is what keeps
+/// [`charge_lzma_dict_waiting`] from waiting forever - while an additional
+/// window is admitted only while the running sum stays within `cap`.
+fn dict_charge_admits(cur: u64, need: u64, cap: u64) -> bool {
+    cur == 0 || cur.saturating_add(need) <= cap
 }
 
 /// B4: RAM-tiered caps on job concurrency (connections per server,
@@ -619,6 +864,9 @@ pub fn dashboard_rss() -> Option<u64> {
 /// dashboard's RAM line and starves nothing proactively. macOS reports
 /// bytes released; glibc's malloc_trim only reports whether anything was
 /// released (surfaced as 0 here); other platforms are a no-op.
+// Not #[expect]: the tail is genuinely unreachable only on macOS.
+// Linux and Windows fall through to it and the expectation goes
+// unfulfilled.
 #[allow(unreachable_code)]
 pub fn trim() -> u64 {
     #[cfg(target_os = "macos")]
@@ -649,18 +897,29 @@ pub fn trim() -> u64 {
 /// Total CPU time (user + system) this process has consumed, in seconds.
 /// Deltas between samples over wall time give the process CPU%.
 pub fn cpu_time_secs() -> Option<f64> {
+    cpu_user_sys_secs().map(|(user, sys)| user + sys)
+}
+
+/// The same charge, split into (user, system) seconds.
+///
+/// The split is not decoration: a measurement rig timing a loopback
+/// path pays most of its system time inside the mock server and the
+/// kernel, which swings run to run, so `tests/delivery_cost.rs` takes
+/// its median on USER time alone. That rig used to call `getrusage`
+/// itself, which does not exist on Windows and (with `--all-targets`)
+/// held `windows-clippy` red; both halves are already here on both
+/// platforms, so it can ask for them instead.
+pub fn cpu_user_sys_secs() -> Option<(f64, f64)> {
     #[cfg(unix)]
     // SAFETY: libc::rusage is plain data (integer fields only) so zeroed()
     // is a valid value, and getrusage writes through a valid &mut pointer.
     unsafe {
         let mut ru: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &mut ru) == 0 {
-            return Some(
-                ru.ru_utime.tv_sec as f64
-                    + ru.ru_utime.tv_usec as f64 / 1e6
-                    + ru.ru_stime.tv_sec as f64
-                    + ru.ru_stime.tv_usec as f64 / 1e6,
-            );
+            return Some((
+                ru.ru_utime.tv_sec as f64 + ru.ru_utime.tv_usec as f64 / 1e6,
+                ru.ru_stime.tv_sec as f64 + ru.ru_stime.tv_usec as f64 / 1e6,
+            ));
         }
     }
     #[cfg(windows)]
@@ -702,7 +961,7 @@ pub fn cpu_time_secs() -> Option<f64> {
             FileTime::default(),
         );
         if GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) != 0 {
-            return Some(k.secs() + u.secs());
+            return Some((u.secs(), k.secs()));
         }
     }
     None
@@ -809,6 +1068,29 @@ mod tests {
         assert!(b.holds_cap() + b.partials_cap() < b.total as usize);
         // And a budget UNDER the ceiling is untouched.
         assert_eq!(MemBudget::with_total(512 << 20).total, 512 << 20);
+    }
+
+    /// The `NZBFAST_HOLDS_CAP` bench override takes `--mem-limit`'s
+    /// DECIMAL units, and the override itself is reduce-only (asserted
+    /// at the call site by `min(natural)`) so no budget invariant moves.
+    /// Parsing is tested rather than the env read: the override latches
+    /// in a process-wide `OnceLock`, so a test that set the variable
+    /// would decide the value for every other test in the binary.
+    #[test]
+    fn holds_cap_override_parses_decimal_sizes() {
+        assert_eq!(parse_decimal_size("400M"), Some(400_000_000));
+        assert_eq!(parse_decimal_size("2400m"), Some(2_400_000_000));
+        assert_eq!(parse_decimal_size("2G"), Some(2_000_000_000));
+        assert_eq!(parse_decimal_size("512K"), Some(512_000));
+        assert_eq!(parse_decimal_size("1024"), Some(1024));
+        assert_eq!(parse_decimal_size(""), None);
+        assert_eq!(parse_decimal_size("M"), None);
+        assert_eq!(parse_decimal_size("1.5G"), None);
+        assert_eq!(parse_decimal_size("18446744073709551615G"), None);
+        // Reduce-only: an override ABOVE the natural slice is ignored,
+        // which is what keeps `holds_cap + partials_cap < total`.
+        let b = MemBudget::with_total(1 << 30);
+        assert_eq!(b.holds_cap(), (1u64 << 30) as usize / 100 * 45);
     }
 
     #[test]
@@ -1001,5 +1283,37 @@ mod tests {
         drop(bufs);
         trim();
         trim(); // idempotent on an already-trimmed heap
+    }
+}
+
+#[cfg(test)]
+mod lzma_dict_budget_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_window_always_admits_even_over_budget() {
+        // A single -mx=9 window (256 MiB) must decode under any budget,
+        // including a 64 MiB --mem-limit, or a legitimate archive fails.
+        assert!(dict_charge_admits(0, 256 << 20, 64 << 20));
+        assert!(dict_charge_admits(0, u64::MAX, 1));
+    }
+
+    #[test]
+    fn a_concurrent_window_is_bounded_by_the_budget() {
+        let cap = 256 << 20;
+        // One 256 MiB window is live; a second would make 512 MiB > cap.
+        assert!(!dict_charge_admits(256 << 20, 256 << 20, cap));
+        // A second window that still fits is admitted.
+        assert!(dict_charge_admits(64 << 20, 64 << 20, 256 << 20));
+        // Exactly at the cap admits (<=), one byte over does not.
+        assert!(dict_charge_admits(128 << 20, 128 << 20, 256 << 20));
+        assert!(!dict_charge_admits(128 << 20, (128 << 20) + 1, 256 << 20));
+    }
+
+    #[test]
+    fn overflow_saturates_rather_than_wraps() {
+        // Without saturation `(MAX-1) + 2` would wrap to 1 and slip under
+        // a small cap; saturating_add pins it at MAX so it is refused.
+        assert!(!dict_charge_admits(u64::MAX - 1, 2, 100));
     }
 }

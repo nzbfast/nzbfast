@@ -35,8 +35,8 @@ pub struct MediaFacts {
     /// nameless payload can say about itself: a muxer writes it at
     /// encode time and a reposter who scrambled the subject line rarely
     /// reaches inside to clear it. A caller that gets a usable Title has
-    /// no business asking a catalogue anything. See
-    /// [`crate::mkv::read_title`] for what "usable" excludes.
+    /// no business asking a catalogue anything. See `read_title` in
+    /// [`crate::mkv`] for what "usable" excludes.
     pub title: Option<String>,
     /// Normalised video codec of the first video track ("h264", "h265",
     /// "av1", "vp9", "mpeg2", "mpeg4", "vc1"), or the raw lowercased id

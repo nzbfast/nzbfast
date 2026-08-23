@@ -152,6 +152,18 @@ pub struct Chaos {
     /// dead-air shape a flat read timeout waits full length on, and the
     /// adaptive TTFB budget cuts short). Retries succeed, like `stall`.
     pub stall_pre: HashSet<String>,
+    /// Ids whose FIRST body arrives in two halves with `gap_ms` of
+    /// silence between them - the starved-share shape of TODO 208.2:
+    /// bytes, then nothing, then the rest, on a connection that is
+    /// alive the whole time (a socket on the losing side of a 360-way
+    /// share through a small queue sits in TCP backoff for tens of
+    /// seconds with nothing wrong on either end). Retries serve whole,
+    /// like `stall`, so a client that kills the read at its stall
+    /// deadline still finishes - one reconnect and one discarded half
+    /// body later.
+    pub gap: HashSet<String>,
+    /// The silence `gap` opens, in ms.
+    pub gap_ms: u64,
     /// Brownout: once this many bodies have been served (across all
     /// connections), EVERY further BODY request hangs in dead air - the
     /// whole frontend goes mute mid-run and never comes back. 0 = off.
@@ -477,7 +489,8 @@ pub struct PostChaos {
 
 /// Shared counters for one server, across every connection of it:
 /// POST/IHAVE command lines seen, articles read off the wire, STATs
-/// answered, and body bytes written back.
+/// answered, and the DATE log. Body bytes are NOT here: they are
+/// charged on the pacing funnel, in [`ThrottleState::bytes_out`].
 #[derive(Default)]
 struct Counters {
     commands: AtomicU64,
@@ -606,7 +619,7 @@ pub struct MockServer {
     pub date_log: Arc<std::sync::Mutex<Vec<u64>>>,
     /// Body bytes this server put on the wire, across all connections -
     /// the independent witness for the §129 3c provider-accounting
-    /// clause (see [`Counters::bytes_out`]).
+    /// clause (see [`ThrottleState::bytes_out`]).
     pub bytes_out: Arc<AtomicU64>,
     /// Every BODY request's message-id (with angle brackets) in arrival
     /// order, across all connections - the M11 tests assert queue-order
@@ -689,6 +702,8 @@ impl MockServer {
             Arc::new(std::sync::Mutex::new(chaos.stall.clone()));
         let stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>> =
             Arc::new(std::sync::Mutex::new(chaos.stall_pre.clone()));
+        let gap_once: Arc<std::sync::Mutex<HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(chaos.gap.clone()));
         let pause: Arc<std::sync::atomic::AtomicBool> = Default::default();
         let pause2 = pause.clone();
         let accepted = Arc::new(AtomicU64::new(0));
@@ -727,6 +742,7 @@ impl MockServer {
                 let body_log = body_log2.clone();
                 let stall_once = stall_once.clone();
                 let stall_pre_once = stall_pre_once.clone();
+                let gap_once = gap_once.clone();
                 let pause = pause2.clone();
                 let counters = counters.clone();
                 let ts = throttle_state.clone();
@@ -800,6 +816,7 @@ impl MockServer {
                         body_log,
                         stall_once,
                         stall_pre_once,
+                        gap_once,
                         pause,
                         counters,
                         ts.clone(),
@@ -1039,7 +1056,7 @@ enum Served {
 /// re-synchronised by hand and then kept in step by a comment asking
 /// the next person to remember. One body instead, so a hook cannot land
 /// on one arm only.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn serve_article(
     w: &mut tokio::net::tcp::OwnedWriteHalf,
     fetch: Fetch,
@@ -1054,6 +1071,7 @@ async fn serve_article(
     body_log: &Arc<std::sync::Mutex<Vec<String>>>,
     stall_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: &Arc<std::sync::Mutex<HashSet<String>>>,
+    gap_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     throttle: &Arc<ThrottleState>,
 ) -> std::io::Result<Served> {
     let nth = {
@@ -1177,6 +1195,22 @@ async fn serve_article(
         w.write_all(&wire).await?;
         return Ok(Served::Hangup); // cut the connection mid-body
     }
+    if gap_once.lock_ok().remove(id) {
+        // Starved share: half the body, a silence, then the rest -
+        // paced like any other body on either side of the gap.
+        let (head, tail) = wire.split_at(wire.len() / 2);
+        throttle
+            .pace_write(&chaos.throttle, conn_next, w, head)
+            .await?;
+        w.flush().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(chaos.gap_ms)).await;
+        throttle
+            .pace_write(&chaos.throttle, conn_next, w, tail)
+            .await?;
+        served.fetch_add(1, Ordering::Relaxed);
+        *bodies_served += 1;
+        return Ok(Served::Answered);
+    }
     // Slow-start trickle: a young connection is paced at the
     // crawl rate instead of its normal ceiling.
     let in_slow_start = chaos
@@ -1201,7 +1235,7 @@ async fn serve_article(
     Ok(Served::Answered)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn serve_conn(
     sock: tokio::net::TcpStream,
     conn_no: u64,
@@ -1212,6 +1246,7 @@ async fn serve_conn(
     body_log: Arc<std::sync::Mutex<Vec<String>>>,
     stall_once: Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    gap_once: Arc<std::sync::Mutex<HashSet<String>>>,
     pause: Arc<std::sync::atomic::AtomicBool>,
     counters: Arc<Counters>,
     throttle: Arc<ThrottleState>,
@@ -1402,6 +1437,22 @@ async fn serve_conn(
                     None => w.write_all(b"436 transfer failed\r\n").await?,
                 }
             }
+        } else if upper.starts_with("HELP") {
+            // RFC 3977 makes HELP mandatory, and a third-party client
+            // may send it as part of its handshake and treat a refusal
+            // as fatal. Newsbin Pro 6.90 does exactly that: against the
+            // 500 this arm replaced it logged "NEWS SERVER ERROR ...
+            // Cmd: HELP" once per connection and abandoned the job,
+            // which reads as a dead server rather than a missing
+            // command. Our own client never sends it, so nothing in
+            // this tree noticed until a commercial client was pointed
+            // at the loopback rig (23 Aug 2026).
+            w.write_all(b"100 help text follows\r\nARTICLE\r\nBODY\r\nGROUP\r\nQUIT\r\n.\r\n")
+                .await?;
+        } else if upper.starts_with("MODE READER") {
+            // Same class: legal, common in a client handshake, and
+            // answered 500 here until the same day.
+            w.write_all(b"200 reader mode\r\n").await?;
         } else if upper.starts_with("CAPABILITIES") {
             w.write_all(b"101 capabilities\r\nVERSION 2\r\nPIPELINING\r\n.\r\n")
                 .await?;
@@ -1454,6 +1505,7 @@ async fn serve_conn(
                 &body_log,
                 &stall_once,
                 &stall_pre_once,
+                &gap_once,
                 &throttle,
             )
             .await?
@@ -1484,6 +1536,7 @@ async fn serve_conn(
                 &body_log,
                 &stall_once,
                 &stall_pre_once,
+                &gap_once,
                 &throttle,
             )
             .await?

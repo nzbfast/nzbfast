@@ -120,8 +120,9 @@ impl Daemon {
             }
         });
     }
-    /// [`Self::run_post_job_hooks`], fenced to the round of the record's
-    /// life the caller started on.
+    /// The post-job hook fan-out, fenced to the round of the record's
+    /// life the caller started on. There is deliberately no unfenced
+    /// spelling: 5ac9c747b retired it as the footgun H1 was about.
     ///
     /// A job ends in a long-running tail, and a delete verb plus a retry
     /// can hand that record to a new generation while the tail is still
@@ -1115,22 +1116,6 @@ mod tests {
         assert!(o.error.contains("HTTP 404"), "{}", o.error);
     }
 
-    /// The hook fan-out must belong to the round the caller planned it
-    /// from - and must describe THAT round, not whatever the record has
-    /// become by the time a slow pp-script returns.
-    ///
-    /// The generation was checked while the plan was built and then the
-    /// worker was detached: the caller parks immediately, so a delete
-    /// verb plus a Retry lands between the two and the script then runs
-    /// inside a live download's folder while the targets are told a
-    /// queued release has finished. And the notify context was read
-    /// LIVE, after the script - which for the documented slow script
-    /// ("it may still be moving or renaming files") described the record
-    /// as it was minutes later: status "Failed", an empty error, and a
-    /// directory the plan never saw (Codex sweep 3, H3).
-    ///
-    /// Both halves in one test on purpose: a fence that declined
-    /// everything would pass the first assert and silence every real
     /// The DETACHED worker's script must survive its own caller's park.
     ///
     /// 18 Aug sweep. `retried_since` exists because the hook worker is
@@ -1220,6 +1205,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The hook fan-out must belong to the round the caller planned it
+    /// from - and must describe THAT round, not whatever the record has
+    /// become by the time a slow pp-script returns.
+    ///
+    /// The generation was checked while the plan was built and then the
+    /// worker was detached: the caller parks immediately, so a delete
+    /// verb plus a Retry lands between the two and the script then runs
+    /// inside a live download's folder while the targets are told a
+    /// queued release has finished. And the notify context was read
+    /// LIVE, after the script - which for the documented slow script
+    /// ("it may still be moving or renaming files") described the record
+    /// as it was minutes later: status "Failed", an empty error, and a
+    /// directory the plan never saw (Codex sweep 3, H3).
+    ///
+    /// Both halves in one test on purpose: a fence that declined
+    /// everything would pass the first assert and silence every real
     /// completion notification.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_hook_fan_out_is_fenced_and_describes_the_round_it_was_planned_from() {

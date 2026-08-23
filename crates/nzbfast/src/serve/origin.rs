@@ -47,6 +47,63 @@ pub(super) fn is_arr_origin(origin: &str) -> bool {
     origin == "arr" || origin.starts_with("arr:")
 }
 
+/// Was this job grabbed by the M23 watchlist watcher?
+///
+/// Two spellings, for the same reason [`is_arr_origin`] has two: a grab
+/// made before the detail below landed carries the bare `watchlist`, and
+/// records already in `queue.json` and history are never rewritten.
+pub(super) fn is_watchlist_origin(origin: &str) -> bool {
+    origin == "watchlist" || origin.starts_with("watchlist:")
+}
+
+/// Longest a single field of a watchlist origin's detail may be.
+///
+/// The title is the user's own watchlist entry, or one synced from Plex
+/// or Trakt, so it is not length-bounded at the source; a custom
+/// category's slot is an identity key that can run long for the same
+/// reason. This whole string is persisted per job and rendered in the
+/// drawer, so each field is capped rather than the total - a long title
+/// must not be able to push the slot and the quality out of the record.
+const WATCHLIST_FIELD_MAX: usize = 60;
+
+/// Origin to record for a watchlist grab: `watchlist:<slot>|<quality>|<title>`.
+///
+/// TODO 44's optional follow-up. The coarse `watchlist` answered "your
+/// watchlist put this here" and stopped, so "did my watchlist grab this,
+/// and for WHICH slot?" was a question only the log could answer, and
+/// only while the line was still in the ring.
+///
+/// The `prefix:detail` shape is the one `rss:<feed-url>` and
+/// `arr:<client>` already use, so this needs no new `Job` field, no
+/// `queue.json` migration and no history rewrite: an older record keeps
+/// the bare `watchlist` and still renders, and every check on the origin
+/// goes through [`is_watchlist_origin`], which takes both.
+///
+/// `|` is the field separator because none of the three can contain one:
+/// a slot is `s01e02` / `s01` / `movie` / `d:20260721` / `c:<key>`, a
+/// quality label is `2160p REMUX`-shaped, and the title is stripped here.
+/// Stripping happens at the point the string is BUILT, exactly as
+/// `api_client` sanitises the user-agent there and not downstream -
+/// nothing that reads this re-checks it.
+///
+/// All three empty gives back the bare `watchlist` rather than
+/// `watchlist:||`, so an item with nothing to say reads as it always did.
+pub(super) fn watchlist_origin(slot: &str, quality: &str, title: &str) -> String {
+    let f = |s: &str| -> String {
+        s.chars()
+            .filter(|c| *c != '|' && !c.is_control())
+            .take(WATCHLIST_FIELD_MAX)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let (slot, quality, title) = (f(slot), f(quality), f(title));
+    if slot.is_empty() && quality.is_empty() && title.is_empty() {
+        return "watchlist".to_string();
+    }
+    format!("watchlist:{slot}|{quality}|{title}")
+}
+
 /// Name the client behind an API call from its User-Agent, or `None`.
 ///
 /// Every automation that adds jobs leads its UA with a standard product

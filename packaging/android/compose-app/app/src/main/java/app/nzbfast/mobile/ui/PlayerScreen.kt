@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import app.nzbfast.mobile.api.PlaybackJob
@@ -40,7 +41,16 @@ import app.nzbfast.mobile.api.StreamTelemetry
  * zero_filled_bytes - process-wide cumulative counters, so the overlay
  * shows the movement since the player opened) plus the job's own
  * coverage for live jobs.
+ *
+ * ExoPlayer and PlayerView are both media3 `@UnstableApi`: the library
+ * ships them outside its stable surface, so every call here needs an
+ * explicit opt-in or `lintDebug` fails (TODO 158 item 5). We take it
+ * once for the whole composable rather than per call site - the screen
+ * exists to drive that player, so there is no non-media3 half of it to
+ * protect. `androidx.annotation.OptIn`, spelled out, because the
+ * unqualified name is Kotlin's own and they are not interchangeable.
  */
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     streamUrl: String,

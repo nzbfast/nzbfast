@@ -29,8 +29,6 @@ pub(in crate::serve) struct ApiCtx<'a> {
     pub base: &'a str,
     pub ua_hdr: &'a str,
     pub key_q: &'a str,
-    #[cfg(feature = "indexer")]
-    pub tmdb_key: &'a Option<String>,
     pub bootstrap_apikey: bool,
     /// The caller presented the ADD-ONLY NZB key, not the full API
     /// key. Handlers in the allowlist use it to keep the tier's

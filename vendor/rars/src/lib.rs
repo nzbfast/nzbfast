@@ -69,6 +69,47 @@ pub struct ArchiveReadOptions<'a> {
     /// pass a policy so a memory-constrained host never selects a flat plan
     /// it cannot afford, and a large host may exceed the built-in flat cap.
     pub rar50_execution_policy: Option<Rar50ExecutionPolicy>,
+    /// How an incrementally decoded RAR 5 split member seeds its BLAKE2sp.
+    ///
+    /// Only the growing-chain path reads this (the volume-sequence driver
+    /// behind `extract_volume_sequence_to*`); every walk that already holds
+    /// the whole set reads the finish fragment's header and is unaffected.
+    pub rar50_split_hash_seeding: Rar50SplitHashSeeding,
+}
+
+/// Whether an incrementally decoded split member may take its FIRST
+/// fragment's header as the set's answer on whether a BLAKE2sp record
+/// exists at all.
+///
+/// A split member's expected BLAKE2sp lives in its LAST fragment's header,
+/// and the growing-chain decode has to decide whether to hash before it has
+/// read that fragment. `Unconditional` therefore hashes the whole payload
+/// and throws the digest away when the finish fragment turns out to carry
+/// no record - which is `rar`'s and WinRAR's DEFAULT (`Pack-CRC32` and no
+/// hash line), so the common set pays a whole-payload BLAKE2sp that nothing
+/// ever checks. Measured on an Apple M3 at +4.22 G instructions per GB
+/// unpacked and +5.83 G paced, against ~42 G for the decode itself.
+///
+/// `FirstFragment` skips the hasher when the first fragment carries no
+/// BLAKE2sp record. That is exact for both writers whose split sets have
+/// been measured here: WinRAR 7.21 and rar 7.23 stamp EVERY fragment of a
+/// `-htb` set (the non-final ones with that fragment's own packed digest -
+/// see `FileHeader::split_fragment_packed_digests`) and stamp none without
+/// it, so the first fragment and the finish fragment always agree. It is
+/// not exact for the rars writer, which stamps only the finish fragment: on
+/// such a set the BLAKE2sp goes unchecked and the member is verified by its
+/// CRC32 alone, exactly as an unstamped set is. Callers whose archives come
+/// from WinRAR or rar should choose it; callers that read rars-written
+/// split sets should not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rar50SplitHashSeeding {
+    /// Always hash, and discard the digest if the finish fragment carries
+    /// no record to check it against.
+    #[default]
+    Unconditional,
+    /// Hash only when the split member's first fragment carries a BLAKE2sp
+    /// record.
+    FirstFragment,
 }
 
 /// Memory and parallelism allowances for RAR 5 extraction.
@@ -142,6 +183,13 @@ impl<'a> ArchiveReadOptions<'a> {
     /// Sets the RAR 5 execution policy (memory and worker allowances).
     pub fn with_rar50_execution_policy(mut self, policy: Rar50ExecutionPolicy) -> Self {
         self.rar50_execution_policy = Some(policy);
+        self
+    }
+
+    /// Sets how an incrementally decoded RAR 5 split member seeds its
+    /// BLAKE2sp - see [`Rar50SplitHashSeeding`].
+    pub fn with_rar50_split_hash_seeding(mut self, seeding: Rar50SplitHashSeeding) -> Self {
+        self.rar50_split_hash_seeding = seeding;
         self
     }
 }
@@ -2369,6 +2417,70 @@ mod tests {
         assert_eq!(extracted[0].data, b"facade encrypted payload\n");
     }
 
+    /// A split STORED member carries the whole-file CRC on its last
+    /// fragment, and a corrupted fragment is refused on extraction. The
+    /// volume writer's stored branches passed `None` for the CRC, so a
+    /// set built over incompressible data (which the compressed writer
+    /// also stores) had no checksum anywhere and extracted corrupt bytes
+    /// as a success. (nzbfast-local change, 22 Aug 2026.)
+    #[test]
+    fn stored_split_volumes_carry_a_final_crc_and_refuse_corruption() {
+        let payload: Vec<u8> = (0..50_000u32)
+            .flat_map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes())
+            .collect();
+        for parts in [
+            rar50::Rar50VolumeWriter::new(rar50_options(ArchiveVersion::Rar50))
+                .stored_entry(rar50::StoredEntry {
+                    name: b"split.bin",
+                    data: &payload,
+                    mtime: None,
+                    attributes: 0x20,
+                    host_os: 3,
+                })
+                .max_payload_per_volume(64 * 1024)
+                .finish()
+                .unwrap(),
+            rar50::Rar50VolumeWriter::new(rar50_options(ArchiveVersion::Rar50))
+                .compressed_entries(&[rar50::CompressedEntry {
+                    name: b"split.bin",
+                    data: &payload,
+                    mtime: None,
+                    attributes: 0x20,
+                    host_os: 3,
+                }])
+                .max_payload_per_volume(64 * 1024)
+                .finish()
+                .unwrap(),
+        ] {
+            assert!(parts.len() >= 3, "the set must split across volumes");
+            let archives: Vec<_> = parts
+                .iter()
+                .map(|part| rar50::Archive::parse(part).unwrap())
+                .collect();
+            let crcs: Vec<Option<u32>> = archives
+                .iter()
+                .flat_map(|a| a.files().map(|f| f.data_crc32))
+                .collect();
+            assert_eq!(crcs.last().copied().flatten(), Some(crc32::crc32(&payload)));
+            assert!(crcs[..crcs.len() - 1].iter().all(Option::is_none));
+            let pristine = collect_rar50_volumes(&archives, None).unwrap();
+            assert_eq!(pristine[0].data, payload);
+
+            let mut damaged = parts.clone();
+            let mid = damaged[1].len() / 2;
+            damaged[1][mid] ^= 0x5a;
+            let archives: Vec<_> = damaged
+                .iter()
+                .map(|part| rar50::Archive::parse(part).unwrap())
+                .collect();
+            let err = collect_rar50_volumes(&archives, None).unwrap_err();
+            assert!(
+                err.to_string().contains("checksum mismatch"),
+                "expected a checksum failure, got {err}"
+            );
+        }
+    }
+
     #[test]
     fn direct_writer_creates_rar15_stored_volumes() {
         let parts = rar15_40::write_stored_volumes(
@@ -2492,6 +2604,58 @@ mod tests {
             let seekable_files: Vec<_> = seekable.files().collect();
             let streamed_files: Vec<_> = streamed.files().collect();
             assert_eq!(seekable_files, streamed_files);
+        }
+    }
+
+    /// The RAR4 twin of `rar50_incremental_parse_converges_on_the_blocking_walk`,
+    /// over WinRAR-made volumes, which carry the ENDARC tail the eager
+    /// walk waits on: half a volume trickled stops the incremental walk
+    /// short, and `enumerate_rest` then ends with the eager walk's blocks.
+    #[test]
+    fn rar15_40_incremental_parse_converges_on_the_blocking_walk() {
+        let names = [
+            "rar300/compressed_multivol_prng_rar300.rar",
+            "rar300/compressed_multivol_prng_rar300.r00",
+            "rar300/multivol_newnaming_rar300.part01.rar",
+        ];
+        for name in names {
+            let part = std::fs::read(rar15_40_fixture(name)).unwrap();
+            assert_eq!(part[part.len() - 5], 0x7b, "{name}: no ENDARC tail");
+            let full = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            full.append(&part);
+            let blocking = rar15_40::Archive::parse_stream(
+                std::sync::Arc::clone(&full) as _,
+                part.len() as u64,
+                ArchiveReadOptions::default(),
+            )
+            .unwrap();
+            let complete = rar15_40::Archive::parse_stream_incremental(
+                full,
+                part.len() as u64,
+                ArchiveReadOptions::default(),
+            )
+            .unwrap();
+            assert!(!complete.is_partially_enumerated(), "{name}");
+            assert_eq!(complete.blocks, blocking.blocks, "{name}");
+
+            let trickle = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            let head = part.len() / 2;
+            trickle.append(&part[..head]);
+            let mut partial = rar15_40::Archive::parse_stream_incremental(
+                std::sync::Arc::clone(&trickle) as _,
+                part.len() as u64,
+                ArchiveReadOptions::default(),
+            )
+            .unwrap();
+            assert!(
+                partial.is_partially_enumerated(),
+                "{name}: the walk ran past the frontier into the tail"
+            );
+            trickle.append(&part[head..]);
+            partial.enumerate_rest(None).unwrap();
+            assert!(!partial.is_partially_enumerated(), "{name}");
+            assert_eq!(partial.blocks, blocking.blocks, "{name}");
+            assert_eq!(partial.main, blocking.main, "{name}");
         }
     }
 
@@ -3045,6 +3209,296 @@ mod tests {
                 assert_eq!(got.1, want.data, "{names:?}");
             }
         }
+    }
+
+    /// The incremental header walk ends where the blocking one does: fed
+    /// to completion, `parse_stream_incremental` + `enumerate_rest` holds
+    /// the same blocks as `parse_stream`, on every multivolume shape
+    /// above, encrypted and stored included - and a walk over a source
+    /// that is already complete is whole from the first call.
+    #[test]
+    fn rar50_incremental_parse_converges_on_the_blocking_walk() {
+        let names = [
+            "multivol.part1.rar",
+            "multivol.part2.rar",
+            "multivol.part3.rar",
+            "solid_multivol.part01.rar",
+            "encrypted_multivol.part1.rar",
+            "stored_multivol.part1.rar",
+        ];
+        for name in names {
+            let part = std::fs::read(rar50_fixture(name)).unwrap();
+            let password: Option<&[u8]> =
+                name.starts_with("encrypted").then_some(b"password".as_slice());
+            let full = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            full.append(&part);
+            let blocking = rar50::Archive::parse_stream(
+                std::sync::Arc::clone(&full) as _,
+                part.len() as u64,
+                ArchiveReadOptions::with_optional_password(password),
+            )
+            .unwrap();
+            let complete = rar50::Archive::parse_stream_incremental(
+                full,
+                part.len() as u64,
+                ArchiveReadOptions::with_optional_password(password),
+            )
+            .unwrap();
+            assert!(
+                !complete.is_partially_enumerated(),
+                "{name}: a complete source walks whole in one call"
+            );
+            assert_eq!(complete.blocks, blocking.blocks, "{name}");
+
+            // Trickled: the first call stops at the frontier, and the
+            // rest is walked once it has landed. Half the volume, so
+            // the headers at the front are in and the END record at
+            // the tail is not.
+            let trickle = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            let head = part.len() / 2;
+            trickle.append(&part[..head]);
+            let mut partial = rar50::Archive::parse_stream_incremental(
+                std::sync::Arc::clone(&trickle) as _,
+                part.len() as u64,
+                ArchiveReadOptions::with_optional_password(password),
+            )
+            .unwrap();
+            assert!(
+                partial.is_partially_enumerated(),
+                "{name}: the walk ran past the frontier into the tail"
+            );
+            trickle.append(&part[head..]);
+            partial.enumerate_rest(password).unwrap();
+            assert!(!partial.is_partially_enumerated(), "{name}");
+            assert_eq!(partial.blocks, blocking.blocks, "{name}");
+            assert_eq!(partial.main, blocking.main, "{name}");
+        }
+    }
+
+    /// A [`BlockingRangeSource`] that has RELEASED everything below
+    /// `base`, the way nzbkit's chase frontier drops the bytes behind
+    /// the engine's watermark: a read there is an error, not a wait.
+    #[derive(Debug)]
+    struct TrimmedSource {
+        inner: std::sync::Arc<GrowableBuffer>,
+        base: std::sync::atomic::AtomicU64,
+    }
+
+    impl BlockingRangeSource for TrimmedSource {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            let base = self.base.load(std::sync::atomic::Ordering::Relaxed);
+            if offset < base {
+                return Err(std::io::Error::other(format!(
+                    "read {offset} behind the trim point {base}"
+                )));
+            }
+            self.inner.read_at(offset, buf)
+        }
+        fn known_len(&self) -> u64 {
+            self.inner.known_len()
+        }
+        fn total_len(&self) -> Option<u64> {
+            self.inner.total_len()
+        }
+    }
+
+    /// nzbkit TODO 220 / 250: finishing a stopped walk must not read
+    /// BEHIND where it stopped. The caller the incremental parse exists
+    /// for releases every byte under the engine's watermark before it
+    /// asks for the rest of the volume, so `enumerate_rest` starting
+    /// over from the signature met a refused read at offset 8 on every
+    /// leg of the set it was built for (2.002x -> 3.001x, 23 Aug 2026).
+    /// Half of each volume arrives, the walk stops, the source then
+    /// refuses everything below that frontier - the stop offset is the
+    /// last enumerated block's data end, which is at or past it - and
+    /// the resumed walk must still converge on the blocking walk's
+    /// blocks. A header-encrypted archive is in the list because the
+    /// HEAD_CRYPT block that carries the header keys' salt sits at
+    /// offset 8, behind the trim: the resume has to have kept the keys.
+    #[test]
+    fn rar50_enumerate_rest_reads_nothing_behind_the_stop() {
+        let mut features = FeatureSet::store_only();
+        features.file_encryption = true;
+        features.header_encryption = true;
+        let payload: Vec<u8> = (0..6000u32).map(|i| (i * 7919 % 251) as u8).collect();
+        let header_encrypted = rar50::Rar50Writer::new(rar50_options_with_features(
+            ArchiveVersion::Rar50,
+            features,
+        ))
+        .encrypted_compressed_entries(&[rar50::EncryptedCompressedEntry {
+            name: b"secret.bin",
+            data: &payload,
+            mtime: None,
+            attributes: 0x20,
+            host_os: 3,
+            password: b"password",
+        }])
+        .finish()
+        .unwrap();
+        let fixtures: Vec<(&str, Vec<u8>, Option<&[u8]>)> = vec![
+            ("multivol.part1.rar", std::fs::read(rar50_fixture("multivol.part1.rar")).unwrap(), None),
+            ("multivol.part2.rar", std::fs::read(rar50_fixture("multivol.part2.rar")).unwrap(), None),
+            ("multivol.part3.rar", std::fs::read(rar50_fixture("multivol.part3.rar")).unwrap(), None),
+            (
+                "solid_multivol.part01.rar",
+                std::fs::read(rar50_fixture("solid_multivol.part01.rar")).unwrap(),
+                None,
+            ),
+            (
+                "encrypted_multivol.part1.rar",
+                std::fs::read(rar50_fixture("encrypted_multivol.part1.rar")).unwrap(),
+                Some(b"password"),
+            ),
+            (
+                "stored_multivol.part1.rar",
+                std::fs::read(rar50_fixture("stored_multivol.part1.rar")).unwrap(),
+                None,
+            ),
+            ("header_encrypted (writer)", header_encrypted, Some(b"password")),
+        ];
+        for (name, part, password) in fixtures {
+            let full = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            full.append(&part);
+            let blocking = rar50::Archive::parse_stream(
+                full as _,
+                part.len() as u64,
+                ArchiveReadOptions::with_optional_password(password),
+            )
+            .unwrap();
+
+            let inner = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+            let head = part.len() / 2;
+            inner.append(&part[..head]);
+            let trimmed = std::sync::Arc::new(TrimmedSource {
+                inner: std::sync::Arc::clone(&inner),
+                base: std::sync::atomic::AtomicU64::new(0),
+            });
+            let mut partial = rar50::Archive::parse_stream_incremental(
+                std::sync::Arc::clone(&trimmed) as _,
+                part.len() as u64,
+                ArchiveReadOptions::with_optional_password(password),
+            )
+            .unwrap();
+            assert!(
+                partial.is_partially_enumerated(),
+                "{name}: the walk ran past the frontier into the tail"
+            );
+            // The rest lands, and everything the walk has already been
+            // over is released underneath it.
+            inner.append(&part[head..]);
+            trimmed
+                .base
+                .store(head as u64, std::sync::atomic::Ordering::Relaxed);
+            partial
+                .enumerate_rest(password)
+                .unwrap_or_else(|e| panic!("{name}: the resumed walk read behind the stop: {e}"));
+            assert!(!partial.is_partially_enumerated(), "{name}");
+            assert_eq!(partial.blocks, blocking.blocks, "{name}");
+            assert_eq!(partial.main, blocking.main, "{name}");
+        }
+    }
+
+    /// nzbkit TODO 220: a caller holding volumes under a retention cap
+    /// needs the engine to START a volume before the volume's tail has
+    /// arrived, or a volume larger than the cap can never be released.
+    /// The feeder withholds volume 0's second half until the engine has
+    /// published a watermark for it. The blocking `parse_stream` waits
+    /// for the end header at the tail and can never get there (checked:
+    /// swapping it in fails this test at the 30 s bound), so the wait is
+    /// bounded and aborts the source - a regression fails here instead
+    /// of hanging.
+    #[test]
+    fn rar50_incremental_parse_reports_a_volume_before_its_tail_arrives() {
+        let names = ["multivol.part1.rar", "multivol.part2.rar", "multivol.part3.rar"];
+        let parts: Vec<Vec<u8>> = names
+            .iter()
+            .map(|name| std::fs::read(rar50_fixture(name)).unwrap())
+            .collect();
+        let archives: Vec<_> = parts
+            .iter()
+            .map(|part| rar50::Archive::parse_with_password(part, None).unwrap())
+            .collect();
+        let reference = collect_rar50_volumes(&archives, None).unwrap();
+
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(usize, u64)>::new()));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entries = RefCell::new(Vec::new());
+        let mut feeders: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        let parts_ref = &parts;
+        let result = rar50::extract_volume_sequence_to_with_progress(
+            |index| {
+                if index >= parts_ref.len() {
+                    return Ok(None);
+                }
+                let part = parts_ref[index].clone();
+                let buffer = std::sync::Arc::new(GrowableBuffer::with_total_len(part.len() as u64));
+                let feed = std::sync::Arc::clone(&buffer);
+                let reports = std::sync::Arc::clone(&reports);
+                let timed_out = std::sync::Arc::clone(&timed_out);
+                feeders.push(std::thread::spawn(move || {
+                    let half = part.len() / 2;
+                    feed.append(&part[..half]);
+                    if index == 0 {
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                        while !reports.lock().unwrap().iter().any(|&(volume, _)| volume == 0) {
+                            if std::time::Instant::now() >= deadline {
+                                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                                feed.abort("no watermark before the tail");
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
+                    feed.append(&part[half..]);
+                }));
+                rar50::Archive::parse_stream_incremental(
+                    buffer,
+                    parts_ref[index].len() as u64,
+                    ArchiveReadOptions::with_optional_password(None),
+                )
+                .map(Some)
+            },
+            read_options(None),
+            |meta| {
+                let data = Rc::new(RefCell::new(Vec::new()));
+                entries
+                    .borrow_mut()
+                    .push((meta.name.clone(), Rc::clone(&data)));
+                Ok(Box::new(CollectWriter { data }))
+            },
+            |index, offset| reports.lock().unwrap().push((index, offset)),
+        );
+        for feeder in feeders {
+            feeder.join().unwrap();
+        }
+        assert!(
+            !timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "the engine published nothing for volume 0 before its tail arrived"
+        );
+        result.unwrap();
+        let streamed: Vec<_> = entries
+            .into_inner()
+            .into_iter()
+            .map(|(name, data)| (name, data.borrow().clone()))
+            .collect();
+        assert_eq!(streamed.len(), reference.len());
+        for (got, want) in streamed.iter().zip(&reference) {
+            assert_eq!(got.0, want.name);
+            assert_eq!(got.1, want.data);
+        }
+        // The mark that let the tail through was a PARTIAL one: the
+        // whole-volume report can only follow the tail.
+        let first_for_zero = reports
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|&&(volume, _)| volume == 0)
+            .map(|&(_, offset)| offset)
+            .unwrap();
+        assert!(
+            first_for_zero < parts[0].len() as u64,
+            "first report for volume 0 was {first_for_zero}, not a partial offset"
+        );
     }
 
     /// Rewrites a middle volume's split fragment header so its packed-data

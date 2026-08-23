@@ -145,7 +145,18 @@ pub(crate) fn print_failure_diagnostics(
 /// never reports the post to an indexer as dead. A flaky provider under
 /// load used to file takedown reports for healthy releases.
 pub(crate) struct LossCauses<'a> {
-    /// Segments where every live server was asked and said 430/423.
+    // Sweep 8, M7: the four cause counters below are PAYLOAD-ONLY, and
+    // their recovery-side twins follow them. They used to be flat
+    // totals over every slot alike while every gate here read them as
+    // statements about the payload, so one 430 on an irrelevant `.par2`
+    // article suppressed `all_transport` and had a release whose
+    // payload died entirely in transport reported as missing/gone - to
+    // the user and to the indexer - and one transport failure on a
+    // recovery article suppressed the wholly-gone verdict for a post
+    // that was genuinely gone. The split is taken at collection, where
+    // the article's slot is still in hand (`get::workers::CauseSplit`).
+    /// Payload segments where every live server was asked and said
+    /// 430/423.
     pub(crate) missing_430: u64,
     /// Of those, segments where at least one refusing server SAID the
     /// article was removed (Giganews's documented 451, or refusal text
@@ -156,8 +167,18 @@ pub(crate) struct LossCauses<'a> {
     pub(crate) takedown_430: u64,
     /// Never requested: outside every server's configured retention.
     pub(crate) retention_excluded: u64,
-    /// Lost to transport errors (timeouts, resets, exhausted retries).
+    /// Payload segments lost to transport errors (timeouts, resets,
+    /// exhausted retries).
     pub(crate) transport_failed: u64,
+    /// The recovery-side share of each counter above. Repair context,
+    /// never a payload verdict: nothing in the classification below may
+    /// read these, and the summary reports them as what they are - a
+    /// reason the parity could not heal the payload, not evidence about
+    /// the payload itself.
+    pub(crate) missing_430_recovery: u64,
+    pub(crate) takedown_430_recovery: u64,
+    pub(crate) retention_excluded_recovery: u64,
+    pub(crate) transport_failed_recovery: u64,
     /// First transport error, verbatim.
     pub(crate) transport_sample: Option<String>,
     /// First decode/write error, verbatim.
@@ -167,16 +188,6 @@ pub(crate) struct LossCauses<'a> {
     /// still damage, and a journal-resume retry can fetch clean parity
     /// from another provider (Codex sweep 5, M6).
     pub(crate) recovery_errs: u64,
-    /// Segments LOST on recovery slots - the recovery-side share of
-    /// `missing_430` + `transport_failed` + `retention_excluded`, which
-    /// count every slot alike while `missing_segments` and `derrs` are
-    /// payload-only. The two gates that ask "did the PAYLOAD lose
-    /// anything to this cause?" need this to subtract the recovery
-    /// noise: one 430 on a `.vol` article used to defeat the
-    /// size-header verdict and produce "1 file(s) with missing
-    /// segments; 0 of 240 segment(s) never arrived" in one breath
-    /// (error-detection audit 20 Aug, A2).
-    pub(crate) recovery_lost: u64,
     /// Servers with no usable connection at any point in the run.
     pub(crate) dead_servers: &'a [String],
     /// Servers that connected and served and then LEFT before the run
@@ -354,18 +365,17 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // this verdict and fall through to "1 file(s) with missing
         // segments; 0 of 240 segment(s) never arrived" in one breath,
         // the exact self-contradiction this branch exists to eliminate.
-        // Any PAYLOAD loss shows in `missing_segments` (every cause
-        // routes through `article_lost`, which bumps the slot), so the
-        // cause counters here only need to not exceed the recovery-side
-        // losses the census counted separately. `<=` and not `==`,
-        // because an outcome whose id maps to no slot bumps a counter
-        // and no slot - that pushes the sum OVER and blocks the verdict,
-        // which is the conservative direction (audit 20 Aug, A2).
+        //
+        // The counters ARE the payload's now (sweep 8, M7), so this
+        // asks the question directly instead of subtracting the
+        // recovery noise back out of a flat total: no payload segment
+        // was lost to any cause. Same conservative direction - an
+        // outcome whose id maps to no slot counts as payload, so it
+        // still blocks the verdict.
         let size_header_lies = causes.total_segments > 0
             && causes.missing_segments == 0
             && derrs == 0
-            && causes.missing_430 + causes.transport_failed + causes.retention_excluded
-                <= causes.recovery_lost;
+            && causes.missing_430 + causes.transport_failed + causes.retention_excluded == 0;
         let mut msg = if size_header_lies {
             format!(
                 "post size header disagrees with its parts: every payload article \
@@ -423,6 +433,30 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                 "; some of that loss is damaged articles rather than absent ones, \
                  which a retry can fetch again",
             );
+        }
+        // The recovery side, as its own sentence and never as evidence
+        // (sweep 8, M7). These losses used to be folded into the
+        // counters above, where they changed the payload verdict; now
+        // they are reported as what they actually are - the reason the
+        // parity could not close a gap the payload has. A clause, so it
+        // can never move `fail_kind`, which classifies on the opening.
+        let rec_lost = causes.missing_430_recovery
+            + causes.transport_failed_recovery
+            + causes.retention_excluded_recovery;
+        if rec_lost > 0 {
+            msg.push_str(&format!(
+                "; {rec_lost} recovery (PAR2) segment(s) were lost as well, so there \
+                 was less parity available to repair with than the post carries"
+            ));
+            // A takedown on the parity is the same hint as one on the
+            // payload and belongs in the same sentence: waiting cannot
+            // bring the recovery volumes back either.
+            if causes.takedown_430_recovery > 0 {
+                msg.push_str(&format!(
+                    " ({} of them reported as removed for a takedown request)",
+                    causes.takedown_430_recovery
+                ));
+            }
         }
         // The segment census, right behind the classifying clause. "94
         // file(s) with missing segments" was the whole story a user got,
@@ -722,6 +756,20 @@ impl UnsupportedArchive {
     }
 }
 
+impl UnsupportedArchive {
+    /// The same sentence as a tagged log line: a warning when the
+    /// payload itself is still packed, a note otherwise. The history
+    /// text keeps its own glyph; the level carries it here.
+    pub(crate) fn log(&self) {
+        let msg = self.message();
+        if self.blocking {
+            tracing::warn!(target: "extract", "{}", msg.trim_start_matches("⚠ "));
+        } else {
+            tracing::info!(target: "extract", "{msg}");
+        }
+    }
+}
+
 /// The first zip anywhere under the output dir, if any.
 ///
 /// This is what downgrades "zip present" from a job failure to a
@@ -887,6 +935,46 @@ pub(crate) fn sevenz_disk_fallback(why: &str) -> bool {
         // "encrypted", "held-bytes cap" - would steer the RAR arms just
         // as wrongly.
         || why.starts_with(nzbkit::extract::ZIP_DISK_FALLBACK_PREFIX)
+        // And the third: a volume the offset-0 sniff started inside a
+        // self-extractor's stub (TODO 94 C) materializes as the posted
+        // `.exe`, which the tail's SFX arm owns. Found on a COMPRESSED SFX
+        // RAR, which took this route every time until the chase learned
+        // the offset (724f65e0f) and still does whenever a group demotes
+        // for any other reason: unmarked, its "compressed" reason ran the
+        // ladder's first arm - `unrar` over a directory holding one
+        // `.exe`, which cannot succeed - and failed a job whose payload
+        // the SFX arm unpacks one pass later. Measured against the real
+        // libarchive stub 23 Aug 2026: the same file posted with the stub
+        // past the first article, so the sniff never fired and the `.exe`
+        // landed as plain data, unpacked.
+        || why.starts_with(nzbkit::extract::SFX_DISK_FALLBACK_PREFIX)
+        // And a fourth: a demoted top-level TAR chase (TODO 163 item
+        // 6). Since the disk half landed (23 Aug 2026) this is the same
+        // story as the two above rather than a special case: the
+        // materialized `.tar` is the post-pass ladder's own input (its
+        // step 6), and its reason text ("symlink", "held-bytes cap")
+        // would steer the RAR arms at a directory holding no RAR. It
+        // was filtered here before that arm existed too, on the second
+        // half of that sentence alone.
+        || why.starts_with(nzbkit::extract::TAR_DISK_FALLBACK_PREFIX)
+}
+
+/// An SFX demote the tail's SFX arm should NOT be handed: locked, with no
+/// password to try. The carve has nothing to do then - `extract_sfx` hands
+/// the archive to a reader that refuses it - and the job would fail over a
+/// `.exe` that is perfectly fine on disk, where the same set inside a plain
+/// `.rar` finishes Completed with the 🔒 prompt and unpacks on a retry.
+///
+/// "compressed" is tested FIRST, exactly as the tail's arms order
+/// themselves, because [`nzbkit::rar::MapBlocker::NotStore`] reads
+/// "compressed or encrypted entries" and carries BOTH words. A bare
+/// "encrypted" test therefore claims every compressed self-extractor and
+/// prints a password prompt for an archive that needs none - which is what
+/// it did, on the first run after it was written.
+pub(crate) fn sfx_locked_fallback(why: &str) -> bool {
+    why.starts_with(nzbkit::extract::SFX_DISK_FALLBACK_PREFIX)
+        && !why.contains("compressed")
+        && (why.contains("encrypted") || why.contains("password"))
 }
 
 /// Does a level-0 extraction fallback leave its volumes UNOWNED, i.e. is the
@@ -929,6 +1017,105 @@ pub(crate) fn fallback_needs_disk_unpack(why: &str) -> bool {
         && !why.contains("never classified")
         && !why.contains("unclassified-holds budget")
         && !why.contains("materialized for repair")
+}
+
+/// The in-stream extraction demoted because the bomb guard refused it -
+/// so the disk ladder below must not run at all, and the job fails here
+/// with the verdict that was actually reached.
+///
+/// Every rung under a demote assumes the demote was about the ARCHIVE
+/// (compressed, encrypted, a CRC that did not hold) and that a second
+/// engine may therefore do better. A bomb verdict is about the DISK, and
+/// no engine does better on a disk: the native disk pass re-refuses (its
+/// own `BombGuardWriter`, same budget) and the external `unrar` has no
+/// budget at all and simply fills the volume. Observed 22 Aug 2026 - a
+/// 2 GB-of-zeros RAR5 refused twice, extracted until ENOSPC on the
+/// third rung, and reported as "the verified volumes could not be
+/// unpacked after a fallback".
+///
+/// Deliberately NOT worded to match `serve::job::disk_full_failure`:
+/// that classifier arms the min-free hold, which puts the job back on
+/// the queue to wait for space. This is not a job that ran out of room
+/// in passing - it is one whose archive cannot fit, and a hold would
+/// re-run it forever.
+///
+/// Returns the job-failure message, having said the same thing once on
+/// the console. `None` when no fallback carries the verdict, which is
+/// every ordinary demote.
+pub(crate) fn bomb_fallback<'a>(reasons: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    if !reasons.into_iter().any(nzbkit::disk::bomb_verdict) {
+        return None;
+    }
+    println!(
+        "⚠ unpacking this archive needs more space than the disk has \
+         (possible decompression bomb) - the verified volumes were kept"
+    );
+    Some(bomb_failure())
+}
+
+/// The job-failure sentence a bomb verdict composes, wherever the
+/// verdict is reached.
+///
+/// One function because the sentence has two loose requirements it must
+/// keep at every site, and neither is visible from a literal: it has to
+/// CARRY [`nzbkit::disk::BOMB_VERDICT`] (so `bomb_verdict` still reads
+/// as true off a job failure quoted back into the ladder), and it must
+/// NOT read as a disk-full to [`crate::serve::job::disk_full_failure`]
+/// (which arms the min-free hold and would requeue the job to wait for
+/// space it can never have enough of). `bomb_fallback` above is the
+/// demote-side site; [`crate::rarfix::try_unrar_spent_why`] is the two
+/// refusals INSIDE the ladder, which have no demote reason to carry
+/// anything for them.
+pub(crate) fn bomb_failure() -> String {
+    format!(
+        "{} - the verified volumes were kept",
+        nzbkit::disk::BOMB_VERDICT
+    )
+}
+
+/// Does a successful unlock ANSWER this job-failure sentence?
+///
+/// The clearing predicate the manual-unlock tail spends once the archive
+/// has actually come open: the Reason the row still carries has just
+/// been made untrue, so it must go, and anything else must stay - a
+/// failure the download itself recorded outranks whatever the unlock
+/// has to say.
+///
+/// Three sentences, and the third is the one a literal list cannot see.
+/// The refused arm of that same tail writes [`unpack_failure`], which
+/// carries the ladder's OWN reason when it named one - today a
+/// [`bomb_failure`], which is about the DISK and not the password. A
+/// user who frees space and unlocks correctly afterwards was left with
+/// a Completed row whose Reason read "extraction exceeded available
+/// disk space" forever. Matched with [`nzbkit::disk::bomb_verdict`],
+/// the matcher `bomb_failure` is documented to keep true, rather than
+/// with a fourth literal that would drift the first time the sentence
+/// is reworded.
+pub(crate) fn unlock_answers(fail_message: &str) -> bool {
+    fail_message == "password required to unpack"
+        || fail_message == "password did not unlock the archive"
+        || nzbkit::disk::bomb_verdict(fail_message)
+}
+
+/// The job failure a refused disk unpack composes: the ladder's OWN
+/// reason when it named one, else the caller's generic wording.
+///
+/// Four sites word that generic sentence, and every one of them blames
+/// the ARCHIVE - "the verified volumes could not be unpacked
+/// (compressed set, or the password is wrong)", "…after a fallback",
+/// "resumed job: the verified volumes on disk could not be extracted",
+/// "PAR2 repair succeeded but re-extraction failed". Each is right for
+/// the failure it was written for and wrong for the only refusal that
+/// names itself: a bomb verdict, which is about the DISK. The console
+/// line said so all along; this is what carries it to the user and to
+/// any *arr reading the job's failure text.
+///
+/// One function rather than four `unwrap_or_else` closures because the
+/// rule - a named reason WINS - is the whole fix, and a site that
+/// quietly stopped preferring it would look exactly like the three that
+/// still did.
+pub(crate) fn unpack_failure(why: Option<String>, generic: &str) -> String {
+    why.unwrap_or_else(|| generic.to_string())
 }
 
 /// Unpack compressed RAR volumes with a bundled/system unrar. Volumes are
@@ -1246,6 +1433,137 @@ mod main_tests {
         );
     }
 
+    /// Sweep 8, M7: a recovery article's failure must not decide
+    /// anything about the payload. Both matrices from the handoff, and
+    /// both are a wrong verdict on the pre-split counters.
+    ///
+    /// Trigger A - every lost PAYLOAD article failed in transport while
+    /// one irrelevant `.par2` article came back 430. On the flat
+    /// counters that 430 landed in `missing_430`, which suppressed
+    /// `all_transport`, and a release whose payload a flaky provider
+    /// simply failed to fetch was reported as missing/gone - to the
+    /// user, and to the indexer as a dead release.
+    ///
+    /// Trigger B - the mirror image, and the more expensive one: every
+    /// PAYLOAD article is confirmed gone while one recovery article had
+    /// a transport failure. That one failure suppressed the wholly-gone
+    /// verdict, so a post that really is gone kept its automatic retry
+    /// and spent the same minutes proving it again.
+    #[test]
+    fn a_recovery_articles_failure_never_decides_the_payloads_verdict() {
+        // A: payload all transport, one recovery 430.
+        let a = super::incomplete_reason(
+            5,
+            0,
+            &LossCauses {
+                transport_failed: 40,
+                transport_sample: Some("unexpected response to BODY: 999 huh".into()),
+                missing_430_recovery: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            a.starts_with("download failed on connection errors"),
+            "one 430 on a parity article must not blame the post: {a}"
+        );
+        // And the recovery loss is still SAID - as repair context, in
+        // its own clause, where it cannot move the classification.
+        assert!(a.contains("1 recovery (PAR2) segment(s) were lost"), "{a}");
+        assert!(
+            !a.contains("takedown request"),
+            "a plain 430 is not a takedown: {a}"
+        );
+        assert_eq!(
+            crate::serve::fail_kind(&a),
+            crate::serve::FailKind::Transport,
+            "the indexer must not hear about a healthy release: {a}"
+        );
+
+        // B: payload wholly gone, one recovery transport failure.
+        let backbones = ["highwinds".to_string()];
+        let b = super::incomplete_reason(
+            94,
+            0,
+            &LossCauses {
+                missing_430: 12_018,
+                missing_segments: 12_018,
+                total_segments: 12_018,
+                bytes_arrived: 0,
+                transport_failed_recovery: 1,
+                backbones: &backbones,
+                post_age_days: 21,
+                ..no_causes()
+            },
+        );
+        assert!(
+            b.starts_with("post is gone"),
+            "one transport failure on a parity article must not un-kill a dead post: {b}"
+        );
+        let kind = crate::serve::fail_kind(&b);
+        assert_eq!(kind, crate::serve::FailKind::Gone);
+        assert!(
+            !kind.transient(),
+            "a gone post must not spend the same minutes again: {b}"
+        );
+
+        // A takedown on the parity is named in the same sentence -
+        // waiting will not bring the recovery volumes back either.
+        let a_td = super::incomplete_reason(
+            5,
+            0,
+            &LossCauses {
+                transport_failed: 40,
+                missing_430_recovery: 2,
+                takedown_430_recovery: 2,
+                ..no_causes()
+            },
+        );
+        assert!(
+            a_td.contains("2 recovery (PAR2) segment(s) were lost as well")
+                && a_td.contains("(2 of them reported as removed for a takedown request)"),
+            "{a_td}"
+        );
+        assert!(
+            a_td.starts_with("download failed on connection errors"),
+            "and it is still not evidence about the payload: {a_td}"
+        );
+
+        // The takedown ratio is two of these counters divided, so it is
+        // distorted the same way: refusals on parity articles must not
+        // dilute "most of the payload was removed".
+        let t = super::incomplete_reason(
+            5,
+            0,
+            &LossCauses {
+                missing_430: 10,
+                takedown_430: 10,
+                missing_430_recovery: 90,
+                ..no_causes()
+            },
+        );
+        assert!(
+            t.contains("10 of the 10 refused segment(s) as removed"),
+            "the dominant-takedown wording must count payload refusals only: {t}"
+        );
+
+        // And a PAYLOAD loss of the same shape still decides, exactly
+        // as before - the split narrows what counts as evidence, it
+        // does not switch the evidence off.
+        let payload_430 = super::incomplete_reason(
+            5,
+            0,
+            &LossCauses {
+                transport_failed: 40,
+                missing_430: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            payload_430.starts_with("download incomplete"),
+            "{payload_430}"
+        );
+    }
+
     /// A LossCauses with nothing known - each test overrides one field.
     fn no_causes() -> LossCauses<'static> {
         LossCauses {
@@ -1253,10 +1571,13 @@ mod main_tests {
             takedown_430: 0,
             retention_excluded: 0,
             transport_failed: 0,
+            missing_430_recovery: 0,
+            takedown_430_recovery: 0,
+            retention_excluded_recovery: 0,
+            transport_failed_recovery: 0,
             transport_sample: None,
             decode_sample: None,
             recovery_errs: 0,
-            recovery_lost: 0,
             dead_servers: &[],
             left_servers: &[],
             par2_slots: 1,
@@ -1910,20 +2231,19 @@ mod main_tests {
             "{lying}"
         );
 
-        // Audit 20 Aug, A2: the cause counters count RECOVERY slots too,
-        // while `missing_segments` is payload-only - so one 430 on a
-        // `.vol` article used to defeat this verdict and fall through to
-        // "1 file(s) with missing segments; 0 of 240 segment(s) never
-        // arrived" in one breath, arming a retry that replays the same
-        // spans to the same gap. Losses the census attributes to
-        // recovery slots must not veto a payload-side verdict.
+        // Audit 20 Aug, A2: a 430 on a `.vol` article used to defeat
+        // this verdict and fall through to "1 file(s) with missing
+        // segments; 0 of 240 segment(s) never arrived" in one breath,
+        // arming a retry that replays the same spans to the same gap.
+        // Losses the census attributes to recovery slots must not veto
+        // a payload-side verdict - which since sweep 8's M7 is true by
+        // construction: the counter they land in is the recovery one.
         let lying_vol_430 = super::incomplete_reason(
             1,
             0,
             &LossCauses {
                 total_segments: 240,
-                missing_430: 1,
-                recovery_lost: 1,
+                missing_430_recovery: 1,
                 ..no_causes()
             },
         );
@@ -2071,11 +2391,12 @@ mod main_tests {
         );
         assert!(!no_vote.contains("backbone"), "{no_vote}");
 
-        // A server addressed by IP names no backbone: `backbone_of` on a
-        // dotted quad reduces to the label "0", which the collector drops
-        // rather than printing a digit as though it were a provider.
-        // (Caught live on a scratch daemon: "asked 1 backbone(s): 0".)
-        assert_eq!(nzbkit::oracle::backbone_of("127.0.0.1"), "0");
+        // A server addressed by IP names no backbone. The collector
+        // drops it rather than printing an address as though it were a
+        // provider (caught live on a scratch daemon: "asked 1
+        // backbone(s): 0", back when a dotted quad reduced to one
+        // octet - see sweep 8's L9).
+        assert_eq!(nzbkit::oracle::backbone_of("127.0.0.1"), "127.0.0.1");
         let none = super::incomplete_reason(
             1,
             0,
@@ -2100,5 +2421,34 @@ mod main_tests {
         );
         assert!(tagged.contains("[nzbfast "), "{tagged}");
         assert!(tagged.ends_with(']'), "{tagged}");
+    }
+
+    /// The bomb sentence is one of the Reasons a successful unlock
+    /// answers.
+    ///
+    /// It reaches `fail_message` through `unpack_failure` on the refused
+    /// arm of the manual-unlock tail, so it is not one of the two
+    /// literals that arm's sibling used to compare against - and a later
+    /// correct password then left a Completed row reading "extraction
+    /// exceeded available disk space" for good. Asserted through the
+    /// composed sentence, not the constant, because the wrapper is what
+    /// the row actually carries.
+    #[test]
+    fn a_successful_unlock_clears_the_bomb_reason_too() {
+        assert!(super::unlock_answers(&super::bomb_failure()));
+        assert!(super::unlock_answers(&super::unpack_failure(
+            Some(super::bomb_failure()),
+            "password did not unlock the archive",
+        )));
+        assert!(super::unlock_answers(&super::unpack_failure(
+            None,
+            "password did not unlock the archive",
+        )));
+        assert!(super::unlock_answers("password required to unpack"));
+        // And a verdict the unlock did NOT answer keeps its say.
+        assert!(!super::unlock_answers(
+            "download incomplete: 1 file(s) with missing segments"
+        ));
+        assert!(!super::unlock_answers(""));
     }
 }

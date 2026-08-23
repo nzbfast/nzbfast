@@ -139,6 +139,12 @@ fn publish_hold(d: &Arc<Daemon>, kind: &str, a: f64, b: f64, fresh: bool) {
 /// the `only_force` verdict to pick with: a spent quota still lets Force
 /// jobs through (SAB semantics), a full disk lets nothing through, and
 /// the no-servers hold and offline do not return at all.
+///
+/// `quick`: the cross-job hand-over path (`tasks/worker.rs`), where the
+/// caller has a draining run to watch and a held guard must return at
+/// once instead of sleeping on the caller's behalf. Every hold is still
+/// recorded and published exactly as on the ordinary pass.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn download_guards(
     d: &Arc<Daemon>,
     config: &std::path::Path,
@@ -147,7 +153,13 @@ pub(super) async fn download_guards(
     ledger: &mut Option<QuotaLedger>,
     disk_probe: &mut Option<tokio::task::JoinHandle<Option<u64>>>,
     server_probe: &mut ServerProbe,
+    quick: bool,
 ) -> Option<bool> {
+    let hold = |secs: u64| async move {
+        if !quick {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        }
+    };
     // §129 2g: a scheduled quota_reset zeroes the window here,
     // where the ledger lives - checked before every guard so a
     // disk hold or offline spell cannot defer it. Opened if
@@ -230,7 +242,7 @@ pub(super) async fn download_guards(
         // strip shows it live. See `publish_hold` for why the
         // revision bump rides WITH the store rather than above it.
         publish_hold(d, "disk", free as f64 / 1e9, min as f64 / 1e9, fresh);
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        hold(5).await;
         return None;
     }
     // §129 backpressure: tails piling up faster than they
@@ -257,7 +269,7 @@ pub(super) async fn download_guards(
             lane.cap() as f64,
             false,
         );
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        hold(1).await;
         return None;
     }
     if guard_reason.as_deref() == Some("postproc") {
@@ -312,7 +324,7 @@ pub(super) async fn download_guards(
         // is the ONLY thing that can move the payload, exactly as
         // `slowstore::bump` documents for the storage pause.
         publish_hold(d, "noservers", 0.0, 0.0, fresh);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        hold(1).await;
         return None;
     }
     if guard_reason.as_deref() == Some("noservers") {
@@ -356,7 +368,7 @@ pub(super) async fn download_guards(
     // that releases it, which is one click and is what the
     // button already says.
     if d.offline.load(Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        hold(1).await;
         return None;
     }
     let mut only_force = d.paused.load(Ordering::Relaxed);
@@ -492,6 +504,15 @@ pub(super) fn reset_hub_for_job(
         *d.hub.excluded_hosts.lock_ok() = excluded;
         *d.hub.host_byte_budgets.lock_ok() = budgets;
     }
+    // TODO 208 item 1: the link anchor the fleet build caps the seed
+    // from. Read here, at job start, so the second job on a fresh
+    // install already has the first job's measured peak.
+    d.hub.line_anchor_bps.store(
+        d.link_peak
+            .effective(d.line_speed.load(Ordering::Relaxed))
+            .0,
+        Ordering::Relaxed,
+    );
     // M2c.5: allow the engine's speculative recovery prefetch
     // for the main job unless a period quota is configured -
     // same reasoning as the sidecar guard: opportunistic
@@ -598,63 +619,51 @@ pub(super) fn reset_hub_for_job(
     *d.hub.seek.lock_ok() = None;
 }
 
-/// Read this job's final figures at network-drain, before the next
-/// iteration is free to zero them, and bill what is already final.
+/// The pool-facing figures of a job, taken off the hub while the hub is
+/// still that job's.
 ///
-/// The quota is billed here because the decoded-byte count is final at
-/// network-drain (the consumers are joined before the signal fires) and
-/// the NEXT job resets the counter; the per-server usage and reliability
-/// ledgers for the same reason - `pool_live` is still THIS job's, since
-/// the next one has not started.
-pub(super) fn settle_job_tail(
-    d: &Arc<Daemon>,
-    nzo_id: &str,
-    ledger: &mut Option<QuotaLedger>,
-) -> JobTail {
-    // Decoded-byte count is final at network-drain (consumers
-    // joined before the signal fires) - safe to bill the quota
-    // before the next job resets the counter.
-    if let Some(led) = ledger.as_mut() {
-        led.add(d.progress.load(Ordering::Relaxed));
-    }
-    // History stats: decoded bytes + network wall time, final
-    // at net-drain (the NEXT job resets the progress counter,
-    // so capture before looping).
-    let dl_bytes = d.progress.load(Ordering::Relaxed);
-    // ...and the same figure plus whatever a resume already had
-    // on disk, which is what a paused row needs to report. Read
-    // here for the same reason `dl_bytes` is: the tail task
-    // below runs concurrently with the next iteration, and that
-    // zeroes both.
-    let on_disk_bytes = dl_bytes.saturating_add(d.hub.resume_seeded.load(Ordering::Relaxed));
-    // Bill this job's per-server bytes to the usage history
-    // (pool_live is still THIS job's - the next one hasn't
-    // started yet), and its article tries/430s to the
-    // reliability ledger.
-    let per_server_rel: Vec<(String, u64, u64)> = d
-        .hub
-        .pool_live
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|l| {
-            l.servers
-                .iter()
-                .map(|s| {
-                    (
-                        s.host.clone(),
-                        s.articles_tried.load(Ordering::Relaxed),
-                        s.articles_missing.load(Ordering::Relaxed),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+/// Two callers, one instant each. On the plain path `settle_job_tail`
+/// detaches at network-drain, exactly where it always read them. On the
+/// cross-job hand-over path (`tasks/worker.rs`) the runner detaches at
+/// the moment the NEXT job claims the hub, which can be seconds before
+/// this job drains - and `pool_live` is an `Arc` the pool keeps
+/// updating, so the per-server figures read at settle are still the
+/// final ones. Only the whyslow stamp and the cap/refusal banks are
+/// taken as of the hand-over: the core only ever judges whoever owns
+/// the wire, and from that instant that is the next job.
+pub(super) struct DetachedTail {
+    pub(super) pool_live: Option<Arc<nzbkit::pool::LiveStats>>,
+    /// The run's stop handles, so the slow-job watchdog can still defer
+    /// a predecessor that is draining behind the active job (the queue
+    /// waits on it, so it is still the job worth judging).
+    pub(super) abort: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) queue_ctl: Option<Arc<nzbkit::pool::QueueControl>>,
+    /// Per-host bytes already billed to the usage ledger when this was
+    /// taken; what the pool adds after that is billed at settle.
+    usage_flushed: std::collections::HashMap<String, u64>,
+    pub(super) resume_seeded: u64,
+    verifier: Option<Arc<nzbkit::live::LiveVerifier>>,
+    shaper: Option<Arc<nzbkit::extract::Extractor>>,
+    #[cfg(feature = "indexer")]
+    oracle_samples: Vec<nzbkit::oracle::Sample>,
+}
+
+/// Take [`DetachedTail`] for `nzo_id` off the hub, which must still be
+/// that job's. Bills the per-server usage up to now (delta-billed, so
+/// the periodic mid-job flush and this never double-bill) and banks
+/// the job's connection ceilings and refusal line.
+pub(super) fn detach_job_tail(d: &Arc<Daemon>, nzo_id: &str) -> DetachedTail {
+    // TODO 207: the shortfall verdict is final here too, and for a
+    // stronger reason than the counters below - the core only ever
+    // judges whoever owns the wire, so from this instant on there is
+    // nothing left to judge and the next job's first tick wipes the
+    // window. `whyslow::stamp` has the whole of the WHEN argument.
+    super::super::whyslow::stamp(d, nzo_id);
     // §96.5: delta-billed against the flush task's high-water
     // map, so bytes the periodic mid-job flush already billed
     // are not billed twice here.
     d.flush_run_usage();
-    d.add_reliability(&per_server_rel);
+    let usage_flushed = d.run_usage_flushed.lock_ok().clone();
     // ...and this job's connection ceilings, in the same window and for
     // the same reason: `pool_live` is still THIS job's. Banking was
     // watchdog-only, so a job shorter than one 1-5 s tick could be
@@ -692,21 +701,82 @@ pub(super) fn settle_job_tail(
         .take()
         .map(|sink| sink.drain())
         .unwrap_or_default();
-    // The verifier is still THIS job's too - keep the Arc so
-    // the tail task reads the final in-stream bad-block count
-    // even after the next job swaps the hub's slot.
-    let verifier = d.hub.verifier.lock_ok().clone();
-    // Same reason for the extractor: the shape is only final
-    // once the tail has settled (a late demote in
-    // finish/verify flips a set to "partly on disk"), and by
-    // then the next job may own the hub slot.
-    let shaper = d.hub.extractor_for(Some(nzo_id));
+    DetachedTail {
+        pool_live: d.hub.pool_live.lock_ok().clone(),
+        abort: d.hub.abort.lock_ok().clone(),
+        queue_ctl: d.hub.queue_ctl.lock_ok().clone(),
+        usage_flushed,
+        resume_seeded: d.hub.resume_seeded.load(Ordering::Relaxed),
+        // The verifier is still THIS job's too - keep the Arc so
+        // the tail task reads the final in-stream bad-block count
+        // even after the next job swaps the hub's slot.
+        verifier: d.hub.verifier.lock_ok().clone(),
+        // Same reason for the extractor: the shape is only final
+        // once the tail has settled (a late demote in
+        // finish/verify flips a set to "partly on disk"), and by
+        // then the next job may own the hub slot.
+        shaper: d.hub.extractor_for(Some(nzo_id)),
+        #[cfg(feature = "indexer")]
+        oracle_samples,
+    }
+}
+
+/// Read this job's final figures at network-drain and bill what is
+/// already final.
+///
+/// The quota is billed here because the decoded-byte count is final at
+/// network-drain (the consumers are joined before the signal fires);
+/// `progress` is the job's OWN counter, so it does not matter whether
+/// the next job has re-pointed the daemon's cell by now. The per-server
+/// usage and reliability ledgers come from `detached` - taken here if
+/// the hub is still this job's, or at the hand-over if it is not.
+pub(super) fn settle_job_tail(
+    d: &Arc<Daemon>,
+    nzo_id: &str,
+    ledger: &mut Option<QuotaLedger>,
+    progress: &AtomicU64,
+    detached: Option<DetachedTail>,
+) -> JobTail {
+    let detached = detached.unwrap_or_else(|| detach_job_tail(d, nzo_id));
+    if let Some(led) = ledger.as_mut() {
+        led.add(progress.load(Ordering::Relaxed));
+    }
+    // History stats: decoded bytes + network wall time, final
+    // at net-drain.
+    let dl_bytes = progress.load(Ordering::Relaxed);
+    // ...and the same figure plus whatever a resume already had
+    // on disk, which is what a paused row needs to report.
+    let on_disk_bytes = dl_bytes.saturating_add(detached.resume_seeded);
+    // Bill this job's per-server bytes to the usage history - what the
+    // pool moved after the detach, which is nothing on the plain path
+    // and the drain's bytes on the hand-over path - and its article
+    // tries/430s to the reliability ledger.
+    let mut residual: Vec<(String, u64)> = Vec::new();
+    let mut per_server_rel: Vec<(String, u64, u64)> = Vec::new();
+    if let Some(l) = &detached.pool_live {
+        for s in &l.servers {
+            let bytes = s.bytes.load(Ordering::Relaxed);
+            let billed = detached.usage_flushed.get(&s.host).copied().unwrap_or(0);
+            if bytes > billed {
+                residual.push((s.host.clone(), bytes - billed));
+            }
+            per_server_rel.push((
+                s.host.clone(),
+                s.articles_tried.load(Ordering::Relaxed),
+                s.articles_missing.load(Ordering::Relaxed),
+            ));
+        }
+    }
+    if !residual.is_empty() {
+        d.add_usage(&residual);
+    }
+    d.add_reliability(&per_server_rel);
     JobTail {
         dl_bytes,
         on_disk_bytes,
-        verifier,
-        shaper,
+        verifier: detached.verifier,
+        shaper: detached.shaper,
         #[cfg(feature = "indexer")]
-        oracle_samples,
+        oracle_samples: detached.oracle_samples,
     }
 }

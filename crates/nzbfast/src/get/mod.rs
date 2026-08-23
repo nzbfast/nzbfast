@@ -5,6 +5,7 @@
 use crate::*;
 use nzbkit::pool::fetch_all_multi_ctl;
 use std::path::Path;
+use tracing::info;
 
 mod vrig;
 use vrig::{Rig, build_rig, install_seek};
@@ -13,6 +14,7 @@ use fleet::{Fleet, build_fleet};
 mod plan;
 use plan::{FetchPlan, Intake, build_fetch_plan, build_intake, clamp_concurrency};
 mod census;
+mod dropped;
 mod tail;
 use tail::finish_run;
 mod settle;
@@ -92,7 +94,8 @@ fn shard_count(total_conns: usize) -> usize {
 /// where the output lands. Lifted out of `get_with_progress` for the
 /// size gate (the §91 rule: the gate forces fixes into helpers).
 fn announce_plan(nzb_path: &Path, files: usize, eager: u64, total: u64, out_dir: &Path) {
-    println!(
+    info!(
+        target: "get",
         "{}: {} files ({:.1} MB eager of {:.1} MB total) → {}",
         nzb_path.display(),
         files,
@@ -115,7 +118,7 @@ async fn run_fetch(
     let total_conns: usize = servers.iter().map(|(_, c)| c.connections).sum();
     let shards = shard_count(total_conns);
     if shards > 1 {
-        println!("  sharding {total_conns} connections across {shards} I/O runtimes");
+        info!(target: "get", "sharding {total_conns} connections across {shards} I/O runtimes");
         let servers_owned = servers.to_vec();
         let qc = queue_ctl.clone();
         tokio::task::spawn_blocking(move || {
@@ -128,7 +131,6 @@ async fn run_fetch(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Test-only (`NZBFAST_TEST_STALL_TAIL_MS`): hold the post-network tail
 /// open so the §129 lane suite can observe the Finishing state
 /// deterministically. Unset (the only production state) is a no-op.
@@ -141,6 +143,7 @@ async fn test_stall_tail() {
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn get_with_progress(
     config: &Path,
     nzb_path: &Path,
@@ -188,7 +191,11 @@ pub(crate) async fn get_with_progress(
     // net_done fires when the network phase is done (all articles
     // terminal, consumers drained) - the daemon starts the next job's
     // download then, while this job's tail (settle/repair/extract) runs.
-    net_done: Option<tokio::sync::oneshot::Sender<()>>,
+    // Carries the instant, because the runner may only READ it later:
+    // since the cross-job hand-over it can be holding a predecessor's
+    // drain when this job's network ends, and a wall time taken at the
+    // read would bill that wait to this job's average speed.
+    net_done: Option<tokio::sync::oneshot::Sender<std::time::Instant>>,
     budget: nzbkit::mem::MemBudget,
 ) -> Result<()> {
     // B4 small-RAM clamp + rotational decoder pick: see clamp_concurrency.
@@ -214,7 +221,8 @@ pub(crate) async fn get_with_progress(
         has_main,
         bootstrap_vol,
         resume_vols,
-    } = build_intake(config, nzb_path, out_dir, password, &hub)?;
+        resume_map,
+    } = build_intake(config, nzb_path, out_dir, password, no_extract, &hub)?;
     // The slot + article fetch plan: see build_fetch_plan. The
     // destructure keeps every downstream read on the inline names.
     let FetchPlan {
@@ -254,6 +262,7 @@ pub(crate) async fn get_with_progress(
         shape_said,
         resume_map,
         extractor,
+        replay,
     } = build_rig(
         &nzb,
         &slots,
@@ -272,6 +281,7 @@ pub(crate) async fn get_with_progress(
         verify_lean,
         no_extract,
         resuming,
+        resume_map,
         &budget,
     );
     // M11: seek re-prioritization handle. QueueControl attaches to the
@@ -369,6 +379,7 @@ pub(crate) async fn get_with_progress(
         &journal,
         &backfill,
         &sniff,
+        &replay,
         &queue_ctl,
         &rt,
         throttle_mbps,
@@ -384,6 +395,11 @@ pub(crate) async fn get_with_progress(
 
     // Live rate ticker: see spawn_rate_ticker.
     let ticker = spawn_rate_ticker(decoded_bytes.clone(), slots.clone());
+
+    // Memory-floor attribution sampler; owns this job's peak record and
+    // is retired BY TOKEN in print_mem_summary (tail.rs) after the
+    // summary reads that record.
+    let mem_sampler = workers::spawn_mem_sampler(stream_owner, nzb_path);
 
     // Deadlock watchdog: see spawn_deadlock_watchdog.
     let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -454,6 +470,40 @@ pub(crate) async fn get_with_progress(
     )
     .await?;
 
+    // §94 A backstop: any restored file whose offset-0 article never
+    // arrived (a 430, a take-down, an abort) still owes its bytes to
+    // the extractor. Feeding them here holds exactly as the old
+    // up-front driver did, which is the correct cost for a volume that
+    // has no header to place against - and it is what stops a restored
+    // span being silently dropped. No-op on a fresh run, on the adopt
+    // path, and on the ordinary case where every head landed.
+    if !replay.is_empty() {
+        replay.drain_rest(&extractor, &verifier);
+    }
+    {
+        // Their article ids sit in `completed`, so nothing downstream
+        // can tell the extractor never received those bytes: the run
+        // must fail loudly rather than settle over the hole (Codex
+        // F-04). Deleting the journal makes the next attempt a fresh
+        // fetch, where the providers still have the articles.
+        let failed = replay.failures();
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "resume replay failed for {} - delete the job's .nzbfast.journal and retry to fetch it afresh",
+                failed.join(", ")
+            );
+        }
+        let (files, bytes) = replay.replayed();
+        if files > 0 {
+            info!(
+                target: "resume",
+                "replayed {files} restored file(s) ({:.1} MB) through the one-pass path, {:.1} MB left in place",
+                bytes as f64 / 1e6,
+                replay.left_in_place() as f64 / 1e6
+            );
+        }
+    }
+
     test_stall_tail().await;
 
     // Issue #14 drain fallback - deferred slots the active set covers
@@ -507,6 +557,7 @@ pub(crate) async fn get_with_progress(
         &hub,
         stream_owner,
         &budget,
+        &mem_sampler,
     )
     .await
 }

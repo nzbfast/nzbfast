@@ -62,14 +62,193 @@ pub(super) struct IndexerHit {
 
 /// How far back the `addnzblnk` rate gate looks.
 pub(super) const NZBLNK_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-/// Link resolutions allowed per window before the endpoint refuses. A
-/// person clicking board links does a handful a minute; a page in a loop
-/// does not stop.
+/// Link resolutions allowed per window, PER PEER, before the endpoint
+/// refuses. A person clicking board links does a handful a minute; a
+/// page in a loop does not stop.
 pub(super) const NZBLNK_MAX: usize = 20;
 /// ...and how many of those may reach the user's indexers. Lower,
 /// because this is the threshold that guards a metered account rather
 /// than our own CPU. Past it the ladder still runs, local-only.
 pub(super) const NZBLNK_EXTERNAL_MAX: usize = 6;
+/// Resolutions allowed per window across ALL peers.
+///
+/// Deliberately looser than [`NZBLNK_MAX`], which is the point of
+/// keying per peer at all: with one shared window, whoever spends it
+/// first denies everyone else, and that is what a hostile page in a
+/// loop does to the user's own paste. Not unbounded, because the peer
+/// map has to be bounded by something and because the indexer quota
+/// this protects is one account however many machines ask - a peer only
+/// ever gets an entry by being ADMITTED, so this is also the ceiling on
+/// how many entries the map can hold.
+pub(super) const NZBLNK_GLOBAL_MAX: usize = NZBLNK_MAX * 3;
+/// Resolutions allowed to be RUNNING at once, across all peers.
+///
+/// The window bounds arrivals per minute and says nothing about how
+/// many are in flight: twenty in one second all passed it. The HTTP
+/// surface is an 8-worker pool over one listener, and a resolution can
+/// hold its worker for a while - rung 3 of `find_by_header` is an
+/// unindexed table scan, and rung 2 fans out to the user's indexer
+/// accounts under a 15 s per-call ceiling. Half the pool is the cap, so
+/// a burst of links can never take the whole of it and leave the
+/// dashboard unanswered on the machine the person is looking at.
+pub(super) const NZBLNK_INFLIGHT_MAX: usize = 4;
+
+/// The `mode=addnzblnk` rate and concurrency gate.
+///
+/// This endpoint is the one an OS protocol handler exposes to the open
+/// web: once `nzblnk:` is registered, any page can navigate to one and,
+/// past the browser's own "Open nzbfast?" prompt, reach it. A link
+/// cannot name a location - `h` is a search key, so the daemon only
+/// ever reads its own index or the user's own indexers - but a page in
+/// a loop can still spend three things that are not free: the unindexed
+/// filename scan, the user's metered indexer quota, and a worker off
+/// the HTTP pool for as long as either takes.
+///
+/// **Keyed on the TRANSPORT peer, never on a header.** `X-Forwarded-For`
+/// is written by whoever sent the request, so keying on it would hand a
+/// hostile page an unlimited supply of buckets and turn the per-peer
+/// half into no gate at all. The cost of that choice is that behind a
+/// reverse proxy every request shares the proxy's address and therefore
+/// one bucket, which is exactly the single global window this replaced -
+/// no worse than before, and [`NZBLNK_GLOBAL_MAX`] still bounds it.
+///
+/// **Which half does the work depends on how the link arrived, and the
+/// clicked one is not the flattering case.** A protocol-handler click
+/// reaches the daemon through the installed app on the same machine, so
+/// every clicked link in the world shares one bucket - localhost - and
+/// the per-peer window is doing nothing there that the old single
+/// window did not. What bounds THAT path is the in-flight cap, which is
+/// the half §51's residue named first and the half no sliding window
+/// can supply. The per-peer window is what stops the OTHER shapes -
+/// a *arr, a phone, a second machine on the LAN, a script - from
+/// spending each other's budget, which one shared window could not tell
+/// apart from a single loop.
+#[derive(Default)]
+pub(super) struct NzblnkGate {
+    /// Arrival instants inside [`NZBLNK_WINDOW`], newest last, one
+    /// window per peer. `None` is the bucket for a transport that
+    /// reports no address at all, which is one bucket for all of them
+    /// rather than a hole in the gate.
+    windows: Mutex<std::collections::HashMap<Option<std::net::IpAddr>, VecDeque<Instant>>>,
+    /// Resolutions running right now. Separate from the windows because
+    /// it is held for the whole of a resolution while the lock above is
+    /// held only across the decision.
+    inflight: std::sync::atomic::AtomicUsize,
+}
+
+/// One in-flight slot, released when the resolution ends.
+///
+/// A guard rather than a decrement at the end of `resolve_nzblnk`,
+/// because that function returns from a dozen places - and an early
+/// return that forgot to give the slot back would leak it permanently,
+/// which after four of them refuses every link until the daemon
+/// restarts. A leak that only shows up under the failure paths is the
+/// one a test is least likely to reach.
+pub(super) struct NzblnkPermit<'a> {
+    gate: &'a NzblnkGate,
+    /// How many of this peer's window this resolution is, 1-based.
+    /// [`NZBLNK_EXTERNAL_MAX`] is read against it, so the expensive
+    /// half is spent per peer like the cheap half.
+    pub(super) nth_for_peer: usize,
+}
+
+impl Drop for NzblnkPermit<'_> {
+    fn drop(&mut self) {
+        self.gate
+            .inflight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Why the gate turned a resolution away.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NzblnkRefusal {
+    /// This peer, or everyone together, has had its window's worth.
+    Rate,
+    /// Too many resolutions already running.
+    Busy,
+}
+
+impl NzblnkGate {
+    /// Admit one resolution, or say why not.
+    ///
+    /// `now` is a parameter so the tests can drive the window without
+    /// sleeping through a minute of it.
+    ///
+    /// The in-flight slot is taken FIRST and dropped again if the
+    /// windows refuse, so a refused request never counts as running;
+    /// the other order would let a peer that is only ever refused hold
+    /// slots off the peers that would be admitted.
+    pub(super) fn admit(
+        &self,
+        peer: Option<std::net::IpAddr>,
+        now: Instant,
+    ) -> std::result::Result<NzblnkPermit<'_>, NzblnkRefusal> {
+        let mut permit = self.take_slot().ok_or(NzblnkRefusal::Busy)?;
+        permit.nth_for_peer = self.admit_window(peer, now).ok_or(NzblnkRefusal::Rate)?;
+        Ok(permit)
+    }
+
+    /// Take one of [`NZBLNK_INFLIGHT_MAX`] slots, or `None`.
+    ///
+    /// A CAS loop rather than `fetch_add` then compare: the add would
+    /// let a burst push the counter past the cap before any of them
+    /// checked, and a counter that has been over its ceiling reads as
+    /// "full" to everyone who looks while the overshoot unwinds.
+    fn take_slot(&self) -> Option<NzblnkPermit<'_>> {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.inflight.load(Ordering::Acquire);
+        loop {
+            if cur >= NZBLNK_INFLIGHT_MAX {
+                return None;
+            }
+            match self.inflight.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(NzblnkPermit {
+                        gate: self,
+                        nth_for_peer: 1,
+                    });
+                }
+                Err(seen) => cur = seen,
+            }
+        }
+    }
+
+    /// Record one arrival for `peer`, or refuse it. Answers how many of
+    /// this peer's window the arrival is, counting itself.
+    fn admit_window(&self, peer: Option<std::net::IpAddr>, now: Instant) -> Option<usize> {
+        let mut w = self.windows.lock_ok();
+        // Trim EVERY peer, not just this one, and drop the peers left
+        // with nothing: an entry is only ever created by an admitted
+        // arrival, so this is what keeps the map bounded by
+        // NZBLNK_GLOBAL_MAX rather than by however many addresses have
+        // ever spoken to us. It is a walk of at most that many short
+        // deques, under a lock held for no I/O.
+        w.retain(|_, q| {
+            while q
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) > NZBLNK_WINDOW)
+            {
+                q.pop_front();
+            }
+            !q.is_empty()
+        });
+        if w.values().map(VecDeque::len).sum::<usize>() >= NZBLNK_GLOBAL_MAX {
+            return None;
+        }
+        let q = w.entry(peer).or_default();
+        if q.len() >= NZBLNK_MAX {
+            return None;
+        }
+        q.push_back(now);
+        Some(q.len())
+    }
+}
 
 /// A grab token stays valid this long after its search.
 #[cfg(feature = "indexer")]
@@ -354,8 +533,7 @@ pub(super) fn indexer_caps_cached(
     }
     let got = indexer_caps_one(cfg).ok();
     d.indexer_rt
-        .lock()
-        .unwrap()
+        .lock_ok()
         .caps
         .insert(id, (Instant::now(), got.clone()));
     got
@@ -381,7 +559,6 @@ pub(super) fn indexer_caps_one(
     Ok(caps)
 }
 
-/// Persist the day's hit/grab counters; best-effort, tiny file.
 /// Persist the day's indexer hit/grab counters.
 ///
 /// The snapshot and the write are ONE critical section, and the write is
@@ -426,34 +603,40 @@ pub(super) fn resolve_nzblnk(
     prio: i32,
     password: Option<&str>,
     dupe_ok: bool,
+    peer: Option<std::net::IpAddr>,
 ) -> serde_json::Value {
     let mut notes: Vec<serde_json::Value> = Vec::new();
 
-    // ---- The rate gate. ---------------------------------------------
-    // Two thresholds off one sliding window, because the two things a
-    // loop can spend are not equally scarce. Local resolution costs CPU
-    // (rung 3 of find_by_header is an unindexed scan); asking the
-    // indexers costs the user's metered account. So the cheap half stays
-    // available far longer than the expensive one, and passing the
-    // second threshold DEGRADES to local-only rather than failing - a
-    // link our own index can answer is answered.
-    let recent = {
-        let mut q = d.nzblnk_recent.lock_ok();
-        let now = Instant::now();
-        while q
-            .front()
-            .is_some_and(|t| now.duration_since(*t) > NZBLNK_WINDOW)
-        {
-            q.pop_front();
-        }
-        if q.len() >= NZBLNK_MAX {
+    // ---- The gate. --------------------------------------------------
+    // Three thresholds, because the three things a loop can spend are
+    // not equally scarce. Local resolution costs CPU (rung 3 of
+    // find_by_header is an unindexed scan); asking the indexers costs
+    // the user's metered account; and either one holds a worker off an
+    // 8-strong HTTP pool while it runs. So the cheap half stays
+    // available far longer than the expensive one, passing the second
+    // threshold DEGRADES to local-only rather than failing - a link our
+    // own index can answer is answered - and the third is a hard cap on
+    // how many can be running at once. See `NzblnkGate`.
+    //
+    // The permit lives to the end of this function: dropping it is what
+    // gives the in-flight slot back, on every path out including the
+    // failures.
+    let permit = match d.nzblnk_gate.admit(peer, Instant::now()) {
+        Ok(p) => p,
+        // One `reason` for both, because they are one sentence to the
+        // person holding the mouse ("too many at once, wait a moment")
+        // and the dashboard already says it in their language. The
+        // `error` string is what tells the two apart in a log.
+        Err(NzblnkRefusal::Rate) => {
             return json!({"status": false, "reason": "toofast",
                 "error": "too many links at once - wait a moment and try again"});
         }
-        q.push_back(now);
-        q.len()
+        Err(NzblnkRefusal::Busy) => {
+            return json!({"status": false, "reason": "toofast",
+                "error": "too many links are still being looked up - wait a moment and try again"});
+        }
     };
-    let may_ask_indexers = recent <= NZBLNK_EXTERNAL_MAX;
+    let may_ask_indexers = permit.nth_for_peer <= NZBLNK_EXTERNAL_MAX;
 
     // ---- Rung 1: our own header index. ------------------------------
     // Ranking, strongest first: complete beats partial, a release in a
@@ -523,7 +706,7 @@ pub(super) fn resolve_nzblnk(
             "nzblnk",
             dupe_ok,
         ) {
-            Ok(nzo) => {
+            Ok(Enqueued { nzo_id: nzo, .. }) => {
                 // Same protection a wall grab gets: the row this job came
                 // from must survive the index size cap.
                 d.touch_opened_release(r.id);
@@ -548,8 +731,7 @@ pub(super) fn resolve_nzblnk(
     // because an obfuscated release name tells nobody what it is.
     let list: Vec<crate::newznab::IndexerConfig> = if may_ask_indexers {
         d.indexers
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .filter(|i| i.enabled)
             .cloned()
@@ -662,8 +844,7 @@ pub(super) fn resolve_nzblnk(
             let mut rt = d.indexer_rt.lock_ok();
             rt.usage.roll(unix_now());
             d.indexers
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .find(|i| i.name == indexer)
                 .is_none_or(|c| rt.usage.grab_allowed(c))
@@ -686,7 +867,7 @@ pub(super) fn resolve_nzblnk(
                     d.enqueue_fetched(&f, &name, cat, prio, None, password, 0, "nzblnk", dupe_ok)
                         .map_err(|e| e.to_string())
                 }) {
-                Ok(nzo) => {
+                Ok(Enqueued { nzo_id: nzo, .. }) => {
                     d.indexer_rt.lock_ok().usage.count_grab(&indexer);
                     save_indexer_usage(d);
                     return json!({"status": true, "nzo_ids": [nzo], "name": name,
@@ -766,7 +947,7 @@ mod nzblnk_local_read_tests {
             header: "some.obfuscated.header".into(),
             ..Default::default()
         };
-        let j = resolve_nzblnk(&d, &l, "", 0, None, false);
+        let j = resolve_nzblnk(&d, &l, "", 0, None, false, None);
         assert_eq!(
             j["busy"],
             json!(true),
@@ -779,6 +960,176 @@ mod nzblnk_local_read_tests {
         );
         drop(d);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod nzblnk_gate_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(last: u8) -> Option<IpAddr> {
+        Some(IpAddr::V4(Ipv4Addr::new(192, 168, 0, last)))
+    }
+
+    /// Fill `peer`'s window with `n` admitted-and-finished resolutions.
+    fn burn(gate: &NzblnkGate, peer: Option<IpAddr>, now: Instant, n: usize) {
+        for i in 0..n {
+            assert!(
+                gate.admit(peer, now).is_ok(),
+                "arrival {i} of {n} should have been admitted"
+            );
+        }
+    }
+
+    /// The point of keying per peer: with one shared window, whoever
+    /// spends it first denies everyone else - which is what a page in a
+    /// loop does to the user's own paste, and is the whole of §51's open
+    /// residue.
+    #[test]
+    fn one_peer_burning_its_window_does_not_deny_another() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        burn(&gate, ip(10), now, NZBLNK_MAX);
+        assert_eq!(
+            gate.admit(ip(10), now).err(),
+            Some(NzblnkRefusal::Rate),
+            "the noisy peer is out of window"
+        );
+        assert!(
+            gate.admit(ip(11), now).is_ok(),
+            "the legitimate user's own paste still goes through"
+        );
+        // ...and an unknown-address transport is one bucket of its own,
+        // not a hole every refused peer can fall through.
+        assert!(gate.admit(None, now).is_ok());
+    }
+
+    /// The other half: per-peer windows must not add up to an unbounded
+    /// total, because the indexer quota underneath is one account
+    /// however many machines ask.
+    #[test]
+    fn the_global_ceiling_bounds_every_peer_together() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        let peers = NZBLNK_GLOBAL_MAX / NZBLNK_MAX;
+        for p in 0..peers {
+            burn(&gate, ip(p as u8), now, NZBLNK_MAX);
+        }
+        // A peer that has never been seen, and so has a completely empty
+        // window of its own, is still refused.
+        assert_eq!(
+            gate.admit(ip(200), now).err(),
+            Some(NzblnkRefusal::Rate),
+            "the global ceiling is not per-peer"
+        );
+    }
+
+    /// The expensive half is spent per peer like the cheap half, and
+    /// passing it still DEGRADES rather than failing - the resolution is
+    /// admitted, it just may not reach the user's metered accounts.
+    #[test]
+    fn the_external_threshold_is_counted_per_peer() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        for n in 1..=NZBLNK_EXTERNAL_MAX {
+            let p = gate.admit(ip(10), now).expect("under the rate cap");
+            assert_eq!(p.nth_for_peer, n);
+            assert!(p.nth_for_peer <= NZBLNK_EXTERNAL_MAX, "may ask indexers");
+        }
+        let p = gate.admit(ip(10), now).expect("still admitted, just local");
+        assert!(
+            p.nth_for_peer > NZBLNK_EXTERNAL_MAX,
+            "past the threshold this peer is local-only"
+        );
+        drop(p);
+        // A different peer starts at one, so one loop cannot spend
+        // another machine's share of the account either.
+        assert_eq!(gate.admit(ip(11), now).expect("fresh peer").nth_for_peer, 1);
+    }
+
+    /// Twenty arrivals in one second all pass the window; nothing in it
+    /// says how many may be RUNNING. The pool this endpoint answers from
+    /// has eight workers.
+    #[test]
+    fn only_four_resolutions_run_at_once() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        let held: Vec<_> = (0..NZBLNK_INFLIGHT_MAX)
+            .map(|i| {
+                gate.admit(ip(i as u8), now)
+                    .expect("under the in-flight cap")
+            })
+            .collect();
+        assert_eq!(
+            gate.admit(ip(200), now).err(),
+            Some(NzblnkRefusal::Busy),
+            "a fresh peer with an empty window is still refused while the pool is full"
+        );
+        drop(held);
+        assert!(
+            gate.admit(ip(200), now).is_ok(),
+            "a finished resolution gives its slot back"
+        );
+    }
+
+    /// The guard is the reason this holds on the failure paths too: a
+    /// refused arrival must not keep a slot, or four refusals in a row
+    /// would wedge the endpoint until the daemon restarted.
+    #[test]
+    fn a_rate_refusal_does_not_keep_its_in_flight_slot() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        burn(&gate, ip(10), now, NZBLNK_MAX);
+        for _ in 0..NZBLNK_INFLIGHT_MAX * 2 {
+            assert_eq!(gate.admit(ip(10), now).err(), Some(NzblnkRefusal::Rate));
+        }
+        assert_eq!(
+            gate.inflight.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "every refusal handed its slot straight back"
+        );
+        assert!(gate.admit(ip(11), now).is_ok());
+    }
+
+    /// The window slides, or a peer that hit the cap once would be
+    /// refused for the life of the process.
+    #[test]
+    fn the_window_slides_off_the_back() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        burn(&gate, ip(10), now, NZBLNK_MAX);
+        assert_eq!(gate.admit(ip(10), now).err(), Some(NzblnkRefusal::Rate));
+        let later = now + NZBLNK_WINDOW + std::time::Duration::from_secs(1);
+        assert_eq!(
+            gate.admit(ip(10), later)
+                .expect("window is out")
+                .nth_for_peer,
+            1,
+            "the peer starts over, it does not resume mid-window"
+        );
+    }
+
+    /// A map keyed by peer address is a map an attacker would like to
+    /// grow. It cannot: an entry is only ever created by an ADMITTED
+    /// arrival, so the global ceiling bounds the entry count too, and a
+    /// peer whose window has run out is dropped rather than kept as an
+    /// empty deque forever.
+    #[test]
+    fn peers_are_forgotten_once_their_window_runs_out() {
+        let gate = NzblnkGate::default();
+        let now = Instant::now();
+        for p in 0..50u8 {
+            assert!(gate.admit(ip(p), now).is_ok());
+        }
+        assert_eq!(gate.windows.lock_ok().len(), 50);
+        let later = now + NZBLNK_WINDOW + std::time::Duration::from_secs(1);
+        assert!(gate.admit(ip(200), later).is_ok());
+        assert_eq!(
+            gate.windows.lock_ok().len(),
+            1,
+            "the 50 stale buckets went with the window, not just the one asked about"
+        );
     }
 }
 

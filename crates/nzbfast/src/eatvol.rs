@@ -1,13 +1,14 @@
 //! TODO 101: the on-disk unpack that eats its own volumes.
 //!
-//! The shapes one-pass cannot serve (notably encrypted RAR5) materialize
-//! every volume on disk and unpack afterwards, so the disk holds the
-//! volumes AND the extracted payload at once - and for an ENCRYPTED set a
-//! THIRD copy, because the finish decrypt writes its plaintext into a temp
-//! beside the ciphertext before renaming (`extract::crypto`'s
-//! `create_decrypt_temp` + `decrypt_pass`; the arithmetic lives in
-//! `serve::job::unpack_space_needed`). That is the ~3x that failed a
-//! 13.85 GB job on a 15.6 GB-free drive.
+//! The shapes one-pass cannot serve materialize every volume on disk and
+//! unpack afterwards, so the disk holds the volumes AND the extracted
+//! payload at once (the arithmetic lives in
+//! `serve::job::unpack_space_needed`). An ENCRYPTED set used to pay a
+//! THIRD copy on top, because the finish decrypt wrote its plaintext
+//! into a temp beside the ciphertext before renaming - the ~3x that
+//! failed a 13.85 GB job on a 15.6 GB-free drive. TODO 27 phase 3
+//! deleted that pass, so encryption costs no extra copy now; the 2x
+//! below is what remains, and it is enough to fail the same job.
 //!
 //! With eating armed, each volume is HARD-deleted - `remove_file`,
 //! deliberately not the Trash, since the entire point is freeing real

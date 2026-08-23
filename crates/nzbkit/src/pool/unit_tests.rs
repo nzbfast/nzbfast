@@ -13,7 +13,16 @@ use super::*;
 use crate::config::ServerConfig;
 use crate::mock::{Chaos, MockServer, make_file_articles};
 
-fn server(host: &str) -> ServerConfig {
+// The §122.5 `next_work` scan-ladder tests, out under the size gate
+// (TODO 106). `cfg(test)` is redundant inside a test module but is what
+// size-gate.py's CFG_TEST_MOD resolver keys on to score the child as
+// test code rather than gate it at the production fn ceiling; the
+// child resolves to unit_tests/next_work_tests.rs because this module
+// is reached by a plain `mod unit_tests;`, not a `#[path]`.
+#[cfg(test)]
+mod next_work_tests;
+
+pub(super) fn server(host: &str) -> ServerConfig {
     ServerConfig {
         host: host.into(),
         port: 119,
@@ -38,14 +47,15 @@ fn server(host: &str) -> ServerConfig {
     }
 }
 
-fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
+pub(super) fn fresh(ids: &[&str]) -> Vec<ArticleReq> {
     ids.iter().map(|id| ArticleReq::fresh(*id)).collect()
 }
 
-fn work(id: &str) -> Work {
+pub(super) fn work(id: &str) -> Work {
     Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: id.into(),
         attempts: 0,
@@ -163,6 +173,44 @@ fn ctx_for_unions_mirror_group_bits() {
     );
 }
 
+/// Codex F-13: every routing decision in the pool is a `u32` bitmask
+/// and `server_bit` answers 0 past `MAX_SERVERS`, so servers 33 and up
+/// would share the empty bit - invisible to each other's 430 ledger,
+/// tier gate and dup guard, and able to drive an article terminal
+/// `Missing` before the last server was ever asked. The config loader
+/// refuses this (`ConfigError::TooManyServers`), but the pool's public
+/// entries are a library surface a caller reaches without it, so the
+/// refusal has to live at the one place all of them funnel through.
+///
+/// `Shared::new` is that place: `fetch_all_multi`, `fetch_all_multi_ctl`
+/// and `fetch_all_sharded` each call it before a socket is opened.
+#[test]
+#[should_panic(expected = "exceeds MAX_SERVERS")]
+fn one_server_past_the_bitmask_is_refused_rather_than_mis_routed() {
+    let servers: Vec<(ServerConfig, PoolConfig)> = (0..=MAX_SERVERS)
+        .map(|i| (server(&format!("s{i}")), PoolConfig::default()))
+        .collect();
+    let _ = Shared::new(fresh(&["<a@x>"]), &servers);
+}
+
+/// And the boundary itself is a SUPPORTED configuration: the assert is
+/// `<=`, so an off-by-one tightening of it would refuse the largest
+/// fleet the config loader accepts. Paired with the panic above so
+/// neither direction can move alone.
+#[test]
+fn exactly_the_bitmask_width_is_accepted() {
+    let servers: Vec<(ServerConfig, PoolConfig)> = (0..MAX_SERVERS)
+        .map(|i| (server(&format!("s{i}")), PoolConfig::default()))
+        .collect();
+    let (sh, unservable) = Shared::new(fresh(&["<a@x>"]), &servers);
+    assert!(unservable.is_empty());
+    assert_eq!(
+        sh.alive.len(),
+        MAX_SERVERS,
+        "32 servers is the widest fleet the u32 mask can distinguish"
+    );
+}
+
 #[test]
 fn shared_new_seeds_age_and_part_onto_work_for_the_pool_paths_that_read_them() {
     let reqs = vec![
@@ -170,6 +218,7 @@ fn shared_new_seeds_age_and_part_onto_work_for_the_pool_paths_that_read_them() {
             id: "<aged@x>".into(),
             age_days: 30,
             part: 2,
+            file: u32::MAX,
         },
         ArticleReq::fresh("<plain@x>"),
     ];
@@ -279,6 +328,206 @@ fn ttfb_suspect_after_reads_the_servers_own_ewma() {
     );
 }
 
+// TODO 208.2: the share-aware stall bound's arithmetic, pinned at the
+// three lines the 21 Aug shaped legs measured. One share of a 750 KB
+// body across 360 connections: 1 Gbps = ~2.2 s (floor runs), 250 Mbit
+// = ~8.6 s (x2 = ~17 s), 100 Mbit = ~21.6 s (x2 = ~43 s).
+#[test]
+fn share_aware_stall_bound_floors_on_fast_lines_and_stretches_on_slow_ones() {
+    let floor = ADAPTIVE_STALL.as_millis() as u64;
+    let ceiling = ADAPTIVE_STALL_MAX.as_millis() as u64;
+    let body = 750_000;
+    // 1 Gbps and 10 GbE: one share moves the body in ~2 s / ~0.2 s, so
+    // the floor is the bound - never sooner than the flat deadline,
+    // never later either.
+    assert_eq!(share_aware_stall_ms(body, 125_000_000, 360), floor);
+    assert_eq!(share_aware_stall_ms(body, 1_250_000_000, 360), floor);
+    // 250 Mbit: 31.25 MB/s / 360 = 86.8 KB/s, 750 KB takes 8.64 s,
+    // x2 = 17.28 s.
+    let ms = share_aware_stall_ms(body, 31_250_000, 360);
+    assert!((17_000..=17_500).contains(&ms), "250 Mbit bound {ms} ms");
+    // 100 Mbit: 12.5 MB/s / 360 = 34.7 KB/s, 750 KB takes 21.6 s,
+    // x2 = 43.2 s - under the ceiling, so the line sets it.
+    let ms = share_aware_stall_ms(body, 12_500_000, 360);
+    assert!((43_000..=43_500).contains(&ms), "100 Mbit bound {ms} ms");
+    // 20 Mbit: 2.5 MB/s / 360 = 6.9 KB/s, 108 s x2 = 216 s - the ceiling holds.
+    assert_eq!(share_aware_stall_ms(body, 2_500_000, 360), ceiling);
+    // Monotone in the connection count at a fixed line: more sharers,
+    // longer bound.
+    assert!(
+        share_aware_stall_ms(body, 12_500_000, 100) < share_aware_stall_ms(body, 12_500_000, 360)
+    );
+    // Untrained in any input keeps the flat bound.
+    assert_eq!(share_aware_stall_ms(0, 12_500_000, 360), floor);
+    assert_eq!(share_aware_stall_ms(body, 0, 360), floor);
+    assert_eq!(share_aware_stall_ms(body, 12_500_000, 0), floor);
+    // A pathological body size cannot wrap past the ceiling.
+    assert_eq!(share_aware_stall_ms(u64::MAX, 1, 1), ceiling);
+}
+
+#[test]
+fn stall_bound_is_flat_until_the_line_peak_and_a_body_are_trained() {
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), PoolConfig::default())]);
+    assert_eq!(
+        sh.stall_bound(),
+        ADAPTIVE_STALL,
+        "cold pool: the shipped flat bound"
+    );
+    // One body trains the size EWMA but the saturation gauge needs half
+    // a time constant of evidence before it calls anything a peak - so
+    // the bound is still flat, exactly as shipped for a run's first
+    // seconds.
+    sh.workers_live.store(360, Ordering::Relaxed);
+    sh.note_srv_bytes(0, 750_000);
+    assert_eq!(sh.body_bytes_ewma.load(Ordering::Relaxed), 750_000);
+    assert_eq!(sh.sat.peak_bps(), 0);
+    assert_eq!(sh.stall_bound(), ADAPTIVE_STALL, "no peak yet: still flat");
+}
+
+#[test]
+fn stall_bound_shares_the_line_among_the_fewer_of_workers_and_articles_left() {
+    // Seed a trained state by hand - the gauge's peak needs wall-clock
+    // evidence, so the test drives the inputs `stall_bound` reads.
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), PoolConfig::default())]);
+    sh.body_bytes_ewma.store(750_000, Ordering::Relaxed);
+    sh.sat.set_peak_bps(12_500_000); // 100 Mbit
+    sh.workers_live.store(360, Ordering::Relaxed);
+    // Mid-run: a deep queue, 360 sharers, the 100 Mbit bound (~43 s).
+    sh.pending.store(1_000, Ordering::Relaxed);
+    let mid = sh.stall_bound();
+    assert_eq!(
+        mid,
+        Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 360))
+    );
+    assert!(mid > Duration::from_secs(40), "mid-run bound {mid:?}");
+    // Queue dry, one article left in the pool's books (the seeded one
+    // is queued, nothing in flight): one sharer owns the whole line,
+    // so the bound is back at the flat floor for the last article.
+    sh.pending.store(1, Ordering::Relaxed);
+    assert_eq!(
+        sh.stall_bound(),
+        ADAPTIVE_STALL,
+        "tail: one sharer, flat bound"
+    );
+}
+
+// The same sharer count, with articles actually IN FLIGHT. `pending`
+// is every non-terminal article - queued AND in flight - so it is the
+// whole count on its own; `stall_bound` used to add `inflight.len()`
+// on top of it and judge the tail against about twice the work that
+// was left (found by the drain-tail note 21 Aug, fixed in the 22 Aug
+// bug sweep). Nothing pinned the fix: the tail case above happens to
+// have an EMPTY inflight map, so it reads the same either way.
+#[test]
+fn stall_bound_counts_an_in_flight_article_once_and_not_twice() {
+    let ids: Vec<String> = (0..100).map(|i| format!("<a{i}@x>")).collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (sh, _) = Shared::new(fresh(&refs), &[(server("s"), PoolConfig::default())]);
+    sh.body_bytes_ewma.store(750_000, Ordering::Relaxed);
+    sh.sat.set_peak_bps(12_500_000); // 100 Mbit
+    // More workers than articles left, so `left` alone picks the share.
+    sh.workers_live.store(360, Ordering::Relaxed);
+    assert_eq!(sh.pending.load(Ordering::Relaxed), 100);
+    // Thirty of the hundred are on the wire. `pending` does not move -
+    // an in-flight article is still non-terminal - so neither may the
+    // bound.
+    let before = sh.stall_bound();
+    for id in ids.iter().take(30) {
+        sh.register_inflight(&work(id), 0);
+    }
+    assert_eq!(sh.inflight.lock_ok().len(), 30);
+    assert_eq!(sh.pending.load(Ordering::Relaxed), 100);
+    assert_eq!(
+        sh.stall_bound(),
+        before,
+        "dispatching an article may not lengthen the bound"
+    );
+    assert_eq!(
+        before,
+        Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 100)),
+        "the share is the 100 articles left, not 130"
+    );
+    // And the two are far enough apart to be distinguishable: the
+    // double-counted figure is a different, longer bound, not the same
+    // number reached twice.
+    assert_ne!(
+        before,
+        Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 130))
+    );
+}
+
+// TODO 208.2 warm-up: before the run has trained a peak, the bound
+// divides the daemon's link anchor (the figure the §208.1 seed was
+// sized from), and the run's own peak takes over the moment it exists.
+#[test]
+fn stall_bound_takes_the_daemons_anchor_until_the_runs_own_peak_trains() {
+    let cfg = PoolConfig {
+        line_anchor_bps: 12_500_000, // 100 Mbit, persisted from a prior job
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), cfg)]);
+    sh.workers_live.store(360, Ordering::Relaxed);
+    sh.pending.store(1_000, Ordering::Relaxed);
+    assert_eq!(
+        sh.stall_bound(),
+        ADAPTIVE_STALL,
+        "no body delivered yet: nothing to size a share of"
+    );
+    // The first delivered body seeds the size EWMA whole, and from that
+    // moment the anchor carries the bound - no 7 s plateau wait.
+    sh.note_srv_bytes(0, 750_000);
+    assert_eq!(sh.sat.peak_bps(), 0, "the gauge has not trained");
+    let warm = sh.stall_bound();
+    assert_eq!(
+        warm,
+        Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 360))
+    );
+    assert!(warm > Duration::from_secs(40), "anchor-fed bound {warm:?}");
+    // The run's own reading wins over the stamp once there is one, in
+    // either direction: a faster line than the anchor tightens it.
+    sh.sat.set_peak_bps(31_250_000);
+    assert_eq!(
+        sh.stall_bound(),
+        Duration::from_millis(share_aware_stall_ms(750_000, 31_250_000, 360))
+    );
+}
+
+// Without an anchor (a CLI run, or the daemon's first job) the gauge's
+// provisional reading fills the gap from a quarter time constant of
+// evidence - about 3.6 s after the first body - instead of the 7.2 s
+// the peak waits for.
+#[test]
+fn stall_bound_takes_the_gauges_provisional_reading_without_an_anchor() {
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), PoolConfig::default())]);
+    sh.workers_live.store(360, Ordering::Relaxed);
+    sh.pending.store(1_000, Ordering::Relaxed);
+    sh.body_bytes_ewma.store(750_000, Ordering::Relaxed);
+    // Drive the gauge directly: 1 MB at t=0 and again 4 s later. The
+    // peak needs 7.2 s of age, the provisional reading 3.6 s.
+    sh.sat.note_bytes(0, 1_000_000, false);
+    assert_eq!(
+        sh.sat.line_estimate_bps(2_000),
+        0,
+        "2 s: too little evidence"
+    );
+    sh.sat.note_bytes(4_000, 1_000_000, false);
+    let est = sh.sat.line_estimate_bps(4_000);
+    assert!(est > 0, "4 s: the slow window has a corrected rate");
+    assert_eq!(sh.sat.peak_bps(), 0, "and it is still not a peak");
+    // That estimate is a slow line (2 MB over 4 s ~ 0.5 MB/s read
+    // through the warm-up correction), so 360 sharers stretch the
+    // bound to its ceiling.
+    let bound = sh.stall_bound_at(4_000);
+    assert!(
+        bound > ADAPTIVE_STALL,
+        "provisional bound {bound:?} is off the floor"
+    );
+    assert_eq!(
+        bound,
+        Duration::from_millis(share_aware_stall_ms(750_000, est, 360)).min(ADAPTIVE_STALL_MAX)
+    );
+}
+
 #[test]
 fn mark_suspect_flags_a_live_entry_and_ignores_a_finished_one() {
     let cfg = PoolConfig {
@@ -327,17 +576,25 @@ fn pick_suspect_dup_walks_its_gate_ladder() {
     assert!(sh.pick_suspect_dup(0b10, 0b10, 1, 0).is_none());
     assert!(sh.pick_suspect_dup(0b10, 0b10, 0, 3).is_none());
     // The hedge issue-rate cap prices jitter: over it, the budget path
-    // still rescues, but no new dup is issued.
-    sh.hedges_issued.store(1_000, Ordering::Relaxed);
+    // still rescues, but no new dup is issued. §17c: it is the TTFB
+    // rule's OWN purse - a spent STALE purse must not starve it.
+    sh.ttfb_hedges_issued.store(1_000, Ordering::Relaxed);
     assert!(sh.pick_suspect_dup(0b10, 0b10, 0, 0).is_none());
-    sh.hedges_issued.store(0, Ordering::Relaxed);
+    sh.ttfb_hedges_issued.store(0, Ordering::Relaxed);
+    sh.hedges_issued.store(1_000, Ordering::Relaxed);
 
     let dup = sh
         .pick_suspect_dup(0b10, 0b10, 0, 0)
-        .expect("an idle primary races the suspect");
+        .expect("an idle primary races the suspect even with the stale purse spent");
     assert_eq!(&*dup.id, "<a@x>");
     assert!(dup.dup, "raced copy is a duplicate, never an owner");
-    assert_eq!(sh.hedges_issued.load(Ordering::Relaxed), 1);
+    assert_eq!(sh.ttfb_hedges_issued.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        sh.hedges_issued.load(Ordering::Relaxed),
+        1_000,
+        "the TTFB rescue never draws down the straggler budget"
+    );
+    sh.hedges_issued.store(0, Ordering::Relaxed);
     {
         let inf = sh.inflight.lock_ok();
         let e = inf.get("<a@x>").unwrap();
@@ -829,45 +1086,89 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     );
 }
 
+/// Codex F-07 (22 Aug 2026): `requeue` used to clear the revived
+/// articles' `done` bits BEFORE its refusal points, and its rollback
+/// re-claimed them on the way out. A lingering duplicate dispatch
+/// completing inside that window took the cleared bit as a fresh
+/// completion and subtracted `pending` - and the rollback, which does
+/// not know the claim happened, subtracted the same revival AGAIN. Two
+/// articles, one still unresolved, and the run fired `finished`:
+/// cancel A (2 -> 1), revive (-> 2), duplicate completes A (-> 1),
+/// rollback (-> 0). The fix clears the bits only under the queue lock,
+/// past the last refusal, so a duplicate in the window meets a bit that
+/// is still terminal and claims nothing.
+///
+/// The staging: the test HOLDS the queue lock, so the requeue spins its
+/// whole bounded try_lock ladder and then rolls back - the exact
+/// refusal the audit's ledger walked. The gate barrier only sequences
+/// entry into that wait; the duplicate's completion is placed inside it
+/// by polling for the moment the pre-fix code exposes (the bit going
+/// un-terminal mid-wait), a moment the fixed code never produces.
 #[test]
-fn seal_run_blocking_fails_orphans_exactly_once() {
+fn a_duplicate_completing_inside_the_requeue_window_is_not_subtracted_twice() {
+    let ctl = Arc::new(QueueControl::default());
     let (sh, _) = Shared::new(
         fresh(&["<a@x>", "<b@x>"]),
         &[(server("s"), PoolConfig::default())],
     );
-    let (tx, mut rx) = mpsc::channel(8);
-    // Live workers: not this path's job - the async seal owns it.
+    ctl.attach(&sh);
+    sh.workers_born.store(1, Ordering::Release);
     sh.workers_live.store(1, Ordering::Release);
-    assert_eq!(seal_run_blocking(&sh, &tx, "shards stopped"), 0);
-    sh.workers_live.store(0, Ordering::Release);
-    // A draining run keeps its queue intact for the resume.
-    sh.draining.store(true, Ordering::Release);
-    assert_eq!(seal_run_blocking(&sh, &tx, "shards stopped"), 0);
-    sh.draining.store(false, Ordering::Release);
-    // One orphan still queued, one stranded in flight: both must reach
-    // a terminal Failed, and the pending count must reach zero.
+    let mut cancel_ids = HashSet::new();
+    cancel_ids.insert("<a@x>".into());
+    assert_eq!(ctl.cancel(&cancel_ids), vec!["<a@x>".into()]);
+    assert_eq!(sh.pending.load(Ordering::Acquire), 1);
+
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let released = Arc::new(std::sync::Barrier::new(2));
+    *sh.requeue_gate_barrier.lock_ok() = Some((entered.clone(), released.clone()));
+    let ctl2 = ctl.clone();
+    let requeuer = std::thread::spawn(move || ctl2.requeue(&["<a@x>".into()]));
+    entered.wait(); // pending raised to 2, queue lock not taken yet
+    *sh.requeue_gate_barrier.lock_ok() = None; // one trip only
+    // Contend the queue so the requeue lives out its bounded wait and
+    // rolls back with the fleet still alive.
+    let q = sh.queue.try_lock().expect("nobody else holds the queue");
+    released.wait();
+    // The lingering duplicate delivers its body INSIDE the wait -
+    // exactly what a dup dispatch does on completion: claim, and
+    // complete if it won. The poll waits out the instant the pre-fix
+    // code un-terminals the bit mid-wait; on the fixed code that
+    // instant never comes (the bit is cleared only past the lock), the
+    // deadline lapses well inside the requeue's own wait, and the
+    // claim below meets a bit that is still terminal.
+    let cleared_at = std::time::Instant::now();
+    while sh.done.lock_ok().contains(0)
+        && cleared_at.elapsed() < std::time::Duration::from_millis(8)
     {
-        let mut q = sh.queue.try_lock().unwrap();
-        let w = q.pop_front().unwrap();
-        drop(q);
-        sh.register_inflight(&w, 0);
+        std::thread::yield_now();
     }
-    assert_eq!(seal_run_blocking(&sh, &tx, "all shard runtimes stopped"), 2);
-    let mut failed = Vec::new();
-    while let Ok(o) = rx.try_recv() {
-        match o {
-            FetchOutcome::Failed { id, error } => {
-                assert_eq!(error, "all shard runtimes stopped");
-                failed.push(id);
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
+    if sh.claim_done("<a@x>", 0) {
+        sh.complete_one();
     }
-    failed.sort();
-    assert_eq!(failed, vec!["<a@x>".into(), "<b@x>".into()]);
-    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
-    // Nothing left: the pending==0 early return, and no double report.
-    assert_eq!(seal_run_blocking(&sh, &tx, "again"), 0);
+    assert_eq!(
+        requeuer.join().unwrap(),
+        0,
+        "a requeue that cannot take the queue must refuse, not publish blind"
+    );
+    drop(q);
+    assert_eq!(
+        sh.pending.load(Ordering::Acquire),
+        1,
+        "only the rollback's own subtract may land - <b@x> is still owed its outcome"
+    );
+    assert!(
+        !*sh.finished.borrow(),
+        "the run must not read as finished with <b@x> unresolved"
+    );
+    assert!(
+        sh.done.lock_ok().contains(0),
+        "the revived article is terminal again, exactly as cancel left it"
+    );
+    assert!(
+        sh.cancelled.lock_ok().contains_key("<a@x>"),
+        "the refusal re-stashes, so the caller keeps its deferred accounting"
+    );
 }
 
 #[tokio::test]
@@ -938,6 +1239,7 @@ fn sharded_fetch_serves_everything_across_shards() {
         id: "<ancient@x>".into(),
         age_days: 400,
         part: 0,
+        file: u32::MAX,
     });
     let cfg = PoolConfig {
         connections: 3,
@@ -2087,533 +2389,6 @@ async fn desync_echoed_id_cuts_the_session_and_completes_byte_perfect() {
     }
 }
 
-// §122.5 round 2 (6 Aug): the next_work scan ladder, driven directly.
-// Every branch here is a queue-shape decision the e2e rigs only reach
-// probabilistically: the all-live-430 terminal report, the tail latch,
-// the futile-scan throttle, the steer-inbox adoption order, the fill
-// gate, the endgame hold-back, and the promoted leave-for-faster hop.
-
-#[tokio::test]
-async fn next_work_reports_a_dead_article_and_latches_the_tail() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<dead@x>", "<ok@x>"]), &servers);
-    let ctx = ctx_for(&servers, 0);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    // Every LIVE server has already 430'd the head article: it is
-    // terminal, and waiting on it would rotate it forever.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = sh.live_mask();
-    let (tx, mut rx) = mpsc::channel(4);
-    let w = next_work(&sh, ctx, &tx, Pipeline::payload(0))
-        .await
-        .expect("the healthy article is picked");
-    assert_eq!(&*w.id, "<ok@x>");
-    match rx.try_recv() {
-        Ok(FetchOutcome::Missing { id, cause }) => {
-            assert_eq!(&*id, "<dead@x>");
-            assert!(matches!(cause, MissingCause::Gone { .. }), "{cause:?}");
-        }
-        other => panic!("expected the dead article's Missing report, got {other:?}"),
-    }
-    // The queue is dry with work still pending: this scan finds nothing,
-    // latches the tail phase exactly once, and arms the futile throttle.
-    assert!(sh.tail_started.lock_ok().is_none());
-    assert!(
-        next_work(&sh, ctx, &tx, Pipeline::payload(0))
-            .await
-            .is_none()
-    );
-    assert!(
-        sh.tail_started.lock_ok().is_some(),
-        "a primary finding the queue dry latches the tail"
-    );
-    assert_ne!(sh.scan_futile[0].load(Ordering::Relaxed), u64::MAX);
-    // An immediate rescan takes the throttled path (dup pick only).
-    assert!(
-        next_work(&sh, ctx, &tx, Pipeline::payload(0))
-            .await
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn steer_inbox_requeues_are_adopted_in_promoted_first_order() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<q@x>"]), &servers);
-    let ctx = ctx_for(&servers, 0);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    {
-        let mut inbox = sh.steer_inbox.lock_ok();
-        let mut p = work("<p@x>");
-        p.promoted = true;
-        inbox.push(p);
-        inbox.push(work("<n@x>"));
-    }
-    let (tx, _rx) = mpsc::channel(4);
-    let w = next_work(&sh, ctx, &tx, Pipeline::payload(0))
-        .await
-        .expect("work is available");
-    assert_eq!(&*w.id, "<p@x>", "the promoted steer lands at the front");
-    assert_eq!(
-        sh.promoted_pending.load(Ordering::Acquire),
-        0,
-        "the adopt charged promoted_pending and the pick spent it"
-    );
-    let q = sh.queue.lock().await;
-    let ids: Vec<&str> = q.iter().map(|w| &*w.id).collect();
-    assert_eq!(
-        ids,
-        ["<q@x>", "<n@x>"],
-        "the plain steer queued at the back"
-    );
-}
-
-#[tokio::test]
-async fn a_fill_server_waits_for_every_live_primary_miss() {
-    let mut fill = server("fill");
-    fill.level = 1;
-    let servers = vec![
-        (server("prime"), PoolConfig::default()),
-        (fill, PoolConfig::default()),
-    ];
-    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
-    let ctx1 = ctx_for(&servers, 1);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    sh.alive[1].fetch_add(1, Ordering::AcqRel);
-    let (tx, _rx) = mpsc::channel(4);
-    // The primary is live and has not missed: the fill server sits out.
-    assert!(
-        next_work(&sh, ctx1, &tx, Pipeline::payload(0))
-            .await
-            .is_none()
-    );
-    sh.scan_futile[1].store(u64::MAX, Ordering::Relaxed);
-    // The primary 430'd it: the gate opens.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(0);
-    let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
-        .await
-        .expect("gate satisfied");
-    assert_eq!(&*w.id, "<a@x>");
-}
-
-/// M5: the primary resets on one article every time it is dispatched.
-/// Nothing ever 430s, so before the `spent` mask the fill server stayed
-/// gated for the whole run, the primary kept retaking its own casualty
-/// (`other_can_take` saw no eligible elsewhere), and the article was
-/// reported lost with a healthy server one level down never asked.
-#[tokio::test]
-async fn a_primary_that_spends_its_budget_hands_the_article_down() {
-    let mut fill = server("fill");
-    fill.level = 1;
-    let servers = vec![
-        (server("prime"), PoolConfig::default()),
-        (fill, PoolConfig::default()),
-    ];
-    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
-    let ctx0 = ctx_for(&servers, 0);
-    let ctx1 = ctx_for(&servers, 1);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    sh.alive[1].fetch_add(1, Ordering::AcqRel);
-    let cfg = PoolConfig::default();
-    let (tx, mut rx) = mpsc::channel(4);
-    // Every dispatch dies with the article at the front of a session
-    // that never answered: the charge the RST-after-AUTH guard makes.
-    for attempt in 0..=cfg.article_retries {
-        sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
-        let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
-            .await
-            .unwrap_or_else(|| panic!("the primary picks it on attempt {attempt}"));
-        assert_eq!(&*w.id, "<a@x>");
-        sh.charge_wire();
-        sh.register_inflight(&w, 0);
-        let mut inflight: VecDeque<Work> = VecDeque::new();
-        inflight.push_back(w);
-        requeue_or_fail(&sh, &tx, &cfg, ctx0, &mut inflight, "rst", true).await;
-    }
-    assert!(
-        rx.try_recv().is_err(),
-        "the article must not be declared lost while a server that never saw it is live"
-    );
-    {
-        let q = sh.queue.lock().await;
-        let w = q.front().expect("requeued, not failed");
-        assert_eq!(w.attempts, 0, "the ladder hands the next tier a budget");
-        assert_eq!(
-            w.tried_430, 0,
-            "a reset answers no question about retention"
-        );
-        assert_eq!(w.tried_fail, server_bit(0));
-    }
-    assert_eq!(sh.spent_mask("<a@x>"), server_bit(0));
-    // The primary now steps aside: someone else can finally have it.
-    sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
-    assert!(
-        next_work(&sh, ctx0, &tx, Pipeline::payload(0))
-            .await
-            .is_none(),
-        "the server that spent its budget must not retake its own casualty"
-    );
-    sh.scan_futile[1].store(u64::MAX, Ordering::Relaxed);
-    let w = next_work(&sh, ctx1, &tx, Pipeline::payload(0))
-        .await
-        .expect("the fill server takes the article the primary could not fetch");
-    assert_eq!(&*w.id, "<a@x>");
-}
-
-#[tokio::test]
-async fn endgame_ladder_articles_ride_empty_pipelines_only() {
-    let servers = vec![
-        (server("a"), PoolConfig::default()),
-        (server("b"), PoolConfig::default()),
-    ];
-    let (sh, _) = Shared::new(fresh(&["<l@x>"]), &servers);
-    let ctx0 = ctx_for(&servers, 0);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    sh.alive[1].fetch_add(1, Ordering::AcqRel);
-    // One pending article 430'd by the sibling: an endgame ladder probe.
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(1);
-    let (tx, _rx) = mpsc::channel(4);
-    // A busy pipeline holds it back (head-of-line blocking on the last
-    // windows was the measured straggler tail).
-    assert!(
-        next_work(&sh, ctx0, &tx, Pipeline::payload(3))
-            .await
-            .is_none()
-    );
-    sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
-    // An idle worker answers the probe in one RTT.
-    let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
-        .await
-        .expect("idle takes the probe");
-    assert_eq!(&*w.id, "<l@x>");
-}
-
-#[tokio::test]
-async fn untried_promoted_work_is_left_for_a_faster_server() {
-    let servers = vec![
-        (server("slow"), PoolConfig::default()),
-        (server("fast"), PoolConfig::default()),
-    ];
-    let (sh, _) = Shared::new(fresh(&["<s@x>"]), &servers);
-    let ctx0 = ctx_for(&servers, 0);
-    sh.alive[0].fetch_add(1, Ordering::AcqRel);
-    sh.alive[1].fetch_add(1, Ordering::AcqRel);
-    // A stream reader is attached and the sibling is measurably faster.
-    sh.note_stream();
-    sh.bytes[1].store(64_000_000, Ordering::Release);
-    {
-        let mut q = sh.queue.lock().await;
-        q.front_mut().unwrap().promoted = true;
-        sh.promoted_pending.fetch_add(1, Ordering::AcqRel);
-    }
-    let (tx, _rx) = mpsc::channel(4);
-    // The slow server steps past it - and puts it back at the FRONT.
-    assert!(
-        next_work(&sh, ctx0, &tx, Pipeline::payload(0))
-            .await
-            .is_none()
-    );
-    {
-        let q = sh.queue.lock().await;
-        assert_eq!(q.front().map(|w| &*w.id), Some("<s@x>"));
-        assert!(q.front().unwrap().promoted);
-    }
-    assert_eq!(
-        sh.promoted_pending.load(Ordering::Acquire),
-        1,
-        "stepping past is not a pick - the promise stays charged"
-    );
-    // Once ANY backbone has 430'd it, latency beats speed-matching:
-    // whoever can serve it, serves it.
-    sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
-    sh.queue.lock().await.front_mut().unwrap().tried_430 = server_bit(1);
-    let w = next_work(&sh, ctx0, &tx, Pipeline::payload(0))
-        .await
-        .expect("a missed promote goes to whoever is standing");
-    assert_eq!(&*w.id, "<s@x>");
-    assert_eq!(sh.promoted_pending.load(Ordering::Acquire), 0);
-}
-
-/// A bare 430 (no echoed message-id) defers the verdict instead of
-/// declaring the article missing, and MUST tick `deferred` on its way
-/// out. The caller's stall watchdog reads decoded bytes, outstanding
-/// articles and this counter; a deferral moves neither of the first
-/// two, so without the tick a wholly dead post - which takes this
-/// branch for every one of its articles before any can go terminal -
-/// looks exactly like a wedged pool and gets aborted mid-ladder, then
-/// blamed on the user's machine. That abort shipped once already
-/// (31 Jul) and this branch reopened it; the e2e guard is
-/// `dead_post_is_driven_to_missing_not_abandoned_as_a_stall`.
-#[tokio::test]
-async fn a_bare_430_defers_the_verdict_and_says_so() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
-    let cfg = PoolConfig::default();
-    let ctx = ctx_for(&servers, 0);
-    let (tx, mut rx) = mpsc::channel(8);
-    // Dispatch it the way a worker would, so the queue below counts the
-    // requeue and not the seeded entry.
-    let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
-    let mut inflight: VecDeque<Work> = [dispatched].into_iter().collect();
-    sh.charge_wire();
-
-    let before = sh.deferred.load(Ordering::Relaxed);
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut Default::default(),
-    )
-    .await;
-    assert_eq!(
-        sh.deferred.load(Ordering::Relaxed),
-        before + 1,
-        "a deferred verdict is forward progress and must be visible as such"
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "the first bare 430 requeues - it does not resolve the article"
-    );
-    assert_eq!(sh.queue.lock().await.len(), 1, "requeued for the recheck");
-
-    // The confirming repeat lands on the re-aligned session and is
-    // authoritative: the article goes terminally Missing, and THAT
-    // resolution is the outstanding-count movement the watchdog sees.
-    let w = sh
-        .queue
-        .lock()
-        .await
-        .pop_front()
-        .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
-    sh.charge_wire();
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut Default::default(),
-    )
-    .await;
-    assert!(
-        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<a@x>"),
-        "the second bare 430 confirms the first and declares the article"
-    );
-    assert_eq!(
-        sh.deferred.load(Ordering::Relaxed),
-        before + 1,
-        "a resolving response is not a deferral"
-    );
-}
-
-/// The soft-430 recheck requeues at the FRONT of the queue, not the
-/// back. At the back the confirming repeat only dispatches as the queue
-/// empties, so the terminal Missing lands at drain-end - on a long
-/// download that defers the verdict by the WHOLE download and starves
-/// the M2c.5 speculative prefetch of the trigger it polls for (the
-/// 7 Aug nightly red). The fence armed by the first bare refusal proves
-/// alignment before any verdict is charged, so the early slot costs
-/// nothing on correctness.
-#[tokio::test]
-async fn the_bare_430_recheck_jumps_the_queue() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<a@x>", "<b@x>"]), &servers);
-    let cfg = PoolConfig::default();
-    let ctx = ctx_for(&servers, 0);
-    let (tx, _rx) = mpsc::channel(8);
-    let dispatched = sh.queue.lock().await.pop_front().expect("the seeded work");
-    assert_eq!(&*dispatched.id, "<a@x>");
-    let mut inflight: VecDeque<Work> = [dispatched].into_iter().collect();
-    sh.charge_wire();
-
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut Default::default(),
-    )
-    .await;
-    let q = sh.queue.lock().await;
-    assert_eq!(q.len(), 2, "requeued for the recheck");
-    assert_eq!(
-        q.front().map(|w| &*w.id),
-        Some("<a@x>"),
-        "the recheck must dispatch ahead of untouched work, not at drain-end"
-    );
-}
-
-/// §129 3g: the confirming repeat is a WINDOWED confirmation, not a
-/// one-time pass for the whole run. Two bare refusals only confirm each
-/// other while both were read off aligned sockets; when the session that
-/// took the first one is afterwards shown to have been reading responses
-/// off by one, that refusal was never evidence about this article at all
-/// and the pass comes back.
-///
-/// Before this, `soft_430` was set once and carried across every requeue
-/// forever, so it defeated exactly ONE desync event per article: a second
-/// misattributed refusal - from an unrelated event, on a different
-/// session, minutes later - folded straight into `tried_430` and
-/// declared an article the server HOLDS terminally Missing. On a
-/// single-server run nothing contradicts that verdict, which makes it
-/// silent data loss rather than a slowdown.
-#[tokio::test]
-async fn a_proven_desync_gives_the_bare_430_pass_back() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
-    let cfg = PoolConfig::default();
-    let ctx = ctx_for(&servers, 0);
-    let (tx, mut rx) = mpsc::channel(8);
-    let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
-
-    // A desynced session's refusal: bare, and about the article behind.
-    let w = sh.queue.lock().await.pop_front().expect("the seeded work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
-    sh.charge_wire();
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut ledger,
-    )
-    .await;
-    assert_eq!(
-        ledger.len(),
-        1,
-        "a bare refusal goes in the session's ledger - it is the only \
-         record of what a later desync proof would have to void"
-    );
-
-    // That session then reads an id that is not the one it asked for,
-    // proving every refusal since its last checked id was positional
-    // evidence off a misaligned socket.
-    sh.void_soft_430(&ledger, ctx.group_bits);
-
-    // The next bare refusal is therefore FIRST evidence again.
-    let w = sh
-        .queue
-        .lock()
-        .await
-        .pop_front()
-        .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
-    sh.charge_wire();
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut Default::default(),
-    )
-    .await;
-    assert!(
-        rx.try_recv().is_err(),
-        "the voided refusal cannot confirm anything - declaring the \
-         article here is the false Missing this item exists to close"
-    );
-    assert_eq!(sh.queue.lock().await.len(), 1, "requeued for the recheck");
-
-    // And with no fresh proof, the pair that follows still resolves it:
-    // re-arming may not turn a dead post into a loop.
-    let w = sh
-        .queue
-        .lock()
-        .await
-        .pop_front()
-        .expect("the requeued work");
-    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
-    sh.charge_wire();
-    handle_missing(
-        &cfg,
-        ctx,
-        &sh,
-        &tx,
-        &mut inflight,
-        Vec::new(),
-        false,
-        false,
-        &mut Default::default(),
-    )
-    .await;
-    assert!(
-        matches!(rx.try_recv(), Ok(FetchOutcome::Missing { id, .. }) if &*id == "<a@x>"),
-        "two refusals off aligned sockets are still a confirmation"
-    );
-}
-
-/// §129 3g, the other half: the re-arm is CAPPED, so a provider that
-/// desyncs on every session cannot keep an article out of a terminal
-/// verdict for ever. The first cut of the fix had no cap and hung the
-/// 1-in-5 desync leg outright - every session's death handed every
-/// article it had refused its pass back, and a wholly-absent post then
-/// had no way to resolve at all.
-#[tokio::test]
-async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
-    let servers = vec![(server("s"), PoolConfig::default())];
-    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
-    let cfg = PoolConfig::default();
-    let ctx = ctx_for(&servers, 0);
-    let (tx, mut rx) = mpsc::channel(8);
-
-    // Every single refusal is followed by a proof of desync - the worst
-    // case a hostile or badly broken frontend can produce.
-    for round in 0..(SOFT_REARM_CAP as usize + 2) {
-        let Some(w) = sh.queue.lock().await.pop_front() else {
-            break; // resolved: the article left the queue for good
-        };
-        let mut ledger: VecDeque<Arc<str>> = VecDeque::new();
-        let mut inflight: VecDeque<Work> = [w].into_iter().collect();
-        sh.charge_wire();
-        handle_missing(
-            &cfg,
-            ctx,
-            &sh,
-            &tx,
-            &mut inflight,
-            Vec::new(),
-            false,
-            false,
-            &mut ledger,
-        )
-        .await;
-        sh.void_soft_430(&ledger, ctx.group_bits);
-        if let Ok(FetchOutcome::Missing { id, .. }) = rx.try_recv() {
-            assert_eq!(&*id, "<a@x>");
-            assert!(
-                round <= SOFT_REARM_CAP as usize + 1,
-                "resolved after {round} rounds"
-            );
-            return;
-        }
-    }
-    panic!(
-        "the article never reached a terminal verdict in \
-         {} rounds of refusal-plus-proof - the re-arm is unbounded",
-        SOFT_REARM_CAP + 2
-    );
-}
-
 /// §123 chip 6, heal-after: the brownout that ENDS. Every prior
 /// brownout rig models a frontend that never returns and hands the
 /// job to a healthy twin; this one has no twin - the same server
@@ -2854,4 +2629,62 @@ fn a_live_fleet_larger_than_the_cap_retires_it() {
     );
     assert_eq!(s.granted_hi.load(Ordering::Acquire), 64);
     assert_eq!(s.capped_since.load(Ordering::Acquire), 0);
+}
+
+/// Lock-order pin for `deregister_inflight_done`. The park's `set`
+/// holds `files` + `groups` and asks `inflight_of`, which takes the
+/// in-flight map; the done path takes the in-flight map and then calls
+/// `note_left`, which takes the park's own maps. If the done path
+/// holds its guard across `note_left` - which an `if let` on the
+/// removal DOES in
+/// edition 2024 - the two orders are AB/BA and the pool wedges.
+///
+/// Staged rather than hammered: the park thread parks first and stalls
+/// inside `inflight_of`, the done thread is given time to reach
+/// `note_left`, and only then is the park let go. Before the fix the
+/// done thread is sitting on the in-flight map at that instant and
+/// neither side ever moves; the harness times out here instead.
+#[test]
+fn a_done_deregistration_never_holds_the_inflight_map_into_the_park() {
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), PoolConfig::default())]);
+    let mut w = work("<a@x>");
+    w.file = 7;
+    sh.register_inflight(&w, 0);
+    sh.park
+        .set(&[7], Some(EST_BODY_BYTES * 4), |_| vec![w.id.clone()]);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let parker = {
+        let sh = sh.clone();
+        std::thread::spawn(move || {
+            // A file this park has not seen, so `inflight_of` is asked.
+            sh.park.set(&[9], Some(EST_BODY_BYTES * 4), |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                sh.inflight.lock_ok().keys().cloned().collect()
+            });
+        })
+    };
+    entered_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let doner = {
+        let sh = sh.clone();
+        std::thread::spawn(move || {
+            sh.deregister_inflight_done(&w);
+            done_tx.send(()).unwrap();
+        })
+    };
+    // Long enough for the done thread to reach `note_left` and block on
+    // the park's `files` map, which the parker is holding.
+    std::thread::sleep(Duration::from_millis(100));
+    release_tx.send(()).unwrap();
+
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the done path deadlocked against a concurrent park");
+    parker.join().unwrap();
+    doner.join().unwrap();
+    assert!(sh.inflight.lock_ok().is_empty(), "the entry was retired");
 }

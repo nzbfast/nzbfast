@@ -146,7 +146,7 @@ pub struct Target {
 /// can never drift.
 pub fn sign(secret: &str, body: &[u8]) -> String {
     use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes())
+    let mut mac = <Hmac<sha2::Sha256> as hmac::digest::KeyInit>::new_from_slice(secret.as_bytes())
         .expect("hmac accepts any key length");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))

@@ -674,6 +674,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
     let w = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<q0>".into(),
         attempts: 0,
@@ -748,6 +749,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
     let refetch = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<q0>".into(),
         attempts: 0,
@@ -891,6 +893,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     let w0 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<s0>".into(),
         attempts: 0,
@@ -926,6 +929,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     let w1 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<s1>".into(),
         attempts: 0,
@@ -959,6 +963,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
     let w2 = Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: "<s2>".into(),
         attempts: 0,
@@ -1002,6 +1007,381 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
             .is_none(),
         "hedge fired while switched off"
     );
+}
+
+/// A one-connection server for the two TODO 202 bound guards below.
+/// `hedge` is always on - these rigs exist to prove the hedge fires,
+/// and the parent rig above already covers the off case.
+fn bound_guard_server(host: &str, tail_fanout: bool) -> (ServerConfig, PoolConfig) {
+    (
+        ServerConfig {
+            host: host.into(),
+            port: 119,
+            tls: false,
+            username: None,
+            password: None,
+            connections: 1,
+            pin_connections: false,
+            level: 0,
+            group: None,
+            retention_days: 0,
+            rcvbuf: None,
+            block_bytes: None,
+            block_account: false,
+            bind_ip: None,
+            socks5: None,
+            enabled: true,
+            warm_pool: false,
+            idle_release_secs: None,
+            idle_keep: None,
+            max_source_ips: None,
+        },
+        PoolConfig {
+            hedge: true,
+            tail_fanout,
+            ..Default::default()
+        },
+    )
+}
+
+/// Register `id` as owned by server 0, on the wire for `age`, with
+/// `tried_fail` already recorded against it.
+fn bound_guard_straggler(shared: &Arc<Shared>, id: &str, tried_fail: u32, age: Duration) {
+    let w = Work {
+        age_days: 0,
+        part: 0,
+        file: u32::MAX,
+        ord: 0,
+        id: id.into(),
+        attempts: 0,
+        promoted: false,
+        tried_430: 0,
+        tried_fail,
+        dup: false,
+        prebyte_expiries: 0,
+        soft_430: 0,
+        fenced: false,
+        rearms: 0,
+        ladder: false,
+        probe: false,
+    };
+    shared.register_inflight(&w, 0);
+    shared.inflight.lock_ok().get_mut(id).unwrap().dispatched = Instant::now() - age;
+}
+
+/// The article time a real 1 Gbps leg trained: `art 22280 ms`, off a
+/// tv4 cost-suite leg. Well above the 8 s ceiling once tripled, which
+/// is what makes today's adaptive bound inert and is the whole reason
+/// TODO 202 revisits it.
+const TRAINED_ART_MS: u64 = 22_280;
+
+/// TODO 202 guard: the staleness bound must stay under the pool's own
+/// read timeout, or hedging is dead by construction.
+///
+/// This is a structural bound, not a tuning preference. A dup issued
+/// after the read timeout cannot rescue anything - the timeout reaps
+/// the article first - so a bound at or above `read_timeout` means the
+/// stale rule never fires at all, whatever its arithmetic says. That
+/// makes "an article on the wire for the whole read timeout has
+/// already been raced" the weakest honest invariant available, and it
+/// is the one this pins.
+///
+/// It is aimed at a specific near miss. The candidate TODO 202 fix
+/// makes the clamp's upper bound a function of `art_ms` instead of the
+/// flat 8 s, and at the EWMA below that yields `3 x 22.28 s` = 66.8 s
+/// - more than twice the 30 s read timeout, so hedging would stop
+/// firing entirely while every gate stayed green. The rig above cannot
+/// see it: its behavioural half runs at `art_ms = 400`, where the
+/// clamp is not engaged at either end, so it passes however far the
+/// ceiling moves, and its one ceiling assertion is a bare constant a
+/// fix must rewrite to land at all.
+#[tokio::test]
+async fn the_stale_bound_stays_under_the_read_timeout() {
+    let servers = vec![
+        bound_guard_server("a", false),
+        bound_guard_server("b", false),
+    ];
+    let read_timeout = servers[0].1.read_timeout;
+    // Normal phase, for the same reason as the rig above: the
+    // endgame's own rules must stay out of the way of this answer.
+    let reqs: Vec<ArticleReq> = (0..(ENDGAME_MAX + 10))
+        .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+
+    shared.art_ms.store(TRAINED_ART_MS, Ordering::Relaxed);
+    assert!(
+        shared.hedge_stale_bound() < read_timeout,
+        "a stale bound of {:?} is at or past the {read_timeout:?} read timeout - \
+         the timeout reaps the article first, so the hedge can never fire",
+        shared.hedge_stale_bound(),
+    );
+
+    // And the behaviour that bound is supposed to produce.
+    bound_guard_straggler(&shared, "<s1>", 0, read_timeout);
+    let d = shared
+        .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+        .expect("an article on the wire for the whole read timeout must have been raced");
+    assert_eq!(&*d.id, "<s1>");
+    assert!(d.dup);
+    // A hedge, not a fan-out pick: only the stale rule counts here.
+    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
+}
+
+/// TODO 202 guard, damaged-post half: at the endgame a steered
+/// refetch's only rescue is the stale rule, so relaxing that rule
+/// takes its first casualty on the shape where hedging is
+/// load-bearing rather than opportunistic.
+///
+/// The tail fan-out exempts refetch legs (`tried_fail != 0`) - it has
+/// to, because the same-server allowance made a recovering twin race
+/// its own steered refetches, measured at 33-43 dups for 0 wins on the
+/// damage matrix. That exemption leaves the stale rule holding the
+/// whole damaged case alone. Every wall-clock damage rig that would
+/// notice it going quiet is `#[ignore]`d and runs in no CI job, so
+/// this cheap deterministic one stands in for them.
+#[tokio::test]
+async fn a_steered_refetch_keeps_its_stale_rescue_at_the_endgame() {
+    let servers = vec![bound_guard_server("a", true), bound_guard_server("b", true)];
+    let read_timeout = servers[0].1.read_timeout;
+    // Few enough to be inside the endgame, where the fan-out arms.
+    let reqs: Vec<ArticleReq> = (0..4)
+        .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+    assert!(
+        shared.pending.load(Ordering::Acquire) <= ENDGAME_MAX,
+        "rig broken: this leg must be in the endgame"
+    );
+
+    shared.art_ms.store(TRAINED_ART_MS, Ordering::Relaxed);
+    // Server a (bit 0b01) already failed this one - a CRC-steer or a
+    // plain failure requeue, now stalled on its chosen server.
+    bound_guard_straggler(&shared, "<s1>", 0b01, read_timeout);
+
+    let d = shared
+        .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+        .expect("a stalled refetch the fan-out will not touch must still be raced");
+    assert_eq!(&*d.id, "<s1>");
+    // The fan-out skipped it (`tried_fail != 0`) and the stale rule
+    // caught it: a fan pick would not have counted a hedge.
+    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
+}
+
+/// Drive the TODO 202 line gauge into its SHUT state.
+///
+/// Not instant, and it cannot be: `saturated()` reads the pool's own
+/// elapsed clock, and a now-rate is `None` until the 1 s window holds a
+/// quarter of its time constant (~360 ms) of evidence, so no fake `now`
+/// stands in for real time here. Feed a plateau for ~450 ms, then pin
+/// the peak under it with the gauge's own test seam - training a peak
+/// the honest way takes half the 10 s window's time constant, which no
+/// unit test can spend. Pinned a factor of ten below the plateau so the
+/// gate survives seconds of scheduler delay between here and the pick;
+/// the gate's own arithmetic is guarded in `pool::saturation::tests`.
+async fn shut_the_line_gate(shared: &Arc<Shared>) {
+    for _ in 0..18 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        shared
+            .sat
+            .note_bytes(shared.start.elapsed().as_millis() as u64, 100_000, false);
+    }
+    let now = shared.start.elapsed().as_millis() as u64;
+    let rate = shared
+        .sat
+        .now_rate(now)
+        .expect("rig broken: a now-rate must have trained");
+    shared.sat.set_peak_bps((rate / 10.0) as u64);
+    assert!(
+        shared.line_saturated(shared.start.elapsed().as_millis() as u64),
+        "rig broken: the line gate must read shut"
+    );
+}
+
+/// TODO 202 §17: a STALLED article escapes the line gate; a merely
+/// slow one does not.
+///
+/// The gate's argument is that on a saturated line a speculative copy
+/// displaces payload byte for byte. That is true of a slow owner and
+/// false of a stalled one, which delivers nothing and so competes for
+/// nothing - and the gauge cannot tell them apart, because it is a
+/// FLEET aggregate and one stalled connection does not move it at any
+/// shipping fleet size (`one_stalled_connection_of_many_never_opens_
+/// the_gate` pins that arithmetic).
+///
+/// So this rig drives the gate shut for real and asks the picker both
+/// halves of the question. Deterministic on purpose: every wall-clock
+/// rig that would notice hedging going silent is `#[ignore]`d and the
+/// only `--run-ignored` in CI is `leak_soak`, and the natural A/B
+/// (`payout_hedge_rescues_stalls_in_under_a_second_not_eight` at
+/// `NZBFAST_RACE_SAT_PCT` 80 vs 0) runs a FOUR-connection fleet, the
+/// one size where the fleet gauge opens by itself - so it passes
+/// either way and says nothing.
+#[tokio::test]
+async fn a_stalled_article_escapes_the_shut_line_gate() {
+    let servers = vec![
+        bound_guard_server("a", false),
+        bound_guard_server("b", false),
+    ];
+    assert_eq!(
+        servers[0].1.race_sat_pct, 70,
+        "rig broken: the line gate must be armed at the shipped default"
+    );
+    let read_timeout = servers[0].1.read_timeout;
+    // Normal phase: the endgame's own rules must stay out of this
+    // answer, exactly as in the two bound guards above.
+    let reqs: Vec<ArticleReq> = (0..(ENDGAME_MAX + 10))
+        .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+    shared.art_ms.store(TRAINED_ART_MS, Ordering::Relaxed);
+    bound_guard_straggler(&shared, "<s1>", 0, read_timeout);
+    shut_the_line_gate(&shared).await;
+
+    // A straggler on the wire for the whole read timeout - the shape
+    // `the_stale_bound_stays_under_the_read_timeout` proves is raced -
+    // stands down while the fleet reads saturated. Nothing about the
+    // ARTICLE has changed; only the fleet's aggregate rate.
+    assert!(
+        shared
+            .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+            .is_none(),
+        "the line gate should suppress a plain stale hedge"
+    );
+    assert_eq!(shared.sat.escapes(), 0);
+
+    // Now the owner's read reports pre-byte silence: this article has
+    // moved no bytes, so its copy displaces no payload and the gate
+    // must let it through.
+    shared.mark_suspect("<s1>");
+    let d = shared
+        .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+        .expect("a stalled article must be raced even while the line reads saturated");
+    assert_eq!(&*d.id, "<s1>");
+    assert!(d.dup);
+    // The stale rule caught it, and the ledger recorded that the dup
+    // left through a shut gate.
+    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
+    assert_eq!(shared.sat.escapes(), 1);
+}
+
+/// TODO 202 §17: `race_escape` off restores the pre-escape suppression
+/// exactly - the arm that lets the escape's own payout be priced on ONE
+/// binary.
+///
+/// `race_sat_pct` 0-vs-80 prices the GATE and cannot price the escape:
+/// at 0 there is no gate to escape from, so both arms behave
+/// identically on a stalled article. The bench round that prices the
+/// escape is this knob at `race_sat_pct = 80`, and it only means
+/// anything if OFF is genuinely the old behaviour - which is what this
+/// pins, against the same rig as
+/// `a_stalled_article_escapes_the_shut_line_gate` above.
+#[tokio::test]
+async fn the_escape_knob_turns_the_escape_off_and_nothing_else() {
+    let servers: Vec<(ServerConfig, PoolConfig)> = [
+        bound_guard_server("a", false),
+        bound_guard_server("b", false),
+    ]
+    .into_iter()
+    .map(|(sc, c)| {
+        (
+            sc,
+            PoolConfig {
+                race_escape: false,
+                ..c
+            },
+        )
+    })
+    .collect();
+    let read_timeout = servers[0].1.read_timeout;
+    let reqs: Vec<ArticleReq> = (0..(ENDGAME_MAX + 10))
+        .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+    shared.art_ms.store(TRAINED_ART_MS, Ordering::Relaxed);
+    bound_guard_straggler(&shared, "<s1>", 0, read_timeout);
+    shut_the_line_gate(&shared).await;
+
+    // Marked stalled, and still suppressed: this is the pre-escape
+    // behaviour, reachable without a second build.
+    shared.mark_suspect("<s1>");
+    assert!(
+        shared
+            .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+            .is_none(),
+        "the escape fired with race_escape off - the A/B arm is not an arm"
+    );
+    assert_eq!(shared.sat.escapes(), 0);
+
+    // And the knob touches nothing ELSE. A fresh fleet with the same
+    // config and an untrained gauge (no peak, so the gate is open):
+    // the ordinary stale rule still races a straggler, escape or no
+    // escape. Fresh rather than reusing the pool above, because N6's
+    // idle-spin record from that suppressed walk is time-capped at
+    // `SCAN_RETRY_MS` and would swallow the next pick - correct in
+    // production, where the gate opens by clock and the retry follows
+    // inside 100 ms, but it would make this assertion about the wrong
+    // thing.
+    let (open, _) = Shared::new(
+        (0..(ENDGAME_MAX + 10))
+            .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+            .collect(),
+        &servers,
+    );
+    open.art_ms.store(TRAINED_ART_MS, Ordering::Relaxed);
+    bound_guard_straggler(&open, "<s1>", 0, read_timeout);
+    assert!(
+        !open.line_saturated(open.start.elapsed().as_millis() as u64),
+        "rig broken: an untrained gauge must read the gate open"
+    );
+    let d = open
+        .pick_dup(1, 0b10, 0b10, 0, Pipeline::payload(0), 0)
+        .expect("the stale rule must still race a straggler on an idle line");
+    assert_eq!(&*d.id, "<s1>");
+    assert_eq!(open.sat.escapes(), 0, "an open gate issues no escapes");
+}
+
+/// TODO 202 §17, the fan-out half: at the endgame the escape also
+/// reaches the picker that may race a SIBLING SESSION OF THE SAME
+/// SERVER, which is the rescue a wedged TCP session actually needs -
+/// the enemy there is one degraded socket, not a slow provider, and
+/// the article's own server is usually the fastest answer to it.
+///
+/// Without the escape this article waits out the 30 s read timeout:
+/// the fan-out is the only rule that races same-server, the slow-owner
+/// and stale rules both skip `inf.server == me`, and the fleet gauge
+/// has stood all three down.
+#[tokio::test]
+async fn a_stalled_article_reaches_the_same_server_fan_out_through_a_shut_gate() {
+    let servers = vec![bound_guard_server("a", true), bound_guard_server("b", true)];
+    let reqs: Vec<ArticleReq> = (0..4)
+        .map(|i| ArticleReq::fresh(format!("<s{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &servers);
+    assert!(
+        shared.pending.load(Ordering::Acquire) <= ENDGAME_MAX,
+        "rig broken: this leg must be in the endgame"
+    );
+    // Owned by server 0 and raced BY server 0: an idle sibling session.
+    bound_guard_straggler(&shared, "<s1>", 0, TAIL_FANOUT_MIN_AGE * 4);
+    shut_the_line_gate(&shared).await;
+
+    assert!(
+        shared
+            .pick_dup(0, 0b1, 0b1, 0, Pipeline::payload(0), 0)
+            .is_none(),
+        "the line gate should suppress a healthy fan-out pick"
+    );
+
+    shared.mark_suspect("<s1>");
+    let d = shared
+        .pick_dup(0, 0b1, 0b1, 0, Pipeline::payload(0), 0)
+        .expect("a stalled article must reach its own server's idle sibling");
+    assert_eq!(&*d.id, "<s1>");
+    assert!(d.dup);
+    // A fan-out pick, not a hedge: only the fan-out races same-server.
+    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 0);
+    assert_eq!(shared.sat.escapes(), 1);
 }
 
 /// TTFB-suspicion hedge (TODO 115, opt-in `PoolConfig::ttfb_hedge`):
@@ -1052,6 +1432,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
     let mk_work = |id: &str| Work {
         age_days: 0,
         part: 0,
+        file: u32::MAX,
         ord: 0,
         id: id.into(),
         attempts: 0,
@@ -1094,7 +1475,9 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
         .expect("suspect article should be raced immediately");
     assert_eq!(&*d.id, "<s0>");
     assert!(d.dup);
-    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 1);
+    // §17c: the TTFB rescue spends its own purse, never the stale one.
+    assert_eq!(shared.ttfb_hedges_issued.load(Ordering::Relaxed), 1);
+    assert_eq!(shared.hedges_issued.load(Ordering::Relaxed), 0);
     assert!(shared.pick_suspect_dup(0b10, 0b10, 0, 0).is_none());
     assert!(
         !shared.suspect_pending.load(Ordering::Acquire),
@@ -1107,7 +1490,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
     assert!(shared.pick_suspect_dup(0b1, 0b1, 0, 0).is_none());
     shared.register_inflight(&mk_work("<s1>"), 0);
     shared.mark_suspect("<s1>");
-    shared.hedges_issued.store(1000, Ordering::Relaxed);
+    shared.ttfb_hedges_issued.store(1000, Ordering::Relaxed);
     assert!(
         shared.pick_suspect_dup(0b10, 0b10, 0, 0).is_none(),
         "a capped suspect dup still issued"
@@ -1214,6 +1597,70 @@ async fn a_live_target_change_parks_and_wakes_workers() {
         .expect("run hung across live target changes")
         .unwrap();
     assert_eq!(collect.await.unwrap(), segs.len());
+}
+
+/// F-22: admission under the live target is a COUNT, not a slot
+/// ordinal. Target 1, fleet 8, and the server answers the first
+/// `MAX_SESSION_ATTEMPTS` BODYs with 502 - exactly enough to retire the
+/// one admitted worker for good. Under the old `slot < target` rule the
+/// seven parked ordinals stayed parked (the target never rises without
+/// bytes) and the run hung with pending > 0; now the retiring worker's
+/// admission is re-filled by a parked one, which finds a recovered
+/// server and finishes the job.
+#[tokio::test(start_paused = true)]
+async fn a_retired_admitted_worker_is_replaced_from_the_parked_fleet() {
+    let _tick = super::inline_tests::Metronome::start();
+    let mut articles = std::collections::HashMap::new();
+    let payload: Vec<u8> = (0..60_000u32).map(|i| (i * 23) as u8).collect();
+    crate::mock::make_file_articles("adm.bin", &payload, 6_000, "adm", &mut articles);
+    let n = articles.len();
+    let srv = crate::mock::MockServer::start(
+        articles.clone(),
+        crate::mock::Chaos {
+            body_error: Some(MAX_SESSION_ATTEMPTS as u64),
+            ..Default::default()
+        },
+    )
+    .await;
+    let target = ConnTarget::new(1);
+    let (sc, mut cfg) = payout_server(
+        &srv,
+        8,
+        PoolConfig {
+            // One BODY in flight: every failure is exactly one session
+            // failure, so the first worker walks to the ceiling alone.
+            window: 1,
+            connect_backoff: Duration::from_secs(2),
+            article_retries: 250,
+            ..Default::default()
+        },
+    );
+    cfg.live_target = Some(target.clone());
+    let reqs: Vec<ArticleReq> = articles
+        .keys()
+        .map(|k| ArticleReq::fresh(k.clone()))
+        .collect();
+    let (tx, mut rx) = mpsc::channel(256);
+    tokio::time::timeout(
+        Duration::from_secs(600),
+        fetch_all_multi(&[(sc, cfg)], reqs, tx),
+    )
+    .await
+    .expect("run hung: the retired admission was never re-filled");
+    let mut done = 0;
+    while let Ok(o) = rx.try_recv() {
+        if matches!(o, FetchOutcome::Done { .. }) {
+            done += 1;
+        }
+    }
+    assert_eq!(
+        done, n,
+        "every article must land once a parked worker took over"
+    );
+    assert!(
+        srv.accepted.load(Ordering::Relaxed) > MAX_SESSION_ATTEMPTS as u64,
+        "a second worker never dialled"
+    );
 }
 
 /// §96.5: a prepaid block that runs out MID-RUN releases its server -
@@ -1528,5 +1975,475 @@ async fn a_desyncing_provider_keeps_its_fence() {
     assert!(
         held.is_empty(),
         "present article(s) declared Missing by a desynced session: {held:?}"
+    );
+}
+
+/// TODO 208 item 1: the in-run half of the fleet cap. A fleet spawned
+/// at sixteen under a cap of ten sheds to it in ONE step, not the
+/// walker's one-per-seven-epochs. The cap is a constant (§208 Rounds A
+/// and B), so nothing here is divided out of the line - but the shed
+/// still needs the install's link anchor to run at all, which is what
+/// this rig gives it and the sibling rig below takes away. Assertions:
+/// `connected` falls to at most the cap and stays there, nobody retires
+/// (the shed parks; `workers_live` is the fleet), and every article
+/// still gets its outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_line_cap_sheds_a_fleet_to_the_constant_in_one_step() {
+    let (srv, ids, want) = line_cap_fixture().await;
+    let target = ConnTarget::new(16);
+    let (sc, mut cfg) = payout_server(&srv, 16, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    cfg.line_cap_fleet = 10;
+    cfg.line_anchor_bps = 2_400_000;
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
+    // The pool was handed sixteen - the seed lives in the daemon, not
+    // here - and the shed's first tick walks the target to the cap in
+    // one step. Then the top slots park behind it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    while target.get() > 10 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "target stuck at {}",
+            target.get()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    while connected() > 10 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connected stuck at {} (target {})",
+            connected(),
+            target.get()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let shed_to = target.get();
+    assert!((1..=10).contains(&shed_to), "target {shed_to} is not a cap");
+    assert_eq!(
+        live.servers[0].budget.load(Ordering::Relaxed),
+        shed_to,
+        "the dashboard's 'using M of N' did not follow the shed"
+    );
+    // It stays shed: the cap is a constant, so nothing the smaller
+    // fleet then measures can raise it, and a parked slot must not
+    // flap back.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        target.get() <= 10 && connected() <= 10,
+        "the cap loosened on the shed fleet: target {} connected {}",
+        target.get(),
+        connected()
+    );
+    tokio::time::timeout(Duration::from_secs(180), fetch)
+        .await
+        .expect("run hung across the shed")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), want);
+}
+
+/// TODO 208 item 1, the regression that bought the anchor requirement
+/// (22 Aug 2026, when the cap was still divided out of the measured
+/// line). The rig above with the anchor taken away and nothing else
+/// changed: sixteen sockets throttled to 150 KB/s EACH, so the fleet
+/// moves 2.4 MB/s whatever the line underneath it is. Read as a
+/// statement about the line, that was "19 Mbit", the rule made it a
+/// cap of ten, and the shed took it - costing 37% of a fleet whose
+/// throughput is exactly proportional to its connection count, and
+/// costing it unrecoverably, because the peak is monotone and the
+/// smaller fleet can never argue its way back up. On the daemon the
+/// same shape shed a live job 4 -> 1 and doubled its wall clock
+/// (`prefetch_borrows_from_the_busy_server_when_no_healthy_idle`).
+///
+/// A constant cap cannot make that arithmetic mistake, so what the
+/// anchor requirement carries now is the narrower rule it left behind:
+/// a run with no independent estimate of its line - a CLI run, or a
+/// daemon's first job - is dialled once and never resized mid-flight.
+/// The cap here would bite (ten against sixteen) if the gate let it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_line_cap_never_sheds_a_fleet_that_has_no_anchor() {
+    let (srv, ids, want) = line_cap_fixture().await;
+    let target = ConnTarget::new(16);
+    let (sc, mut cfg) = payout_server(&srv, 16, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    cfg.line_cap_fleet = 10;
+    // No `line_anchor_bps`: the CLI shape, and a daemon's first job.
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while connected() < 16 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fleet never dialled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Well past the ~7 s the gauge needs to train a plateau, and past
+    // the 8 s at which the daemon job was shed.
+    for _ in 0..24 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            target.get(),
+            16,
+            "a fleet with no line anchor was resized mid-run (connected {})",
+            connected()
+        );
+    }
+    assert_eq!(connected(), 16, "connections parked without a line to cap");
+    tokio::time::timeout(Duration::from_secs(180), fetch)
+        .await
+        .expect("run hung")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), want);
+}
+
+/// The two line-cap rigs' shared fixture: 36 MB in 50 kB articles from
+/// a server that throttles every connection to 150 KB/s, so a fleet of
+/// sixteen moves 2.4 MB/s - about 19 Mbit - for roughly 15 s. Returns
+/// the server, the requests, and how many outcomes to expect.
+async fn line_cap_fixture() -> (crate::mock::MockServer, Vec<ArticleReq>, usize) {
+    let data: Vec<u8> = (0..36_000_000u32).map(|i| (i * 7) as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("lc.bin", &data, 50_000, "lc", &mut articles);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    (srv, ids, segs.len())
+}
+
+/// TODO 208 item 1, the other side of the shed: a run whose rate is
+/// set by the CONNECTIONS, not by a line, must not be shed at all.
+///
+/// Eight sockets throttled to 150 KB/s each read as ~1.2 MB/s, about
+/// 9.6 Mbit, and the retired per-Mbit rule made that a cap of five - so
+/// it took three sockets off a fleet that would have gone FASTER with
+/// more, and nothing downstream could undo it: the gauge's peak is
+/// monotone, so the survivors could never read a higher number and the
+/// raise-back arm was dead for the rest of the run. That is the shape
+/// that doubled the daemon suite's borrow test (24.6 s against
+/// ~12.5 s) when the cap first landed, and a `LINE_CAP_FLOOR` of eight
+/// was bolted under the rule to bound it.
+///
+/// The SHIPPED constant is what holds it now, which is why this rig
+/// runs at the real default rather than at a number chosen for it: a
+/// fleet of eight is under the cap outright, so the shed has no
+/// surplus to take and no reading of the line can invent one. The
+/// anchor is set, so the shed is armed and this is not passing for the
+/// sibling rig's reason. The other half of the same defect - the
+/// arithmetic the constant removes - is
+/// `the_line_cap_never_sheds_a_fleet_that_has_no_anchor`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_line_cap_leaves_a_connection_bound_fleet_alone() {
+    let data: Vec<u8> = (0..18_000_000u32).map(|i| (i * 7) as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("lcf.bin", &data, 50_000, "lcf", &mut articles);
+    drop(data);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let target = ConnTarget::new(8);
+    let (sc, mut cfg) = payout_server(&srv, 8, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    cfg.line_cap_fleet = linecap::LINE_CAP_DEFAULT_FLEET;
+    // An anchor, so the shed is ARMED and it is the cap and not the
+    // gate that this rig measures. Under the old rule 9.6 Mbit at
+    // 0.5/Mbit was five, and five would have shed this fleet.
+    cfg.line_anchor_bps = 1_200_000;
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while connected() < 8 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fleet never dialled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Well past the gauge's ~7 s training point and several shed ticks
+    // in: the shed HAS run by now and had nothing to take.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert!(
+        live.servers[0].bytes.load(Ordering::Relaxed) > 0,
+        "nothing was delivered, so the gauge never read a line at all"
+    );
+    assert!(
+        connected() == 8 && target.get() == 8,
+        "a connection-bound fleet was shed: target {} connected {}",
+        target.get(),
+        connected()
+    );
+    tokio::time::timeout(Duration::from_secs(300), fetch)
+        .await
+        .expect("run hung")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), segs.len());
+}
+
+/// TODO 208.2, the warm-up gap. A starved share looks like this on the
+/// wire: half a body, then nothing for longer than the flat 8 s
+/// deadline, then the rest - on a connection that is alive the whole
+/// time. Under the shipped bound that silence was judged by the floor
+/// whenever it began before the run's own line peak had trained (7 s
+/// after the FIRST delivered body, which on a 100 Mbit line under 360
+/// connections lands 10-27 s in), because the bound was sampled once
+/// at read start and nothing that the gauge learned afterwards could
+/// reach a wait already armed. Here the gap opens 4 s into the run on
+/// the very first article; the fleet's first body lands at 8 s; the
+/// floor would fire at 12 s; the gap closes at 14 s (plus the mock's
+/// first paced chunk, ~1.3 s).
+///
+/// The fleet dials on a 1 s ramp in the warm-up pair, as a real one
+/// does (150 ms a slot shipped, so a 100-per-server fleet spreads over
+/// 15 s), and that was load-bearing when the rig was built: with all
+/// eight dialled at once, seven bodies that spent 8 s on the wire land
+/// in one clump at t=8 s, and a gauge fed per delivered body - its age
+/// starting at the FIRST one - credits them to a window that has
+/// barely opened. Measured on this rig before the ramp: a trained peak
+/// of 695 KB/s for a 400 KB/s line (+74%), which cut the bound to
+/// 9.2 s mid-silence and killed the read the warm-up had just saved.
+/// The banked shaped legs carry the same artefact at 10-35% (a `line
+/// peak` of 37.3 MB/s through a 248 Mbit pipe; 15.7 to 16.9 MB/s at
+/// fleet 360 through 99 Mbit, rising with the fleet), smaller because
+/// TCP unfairness spreads a real first wave out. The peak is a run
+/// max, so that over-read shortened every stall bound of the run by
+/// the same share, loosened the §202 gate and fed the §208.1 cap.
+/// Fixed 22 Aug (TODO 208.2 over-read, `PoolConfig::peak_arrivals`):
+/// the gauge is fed per arriving chunk, so there is no clump to
+/// credit. The `ramp_ms = 0` pair below is that fix's rig: the fleet
+/// dialled together, the live bound on, and the read survives only
+/// on the arrivals arm - the per-body arm reproduces the kill above.
+///
+/// Live (the shipped posture): the daemon's link anchor sizes a share
+/// from the first delivered body, the wait re-reads the bound during
+/// the silence, and the body lands - zero stall kills, zero
+/// reconnects. `stall_live` off (the A/B arm, exactly the pre-warm-up
+/// code path): the read is killed at 12 s, the half body is thrown
+/// away, the worker re-dials and fetches it whole. Both arms finish
+/// the job; the difference is the one discarded body and the one
+/// reconnect, which is the per-event cost the 311-per-job tally at
+/// 100 Mbit was made of.
+async fn warm_up_gap_leg(
+    stall_live: bool,
+    ramp_ms: u64,
+    peak_arrivals: bool,
+    anchor_bps: u64,
+) -> (usize, u64, u64, u64) {
+    let data: Vec<u8> = (0..9_600_000u32).map(|i| (i * 13) as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("gap.bin", &data, 400_000, "gap", &mut articles);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let first = ids[0].id.to_string();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            gap: [first].into_iter().collect(),
+            gap_ms: 10_000,
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 50_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let (sc, mut cfg) = payout_server(
+        &srv,
+        8,
+        PoolConfig {
+            adaptive_timeout: true,
+            stall_live,
+            peak_arrivals,
+            // The daemon's stamp: a 400 KB/s line shared eight ways is
+            // 50 KB/s a share, 8 s a body, a 16 s bound. 0 = the CLI
+            // shape, where the bound is fed by the gauge's provisional
+            // reading instead.
+            line_anchor_bps: anchor_bps,
+            ..PoolConfig::default()
+        },
+    );
+    cfg.ramp_delay = Duration::from_millis(ramp_ms);
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    tokio::time::timeout(Duration::from_secs(120), fetch)
+        .await
+        .expect("warm-up gap leg hung")
+        .unwrap();
+    let done = collect.await.unwrap();
+    let s = &live.servers[0];
+    (
+        done,
+        s.ends_stall.load(Ordering::Relaxed),
+        s.reconnects.load(Ordering::Relaxed),
+        live.race.line_peak_bps.load(Ordering::Relaxed),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_stall_bound_carries_a_starved_body_through_the_warm_up_gap() {
+    let (done, stalls, reconnects, _) = warm_up_gap_leg(true, 1000, true, 400_000).await;
+    assert_eq!(done, 24, "every article landed");
+    assert_eq!(
+        (stalls, reconnects),
+        (0, 0),
+        "live bound: the 10 s silence was judged by the anchor's 16 s share, \
+         not the 8 s floor - but it was killed ({stalls} stall kills, \
+         {reconnects} reconnects)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stall_live_knob_restores_the_flat_floor_until_the_peak_trains() {
+    let (done, stalls, reconnects, _) = warm_up_gap_leg(false, 1000, true, 400_000).await;
+    assert_eq!(done, 24, "the A/B arm still finishes the job");
+    assert!(
+        stalls >= 1 && reconnects >= 1,
+        "stall_live off: the silence that began before the peak trained must \
+         still be killed at the 8 s floor (got {stalls} stall kills, \
+         {reconnects} reconnects) - the arm is not an arm"
+    );
+}
+
+/// TODO 208.2 over-read: the fleet dialled TOGETHER (no ramp) and NO
+/// anchor - the CLI shape, where the live bound is fed by the gauge's
+/// own reading. Fed per arriving chunk the gauge trains a peak that
+/// reads the 400 KB/s line as what it is (within the mock's 64 KB
+/// chunk discretisation), the bound is the 16 s share from the first
+/// bodies on, and the 10 s silence is carried - no kill, no reconnect.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_line_peak_reads_the_line_with_the_fleet_dialled_together() {
+    let (done, stalls, reconnects, peak) = warm_up_gap_leg(true, 0, true, 0).await;
+    assert_eq!(done, 24, "every article landed");
+    assert_eq!(
+        (stalls, reconnects),
+        (0, 0),
+        "arrivals on, no ramp: the first wave's clump should not exist, yet the \
+         bound it inflates killed the read ({stalls} stall kills, {reconnects} reconnects)"
+    );
+    assert!(
+        (340_000..=460_000).contains(&peak),
+        "arrivals on: trained line peak {peak} B/s for a 400 KB/s line"
+    );
+}
+
+/// The A/B arm reproduces the recorded defect in the figure that
+/// carries it: per-body folding, the fleet dialled together, and the
+/// clump of seven first bodies at 8 s trains a peak of ~1.7x the line
+/// at the second wave (695 KB/s measured for 400 KB/s, the number in
+/// TODO 208.2; the arithmetic says 718). That peak is a run max, so it
+/// is what every stall bound of the run divides (9.2 s instead of
+/// 16 s) - which is what killed the read in the 22 Aug rig. Asserted
+/// on the peak rather than on a kill: the rig's one silence (4-14 s)
+/// ends before the inflated peak exists, and a rig whose geometry is
+/// tuned until the consequence shows would be pinning the geometry.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_peak_arrivals_knob_restores_the_first_wave_clump() {
+    let (done, _, _, peak) = warm_up_gap_leg(true, 0, false, 0).await;
+    assert_eq!(done, 24, "the A/B arm still finishes the job");
+    assert!(
+        peak >= 560_000,
+        "peak_arrivals off, no ramp: the per-body clump should over-read the \
+         400 KB/s line by ~1.7x, got a trained peak of {peak} B/s - the arm is not an arm"
     );
 }

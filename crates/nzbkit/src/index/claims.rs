@@ -266,7 +266,7 @@ pub(super) fn msgid_map_backfill(db: &mut Connection) {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            let rows: Vec<(i64, i64, String)> = {
+            let rows: Vec<(i64, i64, SegList)> = {
                 let mut sel = tx.prepare_cached(
                     "SELECT rowid, release_id, segments FROM files
                       WHERE rowid > ?1 ORDER BY rowid LIMIT 2000",
@@ -284,8 +284,7 @@ pub(super) fn msgid_map_backfill(db: &mut Connection) {
                 return Ok(());
             };
             for (_, rid, segs) in &rows {
-                let mut parsed: Vec<(u32, String, u64)> =
-                    serde_json::from_str(segs).unwrap_or_default();
+                let mut parsed = segs.0.clone();
                 // Serialized from a BTreeMap so already ascending, but
                 // the sort is cheap insurance against a hand-edited row.
                 parsed.sort_by_key(|(n, _, _)| *n);

@@ -280,7 +280,7 @@ pub(in crate::serve) fn sort_arm(
 /// key neither client defines, so a typo is visible instead of a
 /// silent success over an unsorted queue.
 pub(in crate::serve) fn sort_queue(d: &Arc<Daemon>, key: &str, asc: bool) -> bool {
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     let keyfn: Box<dyn Fn(&Job) -> (i64, String)> = match key {
         "name" => Box::new(|g| (0, g.name.to_lowercase())),
         "size" | "mb" => Box::new(|g| (g.total_bytes as i64, String::new())),

@@ -44,15 +44,19 @@
 //! 15 s tick), `NZBFAST_SOAK_REPORT` (path for the JSON report, which
 //! carries every sample so a baseline can be re-recorded from a green run).
 
+// The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
+// serve / wait_ready), one copy for every suite that spawns a daemon.
+mod harness;
 mod scratch;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
+use harness::serve;
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 use nzbkit::rar::fixtures;
 
@@ -65,17 +69,6 @@ use nzbkit::rar::fixtures;
 // be edited on its own schedule. The comments there explain WHY each piece
 // is shaped the way it is; they are not repeated in full here.
 // ---------------------------------------------------------------------------
-
-/// OS-assigned free port. Never a pid-derived one: those collide for whole
-/// pid windows and can land on the ephemeral range our own client sockets
-/// draw from.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 /// Response body of a request to the daemon (headers stripped).
 ///
@@ -133,80 +126,6 @@ fn http_once(port: u16, req: &str, body: Option<(&str, &[u8])>) -> std::io::Resu
         }));
     }
     Ok(out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
-}
-
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        // ...and reap it: kill() alone leaves a zombie holding its pid.
-        let _ = self.0.wait();
-    }
-}
-
-/// The daemon under soak: killed and reaped on drop. Killed by PID (its own
-/// child handle), never by name - other sessions run their own daemons on
-/// this box (CLAUDE.md invariant 2).
-struct Daemon {
-    _child: KillOnDrop,
-    port: u16,
-    pid: u32,
-}
-
-async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
-    for attempt in 0..3 {
-        let port = free_port();
-        let logfile = dir.join(format!("daemon-{port}.log"));
-        let out = std::fs::File::create(&logfile).unwrap();
-        let err = out.try_clone().unwrap();
-        let mut cmd = build(port);
-        cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        let child = KillOnDrop(cmd.spawn().unwrap());
-        let pid = child.0.id();
-        let log = logfile.clone();
-        let (child, ready) = tokio::task::spawn_blocking(move || {
-            let mut child = child;
-            let ready = wait_ready(&mut child, port, &log);
-            (child, ready)
-        })
-        .await
-        .unwrap();
-        if ready {
-            return Daemon {
-                _child: child,
-                port,
-                pid,
-            };
-        }
-        let tail = std::fs::read_to_string(&logfile).unwrap_or_default();
-        assert!(
-            attempt < 2,
-            "daemon exited without binding :{port}\n--- log ---\n{tail}"
-        );
-    }
-    unreachable!()
-}
-
-/// Wait for OUR daemon's own listener banner in its own log, not for
-/// "something answers on :port" - a bare connect cannot tell our daemon
-/// from a parallel test's that won the port race.
-fn wait_ready(child: &mut KillOnDrop, port: u16, logfile: &Path) -> bool {
-    let banner = format!("open the dashboard at  http://localhost:{port}/");
-    for _ in 0..600 {
-        if std::fs::read_to_string(logfile)
-            .unwrap_or_default()
-            .contains(&banner)
-            && TcpStream::connect(("127.0.0.1", port)).is_ok()
-        {
-            return true;
-        }
-        if child.0.try_wait().ok().flatten().is_some() {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let tail = std::fs::read_to_string(logfile).unwrap_or_default();
-    panic!("daemon never came up on :{port}\n--- log ---\n{tail}");
 }
 
 // ---------------------------------------------------------------------------
@@ -869,7 +788,7 @@ async fn mixed_queue_soak_holds_resources_flat() {
         c
     })
     .await;
-    let (port, pid) = (d.port, d.pid);
+    let (port, pid) = (d.port, d.pid());
 
     // Fail on the FIRST sample rather than after hours of unmeasured work.
     if let Err(e) = sample_process(pid) {

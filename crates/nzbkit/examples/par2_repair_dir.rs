@@ -27,12 +27,12 @@ fn main() {
     // work onto E-cores a few seconds in, which took a heavy repair leg from
     // 16.6 s to 58 s on the laptop rig. No effect anywhere else.
     nzbkit::mem::opt_out_of_power_throttling();
-    // Mirror the daemon's "fast par mode" setting, which serve.rs turns ON at
-    // startup (FAST_PAR_DEFAULT). The library flag defaults to OFF because it
-    // is the daemon's setting to own, so a driver that skips this call runs
-    // the streaming fold and reports a configuration nobody ships any more -
-    // the same class of mistake as benchmarking `ourrars` instead of
-    // `prodrar`. It cost a heavy-damage repair leg 3x in the 31 Jul round.
+    // Mirror the daemon's "fast par mode" setting, which serve/startup.rs
+    // turns ON at startup (FAST_PAR_DEFAULT). The library flag defaults to OFF
+    // because it is the daemon's setting to own, so a driver that skips this
+    // call runs the streaming fold and reports a configuration nobody ships
+    // any more - the same class of mistake as benchmarking `ourrars` instead
+    // of `prodrar`. It cost a heavy-damage repair leg 3x in the 31 Jul round.
     //
     // MUST TRACK `nzbfast::serve::FAST_PAR_DEFAULT`; nzbkit cannot depend on
     // the daemon crate to read it directly.

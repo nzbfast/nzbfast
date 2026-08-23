@@ -309,7 +309,12 @@ segundo. Os cartões, de cima para baixo:</p>
 <h3>Barra de cabeçalho</h3>
 <ul>
 <li>Menu de <b>limite de velocidade</b> - tetos fixos, <i>auto · ceder à LAN</i> (um modo
-regulado por RTT que recua quando outra pessoa na casa precisa da linha) ou ilimitado.</li>
+regulado por RTT que recua quando outra pessoa na casa precisa da linha) ou ilimitado.
+As predefinições são números redondos para linhas redondas, e um envio de 37&nbsp;Mb/s
+não é um deles: <b>personalizado…</b> pede-lhe antes o valor e aceita tudo o que a API
+aceita (<code>25M</code>, <code>500K</code>, ou 0 para sem limite). O menu passa então
+a mostrar <b>(personalizado)</b> com a taxa ao lado, até escolher de novo uma
+predefinição ou <i>auto</i>.</li>
 <li><b>Pausar por…</b> - pausa tudo por 15&nbsp;min/30&nbsp;min/1&nbsp;h/3&nbsp;h com
 retomada automática, ou use o botão Pausar para uma pausa sem prazo. A pausa é
 imediata: a transferência ativa para em segundos e retoma depois a partir do
@@ -348,6 +353,7 @@ blocos verificados, quanto cada servidor contribuiu para <em>este</em> trabalho,
 Um botão <b>Transferir o .nzb</b> salva o arquivo <code>.nzb</code> do trabalho - o nzbfast
 mantém sua própria cópia, então isso funciona para todo trabalho, mesmo quando o arquivo
 original já desapareceu.</li>
+<li><b>"Porque está lento?"</b> Enquanto um trabalho descarrega, a linha por baixo da barra de progresso traz um veredicto sobre <em>esse</em> trabalho, não sobre a máquina: <i>os seus fornecedores são o limite</i>, <i>esta máquina está no limite do CPU</i>, <i>o armazenamento não está a acompanhar</i>, e assim por diante. Clique nela e a linha abre nas provas: o que a sua linha consegue, o que os fornecedores entregaram, o que está a chegar agora, e uma tabela por servidor onde um fornecedor limitado se vê à primeira vista. Um trabalho à velocidade máxima não diz nada aqui, nem um cujo veredicto ainda se está a formar.</li>
 <li>Emblemas mostram estados especiais: <i>adiado (lento)</i>, <i>pré-carregando</i>,
 <i>pausado</i> (veja <a href="#performance">Ferramentas de desempenho</a>).</li>
 <li>Um gráfico de contagem regressiva acompanha o total de GB restantes em toda a fila.</li>
@@ -376,7 +382,7 @@ senha e o trabalho termina no lugar. A faixa de saúde da verificação plota os
 download - uma cauda crescente indica que os artigos chegam danificados.
 A gaveta de cada linha diz quem adicionou o trabalho e tem o mesmo botão
 <b>Transferir o .nzb</b> da fila - útil para baixar um lançamento de novo em outro
-lugar, ou para anexar o <code>.nzb</code> a um relato de problema.</p>
+lugar, ou para anexar o <code>.nzb</code> a um relato de problema. Ao lado está <b>Criar relatório</b>, que costuma ser a melhor coisa a anexar: ver <a href="#troubleshooting">Solução de problemas</a>.</p>
 <p>O cartão lista dez downloads por padrão e o restante fica a um clique, no botão ▤. Status, local e o motivo de uma falha ficam atrás de um clique na própria linha, de modo que o caso comum - o que terminou, de que tamanho, quando - continua legível sem rolagem. Arraste a borda inferior do cartão para que a lista role numa altura à sua escolha. <b>History rows</b> em Ajustes → Interface muda esse dez; por ser uma propriedade do daemon e não do seu navegador, vale para todos os dispositivos que olham para esta instalação. <b>Colour History names</b>, ao lado, tinge de verde os nomes concluídos e de vermelho os que falharam; desligado, os nomes ficam neutros, e o ponto colorido e os detalhes da linha continuam dizendo qual é qual.</p>
 <p>O nzbfast guarda o histórico para sempre, a não ser que diga o contrário.
 <b>Limpeza do histórico</b> em Definições → Sistema remove as entradas antigas por
@@ -397,10 +403,12 @@ medidas e de bloco. Contas de bloco mostram o uso acumulado contra seu tamanho.<
 
 <h3 id="dash-layout">Organizar o painel</h3>
 <p>O painel é seu para organizar. Quatro operações, com o mesmo nome onde quer que as
-encontre: <b>Mover</b> um cartão, <b>Compactar</b>, <b>Redimensionar</b> ou <b>Ocultar</b>.
-Cada escolha é lembrada pelo navegador em que a fez, por isso cada dispositivo mantém a sua
-própria disposição, e <b>Redefinir layout</b> em Ajustes → Interface repõe cada cartão,
-tamanho e coluna como vieram.</p>
+encontre: <b>Mover</b> um cartão, <b>Compactar</b>, <b>Redimensionar</b> ou
+<b>Ocultar</b>. Cada escolha é lembrada pelo perfil de navegador em que a fez: a ordem dos
+seus cartões e os que ocultou aplicam-se em qualquer largura de janela nesse perfil, ao
+passo que os tamanhos de cartão e de gráfico ficam reservados ao ambiente de trabalho.
+<b>Redefinir layout</b> em Ajustes → Interface repõe cada cartão, tamanho e coluna como
+vieram.</p>
 <p><b>Personalizar layout</b> é a entrada guiada, e a forma mais rápida de ver o que um
 cartão sabe fazer. Abra-o pela ligação discreta mesmo acima do primeiro cartão, ou em
 Ajustes → Interface, onde é o primeiro botão da linha <b>Layout do painel</b>. Enquanto
@@ -424,12 +432,13 @@ números, menos espaço. No Histórico alterna entre as dez descargas mais recen
 do seu histórico. <b>Modo compacto</b> em Ajustes → Interface faz o painel inteiro de uma
 vez.</li>
 <li><b>Redimensionar.</b> Um cartão que tem uma lista ou um gráfico traz uma barra na sua
-margem inferior: arraste-a até à altura que quiser. A barra é ténue até apontar para o
-cartão, e então desenha-se como um fio a toda a largura com estrias no canto traseiro;
-também aceita o foco do teclado, onde as setas para cima e para baixo acertam a altura e
-Shift dá um passo maior. Quais os cartões que a têm vai mudando conforme ganham e perdem
-listas próprias: tome a barra como resposta, e não uma lista aqui. Em <b>Personalizar
-layout</b> os cartões que não a têm dizem-no eles mesmos.</li>
+margem inferior onde tiver rato ou painel táctil: arraste-a até à altura que quiser. Um
+ecrã táctil não recebe nenhuma. A barra é ténue até apontar para o cartão, e então
+desenha-se como um fio a toda a largura com estrias no canto traseiro; também aceita o
+foco do teclado, onde as setas para cima e para baixo acertam a altura e Shift dá um passo
+maior. Quais os cartões que a têm vai mudando conforme ganham e perdem listas próprias:
+tome a barra como resposta, e não uma lista aqui. Em <b>Personalizar layout</b> os cartões
+que não a têm dizem-no eles mesmos.</li>
 <li><b>Ocultar.</b> O último botão da linha do título oculta esse cartão. Os cartões
 ocultos juntam-se numa barra <b>Ocultos</b> ao pé do painel; clique num nome ali para
 trazer um de volta.</li>
@@ -468,11 +477,13 @@ movem-no, e Shift com uma seta redimensiona-o.</p>
 <tr><th>Método</th><th>Como</th></tr>
 <tr><td><b>Arrastar e soltar</b></td><td>Solte um ou mais arquivos <code>.nzb</code> em qualquer lugar do painel.</td></tr>
 <tr><td><b>Pasta monitorada</b></td><td>Defina uma pasta em Ajustes; qualquer <code>.nzb</code> salvo nela é
-detectado em até 5 segundos e movido para o Lixo, e um painel aberto anuncia cada
+detectado assim que chega e movido para o Lixo, e um painel aberto anuncia cada
 recolha pelo nome ("… recolhido de Downloads"), para que um arquivo sumindo da pasta
 nunca seja um mistério. Prefere manter seus arquivos? Ligue <b>Manter os .nzb após a
 recolha</b> (veja <a href="#settings">§9</a>). Aponte a pasta de downloads do seu navegador
-para ela para capturas de um clique a partir de sites indexadores.</td></tr>
+para ela para capturas de um clique a partir de sites indexadores. As subpastas, os ficheiros que afinal não são NZB e o intervalo de reverificação
+de que precisa uma pasta numa partilha de rede têm cada um o seu próprio interruptor;
+veja <a href="#settings">§9</a>.</td></tr>
 <tr><td><b>De uma URL</b></td><td>Cole um link NZB (API <code>mode=addurl</code>, ou por qualquer app conectado).</td></tr>
 <tr><td><b>Links nzblnk:</b></td><td>Cole um link <code>nzblnk:</code> em qualquer lugar do painel, ou arraste-o para dentro. Se você instalou pelo DMG do macOS ou pelo instalador do Windows, também dá para clicar num direto no board. Veja <a href="#nzblnk">os links nzblnk</a> mais abaixo.</td></tr>
 <tr><td><b>Explorar índice</b></td><td>Clique em qualquer lançamento completo no cartão Explorar.</td></tr>
@@ -586,11 +597,29 @@ pequeno põe mais no ecrã, grande menos.</li>
 <li><b>Prévia ao passar o mouse</b>, por cima da tabela de Lançamentos: pouse o ponteiro
 numa linha para ver pôster e sinopse, tudo do seu próprio índice.</li>
 <li><b>Agrupar por título</b>, o interruptor ao lado: uma linha por título com os seus
-lançamentos por baixo. Abra-a com <b>&#9656;</b> ou clicando na linha; a caixa do título
-seleciona os lançamentos mostrados. O agrupamento só vale para <b>Este índice</b>.</li>
+lançamentos por baixo. Abra-a com <b>&#9656;</b> ou clicando na linha; a caixa do
+título seleciona os lançamentos mostrados. O agrupamento só vale para <b>Este
+índice</b>; escolha <b>Indexadores</b> ou <b>Ambos</b> e a tabela volta a ser plana, e
+di-lo.</li>
+<li><b>Todos os lançamentos de um título</b> aparecem quando abre o seu cartão, com a
+resolução, o codec, o formato de áudio e a gama dinâmica (Dolby Vision, HDR10) lidos
+do nome do lançamento, mais o tamanho, a idade e se todas as partes continuam no seu
+fornecedor. Defina <b>Versão preferida</b> em Ajustes → Organização → Indexação e os
+que correspondem sobem para o topo, com uma marca <b>melhor correspondência</b> e as
+etiquetas coincidentes realçadas. Nada fica escondido: os nomes de lançamento omitem
+estas etiquetas a toda a hora, por isso uma preferência só muda a ordem. É ela que
+decide também para que codificação a watchlist faz a subida.</li>
 <li><b>Separadores</b> de Filmes / Séries / Outros, pesquisa instantânea e sete
-ordenações: <b>Para você</b>, Publicações mais recentes, Ano de lançamento, Mais bem
-avaliados, Título A–Z, Maiores e Mais publicados.</li>
+ordenações: <b>Para você</b>, Publicações mais recentes, Data de lançamento, Mais bem
+avaliados, Título A–Z, Maiores e Mais publicados. O botão <b>↓</b> ao lado da
+ordenação inverte-a, por isso cada uma corre também ao contrário (mais antigos, mais
+pequenos, pior avaliados, Z–A).</li>
+<li><b>Data de lançamento</b> é o lançamento original ou a primeira emissão, ao dia
+onde o fornecedor de metadados nos deu uma: responde a «o que saiu mesmo esta semana»,
+coisa que Publicações mais recentes não consegue (essa é a data de envio, e a
+republicação de um filme de trinta anos vai parar ao topo). Os títulos enriquecidos
+antes disto existir, ou cujo fornecedor não tinha data, recaem no seu ano até
+atualizar os metadados.</li>
 <li><b>Somente correspondidos</b> vem ligado por padrão, ocultando lixo não identificado; um chip
 "+N não correspondidos" o revela.</li>
 <li>Clique em um bloco para a folha de detalhes: sinopse, nota e votos do IMDb, elenco -
@@ -765,7 +794,7 @@ comandos).</p>
 <h3>Velocidade e agendamento <span class="pill live">ao vivo</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Ajuste</th><th>O que faz</th></tr>
-<tr><td>Limite de velocidade</td><td>Teto em bytes/seg (<code>50M</code>, <code>1G</code>, 0 = ilimitado). Apps remotos podem enviar porcentagens - defina a <i>Velocidade da linha</i> para que sejam traduzidas corretamente.</td></tr>
+<tr><td>Limite de velocidade</td><td>Teto em bytes/seg (<code>50M</code>, <code>1G</code>, 0 = ilimitado). Apps remotos podem enviar porcentagens - defina a <i>Velocidade da linha</i> para que sejam traduzidas corretamente. A entrada <b>personalizado…</b> do cabeçalho define este mesmo teto sem abrir os Ajustes.</td></tr>
 <tr><td>Velocidade automática</td><td>Teto regulado por RTT que cede a outro tráfego da casa e se reexpande quando a linha está tranquila.</td></tr>
 <tr><td>Adiar downloads lentos automaticamente</td><td>Um trabalho preso em um servidor lento enquanto outros esperam é movido para o fim da fila (o progresso é mantido). Veja <a href="#performance">§13</a>.</td></tr>
 <tr><td>Pré-carregar em servidores ociosos</td><td>Servidores inúteis ao trabalho ativo iniciam o próximo da fila. Veja <a href="#performance">§13</a>.</td></tr>
@@ -812,6 +841,15 @@ contém um 7z que contém outro RAR é normal na Usenet, e o nzbfast segue a cad
 uma segunda passagem. No limite, o arquivo mais profundo fica simplesmente onde está,
 por descompactar, e o download termina à mesma. Só aumente para releases invulgarmente
 profundas.</p>
+<p><b>Permissões das transferências concluídas</b> (uma definição avançada) é uma umask, o mesmo número
+que o Docker e os guias de instalação usam: <code>002</code> dá 775 às pastas e 664 aos
+ficheiros, <code>022</code> dá 755 e 644. Vazio é o valor por omissão e não muda nada.
+Defina-a quando o Sonarr ou o Radarr correrem como outro utilizador do mesmo grupo e não conseguirem ler nem
+importar o que chega aqui: numa instalação systemd normalmente não conseguem, porque a unit
+mantém tudo o que o serviço escreve acessível só ao dono para proteger a chave API. As
+permissões são aplicadas quando uma tarefa concluída deixa de se mover, na pasta da tarefa, em tudo
+o que está lá dentro e nas pastas entre ela e a pasta de transferências, porque importar renomeando
+exige permissão de escrita na pasta de onde se renomeia. Ignorada no Windows, que não tem isto.</p>
 
 <h3>Renomeação automática e limpeza <span class="pill live">live</span></h3>
 <p><b>Renomear downloads concluídos</b> (ligado por omissão) dá à pasta e ao ficheiro
@@ -867,6 +905,27 @@ corre mal. Um arquivo mantido é lembrado, inclusive entre reinícios, e não vo
 fila; salve-o de novo para baixá-lo outra vez. Seja qual for a escolha, a gaveta de
 cada trabalho tem um botão <b>Transferir o .nzb</b>, então uma cópia do <code>.nzb</code>
 de qualquer trabalho nunca está a mais de um clique.</p>
+<p><b>Procurar também nas subpastas</b> (desligado por predefinição) recolhe também
+os ficheiros das pastas dentro da pasta monitorada, e o nome da primeira subpasta passa
+a ser a categoria do download: um ficheiro largado em <code>watch/tv</code> entra na
+categoria tv. É a forma mais rápida de arrumar as capturas sem tocar no painel - aponte
+um marcador do navegador para <code>watch/tv</code> e outro para
+<code>watch/movies</code>, e a arrumação fica feita à entrada. Uma pasta chamada
+<code>rejected</code> é a única exceção e fica sempre intocada.</p>
+<p><b>Pôr de lado os ficheiros inutilizáveis</b> (desligado por predefinição) move tudo
+o que não seja um NZB utilizável para uma pasta <code>rejected</code> dentro da pasta
+monitorada, com um pequeno ficheiro de texto ao lado a dizer o que estava errado. Vale
+a pena ligar para uma pasta onde o seu navegador guarda, onde uma página de início de
+sessão ou de erro pode chegar com um nome <code>.nzb</code>. Desligado, o ficheiro fica
+onde o pôs e o motivo é mostrado por cima da fila. Um ficheiro que apenas parece
+incompleto fica no lugar em qualquer dos casos, porque pode ainda estar a chegar.</p>
+<p><b>Voltar a ver a pasta a cada</b> (uma definição avançada) é uma rede de segurança e
+nada mais, por isso não é o botão que torna as recolhas rápidas. Um ficheiro largado
+nesta máquina é notado no momento em que aterra, porque o sistema o diz; este intervalo
+cobre apenas as pastas sobre as quais o sistema nada pode dizer, o que na prática
+significa uma partilha de rede escrita a partir de outro computador. Em segundos, de 1 a
+3600, predefinição 5. Baixe-o se as recolhas de uma partilha parecerem tardias, suba-o
+se as reverificações não compensarem o tráfego numa ligação lenta.</p>
 
 <h3 id="set-indexers">Pesquisar nos indexadores <span class="pill live">ao vivo</span></h3>
 <p>As suas contas em sites indexadores de NZB, uma linha cada, para que uma pesquisa no
@@ -1007,7 +1066,12 @@ a adição segue intocada e o log diz por quê.</p>
 <h3>Eventos de ciclo de vida e webhooks assinados</h3>
 <p>Cada marco de um trabalho é um evento versionado: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, mais
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(uma repetição automática recolocou na fila um download que falhou) e
+<code>job.delete_kept</code> (uma exclusão removeu o registro mas não conseguiu
+remover os arquivos dele), mais <code>watch.picked</code> (um .nzb foi retirado
+da pasta vigiada), <code>watchlist.upgraded</code> (uma melhoria da lista de
+acompanhamento chegou e a cópia substituída foi removida),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> e <code>quota.reached</code>. Cada um carrega
 <code>schema_version</code> (atualmente 1; chaves novas podem aparecer sem incremento -
@@ -1060,6 +1124,12 @@ se comportam como os *arrs esperam.</p>
 <li>O nzbfast serve consultas <code>caps</code>, <code>search</code>, <code>tvsearch</code> e
 <code>movie</code> a partir de seu próprio índice dos seus grupos monitorados, e
 <code>/getnzb/&lt;id&gt;</code> devolve o NZB.</li>
+<li>As pesquisas podem ser por nome ou por id: as séries aceitam um id TVDB, IMDb ou
+TVmaze, os filmes um id IMDb ou TMDB, e a aplicação lê qual em <code>caps</code>. Os
+ids TVDB só são oferecidos depois de o índice os ter recolhido, o que acontece sozinho
+em segundo plano. Um id para o qual não temos nada responde com um resultado vazio, e
+um id que não conseguimos resolver de todo é recusado pelo nome: nenhum deles recebe
+alguma vez uma lista de lançamentos sem relação.</li>
 </ol>
 <div class="note"><b>Ligue primeiro o indexador embutido</b> (Ajustes → Indexação). Ele
 vem desligado, e enquanto estiver assim esta fachada responde a toda consulta com
@@ -1082,7 +1152,13 @@ app de celular/tablet funciona. Escolha o protocolo que seu app suportar:</p>
 <tr><td>Senha</td><td>sua <b>chave de API</b></td></tr>
 </table></div>
 <p>Toda a superfície JSON-RPC que esses apps usam é servida: status, fila com
-reordenar/pausar/excluir, histórico, adicionar-NZB, limite de velocidade, pausar/retomar, log.</p>
+reordenar/renomear/pausar/excluir, histórico, adicionar-NZB (ficheiro ou URL), limite
+de velocidade, pausar/retomar, log. As credenciais também podem seguir no URL, a forma
+<code>http://user:apikey@host:6789/</code> do próprio NZBGet, que é o que o LunaSea
+envia.</p>
+<p><b>Utilizadores do nzb360:</b> adicione o nzbfast como servidor <b>SABnzbd</b>
+(secção seguinte). O nzb360 fala com um NZBGet verdadeiro por XML-RPC, que o nzbfast
+não serve, por isso o seu modo NZBGet não consegue ligar.</p>
 <h3>Apps que falam SABnzbd</h3>
 <div class="tblwrap"><table>
 <tr><th>Campo no app</th><th>Valor</th></tr>
@@ -1376,7 +1452,7 @@ para onde <code>--config</code> / <code>$NZBFAST_CONFIG</code> apontar.</td></tr
 <h2 id="troubleshooting">18 · Solução de problemas</h2>
 <div class="tblwrap"><table>
 <tr><th>Sintoma</th><th>Verifique</th></tr>
-<tr><td>Downloads lentos</td><td>Execute o <b>Benchmark do sistema</b> - ele nomeia o gargalo diretamente. Se for a rede: execute o <b>Ajuste de conexões</b>, verifique as contagens de conexões por servidor e confirme que seus provedores não são todos um mesmo backbone (<b>Diversidade de servidores</b>).</td></tr>
+<tr><td>Downloads lentos</td><td>Pergunte primeiro ao próprio download: enquanto corre, a linha por baixo da barra de progresso nomeia a camada que está a travar <i>este</i> trabalho, e um clique nesse veredicto abre a linha nas provas (ver <a href="#dash-queue">Fila</a>). Execute o <b>Benchmark do sistema</b> - ele nomeia o gargalo diretamente. Se for a rede: execute o <b>Ajuste de conexões</b>, verifique as contagens de conexões por servidor e confirme que seus provedores não são todos um mesmo backbone (<b>Diversidade de servidores</b>).</td></tr>
 <tr><td>Lento só em trabalhos muito grandes<br>(NAS ou máquina com pouca RAM)</td><td>Esperado, e mensurável: um orçamento de memória apertado dá spill dos caches para o disco e custa 20–40% acima de ~87 GB. Veja <a href="#memory">Orçamento de memória</a> para os números e quanta RAM dar. Trabalhos menores não são afetados.</td></tr>
 <tr><td>Download falha "artigos ausentes"</td><td>A publicação expirou ou foi removida nos seus provedores. Um segundo provedor em um backbone diferente resgata a maioria destes. <code>nzbfast check</code> prevê isso antes de baixar. E o mural assinala à partida as que provavelmente desapareceram, com o seu
 ponto de disponibilidade (<a href="#oracle">§13</a>). Uma primeira falha desta forma
@@ -1394,7 +1470,7 @@ indistinguível e resolve-se por si.</td></tr>
 <tr><td>O daemon não inicia: porta em uso</td><td>Outra instância está rodando - ou altere <code>--port</code>.</td></tr>
 <tr><td>Onde estão os logs?</td><td>O cartão Log no painel, ou o terminal/arquivo de log com que você iniciou o <code>serve</code>.</td></tr>
 </table></div>
-<div class="note"><b>Ainda travado?</b>O cartão Log normalmente nomeia o culpado -
+<div class="note"><b>Ainda travado?</b>Para um problema com uma única descarga, use <b>Criar relatório</b>: está na gaveta desse trabalho na fila enquanto corre, e depois na gaveta do histórico. Copia tudo sobre essa descarga em concreto, incluindo apenas as linhas de registo dela em vez das do serviço inteiro. Nomes de utilizador, palavras-passe e chaves API nunca são lidos, e a sua pasta pessoal é escrita como <code>~</code>. O cartão Log normalmente nomeia o culpado -
 inclua sua cauda ao relatar um problema, junto com seu
 <code>nzbfast --version</code>.</div>
 

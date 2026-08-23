@@ -39,6 +39,10 @@ impl Extractor {
     /// as zeros, so the M15 backfill path must ask first.
     pub fn covered(&self, slot: usize, off: u64, len: usize) -> bool {
         let inner = self.inner_read();
+        // TODO 211 (b): a split part's bytes are its head's, at the
+        // logical offset (same translation in read_at and
+        // covered_intervals).
+        let (slot, off) = Self::split_target(&inner, slot, off);
         let s = &inner.slots[slot];
         match s.mode {
             SlotMode::Plain | SlotMode::RarFallback => s
@@ -132,7 +136,7 @@ impl Extractor {
                 }
                 intervals_cover_all(covered, len as u64)
             }
-            SlotMode::Discard => false,
+            SlotMode::Discard | SlotMode::SplitPart => false,
         }
     }
 
@@ -157,6 +161,7 @@ impl Extractor {
         let mut reads: Vec<Plan> = Vec::new();
         {
             let inner = self.inner_read();
+            let (slot, off) = Self::split_target(&inner, slot, off);
             let s = &inner.slots[slot];
             match s.mode {
                 SlotMode::Plain | SlotMode::RarFallback => {
@@ -305,7 +310,7 @@ impl Extractor {
                         return Err(nofile());
                     }
                 }
-                SlotMode::Discard => return Err(nofile()),
+                SlotMode::Discard | SlotMode::SplitPart => return Err(nofile()),
             }
         }
         for r in reads {
@@ -339,6 +344,19 @@ impl Extractor {
     /// deferred write is never copied as zeros.
     pub fn covered_intervals(&self, slot: usize, off: u64, len: u64) -> Vec<(u64, u64)> {
         let inner = self.inner_read();
+        // TODO 211 (b): ask in the head's logical space, answer in the
+        // part's own.
+        let (slot, delta) = Self::split_target(&inner, slot, 0);
+        let ivs = Self::covered_intervals_in(&inner, slot, off + delta, len);
+        if delta == 0 {
+            return ivs;
+        }
+        ivs.into_iter()
+            .map(|(a, b)| (a - delta, b - delta))
+            .collect()
+    }
+
+    fn covered_intervals_in(inner: &Inner, slot: usize, off: u64, len: u64) -> Vec<(u64, u64)> {
         let s = &inner.slots[slot];
         match s.mode {
             SlotMode::Plain | SlotMode::RarFallback => s
@@ -385,12 +403,12 @@ impl Extractor {
                     }
                 }
                 for (ei, piece_off, span_off, plen) in m.map_span(off, len) {
-                    let Some(base) = Self::base_for(&inner, slot, ei) else {
+                    let Some(base) = Self::base_for(inner, slot, ei) else {
                         continue;
                     };
                     let file_lo = base + piece_off;
-                    let sub = match Self::dest_for(&inner, slot, &m.entries[ei].name) {
-                        Some(Dest::Writer(w)) => match Self::crypto_of(&inner, &w) {
+                    let sub = match Self::dest_for(inner, slot, &m.entries[ei].name) {
+                        Some(Dest::Writer(w)) => match Self::crypto_of(inner, &w) {
                             Some(cs) => cs.intervals(file_lo, plen),
                             None => w.covered_intervals(file_lo, plen),
                         },
@@ -423,7 +441,8 @@ impl Extractor {
                 }
                 merge_intervals(ivs)
             }
-            SlotMode::Discard => Vec::new(),
+            // An alias was translated to its head above.
+            SlotMode::Discard | SlotMode::SplitPart => Vec::new(),
         }
     }
 
@@ -452,10 +471,36 @@ impl Extractor {
     /// the repair marker rides along inert. Admitting it is what keeps a
     /// set whose only damage is in a plain member on the mapped lane
     /// instead of demoting every chased volume beside it to disk (TODO
-    /// 160). `RarFallback` is deliberately NOT admitted though `read_at`
-    /// treats it identically: that slot already materialized, so the set
-    /// is paying for volumes on disk regardless, and its re-extract
-    /// accounting is the fallback path's business.
+    /// 160).
+    ///
+    /// `RarFallback` is admitted too, and ONLY because a slot can reach
+    /// it in the middle of this very repair. A rebuilt block landing on
+    /// a chased slot conflicts inside `chase_span`, which forfeits
+    /// before it returns - so the write that tripped it is already in
+    /// the frontier buffer and materializes with the volume, and every
+    /// REMAINING block of the same repair then arrives at a slot that
+    /// demoted a moment ago. Refusing them used to cost the whole
+    /// attempt: the write loop propagates the error, `repair_mapped`
+    /// returns Err, and blocks already solved in memory are thrown away
+    /// for the disk route to fetch recovery for and solve a second time
+    /// (measured 23 Aug 2026 at test scale: 1 of 3 blocks written). The
+    /// demote is synchronous and complete by the time `chase_span`
+    /// returns - the frontier buffer is drained into the volume file and
+    /// the holds after it - so a later span writes through `plain_job`
+    /// onto a fully materialized volume, exactly as `chase_span`'s own
+    /// doc promises ("a span landing after demotion writes through the
+    /// slot's current mode like any late span").
+    ///
+    /// This does NOT put an already-materialized set on the mapped lane:
+    /// the repair gate admits a slot by [`Self::is_mapped`],
+    /// [`Self::is_plain_patchable`] or [`Self::is_chase_patchable`], and
+    /// none of the three matches `RarFallback`. The only way to arrive
+    /// here in that mode is to have demoted since. Nor does it weaken
+    /// the conflict tripwire, which is the caller's post-check and fires
+    /// on exactly this shape: the decode consumed stale bytes and the
+    /// set must re-extract off disk. What changes is that the repair
+    /// FINISHES first, so the disk route it declines to finds the set
+    /// already verifying rather than half-repaired.
     ///
     /// [`write`]: Extractor::write
     /// [`finish`]: Extractor::finish
@@ -464,14 +509,21 @@ impl Extractor {
         let (name, size) = {
             let inner = self.inner.lock_ok();
             let s = &inner.slots[slot];
-            if !matches!(s.mode, SlotMode::Rar | SlotMode::Plain) {
+            if !matches!(
+                s.mode,
+                SlotMode::Rar
+                    | SlotMode::Plain
+                    | SlotMode::RarChase
+                    | SlotMode::SplitPart
+                    | SlotMode::RarFallback
+            ) {
                 return Err(nofile());
             }
             (s.name.clone(), s.size)
         };
         // Repair bytes REPLACE a range that may already have composed;
         // reuse is excluded for repair anyway.
-        self.write_impl(slot, &name, size, off, data, true, None)
+        self.write_impl(slot, &name, size, off, data, true, None, None)
             .map(|_| ())
     }
 
@@ -615,6 +667,61 @@ impl Extractor {
         out
     }
 
+    /// Publish full coverage for every output file an external repair
+    /// has just VERIFIED (sweep 8, M5).
+    ///
+    /// `unpark` restores a parked writer's handle and deliberately
+    /// keeps its interval map, on the reading that repair fills bytes
+    /// in and never unwrites them. That is true of the bytes we wrote
+    /// and silent about the ones we did not: external par2cmdline fills
+    /// the sparse ranges that were MISSING, outside the writer, so a
+    /// reader still gated on that map goes on waiting for bytes that
+    /// are already correct on disk - or, once the dead-span verdict
+    /// fires, zero-fills over them.
+    ///
+    /// `verified` is (filename, length) for each file the recovery set
+    /// declares, and a writer must match BOTH: a name alone would mark
+    /// a file we disagree about the size of, and a length alone matches
+    /// anything. Files outside the set are untouched - par2's exit
+    /// status says nothing about them. Returns how many writers were
+    /// published, which is what a caller asserts on.
+    pub fn publish_repaired_coverage(&self, verified: &[(String, u64)]) -> usize {
+        let (writers, child) = {
+            let g = self.inner.lock_ok();
+            let mut ws: Vec<Arc<FileWriter>> = g.inner_writers.values().cloned().collect();
+            ws.extend(g.slots.iter().filter_map(|s| s.writer.clone()));
+            (ws, g.child.clone())
+        };
+        let mut n = 0;
+        for w in &writers {
+            let name = w
+                .current_path()
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if verified.iter().any(|(vn, vl)| *vn == name && *vl == w.size) {
+                w.note_repaired(0, w.size);
+                n += 1;
+            }
+        }
+        if let Some(c) = child {
+            n += c.publish_repaired_coverage(verified);
+        }
+        n
+    }
+
+    /// Every live output writer with the name its file has ON DISK
+    /// RIGHT NOW.
+    ///
+    /// `current_path`, not `path` (sweep 8, M6): a verified-name publish
+    /// renames an obfuscated slot's file under its open writer while the
+    /// job is still finishing. Naming the snapshot from the immutable
+    /// creation path made the live media pick judge a renamed file by a
+    /// name that no longer exists - an extensionless creation name
+    /// dropped the writer out of the pick entirely, and when both names
+    /// looked like media the pick succeeded and the fresh open behind it
+    /// went to the removed path and returned 410.
     pub fn writers_snapshot(&self) -> Vec<(String, Arc<FileWriter>)> {
         let (mut out, child) = {
             let inner = self.inner_read();
@@ -626,7 +733,7 @@ impl Extractor {
             for s in &inner.slots {
                 if let Some(w) = &s.writer {
                     out.push((
-                        w.path
+                        w.current_path()
                             .file_name()
                             .unwrap_or_default()
                             .to_string_lossy()
@@ -739,6 +846,68 @@ impl Extractor {
         matches!(self.inner.lock_ok().slots[slot].mode, SlotMode::RarFallback)
     }
 
+    /// Does this MATERIALIZED slot's own volume file already hold every
+    /// byte of `[off, off+len)`? Answers with the file's (name, size)
+    /// when it does, so one lock settles mode, coverage and the name the
+    /// record will carry.
+    ///
+    /// TODO 252 (23 Aug 2026): the journal writer parks an article that
+    /// returned [`Persist::Held`](super::Persist) and completes it from
+    /// the late placements the drains surface. A demote raises
+    /// `refeed_active` so its whole reconstruction surfaces those
+    /// placements - but the bytes can reach the volume by routes that
+    /// report nothing: the post-write re-route in `write` (which
+    /// deliberately returns `Persist::No`) and the forward-delivery
+    /// re-check both run with the flag DOWN, and the read-back skips a
+    /// range whose pwrite has not landed yet. The article then stayed
+    /// parked for the life of the job and refetched on the next run -
+    /// ~8% of runs standalone here, ~40% under a loaded suite, always
+    /// exactly one article of the post.
+    ///
+    /// So ask the destination instead of the placement trail. This is
+    /// the same claim the slot's `M` line makes, and it is a MEASURED
+    /// one: [`FileWriter::covered`](crate::disk::FileWriter::covered) is
+    /// the writer's own record of the pwrites that landed, so a range
+    /// nothing wrote is a gap and stays parked (the safe direction, and
+    /// the one a dropped-and-not-yet-refetched trim prefix takes - that
+    /// refetch bypasses the writer entirely and reports no coverage).
+    /// Every write that CAN reach a materialized volume puts posted
+    /// bytes at their volume offsets: the header stash, the interval-
+    /// gated inner read-back (through the re-encrypt shim for a
+    /// plaintext-once output, so the volume takes cipher), the chase
+    /// buffer, the hold drain, a post-demote write-through, and a repair
+    /// patch. A wrong identity claim here is silent corruption on the
+    /// next resume, so the slot's OWN writer is the only one consulted:
+    /// no split translation (a `SplitPart` alias flips to
+    /// `RarFallback` with its own file, whose offsets ARE the article
+    /// offsets), and a slot with no writer of its own answers `None`.
+    pub fn materialized_span_on_disk(
+        &self,
+        slot: usize,
+        off: u64,
+        len: u64,
+    ) -> Option<(String, u64)> {
+        let inner = self.inner.lock_ok();
+        let s = inner.slots.get(slot)?;
+        if !matches!(s.mode, SlotMode::RarFallback) {
+            return None;
+        }
+        let w = s.writer.as_ref()?;
+        // `covered` and not a walk over `covered_intervals`: the map is
+        // kept sorted and MERGED, so a gap-free span is contained in one
+        // interval by construction.
+        w.covered(off, len).then(|| {
+            (
+                w.current_path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                w.size,
+            )
+        })
+    }
+
     /// (file name, size) of the slot's on-disk file - what the journal
     /// records as the slot's restore destination. The LIVE path, not the
     /// creation-time one: a verified-name publish renames the file, and
@@ -772,13 +941,23 @@ impl Extractor {
     /// spent source. Claiming the name here pushes the inner output to a
     /// disambiguated one, which is what the disk extractor achieves by
     /// staging into an isolated directory.
-    pub fn preclaim_name(&self, file_name: &str) {
-        let inner = self.inner.lock_ok();
-        inner
-            .names_taken
-            .lock()
-            .unwrap()
-            .insert(name_collision_key(inner.fold_names, file_name));
+    /// `slot` is the slot the restored file BELONGS to, and it is
+    /// load-bearing: without it the claim collided with the slot's own
+    /// plain writer, `claim_name` disambiguated to `000-<name>`, and a
+    /// resumed plain payload finished byte-perfect under a mangled name
+    /// while PAR2 verified the orphaned restored stub and condemned it
+    /// (1947/2000 blocks bad). A slot may adopt a name it preclaimed
+    /// itself; nothing else may.
+    pub fn preclaim_name(&self, slot: usize, file_name: &str) {
+        let mut inner = self.inner.lock_ok();
+        let key = name_collision_key(inner.fold_names, file_name);
+        inner.names_taken.lock_ok().insert(key.clone());
+        // First claimant owns. A map-mode replay preclaims one source
+        // file under EVERY volume that reads it, in volume order, and
+        // the grant must sit on the first volume - the one whose parse
+        // founds the group - not on the last, which has not parsed when
+        // the member routes (Codex F-03).
+        inner.preclaimed.entry(key).or_insert(slot);
     }
 
     /// Crash resume: adopt `file_name` (already restored on disk by the
@@ -813,14 +992,15 @@ impl Extractor {
         }
         inner
             .names_taken
-            .lock()
-            .unwrap()
+            .lock_ok()
             .insert(name_collision_key(inner.fold_names, file_name));
         let s = &mut inner.slots[slot];
         s.mode = SlotMode::Plain;
         s.name = file_name.to_string();
         s.size = size.max(cur);
         s.writer = Some(w);
+        // TODO 211 (b): a restored part is a file; its set is a disk set.
+        self.split_slot_plain(inner, slot)?;
         Ok(())
     }
 
@@ -830,8 +1010,28 @@ impl Extractor {
     /// which delegates per range and fails only for ranges the chain
     /// truly cannot serve - a whole-slot veto here would push a healthy
     /// mapped slot onto the no-writer path (worse than a few bad blocks).
+    ///
+    /// TODO 211 (b): `SplitPart` answers YES, and that is the whole
+    /// question this predicate exists to ask - an aliased split part is
+    /// direct-extracted through its HEAD and owns no file whatever.
+    /// [`Self::read_at`], [`Self::covered`], [`Self::covered_intervals`],
+    /// [`Self::materialize`] and [`Self::patch_volume_span`] were all
+    /// taught the alias when the mode landed; this seam was not, so
+    /// `get::settle` sent every split part down the no-writer path,
+    /// read its still-Pending blocks back against a file that does not
+    /// exist, and marked EVERY one of them bad. A clean download then
+    /// reported "N recovery block(s) needed but the NZB only carries
+    /// M" and failed the job (§272, 23 Aug 2026 - the bytes on disk
+    /// were byte-identical to the fixture in every captured failure).
+    /// Load-dependent only in HOW MANY blocks were still Pending at
+    /// settle, which is why it read as a flake: the shape is the same
+    /// one `chase.rs` names when it says zip rides the 7z mode "rather
+    /// than re-teaching a new mode to every `is_mapped` seam".
     pub fn is_mapped(&self, slot: usize) -> bool {
-        matches!(self.inner.lock_ok().slots[slot].mode, SlotMode::Rar)
+        matches!(
+            self.inner.lock_ok().slots[slot].mode,
+            SlotMode::Rar | SlotMode::SplitPart
+        )
     }
 
     /// TODO 160 - may a mapped repair patch this slot's DAMAGED blocks in
@@ -886,6 +1086,103 @@ impl Extractor {
         )
     }
 
+    /// Shape-coverage row 26 - may a mapped repair patch this CHASED
+    /// slot's damaged blocks straight into its frontier buffer, instead
+    /// of declining the whole call to the materialize + `repair_dir` +
+    /// unpack path that costs three writes of the payload?
+    ///
+    /// The admission is deliberately narrow, and each term is load-
+    /// bearing rather than defensive:
+    ///
+    /// - **`RarChase` only.** The 7z chase reads at arbitrary offsets
+    ///   and its set is a byte split whose members share one ctl, so a
+    ///   member's forfeit takes the container with it; it is a separate
+    ///   account (see the design note). Row 26 as measured is RAR.
+    /// - **The chase is still attached and its buffer live.** A slot
+    ///   that already forfeited has volume files, which is the ordinary
+    ///   path.
+    /// - **Nothing was DROPPED.** A dropping trim released the consumed
+    ///   prefix with no copy anywhere ([`ChaseSlot::dropped`]); a repair
+    ///   there has nothing to patch and the re-fetch that fixes a demote
+    ///   (`get/dropped.rs`) has no equivalent here.
+    /// - **The buffer has not already conflicted.** Sticky, and it means
+    ///   the decode consumed bytes a rewrite has since corrected.
+    ///
+    /// What is NOT in the list, on purpose: any test that the damaged
+    /// blocks sit ahead of the decode. The decode is forward-only and a
+    /// blocking read parks at a hole, so it cannot have consumed a
+    /// block that never arrived - and where bytes DID arrive and are
+    /// wrong, byte-comparing them against the rebuilt copy is exactly
+    /// what [`FrontierBuffer::write_span`] already does. The verdict is
+    /// therefore read once, afterwards, from
+    /// [`Self::chase_repair_conflicted`], under the pause that makes
+    /// the whole patch atomic against the engine
+    /// ([`Self::pause_chase_reads`]).
+    pub fn is_chase_patchable(&self, slot: usize) -> bool {
+        let inner = self.inner_read();
+        let s = &inner.slots[slot];
+        if !matches!(s.mode, SlotMode::RarChase) {
+            return false;
+        }
+        let Some(ch) = s.chase.as_ref() else {
+            return false;
+        };
+        ch.dropped.is_empty() && !ch.buf.conflicted()
+    }
+
+    /// Did patching this chased slot rewrite bytes its decode had
+    /// already consumed? Read AFTER the whole set is patched and under
+    /// the same pause - see [`Self::is_chase_patchable`]. True means the
+    /// in-place route is off for this repair: the buffer holds the
+    /// corrected bytes either way, so the caller's fall-through
+    /// materializes an exact volume, which is what it would have done
+    /// from the start.
+    ///
+    /// A slot whose chase is GONE by the time this runs conflicted in
+    /// the strongest possible sense - `chase_span` forfeits the moment
+    /// it sees the flag - so an absent chase reads as true.
+    pub fn chase_repair_conflicted(&self, slot: usize) -> bool {
+        let inner = self.inner_read();
+        match inner.slots[slot].chase.as_ref() {
+            Some(ch) => ch.buf.conflicted(),
+            None => matches!(
+                inner.slots[slot].mode,
+                SlotMode::RarChase | SlotMode::SevenZ | SlotMode::RarFallback
+            ),
+        }
+    }
+
+    /// Has this slot given up on its in-RAM view and materialized its
+    /// volume to disk since the repair gate admitted it?
+    ///
+    /// The gate admits a slot by [`Self::is_mapped`],
+    /// [`Self::is_plain_patchable`] or [`Self::is_chase_patchable`], and
+    /// none of the three matches `RarFallback` - so on a slot the gate
+    /// passed, this reading true means the demote happened DURING the
+    /// patch. That matters because a demote deletes the group's
+    /// partially-extracted inner files (`delete_group_out_files`): the
+    /// repair can still finish onto the materialized volumes and the
+    /// self-prove still passes, but there is no extracted output left
+    /// for the caller to claim, so the set has to re-extract off disk.
+    ///
+    /// Read AFTER the whole set is patched, alongside
+    /// [`Self::chase_repair_conflicted`] - which covers the chased slots
+    /// and names the sharper reason when it fires, since a forfeited
+    /// chase reads true here too. This one is what catches a MAPPED slot
+    /// that demoted for a reason of its own (a budget breach, a mapping
+    /// error) with no conflict to report.
+    ///
+    /// `Discard` is folded in as the other "this slot no longer owns its
+    /// bytes" ending. Unreachable from the daemon - it needs
+    /// `protect_sources`, which the download path never sets - but it is
+    /// the same answer to the same question.
+    pub fn demoted_to_disk(&self, slot: usize) -> bool {
+        matches!(
+            self.inner.lock_ok().slots[slot].mode,
+            SlotMode::RarFallback | SlotMode::Discard
+        )
+    }
+
     /// The RAR flavor of [`Self::is_chased`] alone. The distinction
     /// matters to exactly one caller: a `.7z` materialized for repair is
     /// the 7z post-pass's own input, but a RAR chase demoted the same
@@ -896,80 +1193,6 @@ impl Extractor {
     /// its output with exit 0.
     pub fn is_rar_chased(&self, slot: usize) -> bool {
         matches!(self.inner.lock_ok().slots[slot].mode, SlotMode::RarChase)
-    }
-
-    /// Open an output file for /stream. For an encrypted store output
-    /// still on disk as ciphertext, this returns a [`StreamCrypt`] the
-    /// reader decrypts through on the fly (so encrypted releases stream
-    /// mid-download, not just after the finish decrypt) and leases a live
-    /// reader so finish() will temp+rename instead of mutating in place.
-    /// The file is opened HERE, under the lock, so the ciphertext-vs-
-    /// plaintext decision can't race the finish rename. Plain files (the
-    /// common case) return [`StreamOpen::Plain`] and are opened by the
-    /// caller exactly as before.
-    pub fn open_stream(&self, out_name: &str) -> StreamOpen {
-        // Poison-tolerant (see `inner_read`): this is the /stream read
-        // path. Its only mutations are inserting a fresh per-output
-        // stream state and bumping its reader count - both self-
-        // contained and independent of the routing state a panicking
-        // writer could have been mid-mutation on, so serving a read
-        // after recovery is as safe as the pure readers above.
-        let mut g = self.inner_read();
-        let inner = &mut *g;
-        // Plaintext-once output: the disk already holds plaintext, so
-        // the reader serves raw ranges exactly like any plain file (its
-        // coverage answers come from the writer, which only ever holds
-        // decrypted bytes).
-        if inner.crypto_files.contains_key(out_name) {
-            return StreamOpen::Plain;
-        }
-        let Some((path, crypt, unp)) = Self::locate_encrypted_output(inner, out_name) else {
-            // Not one of ours - a nested child may own the name (its
-            // encrypted outputs live in its own writer map).
-            let child = inner.child.clone();
-            drop(g);
-            return match child {
-                Some(c) => c.open_stream(out_name),
-                None => StreamOpen::Plain,
-            };
-        };
-        let aes = inner.password.as_ref().and_then(|pw| crypt.derive(pw));
-        let Some(aes) = aes else {
-            // Verified encrypted output with an underivable password
-            // shouldn't reach here (the group would have fallen back);
-            // serve raw rather than hand out a broken decryptor.
-            return StreamOpen::Plain;
-        };
-        let st = inner
-            .stream_states
-            .entry(out_name.to_string())
-            .or_insert_with(|| {
-                Arc::new(StreamState {
-                    state: Mutex::new(DecState::Ciphertext),
-                    readers: AtomicUsize::new(0),
-                })
-            })
-            .clone();
-        let state = *st.state.lock_ok();
-        match state {
-            DecState::Decrypted => StreamOpen::Plain,
-            DecState::Ciphertext => match std::fs::File::open(&path) {
-                Ok(f) => {
-                    st.readers.fetch_add(1, Ordering::Relaxed);
-                    StreamOpen::Encrypted(
-                        f,
-                        StreamCrypt {
-                            key: aes.aes,
-                            iv: aes.iv,
-                            cipher_len: rarcrypt::align16(unp),
-                            plain_len: unp,
-                            st,
-                        },
-                    )
-                }
-                Err(_) => StreamOpen::Plain,
-            },
-        }
     }
 
     /// PAR2 deobfuscation rename: update the name a future materialization
@@ -1138,6 +1361,9 @@ impl Extractor {
         {
             let mut inner = self.inner.lock_ok();
             let inner = &mut *inner;
+            // TODO 211 (b): materializing a split part materializes
+            // the set; the head's reconstruction writes every part.
+            let (slot, _) = Self::split_target(inner, slot, 0);
             if matches!(
                 inner.slots[slot].mode,
                 SlotMode::Rar | SlotMode::RarChase | SlotMode::SevenZ
@@ -1369,7 +1595,6 @@ mod tests {
             ex.map_output_range("file.bin", 0, 1000),
             vec![(0, 0, 1000, data.len() as u64)]
         );
-        assert!(matches!(ex.open_stream("file.bin"), StreamOpen::Plain));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

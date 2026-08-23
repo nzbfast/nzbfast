@@ -723,27 +723,124 @@ fn copy_range(src: &dyn RangeSource, offset: u64, len: u64, dest: &mut File) -> 
 ///
 /// Returns `Ok(true)` when `dest` now holds a byte-complete copy (cloned or
 /// not - a plain copy is still a valid prefill), `Ok(false)` when the caller
-/// should fall back to the streaming copy path, and an error when `dest`
+/// should fall back to the streaming copy path, and an error when the copy
 /// came back as something other than a regular file, which is refused
 /// rather than written through.
+///
+/// # Ownership (nzbfast-local change, 22 Aug 2026 - sweep 8, M10)
+///
+/// This used to `remove_file(dest)` and then `std::fs::copy(src, dest)` by
+/// NAME. The caller claims `dest` with `create_new` precisely so it holds a
+/// name nobody else has and no symlink can be followed through - and the
+/// unlink threw that claim away. In the window that opened, another process
+/// (or another repair in the same directory, which the deterministic
+/// `.rrtmpN` names make a real possibility) could install a symlink at
+/// `dest`; `std::fs::copy` follows one, so the volume was written over
+/// whatever it pointed at, OUTSIDE the job. The `symlink_metadata` guard
+/// below the copy saw only the end state, after the damage.
+///
+/// So the copy never touches `dest` by name. It lands in a directory this
+/// call creates exclusively - `create_dir` refuses an existing entry of any
+/// kind, symlinks included, so nothing can be pre-planted inside it - and is
+/// published onto `dest` with `rename`, which replaces the entry atomically
+/// and does not follow a symlink sitting there. The clone survives: the copy
+/// destination still does not exist when `std::fs::copy` runs, which is the
+/// condition APFS `fclonefileat` and `copy_file_range` need.
 pub fn clone_prefill(src: &Path, dest: &Path) -> Result<bool> {
-    match std::fs::remove_file(dest) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Ok(false),
-    }
-    let Ok(copied) = std::fs::copy(src, dest) else {
+    let Some((stage_dir, staged)) = stage_beside(dest) else {
         return Ok(false);
     };
-    let meta = std::fs::symlink_metadata(dest)?;
+    let cleanup = || {
+        let _ = std::fs::remove_file(&staged);
+        let _ = std::fs::remove_dir(&stage_dir);
+    };
+    let Ok(copied) = std::fs::copy(src, &staged) else {
+        cleanup();
+        return Ok(false);
+    };
+    let meta = match std::fs::symlink_metadata(&staged) {
+        Ok(m) => m,
+        Err(error) => {
+            cleanup();
+            return Err(error.into());
+        }
+    };
     if !meta.is_file() {
+        cleanup();
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "repair destination is not a regular file",
         )
         .into());
     }
-    Ok(meta.len() == copied)
+    if meta.len() != copied {
+        cleanup();
+        return Ok(false);
+    }
+    // Atomic publish. A rename never follows a symlink at the target, so a
+    // link smuggled onto `dest` is REPLACED rather than written through.
+    if std::fs::rename(&staged, dest).is_err() {
+        cleanup();
+        return Ok(false);
+    }
+    let _ = std::fs::remove_dir(&stage_dir);
+    Ok(true)
+}
+
+/// Claim a private staging directory beside `dest` and name a file in it.
+/// (nzbfast-local change, 22 Aug 2026 - sweep 8, M10.)
+///
+/// `create_dir` is the exclusive primitive: it fails if the name exists at
+/// all - regular file, directory or symlink - so a successful call means
+/// this process owns the directory and nothing can already be inside it.
+/// The candidate loop mirrors the caller's own `.rrtmpN` claim so two
+/// concurrent repairs in one directory get separate staging areas instead of
+/// stealing each other's.
+fn stage_beside(dest: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let parent = dest.parent()?;
+    let leaf = dest.file_name()?.to_string_lossy().into_owned();
+    for n in 0..1024 {
+        let dir = parent.join(format!(".{leaf}.rrstage{n}"));
+        if std::fs::create_dir(&dir).is_err() {
+            continue;
+        }
+        // Best effort, and only a defence in depth: the directory is
+        // already ours, this just keeps a world-writable parent from
+        // making its CONTENTS reachable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let staged = dir.join("v");
+        return Some((dir, staged));
+    }
+    None
+}
+
+/// Open a repair destination the caller claimed, refusing to follow a
+/// symlink at the final component (nzbfast-local change, 22 Aug 2026 -
+/// sweep 8, M10).
+///
+/// The three repair-to-path entry points open `dest` for writing right after
+/// [`clone_prefill`], and a plain `OpenOptions::open` follows a symlink -
+/// so a prefill that declined (returning `Ok(false)`, which leaves whatever
+/// is at `dest` alone) handed the streaming path the same escape the clone
+/// used to have. `O_NOFOLLOW` closes it: the open fails rather than writing
+/// a repaired volume through a link.
+///
+/// Windows has no equivalent flag on `OpenOptions` and creating a symlink
+/// there needs either administrator rights or developer mode, so it keeps
+/// the plain open.
+pub fn open_repair_dest(dest: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).read(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(dest)
 }
 
 /// Repairs the protected prefix of `src` into `dest`, streaming.
@@ -1174,9 +1271,22 @@ mod tests {
         assert!(result.is_err(), "a length mismatch must fail, not patch");
     }
 
+    /// Sweep 8, M10: a symlink at `dest` is REPLACED, never written
+    /// through - including one that is already there when the prefill
+    /// starts, which is the end state of the unlink/copy window the old
+    /// shape opened.
+    ///
+    /// The old code unlinked `dest` and then copied to it BY NAME,
+    /// throwing away the `create_new` claim the caller took precisely so
+    /// no symlink could be followed. Anything installed at the name in
+    /// that window received the whole volume, outside the job entirely;
+    /// the `symlink_metadata` guard ran after the copy and saw only the
+    /// end state. Now the copy lands in a directory this call creates
+    /// exclusively and is published with `rename`, which does not follow
+    /// a link at the target.
     #[cfg(unix)]
     #[test]
-    fn clone_prefill_refuses_a_symlink_destination() {
+    fn clone_prefill_replaces_a_symlink_instead_of_writing_through_it() {
         let src_path = temp_path("symlink-src");
         let dest_path = temp_path("symlink-dest");
         let target_path = temp_path("symlink-target");
@@ -1184,19 +1294,83 @@ mod tests {
         std::fs::write(&target_path, b"must survive").unwrap();
         std::os::unix::fs::symlink(&target_path, &dest_path).unwrap();
 
-        // remove_file unlinks the symlink itself, so the common case is a
-        // clean clone; the guard is for a link smuggled in AFTER that
-        // window, which symlink_metadata sees because fs::copy re-created
-        // the path. Simulate the end state directly: copy through, then
-        // verify the metadata check would have refused a non-regular file.
-        let result = clone_prefill(&src_path, &dest_path);
+        assert_eq!(clone_prefill(&src_path, &dest_path).unwrap(), true);
+        assert_eq!(
+            std::fs::read(&target_path).unwrap(),
+            b"must survive",
+            "the link target must never see a byte of the volume"
+        );
+        assert!(
+            std::fs::symlink_metadata(&dest_path).unwrap().is_file(),
+            "and the destination is a regular file the repair owns"
+        );
+        assert_eq!(std::fs::read(&dest_path).unwrap(), b"source bytes");
+        // No staging litter left beside it.
+        let parent = dest_path.parent().unwrap().to_path_buf();
+        let leaf = dest_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(!parent.join(format!(".{leaf}.rrstage0")).exists());
+
         std::fs::remove_file(&dest_path).ok();
-        // The unlink-first behavior makes this succeed as a REGULAR file -
-        // assert exactly that, and that the link target was not written.
-        assert_eq!(result.unwrap(), true);
-        assert_eq!(std::fs::read(&target_path).unwrap(), b"must survive");
         std::fs::remove_file(&src_path).ok();
         std::fs::remove_file(&target_path).ok();
+    }
+
+    /// Sweep 8, M10, the other half: the streaming fallback opens the
+    /// destination with `O_NOFOLLOW`, so a prefill that DECLINED - which
+    /// leaves whatever is at `dest` alone - cannot hand the repair a
+    /// link to write a volume through.
+    #[cfg(unix)]
+    #[test]
+    fn the_repair_destination_open_refuses_a_symlink() {
+        let dest_path = temp_path("nofollow-dest");
+        let target_path = temp_path("nofollow-target");
+        std::fs::write(&target_path, b"must survive").unwrap();
+        std::os::unix::fs::symlink(&target_path, &dest_path).unwrap();
+
+        let err = open_repair_dest(&dest_path).unwrap_err();
+        assert_eq!(
+            std::fs::read(&target_path).unwrap(),
+            b"must survive",
+            "{err}"
+        );
+        // A regular file at the same name opens normally.
+        std::fs::remove_file(&dest_path).ok();
+        std::fs::write(&dest_path, b"claimed").unwrap();
+        open_repair_dest(&dest_path).expect("a regular destination still opens");
+
+        std::fs::remove_file(&dest_path).ok();
+        std::fs::remove_file(&target_path).ok();
+    }
+
+    /// Sweep 8, M10: two repairs publishing into the same directory at
+    /// once get separate staging areas and separate outputs. The old
+    /// deterministic path let concurrent repairs steal and clobber the
+    /// same name.
+    #[test]
+    fn concurrent_prefills_do_not_share_a_staging_area() {
+        let a_src = temp_path("conc-src-a");
+        let b_src = temp_path("conc-src-b");
+        let a_dest = temp_path("conc-dest-a");
+        let b_dest = temp_path("conc-dest-b");
+        std::fs::write(&a_src, vec![0xAAu8; 64 * 1024]).unwrap();
+        std::fs::write(&b_src, vec![0xBBu8; 64 * 1024]).unwrap();
+
+        let (ad, bd) = (a_dest.clone(), b_dest.clone());
+        let (asrc, bsrc) = (a_src.clone(), b_src.clone());
+        let ta = std::thread::spawn(move || clone_prefill(&asrc, &ad).unwrap());
+        let tb = std::thread::spawn(move || clone_prefill(&bsrc, &bd).unwrap());
+        assert!(ta.join().unwrap());
+        assert!(tb.join().unwrap());
+        assert_eq!(std::fs::read(&a_dest).unwrap(), vec![0xAAu8; 64 * 1024]);
+        assert_eq!(std::fs::read(&b_dest).unwrap(), vec![0xBBu8; 64 * 1024]);
+
+        for p in [&a_src, &b_src, &a_dest, &b_dest] {
+            std::fs::remove_file(p).ok();
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Local configuration (`config.local.json`, gitignored - holds credentials).
 
 use std::path::Path;
-use tracing::info;
+use tracing::warn;
 
 use serde::{Deserialize, Serialize};
 
@@ -507,32 +507,82 @@ impl Config {
     /// `sabnzbd.ini` format; anything else is our JSON. If `path` doesn't
     /// exist, fall back to a SABnzbd install's ini in its standard
     /// per-platform location - a machine already running SAB needs no
-    /// configuration at all.
+    /// configuration at all. That fallback is unconditional, including
+    /// when the operator named `path` themselves; the reasoning, and the
+    /// policy that was weighed against it, is beside `load_no_fallback`.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
-        let (bytes, ini) = match std::fs::read(path) {
-            Ok(b) => (b, is_ini(path)),
+        // Search next to the missing config too: in Docker that is
+        // /config, the one place a user can put the file. Lazily, inside
+        // the closure: this runs at the download runner's tick rate, and
+        // the healthy path must not stat a directory it will never read.
+        Self::load_or_sab(path, || {
+            let near: Vec<&Path> = path.parent().into_iter().collect();
+            sabnzbd_ini_path(&near)
+        })
+    }
+
+    /// [`load`](Self::load) with the SABnzbd search injected, so both
+    /// halves of the fallback are testable on a machine that HAS a
+    /// SABnzbd install - which every bench box here does. Same seam, and
+    /// the same reason, as `storage_override` in `crates/nzbkit/src/disk.rs`:
+    /// tests share one process, so pointing `$HOME` at an empty
+    /// directory would race every other test that reads it.
+    fn load_or_sab(
+        path: &Path,
+        find_sab: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> Result<Config, ConfigError> {
+        match std::fs::read(path) {
+            Ok(b) => Self::parse(&b, is_ini(path)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Search next to the missing config too: in Docker that
-                // is /config, the one place a user can put the file.
-                let near: Vec<&Path> = path.parent().into_iter().collect();
-                let Some(sab) = sabnzbd_ini_path(&near) else {
+                let Some(sab) = find_sab() else {
                     return Err(e.into());
                 };
+                let parsed = Self::parse(&std::fs::read(&sab)?, true);
+                // WARN, not INFO, and after the parse rather than before
+                // it. INFO goes to stdout (the writer split in
+                // `crates/nzbfast/src/logging.rs` gives stderr WARN and
+                // above), so under a download's own output this line
+                // scrolled past unread: on 22 Aug 2026 five benchmark
+                // legs ran against a provider nobody had configured
+                // before anyone noticed, and the run's visible failure
+                // was "no usable connection to <that provider>", which
+                // reads as a network fault. Naming the hosts is what
+                // connects the two, and it is why the parse comes first.
+                //
+                // The failed parse is announced too, not swallowed as an
+                // error path that speaks for itself: `NoServers` from a
+                // SAB ini with nothing enabled is reported by callers as
+                // "config has no servers", which points at a file the
+                // operator never wrote and may not know was read.
+                //
+                // Once per process: the daemon re-loads this config
+                // several times a second.
                 static NOTICE: std::sync::Once = std::sync::Once::new();
-                let b = std::fs::read(&sab)?;
-                NOTICE.call_once(|| {
-                    info!(
+                NOTICE.call_once(|| match &parsed {
+                    Ok(cfg) => {
+                        let hosts: Vec<&str> =
+                            cfg.servers.iter().map(|s| s.host.as_str()).collect();
+                        warn!(
+                            target: "config",
+                            "{} not found - using SABnzbd's server list from {} instead: {}",
+                            path.display(),
+                            sab.display(),
+                            hosts.join(", ")
+                        );
+                    }
+                    Err(e) => warn!(
                         target: "config",
-                        "{} not found - using SABnzbd servers from {}",
+                        "{} not found - fell back to SABnzbd's {}, which gives no usable \
+                         server list either: {}",
                         path.display(),
-                        sab.display()
-                    );
+                        sab.display(),
+                        e
+                    ),
                 });
-                (b, true)
+                parsed
             }
-            Err(e) => return Err(e.into()),
-        };
-        Self::parse(&bytes, ini)
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The file the operator pointed us at, and nothing else: no search
@@ -557,6 +607,43 @@ impl Config {
     /// servers" as it did before §154). Every other SAB-fallback shape
     /// is untouched - `load` still resolves the servers the download
     /// actually dials.
+    ///
+    /// ## Why `load` falls back even when `--config` was explicit
+    ///
+    /// Asked and answered 22 Aug 2026, after a loopback rig was handed
+    /// `--config '{"servers":[...]}'` - inline JSON, so a filename that
+    /// does not exist - and quietly downloaded through the host's
+    /// SABnzbd server list for five benchmark legs. The obvious policy
+    /// is "fall back when we were guessing, fail when you told us":
+    /// clap knows whether an argument came from the command line, the
+    /// environment or its default, so a typo'd path could come back as
+    /// the `Io` error it is while a container's absent
+    /// `/config/config.json` still found the SAB ini beside it.
+    ///
+    /// It was rejected, and not on complexity grounds - it does not
+    /// work. EVERY packaged deployment passes `--config` on the command
+    /// line: `packaging/docker-entrypoint.sh` builds `serve --config
+    /// "$CONFIG"`, and so do the systemd unit, the launchd plist, the
+    /// FreeBSD rc.d script, the Synology and QNAP wrappers, the flatpak
+    /// launcher, the Homebrew service, both desktop start scripts and
+    /// both Android engine services. Under that policy the fallback
+    /// would fire only for a developer running bare `nzbfast` in a cwd,
+    /// and would be dead in the container it was written for (issue #15,
+    /// fa70cc23, whose message names "the daemon's missing-config
+    /// fallback" as one of the three things it was fixing). The
+    /// argument's SOURCE does not separate a first-run container from a
+    /// typo; it separates packaged installs from unpackaged ones, which
+    /// is not the question anyone is asking. Do not re-derive this.
+    ///
+    /// What changed instead is what the fallback SAYS. The notice in
+    /// `load_or_sab` was one INFO line, and INFO goes to stdout, so a
+    /// download's own output buried it; it is now a WARN on stderr that
+    /// names the hosts it adopted, which is the link between "some other
+    /// application's config" and the "no usable connection to <host>"
+    /// the run dies of minutes later. The one shape now refused outright
+    /// is inline JSON in `--config`, caught at parse time by
+    /// `config_path` in `crates/nzbfast/src/main.rs` - it is never a
+    /// filename anyone meant, so there is no behaviour to preserve.
     pub fn load_no_fallback(path: &Path) -> Result<Config, ConfigError> {
         Self::parse(&std::fs::read(path)?, is_ini(path))
     }
@@ -1183,6 +1270,75 @@ x = y
                 .len(),
             2
         );
+    }
+
+    /// The three shapes the 22 Aug 2026 fallback decision turns on, in
+    /// the order the argument runs. The policy settled on is that
+    /// `load` cannot see the difference between the first two and must
+    /// not try (the reasoning is beside `load_no_fallback`), so what is
+    /// pinned here is that an EXPLICIT path and a DEFAULTED one behave
+    /// identically, and that the fallback is skipped - not merely
+    /// unlucky - when there is no SABnzbd install to find.
+    ///
+    /// `load_or_sab` rather than `load` because the third case cannot
+    /// be written against the real search: these bench boxes all have
+    /// SABnzbd installed (we benchmark against it), so `sabnzbd_ini_path`
+    /// finds `$HOME/.sabnzbd/sabnzbd.ini` and a "nothing to find" test
+    /// would pass on CI and silently not run here.
+    #[test]
+    fn missing_config_falls_back_the_same_way_however_the_path_was_chosen() {
+        let dir = std::env::temp_dir().join("nzbfast-cfg-test-fallback-policy");
+        // From scratch: the last case below writes a real config at one
+        // of the paths the first case needs to be MISSING, and temp_dir
+        // survives the test binary, so a second run inherited it and
+        // failed on the first assertion.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
+        let sab = dir.join("sabnzbd.ini");
+        let find = || Some(sab.clone());
+
+        // 1. Explicit and missing: the operator named this path, and it
+        //    still resolves to SAB's servers. This is the case that cost
+        //    five benchmark legs, and it is deliberate - every packaged
+        //    install (Docker's entrypoint included) passes --config, so
+        //    refusing here would kill the fallback where it is needed.
+        let explicit = dir.join("typo.local.json");
+        let cfg = Config::load_or_sab(&explicit, find).expect("explicit-and-missing falls back");
+        assert_eq!(cfg.servers.len(), 2);
+
+        // 2. Defaulted and missing, SABnzbd present: issue #15's Docker
+        //    shape. Indistinguishable from case 1 by construction - same
+        //    call, same result - which IS the finding.
+        let defaulted = dir.join("config.local.json");
+        let cfg = Config::load_or_sab(&defaulted, find).expect("default-and-missing falls back");
+        assert_eq!(cfg.servers.len(), 2);
+        assert_eq!(cfg.servers[0].host, "news.frugal.com");
+
+        // 3. Defaulted and missing with nothing to find: the search
+        //    coming back empty must surface the original NotFound, not
+        //    some later error from a file it went looking for.
+        let err = Config::load_or_sab(&defaulted, || None).expect_err("nothing to fall back to");
+        assert!(
+            matches!(&err, ConfigError::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "with no SABnzbd install the missing config must stay an Io error, got {err:?}"
+        );
+
+        // A SAB ini that gives nothing usable still reports the SAB
+        // error, not a silent one: `NoServers` here is about a file the
+        // operator never wrote, and the warning is what says so.
+        let empty = dir.join("empty.ini");
+        std::fs::write(&empty, "[servers]\n").unwrap();
+        let err = Config::load_or_sab(&defaulted, || Some(empty.clone()))
+            .expect_err("an ini with no servers is not a config");
+        assert!(matches!(err, ConfigError::NoServers), "got {err:?}");
+
+        // And a config that IS there is never overridden by an ini
+        // sitting next to it, whatever the search would have returned.
+        std::fs::write(&explicit, br#"{"servers":[{"host":"mine","port":119}]}"#).unwrap();
+        let cfg = Config::load_or_sab(&explicit, find).expect("present config wins");
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].host, "mine");
     }
 }
 

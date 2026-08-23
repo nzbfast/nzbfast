@@ -249,7 +249,7 @@ pub struct PersonHit {
 ///
 /// Carried as a value rather than four positional arguments because the
 /// wall queues these to the enricher instead of writing them on the HTTP
-/// request path (`Daemon::title_seeds`).
+/// request path ([`Index::title_seed_many`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleSeed {
     /// `titles.key` - the card's identity.
@@ -686,6 +686,111 @@ impl Index {
             [key],
         )?;
         Ok(n > 0)
+    }
+
+    /// What a title blanked by a failed lookup looks like on disk.
+    ///
+    /// Every metadata column at its default with `checked` stamped: that
+    /// is exactly what `title_fill(&Default::default())` writes, and
+    /// before TODO 26c the enricher wrote it for a 429, a 503 and a
+    /// DNS blip as readily as for a real "no such film".
+    ///
+    /// It cannot tell those two apart retroactively - nothing recorded
+    /// WHY - so the sweep below is deliberately a superset: a row that
+    /// genuinely has no metadata anywhere costs one more lookup and is
+    /// stamped again, while a row a blip blanked gets its card. That
+    /// trade is only sound ONCE, which is why the caller is a kv-guarded
+    /// one-off and not a recurring pass.
+    ///
+    /// `kind` is the guard that keeps it from being a `titles_reset_all`
+    /// with extra steps: obfuscated and unparseable rows land on
+    /// `Kind::Other`, and the enricher stamps those without asking any
+    /// provider at all. Sweeping them back in would re-queue every junk
+    /// stem on the wall to be stamped again unlooked, forever.
+    ///
+    /// A Wikipedia-only card (no provider id, but a plot or a poster)
+    /// fails the empty-column tests and is left alone, which is right -
+    /// it is a real answer.
+    const BLANKED: &'static str = "checked > 0 AND kind IN ('tv','movie','music','book')
+           AND tmdb_id = 0 AND id_src = '' AND overview = '' AND genres = ''
+           AND poster = '' AND backdrop = '' AND imdb = '' AND actors = ''
+           AND air_date = '' AND rating = 0";
+
+    /// kv keys for the one-off sweep: how far it has walked, and that it
+    /// is finished. The `_v1` is the re-arm handle - see
+    /// [`Self::titles_unstamp_rearm`].
+    const UNSTAMP_CURSOR: &'static str = "enrich_unstamp_cursor";
+    const UNSTAMP_DONE: &'static str = "enrich_unstamp_v1";
+
+    /// TODO 26c: put back the titles a transient provider failure
+    /// blanked before the enricher could tell "no such film" from "ask
+    /// later". Returns (rows re-queued this call, sweep finished).
+    ///
+    /// A one-off, guarded by [`Self::UNSTAMP_DONE`], because the
+    /// predicate above is a superset and re-running it on a schedule
+    /// would put every genuinely-unknown title back in the queue on
+    /// every pass - an enricher that never settles.
+    ///
+    /// Sliced on the rowid with the cursor persisted, for the reason
+    /// `split_merge` is: the caller holds the shared index write mutex
+    /// for the whole call, so a live index's worth of `titles` cannot be
+    /// one statement. A LIMIT would not do instead - an un-stamped row
+    /// leaves the set, so each successive slice would rescan everything
+    /// already swept to find the next match.
+    pub fn titles_unstamp_blanked(
+        &self,
+        budget: std::time::Duration,
+    ) -> rusqlite::Result<(usize, bool)> {
+        if self.kv_get(Self::UNSTAMP_DONE).is_some() {
+            return Ok((0, true));
+        }
+        const STRIDE: i64 = 20_000;
+        let started = std::time::Instant::now();
+        let mut cursor: i64 = self
+            .kv_get(Self::UNSTAMP_CURSOR)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let top: i64 = self
+            .db
+            .query_row("SELECT COALESCE(MAX(rowid),0) FROM titles", [], |r| {
+                r.get(0)
+            })?;
+        let mut n = 0usize;
+        let sql = format!(
+            "UPDATE titles SET checked=0, air_tried=0
+              WHERE rowid>?1 AND rowid<=?2 AND {}",
+            Self::BLANKED
+        );
+        let done = loop {
+            let hi = cursor.saturating_add(STRIDE).min(top);
+            n += self.db.prepare_cached(&sql)?.execute([cursor, hi])?;
+            cursor = hi;
+            if hi >= top {
+                break true;
+            }
+            self.kv_set(Self::UNSTAMP_CURSOR, &cursor.to_string())?;
+            if started.elapsed() >= budget {
+                break false;
+            }
+        };
+        if done {
+            self.kv_set(Self::UNSTAMP_DONE, "1")?;
+            self.db
+                .execute("DELETE FROM kv WHERE k=?1", [Self::UNSTAMP_CURSOR])?;
+        }
+        Ok((n, done))
+    }
+
+    /// Forget that the sweep above has run, so it runs again from the
+    /// start. The manual half of the one-off: `wall_refresh&value=blanked`
+    /// is how an install that collected blanked rows AFTER the automatic
+    /// sweep (a long outage, say) asks for another.
+    pub fn titles_unstamp_rearm(&self) -> rusqlite::Result<()> {
+        self.db.execute(
+            "DELETE FROM kv WHERE k IN (?1,?2)",
+            [Self::UNSTAMP_DONE, Self::UNSTAMP_CURSOR],
+        )?;
+        Ok(())
     }
 
     /// M16: reset EVERY title's metadata (fresh enrichment pass over the
@@ -1252,6 +1357,102 @@ impl Index {
 mod tests {
     use super::*;
     use crate::index::testutil::{entry, teardown};
+
+    /// TODO 26c: the one-off that puts back titles a transient provider
+    /// failure blanked, and - just as important - what it must NOT
+    /// touch.
+    ///
+    /// The live index accumulated these for months, because the
+    /// enricher stamped `checked` on any miss and `title_fill` writes
+    /// the card and that stamp in one statement. Nothing recorded WHY a
+    /// row came back empty, so the sweep works off the shape a blanked
+    /// row leaves behind - which makes it a superset, and makes running
+    /// it exactly once the whole design.
+    #[test]
+    fn the_transient_unstamp_sweep_re_queues_blanks_and_spares_everything_else() {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-index-unstamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        let blank = |key: &str, kind: &str| {
+            ix.title_seed(key, kind, key, 0).unwrap();
+            // Exactly what the lane wrote for a 429 before this landed.
+            ix.title_fill(key, &TitleFill::default(), 100).unwrap();
+        };
+        blank("m:blanked", "movie");
+        blank("t:blanked", "tv");
+        // Junk: `Kind::Other` is stamped WITHOUT asking any provider, so
+        // sweeping it back in would re-queue every obfuscated stem on
+        // the wall to be stamped again unlooked, forever.
+        blank("x:junk", "other");
+        // A real answer, and a Wikipedia-only card - no provider id, but
+        // a plot. Both are verdicts and must be left alone.
+        ix.title_seed("m:real", "movie", "Real", 1999).unwrap();
+        ix.title_fill(
+            "m:real",
+            &TitleFill {
+                tmdb_id: 603,
+                id_src: "tmdb",
+                overview: "Neo.",
+                ..Default::default()
+            },
+            100,
+        )
+        .unwrap();
+        ix.title_seed("m:wikionly", "movie", "Wiki Only", 0)
+            .unwrap();
+        ix.title_fill(
+            "m:wikionly",
+            &TitleFill {
+                overview: "A film about something.",
+                ..Default::default()
+            },
+            100,
+        )
+        .unwrap();
+        // ...and one row nobody has looked at yet, which is already in
+        // the queue and must not be counted twice.
+        ix.title_seed("m:fresh", "movie", "Fresh", 0).unwrap();
+
+        let budget = std::time::Duration::from_secs(30);
+        let (n, done) = ix.titles_unstamp_blanked(budget).unwrap();
+        assert_eq!((n, done), (2, true), "swept the wrong set of rows");
+        let checked = |k: &str| ix.title_get(k).unwrap().unwrap().checked;
+        assert_eq!(checked("m:blanked"), 0, "a blanked movie was left retired");
+        assert_eq!(checked("t:blanked"), 0, "a blanked show was left retired");
+        assert_eq!(
+            checked("x:junk"),
+            100,
+            "a junk row was put back in the queue"
+        );
+        assert_eq!(checked("m:real"), 100, "a real card was re-queued");
+        assert_eq!(
+            checked("m:wikionly"),
+            100,
+            "a Wikipedia-only card is an ANSWER and must not be re-queued"
+        );
+
+        // ONE-OFF. The predicate is a superset - a title no provider
+        // has ever heard of looks identical to one a 429 blanked - so a
+        // sweep on every maintenance pass would re-queue the genuinely
+        // unknown forever and the enricher would never settle.
+        ix.title_fill("m:blanked", &TitleFill::default(), 200)
+            .unwrap();
+        assert_eq!(
+            ix.titles_unstamp_blanked(budget).unwrap(),
+            (0, true),
+            "the sweep ran a second time"
+        );
+        assert_eq!(checked("m:blanked"), 200);
+
+        // ...and the manual re-arm is what re-opens it, for an install
+        // that collected more blanks after the automatic sweep.
+        ix.titles_unstamp_rearm().unwrap();
+        assert_eq!(ix.titles_unstamp_blanked(budget).unwrap(), (1, true));
+        assert_eq!(checked("m:blanked"), 0);
+        teardown(&dir, ix);
+    }
 
     /// TODO 187: the TVDB backfill lane's eligibility, and the trap
     /// underneath it.

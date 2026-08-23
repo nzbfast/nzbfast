@@ -42,12 +42,54 @@ use md5::{Digest, Md5};
 use crate::par2::{BlockCheck, Par2Error, Par2Set};
 
 /// Default GLOBAL cap on bytes held in partial (boundary) block buffers,
-/// across ALL slots. Beyond it, new partials are abandoned to the settle
-/// read-back path instead of allocated. This must be global: a per-file
-/// cap multiplied by hundreds of volume slots was the linear RSS term
-/// measured on big jobs (5 GB @ 87 GB → 25.8 GB @ 190 GB). Overridden by
-/// the MemBudget slice (`with_partials_cap`).
+/// across ALL slots, used when NOTHING published a process budget. Beyond
+/// it, new partials are abandoned to the settle read-back path instead of
+/// allocated. This must be global: a per-file cap multiplied by hundreds
+/// of volume slots was the linear RSS term measured on big jobs
+/// (5 GB @ 87 GB → 25.8 GB @ 190 GB). Overridden by the MemBudget slice
+/// (`with_partials_cap`), and by [`default_partials_cap`] whenever an
+/// entry point sized the process.
 const PARTIAL_BYTES_DEFAULT_CAP: usize = 256 * 1024 * 1024;
+/// Floor under any partials cap, however it was chosen. One block's
+/// boundary buffer has to fit or the verifier spills every partial it
+/// ever sees and the in-stream lane degrades to pure read-back.
+const PARTIAL_BYTES_CAP_FLOOR: usize = 1 << 20;
+
+/// The cap a freshly-built [`LiveVerifier::new`] starts with: the
+/// published budget's 30% slice if an entry point sized this process,
+/// else the flat [`PARTIAL_BYTES_DEFAULT_CAP`] (TODO 265).
+///
+/// The sibling of the extractor's `default_holds_cap` (TODO 260), fixed
+/// for symmetry rather than for a live bug: as of 23 Aug 2026 the only
+/// production `LiveVerifier` is built by `crates/nzbfast/src/get/vrig.rs`,
+/// which already passes `budget.partials_cap()`, and every
+/// `LiveVerifier::new` in the tree is a test or a test rig. The trap is
+/// latent, and it is the same one: `set_process_budget` is read
+/// IMPLICITLY by the repair paths, `rar_read_options` and the LZMA gauge,
+/// so it looks like the way to size a pipeline, and a rig that pins
+/// 256 MiB and then builds a bare verifier would silently buffer against
+/// a figure it never chose. That exact shape cost a measurement day on
+/// the extractor tier (TODO 209 / 256), where it was written up as an
+/// untracked allocation wanting a new budget tier. It was neither.
+///
+/// Reading [`crate::mem::published_budget`] rather than
+/// [`crate::mem::process_budget`] is the whole design, verbatim from
+/// TODO 260. `process_budget` falls back to `MemBudget::auto` - RAM/4,
+/// clamped to [256 MiB, 16 GiB] - so a default routed through it would
+/// hand a 4 GB CI runner a 307 MiB cap and this dev box a 4.8 GiB one,
+/// and every partials-sensitive test would spill or not according to the
+/// host it ran on. Nothing publishes a budget in a unit test, so `None`
+/// keeps the whole existing suite byte-identical to the flat 256 MiB it
+/// was written against, while every real entry point (`serve`, the CLI's
+/// `run`, `embedded_init`) and any rig that says `set_process_budget`
+/// gets the honest slice.
+fn default_partials_cap() -> usize {
+    crate::mem::published_budget()
+        .map(|b| b.partials_cap())
+        .unwrap_or(PARTIAL_BYTES_DEFAULT_CAP)
+        .max(PARTIAL_BYTES_CAP_FLOOR)
+}
+
 /// First-16-KiB capture used for md5_16k matching of obfuscated posts.
 const HEAD_LEN: usize = 16384;
 
@@ -92,14 +134,44 @@ impl VerifyGate {
     }
 
     /// The slot's current watermark; ungated slots read as `u64::MAX`.
+    ///
+    /// A slot past the cells this gate was sized for is ungated too. The
+    /// root extractor mints slots the NZB never had (`alloc_slot` from
+    /// the mapped repair, for a wholly-missing volume rebuilt in full
+    /// from parity), and the gate is sized at the NZB's slot count. The
+    /// bytes such a slot holds came out of the PAR2 repair, so they are
+    /// vouched by construction; before this tolerance the chase worker
+    /// panicked on the index (gated e2e matrix, 22 Aug 2026:
+    /// `compressed_set_wholly_missing_volume_joins_chase_one_pass`).
     pub fn watermark(&self, slot: usize) -> u64 {
-        self.marks.lock_ok()[slot].unwrap_or(u64::MAX)
+        self.cell(slot).unwrap_or(u64::MAX)
+    }
+
+    /// The cell, or `None` past the sized range (see [`watermark`]).
+    ///
+    /// [`watermark`]: VerifyGate::watermark
+    fn cell(&self, slot: usize) -> Option<u64> {
+        self.marks.lock_ok().get(slot).copied().flatten()
+    }
+
+    /// The watermark only if the verifier has ENGAGED this slot (claimed
+    /// it while the set was active): `None` is "nothing vouched for
+    /// yet", where [`watermark`] would answer `u64::MAX`. The dropping
+    /// trim asks this, because it must not read an unclaimed slot as
+    /// fully verified (bug sweep 22 Aug 2026).
+    ///
+    /// [`watermark`]: VerifyGate::watermark
+    pub fn engaged_mark(&self, slot: usize) -> Option<u64> {
+        self.cell(slot)
     }
 
     /// A claim engaged the gate for this slot: from here on the decode
     /// waits for verification. Idempotent; never lowers an existing mark.
     pub(crate) fn engage(&self, slot: usize) {
         let mut m = self.marks.lock_ok();
+        if m.len() <= slot {
+            m.resize(slot + 1, None);
+        }
         if m[slot].is_none() {
             m[slot] = Some(0);
             drop(m);
@@ -111,6 +183,9 @@ impl VerifyGate {
     /// racer and is dropped).
     pub(crate) fn advance(&self, slot: usize, bytes: u64) {
         let mut m = self.marks.lock_ok();
+        if m.len() <= slot {
+            m.resize(slot + 1, None);
+        }
         let cur = m[slot].unwrap_or(0);
         if bytes > cur || m[slot].is_none() {
             m[slot] = Some(bytes.max(cur));
@@ -124,13 +199,79 @@ impl VerifyGate {
     /// the bounded wait is what keeps an abort from stranding a
     /// gate-blocked reader).
     pub fn wait_past(&self, slot: usize, offset: u64, timeout: std::time::Duration) {
+        let mark = |m: &Vec<Option<u64>>| m.get(slot).copied().flatten().unwrap_or(u64::MAX);
         let m = self.marks.lock_ok();
-        if m[slot].unwrap_or(u64::MAX) > offset {
+        if mark(&m) > offset {
             return;
         }
         let _ = self
             .cv
-            .wait_timeout_while(m, timeout, |m| m[slot].unwrap_or(u64::MAX) <= offset);
+            .wait_timeout_while(m, timeout, |m| mark(m) <= offset);
+    }
+
+    /// Park until ANY mark advances, or `timeout` passes. What a
+    /// [`ChaseGate`] that derives its limit from several slots (a
+    /// routed child's, row 27) waits on: it cannot name one slot, so
+    /// it wakes on every advance and recomputes.
+    pub fn wait_any(&self, timeout: std::time::Duration) {
+        let m = self.marks.lock_ok();
+        let _ = self.cv.wait_timeout(m, timeout);
+    }
+
+    /// Every engaged slot is now fully vouched for. Called once a
+    /// mapped repair has proved the whole set (it re-reads every file
+    /// of the set through the view it wrote through - whole-file MD5
+    /// for the files it rebuilt into, per-block CRC32 for the rest):
+    /// the Bad blocks it rebuilt are Ok now, but the verifier's block
+    /// states were taken before the repair and never move again, so
+    /// without this a decode parked at a repaired block would wait
+    /// until finish released it (row 27, 22 Aug 2026). Unengaged slots
+    /// stay unengaged: an advance would turn "nothing vouched for" into
+    /// "everything vouched for" in [`engaged_mark`]'s eyes.
+    ///
+    /// [`engaged_mark`]: VerifyGate::engaged_mark
+    pub fn release_all(&self) {
+        let mut m = self.marks.lock_ok();
+        for cell in m.iter_mut() {
+            if cell.is_some() {
+                *cell = Some(u64::MAX);
+            }
+        }
+        drop(m);
+        self.cv.notify_all();
+    }
+}
+
+/// What a chase frontier buffer waits on (§94 B): the offset below
+/// which its volume's bytes are PAR2-vouched. The root's buffers key
+/// straight into [`VerifyGate`] by slot ([`SlotGate`]); a routed child's
+/// bytes come from several parent volumes, so its gate translates
+/// through the routing map (`extract::ChildGate`). The buffer only ever
+/// asks two things of it: the limit now, and a bounded park for it to
+/// move.
+pub trait ChaseGate: Send + Sync {
+    /// Bytes at or past this offset must not reach the decode. `u64::MAX`
+    /// = nothing is withheld.
+    fn watermark(&self) -> u64;
+    /// Park until the limit may have moved past `offset`, or `timeout`
+    /// passes. Spurious wakes are fine: the caller re-reads
+    /// [`watermark`](ChaseGate::watermark) and loops.
+    fn wait_past(&self, offset: u64, timeout: std::time::Duration);
+}
+
+/// [`ChaseGate`] for a root-level slot: the [`VerifyGate`] cell itself.
+pub struct SlotGate {
+    pub gate: Arc<VerifyGate>,
+    pub slot: usize,
+}
+
+impl ChaseGate for SlotGate {
+    fn watermark(&self) -> u64 {
+        self.gate.watermark(self.slot)
+    }
+
+    fn wait_past(&self, offset: u64, timeout: std::time::Duration) {
+        self.gate.wait_past(self.slot, offset, timeout);
     }
 }
 
@@ -520,8 +661,8 @@ pub fn reset_crc_reuse_geometry_total() {
 pub struct LiveVerifier {
     plan: RwLock<Plan>,
     slots: Vec<Mutex<SlotState>>,
-    /// §94 B: watermark handle the chase decode gates on; None unless
-    /// the run wired one (env-gated in get.rs while the feature soaks).
+    /// §94 B: watermark handle the chase decode gates on; None unless the
+    /// run wired one (attached, and its WAIT env-gated, in get/vrig.rs).
     gate: Mutex<Option<Arc<VerifyGate>>>,
     /// Run-wide counters for the dashboard's verify lane (M14h).
     live_ok_total: std::sync::atomic::AtomicU64,
@@ -548,7 +689,7 @@ pub struct LiveVerifier {
 
 impl LiveVerifier {
     pub fn new(n_slots: usize) -> LiveVerifier {
-        Self::with_partials_cap(n_slots, PARTIAL_BYTES_DEFAULT_CAP)
+        Self::with_partials_cap(n_slots, default_partials_cap())
     }
 
     /// M15: cap partial-block memory at `cap` bytes GLOBALLY (a MemBudget
@@ -558,7 +699,7 @@ impl LiveVerifier {
             plan: RwLock::new(Plan::Waiting),
             live_ok_total: Default::default(),
             live_bad_total: Default::default(),
-            partials_cap: cap.max(1 << 20),
+            partials_cap: cap.max(PARTIAL_BYTES_CAP_FLOOR),
             partials_used: Default::default(),
             partials_peak: Default::default(),
             partials_spilled: Default::default(),
@@ -640,6 +781,12 @@ impl LiveVerifier {
     /// own use (repair planning, reporting).
     pub fn activate(&self, inputs: &[&[u8]]) -> Result<Arc<Par2Set>, Par2Error> {
         let set = Arc::new(pick_set(inputs)?);
+        // Memory-floor gauge (instrument-first): the retained per-block
+        // verification tables. 20 B of BlockCheck per IFSC block (rounded
+        // to 24 for Vec/padding) - proportional to set size over block
+        // size, so a pathological small-block set shows up here.
+        let blocks: u64 = set.files.iter().map(|f| f.blocks.len() as u64).sum();
+        crate::memgauge::set_at_least(crate::memgauge::Sub::VerifierMeta, blocks * 24);
         *self.plan.write_ok() = Plan::Active(Active::new(set.clone()));
         Ok(set)
     }
@@ -1131,6 +1278,16 @@ impl LiveVerifier {
         self.geom.snapshot()
     }
 
+    /// This verifier's EFFECTIVE partial-buffer cap: what
+    /// [`Self::with_partials_cap`] was handed (or [`default_partials_cap`]
+    /// for a bare [`Self::new`]), floored. The figure a memory rig should
+    /// print beside the peak from [`Self::partials_stats`], so a run that
+    /// never got the production cap says so out loud - the single line
+    /// that would have caught the TODO 209 misreading on sight (TODO 265).
+    pub fn partials_cap(&self) -> usize {
+        self.partials_cap
+    }
+
     /// (peak partial-buffer bytes, blocks spilled to read-back) - the
     /// end-of-run memory summary (M15).
     pub fn partials_stats(&self) -> (usize, u64) {
@@ -1296,8 +1453,7 @@ impl LiveVerifier {
         match &*self.plan.read_ok() {
             Plan::Active(a) => a
                 .claimed
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.is_none())
@@ -1698,7 +1854,6 @@ pub enum ReadAt<'a> {
     Path(&'a Path),
     /// Reconstructed bytes (direct-extracted volumes): read `buf.len()`
     /// bytes at the given offset.
-    #[allow(clippy::type_complexity)]
     Reader(&'a (dyn Fn(u64, &mut [u8]) -> io::Result<()> + Sync)),
 }
 
@@ -1778,6 +1933,24 @@ pub fn summarize_damage<'a>(reports: impl Iterator<Item = &'a SlotReport>) -> Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A slot the gate was never sized for is UNGATED, not a panic:
+    /// the mapped repair mints root slots past the NZB's count for a
+    /// wholly-missing volume it rebuilds from parity (gated e2e matrix,
+    /// 22 Aug 2026). Engaging one grows the gate instead.
+    #[test]
+    fn verify_gate_tolerates_slots_past_its_size() {
+        let g = VerifyGate::new(2);
+        assert_eq!(g.watermark(5), u64::MAX);
+        assert_eq!(g.engaged_mark(5), None);
+        g.wait_past(5, 100, std::time::Duration::from_millis(1));
+        g.engage(5);
+        assert_eq!(g.watermark(5), 0);
+        g.advance(7, 40);
+        assert_eq!(g.engaged_mark(7), Some(40));
+        assert_eq!(g.engaged_mark(6), None);
+        assert_eq!(g.watermark(1), u64::MAX);
+    }
 
     /// §94 B VerifyGate contract: ungated reads as MAX, a claim engages
     /// at 0, advances are monotonic (a stale racer can never lower the
@@ -2472,7 +2645,7 @@ mod tests {
         Active::new(v.activate(&[meta.as_slice()]).expect("fixture parses"))
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn run_world(
         files: &[(&str, &[u8])],
         steps: &[Step],

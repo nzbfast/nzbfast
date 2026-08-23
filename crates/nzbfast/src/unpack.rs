@@ -30,21 +30,22 @@ pub(crate) fn extract_local(dir: &std::path::Path, password: Option<&str>) -> Re
     let mut par2_ok = true;
     if has_par2 {
         match repair_dir(dir) {
-            Ok(RepairStatus::NoDamage) => println!("PAR2: no damage, set verifies ✔"),
+            Ok(RepairStatus::NoDamage) => info!(target: "par2", "no damage, set verifies ✔"),
             Ok(RepairStatus::Repaired(r)) => {
-                println!(
-                    "PAR2: repaired ✔ ({} block(s) rebuilt, {} adopted, {} file(s) patched)",
+                info!(
+                    target: "par2",
+                    "repaired ✔ ({} block(s) rebuilt, {} adopted, {} file(s) patched)",
                     r.blocks_rebuilt,
                     r.blocks_adopted,
                     r.files_patched.len()
                 );
             }
             Ok(RepairStatus::Unrepairable { needed, have }) => {
-                println!("PAR2: UNREPAIRABLE - need {needed} recovery block(s), have {have}");
+                warn!(target: "par2", "UNREPAIRABLE - need {needed} recovery block(s), have {have}");
                 par2_ok = false;
             }
             Err(e) => {
-                println!("PAR2: repair error - {e}");
+                warn!(target: "par2", "repair error - {e}");
                 par2_ok = false;
             }
         }
@@ -67,7 +68,7 @@ pub(crate) fn extract_local(dir: &std::path::Path, password: Option<&str>) -> Re
         NestOutcome::Produced => true,
         NestOutcome::ZipGap => match unsupported_archive_present(dir) {
             Some(u) => {
-                println!("{}", u.message());
+                u.log();
                 !u.blocking
             }
             None => false,
@@ -130,10 +131,42 @@ impl NestOutcome {
 /// passes (the shared daemon `nested_max_depth` setting); at the cap the
 /// deepest layer is left materialized on disk and the job still succeeds -
 /// the design guarantee that a too-deep chain degrades, never fails.
+///
+/// The bool-shaped twin: [`extract_local`] and the tests read the
+/// outcome and nothing else. A caller that composes a user-facing job
+/// failure wants [`extract_nested_why`], because a `Failed` here does
+/// not say whether the archive was the problem or the disk was.
 pub(crate) fn extract_nested(
     dir: &std::path::Path,
     password: Option<&str>,
     depth: usize,
+) -> Result<NestOutcome> {
+    extract_nested_why(dir, password, depth, &mut None)
+}
+
+/// [`extract_nested`] carrying the pass's own reason back out, on the
+/// one class of refusal that has one.
+///
+/// Same contract and same reasoning as
+/// [`crate::rarfix::try_unrar_spent_why`] and
+/// [`crate::repair::reextract_dir_why`], and it is the last of the three
+/// entry points into the disk ladder to get it: a bomb refused inside
+/// this pass used to arrive at the tail as a bare `Failed`, which the
+/// tail reported as "the payload … could not be unpacked (damaged,
+/// encrypted, or an unsupported compression method)". Wrong blame, and
+/// the one an *arr acts on by blocklisting a release that is perfectly
+/// good.
+///
+/// `why` is written at most once, by whichever level and arm refused
+/// first, and it survives the descent: a bomb two layers down is still
+/// this job's failure. It is NOT cleared by a later level succeeding -
+/// nothing below can make the disk bigger, and the outcome the caller
+/// judges is `ok`, which a refusal has already fixed at `Failed`.
+pub(crate) fn extract_nested_why(
+    dir: &std::path::Path,
+    password: Option<&str>,
+    depth: usize,
+    why: &mut Option<String>,
 ) -> Result<NestOutcome> {
     use nzbkit::extract::release_stem;
     // Nested-level PAR2 repair - the per-level twin of extract_local's
@@ -236,7 +269,8 @@ pub(crate) fn extract_nested(
         .filter(|p| p.parent() == Some(dir) && is_extractable_archive(p))
         .cloned()
         .collect();
-    let top = extract_one_level(dir, password, depth)?;
+    let mut refused: Vec<PathBuf> = Vec::new();
+    let top = extract_one_level_at(dir, password, depth, true, &mut refused, why)?;
     if top == Some(NestOutcome::Failed) {
         // A format we support, present and not produced -> loud fail.
         // Nothing deeper can redeem it, so stop here.
@@ -276,6 +310,20 @@ pub(crate) fn extract_nested(
             return;
         }
         use std::collections::HashSet;
+        // A file an arm REFUSED is not an intermediate this level spent:
+        // nothing opened it, so nothing produced its payload, and it is
+        // only here because the ladder forgave it (a mid-set fragment -
+        // `ObfReport::strays`). Dropped before the stem COUNT as well as
+        // before the delete, or one stray beside one real set reads as
+        // two sets and strands the real one.
+        let entry_archives: Vec<PathBuf> = entry_archives
+            .iter()
+            .filter(|p| !refused.contains(p))
+            .cloned()
+            .collect();
+        if entry_archives.is_empty() {
+            return;
+        }
         let stems: HashSet<String> = entry_archives
             .iter()
             .filter_map(|a| a.file_name())
@@ -364,8 +412,9 @@ pub(crate) fn extract_nested(
         if !leftover.is_empty() {
             leftover.sort();
             leftover.dedup();
-            println!(
-                "⚠ nested archives deeper than {cap} levels - deepest layer left \
+            warn!(
+                target: "extract",
+                "nested archives deeper than {cap} levels - deepest layer left \
                  materialized on disk ({}); raise the nested_max_depth setting to unpack further",
                 leftover.join(", ")
             );
@@ -392,35 +441,7 @@ pub(crate) fn extract_nested(
             // the outer volume set - move just this pass's new top-level
             // files into a scratch subdir so the inner whole-dir scan can't
             // see the outer set, extract there, then lift the results back.
-            // A scratch directory this call PROVABLY created.
-            //
-            // This used to be a fixed `.nzbfast-nest` preceded by an
-            // unconditional `remove_dir_all`. The recursive snapshot skips
-            // `.nzbfast*`, so a legitimate archive payload extracted to
-            // `.nzbfast-nest/` was invisible to every protection and simply
-            // deleted the moment a sibling `inner.rar` triggered nesting.
-            // `create_dir` fails if the path exists at all, so we can never
-            // adopt - or destroy - something that was already there.
-            let sub = {
-                let mut made = None;
-                for n in 0..1024 {
-                    let candidate = match n {
-                        0 => dir.join(".nzbfast-nest"),
-                        n => dir.join(format!(".nzbfast-nest{n}")),
-                    };
-                    match std::fs::create_dir(&candidate) {
-                        Ok(()) => {
-                            made = Some(candidate);
-                            break;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                made.ok_or_else(|| {
-                    anyhow::anyhow!("no free nest scratch name in {}", dir.display())
-                })?
-            };
+            let sub = nest_scratch_dir(dir)?;
             for p in snapshot_files(dir)? {
                 // Move this pass's output only - and never a rebuilt member
                 // of the outer volume set (.rev/RR repairs land in the diff
@@ -436,15 +457,16 @@ pub(crate) fn extract_nested(
                     let _ = std::fs::rename(&p, sub.join(name));
                 }
             }
-            ok = ok.and(extract_nested(&sub, password, depth + 1)?);
+            ok = ok.and(extract_nested_why(&sub, password, depth + 1, why)?);
             if lift_nest_outputs(&sub, dir) {
                 let _ = std::fs::remove_dir_all(&sub);
             } else {
                 // Never sweep a scratch dir that still holds payload - a
                 // swallowed rename here once deleted the stranded output
                 // and reported success.
-                println!(
-                    "⚠ nest lift-back incomplete - keeping {} in place",
+                warn!(
+                    target: "extract",
+                    "nest lift-back incomplete - keeping {} in place",
                     sub.display()
                 );
                 ok = ok.and(NestOutcome::Failed);
@@ -452,13 +474,36 @@ pub(crate) fn extract_nested(
         } else {
             // A fresh subdir holds only this pass's output - safe to recurse
             // in place (the outer volumes are elsewhere).
-            ok = ok.and(extract_nested(&idir, password, depth + 1)?);
+            ok = ok.and(extract_nested_why(&idir, password, depth + 1, why)?);
         }
     }
     // The nested layer(s) this level held are now denested (or not, if a
     // deeper level failed): sweep the spent input archives on full success.
     sweep_spent_entry(ok.produced());
     Ok(ok)
+}
+
+/// A nest scratch directory this call PROVABLY created.
+///
+/// This used to be a fixed `.nzbfast-nest` preceded by an unconditional
+/// `remove_dir_all`. The recursive snapshot skips `.nzbfast*`, so a
+/// legitimate archive payload extracted to `.nzbfast-nest/` was invisible
+/// to every protection and simply deleted the moment a sibling `inner.rar`
+/// triggered nesting. `create_dir` fails if the path exists at all, so we
+/// can never adopt - or destroy - something that was already there.
+pub(crate) fn nest_scratch_dir(dir: &std::path::Path) -> Result<PathBuf> {
+    for n in 0..1024 {
+        let candidate = match n {
+            0 => dir.join(".nzbfast-nest"),
+            n => dir.join(format!(".nzbfast-nest{n}")),
+        };
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("no free nest scratch name in {}", dir.display())
 }
 
 /// Move everything the nest scratch dir holds up into `dir`.
@@ -521,7 +566,7 @@ pub(crate) fn lift_scratch_into(
             target
         };
         if let Err(err) = std::fs::rename(&p, &dest) {
-            println!("⚠ {what}: {} → {}: {err}", p.display(), dest.display());
+            warn!(target: "extract", "{what}: {} → {}: {err}", p.display(), dest.display());
             clean = false;
         }
     }
@@ -629,24 +674,102 @@ impl Drop for ExtractStaging {
 /// The named-RAR arm of [`extract_one_level`], with its two recovery
 /// rungs: destroyed or missing volumes may be rebuildable from `.rev`
 /// recovery volumes, byte-damaged ones from embedded recovery records.
-fn unpack_named_rar(dir: &std::path::Path, password: Option<&str>) -> NestOutcome {
-    if try_unrar(dir, password) {
-        return NestOutcome::Produced;
+///
+/// `why` takes the ladder's own reason for refusing, on the one class of
+/// refusal that has one - a bomb verdict, which is about the DISK and
+/// not about the archive. This arm read the ladder through
+/// [`try_unrar`], the bool wrapper, so the reason stopped here and the
+/// tail then reported the set as "damaged, encrypted, or an unsupported
+/// compression method" - the exact wrong blame the 22 Aug 2026 incident
+/// was reported as, one arm further out than
+/// [`crate::rarfix::try_unrar_spent_why`] reached.
+///
+/// A named reason also ENDS the arm rather than falling through to the
+/// rungs below. Both of those rebuild volumes and hand them straight
+/// back to the engine that has just refused for want of space, so a
+/// second and third attempt can only fill the disk further - the same
+/// reason the tail runs [`bomb_fallback`] AHEAD of all three of its
+/// unpack arms rather than beside them.
+///
+/// The third rung below carries its verdict out too, through
+/// [`try_rar_rr_repair_why`] (TODO §249 item 1). It is reached only when
+/// both attempts above failed for a reason that was NOT the disk, so a
+/// verdict there means the repaired set bombed where the damaged one had
+/// not got far enough to - narrow, but the blame it used to drop was the
+/// same wrong blame as the two arms above.
+fn unpack_named_rar(
+    dir: &std::path::Path,
+    password: Option<&str>,
+    why: &mut Option<String>,
+) -> NestOutcome {
+    // The spent volumes this arm does not read: `try_unrar` never swept
+    // them either, and the nested pass owns its own before/after diff.
+    let mut attempt = |dir: &std::path::Path| match try_unrar_spent_why(dir, password) {
+        Ok(_) => Some(NestOutcome::Produced),
+        Err(Some(w)) => {
+            *why = Some(w);
+            Some(NestOutcome::Failed)
+        }
+        Err(None) => None,
+    };
+    if let Some(o) = attempt(dir) {
+        return o;
     }
-    if try_rev_reconstruct(dir) && try_unrar(dir, password) {
-        return NestOutcome::Produced;
+    if try_rev_reconstruct(dir)
+        && let Some(o) = attempt(dir)
+    {
+        return o;
     }
-    println!("extraction failed - trying recovery-record self-repair…");
-    NestOutcome::from_produced(try_rar_rr_repair(dir, password))
+    warn!(target: "extract", "extraction failed - trying recovery-record self-repair…");
+    match try_rar_rr_repair_why(dir, password) {
+        Ok(()) => NestOutcome::Produced,
+        Err(Some(w)) => {
+            *why = Some(w);
+            NestOutcome::Failed
+        }
+        Err(None) => NestOutcome::Failed,
+    }
+}
+
+/// [`extract_one_level_at`] with the rescue on and nothing reported back
+/// - the three-argument shape the unit tests drive the ladder through.
+#[cfg(test)]
+pub(crate) fn extract_one_level(
+    dir: &std::path::Path,
+    password: Option<&str>,
+    depth: usize,
+) -> Result<Option<NestOutcome>> {
+    extract_one_level_at(dir, password, depth, true, &mut Vec::new(), &mut None)
 }
 
 /// One extraction pass over `dir`, unpacking EVERY archive family present.
 /// `Ok(None)` = no archive present; otherwise the pass's [`NestOutcome`],
 /// which names WHICH format stopped it so only the zip gap gets forgiven.
-pub(crate) fn extract_one_level(
+///
+/// `rescue` switches step 8's container rescue off: the rescue extracts
+/// what it joined by calling back in here, and that call must not rescue
+/// again - see [`rescue_split_of_container`]. `refused` collects what an
+/// arm looked at and declined to own, which the caller must keep every
+/// later pass off - see [`ObfReport::strays`].
+///
+/// `why` is the second out-channel and the same shape as the first: a
+/// refusal that named its own reason, which today is only a bomb verdict
+/// out of [`unpack_named_rar`]. [`NestOutcome`] deliberately does not
+/// carry it. That enum is the FORGIVENESS decision - three `Copy` states
+/// whose `and` lattice every arm and every nested level folds together -
+/// and a reason is not something a lattice can combine: a payload or a
+/// fourth variant would make `and` choose between two archives' reasons,
+/// would break `Copy` and `==` at some forty sites, and would still have
+/// to be unwrapped into the `Option<String>` that
+/// [`crate::diag::unpack_failure`] already takes. Set-once and carried
+/// alongside instead, exactly like `refused`.
+pub(crate) fn extract_one_level_at(
     dir: &std::path::Path,
     password: Option<&str>,
     depth: usize,
+    rescue: bool,
+    refused: &mut Vec<PathBuf>,
+    why: &mut Option<String>,
 ) -> Result<Option<NestOutcome>> {
     // Nested password-chain auto-unlock: an encrypted archive here may be
     // unlockable by a password sitting in a sibling text file the level
@@ -694,15 +817,28 @@ pub(crate) fn extract_one_level(
     let obf = collect_obfuscated_rar_volumes(dir)?;
     let sevenz = collect_sevenz_archives(dir)?;
     let zips = nzbkit::zip::scan(dir);
+    let tars = collect_tar_containers(dir)?;
     // The plain-split collector runs here for the same reason as the rest:
     // whatever it sees now is what the post ARRIVED with, so no arm's
     // output can be mistaken for a split part. Its arm still runs last -
-    // see step 6, which re-scans and keeps only the sets that survive
+    // see step 7, which re-scans and keeps only the sets that survive
     // unchanged.
     let arrived_splits = collect_split_sets(dir)?;
+    // Step 8's input, taken here for the same reason and read the same way.
+    let arrived_containers = if rescue {
+        collect_container_split_sets(dir)?
+    } else {
+        Vec::new()
+    };
     let entries_left =
         |ps: &[PathBuf]| -> Vec<PathBuf> { ps.iter().filter(|p| p.exists()).cloned().collect() };
     let mut out: Option<NestOutcome> = None;
+    // The verdicts of the arms that can NOT own a split container's
+    // head (SFX, 7z, zip, tar, plain split). Step 8's rescue replaces
+    // the RAR arms' verdict on the container it joined, not the level's:
+    // a broken `subs.7z` beside a rescued split RAR stayed broken (Codex
+    // F-01, 22 Aug 2026), so these fold back in after the rescue.
+    let mut others: Option<NestOutcome> = None;
     let claim = |o: NestOutcome, out: &mut Option<NestOutcome>| {
         *out = Some(out.map_or(o, |prev| prev.and(o)));
     };
@@ -711,16 +847,27 @@ pub(crate) fn extract_one_level(
     //    the Rar! magic). Native rars first (bundled unrar fallback), then
     //    the two recovery rungs - see `unpack_named_rar`.
     if named_rar {
-        claim(unpack_named_rar(dir, password), &mut out);
+        claim(unpack_named_rar(dir, password, why), &mut out);
     }
     // 2. Obfuscated RAR: extensionless files carrying the Rar! magic, with
     //    no filename order - ordered by the RAR header volume number.
     let obf = entries_left(&obf);
     if !obf.is_empty() {
-        claim(
-            NestOutcome::from_produced(extract_obfuscated_rar(dir, &obf, level_pw, depth)),
-            &mut out,
-        );
+        let r = extract_obfuscated_rar(dir, &obf, level_pw, depth);
+        refused.extend(r.strays.iter().cloned());
+        // A pass whose ONLY casualty was a mid-set fragment claims
+        // `Produced`, the identity of the `and` lattice: it cannot mask
+        // another arm's `Failed` or `ZipGap`, it just stops this arm
+        // inventing one. It must CLAIM rather than stay silent - leaving
+        // `out` at `None` drops the level through the "no extractor
+        // claimed it" backstop at the bottom of this function, which
+        // reads the fragment's `Rar!` head and fails the job by the
+        // other door.
+        if r.failed {
+            claim(NestOutcome::Failed, &mut out);
+        } else {
+            claim(NestOutcome::Produced, &mut out);
+        }
     }
     // 3. SFX self-extractors: an .exe/.bin/.sfx whose head embeds the RAR
     //    signature past a stub. rars scans for the offset itself; only the
@@ -738,10 +885,9 @@ pub(crate) fn extract_one_level(
     if depth == 0 && out.is_none() {
         let sfx = collect_sfx_archives(dir)?;
         if !sfx.is_empty() {
-            claim(
-                NestOutcome::from_produced(extract_sfx(dir, &sfx, level_pw)),
-                &mut out,
-            );
+            let o = NestOutcome::from_produced(extract_sfx(dir, &sfx, level_pw));
+            claim(o, &mut out);
+            claim(o, &mut others);
         }
     }
     // 4. 7-Zip (native, incl. split .7z.001 multipart).
@@ -750,10 +896,9 @@ pub(crate) fn extract_one_level(
         .filter(|set| set.iter().all(|p| p.exists()))
         .collect();
     if !sevenz.is_empty() {
-        claim(
-            NestOutcome::from_produced(extract_sevenz(dir, &sevenz, password)),
-            &mut out,
-        );
+        let o = NestOutcome::from_produced(extract_sevenz(dir, &sevenz, password));
+        claim(o, &mut out);
+        claim(o, &mut others);
     }
     // 5. Zip is a KNOWN, documented gap: we cannot produce the payload, so
     //    say so instead of exiting 0 with the archive still packed.
@@ -776,13 +921,34 @@ pub(crate) fn extract_one_level(
         // Anything else - an exotic codec, an encrypted entry - still
         // reports as a gap rather than a failure to open, so the message
         // names what was hit and the caller can still forgive a sidecar.
-        if extract_zip(dir, &zips, password) {
-            claim(NestOutcome::Produced, &mut out);
+        let o = if extract_zip(dir, &zips, password) {
+            NestOutcome::Produced
         } else {
-            claim(NestOutcome::ZipGap, &mut out);
-        }
+            NestOutcome::ZipGap
+        };
+        claim(o, &mut out);
+        claim(o, &mut others);
     }
-    // 6. Plain split files: an HJSplit-style `.001/.002/…` (or `.1/.2/…`)
+    // 6. Tar containers (TODO 163 item 6's disk half). A `.tar` reaches
+    //    a job directory three ways, none of them a fault: a chase that
+    //    demoted, a resumed run (which never chases at all), and
+    //    `NZBFAST_NO_TAR=1`. Until this arm existed all three left the
+    //    payload packed inside it with the job reporting Completed.
+    //
+    //    The one arm that DECLINES rather than fails: a container it
+    //    refuses claims `Produced` (the `and` lattice's identity, so it
+    //    can neither mask another arm's failure nor invent one) and is
+    //    recorded as REFUSED, which keeps the spent-intermediate sweep
+    //    from deleting the container holding the payload we did not
+    //    produce. See `rarfix::tar` for why a refusal is not a job
+    //    failure here where it is one for a RAR or a 7z.
+    let tars = entries_left(&tars);
+    if !tars.is_empty() {
+        refused.extend(extract_tar(dir, &tars));
+        claim(NestOutcome::Produced, &mut out);
+        claim(NestOutcome::Produced, &mut others);
+    }
+    // 7. Plain split files: an HJSplit-style `.001/.002/…` (or `.1/.2/…`)
     //    run whose parts carry NO archive header at all. There is no
     //    container to open - the poster byte-split a raw payload, and the
     //    extraction IS a concatenation in numeric order. SABnzbd's
@@ -817,11 +983,24 @@ pub(crate) fn extract_one_level(
             .filter(|s| arrived_splits.contains(s))
             .collect();
         if !sets.is_empty() {
-            claim(
-                NestOutcome::from_produced(join_split_sets(dir, &sets)),
-                &mut out,
-            );
+            let o = NestOutcome::from_produced(join_split_sets(dir, &sets));
+            claim(o, &mut out);
+            claim(o, &mut others);
         }
+    }
+    // 8. A byte split of a CONTAINER, once the arm that owns its head has
+    //    failed on it (TODO 211). Strictly after everything above, and
+    //    conditional on their verdict: this is the one set the ladder can
+    //    be sure belongs to nobody, because the arm that would own it has
+    //    just said so. `rescue_split_of_container` re-judges the joined
+    //    container, so its answer replaces the RAR arms' verdict - and
+    //    ONLY theirs: every other arm's verdict (`others`) still stands.
+    if let Some(o) = out
+        && !o.produced()
+        && !arrived_containers.is_empty()
+        && let Some(rescued) = rescue_split_of_container(dir, &arrived_containers, level_pw, depth)?
+    {
+        return Ok(Some(others.map_or(rescued, |x| x.and(rescued))));
     }
     if let Some(out) = out {
         return Ok(Some(out));
@@ -851,8 +1030,9 @@ pub(crate) fn extract_one_level(
             && (rar_magic(&p) || sevenz_magic(&p))
     });
     if let Some(e) = stray {
-        println!(
-            "⚠ {} looks like an archive but no extractor claimed it",
+        warn!(
+            target: "extract",
+            "{} looks like an archive but no extractor claimed it",
             e.file_name().to_string_lossy()
         );
         return Ok(Some(NestOutcome::Failed));
@@ -988,6 +1168,12 @@ pub(crate) fn dir_has_par2(dir: &std::path::Path) -> Result<bool> {
             || file_starts_with_par2_magic(&path)
     }))
 }
+
+/// The obfuscated-RAR arm: `Rar!`-magic files whose names carry no set
+/// and no order, grouped into their original volume sets by header
+/// continuity (TODO 106 size-gate split out of this file).
+mod obfuscated;
+pub(crate) use obfuscated::*;
 
 /// Password candidate harvesting and the per-container key probes
 /// (TODO 106 size-gate split out of this file).
@@ -1144,23 +1330,26 @@ pub(crate) fn nested_par2_repair(dir: &std::path::Path) {
     let results = match repair_present_sets(dir) {
         Ok(r) => r,
         Err(e) => {
-            println!("nested PAR2: scan error - {e}");
+            warn!(target: "par2", "nested set: scan error - {e}");
             return;
         }
     };
     for r in results {
         match r.status {
-            Ok(RepairStatus::NoDamage) => println!("nested PAR2: no damage, set verifies ✔"),
-            Ok(RepairStatus::Repaired(rep)) => println!(
-                "nested PAR2: repaired ✔ ({} block(s) rebuilt, {} adopted, {} file(s) patched)",
+            Ok(RepairStatus::NoDamage) => {
+                info!(target: "par2", "nested set: no damage, set verifies ✔")
+            }
+            Ok(RepairStatus::Repaired(rep)) => info!(
+                target: "par2",
+                "nested set: repaired ✔ ({} block(s) rebuilt, {} adopted, {} file(s) patched)",
                 rep.blocks_rebuilt,
                 rep.blocks_adopted,
                 rep.files_patched.len()
             ),
             Ok(RepairStatus::Unrepairable { needed, have }) => {
-                println!("nested PAR2: UNREPAIRABLE - need {needed} recovery block(s), have {have}")
+                warn!(target: "par2", "nested set: UNREPAIRABLE - need {needed} recovery block(s), have {have}")
             }
-            Err(e) => println!("nested PAR2: repair error - {e}"),
+            Err(e) => warn!(target: "par2", "nested set: repair error - {e}"),
         }
     }
 }
@@ -1337,8 +1526,9 @@ impl OuterHold {
                         stranded += 1;
                         continue;
                     }
-                    println!(
-                        "⚠ {} was produced while the outer volume of that name was                          parked - kept as {}",
+                    warn!(
+                        target: "extract",
+                        "{} was produced while the outer volume of that name was parked - kept as {}",
                         name.to_string_lossy(),
                         aside.file_name().unwrap_or(name).to_string_lossy()
                     );
@@ -1446,318 +1636,6 @@ pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
     }))
 }
 
-/// RAR volumes whose names carry NO recognized RAR extension but which
-/// start with the Rar! magic (obfuscated usenet posts strip extensions and
-/// rename volumes to hex). Only consulted when no normally-named set was
-/// found, so this never shadows the fast name-based path. A named payload
-/// file (`.cbr`) is excluded: its bytes are a RAR, but the file IS the
-/// deliverable, and this collector's caller deletes what it spends.
-pub(crate) fn collect_obfuscated_rar_volumes(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for e in std::fs::read_dir(dir)?.flatten() {
-        let path = e.path();
-        if e.file_type().is_ok_and(|t| t.is_file())
-            && (!looks_like_named_rar(&path) || rar_name_carries_no_set(&path))
-            && !nzbkit::extract::is_final_file(&path)
-            && rar_magic(&path)
-        {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
-/// The RAR5+ volume number from a parsed archive header, when present.
-/// RAR5 volume sets carry it; older families and single archives do not
-/// (they sort by filename, which for a real set already reflects order).
-pub(crate) fn archive_volume_number(archive: &rars::Archive) -> Option<u64> {
-    match archive {
-        rars::Archive::Rar50Plus(a) => a.main.volume_number,
-        _ => None,
-    }
-}
-
-/// Extract obfuscated RAR volumes: parse each candidate, PARTITION the
-/// volumes into their original sets (a directory can hold several
-/// interleaved obfuscated sets - the volumes carry no usable names, so
-/// grouping runs on headers: volume numbers plus split-member name
-/// continuity across volume boundaries), order each set by header volume
-/// number, and extract every set. Returns true only when every detected
-/// set extracted.
-pub(crate) fn extract_obfuscated_rar(
-    dir: &std::path::Path,
-    candidates: &[PathBuf],
-    password: Option<&str>,
-    depth: usize,
-) -> bool {
-    let options = nzbkit::mem::rar_read_options(password.map(str::as_bytes));
-    // One parse session for the whole candidate set: an encrypted set
-    // shares one salt across its volumes, and the per-volume PBKDF2
-    // ladder dwarfed the parse itself on p99-sized sets.
-    let mut parse = rars::ReadSession::new(options);
-    let mut parsed: Vec<(Option<u64>, PathBuf, rars::Archive)> = Vec::new();
-    for path in candidates {
-        match parse.read_path(path) {
-            Ok(archive) => parsed.push((archive_volume_number(&archive), path.clone(), archive)),
-            // A Rar!-magic file that will not parse is not a usable volume;
-            // skip it rather than abort the whole set.
-            Err(e) => println!("  – skipping {}: {e}", path.display()),
-        }
-    }
-    if parsed.is_empty() {
-        return false;
-    }
-    parsed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-    // First/last member metadata drives the continuity linkage.
-    let boundary = |archive: &rars::Archive| -> (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>) {
-        let mut first: Option<(Vec<u8>, bool)> = None;
-        let mut last: Option<(Vec<u8>, bool)> = None;
-        for member in archive.members() {
-            let name = member.meta.name_bytes().to_vec();
-            if first.is_none() {
-                first = Some((name.clone(), member.meta.is_split_before));
-            }
-            last = Some((name, member.meta.is_split_after));
-        }
-        (first, last)
-    };
-
-    // Partition. Sets start at volumes with no volume number (a RAR5 set's
-    // first volume, or a standalone archive); numbered volumes attach to
-    // the open set whose tail's split-after member name matches their
-    // split-before head - or, when the boundary member is not split, to
-    // the only open set awaiting that number.
-    let mut sets: Vec<Vec<(PathBuf, rars::Archive)>> = Vec::new();
-    let mut open: Vec<usize> = Vec::new(); // indexes of sets still growing
-    for (number, path, archive) in parsed {
-        if number.is_none() {
-            let closed = {
-                let (_, last) = boundary(&archive);
-                // A first volume whose last member is not split-after is a
-                // complete single-volume archive.
-                !last.is_some_and(|(_, split_after)| split_after)
-            };
-            sets.push(vec![(path, archive)]);
-            if !closed {
-                open.push(sets.len() - 1);
-            }
-            continue;
-        }
-        let number = number.unwrap_or(0);
-        let (first, last) = boundary(&archive);
-        // Candidate open sets currently ending at `number - 1` volumes past
-        // their first (RAR5 numbers later volumes 1, 2, …).
-        let expecting: Vec<usize> = open
-            .iter()
-            .copied()
-            .filter(|&si| sets[si].len() as u64 == number)
-            .collect();
-        let chosen = match expecting.len() {
-            0 => None,
-            1 => Some(expecting[0]),
-            _ => expecting.iter().copied().find(|&si| {
-                let tail = &sets[si].last().expect("open set is non-empty").1;
-                let (_, tail_last) = boundary(tail);
-                match (&tail_last, &first) {
-                    (Some((tail_name, true)), Some((head_name, true))) => tail_name == head_name,
-                    _ => false,
-                }
-            }),
-        };
-        match chosen {
-            Some(si) => {
-                sets[si].push((path, archive));
-                if !last.is_some_and(|(_, split_after)| split_after) {
-                    open.retain(|&s| s != si);
-                }
-            }
-            None => {
-                // No open set expects this volume - treat it as starting
-                // its own (best effort; extraction will surface gaps).
-                println!(
-                    "  – volume {} (#{number}) matches no open set - treating as its own set",
-                    path.display()
-                );
-                sets.push(vec![(path, archive)]);
-            }
-        }
-    }
-
-    println!(
-        "unpacking {} obfuscated RAR set(s) ({} volume(s)) by header order…",
-        sets.len(),
-        sets.iter().map(|s| s.len()).sum::<usize>()
-    );
-    let mut all_ok = true;
-    // §101, the same refusal the named-stem ladder makes: a directory
-    // holding more than one archive set must not eat. It was applied
-    // only in `try_unrar_spent`'s loop, and this path partitions by
-    // HEADER continuity rather than by stem, so a directory of two
-    // obfuscated sets slipped past it entirely. Set one eats its volumes
-    // and publishes; set two fails part-way with several of its own
-    // volumes already hard-deleted - and the failure arm below still
-    // says every volume of a failed set stays, "on a finished download
-    // they are the only copy", which eating has just made untrue.
-    // Held for the whole partitioned run, restored on drop.
-    let _single_set_only = (sets.len() > 1).then(|| crate::eatvol::EatArm::new(false));
-    for set in sets {
-        // Keep each set's SOURCE paths instead of dropping them on the
-        // floor: they are the exact files we parsed and are about to feed
-        // the extractor, so a successful extraction proves them ours AND
-        // spent. Nothing downstream can re-derive that. The nested pass's
-        // `sweep_spent_entry` groups candidates by `release_stem`, and a
-        // hash name matches none of the volume suffixes it strips - seven
-        // obfuscated volumes read as seven separate releases, its
-        // "exactly one set present" guard trips, and the whole set used
-        // to be left sitting beside the extracted payload.
-        let (sources, archives): (Vec<PathBuf>, Vec<rars::Archive>) = set.into_iter().unzip();
-        // Does this set declare a real file to produce? A `.rev` recovery
-        // volume also starts with `Rar!`, so it arrives here as a
-        // candidate, and its payload can carry a RAR signature the SFX
-        // scan latches onto - parsing as a memberless "set" of its own.
-        // Deleting one destroys the recovery data a damaged set is
-        // repaired FROM, which is the worst outcome available here.
-        let has_member = archives
-            .iter()
-            .any(|a| a.members().any(|m| !m.meta.is_directory));
-        // Taken per set, immediately before the extraction that fills it:
-        // the diff against it names exactly what THIS set published.
-        let before = snapshot_recursive(dir).ok();
-        // `sources` and `archives` came off the same unzip, so index i of
-        // one is index i of the other - the mapping §101's eating mode
-        // needs to delete each volume as the extractor finishes with it.
-        //
-        // Withheld on the two gates the post-extraction sweep below
-        // already applies, because eating happens INSIDE the extractor
-        // and so runs before `sweep_spent_obfuscated` is ever consulted -
-        // its refusals cannot protect a file that is already gone.
-        //
-        //  - `has_member`: a memberless set is the `.rev` shape. Such a
-        //    file walks out of the extractor as a one-volume set with no
-        //    files, which reports `consumed(0)` immediately, so eating
-        //    hard-deleted the recovery data a damaged set is repaired
-        //    FROM. The sweep's own doc calls that the worst outcome
-        //    available here, and `repair.rs`'s
-        //    `obfuscated_sweep_never_touches_a_memberless_rar_file`
-        //    pins it as the property that must not bend - it passed only
-        //    because eating is disarmed under test.
-        //  - `depth >= 1`: depth 0 is the user's own set from the offline
-        //    `extract` CLI, whose retention is finalize/policy's call.
-        //    Unreachable today (the CLI never calls `eatvol::set_mode`,
-        //    so its mode is always Off), but the two paths must not
-        //    disagree about which volumes are spendable.
-        //
-        // An empty mapping is the off switch: `write_archives_to_spending`
-        // requires one source per archive before it will eat anything.
-        let eat_sources: &[PathBuf] = if has_member && depth >= 1 {
-            &sources
-        } else {
-            &[]
-        };
-        match write_archives_to_spending(dir, &archives, password, eat_sources) {
-            Ok(()) => {
-                println!("native unpack complete ✔");
-                // Same depth gate the named-set sweep uses, and for the
-                // same reason: depth 0 is the user's own downloaded set or
-                // an offline `extract` target, whose retention is
-                // finalize/policy's call, not ours. Without this an
-                // obfuscated set would be deleted where an identical named
-                // set is kept, which is a difference the user never asked
-                // for and cannot see coming.
-                if depth >= 1 {
-                    sweep_spent_obfuscated(dir, &sources, has_member, before.as_ref());
-                }
-            }
-            Err(e) => {
-                // Every volume of a failed set stays. PAR2 repair, `.rev`
-                // reconstruction and a plain retry all read them, and on
-                // a finished download they are the only copy.
-                println!("⚠ obfuscated RAR unpack failed ({e})");
-                all_ok = false;
-            }
-        }
-    }
-    all_ok
-}
-
-/// Remove the obfuscated volumes one set consumed, once that set has
-/// extracted and published successfully.
-///
-/// `sources` is not a guess from a filename: it is the list of files this
-/// pass opened, parsed as RAR headers and handed to the extractor, so each
-/// entry is provably an input of the extraction that just succeeded.
-/// Three separate refusals, any one of which keeps the ENTIRE set:
-///
-/// * `has_member` is false - the set declared no file member, so it never
-///   produced one. That is the `.rev` shape, and recovery data must
-///   survive its own misdetection.
-/// * we could not snapshot `dir` beforehand, so nothing here can tell an
-///   input from an output. No proof, no delete.
-/// * the extraction published no file at all - there is no payload these
-///   volumes could be spent ON.
-///
-/// and per path: never remove something the extraction just published.
-/// `lift_scratch_into` refuses to replace an existing name, so a member
-/// colliding with a volume lands as `extracted-N-…` and the volume is
-/// still the volume - but this asks the before/after diff rather than
-/// trusting that invariant to hold forever.
-pub(crate) fn sweep_spent_obfuscated(
-    dir: &std::path::Path,
-    sources: &[PathBuf],
-    has_member: bool,
-    before: Option<&std::collections::HashSet<PathBuf>>,
-) {
-    if !has_member {
-        return;
-    }
-    let Some(before) = before else { return };
-    let Ok(after) = snapshot_recursive(dir) else {
-        return;
-    };
-    let published: std::collections::HashSet<PathBuf> = after.difference(before).cloned().collect();
-    if published.is_empty() {
-        return;
-    }
-    // Trash-aware, unlike the nested-intermediate sweep above: these
-    // volumes were DOWNLOADED - they are the obfuscated post itself, the
-    // .rar set a user might well want to keep or re-share - and the
-    // "spent" verdict is a heuristic chain, which is exactly what the
-    // "Deleted files go to the Trash" setting promises to make
-    // reversible. Read once for the whole sweep (remove_user_file's
-    // contract), and parked for the deferred worker like the finalize
-    // sweeps (§64) so a slow Finder never sits inside the job's tail.
-    let recoverable = crate::smart::cleanup_recoverable();
-    let staging = crate::smart::trash_staging_dir(dir);
-    for path in sources {
-        if published.contains(path) {
-            info!(
-                target: "extract",
-                "keeping {} - the extraction published it",
-                path.display()
-            );
-            continue;
-        }
-        // §101: under the volume-eating mode the extraction already
-        // deleted this one as it read past it. Nothing left to sweep, and
-        // nothing worth warning about - the two paths agree on the end
-        // state, they just get there at different moments.
-        if !path.exists() {
-            continue;
-        }
-        match crate::smart::remove_swept_file(path, recoverable, staging.as_deref()) {
-            Ok(_) => info!(target: "extract", "removed spent volume {}", path.display()),
-            // warn!, not println: the daemon's log ring is where a user
-            // asking "why is this file still here" will look.
-            Err(e) => warn!(
-                target: "extract",
-                "could not remove spent volume {}: {e}",
-                path.display()
-            ),
-        }
-    }
-}
-
 /// Archive detector used for nested-layer descent: is this file an
 /// archive a pass should descend into (RAR, 7z, or zip)? SFX stubs and
 /// other executables are deliberately excluded - a payload executable
@@ -1779,9 +1657,24 @@ pub(crate) fn sweep_spent_obfuscated(
 /// keeps `.cbz`/`.epub` payloads out of that on its own; the RAR/7z arms
 /// need the same guard here, or a `.cbr`/`.cb7` an outer archive produced
 /// becomes a nested layer and then a spent intermediate - deleted.
+///
+/// Tar counts too, from TODO 163 item 6's disk half. The DESCENT
+/// consumer gains nothing by it either way - a tar's own output lands
+/// beside it and is found by the before/after diff whatever this
+/// predicate says - so the reason is the SWEEP: a nested `.tar` the arm
+/// has fully unpacked is scratch our own outer extraction materialized
+/// seconds ago, the exact bytes a clean one-pass run never writes at
+/// all, and leaving it behind doubles the payload on disk. The
+/// widening hazard the SFX exclusion above guards against does not
+/// arise here, because `is_tar_container`'s name gate is
+/// `nzbkit::tar::chase_eligible_name` - `.tar` or nothing at all - so a
+/// NAMED payload file never reaches the sniff to begin with. A tar the
+/// arm REFUSES never reaches the sweep either: the ladder records it as
+/// refused, which drops it before the stem count.
 pub(crate) fn is_extractable_archive(path: &std::path::Path) -> bool {
     (!nzbkit::extract::is_final_file(path) && (rar_magic(path) || sevenz_magic(path)))
         || nzbkit::zip::is_container(path)
+        || is_tar_container(path)
 }
 
 /// Phase 0(b): classify the nested inner archive the disk post-pass is
@@ -1811,6 +1704,14 @@ pub(crate) fn nested_inner_kind(dir: &std::path::Path) -> Option<&'static str> {
     // it, which is what makes a zip-packed nest legible in a log.
     if nzbkit::zip::first(dir).is_some() {
         return Some("zip");
+    }
+    // Tar, last, matching the ladder's own order. Counted the same way
+    // as zip and for the same reason: minting a `tar` COUNTER means a
+    // new field on the stats API's `NestedPrevalence`, which is a
+    // persisted wire value, and that is the piece of work the tar shape
+    // badge was declined over too. The line names the kind either way.
+    if first_tar_container(dir).is_some() {
+        return Some("tar");
     }
     None
 }
@@ -1852,55 +1753,11 @@ pub(crate) fn classify_rar_head(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Publish a PAR2-verified slot file under the name the FileDesc gives
-/// it, replacing whatever sits there. No-op when it is already correct.
-///
-/// A previous run's copy may already sit at the real name (re-download
-/// into the same folder). The bytes we just PAR2-verified are
-/// authoritative - REPLACE, never strand this download under its
-/// obfuscated post name.
-///
-/// Rename straight over it: `fs::rename` replaces atomically on unix AND
-/// windows (MOVEFILE_REPLACE_EXISTING), so there is never a moment with
-/// neither file. The old code removed the target first and then ignored
-/// the rename's result, so a failed rename left the good previous copy
-/// deleted and the verified bytes still under the obfuscated name.
-pub(crate) fn publish_verified_name(
-    path: &std::path::Path,
-    pname: &str,
-    out_dir: &std::path::Path,
-) -> Option<std::path::PathBuf> {
-    let real = nzbkit::disk::sanitize_filename(pname);
-    if path.file_name().and_then(|n| n.to_str()) == Some(real.as_str()) {
-        return None;
-    }
-    let target = out_dir.join(&real);
-    let existed = target.exists();
-    match std::fs::rename(path, &target) {
-        Ok(()) => {
-            println!(
-                "  » renamed {} → {real}{}",
-                path.file_name().unwrap_or_default().to_string_lossy(),
-                if existed {
-                    " (replaced the previous copy)"
-                } else {
-                    ""
-                }
-            );
-            // The caller must tell any live writer (note_slot_renamed):
-            // its handle survives the rename, but a by-path reopen
-            // (unpark after the external par2) needs this name.
-            Some(target)
-        }
-        Err(e) => {
-            eprintln!(
-                "  ✘ could not publish {real}: {e} - the verified file is still at {}",
-                path.display()
-            );
-            None
-        }
-    }
-}
+/// The PAR2 verified-name publish and the per-job output-name claim that
+/// keeps two of them from landing on one path (TODO 106 size-gate split
+/// out of this file).
+mod published_names;
+pub(crate) use published_names::*;
 
 /// Does the file start with the 7-Zip signature (`7z\xBC\xAF\x27\x1C`)?
 pub(crate) fn sevenz_magic(path: &std::path::Path) -> bool {
@@ -2002,19 +1859,21 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
     if skipped > 0 {
         // Said out loud, because it is why the recovery-block count below
         // may understate what is actually on disk.
-        println!(
+        warn!(
+            target: "par2",
             "{skipped} PAR2 file(s) not read - scan capped at {} MiB",
             cap >> 20
         );
     }
     if par2_bytes.is_empty() {
         if skipped > 0 {
-            println!(
+            warn!(
+                target: "par2",
                 "PAR2 files in {} are all over the scan cap - verification skipped",
                 dir.display()
             );
         } else {
-            println!("no PAR2 files in {} - verification skipped", dir.display());
+            info!(target: "par2", "no PAR2 files in {} - verification skipped", dir.display());
         }
         return Ok(false);
     }
@@ -2022,12 +1881,13 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
     let set = match Par2Set::parse(&refs) {
         Ok(s) => s,
         Err(e) => {
-            println!("PAR2 parse failed ({e}) - verification skipped");
+            warn!(target: "par2", "parse failed ({e}) - verification skipped");
             return Ok(false);
         }
     };
-    println!(
-        "PAR2 set: {} file(s), block size {}, {} recovery block(s) on hand",
+    info!(
+        target: "par2",
+        "set: {} file(s), block size {}, {} recovery block(s) on hand",
         set.files.len(),
         set.block_size,
         set.recovery_blocks_seen
@@ -2046,11 +1906,12 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
             Ok(v) => {
                 let bad = v.blocks.iter().filter(|ok| !**ok).count();
                 if bad == 0 && v.md5_ok {
-                    println!("  ✔ {} - {} blocks, MD5 ok", f.name, v.blocks.len());
+                    info!(target: "par2", "✔ {} - {} blocks, MD5 ok", f.name, v.blocks.len());
                 } else {
                     all_ok = false;
-                    println!(
-                        "  ✘ {} - {bad}/{} blocks bad, md5 {}",
+                    warn!(
+                        target: "par2",
+                        "✘ {} - {bad}/{} blocks bad, md5 {}",
                         f.name,
                         v.blocks.len(),
                         if v.md5_ok { "ok" } else { "MISMATCH" }
@@ -2059,14 +1920,14 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 all_ok = false;
-                println!("  ✘ {} - file missing", f.name);
+                warn!(target: "par2", "✘ {} - file missing", f.name);
             }
             // Reached only now that the bytes are read here rather than
             // up front: a mid-file read error is not a missing file and
             // must not be reported as one.
             Err(e) => {
                 all_ok = false;
-                println!("  ✘ {} - unreadable ({e})", f.name);
+                warn!(target: "par2", "✘ {} - unreadable ({e})", f.name);
             }
         }
     }
@@ -2401,7 +2262,7 @@ pub(crate) fn interned_bracketed(
 /// and keeps the slot counters consistent with what will now never arrive.
 /// `head` is the decoded offset-0 span, mirrored into the bootstrap's
 /// capture so activation can parse it later.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn reclassify_sniffed_par2(
     ctl: &SniffCtl,
     slots: &[Arc<FileSlot>],
@@ -2454,7 +2315,11 @@ pub(crate) fn reclassify_sniffed_par2(
                     // recovery_blocks_seen counts exactly the volume the
                     // repair planner is told is already on hand.
                     st.bootstrap = Some(sidx);
-                    *slots[b].capture.lock_ok() = None;
+                    if let Some(old) = slots[b].capture.lock_ok().take() {
+                        // Memory-floor gauge: the demoted bootstrap's
+                        // partial capture is freed here.
+                        nzbkit::memgauge::sub(nzbkit::memgauge::Sub::Par2Capture, old.len() as u64);
+                    }
                     demoted = Some(b);
                 }
                 Some(_) => {}
@@ -2471,6 +2336,11 @@ pub(crate) fn reclassify_sniffed_par2(
             let buf = cap.get_or_insert_with(Vec::new);
             if head.len() <= MAX_PAR2_CAPTURE {
                 if buf.len() < head.len() {
+                    // Memory-floor gauge: capture growth.
+                    nzbkit::memgauge::add(
+                        nzbkit::memgauge::Sub::Par2Capture,
+                        (head.len() - buf.len()) as u64,
+                    );
                     buf.resize(head.len(), 0);
                 }
                 buf[..head.len()].copy_from_slice(head);
@@ -2479,8 +2349,9 @@ pub(crate) fn reclassify_sniffed_par2(
         (st.bootstrap == Some(sidx), demoted)
     };
     if is_bootstrap {
-        println!(
-            "  ▸ recovery volume identified in-stream ({}) - bootstrapping the PAR2 set from it",
+        info!(
+            target: "par2",
+            "recovery volume identified in-stream ({}) - bootstrapping the PAR2 set from it",
             slots[sidx].hint
         );
         // The static path schedules par2-main articles FIRST so the set
@@ -2502,8 +2373,9 @@ pub(crate) fn reclassify_sniffed_par2(
     }
     for d in demoted.into_iter().chain((!is_bootstrap).then_some(sidx)) {
         let mb = defer_sniffed_slot(ctl, slots, d, queue, id_to_slot);
-        println!(
-            "  ▸ recovery volume identified in-stream ({}) - deferring {:.1} MB",
+        info!(
+            target: "par2",
+            "recovery volume identified in-stream ({}) - deferring {:.1} MB",
             slots[d].hint, mb
         );
     }
@@ -2617,7 +2489,8 @@ pub(crate) fn reconcile_deferred_payload(
         // (never cancelled - e.g. the slot deferred nothing) count as
         // zero and the slot simply stays deferred. A refusal (short
         // post: the pool already wound down) is fine too - the drain
-        // fallback in get.rs side-fetches whatever stayed deferred.
+        // fallback in get/settle.rs side-fetches whatever stayed
+        // deferred.
         let n = queue.requeue(&ids);
         if n == 0 || n != ids.len() {
             continue;
@@ -2629,9 +2502,10 @@ pub(crate) fn reconcile_deferred_payload(
         ctl.deferred_bytes.fetch_sub(bytes, Ordering::Relaxed);
         // Give the deferral's progress credit back: these articles are
         // in the pool again and will credit themselves when they land.
-        // Keeping it would take the bar past 100%. The drain fallback in
-        // get.rs is the opposite case - it side-fetches OUTSIDE the
-        // pool, so no outcome follows and the credit must stand.
+        // Keeping it would take the bar past 100%. The drain fallback
+        // in get/settle.rs is the opposite case - it side-fetches
+        // OUTSIDE the pool, so no outcome follows and the credit must
+        // stand.
         ctl.fetch_done.fetch_sub(bytes, Ordering::Relaxed);
         // Payload again: articles arriving from the requeue take the
         // normal verifier path from here on.
@@ -2654,14 +2528,40 @@ pub(crate) fn reconcile_deferred_payload(
                 verifier.on_data_from_disk(sidx, "", file_size, 0, &buf);
             }
         }
-        println!(
-            "  ▸ {} is payload the recovery set covers - resuming its download \
+        info!(
+            target: "par2",
+            "{} is payload the recovery set covers - resuming its download \
              ({:.1} MB back on the queue)",
             slots[sidx].hint,
             bytes as f64 / 1e6
         );
     }
 }
+
+/// One backfill worker's read buffer. Sized to amortize the pread and
+/// the verifier call, and - the load-bearing half - to stay at or above
+/// any realistic PAR2 block size: a span that fully contains a block
+/// hashes straight out of this buffer, while one shorter than the block
+/// has to go through the partials budget instead, where it can spill to
+/// settle read-back. Shrinking this to pay for more workers would
+/// therefore trade the very read-back the backfill exists to delete.
+const BACKFILL_BUF: usize = 4 << 20;
+
+/// How many slots the backfill hashes at once (TODO 129's "the resume/
+/// backfill hash path must ride the parallel-MD5 pool").
+///
+/// Half the machine, capped at 4, because this pass runs WHILE the
+/// download does: unlike the settle read-back - which owns the box and
+/// takes `min(cores, 12)` in `get/settle.rs` - every core here is one
+/// the decoders and the pool are not getting. Four lanes of `md5::soft`
+/// is ~2.8 GB/s against ~0.7 serial, which is already at or past what
+/// the re-read itself sustains, so the lanes above it would buy
+/// contention rather than wall.
+///
+/// It also bounds the buffers: [`BACKFILL_BUF`] is per worker, so the
+/// cap is what keeps this pass's transient RSS at 16 MiB rather than
+/// one buffer per core.
+const BACKFILL_MAX_WORKERS: usize = 4;
 
 /// When the last outstanding par2-main slot completes, parse the captured
 /// packets and switch the verifier to in-stream mode.
@@ -2670,47 +2570,114 @@ pub(crate) fn reconcile_deferred_payload(
 /// to be the settle pass's re-read (42 GB on the 87 GB run) overlaps the
 /// network phase instead. Coverage-gated: a span not fully on disk yet
 /// (or in a still-unclassified slot) is skipped and settles as before.
+///
+/// Slots run on a small pool, not one after another. The hot loop is
+/// `md5::soft` - the same leaf §129's parallel PAR2 verify moved - and
+/// on a crash resume `seed_pre_spans` hands this pass the WHOLE restored
+/// payload, so serially it was one core hashing tens of GB while the
+/// rest of the box idled. Slots are independent by construction:
+/// `on_data_inner` claims under the per-slot lock and hashes outside it,
+/// and the one piece of cross-slot state - the global partials budget -
+/// is already reserve-then-check for concurrent slots (M15). Which
+/// blocks lose a budget race can therefore differ from the serial order;
+/// that changes only how many blocks settle by read-back, never a
+/// verdict, and `backfill_slot` is the seam the differential test drives
+/// both ways.
 pub(crate) fn backfill_pre_activation(
     verifier: &nzbkit::live::LiveVerifier,
     extractor: &nzbkit::extract::Extractor,
     n_slots: usize,
     par2_slots: &[bool],
 ) -> u64 {
-    let mut fed: u64 = 0;
-    let mut buf = vec![0u8; 4 << 20];
-    for sidx in 0..n_slots {
-        if par2_slots[sidx] {
-            continue;
-        }
-        // Spans this run decoded keep a fresh span's claim strength, so
-        // their boundary blocks compose as CRC parts instead of demanding
-        // a block-sized byte buffer each. take_pre_spans decides which
-        // spans qualify and hands back the source to feed them under;
-        // crash-resume seeds, and pcrc-absent articles outside lean mode,
-        // take the full-MD5 disk path.
-        let (spans, how) = verifier.take_pre_spans(sidx);
-        for (off, len) in spans {
-            let mut o = off;
-            let end = off + len;
-            while o < end {
-                let n = ((end - o) as usize).min(buf.len());
-                if !extractor.covered(sidx, o, n) {
-                    break; // not (yet) on disk - leave for settle
-                }
-                if extractor.read_at(sidx, o, &mut buf[..n]).is_err() {
-                    break;
-                }
-                match how {
-                    nzbkit::live::PreSpanSrc::Backfill => {
-                        verifier.on_data_backfill(sidx, "", 0, o, &buf[..n])
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    let work: Vec<usize> = (0..n_slots).filter(|&i| !par2_slots[i]).collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get() / 2)
+        .clamp(1, BACKFILL_MAX_WORKERS)
+        .min(work.len());
+    let t0 = std::time::Instant::now();
+    let fed = if workers <= 1 {
+        let mut buf = vec![0u8; BACKFILL_BUF];
+        work.iter()
+            .map(|&sidx| backfill_slot(verifier, extractor, sidx, &mut buf))
+            .sum()
+    } else {
+        let next = AtomicUsize::new(0);
+        let fed = AtomicU64::new(0);
+        let work = &work;
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    let mut buf = vec![0u8; BACKFILL_BUF];
+                    while let Some(&sidx) = work.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let n = backfill_slot(verifier, extractor, sidx, &mut buf);
+                        fed.fetch_add(n, Ordering::Relaxed);
                     }
-                    nzbkit::live::PreSpanSrc::Disk => {
-                        verifier.on_data_from_disk(sidx, "", 0, o, &buf[..n])
-                    }
-                }
-                fed += n as u64;
-                o += n as u64;
+                });
             }
+        });
+        fed.load(Ordering::Relaxed)
+    };
+    // The A/B this pass was landed without (TODO 129 (c)) needs the PHASE,
+    // not just the job: the join in `get/workers.rs` happens after the
+    // network drains, so whether any of this reaches wall depends on how
+    // much of it outlasts the download. Bytes, lanes and elapsed on one
+    // line is what the round parses; `workers` is what tells the two arms
+    // apart in a log.
+    if fed > 0 {
+        info!(
+            target: "par2",
+            "backfill: {:.1} MB over {} slot(s) on {} worker(s) in {:.0} ms",
+            fed as f64 / 1e6,
+            work.len(),
+            workers,
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    fed
+}
+
+/// One slot's share of [`backfill_pre_activation`]: re-read its
+/// pre-activation spans from disk and feed them under the source
+/// `take_pre_spans` hands back. Returns the bytes fed.
+///
+/// `pub(crate)` for the differential test, which runs every slot through
+/// this on one thread and must reach the identical block verdicts.
+pub(crate) fn backfill_slot(
+    verifier: &nzbkit::live::LiveVerifier,
+    extractor: &nzbkit::extract::Extractor,
+    sidx: usize,
+    buf: &mut [u8],
+) -> u64 {
+    // Spans this run decoded keep a fresh span's claim strength, so
+    // their boundary blocks compose as CRC parts instead of demanding
+    // a block-sized byte buffer each. take_pre_spans decides which
+    // spans qualify and hands back the source to feed them under;
+    // crash-resume seeds, and pcrc-absent articles outside lean mode,
+    // take the full-MD5 disk path.
+    let (spans, how) = verifier.take_pre_spans(sidx);
+    let mut fed: u64 = 0;
+    for (off, len) in spans {
+        let mut o = off;
+        let end = off + len;
+        while o < end {
+            let n = ((end - o) as usize).min(buf.len());
+            if !extractor.covered(sidx, o, n) {
+                break; // not (yet) on disk - leave for settle
+            }
+            if extractor.read_at(sidx, o, &mut buf[..n]).is_err() {
+                break;
+            }
+            match how {
+                nzbkit::live::PreSpanSrc::Backfill => {
+                    verifier.on_data_backfill(sidx, "", 0, o, &buf[..n])
+                }
+                nzbkit::live::PreSpanSrc::Disk => {
+                    verifier.on_data_from_disk(sidx, "", 0, o, &buf[..n])
+                }
+            }
+            fed += n as u64;
+            o += n as u64;
         }
     }
     fed
@@ -2739,8 +2706,9 @@ pub(crate) fn maybe_activate_par2(
     };
     match set {
         Ok(set) => {
-            println!(
-                "  ▶ PAR2 set live: {} file(s), block size {} - verifying in-stream",
+            info!(
+                target: "par2",
+                "set live: {} file(s), block size {} - verifying in-stream",
                 set.files.len(),
                 set.block_size
             );
@@ -2752,7 +2720,7 @@ pub(crate) fn maybe_activate_par2(
             true
         }
         Err(e) => {
-            println!("  ⚠ PAR2 activation failed ({e}) - falling back to post-download verify");
+            warn!(target: "par2", "activation failed ({e}) - falling back to post-download verify");
             verifier.set_off();
             false
         }
@@ -2776,6 +2744,14 @@ pub(crate) fn nzb_age_days(date: i64) -> u32 {
 #[cfg(test)]
 #[path = "unpack/pwfile_tests.rs"]
 mod pwfile_tests;
+
+#[cfg(test)]
+#[path = "unpack/scratch_dir_tests.rs"]
+mod scratch_dir_tests;
+
+#[cfg(test)]
+#[path = "unpack/backfill_tests.rs"]
+mod backfill_tests;
 
 /// GitHub issue #40: a named `.cbr` comic is a RAR container whose file
 /// IS the deliverable. The ladder used to sniff it into the obfuscated

@@ -210,6 +210,18 @@ Object.assign(out, {
   'err.proxy address: expected host:port': 'proxy address: expected host:port',
   'err.proxy address: put the user and password in their own boxes':
     'proxy address: put the user and password in their own boxes',
+  // IndexBusy::message() (serve/daemon_index.rs): the two transient
+  // "ask again" answers from the index read path. The read handlers have
+  // emitted them since they shipped; TODO 166 widened their reach to
+  // every user-WRITE handler in serve/api/wall.rs and serve/api/index.rs
+  // (wall_fix, wall_art, wall_refresh, wall_merge, wall_hide/unhide,
+  // wall_rule_add/del, wall_suggest_no, pre_assign, pre_reject,
+  // rar_name), which is when 27 locales showing English became worth
+  // fixing. tErr() keys on the wire text, so the key IS the sentence.
+  'err.the index is busy - try again in a moment':
+    'the index is busy - try again in a moment',
+  'err.the index schema changed mid-query - try again in a moment':
+    'the index schema changed mid-query - try again in a moment',
   // Not from serve.rs: api() mints this one when the request never gets
   // an answer at all (ERR_UNREACHABLE), so it rides the same tErr() path
   // as the wire strings.

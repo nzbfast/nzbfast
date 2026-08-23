@@ -195,26 +195,34 @@ pub(super) async fn sample_one_group(
 }
 
 /// Sample `group` in the background unless a sample is already in flight
-/// for it. Returns whether THIS call started one.
+/// for it. `Some(handle)` when THIS call started one, `None` when one was
+/// already running.
 ///
 /// Per-group single-flight rather than one global flag: opening two rows
 /// in the browser should sample both, but opening the same row twice
 /// should not go to the provider twice.
+///
+/// The handle is the caller's choice of concurrency, and the two callers
+/// want opposite things. An API request DROPS it - a click must not block
+/// a request worker on a provider round trip. The steady background pass
+/// AWAITS it, which is the only thing that makes that pass sequential;
+/// dropping it there is what put seven concurrent sockets on one account
+/// in the 23 Aug 2026 incident.
 #[cfg(feature = "indexer")]
 pub(super) fn kick_group_sample(
     d: &Arc<Daemon>,
     config: PathBuf,
     group: String,
     posts: u64,
-) -> bool {
+) -> Option<tokio::task::JoinHandle<()>> {
     {
         let mut inflight = d.group_sampling.lock_ok();
         if !inflight.insert(group.clone()) {
-            return false;
+            return None;
         }
     }
     let d = d.clone();
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         // Hard ceiling: a black-holed provider must not pin an entry in
         // the in-flight set forever, which would make that group
         // permanently unsampleable until a restart.
@@ -243,8 +251,7 @@ pub(super) fn kick_group_sample(
             Err(e) => info!(target: "groups", "sample of {group} failed: {e}"),
         }
         d.group_sampling.lock_ok().remove(&group);
-    });
-    true
+    }))
 }
 
 /// Groups profiled per hourly tick by the background pass.
@@ -357,9 +364,11 @@ mod group_burst_tests {
 /// at: the ones they already scan, then the busiest binary groups.
 /// Returns how many samples this pass started.
 ///
-/// Sequential. One connection at a time is gentle, but a provider account
-/// has a hard connection limit and the download pool is entitled to all
-/// of it, so the steady pass stands down entirely while anything is
+/// Sequential - it awaits each sample before starting the next, and that
+/// is load-bearing rather than incidental (see the await below). One
+/// connection at a time is gentle, but a provider account has a hard
+/// connection limit and the download pool is entitled to all of it, so
+/// the steady pass ALSO stands down entirely while anything is
 /// downloading rather than risking a rejected connection on the hot path.
 ///
 /// `burst` lifts only the idle gate, and only for the fresh-install
@@ -417,9 +426,23 @@ pub(super) async fn sample_top_groups(d: &Arc<Daemon>, config: &Path, burst: boo
         if !d.group_stats.lock_ok().is_stale(&name, now) {
             continue;
         }
-        if !kick_group_sample(d, config.to_path_buf(), name, posts) {
+        let Some(sample) = kick_group_sample(d, config.to_path_buf(), name, posts) else {
             continue; // already in flight from an on-demand request
-        }
+        };
+        // AWAIT it. `kick_group_sample` spawns, so letting the handle drop
+        // here made this loop fire-and-forget at one sample a second: with
+        // samples lasting D seconds, D of them are on the wire at once. On
+        // 23 Aug 2026 that was seven concurrent sockets against an account
+        // another machine's benchmark round was already using, and the tail of
+        // the pass was still reporting "502 Too many connections" four
+        // seconds after this loop had printed its summary.
+        //
+        // Bounded: the spawned body carries its own 45 s ceiling, so this
+        // await cannot wedge the tick. The worst case is a slower pass,
+        // not a stuck one - and the tick loop sleeps its hour AFTER this
+        // returns, so a long pass delays the next one rather than
+        // stacking on it.
+        let _ = sample.await;
         done += 1;
         // Space them out. This is housekeeping, not a job - and when the
         // pool is downloading through the same account, housekeeping that
@@ -697,5 +720,210 @@ pub(super) fn measure_system(
     })?;
     let mut v = nzbkit::sysbench::verdict(net, &compute, disk);
     (v.network_host, v.network_conns) = probed;
+    // §210 (b): which network is short. Only when the network row IS
+    // the limit - that is when the card tells the reader to add
+    // connections or a provider, and it is the reading this corrects.
+    // The link speaks for itself or not at all (`measured_note` is
+    // empty unless the figure actually reached its ceiling), so this
+    // never puts a second opinion beside a healthy row.
+    if v.bottleneck == "network" {
+        v.network_link = d
+            .local_link
+            .lock_ok()
+            .as_ref()
+            .map(|l| l.measured_note((net * 1e9 / 8.0) as u64))
+            .unwrap_or_default();
+    }
     Ok(v)
+}
+
+/// Regression test for the 23 Aug 2026 incident: a server switched OFF in
+/// config held seven live TLS sockets to the provider, while a benchmark
+/// round on another machine was using that same account.
+///
+/// The hourly group-profile sampler reaches the provider through
+/// `crate::load_server`, which was `cfg.servers[0].clone()` and consulted
+/// `enabled` nowhere. On that box `servers[0]` WAS the disabled account, so
+/// every sample in the pass dialled the one server the user had switched
+/// off. Nothing named the host in the log, because only the download
+/// planner prints "<host> disabled - not in the pool" and no download ran.
+///
+/// Drives the real lane against two local listeners rather than asserting
+/// on `load_server` in isolation: the defect only bites because a
+/// background task reaches it, and a test on the helper alone would still
+/// pass if this caller later grew its own unfiltered pick.
+#[cfg(all(test, feature = "indexer"))]
+mod sampler_stays_sequential {
+    use nzbkit::sync::MutexExt as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One listener that records the HIGH-WATER mark of simultaneously
+    /// open connections.
+    ///
+    /// `HOLD_MS` must EXCEED the pass's own one-second spacing or this
+    /// test is a rubber stamp: at a 400 ms hold the broken, spawn-and-
+    /// forget version also scores a peak of 1, because each sample is
+    /// already finished before the next is launched. Verified by
+    /// reverting the await - at 400 ms the test passed on the defect, at
+    /// 1500 ms it fails on it. That, plus the two-group corpus, is what
+    /// sets this test's ~5 s runtime; do not trim either to speed it up.
+    const HOLD_MS: u64 = 1_500;
+
+    fn counting_listener(peak: Arc<AtomicUsize>, live: Arc<AtomicUsize>) -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for sock in l.incoming().take(8).flatten() {
+                let (peak, live) = (peak.clone(), live.clone());
+                std::thread::spawn(move || {
+                    let n = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(HOLD_MS));
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    let _ = sock.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        port
+    }
+
+    fn group(name: &str) -> crate::groups::CatGroup {
+        crate::groups::CatGroup {
+            name: name.to_string(),
+            posts: 1_000,
+            desc: String::new(),
+            cat: crate::groups::Category::Other,
+            status: 'y',
+            first_seen: 0,
+        }
+    }
+
+    /// The 23 Aug 2026 incident's OTHER half. `kick_group_sample`
+    /// spawns, so a pass that drops the handle puts one socket per second
+    /// of sample duration on a single account - seven of them that day,
+    /// against an account another machine's benchmark round was using. This
+    /// pass
+    /// has always DOCUMENTED itself sequential; nothing enforced it.
+    #[tokio::test]
+    async fn the_steady_pass_holds_one_connection_at_a_time() {
+        let peak = Arc::new(AtomicUsize::new(0));
+        let port = counting_listener(peak.clone(), Arc::new(AtomicUsize::new(0)));
+
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-groupscan-serial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.local.json");
+        std::fs::write(
+            &cfg,
+            format!(
+                r#"{{"servers":[{{"host":"127.0.0.1","port":{port},"tls":false,
+                    "enabled":true,"connections":8}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let d = crate::serve::testutil::test_daemon(&dir);
+        // Subscribed groups are sampled first and skip the is-binary
+        // test, so two names are all this needs - one to be in flight
+        // and one to collide with it. Any more just pays the pass's own
+        // one-second spacing again.
+        let names = ["alt.binaries.one", "alt.binaries.two"];
+        *d.index_groups.lock_ok() = names.iter().map(|n| n.to_string()).collect();
+        *d.group_catalog.lock_ok() = Some(std::sync::Arc::new(crate::groups::Catalog {
+            fetched_at: 0,
+            groups: names.iter().map(|n| group(n)).collect(),
+        }));
+
+        let done = super::sample_top_groups(&d, &cfg, false).await;
+
+        assert_eq!(done, 2, "every subscribed group should have been sampled");
+        assert_eq!(
+            peak.load(Ordering::Relaxed),
+            1,
+            "the steady profile pass opened more than one provider \
+             connection at once - it must await each sample, not spawn \
+             and move on (23 Aug 2026)"
+        );
+        // The same defect seen from the other side, and the shape the
+        // incident log actually showed: the pass printed its summary at
+        // 19:03:19Z with six samples still running, which reported "502
+        // Too many connections" for another ten seconds. A pass that has
+        // returned must own nothing on the wire.
+        assert!(
+            d.group_sampling.lock_ok().is_empty(),
+            "sample_top_groups returned with samples still in flight"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod disabled_server_never_dialled {
+    use std::io::Write as _;
+    use std::sync::mpsc;
+
+    /// A listener that reports the moment it accepts, then hangs up.
+    ///
+    /// Hanging up rather than going silent matters: the sampler's own
+    /// ceiling is 45 s, and a listener that accepts and says nothing makes
+    /// every run of this test pay a network timeout it is not measuring.
+    fn spy(tx: mpsc::Sender<&'static str>, tag: &'static str) -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((s, _)) = l.accept() {
+                let _ = tx.send(tag);
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        });
+        port
+    }
+
+    fn two_server_config(off_port: u16, on_port: u16) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-groupscan-enabled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.local.json");
+        let mut f = std::fs::File::create(&p).unwrap();
+        // The incident's shape exactly: the DISABLED account is first in
+        // the array, which is the position `load_server` used to take
+        // unconditionally.
+        write!(
+            f,
+            r#"{{"servers":[
+                 {{"host":"127.0.0.1","port":{off_port},"tls":false,
+                   "enabled":false,"connections":1}},
+                 {{"host":"127.0.0.1","port":{on_port},"tls":false,
+                   "enabled":true,"connections":1}}]}}"#
+        )
+        .unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn the_group_sampler_skips_a_server_the_user_switched_off() {
+        let (tx, rx) = mpsc::channel();
+        let off_port = spy(tx.clone(), "disabled");
+        let on_port = spy(tx, "enabled");
+        let cfg = two_server_config(off_port, on_port);
+
+        // The sample itself cannot succeed against a socket that hangs up
+        // on the greeting, and does not need to: the question is only
+        // which account the lane reached for.
+        let _ = super::sample_one_group(&cfg, "alt.binaries.test", 0).await;
+
+        let reached: Vec<&str> = rx.try_iter().collect();
+        assert!(
+            !reached.contains(&"disabled"),
+            "the hourly profile sampler dialled a server with \
+             `\"enabled\": false` - this is the 23 Aug 2026 defect"
+        );
+        assert_eq!(
+            reached,
+            ["enabled"],
+            "the sampler must fall through to the first ENABLED server"
+        );
+    }
 }

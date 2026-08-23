@@ -10,6 +10,7 @@ use crate::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
+use tracing::info;
 
 /// The wired-up verification and extraction machinery. Field names match
 /// the local bindings the inline code used.
@@ -21,9 +22,13 @@ pub(super) struct Rig {
     pub(super) shape_said: Arc<std::sync::atomic::AtomicBool>,
     pub(super) resume_map: bool,
     pub(super) extractor: Arc<nzbkit::extract::Extractor>,
+    /// §94 A: restored files the replay still owes the extractor,
+    /// fed back per slot as each one's offset-0 article lands. See
+    /// `ReplayPending` for why this is not done up front.
+    pub(super) replay: Arc<super::rig::ReplayPending>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn build_rig(
     nzb: &Arc<Nzb>,
     slots: &[Arc<FileSlot>],
@@ -42,6 +47,7 @@ pub(super) fn build_rig(
     verify_lean: bool,
     no_extract: bool,
     resuming: bool,
+    resume_map: bool,
     budget: &nzbkit::mem::MemBudget,
 ) -> Rig {
     let verifier_seed_slots: Vec<usize> = slots
@@ -72,11 +78,11 @@ pub(super) fn build_rig(
     verifier.set_fast_verify(fast_verify);
     verifier.set_lean(fast_verify && verify_lean);
     if !fast_verify {
-        println!("verify: full (per-block MD5+CRC32)");
+        info!(target: "verify", "full (per-block MD5+CRC32)");
     } else if verify_lean {
-        println!(
-            "verify: lean - article CRCs skipped once PAR2 covers a file \
-             (single-CRC32 in-stream; end-of-job verification unchanged)"
+        info!(
+            target: "verify",
+            "lean - article CRCs skipped once PAR2 covers a file (single-CRC32 in-stream; end-of-job verification unchanged)"
         );
     }
     let n_par2_slots = slots.iter().filter(|s| s.is_par2_main).count();
@@ -106,9 +112,9 @@ pub(super) fn build_rig(
         fetch_done: fetch_done.clone(),
     });
     if !resume_sniffed_slots.is_empty() {
-        println!(
-            "resume: {} restored file(s) are recovery volumes by content - \
-             deferring {resume_deferred_arts} unfetched article(s)",
+        info!(
+            target: "resume",
+            "{} restored file(s) are recovery volumes by content - deferring {resume_deferred_arts} unfetched article(s)",
             resume_sniffed_slots.len()
         );
         // Registered as sniffed-but-never-bootstrap: the repair planner
@@ -122,27 +128,57 @@ pub(super) fn build_rig(
     }
     // All file writing goes through the extractor: plain files write
     // through; store-mode RAR volumes extract in-stream (M3). Resumed
-    // runs without NZBFAST_RESUME_MAP disable in-stream mapping
+    // runs under NZBFAST_NO_RESUME_MAP disable in-stream mapping
     // (restored spans then never flow through `write`, so headers would
     // be incomplete) - volumes materialize and extraction happens from
-    // disk after verification instead. With it, the replay below feeds
-    // the restored spans through `write` first, and mapping proceeds as
-    // on a fresh run.
+    // disk after verification instead. With it, the replay feeds the
+    // restored spans through `write` as the run opens, and mapping
+    // proceeds as on a fresh run.
     // The archive shape prints ONCE, folded into the first volume line
     // that lands after the mappers have worked it out - several decode
     // consumers race for that line, so the flag is shared.
     let shape_said = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // §94 A: resumed jobs map in-stream. Restored spans REPLAY through
-    // the normal write path before the network opens, so the mappers
-    // re-derive their state from replayed headers and the run continues
+    // the normal write path - per slot, as soon as that slot can place
+    // them (see `ReplayPending`) - so the mappers re-derive their state
+    // from the same code a fresh run uses and the run continues
     // one-pass; only the still-missing fraction transits the wire, and
-    // only the resumed fraction is read back off disk. Opt-in while it
-    // soaks (NZBFAST_RESUME_MAP=1); without it a resumed run
-    // materializes volumes and extracts from disk, as before. `resume`
-    // stays true either way - writers must adopt restored files without
-    // truncating them.
-    let resume_map =
-        resuming && !no_extract && std::env::var("NZBFAST_RESUME_MAP").is_ok_and(|v| v == "1");
+    // only the resumed fraction is read back off disk. Without it a
+    // resumed run materializes volumes and extracts from disk, as
+    // before. `resume` stays true either way - writers must adopt
+    // restored files without truncating them.
+    //
+    // DEFAULT ON since 21 Aug 2026, with `NZBFAST_NO_RESUME_MAP=1` as
+    // the kill switch, per the plan's sequencing (build dark, soak,
+    // then flip in its own commit).
+    //
+    // Measured on a 4 GiB store set killed at half and resumed, over a
+    // loopback post, out-dir on a dedicated disk image
+    // (research/MEASURED-94A-resume-map-2026-08-21.md). Device I/O as a
+    // multiple of payload: a clean run 1.01x, the resumed run 2.53x
+    // without this and 1.51x with it - and a PEAK footprint of 0.95x
+    // rather than 1.9x, because no volume file is written at all. The
+    // last 0.5x is the replay writing bytes the output already holds;
+    // recognising those ranges as already-correct instead of feeding
+    // them is the next step, and is not taken yet.
+    //
+    // The first cut of the replay was WORSE than not mapping at all
+    // (4.4x at a 2 GB budget, 13.6x at 512 MB) because it fed every
+    // restored span before the pool opened and held all of them. Three
+    // things fixed that and all three are load-bearing: `replay_order`
+    // sorts the seeds, `ReplayPending` waits for each slot to be able
+    // to PLACE what it is given, and the admission gate below declines
+    // to map at all when the restored bytes cannot fit. With them the
+    // mapped path is never worse than the ordinary one at any budget -
+    // 1.51x where it fits, and exactly the 2.53x adopt path where it
+    // does not.
+    //
+    // The decision itself is `plan.rs resume_map_admitted`, made before
+    // the restore because the restore's own behaviour depends on it -
+    // a run that will replay must not have its placements copied into
+    // volume files first. `resuming` still gates it here: a fresh run
+    // maps because it is fresh, not because of §94 A.
+    let resume_map = resuming && resume_map;
     let extractor = Arc::new(nzbkit::extract::Extractor::with_resume(
         out_dir,
         slots.len(),
@@ -155,17 +191,38 @@ pub(super) fn build_rig(
     // promote hook below anchors too, but it only exists on the daemon
     // path, and `nzbfast get` chases the same archives.
     extractor.anchor();
-    // §94 B, opt-in while it soaks (NZBFAST_CHASE_VERIFY_GATE=1): the
-    // chase decode gates on the PAR2 verified-block watermark, so a
-    // repair can never rewrite consumed bytes and the "repair rewrote
-    // chased bytes" demote becomes unreachable for gated sets. The
-    // frontier's conflict tripwire stays armed underneath either way.
-    if std::env::var("NZBFAST_CHASE_VERIFY_GATE").is_ok_and(|v| v == "1") {
-        let gate = nzbkit::live::VerifyGate::new(slots.len());
-        verifier.set_gate(gate.clone());
-        extractor.set_verify_gate(gate);
-    }
+    // §94 B, DEFAULT ON since 23 Aug 2026 (`NZBFAST_CHASE_VERIFY_GATE=0`
+    // is the escape hatch): the chase decode gates on the PAR2
+    // verified-block watermark, so a repair can never rewrite consumed
+    // bytes and the "repair rewrote chased bytes" demote becomes
+    // unreachable for gated sets. The frontier's conflict tripwire
+    // stays armed underneath either way. Flipped on the three
+    // preconditions §94 B set: the damaged-corpus leg (row 27, 2.55x ->
+    // 1.01x nested), the gated e2e damage matrix (22 Aug), and the
+    // costB2 leg with the gate and row 26's in-place repair both on
+    // (23 Aug: 2.02x, zero forfeits, inert on missing-article damage,
+    // and 2.05x -> 1.01x on the silent-corruption twin at the root).
+    //
+    // The HANDLE is attached unconditionally (22 Aug 2026): the dropping
+    // trim reads its watermark to drop only bytes the verifier has
+    // vouched for, spilling the rest, so a drop can never leave the
+    // settle read-back a range nothing can serve. Only the decode's
+    // WAIT on it answers to the env variable.
+    let gate = nzbkit::live::VerifyGate::new(slots.len());
+    verifier.set_gate(gate.clone());
+    extractor.set_verify_gate(gate);
+    extractor.set_verify_gate_waits(verify_gate_waits_value(
+        std::env::var("NZBFAST_CHASE_VERIFY_GATE").ok().as_deref(),
+    ));
     extractor.set_holds_cap(budget.holds_cap());
+    // TODO 219 follow-up: under the daemon two pipelines are alive
+    // during a hand-over, and each would otherwise claim the full 45%
+    // slice. The process ledger makes the pair share one cap - the job
+    // on the lane keeps the whole slice, the successor sees what is
+    // left. Only the daemon installs a ledger; `get` is unchanged.
+    if let Some(ledger) = nzbkit::extract::process_ledger() {
+        extractor.join_holds_ledger(&ledger);
+    }
     // One-pass zip, split sets: a byte-split zip cannot be sized from
     // its own bytes (no part carries a container-sizing header, unlike
     // 7z), so the NZB's file list - which we have and the extractor
@@ -200,6 +257,30 @@ pub(super) fn build_rig(
             }
         }
     }
+    // TODO 211 (b): the same declaration for a `.rar.NNN` byte split of
+    // a single `.rar`, for the same reason - no RAR header sizes the
+    // container, so the NZB's part count is what lets the head's mapper
+    // close once every part's exact size is in. Same gapless rule: a
+    // set the NZB has a hole in never maps, and undeclared parts take
+    // the disk path plus the (a) rescue exactly as before.
+    {
+        let mut sets: HashMap<String, Vec<u32>> = HashMap::new();
+        for s in slots.iter().filter(|s| !s.is_par2_main) {
+            if let Some((base, idx)) = nzbkit::extract::rar_split_part_name(&s.hint) {
+                sets.entry(base).or_default().push(idx);
+            }
+        }
+        for (base, mut idxs) in sets {
+            idxs.sort_unstable();
+            let n = idxs.len() as u32;
+            if idxs.first() == Some(&1)
+                && idxs.last() == Some(&n)
+                && idxs.windows(2).all(|w| w[0] < w[1])
+            {
+                extractor.declare_rar_split(&base, n);
+            }
+        }
+    }
     // An inner file's declared `unpacked_size` is an attacker-controlled
     // RAR header vint, and on Linux preallocation is a real fallocate - so
     // a few-hundred-KB post declaring 8 TB used to genuinely reserve the
@@ -222,8 +303,31 @@ pub(super) fn build_rig(
     // post-pass sinks, which until now covered only the fallback and not
     // the default path. Shared across every inner file and every nesting
     // level, so a bomb split over many outputs gets one allowance.
+    //
+    // FLOORED at the post's own byte bound, and that floor is what makes
+    // free space a legitimate ceiling here at all. On the DISK path the
+    // volumes are already on disk when extraction starts, so free space
+    // is genuinely the room the output has left to grow into. On the
+    // in-stream path they never land: the extracted file IS the job's
+    // whole footprint, and free-space-minus-reserve therefore demands
+    // payload + 256 MB free to write payload bytes. A RAR5 STORED set -
+    // no expansion whatever, the extracted size equals the packed size -
+    // then trips a "decompression bomb" purely for being on a tight
+    // disk. Measured 22 Aug 2026 on the TODO 206 class E floor: a
+    // 6.48 GB set on 1.02x free failed all three reps at the last
+    // ~134 MB, the exact size of the reserve overhang; 1.05x passed.
+    //
+    // Nothing posted can legitimately unpack to LESS than what was
+    // posted, so a budget below that bound is not a bomb test - it is a
+    // disk-space test wearing a bomb's error message, and disk space is
+    // ENOSPC's job (which halts with the right verdict and keeps the
+    // journal). The same bound the preallocation ceiling above uses, for
+    // the same reason and with the same untrusted-attribute guard.
     if let Some(free) = crate::serve::free_bytes(out_dir) {
-        extractor.set_extract_budget(free.saturating_sub(EXTRACT_RESERVE));
+        extractor.set_extract_budget(instream_extract_budget(
+            free,
+            crate::repair::volume_prealloc_cap(nzb),
+        ));
         // Holds-paging scratch ceiling: transient relief for the RAM
         // holds cap, not a second copy of the download - 4x the RAM cap,
         // and never more than a quarter of post-reserve free space (the
@@ -249,36 +353,19 @@ pub(super) fn build_rig(
         stream_owner,
         &crate::smart::dominant_poster(nzb),
     );
-    // That AES pass replaces the ciphertext this journal's placement
-    // records point INTO. Once a file holds plaintext it is no longer the
-    // bytes the journal describes, so a resume that still trusted it would
-    // copy translated fragments out of it into the volume files and mark
-    // those articles restored - skipping the refetch, and without PAR2
-    // looping forever on poisoned local bytes while the provider still has
-    // every original article. Gate the publish on retiring the claim
-    // first: the extractor hands over the output names and moves no byte
-    // until this returns Ok, and `invalidate` is durable before it does.
-    //
-    // Weak, like the promote hook: the extractor outlives this scope, and
-    // a strong clone parked in it would defeat the `Arc::try_unwrap` that
-    // retires the whole journal after a verified finish. A journal that is
-    // already gone claims nothing, so publishing is free.
-    {
-        let j = Arc::downgrade(journal);
-        extractor.set_decrypt_barrier(Arc::new(move |names: &[String]| match j.upgrade() {
-            // retire_for_decrypt = invalidate + parking the dropped
-            // placements, so the publish hook below can republish them.
-            Some(j) => j.retire_for_decrypt(names),
-            None => Ok(()),
-        }));
-    }
     // Materialized-volume demote (advG follow-up, 13 Aug 2026): when a
     // slot falls back to volumes-on-disk, its reconstruction puts every
     // journaled byte at final offsets in the volume file - and then
     // deletes the inner files the R records name as copy sources, so
     // without this line a retry over intact, complete volumes refetched
     // the ENTIRE post. The M record lets parse rewrite those placements
-    // to identity form. Weak for the same try_unwrap reason as above.
+    // to identity form.
+    //
+    // Weak, like the promote hook: the extractor outlives this scope, and
+    // a strong clone parked in it would defeat the `Arc::try_unwrap` that
+    // retires the whole journal after a verified finish. A journal that is
+    // already gone records nothing, which is the right answer once the
+    // job is done.
     {
         let j = Arc::downgrade(journal);
         extractor.set_materialized_hook(Arc::new(move |slot: usize, name: &str, size: u64| {
@@ -287,26 +374,16 @@ pub(super) fn build_rig(
             }
         }));
     }
-    // TODO 100: the publish half of the handshake. Once a file's verified
-    // plaintext is RENAMED into place, its crypt facts land as E/K/T
-    // records and the retired placements republish as D records - the
-    // plaintext-once grammar, which a resume run restores by re-encrypting
-    // the local plaintext. Without this, a later failure in the same job
-    // (another file's ENOSPC, the nested pass) left a journal that could
-    // vouch for nothing of a file that was already done, and the retry
-    // refetched essentially the whole set.
-    {
-        let j = Arc::downgrade(journal);
-        extractor.set_decrypt_publish(Arc::new(
-            move |name: &str, evs: &[nzbkit::extract::CryptoJournalEvent]| {
-                if let Some(j) = j.upgrade() {
-                    j.record_decrypted(name, evs);
-                }
-            },
-        ));
-    }
     // Crash resume (placement journal): see replay_or_adopt_restored.
-    replay_or_adopt_restored(restored, slots, resume_map, &extractor, &verifier, out_dir);
+    let replay = Arc::new(replay_or_adopt_restored(
+        restored, slots, resume_map, &extractor, &verifier, out_dir, journal,
+    ));
+    // Seeds that carry their own offset 0 need no fresh article to
+    // trigger them (see `ReplayPending::try_drain`), and a run whose
+    // every head is restored may never write an offset 0 at all.
+    if !replay.is_empty() {
+        replay.try_drain(&extractor, &verifier);
+    }
     // Fully-resumed slots see no articles - seed their names so PAR2
     // matching and read-back verification still reach them.
     for &si in &verifier_seed_slots {
@@ -320,6 +397,7 @@ pub(super) fn build_rig(
         shape_said,
         resume_map,
         extractor,
+        replay,
     }
 }
 
@@ -327,7 +405,7 @@ pub(super) fn build_rig(
 /// hook through a weak ref, and publish the run's control surfaces
 /// (extractor, verifier, seek, abort, queue ctl) on the hub. Returns
 /// the SeekCtl clone the decode consumers register observed names on.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn install_seek(
     slots: &[Arc<FileSlot>],
     slot_arts: &mut Vec<(Vec<(u64, std::sync::Arc<str>)>, u64)>,
@@ -390,6 +468,39 @@ pub(super) fn install_seek(
             }
         },
     ));
+    // Held-bytes backpressure (TODO 94 item E): the root extractor
+    // parks a chased group's slots at the pool near its holds cap and
+    // releases them as the engine catches up. Slots ARE the pool's file
+    // ordinals (`ArticleReq::file`). A Weak, like the promote hook: the
+    // queue control outlives the run only through the hub.
+    let weak_ctl = Arc::downgrade(queue_ctl);
+    let weak_gauge = Arc::downgrade(queue_ctl);
+    extractor.set_park_hook(
+        Arc::new(move |slots: &[usize], allow: Option<u64>| {
+            if let Some(ctl) = weak_ctl.upgrade() {
+                let files: Vec<u32> = slots.iter().map(|&s| s as u32).collect();
+                ctl.park_files(&files, allow);
+                tracing::trace!(
+                    target: "extract",
+                    "holds backpressure: {} slot(s) at the pool, allowance {:?}",
+                    files.len(),
+                    allow
+                );
+            }
+        }),
+        Some(Arc::new(move || {
+            let wire = weak_gauge
+                .upgrade()
+                .and_then(|c| c.wire_inflight_bytes())
+                .unwrap_or(0);
+            // Between the wire and the holds: raw bodies off the socket
+            // (channel and decoder hands) and decoded payloads not yet
+            // routed. Process-wide gauges, which is conservative under
+            // a hand-over and exact otherwise.
+            use nzbkit::memgauge::{Sub, cur};
+            (wire, cur(Sub::RawOut) + cur(Sub::OutOut))
+        })),
+    );
     if let Some(h) = &hub {
         *h.extractor.lock_ok() = Some((stream_owner.to_string(), extractor.clone()));
         *h.verifier.lock_ok() = Some(verifier.clone());
@@ -398,4 +509,99 @@ pub(super) fn install_seek(
         *h.queue_ctl.lock_ok() = Some(queue_ctl.clone());
     }
     seek_names
+}
+
+/// The in-stream extractor's decompression-bomb allowance: free space
+/// less the reserve, but never below what the post itself declares.
+///
+/// See the call site for why the floor is load-bearing on this path and
+/// not on the disk one. `posted` is `volume_prealloc_cap` - the posted
+/// byte count bounded by the post's article geometry, so an inflated
+/// attribute cannot buy an attacker allowance it did not also declare
+/// articles for.
+pub(super) fn instream_extract_budget(free: u64, posted: u64) -> u64 {
+    free.saturating_sub(EXTRACT_RESERVE).max(posted)
+}
+
+/// Pure parse of `NZBFAST_CHASE_VERIFY_GATE` (unit-testable without
+/// touching the process environment under the parallel test runner, the
+/// `chase_repair_on_value` pattern in `repair.rs`). Only the exact `0`
+/// disables the decode's wait on the verified-block watermark: `1` was
+/// the soak-era opt-in and still means on, and a near-miss like `false`
+/// must not silently hand a set back to the materialize route.
+pub(crate) fn verify_gate_waits_value(v: Option<&str>) -> bool {
+    v != Some("0")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // §94 B went default-ON on 23 Aug 2026; the switch that matters is
+    // the one that turns it OFF, and only the exact `0` is that switch.
+    #[test]
+    fn only_an_exact_zero_disables_the_verify_gate_wait() {
+        assert!(
+            verify_gate_waits_value(None),
+            "unset must be ON after the flip"
+        );
+        assert!(
+            !verify_gate_waits_value(Some("0")),
+            "the escape hatch must bite"
+        );
+        assert!(
+            verify_gate_waits_value(Some("1")),
+            "the soak-era opt-in still means on"
+        );
+        assert!(verify_gate_waits_value(Some("")), "empty is not the hatch");
+        assert!(
+            verify_gate_waits_value(Some("false")),
+            "only `0` is the hatch"
+        );
+    }
+
+    /// BUG (HIGH): the in-stream bomb budget was free-space-minus-reserve
+    /// flat, which on the one-pass path (volumes never land, so the
+    /// extracted file is the job's whole footprint) demands
+    /// payload + 256 MB free to write payload bytes. A RAR5 STORED set
+    /// expands by nothing at all and still tripped "possible
+    /// decompression bomb" for being on a tight disk - TODO 206 class E,
+    /// 22 Aug 2026: 6,483,486,514 bytes onto 6,612,279,296 free failed
+    /// all three reps at the last ~134 MB, the size of the reserve
+    /// overhang. Whether the payload physically FITS is ENOSPC's
+    /// question, and ENOSPC answers it with the right verdict.
+    #[test]
+    fn a_stored_set_is_never_a_bomb_on_a_tight_disk() {
+        const RESERVE: u64 = EXTRACT_RESERVE;
+        let payload = 6_483_486_514u64;
+        let free = 6_457_304u64 * 1024; // 1.02x the payload, the failing leg
+
+        assert!(
+            free.saturating_sub(RESERVE) < payload,
+            "the leg's arithmetic must still be the tight one"
+        );
+        assert!(
+            instream_extract_budget(free, payload) >= payload,
+            "a stored set writing exactly what was posted must not trip"
+        );
+
+        // A genuine bomb is unaffected: a small post on a big disk still
+        // gets the free-space ceiling, because the floor is below it.
+        let tiny_post = 4u64 << 20;
+        let big_disk = 900u64 << 30;
+        assert_eq!(
+            instream_extract_budget(big_disk, tiny_post),
+            big_disk - RESERVE,
+            "the floor must never RAISE a bomb's allowance"
+        );
+
+        // And an NZB with no byte attributes at all (posted == 0, the
+        // "unknown" case volume_prealloc_cap folds into geometry) keeps
+        // exactly today's behaviour.
+        assert_eq!(
+            instream_extract_budget(big_disk, 0),
+            big_disk - RESERVE,
+            "an unknown post size must not change the ceiling"
+        );
+    }
 }

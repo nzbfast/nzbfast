@@ -365,8 +365,7 @@ fn m_eat_volumes(
             let hit = |j: &&Arc<Mutex<Job>>| j.lock_ok().nzo_id == id;
             let found = d
                 .queue
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .find(hit)
                 .cloned()
@@ -408,8 +407,7 @@ fn m_set_password(
             let hit = |j: &&Arc<Mutex<Job>>| j.lock_ok().nzo_id == id;
             let found = d
                 .queue
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .iter()
                 .find(hit)
                 .cloned()
@@ -539,7 +537,15 @@ fn m_set_password(
                                 }
                             }
                             let _clear = ClearFinalizing(job2.clone());
-                            if crate::smart::unlock(&out_dir, &pw) {
+                            // One password, so there is no sweep to
+                            // stand down - but the same wrong blame:
+                            // "the password did not unlock the archive"
+                            // is what a refusal ABOUT THE DISK used to
+                            // be reported as, to a user who had just
+                            // typed the right one. See
+                            // [`crate::smart::unlock`].
+                            let unlocked = crate::smart::unlock(&out_dir, &pw);
+                            if unlocked.is_ok() {
                                 let post_year = match post_year_of(&nzb) {
                                     0 => crate::identify::current_year(),
                                     y => y,
@@ -555,15 +561,14 @@ fn m_set_password(
                                 );
                                 let mut j = job2.lock_ok();
                                 j.password_required = false;
-                                // BOTH password stories end here: the one this
-                                // record was parked with, and the one a WRONG
-                                // guess wrote over it - a tester's failed guess
-                                // followed by the right password left a
-                                // Completed row whose Reason still read
-                                // "password did not unlock the archive".
-                                if j.fail_message == "password required to unpack"
-                                    || j.fail_message == "password did not unlock the archive"
-                                {
+                                // EVERY story the refused arm below can
+                                // have written ends here - see
+                                // [`crate::diag::unlock_answers`], which
+                                // owns the list because that arm writes
+                                // `unpack_failure` and so can carry the
+                                // ladder's own reason rather than the
+                                // literal beside it.
+                                if crate::diag::unlock_answers(&j.fail_message) {
                                     j.fail_message.clear();
                                 }
                                 if !done.identify.is_empty() {
@@ -602,7 +607,10 @@ fn m_set_password(
                                 }
                             } else {
                                 let mut j = job2.lock_ok();
-                                j.fail_message = "password did not unlock the archive".into();
+                                j.fail_message = crate::diag::unpack_failure(
+                                    unlocked.err().flatten(),
+                                    "password did not unlock the archive",
+                                );
                                 drop(j);
                                 // Only the Reason line: the record is
                                 // already parked as password_required
@@ -768,8 +776,7 @@ fn m_stats(
         let live_servers: Vec<Value> = d
             .hub
             .pool_live
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .map(|l| {
                 l.servers
@@ -862,8 +869,7 @@ fn m_stats(
             let mut evs: Vec<(u64, Value)> = d
                 .hub
                 .pool_live
-                .lock()
-                .unwrap()
+                .lock_ok()
                 .as_ref()
                 .map(|l| {
                     l.recent_events(60)
@@ -922,8 +928,7 @@ fn m_stats(
         let (vdone, vbad, vtotal) = d
             .hub
             .verifier
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .map(|v| {
                 let (done, bad) = v.live_counts();
@@ -937,8 +942,7 @@ fn m_stats(
         let files: Vec<Value> = d
             .hub
             .extractor
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .map(|(_owner, ex)| {
                 let mut ws = ex.writers_snapshot();
@@ -1053,7 +1057,7 @@ fn m_addfile(
                     // and "Added to the queue" was the reply either
                     // way. `held` carries the ids that parked, so
                     // the add flow can say which.
-                    Ok(id) => {
+                    Ok(Enqueued { nzo_id: id, .. }) => {
                         d.record_add_params(
                             &id,
                             params.get("pp").map(String::as_str),
@@ -1116,7 +1120,7 @@ fn m_addurl(
                 match d.enqueue_fetched(&f, &name, &cat, prio, pp, pw.as_deref(), 0, &origin, false)
                 {
                     // §129 2b: same pp=/script= recording as addfile.
-                    Ok(id) => {
+                    Ok(Enqueued { nzo_id: id, .. }) => {
                         d.record_add_params(
                             &id,
                             params.get("pp").map(String::as_str),
@@ -1146,7 +1150,7 @@ fn m_addurl(
 
 fn m_addnzblnk(
     d: &Arc<Daemon>,
-    _req: &mut tiny_http::Request,
+    req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
     _ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
@@ -1173,7 +1177,12 @@ fn m_addnzblnk(
                 let prio = param_priority(params);
                 let dupe_ok = params.get("dupe_ok").map(String::as_str) == Some("1");
                 let pw = (!l.password.is_empty()).then(|| l.password.clone());
-                resolve_nzblnk(d, &l, &cat, prio, pw.as_deref(), dupe_ok)
+                // The TRANSPORT peer, not a forwarded header: the gate
+                // keys its per-peer window on this, and a header the
+                // caller writes would hand a page in a loop as many
+                // buckets as it cared to name.
+                let peer = crate::serve::httputil::peer_ip(req);
+                resolve_nzblnk(d, &l, &cat, prio, pw.as_deref(), dupe_ok, peer)
             }
         }
     })
@@ -1407,7 +1416,7 @@ pub(in crate::serve) fn retry_kept_notice(d: &Arc<Daemon>, path: &str) -> Value 
             restore(note);
             json!({"status": false, "error": e.to_string()})
         }
-        Ok(nzo_id) => {
+        Ok(Enqueued { nzo_id, .. }) => {
             // Spent: the notice has done its job, and the spool copy it
             // was holding is now `enqueue`'s problem (it writes its
             // own). Same three steps `spend_kept_notice` takes - the

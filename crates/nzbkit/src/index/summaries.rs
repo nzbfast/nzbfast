@@ -43,8 +43,8 @@
 //!    rekey/evict passes, migrations), several of them unbounded bulk
 //!    statements. Rather than teach each one to fold - the N8 shape,
 //!    which works there because `files` has five writers - the touched
-//!    keys are collected by SQL triggers into [`title_dirty`], and
-//!    [`Index::drain_title_dirty`] recomputes them. A key nobody
+//!    keys are collected by SQL triggers into the `title_dirty` table,
+//!    and [`Index::drain_title_dirty`] recomputes them. A key nobody
 //!    drained is a key the read path refuses to serve from the summary
 //!    (see [`Index::summaries_fresh`]), so staleness costs latency,
 //!    never a wrong answer.
@@ -128,6 +128,8 @@ pub(crate) struct TitleSummary {
 /// recomputes, and the fold is the measured next step (see the C3
 /// writeup). Tested against `recompute` so the step is a wiring change
 /// and not a design one.
+// Not #[expect]: the unit tests exercise it, so the expectation is
+// unfulfilled under cfg(test).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelFacts {
@@ -146,6 +148,8 @@ pub(crate) struct RelFacts {
 }
 
 /// Rust twin of [`RES_RANK`], held to it by a differential test.
+// Not #[expect]: the unit tests exercise it, so the expectation is
+// unfulfilled under cfg(test).
 #[allow(dead_code)] // see RelFacts: the fold half is not wired yet.
 pub(crate) fn res_rank(res: &str) -> i64 {
     match res {
@@ -229,6 +233,8 @@ impl TitleSummary {
     /// previous contribution, `None` when the release is new to the
     /// key; the function returns false when it refuses the fold, having
     /// changed nothing.
+    // Not #[expect]: the unit tests exercise it, so the expectation is
+    // unfulfilled under cfg(test).
     #[allow(dead_code)] // see RelFacts: the fold half is not wired yet.
     pub(crate) fn apply_release(&mut self, old: Option<&RelFacts>, new: &RelFacts) -> bool {
         if let Some(o) = old {
@@ -272,6 +278,8 @@ impl TitleSummary {
     /// in [`Self::apply_release`] where `latest` has already absorbed
     /// the new row. Read before that assignment, so it is called on the
     /// pre-update value.
+    // Not #[expect]: the unit tests exercise it, so the expectation is
+    // unfulfilled under cfg(test).
     #[allow(dead_code)] // see RelFacts: the fold half is not wired yet.
     fn latest_field_for_rep(&self) -> i64 {
         self.latest
@@ -298,6 +306,25 @@ pub(crate) fn ensure_schema(db: &Connection) -> rusqlite::Result<()> {
             |_| Ok(()),
         )
         .is_ok();
+    // DDL and seed in ONE transaction. Autocommit would let a seed that
+    // dies leave the tables installed and EMPTY, which is the one state
+    // the read path trusts and cannot detect: `summaries_fresh` sees an
+    // empty dirty set beside an empty summary and answers zero cards
+    // forever, because the next call is no longer a fresh install.
+    // SQLite's DDL is transactional, so the rollback takes the tables
+    // and triggers with it and the next call installs from scratch.
+    let tx = db.unchecked_transaction()?;
+    install_schema(&tx)?;
+    if fresh_install {
+        seed(&tx)?;
+    }
+    tx.commit()
+}
+
+/// The tables, indexes and triggers themselves - [`ensure_schema`]'s
+/// DDL half, split out to keep that function inside the size ceiling.
+/// Every statement is `IF NOT EXISTS`, so this is the idempotent part.
+fn install_schema(db: &Connection) -> rusqlite::Result<()> {
     // `title_dirty` first: the triggers reference it, and a trigger
     // whose table is missing fails the WRITE, not the read.
     db.execute_batch(
@@ -355,11 +382,7 @@ pub(crate) fn ensure_schema(db: &Connection) -> rusqlite::Result<()> {
                SELECT NEW.title_key WHERE NEW.title_key <> ''
                                       AND NEW.title_key <> OLD.title_key;
            END;",
-    )?;
-    if fresh_install {
-        seed(db)?;
-    }
-    Ok(())
+    )
 }
 
 /// Build every summary row in one pass and leave the dirty set empty:
@@ -1764,6 +1787,69 @@ mod tests {
                 false,
                 "",
             ),
+        );
+        teardown(&dir, ix);
+    }
+
+    /// An install that dies part-way must leave NOTHING behind. The
+    /// tables and the seed are one transaction, so a failed seed rolls
+    /// the tables back and the next call is a fresh install again -
+    /// where autocommit would leave an installed, empty summary beside
+    /// an empty dirty set, which reads as "this catalogue has no cards"
+    /// forever.
+    ///
+    /// The fault is injected by putting a VIEW where `title_dirty`
+    /// goes: `CREATE TABLE IF NOT EXISTS` steps over it silently and
+    /// the seed's own `DELETE FROM title_dirty` is what fails.
+    #[test]
+    fn a_failed_install_leaves_no_tables_behind() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-c3-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        put(
+            &ix,
+            (
+                1,
+                "t:atomic",
+                "tv",
+                1_700_000_100,
+                500,
+                "1080p",
+                true,
+                0,
+                false,
+                "",
+            ),
+        );
+        ix.db
+            .execute_batch("CREATE VIEW title_dirty AS SELECT title_key FROM releases WHERE 0;")
+            .unwrap();
+        assert!(
+            ensure_schema(&ix.db).is_err(),
+            "the injected fault did not fail the install"
+        );
+        assert!(
+            ix.db
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='title_summaries'",
+                    [],
+                    |_| Ok(())
+                )
+                .is_err(),
+            "an installed, empty summary survived a failed seed"
+        );
+        // With the fault removed the next call is a fresh install
+        // again, and it seeds.
+        ix.db.execute_batch("DROP VIEW title_dirty;").unwrap();
+        ensure_schema(&ix.db).unwrap();
+        assert_eq!(
+            ix.db
+                .query_row("SELECT COUNT(*) FROM title_summaries", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "the retry did not seed"
         );
         teardown(&dir, ix);
     }

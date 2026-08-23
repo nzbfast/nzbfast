@@ -22,8 +22,7 @@ pub(super) const SAB_VERSION: &str = "4.5.0";
 /// Minutes until a timed pause auto-resumes (SAB's `pause_int`).
 pub(super) fn pause_int(d: &Daemon) -> String {
     d.pause_until
-        .lock()
-        .unwrap()
+        .lock_ok()
         .map(|t| {
             t.saturating_duration_since(Instant::now())
                 .as_secs()
@@ -90,8 +89,7 @@ pub(super) fn sab_warnings(
     // that never finishes.
     let waiting: Vec<String> = d
         .queue
-        .lock()
-        .unwrap()
+        .lock_ok()
         .iter()
         .filter_map(|j| {
             let g = j.lock_ok();
@@ -621,67 +619,29 @@ fn watch_failed_json(d: &Daemon) -> Vec<Value> {
 
 /// The queue payload's notice rings, built outside the `json!` literal.
 ///
-/// Six lists that share one job - telling the user about something that
+/// Two lists that share one job - telling the user about something that
 /// happened while nobody was looking - and one shape: a ring the dashboard
 /// drains. Split out of `queue_json` for the size gate (TODO 106); they
 /// touch nothing else in that function, which is why they are the cut.
 ///
-/// The first five are toast-once and narrate a moment that is over. The
-/// last is not: `delete_kept` describes a folder that is still on disk, so
-/// the page keeps showing it until the user dismisses it.
+/// Not one of them is toast-once any more. Each describes a STATE the
+/// user can still act on, so the page keeps it on screen until they do:
+/// files still sitting in the watch folder, a deleted record's folder
+/// still on disk, history rows that kept their original labels.
+///
+/// §129 1b(b) emptied this struct of the other sort: a moment that is
+/// OVER belongs on the sequence-cursored event ring (`life_emit`), not in
+/// a bounded array the client has to diff against a seen-set of its own.
+/// `giveup_tripped` went first, then `watch_picked`, `auto_retried` and
+/// `watch_upgraded`.
 struct QueueNotices {
     watch_failed: Vec<Value>,
-    watch_picked: Vec<Value>,
-    auto_retried: Vec<Value>,
-    giveup_tripped: Vec<Value>,
-    watch_upgraded: Vec<Value>,
     delete_kept: Vec<Value>,
     hist_upgraded: Value,
 }
 
 fn queue_notices(d: &Daemon) -> QueueNotices {
     let watch_failed = watch_failed_json(d);
-    // Recent watch-folder pickups, newest last. The dashboard toasts the
-    // ones stamped after its own first poll, so a page opened later never
-    // replays old events. Like watch_failed, built outside json!.
-    let watch_picked: Vec<Value> = d
-        .watch_picked
-        .lock_ok()
-        .iter()
-        .map(|(name, folder, at)| json!({"name": name, "folder": folder, "at": at}))
-        .collect();
-    // M32: automatic retries that have just re-queued. Same ring shape,
-    // same one-toast-each contract - see `Daemon::auto_retried`.
-    let auto_retried: Vec<Value> = d
-        .auto_retried
-        .lock_ok()
-        .iter()
-        .map(|(id, name, at)| json!({"nzo_id": id, "name": name, "at": at}))
-        .collect();
-    // §96.3: targets the give-up breaker has just stopped chasing,
-    // toasted the same way and for the same reason - the show stops
-    // arriving, and until now only a log line said so.
-    let giveup_tripped: Vec<Value> = d
-        .giveup_tripped
-        .lock_ok()
-        .iter()
-        .map(|(name, count, at)| json!({"name": name, "count": count, "at": at}))
-        .collect();
-    // Watchlist delete_old upgrades that removed the superseded copy,
-    // newest last - toasted the same way pickups are, because a whole
-    // completed download (and its history row) disappearing deserves at
-    // least one sentence in front of the user. `fate` picks between
-    // "went to the Trash", "was deleted" and "is still on disk" - the
-    // page must not promise a Trash the delete did not use, nor a delete
-    // the Trash refused to make.
-    let watch_upgraded: Vec<Value> = d
-    .watch_upgraded
-    .lock_ok()
-    .iter()
-    .map(|(name, old, oldq, fate, at)| {
-        json!({"name": name, "old": old, "oldq": oldq, "fate": fate, "at": at})
-    })
-    .collect();
     // Deletes that removed the record but not the files. NOT a
     // toast-once ring like the four above: those narrate a moment that
     // is over, this one describes a folder that is still there, so the
@@ -711,10 +671,6 @@ fn queue_notices(d: &Daemon) -> QueueNotices {
         .unwrap_or(Value::Null);
     QueueNotices {
         watch_failed,
-        watch_picked,
-        auto_retried,
-        giveup_tripped,
-        watch_upgraded,
         delete_kept,
         hist_upgraded,
     }
@@ -749,6 +705,9 @@ struct SlotCtx {
     /// fetching refinement needs: the hub owner, an open stall episode, and
     /// the per-server pool view.
     activity_map: std::collections::HashMap<String, &'static str>,
+    /// TODO 205: the disk-unpack ladder's live counters per job, so a
+    /// row that says "unpacking" can say how much of it is left.
+    unpack_map: std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>,
     active_id: Option<String>,
     stall: Option<(String, Instant)>,
     pool_view: Vec<(String, usize, u64)>,
@@ -772,7 +731,6 @@ struct SlotCtx {
 /// `SlotCtx` its caller took once before the queue lock and the numbers
 /// that caller already derived under this slot's lock. Everything that has
 /// to be one instant stays one instant, because nothing here can re-read.
-#[allow(clippy::too_many_arguments)]
 fn slot_json(
     ctx: &SlotCtx,
     i: usize,
@@ -791,6 +749,7 @@ fn slot_json(
         speed_bps,
         sc,
         activity_map,
+        unpack_map,
         active_id,
         stall,
         pool_view,
@@ -1018,6 +977,19 @@ fn slot_json(
         "activity": activity,
         "activity_detail": activity_detail,
         "activity_secs": activity_secs,
+        // TODO 205: and, while the DISK unpack ladder runs, how far
+        // through it this row is. Absent on every other row and on
+        // every other stage - the page falls back to the bare
+        // "unpacking" phrase it has always shown. `volumes` is the
+        // count that landed on disk (issue #47 asked for it by name);
+        // `total` is 0 until the first volume set has been parsed, so
+        // the page has a shape for "the count is known, the bytes are
+        // not" as well as one for both.
+        "unpack": unpack_map.get(&j.nzo_id).map(|p| json!({
+            "volumes": p.volumes(),
+            "done": p.done(),
+            "total": p.total(),
+        })).unwrap_or(Value::Null),
         "priority": priority_name(j.priority),
         // Truth-audit I: the canonical name an oracle gave this
         // release, on the QUEUE row and not just in history. A
@@ -1104,6 +1076,11 @@ use prelock::{PreLock, prelock_reads};
 mod walk;
 use walk::{QueueView, QueueWalk, queue_walk};
 
+// The GroupDelete arm of `jr_editqueue`, a child module: see
+// sabcompat/editqueue_delete.rs.
+mod editqueue_delete;
+use editqueue_delete::group_delete;
+
 pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, String>) -> Value {
     // Everything read BEFORE the queue lock: see prelock_reads. The
     // destructure keeps every downstream read on the inline names. This
@@ -1120,6 +1097,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         hold_quota_spent,
         sc,
         activity_map,
+        unpack_map,
         active_id,
         stall,
         pool_view,
@@ -1185,6 +1163,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         speed_bps,
         sc,
         activity_map,
+        unpack_map,
         active_id,
         stall,
         pool_view,
@@ -1247,8 +1226,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
     // Minutes until a timed pause auto-resumes (SAB's pause_int).
     let pause_int = d
         .pause_until
-        .lock()
-        .unwrap()
+        .lock_ok()
         .map(|t| {
             t.saturating_duration_since(Instant::now())
                 .as_secs()
@@ -1312,8 +1290,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // every second, so the chip appears without a dedicated poll.
         "update_version": d
             .update_manifest
-            .lock()
-            .unwrap()
+            .lock_ok()
             .as_ref()
             .and_then(|m| m.get("version").cloned())
             .unwrap_or(Value::Null),
@@ -1390,10 +1367,6 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         "whyslow": d.whyslow.payload(d),
         "auto_speed": d.auto_speed.load(Ordering::Relaxed),
         "watch_failed": notices.watch_failed,
-        "watch_picked": notices.watch_picked,
-        "auto_retried": notices.auto_retried,
-        "giveup_tripped": notices.giveup_tripped,
-        "watch_upgraded": notices.watch_upgraded,
         "delete_kept": notices.delete_kept,
         "hist_upgraded": notices.hist_upgraded,
         // Already exactly the window the caller asked for - applied
@@ -1586,8 +1559,7 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
         // total.
         let queued_remaining: u64 = d
             .queue
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .filter_map(|j| {
                 let g = j.lock_ok();
@@ -1645,8 +1617,7 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
     {
         let groups: Vec<Value> = d
             .queue
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .map(|j| {
                 let g = j.lock_ok();
@@ -1667,24 +1638,13 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
                     .then(|| d.tail_phase(&g.nzo_id))
                     .flatten();
                 let tail = phase.is_some();
+                // The same pairing the SAB queue's active_left takes -
+                // the two compat surfaces must not disagree about the
+                // same job's percentage.
                 let live = (g.state == JobState::Downloading)
                     .then(|| {
-                        let owner = d.active_dl.lock_ok();
-                        (owner.as_deref() == Some(g.nzo_id.as_str())).then(|| {
-                            // UX §15 pair first, exactly as the SAB
-                            // queue's active_left takes it - the two
-                            // compat surfaces must not disagree about
-                            // the same job's percentage.
-                            d.hub
-                                .fetch_left()
-                                .map(|(done, plan, _)| (done, plan))
-                                .unwrap_or((
-                                    d.progress.load(Ordering::Relaxed).saturating_add(
-                                        d.hub.resume_seeded.load(Ordering::Relaxed),
-                                    ),
-                                    d.active_total.load(Ordering::Relaxed).max(1),
-                                ))
-                        })
+                        d.wire_counters(&g.nzo_id)
+                            .map(|(done, total, _)| (done, total))
                     })
                     .flatten();
                 // On the wire right now, as opposed to merely still
@@ -1787,8 +1747,7 @@ fn jr_history(d: &Arc<Daemon>) -> Value {
     {
         let entries: Vec<Value> = d
             .history
-            .lock()
-            .unwrap()
+            .lock_ok()
             .iter()
             .rev()
             .map(|j| {
@@ -1976,7 +1935,7 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                         &api_origin(ua_hdr, "arr"),
                         false,
                     ) {
-                        Ok(nzo) => json!(nzo_int(&nzo)),
+                        Ok(Enqueued { nzo_id: nzo, .. }) => json!(nzo_int(&nzo)),
                         Err(e) => {
                             // `fetch_url`'s errors are formatted "{url}:
                             // ..." and an NZB link routinely carries the
@@ -2016,7 +1975,7 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                 &api_origin(ua_hdr, "arr"),
                 false,
             ) {
-                Ok(nzo) => {
+                Ok(Enqueued { nzo_id: nzo, .. }) => {
                     if !pp.is_empty() {
                         for j in d.queue.lock_ok().iter() {
                             let mut g = j.lock_ok();
@@ -2068,8 +2027,6 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
             .find_map(Value::as_str)
             .unwrap_or("")
             .to_string();
-        // NZBGet addresses jobs by the numeric half of the nzo_id.
-        let hit_id = |id: &str| ids.contains(&nzo_int(id));
         let mut ok = false;
         match cmd {
             // Body in api/remote.rs, with the tail-guard, suspend and
@@ -2078,297 +2035,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 ok = super::api::remote::pause_by_ids(d, &ids, cmd == "GroupPause");
             }
             "GroupDelete" | "GroupDupeDelete" | "GroupFinalDelete" | "GroupParkDelete" => {
-                // M5 (14 Aug sweep): one arm, four distinct NZBGet
-                // contracts. Per nzbget.com/documentation/api/editqueue
-                // and the nzbgetcom ChangeLog:
-                //   GroupDelete      files gone,  history row DELETED/MANUAL
-                //   GroupDupeDelete  files gone,  history row DELETED/DUPE
-                //   GroupFinalDelete files gone,  NO history row
-                //   GroupParkDelete  files KEPT,  history row DELETED/MANUAL
-                // Sonarr and Radarr cancel with GroupFinalDelete, so the
-                // files half is what stops a cancelled partial download
-                // leaving orphaned payload nothing names.
-                let del_files = cmd != "GroupParkDelete";
-                let hist_status = match cmd {
-                    "GroupDupeDelete" => "DUPE",
-                    "GroupFinalDelete" => "",
-                    _ => "MANUAL",
-                };
-                // A deleted job's prefetch sidecar must stop writing to
-                // its directory - the *arrs delete through here, so this
-                // is an ordinary path, not a corner of one.
-                d.poke_sidecar(hit_id);
-                // ...and a job the sidecar is RUNNING still has live
-                // writers, however queued its row looks. Snapshotted
-                // here, before the queue lock: reading the sidecar mutex
-                // inside `q.retain` would take it under queue+job, a
-                // lock edge nothing else in the daemon has.
-                let sidecar_owner = d.sidecar_owner();
-                // §129, same as the REST arm: a Finishing job's repair
-                // must stop pulling recovery volumes. The hub abort at
-                // the bottom cannot do it - it is scoped to the hub's
-                // owner, and a job in the lane is not that.
-                d.cancel_tail_fetches(hit_id);
-                let mut stopped_active = false;
-                // Which job was on the wire: the stop signal is aimed by
-                // nzo_id, same as the REST arm.
-                let mut stopped_ids: Vec<String> = Vec::new();
-                // Slow work is collected under the queue lock and done
-                // after it, exactly like the SAB delete arm and for the
-                // reasons written there: file removal can hold locks for
-                // a Trash call's timeout, and the notice lock is a leaf.
-                let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
-                let mut doomed: Vec<(String, std::path::PathBuf, bool, crate::smart::FiledTail)> =
-                    Vec::new();
-                // The same, for the one job whose writers are the
-                // sidecar's: removed only once that has wound down.
-                let mut pending_sidecar: Vec<(
-                    String,
-                    std::path::PathBuf,
-                    bool,
-                    crate::smart::FiledTail,
-                )> = Vec::new();
-                // Jobs owed a history row, filed after the queue lock
-                // drops - park() pushes to history without the queue
-                // lock held, and this path keeps that order.
-                let mut to_history: Vec<Arc<Mutex<Job>>> = Vec::new();
-                // The releases this verb removes (the *arr's cancel is
-                // the same statement), and the spool copies a refused
-                // removal may still owe the notice. Both are settled
-                // after the lock - see the REST arm, which carries the
-                // rationale for each.
-                let mut deleted_names: Vec<String> = Vec::new();
-                let mut nzb_by_dir = std::collections::HashMap::new();
-                // Active jobs owed a history row park cannot file until
-                // its pipeline drains: they get a durable placeholder
-                // row instead, written before the save_queue at the end
-                // of this handler publishes their absence (M1).
-                let mut prewrite: Vec<Arc<Mutex<Job>>> = Vec::new();
-                // ...but "before the save_queue at the end of this
-                // handler" was only ever true of THIS handler's save.
-                // The row leaves the queue on the next line, the
-                // placeholder is a file write and cannot go under the
-                // queue mutex, and any other mutation's save - the
-                // coalescing saver's own thread included - could land
-                // in between and publish a queue.json the record had
-                // already left while nothing in history named it yet. A
-                // stop right there lost the record from BOTH stores
-                // (read-only sweep 2, M8). Held until every replacement
-                // row is durable, so no save can describe the gap.
-                // IO then queue, the order `save_queue` takes them in.
-                let publish_hold = Daemon::hold_queue_writes();
-                let mut q = d.queue.lock_ok();
-                let before = q.len();
-                q.retain(|j| {
-                    let mut g = j.lock_ok();
-                    if ids.contains(&nzo_int(&g.nzo_id)) {
-                        // ...but not the backup copy: see
-                        // `is_held_alternative`.
-                        if !is_held_alternative(&g) {
-                            deleted_names.push(g.name.clone());
-                        }
-                        let active = g.state == JobState::Downloading;
-                        let lane = g.state == JobState::Finishing;
-                        g.delete_status = hist_status.to_string();
-                        if active {
-                            // The pipeline is running - abort below,
-                            // park() finishes the job's cleanup once the
-                            // fetch drains: it removes the files if
-                            // del_on_drop asks, and files the record into
-                            // history when delete_status asks (or drops
-                            // it, the pre-M5 shape, when it is empty).
-                            g.tombstone = true;
-                            stopped_active = true;
-                            stopped_ids.push(g.nzo_id.clone());
-                            // ...but park is a long way off - the fetch
-                            // has to drain and the deferred file removal
-                            // has to run (unbounded on a hung NAS)
-                            // before it writes anything durable, while
-                            // the save_queue at the end of THIS handler
-                            // publishes a queue.json the row has already
-                            // left. A kill in between and the record is
-                            // in neither store: no DELETED row for the
-                            // dupe check or the retry button, and for
-                            // GroupParkDelete a kept payload nothing
-                            // names (M1). Collected here, written after
-                            // the lock drops - a file write has no
-                            // business under the queue mutex.
-                            if !hist_status.is_empty() {
-                                prewrite.push(j.clone());
-                            }
-                        } else {
-                            // Tombstoned even though it is leaving the
-                            // queue right here: a queued job can still be
-                            // running in the prefetch sidecar, and an Ok
-                            // that lands after this would otherwise run
-                            // the whole completion tail and park the
-                            // deleted job a second time.
-                            g.tombstone = true;
-                            if hist_status.is_empty() {
-                                // FinalDelete: no history row, so the
-                                // spooled NZB is dead weight - unless a
-                                // refused removal needs it back.
-                                hold_or_drop_spool(
-                                    del_files,
-                                    &g.out_dir,
-                                    &g.nzb_path,
-                                    &mut nzb_by_dir,
-                                );
-                            } else {
-                                // The record becomes a history row now.
-                                // Stamped here, not rendered on the fly:
-                                // both facades and the dashboard read
-                                // these fields.
-                                g.state = JobState::Failed;
-                                g.fail_message = if hist_status == "DUPE" {
-                                    "deleted from the queue as a duplicate".into()
-                                } else {
-                                    "deleted from the queue".into()
-                                };
-                                g.finished_at = Some(std::time::Instant::now());
-                                g.finished_unix = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .ok()
-                                    .map(|t| t.as_secs() as i64);
-                                to_history.push(j.clone());
-                            }
-                        }
-                        if del_files {
-                            if active || lane || g.finalizing {
-                                // Writers are still live; removing now
-                                // lets the next positioned write recreate
-                                // the files. Defer to park(), reserving
-                                // the directory so `dir_claim` cannot
-                                // hand it out in the gap - the SAB arm
-                                // documents both halves.
-                                g.del_on_drop = true;
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                            } else if sidecar_owner
-                                .as_ref()
-                                .is_some_and(|(id, _)| *id == g.nzo_id)
-                            {
-                                // A prefetching job is Queued and not
-                                // finalizing, so it fell into the arm
-                                // below and had its directory removed
-                                // while the sidecar was still writing
-                                // into it - and the next file's first
-                                // article recreated it (M2). Same
-                                // reservation, released by the drain.
-                                let tail = delete_tail(&g, || d.job_suffix(filed_stem(&g)));
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                                pending_sidecar.push((
-                                    filed_stem(&g).to_string(),
-                                    g.out_dir.clone(),
-                                    g.filed,
-                                    tail,
-                                ));
-                            } else {
-                                let tail = delete_tail(&g, || d.job_suffix(filed_stem(&g)));
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                                doomed.push((
-                                    filed_stem(&g).to_string(),
-                                    g.out_dir.clone(),
-                                    g.filed,
-                                    tail,
-                                ));
-                            }
-                        }
-                        false
-                    } else {
-                        true
-                    }
-                });
-                ok = q.len() < before;
-                drop(q);
-                // The rows are gone from the live queue and every
-                // durable replacement is still ahead of us.
-                #[cfg(test)]
-                {
-                    let spool = d.spool.display().to_string();
-                    let seam = DELETE_PREWRITE_BARRIER
-                        .lock_ok()
-                        .clone()
-                        .filter(|(k, _, _)| *k == spool);
-                    if let Some((_, open, release)) = seam {
-                        open.wait();
-                        release.wait();
-                    }
-                }
-                // The active job's placeholder goes down first, and in
-                // any case before this handler's save_queue publishes
-                // the queue without it.
-                for j in &prewrite {
-                    d.delete_prewrite(j, hist_status);
-                }
-                // History first, so a poll that races the delete sees the
-                // row appear rather than the job vanish and return.
-                if !to_history.is_empty() {
-                    d.history.lock_ok().extend(to_history.iter().cloned());
-                    let _ = d.history_upsert(&to_history);
-                }
-                // Every record this handler removed now has a durable
-                // row of its own, so saves may resume. Retention runs
-                // outside the hold - it prunes, it does not replace.
-                drop(publish_hold);
-                if !to_history.is_empty() {
-                    d.history_enforce_retention();
-                }
-                // The slow half, with no global lock held. Reservations
-                // release after the WHOLE batch (`reserved` is a set; two
-                // entries naming one directory are one member).
-                let reserved_dirs: Vec<std::path::PathBuf> =
-                    doomed.iter().map(|(_, dir, _, _)| dir.clone()).collect();
-                for (name, dir, filed, tail) in doomed {
-                    if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
-                        kept.push((name, dir, why));
-                    }
-                }
-                {
-                    let mut r = d.reserved.lock_ok();
-                    for dir in &reserved_dirs {
-                        r.remove(dir);
-                    }
-                }
-                // A refused removal with the queue row already gone is
-                // invisible unless the notice names it.
-                note_kept_files(d, kept, &mut nzb_by_dir);
-                d.note_releases_deleted(&deleted_names);
-                // The sidecar's job waits for the sidecar. Its own
-                // reservation is released by the drain, not by the batch
-                // above - the removal is still ahead of it.
-                if let Some((_, target)) = sidecar_owner {
-                    for (name, dir, filed, tail) in pending_sidecar {
-                        d.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
-                    }
-                }
-                // `owns_hub`, exactly as the REST arm does it, and for
-                // the reason spelled out there: `state == Downloading`
-                // is NOT the owner test. A job whose network leg has
-                // finished still reads Downloading through its
-                // verify/repair/unpack tail, by which time the
-                // scheduler has handed the hub to the NEXT job -
-                // so deleting the finished one aborted a healthy,
-                // unrelated download, which then failed permanently
-                // (a Local fail_kind is not `transient()`, so nothing
-                // retried it) and fired its pp-script, failure
-                // notification and failure re-grab.
-                //
-                // The REST path was fixed for this; the JSON-RPC
-                // facade is a hand-copy that never got it, so which
-                // client type the user configured in Sonarr decided
-                // whether the bug was reachable - the same shape the
-                // shared queue primitives were extracted to end.
-                //
-                // Shared with the REST arm now rather than hand-copied a
-                // fourth time, which is also how it inherits the re-fire
-                // the single shot needed - see `stop_deleted_transfer`.
-                super::api::queue::stop_deleted_transfer(d, stopped_ids);
-                // Shared with the REST delete rather than hand-copied a
-                // third time - the rationale (and the active-deletion
-                // exception) lives on the helper.
-                if ok {
-                    super::api::queue::note_queue_idle_unless_active(d, stopped_active);
-                }
+                ok = group_delete(d, cmd, &ids);
             }
             "GroupMoveTop" | "GroupMoveBottom" => {
                 let mut q = d.queue.lock_ok();
@@ -2504,8 +2171,18 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                         let g = j.lock_ok();
                         let hit = ids.contains(&nzo_int(&g.nzo_id));
                         if hit {
-                            // Record deleted for good - drop its spooled .nzb.
-                            let _ = std::fs::remove_file(&g.nzb_path);
+                            // Record deleted for good - drop its spooled
+                            // .nzb. Through `drop_spool` rather than a
+                            // swallowed `remove_file` (Codex sweep F-05):
+                            // the row is gone durably by the time this
+                            // returns, so a copy whose unlink is REFUSED
+                            // is a file under the adoptable name that no
+                            // record names, and `recover_orphaned_spool`
+                            // downloads the deleted release again at the
+                            // next start. The REST history delete has gone
+                            // through `hold_or_drop_spool` since that fix;
+                            // this facade is the hand-copy that did not.
+                            drop_spool(&g.nzb_path);
                             gone.push(g.nzo_id.clone());
                         }
                         !hit
@@ -2518,8 +2195,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
             "HistoryRedownload" | "HistoryReturn" | "HistoryRetry" => {
                 let jobs: Vec<String> = d
                     .history
-                    .lock()
-                    .unwrap()
+                    .lock_ok()
                     .iter()
                     .filter(|j| ids.contains(&nzo_int(&j.lock_ok().nzo_id)))
                     .map(|j| j.lock_ok().nzo_id.clone())
@@ -2574,14 +2250,7 @@ fn jr_config(d: &Arc<Daemon>, _rpc_error: &mut Option<String>) -> Value {
             json!({"Name": "AppVersion", "Value": "21.0"}),
             json!({"Name": "KeepHistory", "Value": "7"}),
         ];
-        for (i, c) in d
-            .cats
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| *c != "*")
-            .enumerate()
-        {
+        for (i, c) in d.cats.lock_ok().iter().filter(|c| *c != "*").enumerate() {
             let n = i + 1;
             cfg.push(json!({"Name": format!("Category{n}.Name"), "Value": c}));
             cfg.push(json!({
@@ -2800,7 +2469,7 @@ pub(super) fn handle_jsonrpc(
         "rate" => {
             // NZBGet rate is KB/s; 0 = unlimited.
             let kb = params.first().and_then(Value::as_u64).unwrap_or(0);
-            d.set_speed_ceiling_from(kb * 1024, "api");
+            d.set_speed_ceiling_from(kb.saturating_mul(1024), "api");
             json!(true)
         }
         "append" => jr_append(d, &params, &ua_hdr),
@@ -2814,7 +2483,12 @@ pub(super) fn handle_jsonrpc(
         "servervolumes" => json!([]),
         "log" | "loadlog" => {
             let n = params.get(1).and_then(Value::as_u64).unwrap_or(100) as usize;
-            let lines = nzbkit::logtee::tail(n.min(1000));
+            // §163 item 5: scrubbed on the way out. This tail used to go
+            // into the response verbatim, which made it the one door
+            // every credential that reached the ring by some path we did
+            // not guard could leave by - and it is a door remote apps
+            // call over the network.
+            let lines = super::logscrub::LogScrub::new(d).tail(nzbkit::logtee::tail(n.min(1000)));
             let now = unix_now();
             let entries: Vec<Value> = lines
                 .iter()
@@ -2851,3 +2525,10 @@ mod tail_truth_tests;
 
 #[cfg(test)]
 mod delete_durability_tests;
+
+// Unix-gated at the declaration: its one test forces the unlink
+// refusal with a read-only directory, which Windows mode bits do not
+// express - on Windows the file's import and fixture are dead code and
+// windows-clippy's -D warnings reds on them.
+#[cfg(all(test, unix))]
+mod history_custody_tests;

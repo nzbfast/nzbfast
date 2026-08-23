@@ -54,8 +54,12 @@ pub(in crate::serve) use daemon_park::SidecarTailGuard;
 mod daemon_shutdown;
 pub(in crate::serve) use daemon_shutdown::*;
 
+// §131 D3's search-miss log, whole: every write in it needs the index,
+// so the module is gated rather than each item in it.
+#[cfg(feature = "indexer")]
 #[path = "searchlog.rs"]
 mod searchlog;
+#[cfg(feature = "indexer")]
 pub use searchlog::*;
 
 /// How many index reads may be in flight at once.
@@ -238,6 +242,15 @@ pub(super) struct CatMeta {
     /// already has a home: this struct, one editor row, one saved map.
     #[serde(default)]
     pub nzb_name: Option<bool>,
+    /// TODO 218: auto-assignment. Comma-separated patterns (regex or
+    /// keyword, Smart Folders rules) matched against the NZB's own
+    /// `<meta type="category">` and its newsgroups when an add names no
+    /// category - SABnzbd's "Indexer Categories / Groups" field, which is
+    /// what a reporter moving over from SAB missed first. Matching an
+    /// NZB's meta category to a category's own NAME needs no pattern at
+    /// all (see [`Daemon::infer_category`]).
+    #[serde(default)]
+    pub groups: String,
 }
 
 pub struct Daemon {
@@ -318,6 +331,31 @@ pub struct Daemon {
     /// pick so it can be said again. Without the latch every park of a
     /// quiet queue would repeat it.
     pub queue_idle_latch: AtomicBool,
+    /// §129 4a: post-processing tickets the lane has taken custody of
+    /// and not yet parked (running + waiting). `PostprocLane` owns the
+    /// increments; the counter lives HERE because `note_queue_idle` has
+    /// to read it and the lane is the runner's, not the daemon's.
+    ///
+    /// It is what stops `queue.idle` being said over a tail that is
+    /// still finishing. The scan below it asks the QUEUE, and a tail
+    /// leaves that scan's sight twice before its `job.completed` is
+    /// emitted: the row goes `Completed` early in `run_tail` (matching
+    /// neither state arm, exactly the hole `finish_action::drain_blocker`
+    /// grew `finalizing` for), and then `park_gen` retains it out of the
+    /// queue a hundred lines before it files it into history. Two
+    /// overlapping tails is all it takes - A's park announced the drain
+    /// inside B's, so `queue.idle` landed between the two
+    /// `job.completed`s, with B in neither list for a subscriber that
+    /// went looking (23 Aug 2026).
+    ///
+    /// A counter and not a queue predicate because the failure modes are
+    /// not symmetric: over-counting delays the event by one tail, while
+    /// a terminal row that never leaves the queue would suppress a
+    /// CONTRACT event (the queue-finished action, the webhooks) for the
+    /// life of the daemon, silently. This one is paid back by
+    /// `BacklogTicket`'s Drop, so a panicked or dropped supervisor
+    /// cannot strand it.
+    pub(super) postproc_backlog: Arc<AtomicUsize>,
     pub(super) finish: finish_action::FinishState,
     /// Issue #38 follow-up: the coalesced-save dirty flag. A completion
     /// used to call `save_queue` four times (postproc submit, finalize
@@ -416,7 +454,19 @@ pub struct Daemon {
     /// consulted by `dir_claim` as Active.
     pub reserved: Mutex<std::collections::HashSet<PathBuf>>,
     /// Decoded bytes of the ACTIVE job (shared with the get pipeline).
-    pub progress: Arc<AtomicU64>,
+    /// One counter PER JOB since the cross-job hand-over: job N's
+    /// pipeline keeps counting its last in-flight articles into the
+    /// handle it took at its start after job N+1 has claimed this cell,
+    /// so the cell is re-pointed at a fresh counter per job rather than
+    /// zeroed. See [`ProgressCell`].
+    pub progress: ProgressCell,
+    /// The previous job while it is still draining behind the active
+    /// one (the cross-job hand-over, `tasks/worker.rs`): its own
+    /// counters, so its row keeps reporting ITS bytes and the line-speed
+    /// window sees the whole line rather than the newest job's share of
+    /// it. None when no job is draining behind the active one. Written
+    /// in the same lock section as `active_dl`, read under it.
+    pub drain_dl: Mutex<Option<DrainSlot>>,
     pub active_total: AtomicU64,
     /// The nzo_id whose NETWORK phase owns `progress` / `active_total`
     /// right now, or None between jobs.
@@ -490,6 +540,13 @@ pub struct Daemon {
     /// is now written through to settings.
     pub cats: Mutex<std::collections::BTreeSet<String>>,
     pub port: u16,
+    /// §193 c: the listen ADDRESS this run bound with. Bind-time state
+    /// like [`port`](Self::port), not live state - the settings row
+    /// persists a new value, `pending` surfaces the difference, and a
+    /// restart applies it. Not to be confused with a server's
+    /// `bind_ip`, which picks the local address OUTGOING NNTP
+    /// connections leave from; this one is the dashboard's own listener.
+    pub bind: String,
     /// Per-start secret shared with the desktop wrapper through
     /// `runtime.json` - see [`write_runtime_file`]. Never logged, never
     /// sent: it is only ever hashed with a caller-supplied nonce, which is
@@ -720,7 +777,15 @@ pub struct Daemon {
     /// all on the query path - reaching for the read-write handle
     /// there is the http_wedge class of bug. [`Daemon::note_search`]
     /// only takes this mutex; the 60 s flush task does the writing.
+    #[cfg(feature = "indexer")]
     pub search_log_buf: Mutex<std::collections::HashMap<SearchLogKey, SearchLogPending>>,
+    /// TODO 166: a "forget every recorded search" that could not get the
+    /// write mutex inside `HTTP_INDEX_WAIT`, waiting to be run on the
+    /// writer's own thread by [`Daemon::search_log_tick`]. Only the
+    /// SWITCH latches here - see `clear_search_log_deferred`, which
+    /// carries the argument.
+    #[cfg(feature = "indexer")]
+    pub search_log_clear_pending: std::sync::atomic::AtomicBool,
     /// §131 #6 posted-NZB ingestion (live setting index_nzbimport, ON
     /// by default): one-file `*.nzb` posts are fetched, parsed and
     /// joined against the identity substrate by message-id. The kill
@@ -894,18 +959,11 @@ pub struct Daemon {
     /// these names as an instant grab - so the record says "this was
     /// grabbed because it arrived", not "a pass happened to run".
     pub(super) instant_hint: Mutex<Vec<String>>,
-    /// When `mode=addnzblnk` last ran, newest last, trimmed to the last
-    /// [`NZBLNK_WINDOW`].
-    ///
-    /// This endpoint is the one an OS protocol handler exposes to the
-    /// open web: once `nzblnk:` is registered, any page can navigate to
-    /// one and, past the browser's own "Open nzbfast?" prompt, reach it.
-    /// A link cannot name a location - `h` is a search key, so the
-    /// daemon only ever reads its own index or the user's own indexers -
-    /// but a page in a loop can still spend two things that are not
-    /// free: the unindexed filename scan, and the user's metered
-    /// indexer quota. Sliding window, so both are bounded.
-    pub(super) nzblnk_recent: Mutex<std::collections::VecDeque<Instant>>,
+    /// The `mode=addnzblnk` rate and concurrency gate: a sliding window
+    /// per peer, plus a cap on how many resolutions run at once. See
+    /// [`NzblnkGate`], which carries the whole argument for why the one
+    /// endpoint an OS protocol handler exposes to the open web has one.
+    pub(super) nzblnk_gate: NzblnkGate,
     /// M23 Smart Folders - a live setting: rules evaluated at enqueue
     /// (first match wins) to pick the category, and remembered per-job
     /// for TV filing at completion.
@@ -1217,6 +1275,7 @@ pub struct Daemon {
     /// and the seed importer's refusal threshold, which is the point of
     /// it being one number: a cap the importer does not know about is a
     /// cap that imports rows the next prune eats.
+    #[cfg(feature = "indexer")]
     pub(super) predb_max_rows: std::sync::atomic::AtomicU64,
     /// Default history window, in days, for a seed import that does not
     /// name one. The design's 180; a bigger window costs the source
@@ -1275,9 +1334,11 @@ pub struct Daemon {
     /// the user's metered grab quota.
     pub(super) scoreboard_calibrate: std::sync::atomic::AtomicBool,
     /// A sample run is in flight (one at a time, ever).
+    #[cfg(feature = "indexer")]
     pub(super) scoreboard_running: std::sync::atomic::AtomicBool,
     /// What the scoreboard is doing / last did, for the settings card.
     /// Same contract as `predb_status`.
+    #[cfg(feature = "indexer")]
     pub(super) scoreboard_status: Mutex<String>,
     /// Spotnet spot ingestion, OFF by default and independent of
     /// `index_enabled`.
@@ -1338,16 +1399,18 @@ pub struct Daemon {
     /// Which rows the cap sheds first: "ladder" (the engine's blended
     /// junk/age/availability order), "oldest", "newest", "largest",
     /// "smallest". Validated on write, so this always holds one of those.
+    #[cfg(feature = "indexer")]
     pub index_evict_order: Mutex<String>,
     /// Restrict eviction to these release kinds ("movie", "tv",
     /// "software", "other"); empty = every kind is fair game.
+    #[cfg(feature = "indexer")]
     pub index_evict_kinds: Mutex<Vec<String>>,
     /// A prune left free pages behind and the file wants a VACUUM.
     /// Deliberately NOT acted on where it is set: VACUUM exclusive-locks
     /// and rewrites the whole database, so it waits for a genuinely idle
-    /// moment (`compact_loop`) rather than stalling a scan pass or a
-    /// download. Survives only in memory - a restart is itself an idle
-    /// moment and the next prune re-raises it.
+    /// moment (`spawn_index_compact`) rather than stalling a scan pass
+    /// or a download. Survives only in memory - a restart is itself an
+    /// idle moment and the next prune re-raises it.
     #[cfg(feature = "indexer")]
     pub compact_pending: std::sync::atomic::AtomicBool,
     /// Truth-audit I: what the last AUTOMATIC index trim removed, and
@@ -1395,6 +1458,10 @@ pub struct Daemon {
     /// enabled server not yet probed). Read-only in the settings API;
     /// written by the probe loop and manual ladder runs.
     pub tune_hint: Mutex<String>,
+    /// §210: the interface carrying traffic to the news servers, as
+    /// last probed (None = not yet, or unjudgeable: container, no
+    /// probe on this platform). Read by `update_tune_hint`.
+    pub local_link: Mutex<Option<super::locallink::LocalLink>>,
     /// CPU% sampling state for stats: (sample time, cpu-secs, last pct).
     pub(super) cpu_sample: Mutex<Option<(Instant, f64, f64)>>,
     /// Rolling (time, decoded-bytes) samples for the live speed readout -
@@ -1546,44 +1613,6 @@ pub struct Daemon {
     /// standing in the way can be reached, and matching it back up by
     /// name in the page finds the wrong row for a re-post.
     pub(super) watch_failed: Mutex<std::collections::HashMap<PathBuf, (u64, u64, String, String)>>,
-    /// Recent watch-folder ingests: (file name, source folder's display
-    /// name, unix seconds), newest last, capped small. Surfaced in
-    /// queue_json so an open dashboard can toast the pickup the moment
-    /// it happens - the consumed file vanishes from the folder (a
-    /// browser marks its download "Removed"), and without this the
-    /// disappearance had no explanation anywhere a user looks (Gary,
-    /// v1.0.14).
-    pub(super) watch_picked: Mutex<std::collections::VecDeque<(String, String, i64)>>,
-    /// M32: automatic retries that have just RE-QUEUED, as (nzo_id, name,
-    /// unix seconds), newest last, capped small. The same ring shape as
-    /// `watch_picked` and for the same reason: the moment is invisible
-    /// otherwise. A failed row is announced, sits in History for its
-    /// cooldown, then silently disappears from History and reappears in
-    /// the queue - which reads as the daemon losing the record and
-    /// starting an unasked-for download. Surfaced in queue_json; the
-    /// dashboard toasts each entry once.
-    pub(super) auto_retried: Mutex<std::collections::VecDeque<(String, String, i64)>>,
-    /// §96.3: targets the give-up breaker has just stopped chasing:
-    /// (the release that failed last, how many distinct releases had
-    /// failed, unix seconds), newest last, capped small. Same shape and
-    /// purpose as `watch_picked`: the breaker's decision only existed on
-    /// a `warn!` line, so a watched show simply stopped arriving with
-    /// nothing anywhere to say why.
-    pub(super) giveup_tripped: Mutex<std::collections::VecDeque<(String, u64, i64)>>,
-    /// Recent watchlist delete_old upgrades that removed the superseded
-    /// copy's record: (new release stem, superseded stem, superseded
-    /// quality, what became of its files, unix seconds), newest last,
-    /// capped small. The fate is `"trash"`, `"gone"` or `"kept"` - three
-    /// states, not two, because a Trash that refuses leaves the old copy
-    /// on disk and the toast must not announce a delete that did not
-    /// happen.
-    /// Same contract as `watch_picked` - surfaced in queue_json so an
-    /// open dashboard can toast the moment. The upgrade removes a
-    /// completed download AND its history row, and until this existed
-    /// two log lines were the only narration of a whole release
-    /// disappearing.
-    pub(super) watch_upgraded:
-        Mutex<std::collections::VecDeque<(String, String, String, String, i64)>>,
     /// Deletes whose RECORD went but whose FILES did not: (job name, the
     /// path still on disk, why it was refused, unix seconds), newest
     /// last, capped small. See `Daemon::note_delete_kept`.
@@ -1683,6 +1712,13 @@ pub struct Daemon {
     /// Optional OMDb key (free tier, email-only signup) - richer movie
     /// metadata in the enricher + fix-match search. Live setting.
     pub(super) omdb_key: Mutex<Option<String>>,
+    /// §193 d: optional TMDB key - the enricher's and the identifier's
+    /// second source. Lived in the config file and the `TMDB_API_KEY`
+    /// env only until this row existed, so the seed still READS both (see
+    /// `seed_tmdb_key`) and settings.json is where the UI writes.
+    /// Live: every consumer reads this mutex per lookup, so a key pasted
+    /// into the settings page starts being used without a restart.
+    pub(super) tmdb_key: Mutex<Option<String>>,
     /// Re-verify interval for parked library jobs.
     pub(super) library_recheck_secs: AtomicU64,
     /// Index scanner inputs, read each cycle.
@@ -1840,19 +1876,10 @@ pub struct TasteProfile {
     pub n_signals: u32,
 }
 
-/// §G: one news server's last refusal to authenticate, remembered past
-/// the pool that saw it.
-///
-/// [`nzbkit::pool::Refusal`] lives on the live pool, which exists only
-/// while a job is running. Copying it here at the point it is observed
-/// means the Providers card can still say "this provider rejected your
-/// sign-in" once the queue has drained - the state in which a user
-/// actually goes looking. Cleared when the same host later connects and
-/// moves bytes, so a fixed password stops being reported as broken.
-#[derive(Debug, Clone)]
 /// One daemon-owned moment for the throughput chart's marker ring -
 /// the daemon-side twin of `nzbkit::pool::PoolEvent`, minus the host
 /// (these moments belong to the whole daemon, not to one news server).
+#[derive(Debug, Clone)]
 pub struct DaemonEvent {
     /// Unix milliseconds, same clock as the pool ring and the chart's
     /// throughput samples, so all three lay on top of each other.
@@ -1935,8 +1962,9 @@ pub fn row_outage(
 /// Reported whatever the rest of the pool is doing: a dead BACKUP on an
 /// otherwise healthy job is a real fact about a paid-for provider, and
 /// the Providers card is the right place for it. The queue row applies
-/// its own extra gate (see the `server_down` activity token) so a job
-/// that is downloading fine never shouts about it.
+/// its own extra gate (see `row_outage` above, which speaks only inside
+/// an open stall episode and only past `server_down_secs`) so a job that
+/// is downloading fine never shouts about it.
 pub fn server_outages(d: &Daemon) -> Vec<ServerOutage> {
     let mut v: Vec<ServerOutage> = d
         .hub
@@ -1964,6 +1992,15 @@ pub fn server_outages(d: &Daemon) -> Vec<ServerOutage> {
     v
 }
 
+/// §G: one news server's last refusal to authenticate, remembered past
+/// the pool that saw it.
+///
+/// [`nzbkit::pool::Refusal`] lives on the live pool, which exists only
+/// while a job is running. Copying it here at the point it is observed
+/// means the Providers card can still say "this provider rejected your
+/// sign-in" once the queue has drained - the state in which a user
+/// actually goes looking. Cleared when the same host later connects and
+/// moves bytes, so a fixed password stops being reported as broken.
 #[derive(Debug, Clone)]
 pub struct ServerRefusal {
     /// True when retrying cannot help (a bad credential); false when the
@@ -1998,6 +2035,19 @@ pub struct IndexStatsCache {
     pub era: u64,
     /// A recompute is in flight on some other caller's thread.
     pub refreshing: bool,
+    /// Bumped by every explicit [`Daemon::refresh_index_stats`] (sweep
+    /// 8, L8). A flight that started before the bump is describing the
+    /// database as it was BEFORE whatever the refresher just committed,
+    /// so it may not publish itself as fresh.
+    ///
+    /// The interleaving without it: a dashboard poll begins its SQLite
+    /// reads; the scan pass commits and calls the explicit refresh,
+    /// which clears `at`, sees `refreshing` already set and returns;
+    /// the older flight then finishes and stamps `Instant::now()`, and
+    /// its pre-commit snapshot is served as current for the whole TTL.
+    /// The one call whose entire job is "the cache must reflect what I
+    /// just wrote" is the one the singleflight defeats.
+    pub generation: u64,
 }
 
 /// What the scan loop is doing right now - the shared counter is bumped
@@ -2133,7 +2183,7 @@ pub(super) const COMPACT_ABORT_POLL_MS: u64 = 100;
 /// between chunks, and a chunk cannot be cut short.
 ///
 /// 2048 pages is 8 MB at the default 4 KB page size. Measured by
-/// `nzbkit/tests/compact_abort_latency.rs` on a 1.16 GB index: 66
+/// `nzbkit/tests/integration/compact_abort_latency.rs` on a 1.16 GB index: 66
 /// chunks, worst single chunk 169 ms, and across a sweep of arrival
 /// offsets the worst a job actually waited was 113 ms - against 4061 ms
 /// for the VACUUM path it replaces, which also failed to stop at all
@@ -2430,6 +2480,7 @@ impl Daemon {
     /// Deliberately cheap and approximate: this feeds the scanners'
     /// 100 ms stand-down polls, which need "is a download imminent",
     /// not the runner's full pick logic.
+    #[cfg(feature = "indexer")]
     pub(super) fn queue_has_runnable(&self) -> bool {
         self.queue.lock_ok().iter().any(|j| {
             let g = j.lock_ok();
@@ -2472,6 +2523,7 @@ impl Daemon {
     /// account must not keep receiving traffic. With no name stored,
     /// the manual `scoreboard_url`/`scoreboard_key` pair is the
     /// reference, as before.
+    #[cfg(feature = "indexer")]
     pub(super) fn scoreboard_reference(&self) -> Result<(String, String), String> {
         let source = self.scoreboard_source.lock_ok().trim().to_string();
         if !source.is_empty() {
@@ -2505,6 +2557,7 @@ impl Daemon {
     /// FETCHES NZBs, which most indexers meter as grabs, so it only
     /// ever runs against an account the user manages in the indexer
     /// editor where those quotas are visible.
+    #[cfg(feature = "indexer")]
     pub(super) fn corr_confirm_reference(&self) -> Result<crate::newznab::IndexerConfig, String> {
         let source = self.corr_confirm_source.lock_ok().trim().to_string();
         if source.is_empty() {
@@ -2533,6 +2586,7 @@ impl Daemon {
     /// picker deliberately keeps a vanished account listed, so without
     /// this the card reads "0 of 24 checks used" while every worker
     /// tick is refused.
+    #[cfg(feature = "indexer")]
     pub(super) fn corr_confirm_source_state(&self) -> &'static str {
         let source = self.corr_confirm_source.lock_ok().trim().to_string();
         if source.is_empty() {
@@ -2554,6 +2608,7 @@ impl Daemon {
     /// value - not a hand-edited settings.json, not a stale entry from
     /// a future version - can add a category, and the empty default
     /// means "all of them", the most this ever asks for.
+    #[cfg(feature = "indexer")]
     pub(super) fn scoreboard_categories(&self) -> Vec<(u32, &'static str)> {
         let picked = self.scoreboard_cats.lock_ok().clone();
         SCOREBOARD_CATEGORIES
@@ -2659,6 +2714,44 @@ impl Daemon {
     pub(super) fn index_maintenance_ok(&self) -> bool {
         self.indexing_pause_reason().is_none()
             && self.index_jobs_active.load(Ordering::Acquire) == 0
+    }
+
+    /// May maintenance of the SHARED index database run right now
+    /// (sweep 8, L12, and its policy half)?
+    ///
+    /// [`index_maintenance_ok`] is the wrong predicate for anything the
+    /// database owns jointly, and wrong in the exact configuration the
+    /// finding is about: it goes through [`indexing_pause_reason`],
+    /// which answers `Some("off")` whenever `index_enabled` is false -
+    /// which is what a Spot-only install IS. Gating on it would leave
+    /// the work permanently paused there, which is the state the
+    /// finding describes, so the suggested fix would have changed
+    /// nothing. That trap is why this is a separate predicate rather
+    /// than a tweak to the one above; the tests in
+    /// `tasks/picker_index_tests.rs` pin the correction as well as the
+    /// fix.
+    ///
+    /// The database is shared: [`index_db_wanted`] keeps it for EITHER
+    /// source, both sources write releases into the same tables, and
+    /// every reader - browse, wall, newznab, the picker - reads it the
+    /// same way whichever filled it. So the gate is "some scan source
+    /// is live and nothing is downloading" - if either pause predicate
+    /// is clear then this machine is not offline, not paused and not
+    /// standing down for a job, because both carry all three of those.
+    ///
+    /// Named for the DATABASE, not the picker, since 22 Aug 2026: the
+    /// retention reap, the planner-statistics refresh and the shatter
+    /// fold are on it too. They are properties of the rows, and a
+    /// spot-promoted release row is the same row a scanned one is.
+    ///
+    /// [`index_maintenance_ok`]: Daemon::index_maintenance_ok
+    /// [`indexing_pause_reason`]: Daemon::indexing_pause_reason
+    /// [`index_db_wanted`]: Daemon::index_db_wanted
+    #[cfg(feature = "indexer")]
+    pub(super) fn db_maintenance_ok(&self) -> bool {
+        self.index_db_wanted()
+            && self.index_jobs_active.load(Ordering::Acquire) == 0
+            && (self.indexing_pause_reason().is_none() || self.spot_pause_reason().is_none())
     }
 
     /// Should the pre feed be connected right now?
@@ -2899,7 +2992,7 @@ impl Daemon {
     pub fn stream_token(&self, nzo_id: &str) -> String {
         use sha2::Digest as _;
         let d = sha2::Sha256::digest(format!("{}:{nzo_id}", self.stream_secret).as_bytes());
-        format!("{d:x}")[..32].to_string()
+        hex::encode(d)[..32].to_string()
     }
 }
 
@@ -3190,8 +3283,8 @@ impl Daemon {
         depth: u8,
         origin: &str,
         allow_dupe: bool,
-    ) -> Result<String> {
-        let id = self.enqueue(
+    ) -> Result<Enqueued> {
+        let mut e = self.enqueue(
             &f.bytes, name, category, priority, pp, password, origin, allow_dupe,
         )?;
         let mut stamped = false;
@@ -3199,7 +3292,7 @@ impl Daemon {
             // Just pushed, so it is at the back; scan anyway rather than
             // assume - enqueue may re-order or park a duplicate.
             let q = self.queue.lock_ok();
-            if let Some(job) = q.iter().find(|j| j.lock_ok().nzo_id == id) {
+            if let Some(job) = q.iter().find(|j| j.lock_ok().nzo_id == e.nzo_id) {
                 let mut j = job.lock_ok();
                 j.failure_link = f.failure_link.clone();
                 j.failure_host = f.host.clone();
@@ -3213,9 +3306,9 @@ impl Daemon {
         // depth: the job silently never reports, and a replacement chain
         // restarts its allowance at 0.
         if stamped {
-            self.save_queue();
+            e.durable = self.save_queue();
         }
-        Ok(id)
+        Ok(e)
     }
 
     /// Who, if anyone, already owns `p`. The claim rule `choose_out_dir`
@@ -3327,7 +3420,16 @@ impl Daemon {
     /// Live download speed (bytes/sec) over a ~5 s rolling window of
     /// decoded-byte samples (also feeds queue_json's kbpersec).
     pub(super) fn current_speed_bps(&self) -> f64 {
-        let done = self.progress.load(Ordering::Relaxed);
+        // The whole line: the active job's bytes plus whatever the
+        // previous job is still draining behind it (the cross-job
+        // hand-over), otherwise the figure dips at every queue boundary
+        // while the line is in fact full.
+        let drain = self
+            .drain_dl
+            .lock_ok()
+            .as_ref()
+            .map_or(0, |s| s.progress.load(Ordering::Relaxed));
+        let done = self.progress.load(Ordering::Relaxed).saturating_add(drain);
         let active = self.started_at.lock_ok().is_some();
         let mut win = self.speed_win.lock_ok();
         if !active {
@@ -3586,9 +3688,11 @@ impl Daemon {
             // the history row is a TAIL to every caller, in the
             // `Downloading` window before the lane marks the record
             // `Finishing` just as much as after it.
-            Some("finalizing" | "unlocking" | "identifying" | "renaming" | "scripting") => {
-                Some("Moving")
-            }
+            // `indexwait` is the tail parked behind the index write
+            // mutex (TODO 200): still the same tail, still `Moving`.
+            Some(
+                "finalizing" | "unlocking" | "identifying" | "renaming" | "scripting" | "indexwait",
+            ) => Some("Moving"),
             _ => None,
         }
     }
@@ -3701,6 +3805,11 @@ impl Daemon {
             if owner_paused(self, &paused) {
                 self.fire_pause(!graceful);
             }
+            // A job that handed the hub over but is still draining behind
+            // the new one holds its own stop handles in the drain slot,
+            // and they are the ONLY way to wind it down. Aimed by id, so
+            // the successor is never touched.
+            self.fire_drain(!graceful, |id| paused.iter().any(|s| s == id));
             let d = self.clone();
             std::thread::spawn(move || {
                 for i in 0..240 {
@@ -3719,6 +3828,10 @@ impl Daemon {
                     // rather than inheriting the pause onto whoever is
                     // downloading now.
                     if !d.owns_hub(|id| paused.iter().any(|s| s == id)) {
+                        // Not the hub's - but it may be the job draining
+                        // behind it, whose handles are in the drain slot.
+                        // Same escalation, same aim-by-id.
+                        d.fire_drain(!graceful || i >= 40, |id| paused.iter().any(|s| s == id));
                         std::thread::sleep(std::time::Duration::from_millis(250));
                         continue;
                     }

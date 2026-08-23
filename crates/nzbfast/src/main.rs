@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::info;
 
-// mimalloc on macOS + Linux: faster under the pipeline's alloc/free churn
-// on constrained-CPU Linux boxes (ARM NAS, Celeron, Pi), and on macOS it
-// lets the post-job idle trim (serve.rs) hand freed memory back to the OS.
+// mimalloc on macOS + Linux: faster under the pipeline's alloc/free churn on
+// constrained-CPU Linux boxes (ARM NAS, Celeron, Pi), and on macOS it lets
+// the post-job idle trim (serve/tasks.rs) hand freed memory back to the OS.
 // Windows keeps the system allocator. See the note in Cargo.toml.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[global_allocator]
@@ -54,6 +54,7 @@ mod post_cmd;
 mod rarfix;
 mod ratelimit;
 mod repair;
+mod resumeout;
 mod rss;
 #[cfg(feature = "indexer")]
 mod scan;
@@ -65,6 +66,7 @@ mod splitjoin;
 mod srrdb;
 mod tools;
 mod unpack;
+mod unpackprog;
 #[cfg(feature = "indexer")]
 mod wall;
 // Slim builds compile out wall.rs; wall_slim.rs keeps the
@@ -80,6 +82,10 @@ use unpack::*;
 mod check;
 use check::*;
 use get::*;
+// The three largest subcommand arms of `run`, hoisted out verbatim
+// when that function reached the size gate's 500-line ceiling.
+mod run_cmds;
+use run_cmds::*;
 mod streamhub;
 use diag::*;
 use nettools::*;
@@ -96,10 +102,41 @@ use scan::*;
 use splitjoin::*;
 use streamhub::*;
 
+/// `--config` takes a PATH, and a value opening with `{` is inline JSON.
+///
+/// Nothing downstream can recover from that mistake usefully. The
+/// filename does not exist, so `Config::load` falls back to whatever
+/// SABnzbd install the host has (deliberately - see `load_no_fallback`
+/// in `crates/nzbkit/src/config.rs` for why that fallback is
+/// unconditional), and the run then dials a provider the operator never
+/// named and fails against it minutes later looking like a network
+/// fault. That is how it was found, on a TODO 215 loopback rig on
+/// 22 Aug 2026, five legs in. No real deployment has a config file whose
+/// name begins with a brace, so refusing it here costs nothing and turns
+/// a silent substitution into a clap error before any socket is opened.
+///
+/// Applies to `NZBFAST_CONFIG` too, which is the same mistake by
+/// another route.
+fn config_path(raw: &str) -> Result<PathBuf, String> {
+    if raw.trim_start().starts_with('{') {
+        return Err(
+            "takes a path to a config file, not inline JSON. Write the JSON to a file \
+             and pass that path (or run `nzbfast setup` to create one)."
+                .to_string(),
+        );
+    }
+    Ok(PathBuf::from(raw))
+}
+
 #[derive(Parser)]
 #[command(name = "nzbfast", version, about = "Speed-focused NZB downloader")]
 struct Cli {
-    /// Path to config with server credentials.
+    /// Path to config with server credentials (a path, not inline JSON).
+    ///
+    /// If the file does not exist, a SABnzbd install's server list is
+    /// used instead when one can be found - on the machine, or beside
+    /// this path - and a warning says which file it came from. That
+    /// holds whether or not you passed this flag yourself.
     ///
     /// Falls back to $NZBFAST_CONFIG before the cwd-relative default, so
     /// every subcommand lands on the same file the daemon is serving from.
@@ -112,6 +149,7 @@ struct Cli {
         long,
         env = "NZBFAST_CONFIG",
         default_value = "config.local.json",
+        value_parser = config_path,
         global = true
     )]
     config: PathBuf,
@@ -747,6 +785,11 @@ enum Command {
         /// Maximum total release size.
         #[arg(long, default_value_t = 15.0)]
         max_gb: f64,
+        /// Keep descending past a release with no rar members, instead
+        /// of returning the newest qualifying one. A bare payload plus
+        /// a par2 ladder puts no extractor in the job's path.
+        #[arg(long)]
+        require_rar: bool,
         #[arg(long, default_value = "release.nzb")]
         out: PathBuf,
     },
@@ -933,82 +976,7 @@ async fn run() -> Result<()> {
             )
             .await
         }
-        Command::Get {
-            nzb,
-            out,
-            connections,
-            window,
-            decoders,
-            verify,
-            preflight,
-            no_extract,
-            skip_samples,
-            password,
-        } => {
-            let (fast_verify, verify_lean) = match verify.as_str() {
-                "fast" => (true, false),
-                "full" => (false, false),
-                // Lean: for slow CPUs. Skips the per-article yEnc CRC
-                // once PAR2 covers a file - in-stream corruption is then
-                // caught by the PAR2 block CRC32 alone (one CRC32 layer
-                // instead of two). End-of-job verification and repair
-                // are unchanged; PAR2-less downloads keep article CRCs.
-                "lean" => (true, true),
-                other => anyhow::bail!("--verify must be fast, full, or lean, not {other:?}"),
-            };
-            // M32/C1 perf: CLI downloads have no /stream readers, so
-            // dropping settled page cache is SAFE here - but only a WIN
-            // on small-memory boxes, so the default is memory-aware
-            // rather than the old flat `true` (threshold rationale and
-            // the measured crossover: `drop_cache_auto` in nzbkit's
-            // disk.rs).
-            // NZBFAST_DROP_CACHE=1/0 force-overrides either way.
-            #[cfg(target_os = "linux")]
-            nzbkit::disk::set_drop_cache_default(nzbkit::disk::drop_cache_auto());
-            if preflight {
-                let verdict = check(&cli.config, &nzb, 10, 4, 50, true).await?;
-                if let Verdict::Impossible {
-                    est_missing,
-                    recovery,
-                    measured,
-                    ..
-                } = verdict
-                {
-                    anyhow::bail!(
-                        "aborting: pre-flight says this post cannot complete - {}",
-                        crate::check::impossible_reason(est_missing, recovery, &measured)
-                    );
-                }
-            }
-            get_with_progress(
-                &cli.config,
-                &nzb,
-                &out,
-                connections,
-                window,
-                decoders,
-                fast_verify,
-                verify_lean,
-                no_extract,
-                // No CLI setting for this; matching the daemon default
-                // keeps one behaviour across both front ends, and it
-                // only ever fires on a repair that verified.
-                true,
-                skip_samples,
-                password,
-                // No CLI consent prompt: `unpack_eat_volumes=low_disk`
-                // asks per job through the dashboard drawer, and there is
-                // nowhere here to ask. `always` needs no consent and
-                // still applies to an offline `get`.
-                false,
-                None,
-                None,
-                "",
-                None,
-                budget,
-            )
-            .await
-        }
+        cmd @ Command::Get { .. } => get_cmd(cmd, &cli.config, budget).await,
         Command::ImportSab { ini, out, force } => {
             let ini = match ini {
                 Some(p) => p,
@@ -1043,61 +1011,7 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Command::Sysbench { group } => sysbench_cmd(&cli.config, &group).await,
-        Command::Mockserve {
-            port,
-            bind,
-            files,
-            file_size,
-            article_size,
-            nzb,
-            par2,
-            tls_cert,
-            tls_key,
-        } => {
-            let fsize = serve::parse_size(&file_size)
-                .ok_or_else(|| anyhow::anyhow!("bad --file-size {file_size:?}"))?;
-            let asize = serve::parse_size(&article_size)
-                .ok_or_else(|| anyhow::anyhow!("bad --article-size {article_size:?}"))?
-                as usize;
-            if par2 {
-                info!(target: "benchserve", "hashing the synthetic set for the PAR2 index …");
-            }
-            let set = std::sync::Arc::new(nzbkit::benchserve::BenchSet::with_par2(
-                files, fsize, asize, par2,
-            ));
-            std::fs::write(&nzb, set.nzb())?;
-            info!(
-                target: "benchserve",
-                "set: {} files × {:.2} GB = {:.2} GB{} · nzb: {}",
-                files,
-                fsize as f64 / 1e9,
-                set.total_bytes() as f64 / 1e9,
-                if par2 { " + par2 index" } else { "" },
-                nzb.display()
-            );
-            let tls = match (&tls_cert, &tls_key) {
-                (Some(c), Some(k)) => Some(nzbkit::benchserve::tls_config(c, k)?),
-                (None, None) => None,
-                _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
-            };
-            info!(
-                target: "benchserve",
-                "point any client at host {bind} port {port}, TLS {}, no auth\n\
-                 [benchserve]   nzbfast: {{\"servers\":[{{\"host\":\"localhost\",\"port\":{port},\"tls\":{},\"connections\":16}}]}}\n\
-                 [benchserve]   stats print every 10 s; Ctrl-C to stop",
-                if tls.is_some() { "ON" } else { "OFF" },
-                tls.is_some()
-            );
-            if tls.is_some() {
-                info!(
-                    target: "benchserve",
-                    "  self-signed: run the client with NZBFAST_EXTRA_CA=<cert.pem>"
-                );
-            }
-            spawn_benchserve_stats(set.clone());
-            nzbkit::benchserve::serve_with(&format!("{bind}:{port}"), set, tls).await?;
-            Ok(())
-        }
+        cmd @ Command::Mockserve { .. } => mockserve_cmd(cmd).await,
         Command::ChaosServe(cli) => chaos_serve::run(cli.opts(serve::parse_size)?).await,
         #[cfg(feature = "indexer")]
         Command::Index {
@@ -1221,99 +1135,7 @@ async fn run() -> Result<()> {
                 std::process::exit(3); // user chose Quit - launcher won't serve
             }
         }
-        Command::Serve {
-            port,
-            bind,
-            tls_cert,
-            tls_key,
-            open,
-            apikey,
-            nzbkey,
-            out,
-            watch,
-            script,
-            min_free,
-            quota,
-            quota_period,
-            feeds,
-            connections,
-            window,
-            decoders,
-            speedlimit,
-            schedule,
-            auto_speed,
-            library_cats,
-            library_recheck_secs,
-            #[cfg(feature = "indexer")]
-            index_db,
-            #[cfg(feature = "indexer")]
-            index_groups,
-            #[cfg(feature = "indexer")]
-            index_interval,
-            #[cfg(feature = "indexer")]
-            index_backfill,
-            #[cfg(feature = "indexer")]
-            index_max_age,
-            #[cfg(feature = "indexer")]
-            index_gates,
-        } => {
-            let size = |name: &str, v: Option<String>| -> Result<Option<u64>> {
-                v.map(|s| {
-                    serve::parse_size(&s)
-                        .ok_or_else(|| anyhow::anyhow!("--{name}: can't parse size {s:?}"))
-                })
-                .transpose()
-            };
-            let opts = serve::ServeOpts {
-                // Off unless the dashboard turns it on; settings.json
-                // overrides this on load.
-                group_desc_isc: false,
-                port,
-                bind,
-                tls_cert,
-                tls_key,
-                open,
-                apikey,
-                nzbkey,
-                out_root: out,
-                watch,
-                script,
-                connections,
-                window,
-                decoders,
-                fast_verify: true,
-                verify_lean: false,
-                min_free: size("min-free", min_free)?,
-                // Settings-only (#20): there is no CLI flag, so the
-                // launch value is always "off" and apply_saved_settings
-                // is what turns it on.
-                out_umask: None,
-                auto_retry_mins: 20,
-                preflight: false,
-                quota: size("quota", quota)?,
-                quota_period,
-                feeds,
-                speedlimit,
-                schedule,
-                auto_speed,
-                library_cats,
-                library_recheck_secs,
-                mem_budget: budget,
-                #[cfg(feature = "indexer")]
-                index_db,
-                #[cfg(feature = "indexer")]
-                index_groups,
-                #[cfg(feature = "indexer")]
-                index_interval_secs: index_interval,
-                #[cfg(feature = "indexer")]
-                index_backfill,
-                #[cfg(feature = "indexer")]
-                index_max_age_secs: parse_age(&index_max_age)?,
-                #[cfg(feature = "indexer")]
-                index_gates: index_gates.as_deref().map(gates::Gates::load).transpose()?,
-            };
-            serve::serve(cli.config.clone(), opts).await
-        }
+        cmd @ Command::Serve { .. } => serve_cmd(cmd, cli.config.clone(), budget).await,
         Command::Check {
             nzb,
             sample,
@@ -1337,8 +1159,9 @@ async fn run() -> Result<()> {
             group,
             min_gb,
             max_gb,
+            require_rar,
             out,
-        } => make_release_nzb(&cli.config, &group, min_gb, max_gb, &out).await,
+        } => make_release_nzb(&cli.config, &group, min_gb, max_gb, require_rar, &out).await,
         #[cfg(feature = "indexer")]
         Command::MakeTestNzb {
             group,
@@ -1346,5 +1169,51 @@ async fn run() -> Result<()> {
             max_file_mb,
             out,
         } => make_test_nzb(&cli.config, &group, files, max_file_mb, &out).await,
+    }
+}
+
+#[cfg(test)]
+mod config_arg_tests {
+    use super::config_path;
+    use clap::Parser as _;
+
+    /// The mistake this exists for: `--config '{"servers":[...]}'` is a
+    /// filename that cannot exist, and without this it was answered by
+    /// the host's SABnzbd server list rather than by an error.
+    #[test]
+    fn inline_json_is_refused_and_real_paths_are_not() {
+        for json in [
+            r#"{"servers":[{"host":"127.0.0.1","port":8129,"tls":false}]}"#,
+            "  {}",
+        ] {
+            let err = config_path(json).expect_err("inline JSON must not parse as a path");
+            assert!(err.contains("not inline JSON"), "unhelpful message: {err}");
+        }
+        // Ordinary paths, including ones with a brace somewhere that is
+        // not the first character, are untouched.
+        for ok in [
+            "config.local.json",
+            "/config/config.json",
+            "C:\\ProgramData\\nzbfast\\config.json",
+            "~/.config/nzbfast/{staging}.json",
+        ] {
+            assert_eq!(config_path(ok).unwrap(), std::path::PathBuf::from(ok));
+        }
+    }
+
+    /// End to end through clap, so the wiring is pinned too: the parser
+    /// is only useful if the attribute actually references it.
+    #[test]
+    fn clap_rejects_inline_json_before_any_subcommand_runs() {
+        // `.err()` rather than `expect_err`, which would want `Cli:
+        // Debug` - and `Cli` holds an `--apikey`, so it deliberately
+        // has no Debug to print it with.
+        let e = super::Cli::try_parse_from(["nzbfast", "--config", r#"{"servers":[]}"#, "probe"])
+            .err()
+            .expect("clap must refuse it");
+        assert!(
+            e.to_string().contains("not inline JSON"),
+            "clap surfaced the wrong error: {e}"
+        );
     }
 }

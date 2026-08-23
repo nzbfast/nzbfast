@@ -3,6 +3,12 @@
 //! seek that promotes a deep window, the deep-window preempt, and the
 //! `addfile&stream=1` front door with its player-handoff links.
 //!
+//! ...plus the other end of that contract (TODO 16m): the four rigs at
+//! the bottom of this file drive /stream against a job that is NOT
+//! downloading, where the whole question is whether the answer is
+//! knowable now, worth waiting 30 s for, or - the last of them - an
+//! honest refusal about a payload that is not where the record says.
+//!
 //! A sibling-dir child of daemon.rs (the daemon_chip6 / stream_chaos
 //! pattern) so the parent stays inside its size-gate baseline; harness
 //! via `super::*`.
@@ -622,7 +628,7 @@ async fn stream_promote_preempts_deep_windows() {
     })
     .await;
     let port = d.port;
-    let daemon_log = d.log.clone();
+    let daemon_log = d.log_path();
 
     // "<volB-13@mock>" → Some(13) for tag "volB".
     fn part_of(id: &str, tag: &str) -> Option<u32> {
@@ -920,5 +926,554 @@ async fn stream_add_returns_player_links() {
     })
     .await
     .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// TODO 16m: the /stream admit wait, and the answers that need none
+// ---------------------------------------------------------------------
+
+/// A daemon over a hand-seeded spool and NO configured server.
+///
+/// `hist` rows go to `.spool/history.jsonl`, `queued` rows into
+/// `.spool/queue.json`, both in the shape `job_from_json` restores. No
+/// server means §154 holds the queue, so a seeded row stays exactly as
+/// seeded and no download can race the assertions - which is the whole
+/// point: these rigs are about what /stream says when nothing is
+/// running, and a job that started would answer a different question.
+async fn seeded_daemon(
+    dir: &Path,
+    hist: &[serde_json::Value],
+    queued: &[serde_json::Value],
+) -> harness::Daemon {
+    let spool = dir.join("complete/.spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    if !hist.is_empty() {
+        let lines: String = hist
+            .iter()
+            .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+            .collect();
+        std::fs::write(spool.join("history.jsonl"), lines).unwrap();
+    }
+    if !queued.is_empty() {
+        std::fs::write(
+            spool.join("queue.json"),
+            serde_json::json!({ "queue": queued, "history": [] }).to_string(),
+        )
+        .unwrap();
+    }
+    let cfg = dir.join("config.json");
+    std::fs::write(&cfg, "{\"servers\":[]}").unwrap();
+    serve(dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await
+}
+
+/// One seeded record. `extra` overrides and adds keys, so a rig says
+/// only what it is actually testing.
+fn seed_row(id: &str, dir: &Path, state: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "nzo_id": id,
+        "name": format!("Seeded.{id}"),
+        "nzb_path": dir.join(format!("{id}.nzb")).to_string_lossy(),
+        "out_dir": dir.join(format!("complete/{id}")).to_string_lossy(),
+        "state": state,
+        "total_bytes": 1_000_000u64,
+        "finished_unix": 1_722_000_000i64,
+    });
+    if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in e {
+            o.insert(k.clone(), val.clone());
+        }
+    }
+    v
+}
+
+fn stream_get(id: &str) -> Vec<u8> {
+    format!("GET /stream/{id}?apikey=sekrit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .into_bytes()
+}
+
+/// Send `req` and give the daemon `secs` to start answering. `None` is
+/// "still waiting", which is what the wait path is supposed to do;
+/// `Some` carries whatever came back, including the empty string for a
+/// connection closed without an answer (which is not waiting, and must
+/// fail loudly rather than read as a pass).
+///
+/// The socket is dropped either way. A /stream response still inside
+/// its admit wait holds one HTTP worker until its own deadline whatever
+/// the client does, so the probe cannot shorten it - it only stops the
+/// TEST from paying for it.
+fn answer_within(port: u16, req: &[u8], secs: u64) -> Option<String> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.write_all(req).expect("write");
+    s.set_read_timeout(Some(std::time::Duration::from_secs(secs)))
+        .unwrap();
+    let mut buf = [0u8; 512];
+    match s.read(&mut buf) {
+        Ok(n) => Some(String::from_utf8_lossy(&buf[..n]).to_string()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            None
+        }
+        Err(e) => panic!("probe failed on :{port}: {e}"),
+    }
+}
+
+/// TODO 16m: a job that is finished AND settled gets its 404 at once.
+///
+/// The pre-fix behaviour was the M14i admit wait running to its full 30
+/// s deadline and then answering "no active media" - 15 bytes that were
+/// knowable the moment the request arrived. A player (and the
+/// dashboard's ▶) spends that half minute looking hung on an answer we
+/// already have.
+///
+/// A Failed row is the shape that still reached it: `Completed` +
+/// `fetched` has been served from disk since 72a06c3ac, and an id in
+/// NEITHER store has always been an immediate `unknown nzo_id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_job_answers_stream_without_waiting() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-settled-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const ID: &str = "SABnzbd_nzo_settled1";
+
+    let d = seeded_daemon(
+        &dir,
+        &[seed_row(
+            ID,
+            &dir,
+            "Failed",
+            serde_json::json!({"fail_message": "download incomplete: 12 articles missing"}),
+        )],
+        &[],
+    )
+    .await;
+    let port = d.port;
+
+    let (took, body) = tokio::task::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
+        let out = String::from_utf8_lossy(&raw(port, &stream_get(ID))).to_string();
+        (t0.elapsed(), out)
+    })
+    .await
+    .unwrap();
+
+    assert!(body.starts_with("HTTP/1.1 404"), "{body}");
+    assert!(body.contains("no active media"), "{body}");
+    // The answer is computed, not waited for. The bound is seconds
+    // rather than the "well under a second" this actually measures
+    // because the daemon suite shares a box with other sessions' builds
+    // - what it has to separate is a computed answer from a 30 s
+    // deadline, and any bound in between does that.
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "the settled 404 took {took:?} - the admit wait is still being sat out"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m, the other side: a QUEUED job still waits the full 30 s.
+///
+/// The status word says nothing has happened yet, which is exactly the
+/// case the wait exists for - its writers appear as soon as the runner
+/// picks it up, and a player that asked a second too early must be
+/// served rather than refused. This is also the only rig that pins the
+/// wait's LENGTH, so an early-out that quietly swallowed the wait path
+/// as well would be caught here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_job_still_waits_out_the_admit_deadline() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-queued-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const ID: &str = "SABnzbd_nzo_queued1";
+
+    // Paused as well as serverless: two independent reasons this row
+    // cannot start, so the rig does not depend on either one alone.
+    let d = seeded_daemon(
+        &dir,
+        &[],
+        &[seed_row(
+            ID,
+            &dir,
+            "Queued",
+            serde_json::json!({"paused": true}),
+        )],
+    )
+    .await;
+    let port = d.port;
+
+    let (took, body) = tokio::task::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
+        let out = String::from_utf8_lossy(&raw(port, &stream_get(ID))).to_string();
+        (t0.elapsed(), out)
+    })
+    .await
+    .unwrap();
+
+    assert!(body.starts_with("HTTP/1.1 404"), "{body}");
+    assert!(body.contains("no active media"), "{body}");
+    assert!(
+        took >= std::time::Duration::from_secs(25),
+        "a queued job answered in {took:?} - the 30 s wait for its writers is gone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m, the trap in the middle: a job whose settle has NOT
+/// finished waits, however terminal its status word reads.
+///
+/// The shape here is a record that reached history while its pipeline
+/// was still running - a park torn between its prewrite and its filing.
+/// `job_from_json` restores any nonterminal state as `Queued`, so it
+/// arrives as the queued-looking record sitting in history that
+/// histstore.rs calls out by name. It is in NO queue and it has NO
+/// writers, so a predicate reading only those two would answer it
+/// immediately.
+///
+/// The settle's other half - a `Completed` record that still owes its
+/// payload the move to its final home - cannot be rigged from a seeded
+/// spool: startup re-enqueues every owed move before the mover worker
+/// starts draining, so the flag is gone by the time a request could ask
+/// about it. That arm is pinned in `serve::stream::stream_admit_tests`,
+/// against the predicate directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_still_settling_still_waits() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-settling-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const TORN: &str = "SABnzbd_nzo_torn1";
+
+    let d = seeded_daemon(
+        &dir,
+        &[seed_row(TORN, &dir, "Downloading", serde_json::json!({}))],
+        &[],
+    )
+    .await;
+    let port = d.port;
+
+    let answered = tokio::task::spawn_blocking(move || answer_within(port, &stream_get(TORN), 3))
+        .await
+        .unwrap();
+    assert!(
+        answered.is_none(),
+        "a torn park was answered {answered:?} - a job mid-settle must sit out the wait"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The finished-job branch's two answers that a seeded spool CAN reach:
+/// the file is there and is served, or it is not and the record is
+/// settled, which is the one case "no playable file on disk any more"
+/// is honest about.
+///
+/// Its third answer - the payload is in flight to its final folder, so
+/// the record names a folder the bytes have left - cannot be rigged
+/// from here for the same reason 16m's `move_pending` arm could not:
+/// startup re-enqueues every owed move before the mover starts
+/// draining, and the fence the seam actually turns on is held only for
+/// the width of one copy. It is pinned in
+/// `serve::stream::stream_move_window_tests`, against the predicate and
+/// against a real `mover_process` run.
+///
+/// Both rows here are `Completed` + `fetched`, which is what sends a
+/// request down that branch rather than the library trigger or the
+/// admit wait.
+///
+/// `/preview/probe` resolves the same job through the same
+/// `finished_media_path` and now asks the same in-flight question after
+/// its own miss, so the settled half of ITS answer rides along here -
+/// one door down, and the arm most at risk of being broken by a change
+/// to the door above. `/preview/media`, the third door onto the same
+/// record and the one the dashboard's player opens, rides along for
+/// the same reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_job_serves_its_file_and_says_so_honestly_when_it_is_gone() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-done-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const KEPT: &str = "SABnzbd_nzo_kept1";
+    const GONE: &str = "SABnzbd_nzo_gone1";
+
+    let kept_dir = dir.join(format!("complete/{KEPT}"));
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    std::fs::write(kept_dir.join("Seeded.mkv"), vec![b'k'; 4096]).unwrap();
+
+    let done = serde_json::json!({"fetched": true});
+    let d = seeded_daemon(
+        &dir,
+        &[
+            seed_row(KEPT, &dir, "Completed", done.clone()),
+            seed_row(GONE, &dir, "Completed", done),
+        ],
+        &[],
+    )
+    .await;
+    let port = d.port;
+
+    let probe_gone = format!(
+        "GET /preview/probe/{GONE}?apikey=sekrit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let (kept, gone, probe) = tokio::task::spawn_blocking(move || {
+        (
+            String::from_utf8_lossy(&raw(port, &stream_get(KEPT))).to_string(),
+            String::from_utf8_lossy(&raw(port, &stream_get(GONE))).to_string(),
+            String::from_utf8_lossy(&raw(port, &probe_gone)).to_string(),
+        )
+    })
+    .await
+    .unwrap();
+
+    assert!(kept.starts_with("HTTP/1.1 200"), "{kept}");
+    assert!(kept.contains("Accept-Ranges: bytes"), "{kept}");
+
+    // Nothing was ever written under this one's out_dir, and nothing is
+    // moving, so the record really is naming a folder with no media in
+    // it. 404, and NOT the 503 the in-flight arm answers - a fix that
+    // called every miss a move would say "try again" forever.
+    assert!(gone.starts_with("HTTP/1.1 404"), "{gone}");
+    assert!(gone.contains("no playable file on disk any more"), "{gone}");
+
+    // Same job through the probe: also a 404, and its own wording. The
+    // 503 arm beside it is the in-flight one, and answering a settled
+    // miss with it would tell every client to keep polling a file that
+    // is never coming back.
+    assert!(probe.starts_with("HTTP/1.1 404"), "{probe}");
+    assert!(probe.contains("no playable file on disk"), "{probe}");
+    assert!(!probe.contains("moving"), "{probe}");
+
+    // The third door: `/preview/media` - the remux byte path the
+    // dashboard's player actually opens - resolves the same job through
+    // the same pick and carries the same 404-vs-503 pair. It is gated on
+    // the `full` preview mode, which the seeded rig does not default to.
+    let set_full = b"GET /api?mode=config&name=preview&value=full&apikey=sekrit HTTP/1.1\r\n\
+                     Host: x\r\nConnection: close\r\n\r\n"
+        .to_vec();
+    let media_gone = format!(
+        "GET /preview/media/{GONE}?apikey=sekrit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let (set, media) = tokio::task::spawn_blocking(move || {
+        (
+            String::from_utf8_lossy(&raw(port, &set_full)).to_string(),
+            String::from_utf8_lossy(&raw(port, &media_gone)).to_string(),
+        )
+    })
+    .await
+    .unwrap();
+    assert!(set.starts_with("HTTP/1.1 200"), "{set}");
+    assert!(media.starts_with("HTTP/1.1 404"), "{media}");
+    assert!(media.contains("no playable file on disk"), "{media}");
+    assert!(!media.contains("moved"), "{media}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m's SECOND half: a job that finishes WHILE a player is
+/// mid-request is answered from the finished file, not waited out.
+///
+/// The first pass asked `no_writers_and_no_prospect` exactly once, just
+/// before arming the deadline, and the wait loop never asked again. So a
+/// job that was Downloading when the request arrived, and completed
+/// during the wait, had its writers published away and then sat out the
+/// remainder of the 30 s for a 404 - with its bytes finished on disk the
+/// whole time. 16m's own text named this case and the first pass did not
+/// cover it.
+///
+/// The payload is deliberately NOT a media name. `pick_media` would
+/// otherwise find its writer the moment the download started and serve
+/// bytes off it, which is the M11 rig at the top of this file and a
+/// different question: for THIS one the live pick has to stay empty so
+/// the request reaches the wait at all. That also fixes what the answer
+/// is - the finished branch's "no playable file", since a `.bin` is no
+/// more playable off disk than it was off a writer - so the rig reads
+/// the answer's SHAPE and its CLOCK: the same request, answered by the
+/// finished-job branch in the seconds the download took, rather than by
+/// the live path's "no active media" at 30 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_finishes_mid_request_is_answered_from_disk() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-midflight-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let inner = payload(9_000_000, 11);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("payload.bin", &inner, 300_000, "pb", &mut articles);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+    );
+    xml.push_str(&format!(
+        "  <file poster=\"x\" date=\"0\" subject=\"&quot;payload.bin&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+        segs.len()
+    ));
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        // ~3 s of download at 3 MB/s, so the request below is issued
+        // while the job is still on the wire and the completion lands
+        // well inside the 30 s deadline it would otherwise sit out.
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_THROTTLE_WRITE_MBPS", "3")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("2");
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let (took, body) = tokio::task::spawn_blocking(move || {
+        let boundary = "----midflight";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"p.nzb\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(xml.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let added = http(
+            port,
+            "/api?mode=addfile&output=json&apikey=sekrit",
+            Some((&format!("multipart/form-data; boundary={boundary}"), &body)),
+        );
+        let nzo = added
+            .split("\"nzo_ids\":[\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| panic!("no nzo_id in {added}"))
+            .to_string();
+
+        let t0 = std::time::Instant::now();
+        let out = String::from_utf8_lossy(&raw(port, &stream_get(&nzo))).to_string();
+        (t0.elapsed(), out)
+    })
+    .await
+    .unwrap();
+
+    assert!(body.starts_with("HTTP/1.1 404"), "{body}");
+    assert!(
+        body.contains("no playable file on disk"),
+        "answered {body:?} - the finished-job branch never got a second look"
+    );
+    // It really did wait: the request was issued before the download
+    // started and the throttle holds it on the wire for seconds.
+    assert!(
+        took >= std::time::Duration::from_secs(1),
+        "answered in {took:?} - too fast to have entered the wait at all, \
+         so this rig is no longer testing the mid-request completion"
+    );
+    // ...and it did not wait the deadline out. The measured defect was
+    // 30.03 s; the bound is loose because the daemon suite shares a box.
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "answered in {took:?} - the wait loop is still sitting out the \
+         full admit deadline for a job that finished under it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m, the shape a stale .strm is likeliest to point at: a Failed
+/// job with an automatic retry armed.
+///
+/// The first pass required `auto_retry_at.is_none()` to take the
+/// early-out, so any armed retry kept the request waiting. The default
+/// arm is 20 minutes out ("articles missing - propagation may fill
+/// them"), which cannot produce a writer inside a 30 s deadline, and a
+/// partly-propagated post is the commonest way a job fails - so the
+/// commonest dead pointer in a media library was also the one that still
+/// hung for the full half minute. The stamp is compared against the
+/// wait's own end now.
+///
+/// Seeded rather than run to failure on purpose: this is the ENTRY
+/// path's question, asked before any wait is armed, and a seeded daemon
+/// has no extractor at all - which keeps the rig off the trap that a
+/// failed RUN leaves its extractor installed with a media writer still
+/// listed, so the live pick answers quickly off a file quarantine has
+/// already renamed aside. That is a different question with the same
+/// clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_job_with_a_far_off_retry_answers_stream_without_waiting() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-armed-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const ID: &str = "SABnzbd_nzo_armed1";
+
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 20 * 60;
+    let d = seeded_daemon(
+        &dir,
+        &[seed_row(
+            ID,
+            &dir,
+            "Failed",
+            serde_json::json!({
+                "fail_message": "download incomplete: 12 articles missing",
+                "auto_retry_at": at,
+                "auto_retry_why": "propagation",
+            }),
+        )],
+        &[],
+    )
+    .await;
+    let port = d.port;
+
+    let (took, body) = tokio::task::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
+        let out = String::from_utf8_lossy(&raw(port, &stream_get(ID))).to_string();
+        (t0.elapsed(), out)
+    })
+    .await
+    .unwrap();
+
+    assert!(body.starts_with("HTTP/1.1 404"), "{body}");
+    assert!(body.contains("no active media"), "{body}");
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "a retry armed 20 minutes out took {took:?} - it is still being \
+         read as a prospect of writers inside a 30 s wait"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -69,10 +69,19 @@ pub fn init(style: Style) {
         // the same pipe, so this only shows up in the CLI - where it is
         // the difference between `nzbfast probe > out.txt` capturing the
         // report and capturing the report plus its complaints.
+        //
+        // `with_max_level` is in tracing's VERBOSITY order, where ERROR
+        // is the smallest level: `stdout.with_max_level(INFO)` takes
+        // INFO, WARN and ERROR, so the stderr arm it was chained behind
+        // was dead and every warning went to stdout from the day §80
+        // shipped until 22 Aug 2026 (`nzbfast extract` on a directory
+        // with an unparseable Rar!-magic file put its "skipping" warning
+        // on stdout and nothing on stderr). Stderr takes the severe end
+        // first; everything it declines is stdout's.
         .with_writer(
-            std::io::stdout
-                .with_max_level(Level::INFO)
-                .or_else(std::io::stderr.with_min_level(Level::WARN)),
+            std::io::stderr
+                .with_max_level(Level::WARN)
+                .or_else(std::io::stdout),
         );
     let _ = tracing_subscriber::registry()
         .with(fmt.with_filter(filter_from_env()))

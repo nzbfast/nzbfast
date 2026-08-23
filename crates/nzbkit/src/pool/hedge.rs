@@ -40,6 +40,7 @@ impl Shared {
                 found: 0,
                 age_days: w.age_days,
                 part: w.part,
+                file: w.file,
                 ord: w.ord,
             },
         );
@@ -60,6 +61,7 @@ impl Shared {
     pub(super) fn deregister_inflight(&self, w: &Work) {
         if !w.dup {
             self.inflight.lock_ok().remove(&w.id);
+            self.park.note_left(w);
             self.bump_inflight_gen();
         }
     }
@@ -72,7 +74,17 @@ impl Shared {
         if w.dup {
             return; // dups are tracked via the original's entry
         }
-        if let Some(inf) = self.inflight.lock_ok().remove(&w.id) {
+        // Bound in its own statement so the in-flight guard is dropped
+        // BEFORE `note_left` - which takes the park's own maps, while
+        // `FilePark::set` holds `files` + `groups` and calls back into
+        // `inflight_of`, which takes this same map. Held across the
+        // then-block (edition 2024 keeps a scrutinee temporary alive for
+        // the whole `if let`) the two orders are AB/BA and the pool
+        // deadlocks. Same shape as `deregister_inflight` above and the
+        // retirement path in session.rs.
+        let removed = self.inflight.lock_ok().remove(&w.id);
+        if let Some(inf) = removed {
+            self.park.note_left(w);
             let ms = (inf.dispatched.elapsed().as_millis() as u64).max(1);
             let old = self.art_ms.load(Ordering::Relaxed);
             let new = if old == 0 { ms } else { old - old / 8 + ms / 8 };
@@ -83,6 +95,13 @@ impl Shared {
             self.note_srv_art(inf.server, ms);
         }
         self.bump_inflight_gen();
+        // Publish what the fold just produced - the fleet EWMA and the
+        // bound below derived from it - so both can be read while the
+        // job runs rather than only from the end-of-run `[pool]` line,
+        // which samples the drain. Deliberately outside the `if let`
+        // above: it takes the in-flight lock for its own count, and
+        // that guard must be gone first.
+        self.note_art_gauges();
     }
 
     /// Hedge experiment: the staleness bound for the dup race. 3x the
@@ -107,6 +126,9 @@ impl Shared {
     pub(super) fn charge_wire(&self) {
         self.inflight_body_bytes
             .fetch_add(EST_BODY_BYTES, Ordering::AcqRel);
+        // Memory-floor gauge mirror (instrument-first): same estimate,
+        // readable process-wide beside the other subsystem gauges.
+        crate::memgauge::add(crate::memgauge::Sub::WireEst, EST_BODY_BYTES);
     }
 
     /// B3 wire-cap: release `n` pipeline items' charges - every exit
@@ -121,6 +143,7 @@ impl Shared {
     /// saturating floor degrades into "throttles slightly early" instead.
     pub(super) fn release_wire(&self, n: usize) {
         let owed = EST_BODY_BYTES.saturating_mul(n as u64);
+        crate::memgauge::sub(crate::memgauge::Sub::WireEst, owed);
         let _ = self
             .inflight_body_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
@@ -254,6 +277,14 @@ impl Shared {
         // M7b.2 hygiene cap (design 5.2): at the cap every SPECULATIVE
         // picker stops arming; ladder dups stay exempt (verdicts, not speed).
         let capped = self.dup_spend_capped();
+        // TODO 202: the line gate. On a saturated line every speculative
+        // copy displaces payload, so the fan-out, slow-owner and stale
+        // arms all stand down; the ladder below is exempt (verdicts).
+        // §17: and so is an article whose owner has moved NO bytes -
+        // it is not competing for the line, so its copy displaces
+        // nothing. That escape is per-article, so it is applied inside
+        // the walk (`not_using_the_line`), not here.
+        let saturated = self.line_saturated(now_ms);
         let done = self.done.lock_ok();
         let hedges_ok = !self.hedge
             || self.hedges_issued.load(Ordering::Relaxed) < 4 + done.count() as u64 / 20;
@@ -315,6 +346,7 @@ impl Shared {
             if self.tail_fanout
                 && endgame
                 && !capped
+                && (!saturated || self.not_using_the_line(inf))
                 && !self.speculative_blocked(my_bit, level)
                 && pipe.used == 0
                 && inf.tried_fail == 0
@@ -328,7 +360,7 @@ impl Shared {
             if inf.server == me {
                 continue;
             }
-            if inf.dups >= 1 {
+            if inf.dups >= 1 || (saturated && !self.not_using_the_line(inf)) {
                 continue;
             }
             // Block-account economy: a FILL server never races on speed.
@@ -393,8 +425,9 @@ impl Shared {
         };
         let inf = inflight.get_mut(&id).unwrap();
         if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-            eprintln!(
-                "[pick-dup] {id}: rule={rule} me={me} owner={} owner_fail={:#b} age={:?}",
+            info!(
+                target: "pick-dup",
+                "{id}: rule={rule} me={me} owner={} owner_fail={:#b} age={:?}",
                 inf.server,
                 inf.tried_fail,
                 inf.dispatched.elapsed()
@@ -408,6 +441,16 @@ impl Shared {
         // first racer to reach a given article is usually one that has
         // it. All or nothing is the honest pair of arms.
         let probe = is_ladder && self.stat_probe;
+        self.sat.tally(saturation::Rule::from_name(rule));
+        // TODO 202 §17: this dup left through a SHUT gate, on the
+        // per-article escape - ledger it, so a leg can tell a gate that
+        // held with nothing to rescue from one that held while its
+        // stragglers were rescued anyway. Ladder picks are exempt from
+        // the gate outright (verdicts, not copies), so they are not
+        // escapes.
+        if saturated && !is_ladder {
+            self.note_line_gate_escape();
+        }
         inf.dups += 1;
         inf.dup_servers |= group_bits;
         self.dups_issued.fetch_add(1, Ordering::Relaxed);
@@ -428,21 +471,36 @@ impl Shared {
             probe,
             age_days: inf.age_days,
             part: inf.part,
+            file: inf.file,
             ord: inf.ord,
         })
     }
 
     /// TTFB-suspicion (TODO 115): the owner's read reported pre-byte
     /// silence past the suspicion bound. Flag the article for
-    /// [`Self::pick_suspect_dup`]. The entry may already be gone (the
-    /// timer races the read's own completion) - that's a no-op.
+    /// [`Self::pick_suspect_dup`] - and, since TODO 202 §17, for
+    /// [`Self::pick_dup`]'s escape from the line gate. The entry may
+    /// already be gone (the timer races the read's own completion) -
+    /// that's a no-op.
     pub(super) fn mark_suspect(&self, id: &str) {
-        if let Some(inf) = self.inflight.lock_ok().get_mut(id) {
-            inf.suspect = true;
-            self.suspect_pending.store(true, Ordering::Release);
-            if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-                eprintln!("[ttfb-hedge] suspect {id} at {:?}", self.start.elapsed());
-            }
+        let marked = match self.inflight.lock_ok().get_mut(id) {
+            Some(inf) => !std::mem::replace(&mut inf.suspect, true),
+            None => false,
+        };
+        if !marked {
+            return;
+        }
+        self.suspect_pending.store(true, Ordering::Release);
+        // N6: this mark CREATES a `pick_dup` candidate - a stalled
+        // article the line gate was suppressing now escapes it - so the
+        // idle-spin gate's futile record has to be invalidated, or an
+        // idle server that walked the map a moment ago sits out the
+        // rescue for a whole [`SCAN_RETRY_MS`] window. Every other
+        // writer of this map bumps for the same reason; the flag only
+        // became a candidate-maker with §17.
+        self.bump_inflight_gen();
+        if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
+            info!(target: "ttfb-hedge", "suspect {id} at {:?}", self.start.elapsed());
         }
     }
 
@@ -473,6 +531,15 @@ impl Shared {
         level: u32,
         window_used: usize,
     ) -> Option<Work> {
+        // TODO 202 §17: NO line-saturation gate here. Every candidate
+        // below is `suspect` by construction - an article whose read has
+        // sat in pre-byte silence past the suspicion bound - which makes
+        // this the one dup in the pool that provably cannot displace
+        // payload: its owner is not using the line at all. Suppressing
+        // it on a measurement of whether OTHER connections are using the
+        // line was the sharpest form of the fleet-gauge defect (the gate
+        // is blind to one stalled connection at every fleet size that
+        // ships - see `Shared::not_using_the_line`).
         if !self.ttfb_hedge
             || self.speculative_blocked(my_bit, level)
             || window_used > 0
@@ -482,7 +549,11 @@ impl Shared {
             return None;
         }
         let done = self.done.lock_ok();
-        if self.hedges_issued.load(Ordering::Relaxed) >= 4 + done.count() as u64 / 20 {
+        // §17c: its OWN purse, same formula as the stale hedge's. The
+        // two rules answer different questions (an owner delivering
+        // slowly vs one delivering nothing), so one must not be able to
+        // starve the other, and a leg must be able to say which spent.
+        if self.ttfb_hedges_issued.load(Ordering::Relaxed) >= 4 + done.count() as u64 / 20 {
             return None; // capped; the budget path still rescues
         }
         let mut inflight = self.inflight.lock_ok();
@@ -506,14 +577,17 @@ impl Shared {
             return None;
         };
         let inf = inflight.get_mut(&id).unwrap();
+        if self.line_saturated(self.start.elapsed().as_millis() as u64) {
+            self.note_line_gate_escape();
+        }
         inf.dups += 1;
         inf.dup_servers |= group_bits;
-        self.hedges_issued.fetch_add(1, Ordering::Relaxed);
+        self.ttfb_hedges_issued.fetch_add(1, Ordering::Relaxed);
         self.dups_issued.fetch_add(1, Ordering::Relaxed);
         self.mirror_dup_issued();
         self.note_race_burst();
         if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
-            eprintln!("[ttfb-hedge] dup-race {id} at {:?}", self.start.elapsed());
+            info!(target: "ttfb-hedge", "dup-race {id} at {:?}", self.start.elapsed());
         }
         Some(Work {
             id,
@@ -530,6 +604,7 @@ impl Shared {
             probe: false,
             age_days: inf.age_days,
             part: inf.part,
+            file: inf.file,
             ord: inf.ord,
         })
     }

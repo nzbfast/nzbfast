@@ -16,157 +16,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::ServerConfig;
 use crate::nntp::Connection;
-
-/// Reusable article-body buffers. Kills the per-article 800 KB
-/// alloc/free churn (mmap + page-zero + TLB shootdowns) on the hot path.
-/// Consumers hand buffers back with `give()` once decoded/written.
-pub struct BufPool {
-    bufs: std::sync::Mutex<Vec<Vec<u8>>>,
-    max_held: usize,
-}
-
-impl BufPool {
-    pub fn new(max_held: usize) -> Arc<BufPool> {
-        Arc::new(BufPool {
-            bufs: std::sync::Mutex::new(Vec::new()),
-            max_held,
-        })
-    }
-
-    pub fn take(&self) -> Vec<u8> {
-        self.bufs
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(800 * 1024))
-    }
-
-    pub fn give(&self, mut buf: Vec<u8>) {
-        buf.clear();
-        // Drop a buffer that a single oversized read grew far past the
-        // normal article size - clear() keeps capacity, so retaining it
-        // would pin that allocation in the pool for the rest of the run.
-        // Anything up to 4 MB is a plausible large article; beyond that,
-        // let it free and hand back a right-sized buffer next take().
-        const KEEP_CAP: usize = 4 * 1024 * 1024;
-        if buf.capacity() > KEEP_CAP {
-            return;
-        }
-        let mut bufs = self.bufs.lock_ok();
-        if bufs.len() < self.max_held {
-            bufs.push(buf);
-        }
-    }
-}
-
-/// Pool-level download speed limiter (M14g): one shared coarse token
-/// window charged by every worker of every server after each article body
-/// read. 0 = unlimited. Deliberately cheap and coarse (±10% is fine) -
-/// one mutex'd (window_start, bytes) pair, workers sleep off any debt
-/// asynchronously so runtime threads are never blocked.
-pub struct RateLimit {
-    bytes_per_sec: AtomicU64,
-    /// Virtual clock: the instant the next charged byte is allowed to
-    /// land. See [`RateLimit::throttle`].
-    next: std::sync::Mutex<Instant>,
-    /// Bumped whenever the cap changes, so a worker already sleeping
-    /// against the OLD cap stops waiting instead of stranding.
-    generation: AtomicU64,
-}
-
-impl Default for RateLimit {
-    fn default() -> Self {
-        RateLimit {
-            bytes_per_sec: AtomicU64::new(0),
-            next: std::sync::Mutex::new(Instant::now()),
-            generation: AtomicU64::new(0),
-        }
-    }
-}
-
-impl RateLimit {
-    pub fn new(bytes_per_sec: u64) -> Arc<RateLimit> {
-        let rl = RateLimit::default();
-        rl.set(bytes_per_sec);
-        Arc::new(rl)
-    }
-
-    /// Change the cap live. 0 = unlimited.
-    ///
-    /// A change restarts the virtual clock and bumps the generation:
-    /// reservations priced against the old cap are neither re-priced nor
-    /// left holding workers, which is what the old 5-second sleep clamp
-    /// was reaching for.
-    pub fn set(&self, bytes_per_sec: u64) {
-        if self.bytes_per_sec.swap(bytes_per_sec, Ordering::Relaxed) == bytes_per_sec {
-            return;
-        }
-        *self.next.lock_ok() = Instant::now();
-        self.generation.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn get(&self) -> u64 {
-        self.bytes_per_sec.load(Ordering::Relaxed)
-    }
-
-    /// Charge `n` bytes against the cap and sleep off any debt so the
-    /// aggregate rate stays under `bytes_per_sec`. No-op when unlimited.
-    ///
-    /// A virtual clock, not a byte window: each charge reserves the slice
-    /// of wall time its own bytes are worth AT THE CAP IN FORCE WHEN IT
-    /// IS CHARGED, and the caller waits out that slice. N workers
-    /// therefore queue behind one another and the aggregate rate is the
-    /// cap by construction, at any connection count or article size.
-    ///
-    /// The byte-window version this replaces could not do that. Its sleep
-    /// was clamped to 5 s so that a live cap decrease could not strand a
-    /// worker against stale debt - but nothing ever forgave that debt,
-    /// and its only discharge path (the re-anchor) required the window to
-    /// be paid off, which the clamp itself made unreachable. Once the
-    /// aggregate settled above the cap it stayed there: every call slept
-    /// exactly 5 s forever and the real floor was `connections *
-    /// article_size / 5 s` - about 1.28 MB/s at the shipped default of 8
-    /// connections, so any cap under ~10 Mbit/s was silently exceeded
-    /// with no log line. It also made the --auto-speed governor's whole
-    /// back-off range a no-op, since AUTO_SPEED_FLOOR sits inside it.
-    /// Forgiving the debt and enforcing the cap are mutually exclusive in
-    /// that formulation, which is why the clamp looks reasonable and is
-    /// nonetheless wrong; pricing each charge when it is charged removes
-    /// the need for either.
-    pub async fn throttle(&self, n: u64) {
-        let cap = self.bytes_per_sec.load(Ordering::Relaxed);
-        if cap == 0 || n == 0 {
-            return;
-        }
-        let generation = self.generation.load(Ordering::Relaxed);
-        let deadline = {
-            let mut next = self.next.lock_ok();
-            let now = Instant::now();
-            // `.max(now)` is what stops an idle line banking credit: a
-            // clock left behind in the past resumes from now, not from
-            // where it stopped.
-            let start = (*next).max(now);
-            *next = start + Duration::from_secs_f64(n as f64 / cap as f64);
-            *next
-        };
-        // Sliced rather than one long sleep so that a live cap change is
-        // noticed within a second even when the reservation is minutes
-        // long (a very low cap against a large article).
-        loop {
-            let now = Instant::now();
-            if now >= deadline || self.generation.load(Ordering::Relaxed) != generation {
-                return;
-            }
-            tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
-        }
-    }
-}
 
 /// Live per-server connection target (TODO 112): how many of a server's
 /// spawned workers may hold a session RIGHT NOW.
@@ -218,45 +73,35 @@ impl ConnTarget {
         });
     }
 
+    /// Read-decide-write in ONE step: `f` sees the current target and
+    /// returns the new one (or None to leave it), and runs under the
+    /// channel's write lock so no concurrent `set` can slip between
+    /// the read and the write (F-24). Floored at 1 exactly like `set`.
+    /// Returns whether the target moved.
+    pub fn update(&self, f: impl FnOnce(usize) -> Option<usize>) -> bool {
+        self.tx.send_if_modified(|t| match f(*t) {
+            Some(n) if n.max(1) != *t => {
+                *t = n.max(1);
+                true
+            }
+            _ => false,
+        })
+    }
+
     fn subscribe(&self) -> tokio::sync::watch::Receiver<usize> {
         self.tx.subscribe()
     }
 }
 
-/// Park this worker while its slot ordinal is at or above the live
-/// target. Returns false if the run ended (or began draining) while
-/// parked - the caller must retire, not dial.
-///
-/// The caller has already returned any connection it held: a parked
-/// worker costs the provider nothing.
-async fn wait_for_slot(
-    target: &ConnTarget,
-    slot: u32,
-    finished: &mut tokio::sync::watch::Receiver<bool>,
-    shared: &Shared,
-) -> bool {
-    let mut rx = target.subscribe();
-    loop {
-        if (slot as usize) < *rx.borrow_and_update() {
-            return true;
-        }
-        tokio::select! {
-            r = rx.changed() => {
-                // Controller gone with the target parked low: admit the
-                // slot rather than strand it. The sender lives inside
-                // the PoolConfig clones, so in practice this outlives
-                // the run.
-                if r.is_err() {
-                    return true;
-                }
-            }
-            _ = run_over(finished, shared) => return false,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct PoolConfig {
+    /// Memory-floor gauge for bodies queued in this pool's outcome
+    /// channel (memgauge, instrument-first). None (the default) charges
+    /// nothing: only a consumer that RELEASES the charge on receive may
+    /// set this - a fire-and-forget consumer (sidefetch, post checks,
+    /// nettools probes) would leak the gauge upward monotonically. The
+    /// get pipeline sets `Sub::Channel` and releases in its drain.
+    pub channel_gauge: Option<crate::memgauge::Sub>,
     pub connections: usize,
     /// Pipelined BODY commands in flight per connection.
     pub window: usize,
@@ -328,6 +173,18 @@ pub struct PoolConfig {
     /// TODO 112: live connection target for THIS server; None = every
     /// spawned worker runs, the old behaviour. See [`ConnTarget`].
     pub live_target: Option<Arc<ConnTarget>>,
+    /// TODO 208 item 1: the whole fleet's connection budget the in-run
+    /// shed walks `live_target` down to its share of (see
+    /// `pool::linecap`); 0 = off. A CONSTANT since 23 Aug 2026 - it
+    /// used to be connections per Mbit of the measured line. MAX-folded
+    /// across the fleet, like the gauge's `pct`.
+    pub line_cap_fleet: usize,
+    /// TODO 208 item 1: the line rate in bytes/s the daemon has seen
+    /// this link sustain (its persisted link anchor), 0 = none. The cap
+    /// no longer divides it, but the in-run shed still stands down
+    /// without it, and the stall bound sizes an article's share from
+    /// it. MAX-folded across the fleet.
+    pub line_anchor_bps: u64,
     /// Shared pool-level speed limiter; None = unlimited.
     pub rate: Option<Arc<RateLimit>>,
     /// M29 availability oracle: per-article hit/430 outcomes accumulate
@@ -342,6 +199,16 @@ pub struct PoolConfig {
     /// None = the old behaviour, connect per run and QUIT at the end,
     /// which is still right for a one-shot CLI `get`.
     pub warm: Option<Arc<crate::warmpool::WarmPool>>,
+    /// Cross-job hand-over (see [`handoff`]): this server's connection
+    /// cap as a lease shared with the NEXT job's run. A worker takes a
+    /// permit before it claims or dials and holds it while it has a
+    /// socket; an idle worker after queue-dry hands its socket back when
+    /// a successor is waiting on the lease. None = no successor can ever
+    /// be waiting, which is the CLI and every test that does not opt in.
+    pub lease: Option<Arc<handoff::HostLease>>,
+    /// Per-run latch the caller awaits to start the next job: latched
+    /// the first time a primary worker finds itself idle after queue-dry.
+    pub handoff: Option<Arc<handoff::HandoffSignal>>,
     /// Tail fan-out prototype (off by default, env NZBFAST_TAIL_FANOUT=1):
     /// in the endgame, an IDLE primary connection races a healthy
     /// in-flight article too - same server included - instead of only
@@ -349,6 +216,22 @@ pub struct PoolConfig {
     /// is abandoned, so the waste is bounded to bytes-in-flight at win
     /// time. See `pick_dup` for the exact gates.
     pub tail_fanout: bool,
+    /// TODO 208 item 3 endgame depth taper (dark, env NZBFAST_TAIL_TAPER=1):
+    /// as the work left in the run falls toward one article per
+    /// connection, cap the TOP-UP depth so the fleet arrives at
+    /// queue-dry holding roughly one article each instead of `window`
+    /// each. The drain that follows queue-dry is exactly the in-flight
+    /// set emptying - `conns x window` articles, measured at 1.13-1.62
+    /// GB on every banked 1 GbE bench leg regardless of fixture, line
+    /// speed or the §202 gate. That stretch is not line-idle - it is
+    /// payload arriving - so this is a ROBUSTNESS bound, not a
+    /// throughput one: a connection that grabbed four of the last
+    /// articles cannot hand them back when a faster one goes idle, and
+    /// the tail is where one wedged session is the wall. Tapering
+    /// leaves that work in the QUEUE, where it can still be
+    /// rebalanced, and costs only the round trip between a completion
+    /// and the next BODY at depth 1. See [`Shared::tail_window`].
+    pub tail_taper: bool,
     /// M7b.2 depth steering (dark, env NZBFAST_STEER_DEPTH=1): a server
     /// whose windowed per-conn rate falls below 1/4 of the best other
     /// live server's tops its pipelines up to depth 1 instead of
@@ -365,6 +248,29 @@ pub struct PoolConfig {
     /// the fleet-wide dup-spend hygiene cap; the whole-run 2x
     /// slow-owner rule retires while armed. See `steer::speculative_arm`.
     pub race_envelope: bool,
+    /// TODO 202: speculative racing stands down while the fleet's
+    /// now-rate is within this percent of the run's observed line peak
+    /// - on a saturated line a duplicate can only displace payload.
+    /// 0 = gate off. See `pool/saturation.rs`. Env NZBFAST_RACE_SAT_PCT.
+    /// 70 since 22 Aug 2026 (TODO 208 item 4 ladder: 90 is a cliff,
+    /// 70 ties 80 on wall and spends less; the why is in `get/fleet.rs`).
+    pub race_sat_pct: u8,
+    /// TODO 202 §17: the per-ARTICLE escape from the gate above, ON by
+    /// default - an article whose owner has moved NO bytes is raced
+    /// even while the fleet reads saturated, because it is not
+    /// competing for the line. Rationale and the arithmetic that forces
+    /// it: `Shared::not_using_the_line`. Env NZBFAST_RACE_ESCAPE (0 =
+    /// off), which is the arm that prices the escape on ONE binary -
+    /// `race_sat_pct` 0-vs-80 prices the GATE and cannot price this,
+    /// since at 0 there is no gate to escape from.
+    pub race_escape: bool,
+    /// TODO 208.2 warm-up: the stall bound is re-read DURING a silence
+    /// and fed before the peak trains (see `Shared::stall_bound`). ON
+    /// by default; env NZBFAST_STALL_LIVE (0 = off) is the A/B arm;
+    /// fleet-wide, `any`-folded like `race_escape`.
+    pub stall_live: bool,
+    /// TODO 208.2 over-read: gauge fed per arriving chunk (`pool/saturation.rs`); env NZBFAST_PEAK_ARRIVALS (0 = off).
+    pub peak_arrivals: bool,
     /// Steering design §5.7: every byte on this server costs money -
     /// spend none deliberately. Excludes it from all speculative dup
     /// pickers; the endgame verdict ladder and the CRC-steer refetch
@@ -596,6 +502,7 @@ impl Drop for SessionTally<'_> {
 impl Default for PoolConfig {
     fn default() -> Self {
         PoolConfig {
+            channel_gauge: None,
             connections: 6,
             window: 3,
             ramp_delay: Duration::from_millis(150),
@@ -609,13 +516,22 @@ impl Default for PoolConfig {
             buf_pool: None,
             live: None,
             live_target: None,
+            lease: None,
+            handoff: None,
+            line_cap_fleet: 0,
+            line_anchor_bps: 0,
             rate: None,
             oracle: None,
             inflight_cap: 0,
             warm: None,
             tail_fanout: false,
+            tail_taper: false,
             steer_depth: false,
             race_envelope: false,
+            race_sat_pct: 70,
+            race_escape: true,
+            stall_live: true,
+            peak_arrivals: true,
             block_account: false,
             budget_bytes: None,
             hedge: false,
@@ -728,6 +644,13 @@ pub struct ArticleReq {
     /// article for the WRONG id (split-brain server) - its own pcrc32
     /// passes, so identity is the only check that can catch it.
     pub part: u32,
+    /// The NZB file (slot index) this segment belongs to; `u32::MAX` =
+    /// unscoped (a side fetch, a probe). Only the part-mismatch gate
+    /// reads it: when two backbones agree a file's segment numbering is
+    /// synthesized, the gate stands down for THAT file alone (F-09) -
+    /// a run-wide stand-down let a later file's genuinely wrong part
+    /// sail through unsteered.
+    pub file: u32,
 }
 
 impl ArticleReq {
@@ -740,6 +663,7 @@ impl ArticleReq {
             id: id.into(),
             age_days: 0,
             part: 0,
+            file: u32::MAX,
         }
     }
 }
@@ -781,7 +705,7 @@ pub enum MissingCause {
 /// The decode consumer's per-article verdict, reported back through
 /// [`QueueControl::note_decoded`] (TODO 114 consumer steer). The
 /// consumer reports only what its own decode saw; the expected part
-/// number stays in the pool (`Work::part`, via the stashed [`Handed`]
+/// number stays in the pool (`Work::part`, via the stashed [`queue::Handed`]
 /// copy), which does the split-brain identity comparison itself.
 #[derive(Debug, Clone, Copy)]
 pub enum DecodeReport<'a> {
@@ -897,6 +821,8 @@ pub struct SessionEnds {
 // `pool::LiveStats` / `pool::ServerLive` / `pool::now_ms` spelling
 // unchanged, and puts the private note thresholds back in scope for
 // pool's other descendants exactly as they were.
+mod bufpool;
+pub use bufpool::BufPool;
 mod livestats;
 pub use livestats::*;
 
@@ -1026,10 +952,12 @@ struct Work {
     age_days: u32,
     /// Expected yEnc part number from [`ArticleReq`]; 0 = undeclared.
     /// Read by the split-brain part-mismatch gate in
-    /// [`QueueControl::note_decoded`] via the stashed [`Handed`] copy -
-    /// which is rebuilt from whatever Work DELIVERED, so dups must carry
+    /// [`QueueControl::note_decoded`] via the stashed [`queue::Handed`]
+    /// copy - rebuilt from whatever Work DELIVERED, so dups must carry
     /// it too or a dup-delivered wrong-part body would sail through.
     part: u32,
+    /// [`ArticleReq::file`], the part gate's stand-down scope (F-09).
+    file: u32,
     /// C4: this article's completion ordinal - its accepted-request
     /// index at queue construction, the bit `Shared::done` arbitrates
     /// on. Rides the Work (and [`Inflight`], so both hedge dup
@@ -1082,24 +1010,6 @@ impl Pipeline {
     }
 }
 
-/// TODO 114 consumer steer: one delivered body awaiting the consumer's
-/// decode verdict (see `Shared::handed`). `work` is the rebuilt Work a
-/// bad verdict requeues - always `dup: false`, whatever copy won the
-/// race - and `server`/`group_bits` identify the deliverer so the
-/// steer can exclude its whole backbone.
-struct Handed {
-    work: Work,
-    server: usize,
-    group_bits: u32,
-    /// The delivered copy was a DUP dispatch that won the claim. A
-    /// dup's bad copy never owns damage and never spends the steer
-    /// budget (mirror of the pool-side gate's silent dup discard) -
-    /// it is requeued unconditionally, because the copy that should
-    /// own the outcome may already have lost the claim race inside
-    /// the verdict window.
-    dup_copy: bool,
-}
-
 /// One article currently being fetched by some worker.
 struct Inflight {
     server: usize,
@@ -1129,10 +1039,19 @@ struct Inflight {
     /// the same corrupt copy the steer just rejected (the corrupt dup
     /// claims first and the clean refetch is discarded as the loser).
     tried_fail: u32,
-    /// TTFB-suspicion (TODO 115): the owner's read sat in pre-byte
+    /// Pre-byte silence (TODO 115): the owner's read sat in pre-byte
     /// silence past the suspicion bound. `pick_suspect_dup` races
     /// suspect articles immediately - same server included - instead
     /// of waiting out the full adaptive budget.
+    ///
+    /// TODO 202 §17: it is ALSO the line gate's per-article escape
+    /// (`Shared::not_using_the_line`), which is why the marker is armed
+    /// on the whole adaptive path rather than only under the dark
+    /// `ttfb_hedge` - see `session::read_one`. Set once and never
+    /// cleared: the entry dies with the read, so the only window in
+    /// which it can be stale is between the status line arriving and
+    /// that body completing, and a race issued there is exactly the one
+    /// the pool issued before the gate existed.
     suspect: bool,
     /// The original's [`Work::age_days`], seeded at registration so a
     /// hedge dup - built fresh from this entry, no queued Work in hand -
@@ -1142,6 +1061,8 @@ struct Inflight {
     /// same reason: a dup-delivered body must still face the
     /// part-mismatch gate.
     part: u32,
+    /// The original's [`Work::file`], for the same reason.
+    file: u32,
     /// The original's [`Work::ord`], seeded at registration so a hedge
     /// dup claims the original's completion bit - and so the hedge
     /// scans and the census can ask `done` about an in-flight entry
@@ -1299,6 +1220,12 @@ impl AuthState {
         self.down_ms_total.load(Ordering::Relaxed) + open
     }
 
+    /// Publish an episode event under a fresh generation, so parkers
+    /// can tell it apart from a previous episode's leftover value.
+    fn publish_episode(&self, ep: CapEpisode) {
+        self.episode.send_modify(|v| *v = (ep, v.1 + 1));
+    }
+
     /// Try to give up this worker's slot to a capacity refusal. True when
     /// the slot was yielded and the caller must leave the fleet.
     ///
@@ -1327,12 +1254,6 @@ impl AuthState {
     /// fleet still stops the hammering and still asks the provider for
     /// fewer sessions, which is what a simultaneous-connection cap
     /// actually wants; a stranded server is unrecoverable for the run.
-    /// Publish an episode event under a fresh generation, so parkers
-    /// can tell it apart from a previous episode's leftover value.
-    fn publish_episode(&self, ep: CapEpisode) {
-        self.episode.send_modify(|v| *v = (ep, v.1 + 1));
-    }
-
     fn claim_yield(&self, alive: &AtomicUsize) -> bool {
         self.yielded
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |y| {
@@ -1345,6 +1266,8 @@ impl AuthState {
         self.rejected.load(Ordering::Acquire)
     }
 
+    // Not #[expect]: the unit tests call it, so the expectation is
+    // unfulfilled under cfg(test).
     #[allow(dead_code)] // diagnostic accessor, kept for pool-debug dumps
     fn reason(&self) -> Option<String> {
         self.reason.lock_ok().clone()
@@ -1363,6 +1286,9 @@ struct Shared {
     done: std::sync::Mutex<DoneBits>,
     /// Articles currently in flight, keyed by message-id.
     inflight: std::sync::Mutex<HashMap<Arc<str>, Inflight>>,
+    /// Held-bytes backpressure (TODO 94 item E): files whose pending
+    /// articles `next_work` steps past, see [`park::FilePark`].
+    park: park::FilePark,
     /// Per-server raw byte counters (also the caller-visible stats).
     bytes: Vec<Arc<AtomicU64>>,
     /// Per-server session-end tally by cause, in [`SessionEnds`] field
@@ -1383,6 +1309,8 @@ struct Shared {
     /// second bad copy is delivered as-is and PAR2 owns it, exactly as
     /// with the knob off.
     crc_retried: std::sync::Mutex<HashSet<Arc<str>>>,
+    /// Synthesized-numbering latch for the part gate (see its doc).
+    part_latch: queue::PartLatch,
     /// §129 3g: bare-refusal passes to RE-ARM, keyed by message-id, the
     /// value being the server-group bits to clear from `Work::soft_430`.
     /// Filled when a session shows it was reading responses off by one -
@@ -1418,7 +1346,7 @@ struct Shared {
     /// when the damaged body was the last article on the wire. Bounded
     /// by the outcome channel depth plus the consumers' in-hand
     /// batches. Empty unless `PoolConfig::crc_steer` is on.
-    handed: std::sync::Mutex<HashMap<Arc<str>, Handed>>,
+    handed: std::sync::Mutex<HashMap<Arc<str>, queue::Handed>>,
     /// TODO 114 consumer steer: requeued-after-claim Work waiting to
     /// re-enter the queue. The verdict thread must NOT take the tokio
     /// queue mutex - it is FIFO-fair and worker-hot, and during a
@@ -1464,6 +1392,10 @@ struct Shared {
     /// with work still pending (start of the tail phase).
     dups_issued: AtomicU64,
     tail_started: std::sync::Mutex<Option<Instant>>,
+    /// Cross-job hand-over (`handoff`): per-server leases a successor's
+    /// workers wait on, and this run's idle latch.
+    leases: Vec<Option<Arc<handoff::HostLease>>>,
+    handoff: Option<Arc<handoff::HandoffSignal>>,
     /// Flips to true the moment every article is terminal. Workers blocked
     /// mid-read on slow connections select on this - without it, a tail
     /// duplicate's win is worthless because the pool still waits for the
@@ -1535,6 +1467,10 @@ struct Shared {
     /// Hedge experiment (see [`PoolConfig::hedge`]), uniform like
     /// `tail_fanout`.
     hedge: bool,
+    /// The line gate's per-article escape is armed (see
+    /// [`PoolConfig::race_escape`]). Fleet-wide like the gate itself,
+    /// so the `any` fold is the bool analogue of the gate's `max`.
+    race_escape: bool,
     /// TTFB-suspicion hedge (see [`PoolConfig::ttfb_hedge`]), uniform.
     ttfb_hedge: bool,
     /// TTFB-suspicion fast path: true while some in-flight article MAY
@@ -1545,6 +1481,17 @@ struct Shared {
     suspect_pending: AtomicBool,
     /// Early fan-out (see [`PoolConfig::tail_fanout_early`]), uniform.
     tail_fanout_early: bool,
+    /// TODO 208 item 3: the endgame depth taper is armed for this run.
+    tail_taper: bool,
+    /// The shallowest pipeline depth the taper actually handed out, or
+    /// `usize::MAX` if it never bit. Printed on the `[pool]` line so a
+    /// leg can PROVE the arm took instead of inferring it from the
+    /// drain it is trying to measure - the trap §202's A/B hit, where
+    /// only the gauge's own `saturated 0%` distinguished a real off-arm
+    /// from an env var that never arrived. Written only while the taper
+    /// is biting (a tail-only event), so the steady state pays one
+    /// comparison against a value it already has.
+    taper_min: AtomicUsize,
     /// Dispatch-to-done article time EWMA in ms, trained by the 222
     /// Done path only (430s answer with no body and requeues never
     /// completed - both would drag the average away from what a
@@ -1552,9 +1499,20 @@ struct Shared {
     /// queued behind pipeline-mates, deliberately: that IS the time an
     /// article blocks its slot.
     art_ms: AtomicU64,
+    /// TODO 208.2: delivered body size EWMA in bytes (same 1/8 fold,
+    /// fed beside `srv_rate`), for the share-aware stall bound. 0 =
+    /// untrained, which keeps the flat bound.
+    body_bytes_ewma: AtomicU64,
     /// Dup dispatches issued on staleness alone (the hedge), for the
     /// issue-rate cap and the diagnostics line.
     hedges_issued: AtomicU64,
+    /// Dup dispatches issued on TTFB suspicion (`pick_suspect_dup`),
+    /// against its OWN issue-rate cap. §17c: until 21 Aug 2026 both
+    /// hedges spent one counter against one threshold, so enabling the
+    /// TTFB rescue would have drawn down the straggler budget with no
+    /// ledger able to say which mechanism spent it. Same formula, two
+    /// purses.
+    ttfb_hedges_issued: AtomicU64,
     /// The run's shared event ring (every server's `PoolConfig` carries
     /// the same `Arc`). Held here too so moments that belong to the RUN
     /// rather than to one worker - the tail latch, the drain, a racing
@@ -1639,6 +1597,11 @@ struct Shared {
     /// primary (all its workers bowed out) never wedges the queue.
     levels: Vec<u32>,
     alive: Vec<AtomicUsize>,
+    /// Per-server count of workers holding a live-target admission
+    /// (see [`Admitted`]); `admit_wake` is pinged whenever one is
+    /// returned so a parked worker can take it.
+    admitted: Vec<AtomicUsize>,
+    admit_wake: Vec<tokio::sync::Notify>,
     /// Per-server: latched true the first time any worker holds a usable
     /// connection (fresh dial or warm-pool). Read into
     /// `PoolStats::ever_connected` when the run returns.
@@ -1745,6 +1708,12 @@ struct Shared {
     /// `art_ms` (same fold, same Done-only feeding). 0 = untrained;
     /// the global stays the fleet-wide fallback and clamp source.
     srv_art_ms: Vec<AtomicU64>,
+    /// Ms-since-start of the last article-time gauge line (see
+    /// [`Shared::note_art_gauges`]); 0 = none emitted yet. The gauge is
+    /// sampled on every completion, so without this the log would carry
+    /// one line per article - the same once-a-window discipline
+    /// `last_blocked_note` keeps for the event ring.
+    art_note_at: AtomicU64,
     /// M7b.2 depth steering armed (OR-fold of `PoolConfig::steer_depth`,
     /// like `tail_fanout`).
     steer_depth: bool,
@@ -1754,6 +1723,10 @@ struct Shared {
     steer_clamped: Vec<AtomicBool>,
     /// M7b.2 envelope racing armed (OR-fold, like `tail_fanout`).
     race_envelope: bool,
+    /// TODO 202: the fleet-level line gauge and racing ledger.
+    sat: saturation::Saturation,
+    /// TODO 208 item 1: the in-run line-aware shed (`pool::linecap`).
+    line_cap: linecap::LineCap,
     /// §5.7 block-account mask: servers whose bytes are never spent
     /// speculatively, whatever their level.
     block_bits: u32,
@@ -1808,6 +1781,12 @@ const PROMOTE_SHED_MIN_AGE: Duration = Duration::from_millis(400);
 mod runlife;
 use runlife::*;
 
+mod admit;
+use admit::*;
+
+mod ratelimit;
+pub use ratelimit::RateLimit;
+
 // pool/gates.rs. Inherent methods on `Shared` plus the two server-bit
 // helpers; the glob puts the free functions back in scope for pool and
 // its descendants exactly as the private ones were, and `pub(super)`
@@ -1825,7 +1804,22 @@ use pacing::*;
 // whole to pool/hedge.rs. Inherent `impl Shared` methods, so no glob is
 // needed - the child's `pub(super)` puts them back in scope for pool and
 // every one of its descendants exactly as the private ones were.
+pub mod handoff;
 mod hedge;
+
+// TODO 94 item E: held-bytes backpressure - the per-file park the
+// extractor raises near its holds cap, consulted by `next_work`.
+mod park;
+
+// TODO 202: line-speed-aware racing - the fleet-level saturation gate
+// the speculative pickers consult - plus the racing ledger (`[pool]`
+// summary line, burst marker) that pool.rs used to carry.
+mod saturation;
+
+// TODO 208 item 1: the line-aware fleet cap - the pure rule the seed in
+// nzbfast::get::fleet applies, and the in-run shed that walks live
+// targets down to it once the §202 gauge has read the line.
+pub mod linecap;
 
 // Windowed per-server speed signals for steering and racing (M7b.2) -
 // see the module doc. Inherent `impl Shared` methods, so no glob needed;
@@ -2112,6 +2106,16 @@ impl Shared {
         servers: &[(ServerConfig, PoolConfig)],
     ) -> (Arc<Shared>, Vec<Arc<str>>) {
         let n_servers = servers.len();
+        // F-13: every routing decision is a u32 bitmask and `server_bit`
+        // is 0 past the cap, so two servers past it would be invisible
+        // to each other's 430s, tiers and dup guards. The config loader
+        // already refuses this (`TooManyServers`); the library entries
+        // must not silently accept what the loader does not.
+        assert!(
+            n_servers <= MAX_SERVERS,
+            "pool: {n_servers} servers exceeds MAX_SERVERS ({MAX_SERVERS}); \
+             routing bitmasks cannot distinguish them"
+        );
         let retentions: Vec<u32> = servers.iter().map(|(s, _)| s.retention_days).collect();
         let all = servers_mask(n_servers);
         let mut queue: VecDeque<Work> = VecDeque::with_capacity(reqs.len());
@@ -2156,6 +2160,7 @@ impl Shared {
                     probe: false,
                     age_days: r.age_days,
                     part: r.part,
+                    file: r.file,
                 });
             }
         }
@@ -2172,6 +2177,7 @@ impl Shared {
             pending,
             done,
             inflight: std::sync::Mutex::new(HashMap::new()),
+            park: park::FilePark::new(),
             bytes: (0..n_servers)
                 .map(|_| Arc::new(AtomicU64::new(0)))
                 .collect(),
@@ -2181,6 +2187,7 @@ impl Shared {
                 .collect(),
             blocked_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             crc_retried: std::sync::Mutex::new(HashSet::new()),
+            part_latch: queue::PartLatch::default(),
             soft_rearm: std::sync::Mutex::new(HashMap::new()),
             soft_rearm_n: AtomicUsize::new(0),
             takedown: std::sync::Mutex::new(HashMap::new()),
@@ -2194,6 +2201,8 @@ impl Shared {
             deferred: AtomicU64::new(0),
             dups_issued: AtomicU64::new(0),
             tail_started: std::sync::Mutex::new(None),
+            leases: servers.iter().map(|(_, c)| c.lease.clone()).collect(),
+            handoff: servers.iter().find_map(|(_, c)| c.handoff.clone()),
             finished: tokio::sync::watch::Sender::new(false),
             aborted: AtomicBool::new(false),
             draining: AtomicBool::new(false),
@@ -2208,13 +2217,17 @@ impl Shared {
             arrival_ack: servers.iter().any(|(_, c)| c.arrival_ack),
             tail_fanout: servers.iter().any(|(_, c)| c.tail_fanout),
             tail_fanout_early: servers.iter().any(|(_, c)| c.tail_fanout_early),
+            tail_taper: servers.iter().any(|(_, c)| c.tail_taper),
+            taper_min: AtomicUsize::new(usize::MAX),
             hedge: servers.iter().any(|(_, c)| c.hedge),
             ttfb_hedge: servers
                 .iter()
                 .any(|(_, c)| c.ttfb_hedge && c.adaptive_timeout),
             suspect_pending: AtomicBool::new(false),
             art_ms: AtomicU64::new(0),
+            body_bytes_ewma: AtomicU64::new(0),
             hedges_issued: AtomicU64::new(0),
+            ttfb_hedges_issued: AtomicU64::new(0),
             live: servers.iter().find_map(|(_, c)| c.live.clone()),
             race_note_at: AtomicU64::new(0),
             races_at_note: AtomicU64::new(0),
@@ -2236,6 +2249,8 @@ impl Shared {
             fence_off: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             levels: servers.iter().map(|(s, _)| s.level).collect(),
             alive: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
+            admitted: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
+            admit_wake: (0..n_servers).map(|_| tokio::sync::Notify::new()).collect(),
             connected: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             left_mid_run: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             auth: (0..n_servers).map(|_| AuthState::default()).collect(),
@@ -2253,9 +2268,13 @@ impl Shared {
             srv_rate_val: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             srv_rate_at: (0..n_servers).map(|_| AtomicU64::new(u64::MAX)).collect(),
             srv_art_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
+            art_note_at: AtomicU64::new(0),
             steer_depth: servers.iter().any(|(_, c)| c.steer_depth),
             steer_clamped: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             race_envelope: servers.iter().any(|(_, c)| c.race_envelope),
+            sat: saturation::Saturation::new(servers),
+            race_escape: servers.iter().any(|(_, c)| c.race_escape),
+            line_cap: linecap::LineCap::new(servers),
             block_bits: steer::block_bits(servers),
             budget_bytes: servers
                 .iter()
@@ -2362,75 +2381,6 @@ impl Shared {
                 "drained",
                 "all article data is in - nothing left to download",
             );
-        }
-    }
-
-    /// Called after each duplicate dispatch is issued. Emits at most one
-    /// run-level `racing` marker per [`BURST_WINDOW_MS`], and only for a
-    /// window holding at least [`RACE_BURST`] dups+hedges - the endgame
-    /// of a healthy job issues a handful and must not mark the graph.
-    fn note_race_burst(&self) {
-        let Some(live) = &self.live else {
-            return;
-        };
-        let total =
-            self.dups_issued.load(Ordering::Relaxed) + self.hedges_issued.load(Ordering::Relaxed);
-        let now = now_ms();
-        let opened = self.race_note_at.load(Ordering::Relaxed);
-        if opened == 0 {
-            if self
-                .race_note_at
-                .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.races_at_note
-                    .store(total.saturating_sub(1), Ordering::Relaxed);
-            }
-            return;
-        }
-        if now.saturating_sub(opened) < BURST_WINDOW_MS {
-            return;
-        }
-        if self
-            .race_note_at
-            .compare_exchange(opened, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        let since = total.saturating_sub(self.races_at_note.swap(total, Ordering::Relaxed));
-        if since >= RACE_BURST {
-            live.note_run(
-                "racing",
-                format!(
-                    "{since} duplicate fetches issued in the last {} seconds - \
-                     racing slow articles so the job can finish",
-                    BURST_WINDOW_MS / 1000
-                ),
-            );
-        }
-    }
-
-    fn report_diagnostics(&self) {
-        let dups = self.dups_issued.load(Ordering::Relaxed);
-        let wins = self.dup_wins.load(Ordering::Relaxed);
-        let hedges = self.hedges_issued.load(Ordering::Relaxed);
-        let art = self.art_ms.load(Ordering::Relaxed);
-        let spend = self.dup_spend_line();
-        let ts = *self.tail_started.lock_ok();
-        let da = *self.drained_at.lock_ok();
-        let run = self.start.elapsed().as_secs_f64();
-        match (ts, da) {
-            (Some(t), Some(d)) => info!(
-                target: "pool",
-                "run {run:.2}s · queue dry at {:.2}s · drained at {:.2}s · {dups} dups ({wins} won) · {hedges} hedges · art {art} ms{spend}",
-                (t - self.start).as_secs_f64(),
-                (d - self.start).as_secs_f64(),
-            ),
-            _ => info!(
-                target: "pool",
-                "run {run:.2}s · no tail · {dups} dups ({wins} won) · {hedges} hedges · art {art} ms{spend}"
-            ),
         }
     }
 
@@ -2716,40 +2666,6 @@ impl Shared {
         bits
     }
 
-    /// TODO 114 consumer steer: park a claimed, about-to-be-delivered
-    /// body's Work in `handed` so [`QueueControl::note_decoded`] can
-    /// requeue it after claim (see the field doc). Always `dup: false`
-    /// - whichever copy won the race, a steer requeues an original;
-    /// `dup_copy` remembers which kind won so a dup's bad copy can be
-    /// discarded rather than owned.
-    fn stash_handed(&self, w: &Work, ctx: ServerCtx) {
-        self.handed.lock_ok().insert(
-            w.id.clone(),
-            Handed {
-                work: Work {
-                    id: w.id.clone(),
-                    attempts: w.attempts,
-                    promoted: w.promoted,
-                    tried_430: w.tried_430,
-                    tried_fail: w.tried_fail,
-                    dup: false,
-                    prebyte_expiries: w.prebyte_expiries,
-                    soft_430: w.soft_430,
-                    fenced: false,
-                    rearms: w.rearms,
-                    ladder: false,
-                    probe: false,
-                    age_days: w.age_days,
-                    part: w.part,
-                    ord: w.ord,
-                },
-                server: ctx.idx,
-                group_bits: ctx.group_bits,
-                dup_copy: w.dup,
-            },
-        );
-    }
-
     /// Post-handoff terminal bookkeeping for a Done delivery. Legacy
     /// (no consumer verdicts): the channel owns the body now, and a
     /// lingering `done_ok` entry would keep ±slack neighbors "live"
@@ -2806,6 +2722,11 @@ pub async fn fetch_all(
 /// Note: a 430 Missing is currently terminal even in multi-server mode
 /// (fine for soak benches on fresh articles); per-server retry of missing
 /// articles is Phase 3a's failedServers ledger.
+///
+/// # Panics
+///
+/// If `servers` holds more than [`MAX_SERVERS`] entries - the routing
+/// bitmasks cannot distinguish them (F-13).
 pub async fn fetch_all_multi(
     servers: &[(ServerConfig, PoolConfig)],
     reqs: Vec<ArticleReq>,
@@ -2815,6 +2736,11 @@ pub async fn fetch_all_multi(
 }
 
 /// `fetch_all_multi` with an optional queue-reorder handle (M11 seeks).
+///
+/// # Panics
+///
+/// If `servers` holds more than [`MAX_SERVERS`] entries - the routing
+/// bitmasks cannot distinguish them (F-13).
 pub async fn fetch_all_multi_ctl(
     servers: &[(ServerConfig, PoolConfig)],
     reqs: Vec<ArticleReq>,
@@ -3022,7 +2948,7 @@ async fn join_fleet(
 struct ServerCtx {
     idx: usize,
     bit: u32,
-    #[allow(dead_code)] // mask of every server bit; kept beside bit/group_bits
+    #[expect(dead_code)] // mask of every server bit; kept beside bit/group_bits
     all: u32,
     /// Bits of this server's whole mirror group (incl. itself): a 430
     /// here is authoritative for all of them (M14e Group).
@@ -3112,22 +3038,29 @@ async fn next_work(
     // the queue FRONT in order - a fast server picks from the front, and
     // rotating seek-critical work to the back would strand it.
     let mut left_for_faster: Vec<Work> = Vec::new();
-    {
+    // Held-bytes backpressure: candidates stepped past because their
+    // group is at its allowance. Kept in QUEUE ORDER and put back at the
+    // front, never rotated: the queue runs file-then-offset, so the
+    // first one admitted is the article the engine is blocked on. A
+    // rotation scrambled that and the 4G leg of 23 Aug 2026 starved
+    // its engine 35 s at 6 MB/s while far-ahead bytes broke the cap.
+    // Not a dry queue either - no tail latch, no dup fan-out.
+    let mut parked_kept: Vec<Work> = Vec::new();
+    let parked_past = {
         let mut q = shared.queue.lock().await;
         // TODO 114 consumer steer: adopt any steered requeues parked
         // in the inbox (the verdict thread never takes this lock -
-        // see the `steer_inbox` field doc). Promoted articles keep
-        // the promoted-front rule the 430 requeue uses.
+        // see the `steer_inbox` field doc). Front, behind the promoted
+        // run: the consumer is waiting on exactly this article, and
+        // the `PartLatch` needs a refetch to REPORT early, not last.
         {
             let mut inbox = shared.steer_inbox.lock_ok();
             for w in inbox.drain(..) {
+                let at = q.iter().take_while(|x| x.promoted).count().min(q.len());
                 if w.promoted {
-                    let at = q.iter().take_while(|x| x.promoted).count().min(q.len());
                     shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
-                    q.insert(at, w);
-                } else {
-                    q.push_back(w);
                 }
+                q.insert(at, w);
             }
         }
         for _ in 0..q.len() {
@@ -3154,6 +3087,8 @@ async fn next_work(
                 || (endgame && pipe.payload > 0 && w.tried_430 != 0)
             {
                 q.push_back(w);
+            } else if shared.park.defers(&w) {
+                parked_kept.push(w);
             } else if w.promoted
                 && w.tried_430 == 0
                 && shared.stream_active()
@@ -3177,14 +3112,25 @@ async fn next_work(
                 // been refused is payload, however long it has been
                 // queued.
                 w.ladder = w.tried_430 != 0 || w.soft_430 != 0;
+                // Held-bytes backpressure: counted HERE, under the
+                // queue lock, not at registration a socket write later
+                // - every idle worker passed the one-in-flight floor
+                // in that window at once (60 x 700 KB, the whole
+                // margin, on the 22 Aug rig).
+                shared.park.note_pick(&w);
                 picked = Some(w);
                 break;
             }
         }
+        let parked_past = !parked_kept.is_empty();
+        for w in parked_kept.into_iter().rev() {
+            q.push_front(w);
+        }
         for w in left_for_faster.into_iter().rev() {
             q.push_front(w);
         }
-    }
+        parked_past
+    };
     if picked.is_none() {
         shared.scan_futile[ctx.idx].store(now_ms, Ordering::Relaxed);
     }
@@ -3200,7 +3146,7 @@ async fn next_work(
             shared.complete_one();
         }
     }
-    if picked.is_some() {
+    if picked.is_some() || parked_past {
         return picked;
     }
     if ctx.level == 0 && shared.pending.load(Ordering::Acquire) > 0 {
@@ -3227,6 +3173,11 @@ async fn next_work(
                 "every article has been handed out - waiting for the last ones in flight",
             );
         }
+    }
+    // Cross-job hand-over outranks a speculative duplicate (None lets
+    // the pipeline drain to empty, where `idle_turn` hands over).
+    if shared.want_handoff(ctx.idx) {
+        return None;
     }
     shared.pick_dup(ctx.idx, ctx.bit, ctx.group_bits, required, pipe, ctx.level)
 }
@@ -3262,6 +3213,11 @@ fn deal_shard_plans(
 /// for the single-I/O-driver per-process throughput ceiling (measured:
 /// 4.1 Gbps per process at 9% CPU). Blocking call - run it via
 /// `tokio::task::spawn_blocking` from async contexts.
+///
+/// # Panics
+///
+/// If `servers` holds more than [`MAX_SERVERS`] entries - the routing
+/// bitmasks cannot distinguish them (F-13).
 pub fn fetch_all_sharded(
     servers: Vec<(ServerConfig, PoolConfig)>,
     reqs: Vec<ArticleReq>,
@@ -3322,55 +3278,75 @@ pub fn fetch_all_sharded(
     let servers = Arc::new(servers);
     let counters = Arc::new(counters);
     let mut threads = Vec::new();
-    for plan in plans {
+    for (i, plan) in plans.into_iter().enumerate() {
         let servers = servers.clone();
         let counters = counters.clone();
         let shared = shared.clone();
         let out = out.clone();
-        threads.push(std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    // This shard never spawned its workers; returning
-                    // drops `plan`, whose pre-born lives release their
-                    // head-counts through `Drop` exactly as if the
-                    // workers had died. Panicking here instead leaked
-                    // the counts and made every surviving shard believe
-                    // work could still finish, suppressing terminal
-                    // outcomes.
-                    warn!(target: "pool", "shard runtime: {e}");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                let mut tasks = Vec::new();
-                for (si, ramp_step, life) in plan {
-                    let ctx = ctx_for(&servers, si);
-                    let (server, cfg) = servers[si].clone();
-                    let (_, connects, reconnects) = counters[si].clone();
-                    let shared = shared.clone();
-                    let out = out.clone();
-                    // `ramp_step` is the per-server worker ordinal, so it
-                    // doubles as the live-target slot.
-                    let ramp = cfg.ramp_delay * ramp_step;
-                    tasks.push(tokio::spawn(async move {
-                        worker(
-                            &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp,
-                            ramp_step,
-                        )
-                        .await;
-                    }));
-                }
-                // Each shard joins its own tasks; `seal_run` is gated on
-                // the run-wide live count, so only the shard whose workers
-                // are genuinely the last ones out seals anything.
-                join_fleet(&shared, out, tasks).await;
-            });
-        }));
+        // Test seam (F-15): a denied ordinal answers as the OS does on
+        // thread exhaustion, so the Err arm below is reachable in-tree.
+        #[cfg(test)]
+        let denied = SHARD_SPAWN_DENY.with(|d| d.get()) & (1u64 << i.min(63)) != 0;
+        #[cfg(not(test))]
+        let denied = false;
+        let builder =
+            (!denied).then(|| std::thread::Builder::new().name(format!("nzbfast-shard-{i}")));
+        let spawned = match builder {
+            None => Err(std::io::Error::other("injected shard-thread spawn refusal")),
+            Some(b) => b.spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        // This shard never spawned its workers; returning
+                        // drops `plan`, whose pre-born lives release their
+                        // head-counts through `Drop` exactly as if the
+                        // workers had died. Panicking here instead leaked
+                        // the counts and made every surviving shard believe
+                        // work could still finish, suppressing terminal
+                        // outcomes.
+                        warn!(target: "pool", "shard runtime: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let mut tasks = Vec::new();
+                    for (si, ramp_step, life) in plan {
+                        let ctx = ctx_for(&servers, si);
+                        let (server, cfg) = servers[si].clone();
+                        let (_, connects, reconnects) = counters[si].clone();
+                        let shared = shared.clone();
+                        let out = out.clone();
+                        // `ramp_step` is the per-server worker ordinal, so it
+                        // doubles as the live-target slot.
+                        let ramp = cfg.ramp_delay * ramp_step;
+                        tasks.push(tokio::spawn(async move {
+                            worker(
+                                &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp,
+                                ramp_step,
+                            )
+                            .await;
+                        }));
+                    }
+                    // Each shard joins its own tasks; `seal_run` is gated on
+                    // the run-wide live count, so only the shard whose workers
+                    // are genuinely the last ones out seals anything.
+                    join_fleet(&shared, out, tasks).await;
+                });
+            }),
+        };
+        match spawned {
+            Ok(t) => threads.push(t),
+            // Same symmetry as the runtime-build failure inside the
+            // closure (F-15): the unspawned closure is dropped here and
+            // takes `plan` with it, so its pre-born lives release their
+            // head-counts and the other shards can still seal. A panic
+            // from `thread::spawn` leaked them.
+            Err(e) => warn!(target: "pool", "shard thread {i}: {e}"),
+        }
     }
     for t in threads {
         let _ = t.join();
@@ -3425,7 +3401,16 @@ mod giveup_tests;
 mod unit_tests;
 
 #[cfg(test)]
+mod seal_tests;
+
+#[cfg(test)]
+mod steer_seam_tests;
+
+#[cfg(test)]
 mod rig_tests;
 
 #[cfg(test)]
 mod fault_rigs;
+
+#[cfg(test)]
+mod tail_rigs;

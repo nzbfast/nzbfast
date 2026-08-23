@@ -67,11 +67,39 @@ seen cargo-ndk. So typechecking a Kotlin change costs the SDK install
 and nothing else. You only need the cargo-ndk chain to produce an APK
 whose on-device engine actually runs.
 
-`:app:lintDebug` is NOT part of `assembleDebug`, and it currently
-fails: 6 errors, all predating this note (a missing `super` call in
-`onUserLeaveHint`, and five media3 `UnstableApi` opt-ins in
-PlayerScreen). `lintVitalRelease`, which `assembleRelease` does run,
-is clean. Do not read a red `lintDebug` as a broken build.
+`:app:lintDebug` is NOT part of `assembleDebug`, so it has to be asked
+for by name:
+
+```sh
+./gradlew :app:lintDebug
+```
+
+It is green as of 23 Aug 2026 (0 errors, 14 warnings; the warnings are
+dependency-freshness and manifest notes, not this app's code). It was
+red from 6 Aug with 6 errors, all from `0324c3c3` (PiP and player),
+and both fixes are worth knowing before you touch either file:
+
+- `MissingSuperCall` at `MainActivity.onUserLeaveHint`. The override
+  entered PiP and returned without chaining, which drops whatever the
+  platform does on that callback for every screen that is NOT the
+  player. Fixed by calling `super.onUserLeaveHint()` first.
+- Five `UnsafeOptInUsageError` in `PlayerScreen`, all of them
+  `PlayerView` calls inside the `AndroidView` factory and update
+  lambdas: `setShowNextButton`, `setShowPreviousButton`,
+  `setShowFastForwardButton`, `setShowRewindButton`, and the
+  `DefaultTimeBar` lookup that gates scrubbing. media3 ships those
+  outside its stable surface, so each one needs an explicit opt-in.
+  Taken once for the whole composable, as
+  `@androidx.annotation.OptIn(UnstableApi::class)` on `PlayerScreen` -
+  fully qualified because the unqualified `OptIn` is Kotlin's own
+  annotation and the two are not interchangeable. Note that lint flags
+  the CALLS, not the types: `ExoPlayer.Builder` and the `PlayerView`
+  constructor a few lines above drew nothing, so counting `@UnstableApi`
+  classes will not tell you how many errors to expect.
+
+`lintVitalRelease`, which `assembleRelease` does run, was clean
+throughout - a red `lintDebug` was never a broken build. Lint needs no
+NDK and no engine binary either, same as `assembleDebug` above.
 
 Gradle is pinned by the wrapper (8.13, AGP 8.11.1, Kotlin 2.1.21) -
 build through `./gradlew`, not a system gradle. The debug APK is

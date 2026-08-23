@@ -17,7 +17,7 @@ it. The daemon detects the sandbox and the dashboard's update chip shows
 ## Install
 
 ```sh
-flatpak install --user ./nzbfast-1.1.2-x86_64.flatpak
+flatpak install --user ./nzbfast-1.2.1-x86_64.flatpak
 flatpak run io.github.nzbfast.nzbfast
 ```
 
@@ -196,7 +196,10 @@ If it is submitted, the manifest goes to `flathub/flathub` on the
 
 - the source tarball pointed at a release that contains the Flatpak
   support (1.1.3 or later - 1.1.2 predates the sandbox detection, so its
-  update chip would send Flatpak users to the download page)
+  update chip would send Flatpak users to the download page). DONE 22
+  Aug: the manifest is on v1.2.1, and `cargo-sources.json` was checked
+  against that tag's own `Cargo.lock` rather than the working tree's -
+  328 registry crates, an exact match, so no regeneration was owed.
 - `flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.nzbfast.nzbfast.yaml`
 - the app ID verified by putting the Flathub token at
   `https://nzbfast.github.io/.well-known/org.flathub.VerifiedApps.txt`

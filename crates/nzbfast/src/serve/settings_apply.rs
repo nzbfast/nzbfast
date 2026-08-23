@@ -250,6 +250,16 @@ pub(super) fn apply_setting_tail(
             *d.omdb_key.lock_ok() = (!k.is_empty()).then(|| k.clone());
             (true, if k.is_empty() { Value::Null } else { json!(k) })
         }
+        // §193 d, same shape again. Clearing removes the settings key
+        // rather than storing "", which is what lets the config file /
+        // TMDB_API_KEY seed win again on the next start - the two older
+        // homes are still honoured, so an empty override would have made
+        // them unreachable with no way back through the API.
+        "tmdb_key" => {
+            let k = v.trim().to_string();
+            *d.tmdb_key.lock_ok() = (!k.is_empty()).then(|| k.clone());
+            (true, if k.is_empty() { Value::Null } else { json!(k) })
+        }
         "feeds" => set_feeds(d, name, v)?,
         "indexers" => set_indexers(d, name, v)?,
         "list_sources" => set_list_sources(d, name, v)?,
@@ -344,6 +354,7 @@ pub(super) fn apply_setting_tail(
             (false, json!(b))
         }
         "port" => set_port(d, name, v)?,
+        "bind" => set_bind(d, name, v)?,
         "tls_cert" => set_tls_cert(d, name, v)?,
         "tls_key" => set_tls_key(d, name, v)?,
         "out_dir" => set_out_dir(d, name, v)?,

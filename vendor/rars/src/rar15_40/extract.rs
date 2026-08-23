@@ -381,6 +381,14 @@ where
             .is_some_and(|archive| archive.main.is_solid()),
         password,
     );
+    // This walk has no way to finish a header walk that stopped at an
+    // arrival frontier, so a partially enumerated volume here would
+    // silently skip members; only the sequence driver can complete one.
+    if volumes.iter().any(|a| a.is_partially_enumerated()) {
+        return Err(Error::InvalidHeader(
+            "RAR 1.5 volume set has a partially enumerated volume",
+        ));
+    }
     // Volumes already reported consumed, so the catch-up after a split
     // member releases the whole backlog in order.
     let mut reported = 0usize;
@@ -566,77 +574,96 @@ where
         let mut chase_at: Option<usize> = None;
         {
             let session = session.as_mut().expect("session just created");
-            let archive = &volumes[volume_index];
-            for (file_index, file) in archive.files().enumerate().skip(start_at) {
-                match split.advance(file.is_split_before(), file.is_split_after()) {
-                    SplitVolumeStep::Regular => {
-                        let meta = file.metadata();
-                        if meta.is_directory {
-                            let _ = open(&meta)?;
-                        } else {
-                            let mut writer = open(&meta)?;
-                            if file.is_stored() {
-                                file.write_stored_to(archive, password, &mut writer)
-                                    .map_err(|error| file.entry_error("extracting", error))?;
+            // A resume loop, as in the RAR5 twin: running off the end of
+            // a volume parsed by `Archive::parse_stream_incremental` does
+            // NOT mean it is walked out - the header walk stopped at the
+            // arrival frontier and is finished here, at the bottom, by
+            // which time the split member has decoded and the caller has
+            // released its bytes.
+            let mut resume_at = start_at;
+            'walk: loop {
+                let archive = &volumes[volume_index];
+                for (file_index, file) in archive.files().enumerate().skip(resume_at) {
+                    resume_at = file_index + 1;
+                    match split.advance(file.is_split_before(), file.is_split_after()) {
+                        SplitVolumeStep::Regular => {
+                            let meta = file.metadata();
+                            if meta.is_directory {
+                                let _ = open(&meta)?;
                             } else {
-                                session
-                                    .write_file_to(archive, file, &mut writer)
-                                    .map_err(|error| file.entry_error("extracting", error))?;
+                                let mut writer = open(&meta)?;
+                                if file.is_stored() {
+                                    file.write_stored_to(archive, password, &mut writer)
+                                        .map_err(|error| file.entry_error("extracting", error))?;
+                                } else {
+                                    session
+                                        .write_file_to(archive, file, &mut writer)
+                                        .map_err(|error| file.entry_error("extracting", error))?;
+                                }
                             }
                         }
-                    }
-                    SplitVolumeStep::Start => {
-                        validate_split_fragment(file, password)?;
-                        // `advance` leaves the state untouched for Start
-                        // (only `begin` arms it), so breaking out here is
-                        // clean - the chain owns the member from now on.
-                        if !file.is_stored() {
-                            chase_at = Some(file_index);
-                            break;
-                        }
-                        split.begin(PendingSplitRefs::new(file, volume_index, file_index));
-                    }
-                    SplitVolumeStep::Continue(current) => {
-                        validate_split_continuation_refs(current, file, password)?;
-                        current.append(file, volume_index, file_index)?;
-                    }
-                    SplitVolumeStep::Finish(mut completed) => {
-                        validate_split_continuation_refs(&completed, file, password)?;
-                        completed.append(file, volume_index, file_index)?;
-                        // The splits that land here are STORED members
-                        // (the chase takes every compressed one). They
-                        // stream forward exactly once, so each fragment
-                        // frees its volume as the chain advances - the
-                        // caller's retention window must not have to
-                        // hold a 400-volume stored film whole.
-                        let reported = &mut reported;
-                        let consumed = &consumed;
-                        let mut spent = move |spent_volume: usize| {
-                            while *reported <= spent_volume {
-                                consumed(*reported, u64::MAX);
-                                *reported += 1;
+                        SplitVolumeStep::Start => {
+                            validate_split_fragment(file, password)?;
+                            // `advance` leaves the state untouched for Start
+                            // (only `begin` arms it), so breaking out here is
+                            // clean - the chain owns the member from now on.
+                            if !file.is_stored() {
+                                chase_at = Some(file_index);
+                                // Left here and never walked again, and needs
+                                // no completion: this entry is flagged
+                                // SPLIT_AFTER, and nothing can follow a member
+                                // that continues into the next volume but the
+                                // end block.
+                                break 'walk;
                             }
-                        };
-                        completed.write_to(
-                            &volumes,
-                            file,
-                            password,
-                            session,
-                            &mut open,
-                            Some(&mut spent),
-                        )?;
-                    }
-                    SplitVolumeStep::MissingFirst => {
-                        return Err(Error::InvalidHeader(
-                            "RAR 1.5 split entry is missing its first part",
-                        ));
-                    }
-                    SplitVolumeStep::Interrupted => {
-                        return Err(Error::InvalidHeader(
-                            "RAR 1.5 split entry is interrupted by a regular entry",
-                        ));
+                            split.begin(PendingSplitRefs::new(file, volume_index, file_index));
+                        }
+                        SplitVolumeStep::Continue(current) => {
+                            validate_split_continuation_refs(current, file, password)?;
+                            current.append(file, volume_index, file_index)?;
+                        }
+                        SplitVolumeStep::Finish(mut completed) => {
+                            validate_split_continuation_refs(&completed, file, password)?;
+                            completed.append(file, volume_index, file_index)?;
+                            // The splits that land here are STORED members
+                            // (the chase takes every compressed one). They
+                            // stream forward exactly once, so each fragment
+                            // frees its volume as the chain advances - the
+                            // caller's retention window must not have to
+                            // hold a 400-volume stored film whole.
+                            let reported = &mut reported;
+                            let consumed = &consumed;
+                            let mut spent = move |spent_volume: usize| {
+                                while *reported <= spent_volume {
+                                    consumed(*reported, u64::MAX);
+                                    *reported += 1;
+                                }
+                            };
+                            completed.write_to(
+                                &volumes,
+                                file,
+                                password,
+                                session,
+                                &mut open,
+                                Some(&mut spent),
+                            )?;
+                        }
+                        SplitVolumeStep::MissingFirst => {
+                            return Err(Error::InvalidHeader(
+                                "RAR 1.5 split entry is missing its first part",
+                            ));
+                        }
+                        SplitVolumeStep::Interrupted => {
+                            return Err(Error::InvalidHeader(
+                                "RAR 1.5 split entry is interrupted by a regular entry",
+                            ));
+                        }
                     }
                 }
+                if !volumes[volume_index].is_partially_enumerated() {
+                    break 'walk;
+                }
+                volumes[volume_index].enumerate_rest(password)?;
             }
         }
 
@@ -702,6 +729,7 @@ where
         attr: pending.attr,
         host_os: pending.host_os,
         is_directory: false,
+        unpacked_size: first.unp_size,
     };
     let mut writer = open(&meta)?;
 
@@ -894,6 +922,15 @@ where
                 return Err(Error::InvalidHeader("RAR 1.5 split entry is incomplete"));
             };
             self.volumes.push(archive);
+            // A volume parsed by `Archive::parse_stream_incremental` can
+            // read as empty while it is merely still arriving, and
+            // skipping THAT would drop a fragment of the member being
+            // decoded - so an archive with no entries is pressed for the
+            // truth first.
+            let password = self.password;
+            if self.volumes[volume_index].files().next().is_none() {
+                self.volumes[volume_index].enumerate_rest(password)?;
+            }
             let archive = &self.volumes[volume_index];
             let Some(file) = archive.files().next() else {
                 continue;
@@ -1221,6 +1258,7 @@ impl PendingSplitRefs {
             attr: self.attr,
             host_os: self.host_os,
             is_directory: false,
+            unpacked_size: final_file.unp_size,
         };
         let mut writer = open(&meta)?;
         // Both arms below stream the chain forward exactly once (RAR4 has
@@ -1740,6 +1778,7 @@ mod tests {
             },
             blocks: Vec::new(),
             source: ArchiveSource::Memory(Arc::from(Vec::new().into_boxed_slice())),
+            pending_from: None,
         }
     }
 
@@ -1762,6 +1801,7 @@ mod tests {
             },
             blocks,
             source: ArchiveSource::Memory(Arc::from(source.into_boxed_slice())),
+            pending_from: None,
         }
     }
 
@@ -2081,6 +2121,7 @@ mod tests {
             },
             blocks: vec![Block::File(empty.clone())],
             source: ArchiveSource::Memory(Arc::from([])),
+            pending_from: None,
         };
 
         let mut out = Vec::new();

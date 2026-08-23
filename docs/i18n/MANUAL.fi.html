@@ -308,7 +308,12 @@ sekunnissa. Kortit ylhäältä alas:</p>
 <h3>Otsikkopalkki</h3>
 <ul>
 <li><b>Nopeusrajoitus</b>-valikko - kiinteät katot, <i>auto · väistä lähiverkkoa</i> (RTT-ohjattu
-tila, joka vetäytyy, kun joku muu talossa tarvitsee linjaa) tai rajoittamaton.</li>
+tila, joka vetäytyy, kun joku muu talossa tarvitsee linjaa) tai rajoittamaton.
+Esiasetukset ovat pyöreitä lukuja pyöreille linjoille, eikä 37&nbsp;Mb/s:n lähetyskaista
+ole niistä yksi: <b>oma arvo…</b> kysyy luvun sinulta ja hyväksyy kaiken, minkä API
+hyväksyy (<code>25M</code>, <code>500K</code> tai 0 = ei rajaa). Valikossa lukee sen
+jälkeen <b>(mukautettu)</b> ja nopeus sen vieressä, kunnes valitset taas esiasetuksen
+tai <i>auto</i>-tilan.</li>
 <li><b>Keskeytä ajaksi…</b> - keskeytä kaikki 15&nbsp;min/30&nbsp;min/1&nbsp;t/3&nbsp;t ajaksi
 automaattisella jatkolla, tai käytä Keskeytä-painiketta avoimeen keskeytykseen. Keskeytys on
 välitön: aktiivinen siirto pysähtyy sekunneissa ja jatkuu myöhemmin
@@ -347,6 +352,7 @@ joka kertoo mistä työ tuli (valvontakansio, yhdistetty sovellus, API…).
 <b>Lataa .nzb-tiedosto</b> -painike tallentaa työn <code>.nzb</code>-tiedoston - nzbfast
 säilyttää oman kopionsa, joten tämä toimii jokaiselle työlle, vaikka alkuperäinen
 tiedosto olisi jo kauan sitten poissa.</li>
+<li><b>"Miksi tämä on hidas?"</b> Kun työ latautuu, sen edistymispalkin alla oleva rivi kertoo tuomion <em>tästä</em> työstä, ei koneesta: <i>palveluntarjoajasi ovat raja</i>, <i>tämä kone on suorittimensa rajoilla</i>, <i>tallennus ei pysy perässä</i>, ja niin edelleen. Napsauta sitä, niin rivi avautuu todisteisiin: mihin linjasi pystyy, mitä palveluntarjoajat toimittivat, mitä saapuu juuri nyt, ja palvelinkohtainen taulukko, josta rajoitettu palveluntarjoaja näkyy heti. Täydellä nopeudella kulkeva työ ei sano tässä mitään, eikä sellainenkaan, jonka tuomio on vielä muotoutumassa.</li>
 <li>Merkit näyttävät erityistilat: <i>lykätty (hidas)</i>, <i>esihaetaan</i>,
 <i>keskeytetty</i> (katso <a href="#performance">Suorituskykytyökalut</a>).</li>
 <li>Burn-down-kaavio seuraa jonossa jäljellä olevaa GB-määrää yhteensä.</li>
@@ -374,7 +380,7 @@ salasana ja työ valmistuu paikan päällä. Varmistuksen tila -nauha piirtää 
 lohkoja latausta kohti - nouseva loppupää tarkoittaa, että artikkelit saapuvat vioittuneina.
 Jokaisen rivin tietolaatikko kertoo, kuka työn lisäsi, ja siinä on sama
 <b>Lataa .nzb-tiedosto</b> -painike kuin jonossa - kätevä, kun haluat ladata julkaisun
-uudelleen muualla tai liittää <code>.nzb</code>-tiedoston ongelmaraporttiin.</p>
+uudelleen muualla tai liittää <code>.nzb</code>-tiedoston ongelmaraporttiin. Sen vieressä on <b>Luo raportti</b>, joka on yleensä parempi liite: katso <a href="#troubleshooting">Vianmääritys</a>.</p>
 <p>Kortti listaa oletuksena kymmenen latausta, ja loput ovat yhden klikkauksen päässä ▤-painikkeesta. Tila, sijainti ja epäonnistumisen syy ovat rivin oman klikkauksen takana, joten tavallinen tapaus - mikä valmistui, kuinka suuri, milloin - pysyy luettavana ilman vieritystä. Vedä sen sijaan kortin alareunasta, niin lista vierii valitsemallasi korkeudella. <b>History rows</b> kohdassa Asetukset → Käyttöliittymä muuttaa tuota kymmentä; koska se on daemonin eikä selaimesi ominaisuus, se koskee jokaista tätä asennusta katsovaa laitetta. <b>Colour History names</b> sen vieressä värjää valmiit nimet vihreiksi ja epäonnistuneet punaisiksi; pois päältä nimet pysyvät neutraaleina, ja värillinen piste ja rivin omat tiedot kertovat yhä kumpi on kumpi.</p>
 <p>nzbfast säilyttää historian ikuisesti, ellet toisin sano. <b>Historian siivous</b>
 kohdassa Asetukset → Järjestelmä poistaa vanhat merkinnät kahden toisistaan
@@ -394,11 +400,13 @@ mitatuille ja lohkotileille. Lohkotilit näyttävät elinaikaisen käytön kokoa
 <a href="#performance">Suorituskykytyökalut</a>.</p>
 
 <h3 id="dash-layout">Koontinäytön järjestäminen</h3>
-<p>Koontinäyttö on sinun järjestettäväsi. Neljä toimintoa, samalla nimellä kaikkialla missä
-ne kohtaat: <b>Siirrä</b> korttia, <b>Tiivistä</b> se, <b>Muuta kokoa</b> tai <b>Piilota</b>
-se. Jokaisen valinnan muistaa se selain, jossa sen teit, joten jokainen laite pitää oman
-järjestyksensä, ja <b>Nollaa asettelu</b> kohdassa Asetukset → Käyttöliittymä palauttaa
-jokaisen kortin, koon ja sarakkeen sellaiseksi kuin ne toimitettiin.</p>
+<p>Koontinäyttö on sinun järjestettäväsi. Neljä toimintoa, samalla nimellä kaikkialla
+missä ne kohtaat: <b>Siirrä</b> korttia, <b>Tiivistä</b> se, <b>Muuta kokoa</b> tai
+<b>Piilota</b> se. Jokaisen valinnan muistaa se selainprofiili, jossa sen teit: korttien
+järjestys ja piilottamasi kortit pätevät kaikilla ikkunan leveyksillä siinä profiilissa,
+kun taas korttien ja kaavioiden koot jäävät vain työpöydälle. <b>Nollaa asettelu</b>
+kohdassa Asetukset → Käyttöliittymä palauttaa jokaisen kortin, koon ja sarakkeen
+sellaiseksi kuin ne toimitettiin.</p>
 <p><b>Muokkaa asettelua</b> on opastettu tie sisään ja nopein tapa nähdä, mihin kortti
 pystyy. Avaa se ensimmäisen kortin yläpuolella olevasta vaimeasta linkistä tai kohdasta
 Asetukset → Käyttöliittymä, jossa se on rivin <b>Koontinäytön asettelu</b> ensimmäinen
@@ -420,13 +428,14 @@ sarkainpysäkki: anna sille kohdistus, niin ylä- ja alanuoli siirtävät kortti
 vähemmän tilaa. Historiassa se vaihtelee kymmenen tuoreimman latauksen ja loppujen
 historiasi välillä. <b>Tiivis tila</b> kohdassa Asetukset → Käyttöliittymä tekee koko
 koontinäytön kerralla.</li>
-<li><b>Muuta kokoa.</b> Kortissa jossa on luettelo tai kaavio on palkki alareunassa: vedä se
-haluamallesi korkeudelle. Palkki on himmeä kunnes osoitat korttia, jolloin se piirtyy koko
-leveydeltä hiusviivana ja takakulmassa on uurteet; se ottaa myös näppäimistökohdistuksen,
-jolloin ylä- ja alanuoli asettavat korkeuden ja Vaihto ottaa suuremman askeleen. Se, missä
-korteissa palkki on, muuttuu sitä mukaa kuin kortit saavat ja menettävät omia luetteloitaan:
-ota palkki vastaukseksi äläkä mitään täällä olevaa luetteloa. Tilassa <b>Muokkaa
-asettelua</b> palkittomat kortit kertovat sen itse.</li>
+<li><b>Muuta kokoa.</b> Kortissa jossa on luettelo tai kaavio on palkki alareunassa
+silloin kun käytössäsi on hiiri tai ohjauslevy: vedä se haluamallesi korkeudelle.
+Kosketusnäytölle sitä ei piirretä. Palkki on himmeä kunnes osoitat korttia, jolloin se
+piirtyy koko leveydeltä hiusviivana ja takakulmassa on uurteet; se ottaa myös
+näppäimistökohdistuksen, jolloin ylä- ja alanuoli asettavat korkeuden ja Vaihto ottaa
+suuremman askeleen. Se, missä korteissa palkki on, muuttuu sitä mukaa kuin kortit saavat
+ja menettävät omia luetteloitaan: ota palkki vastaukseksi äläkä mitään täällä olevaa
+luetteloa. Tilassa <b>Muokkaa asettelua</b> palkittomat kortit kertovat sen itse.</li>
 <li><b>Piilota.</b> Otsikkorivin viimeinen painike piilottaa kortin. Piilotetut kortit
 kerääntyvät koontinäytön alalaidassa olevaan <b>Piilotettu</b>-palkkiin; napsauta siellä
 nimeä tuodaksesi yhden takaisin.</li>
@@ -464,11 +473,13 @@ sitä, ja Vaihto nuolen kanssa muuttaa leveyttä.</p>
 <tr><th>Tapa</th><th>Miten</th></tr>
 <tr><td><b>Raahaa &amp; pudota</b></td><td>Pudota yksi tai useampi <code>.nzb</code>-tiedosto minne tahansa koontinäytöllä.</td></tr>
 <tr><td><b>Valvontakansio</b></td><td>Aseta kansio Asetuksissa; mikä tahansa siihen tallennettu <code>.nzb</code>
-poimitaan 5 sekunnin sisällä ja siirretään roskakoriin, ja avoin koontinäyttö ilmoittaa
+poimitaan heti kun se saapuu ja siirretään roskakoriin, ja avoin koontinäyttö ilmoittaa
 jokaisesta poiminnasta nimellä ("… poimittu kansiosta Lataukset"), joten kansiosta katoava
 tiedosto ei jää koskaan arvoitukseksi. Haluatko mieluummin säilyttää tiedostosi? Kytke päälle
 <b>Säilytä .nzb-tiedostot poiminnan jälkeen</b> (katso <a href="#settings">§9</a>). Ohjaa selaimesi latauskansio
-siihen saadaksesi yhden napsautuksen nappaukset indeksoijasivustoilta.</td></tr>
+siihen saadaksesi yhden napsautuksen nappaukset indeksoijasivustoilta. Alikansioilla, tiedostoilla jotka eivät osoittaudukaan NZB:ksi, ja verkkojaossa
+olevan kansion tarvitsemalla tarkistusvälillä on kullakin oma kytkimensä; katso
+<a href="#settings">§9</a>.</td></tr>
 <tr><td><b>URL:sta</b></td><td>Liitä NZB-linkki (API <code>mode=addurl</code> tai minkä tahansa yhdistetyn sovelluksen kautta).</td></tr>
 <tr><td><b>nzblnk:-linkit</b></td><td>Liitä <code>nzblnk:</code>-linkki mihin tahansa kohtaan hallintapaneelia tai raahaa se sisään. Jos asensit macOS-DMG:stä tai Windows-asennusohjelmasta, voit myös napsauttaa linkkiä suoraan boardilla. Katso <a href="#nzblnk">nzblnk-linkit</a> alempaa.</td></tr>
 <tr><td><b>Selaa indeksiä</b></td><td>Napsauta mitä tahansa täydellistä julkaisua Selaa-kortissa.</td></tr>
@@ -583,10 +594,26 @@ päällä, niin saat julisteen ja juonen omasta indeksistäsi.</li>
 <li><b>Ryhmittele nimikkeittäin</b>, viereinen valitsin: yksi rivi nimikettä kohden ja
 sen julkaisut alla. Avaa se painikkeella <b>&#9656;</b> tai napsauttamalla riviä;
 nimikkeen valintaruutu valitsee näytetyt julkaisut. Ryhmittely koskee vain <b>Tätä
-indeksiä</b>.</li>
-<li><b>Välilehdet</b> Elokuvat / Sarjat / Muut, pikahaku ja seitsemän
-järjestystä: <b>Sinulle</b>, Uusimmat julkaisut, Julkaisuvuosi, Parhaiten arvostellut,
-Nimike A–Ö, Suurimmat ja Eniten julkaistut.</li>
+indeksiä</b>; jos valitset <b>Indeksoijat</b> tai <b>Molemmat</b>, taulukko palaa
+litteäksi ja kertoo sen.</li>
+<li><b>Nimikkeen kaikki julkaisut</b> luetellaan kun avaat sen kortin, mukana
+tarkkuus, koodekki, äänimuoto ja dynamiikka-alue (Dolby Vision, HDR10) julkaisun
+nimestä luettuna, sekä koko, ikä ja se onko jokainen osa yhä palveluntarjoajallasi.
+Aseta <b>Haluttu versio</b> kohdassa Asetukset → Järjestäminen → Indeksointi, niin
+osuvat nousevat kärkeen <b>paras osuma</b> -merkillä ja osuvat tunnisteet
+korostettuina. Mitään ei piiloteta: julkaisujen nimistä puuttuu näitä tunnisteita
+jatkuvasti, joten mieltymys muuttaa vain järjestystä. Se ratkaisee myös, mihin
+pakkaukseen seuranta päivittää.</li>
+<li><b>Välilehdet</b> Elokuvat / Sarjat / Muut, pikahaku ja seitsemän järjestystä:
+<b>Sinulle</b>, Uusimmat julkaisut, Julkaisupäivä, Parhaiten arvostellut, Nimike A–Ö,
+Suurimmat ja Eniten julkaistut. Järjestyksen vieressä oleva <b>↓</b>-painike kääntää
+sen, joten jokainen toimii myös toisin päin (vanhimmat, pienimmät, matalimmat, Ö–A).</li>
+<li><b>Julkaisupäivä</b> on alkuperäinen julkaisu tai ensiesitys, päivän tarkkuudella
+silloin kun metatietolähde antoi sellaisen: se vastaa kysymykseen ”mitä tällä viikolla
+oikeasti tuli ulos”, mihin Uusimmat julkaisut ei pysty (se on lähetyspäivä, ja
+kolmekymmentä vuotta vanhan elokuvan uudelleenlähetys nousee siinä huipulle).
+Nimikkeet, jotka rikastettiin ennen tämän olemassaoloa, tai joiden lähteellä ei ollut
+päivää, putoavat takaisin vuoteensa kunnes päivität niiden metatiedot.</li>
 <li><b>Vain osumat</b> on oletuksena päällä ja piilottaa tunnistamattoman roskan; ”+N osumatonta”
 -merkki paljastaa sen.</li>
 <li>Napsauta laattaa avataksesi tietosivun: juoni, IMDb-arvosana ja äänet, näyttelijät -
@@ -762,7 +789,7 @@ voittavat komentorivivalitsimet).</p>
 <h3>Nopeus &amp; ajastus <span class="pill live">live</span></h3>
 <div class="tblwrap"><table>
 <tr><th>Asetus</th><th>Mitä se tekee</th></tr>
-<tr><td>Nopeusrajoitus</td><td>Katto tavuina/s (<code>50M</code>, <code>1G</code>, 0 = rajoittamaton). Etäsovellukset voivat lähettää prosentteja - aseta <i>Linjanopeus</i>, jotta ne kääntyvät oikein.</td></tr>
+<tr><td>Nopeusrajoitus</td><td>Katto tavuina/s (<code>50M</code>, <code>1G</code>, 0 = rajoittamaton). Etäsovellukset voivat lähettää prosentteja - aseta <i>Linjanopeus</i>, jotta ne kääntyvät oikein. Otsikkopalkin <b>oma arvo…</b> asettaa saman katon avaamatta Asetuksia.</td></tr>
 <tr><td>Autonopeus</td><td>RTT-ohjattu katto, joka väistää muuta kotitalousliikennettä ja laajenee uudelleen, kun linja on hiljainen.</td></tr>
 <tr><td>Lykkää hitaat lataukset automaattisesti</td><td>Yhteen hitaaseen palvelimeen jumittunut työ muiden odottaessa siirretään jonon perälle (edistyminen säilyy). Katso <a href="#performance">§13</a>.</td></tr>
 <tr><td>Esihaku jouten olevilla palvelimilla</td><td>Aktiiviselle työlle hyödyttömät palvelimet aloittavat seuraavan jonossa olevan. Katso <a href="#performance">§13</a>.</td></tr>
@@ -809,6 +836,15 @@ arkisto-arkiston-sisällä-kerrosta puretaan automaattisesti: RAR-setti, joka si
 ilman toista kierrosta. Rajalla syvin arkisto jää yksinkertaisesti paikalleen
 purkamatta, ja lataus valmistuu silti. Nosta vain poikkeuksellisen syviä julkaisuja
 varten.</p>
+<p><b>Valmiiden latausten oikeudet</b> (lisäasetus) on umask, sama luku jota Docker ja asennusoppaat
+käyttävät: <code>002</code> antaa kansioille 775 ja tiedostoille 664, <code>022</code> antaa 755 ja
+644. Tyhjä on oletus eikä muuta mitään. Aseta se, kun Sonarr tai Radarr toimivat eri
+käyttäjänä samassa ryhmässä eivätkä pysty lukemaan tai tuomaan tänne
+päätyvää: systemd-asennuksessa ne eivät yleensä pysty, koska yksikkö pitää
+kaiken palvelun kirjoittaman vain omistajan luettavana API-avaimen suojaamiseksi. Oikeudet asetetaan, kun valmis
+työ on lakannut siirtymästä, työn kansioon, kaikkeen sen sisällä ja kansioihin sen ja
+latauskansion välillä, koska nimeämällä tuominen vaatii kirjoitusoikeuden siihen kansioon,
+josta nimetään pois. Ohitetaan Windowsissa, jossa tätä ei ole.</p>
 
 <h3>Automaattinen nimeäminen &amp; siivous <span class="pill live">live</span></h3>
 <p><b>Nimeä valmiit lataukset uudelleen</b> (oletuksena päällä) antaa kansiolle ja
@@ -866,6 +902,27 @@ uudelleenkäynnistysten yli, eikä sitä lisätä jonoon uudelleen; tallenna se 
 ladataksesi sen uudestaan. Valitsitpa kumman tahansa, jokaisen työn tietolaatikossa on
 <b>Lataa .nzb-tiedosto</b> -painike, joten kopio minkä tahansa työn <code>.nzb</code>-tiedostosta
 on aina vain napsautuksen päässä.</p>
+<p><b>Käy läpi myös alikansiot</b> (oletuksena pois) poimii tiedostot myös
+valvontakansion sisällä olevista kansioista, ja ensimmäisen alikansion nimestä tulee
+latauksen luokka: kansioon <code>watch/tv</code> pudotettu tiedosto liittyy luokkaan tv.
+Se on nopein tapa lajitella nappaukset koontinäyttöön koskematta - osoita selaimen yksi
+kirjanmerkki kansioon <code>watch/tv</code> ja toinen kansioon
+<code>watch/movies</code>, niin lajittelu on tehty jo tulovaiheessa. Kansio nimeltä
+<code>rejected</code> on ainoa poikkeus, ja se jätetään aina rauhaan.</p>
+<p><b>Siirrä kelvottomat tiedostot sivuun</b> (oletuksena pois) siirtää kaiken, mikä ei
+ole käyttökelpoinen NZB, valvontakansion sisällä olevaan <code>rejected</code>-kansioon
+ja jättää viereen pienen tekstitiedoston, joka kertoo mikä oli vialla. Kannattaa pitää
+päällä kansiolle, johon selain tallentaa: sinne voi saapua kirjautumis- tai virhesivu
+<code>.nzb</code>-nimisenä. Pois päältä tiedosto jää siihen mihin sen panit ja syy
+näytetään jonon yläpuolella. Tiedosto joka vain näyttää keskeneräiseltä jätetään
+paikalleen kummassakin tapauksessa, koska se voi olla vielä saapumassa.</p>
+<p><b>Tarkista kansio uudelleen joka</b> (lisäasetus) on turvaverkko eikä muuta, joten
+se ei ole se nuppi joka tekee poiminnoista nopeita. Tälle koneelle pudotettu tiedosto
+huomataan samalla hetkellä kun se laskeutuu, koska järjestelmä kertoo siitä; tämä väli
+kattaa vain ne kansiot joista järjestelmä ei voi kertoa mitään, käytännössä siis
+verkkojaon johon kirjoitetaan toiselta koneelta. Sekunteina, 1-3600, oletus 5. Laske
+sitä jos poiminnat verkkojaosta tuntuvat myöhäisiltä, nosta sitä jos tarkistukset eivät
+ole liikenteen arvoisia hitaalla yhteydellä.</p>
 
 <h3 id="set-indexers">Hae indeksoijilta <span class="pill live">live</span></h3>
 <p>Tilisi NZB-indeksoijasivustoilla, rivi kutakin kohti, jotta seinällä tehty haku voi
@@ -1005,7 +1062,12 @@ lisäys etenee koskemattomana ja loki kertoo miksi.</p>
 <h3>Elinkaaritapahtumat ja allekirjoitetut webhookit</h3>
 <p>Jokainen työn merkkipaalu on versioitu tapahtuma: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
-<code>job.completed</code>, <code>job.failed</code>, sekä
+<code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
+(automaattinen uudelleenyritys palautti epäonnistuneen latauksen jonoon) ja
+<code>job.delete_kept</code> (poisto poisti tietueen mutta ei saanut poistettua
+sen tiedostoja), sekä <code>watch.picked</code> (.nzb noudettiin
+valvontakansiosta), <code>watchlist.upgraded</code> (seurantalistan päivitys
+onnistui ja korvattu kopio poistettiin),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> ja <code>quota.reached</code>. Jokainen kantaa
 <code>schema_version</code>-kentän (nyt 1; uusia avaimia voi ilmestyä ilman
@@ -1058,6 +1120,12 @@ käyttäytyvät kaikki niin kuin *arrit odottavat.</p>
 <li>nzbfast tarjoaa <code>caps</code>-, <code>search</code>-, <code>tvsearch</code>- ja
 <code>movie</code>-kyselyt omasta indeksistään valvotuista ryhmistäsi, ja
 <code>/getnzb/&lt;id&gt;</code> palauttaa NZB:n.</li>
+<li>Haku käy nimellä tai id:llä: sarjat ottavat TVDB-, IMDb- tai TVmaze-id:n, elokuvat
+IMDb- tai TMDB-id:n, ja sovellus lukee <code>caps</code>-vastauksesta kumman.
+TVDB-id:itä tarjotaan vasta kun indeksi on kerännyt ne, mikä tapahtuu itsestään
+taustalla. Id, jolle meillä ei ole mitään, saa tyhjän tuloksen, ja id, jota emme osaa
+selvittää lainkaan, torjutaan nimeltä: kumpikaan ei koskaan saa listaa asiaan
+liittymättömiä julkaisuja.</li>
 </ol>
 <div class="note"><b>Kytke sisäänrakennettu indeksoija ensin päälle</b> (Asetukset →
 Indeksointi). Se on oletuksena pois päältä, ja niin kauan kuin se on, tämä julkisivu
@@ -1080,7 +1148,13 @@ mobiili-/tablettisovellus toimii. Valitse mikä tahansa protokolla, jota sovellu
 <tr><td>Password</td><td><b>API-avaimesi</b></td></tr>
 </table></div>
 <p>Koko JSON-RPC-pinta, jota nämä sovellukset käyttävät, tarjotaan: tila, jono
-uudelleenjärjestyksellä/keskeytyksellä/poistolla, historia, lisää-NZB, nopeusrajoitus, keskeytä/jatka, loki.</p>
+uudelleenjärjestyksellä/uudelleennimeämisellä/keskeytyksellä/poistolla, historia,
+lisää-NZB (tiedosto tai URL), nopeusrajoitus, keskeytä/jatka, loki. Tunnukset saavat
+myös kulkea osoitteessa, NZBGetin omassa
+<code>http://user:apikey@host:6789/</code>-muodossa, jota LunaSea lähettää.</p>
+<p><b>nzb360:n käyttäjät:</b> lisää nzbfast <b>SABnzbd</b>-palvelimena (seuraava
+osio). nzb360 puhuu oikean NZBGetin kanssa XML-RPC:llä, jota nzbfast ei tarjoa, joten
+sen NZBGet-tila ei saa yhteyttä.</p>
 <h3>Sovellukset, jotka puhuvat SABnzbdiä</h3>
 <div class="tblwrap"><table>
 <tr><th>Kenttä sovelluksessa</th><th>Arvo</th></tr>
@@ -1380,7 +1454,7 @@ tai minne <code>--config</code> / <code>$NZBFAST_CONFIG</code> osoittaa.</td></t
 <h2 id="troubleshooting">18 · Vianmääritys</h2>
 <div class="tblwrap"><table>
 <tr><th>Oire</th><th>Tarkista</th></tr>
-<tr><td>Hitaat lataukset</td><td>Aja <b>Järjestelmän mittaus</b> - se nimeää pullonkaulan suoraan. Jos se on verkko: aja <b>Yhteyksien viritys</b>, tarkista palvelinkohtaiset yhteysmäärät ja varmista, etteivät palveluntarjoajasi ole kaikki yhtä backbonea (<b>Palvelinten monimuotoisuus</b>).</td></tr>
+<tr><td>Hitaat lataukset</td><td>Kysy ensin lataukselta itseltään: sen käydessä edistymispalkin alla oleva rivi nimeää kerroksen, joka hidastaa <i>tätä</i> työtä, ja tuomiota napsauttamalla rivi avautuu sen todisteisiin (katso <a href="#dash-queue">Jono</a>). Aja <b>Järjestelmän mittaus</b> - se nimeää pullonkaulan suoraan. Jos se on verkko: aja <b>Yhteyksien viritys</b>, tarkista palvelinkohtaiset yhteysmäärät ja varmista, etteivät palveluntarjoajasi ole kaikki yhtä backbonea (<b>Palvelinten monimuotoisuus</b>).</td></tr>
 <tr><td>Hidas vain hyvin suurissa töissä<br>(NAS tai vähämuistinen kone)</td><td>Odotettua, ja mitattavissa: näännytetty muistibudjetti valuttaa välimuistit levylle ja maksaa 20–40% yli ~87 GB. Katso <a href="#memory">Muistibudjetti</a> luvuista ja siitä, kuinka paljon RAM:ia sille antaa. Pienemmät työt ovat vaikuttamattomia.</td></tr>
 <tr><td>Lataus epäonnistuu ”artikkelit puuttuvat”</td><td>Julkaisu on vanhentunut tai poistettu palveluntarjoajiltasi. Toinen palveluntarjoaja eri backbonella pelastaa useimmat näistä. <code>nzbfast check</code> ennustaa tämän ennen lataamista. Ja seinä merkitsee todennäköisesti kadonneet etukäteen
 saatavuuspisteellään (<a href="#oracle">§13</a>). Tämänmuotoinen ensimmäinen
@@ -1398,7 +1472,7 @@ täsmälleen samalta ja korjaantuu itsestään.</td></tr>
 <tr><td>Daemon ei käynnisty: portti käytössä</td><td>Toinen instanssi on käynnissä - tai vaihda <code>--port</code>.</td></tr>
 <tr><td>Missä lokit ovat?</td><td>Koontinäytön Loki-kortti tai terminaali/lokitiedosto, jolla käynnistit <code>serve</code>n.</td></tr>
 </table></div>
-<div class="note"><b>Yhä jumissa?</b>Loki-kortti nimeää yleensä syyllisen -
+<div class="note"><b>Yhä jumissa?</b>Yhtä latausta koskevaan ongelmaan käytä <b>Luo raportti</b>: se on sen työn laatikossa jonossa niin kauan kuin se käy, ja sen jälkeen sen historialaatikossa. Se kopioi kaiken juuri siitä latauksesta, mukaan lukien vain sen omat lokirivit koko palvelun rivien sijaan. Käyttäjätunnuksia, salasanoja ja API-avaimia ei koskaan lueta, ja kotikansiosi kirjoitetaan muodossa <code>~</code>. Loki-kortti nimeää yleensä syyllisen -
 sisällytä sen loppuosa ongelmaa raportoidessasi, sekä
 <code>nzbfast --version</code>.</div>
 

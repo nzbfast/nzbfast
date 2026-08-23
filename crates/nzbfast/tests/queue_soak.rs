@@ -3,33 +3,23 @@
 //! completes byte-identical, states/history stay sane, no
 //! cross-contamination between overlapping jobs.
 
+mod harness;
 mod scratch;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
+
+use harness::Daemon;
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
         .map(|i| (i as u8).wrapping_mul(37).wrapping_add(seed))
         .collect()
-}
-
-/// OS-assigned free port for a daemon under test. The old pid-derived
-/// scheme (`BASE + pid % M`, mixed moduli) collided for whole pid windows
-/// - e.g. pid ∈ [80000,81000) gave two tests the same port, killing
-/// whichever daemon bound second - and could also land on the ephemeral
-/// range the suites' own client sockets draw from.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// Response body of a request to the daemon (headers stripped).
@@ -106,33 +96,13 @@ fn http_once(port: u16, req: &str, body: Option<(&str, &[u8])>) -> std::io::Resu
     Ok(out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
 }
 
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        // ...and reap it. kill() alone leaves a zombie holding its pid for
-        // the rest of the binary's run.
-        let _ = self.0.wait();
-    }
-}
-
-/// A daemon under test: killed and reaped on drop.
-struct Daemon {
-    _child: KillOnDrop,
-    port: u16,
-}
-
 /// Launch a daemon under `dir` and return once OUR daemon is serving.
 ///
 /// `build` is handed the port to serve on and returns the fully
 /// configured command; it may be called again on a fresh port, so it must
 /// not consume anything.
 async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
-    for attempt in 0..3 {
-        let port = free_port();
-        let logfile = dir.join(format!("daemon-{port}.log"));
-        let out = std::fs::File::create(&logfile).unwrap();
-        let err = out.try_clone().unwrap();
+    harness::serve(dir, |port| {
         let mut cmd = build(port);
         // The `min_free` floor (2 GB by default) is measured against the
         // HOST's free disk, not against anything this soak writes, so a
@@ -143,65 +113,9 @@ async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
         // subject. `crates/nzbfast/tests/daemon.rs` carries the same
         // default for the same reason.
         cmd.arg("--min-free").arg("0");
-        cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-        let child = KillOnDrop(cmd.spawn().unwrap());
-        let log = logfile.clone();
-        // The readiness wait blocks; keep it off the runtime's workers,
-        // where this test's own mock server is running.
-        let (child, ready) = tokio::task::spawn_blocking(move || {
-            let mut child = child;
-            let ready = wait_ready(&mut child, port, &log);
-            (child, ready)
-        })
-        .await
-        .unwrap();
-        if ready {
-            return Daemon {
-                _child: child,
-                port,
-            };
-        }
-        // The daemon exited instead of binding: `free_port()` handed :port
-        // to a parallel test between our bind(:0) and the daemon's bind,
-        // and that test's daemon won it. Try a fresh port.
-        let tail = std::fs::read_to_string(&logfile).unwrap_or_default();
-        assert!(
-            attempt < 2,
-            "daemon exited without binding :{port}\n--- log ---\n{tail}"
-        );
-    }
-    unreachable!()
-}
-
-/// Wait for OUR daemon's own listener banner, not for "something answers
-/// on :port". A bare connect cannot tell the two apart, and under a full
-/// parallel run they diverge: `free_port()` can hand :port to a second
-/// test between our bind(:0) and our daemon's bind, that test's daemon
-/// wins the port, ours exits, and a plain connect then succeeds against
-/// the OTHER daemon. The test would run against a stranger and, when that
-/// stranger's owner finished and killed it, fail mid-request with
-/// ConnectionReset. The banner is read from this daemon's own log, so it
-/// can only be ours, and it is printed immediately after the bind returns.
-///
-/// False means the child exited first (the port race above); a genuine
-/// hang panics with the log.
-fn wait_ready(child: &mut KillOnDrop, port: u16, logfile: &Path) -> bool {
-    let banner = format!("open the dashboard at  http://localhost:{port}/");
-    for _ in 0..600 {
-        if std::fs::read_to_string(logfile)
-            .unwrap_or_default()
-            .contains(&banner)
-            && TcpStream::connect(("127.0.0.1", port)).is_ok()
-        {
-            return true;
-        }
-        if child.0.try_wait().ok().flatten().is_some() {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let tail = std::fs::read_to_string(logfile).unwrap_or_default();
-    panic!("daemon never came up on :{port}\n--- log ---\n{tail}");
+        cmd
+    })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]

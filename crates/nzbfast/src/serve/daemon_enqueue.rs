@@ -28,12 +28,33 @@ pub(in crate::serve) static DUPE_ADMIT_BARRIER: Mutex<
     Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
 > = Mutex::new(None);
 
+/// What `Daemon::resolve_add_identity` settles. Fields are the locals
+/// `enqueue` used to declare inline and still uses under the same names.
+struct AddIdentity {
+    stem: String,
+    password: Option<String>,
+    category: String,
+    total_bytes: u64,
+    zip_packed: bool,
+    tv_sort: bool,
+    smart_rule: String,
+}
+
+/// What `Daemon::consult_pre_queue` answers that the caller cannot derive.
+/// The name, category and priority it also rewrites are amended in place.
+struct HookVerdict {
+    pp: Option<i64>,
+    script: String,
+    reject: Option<String>,
+}
+
 impl Daemon {
     /// `pp` is the post-processing mode the CALLER requested (0-3, None
     /// = none named). The pre-queue hook receives it - SAB's contract
     /// hands the script the requested pp - but it is RECORDED on the
     /// job afterwards by `record_add_params`, which fills only what the
     /// hook did not already answer.
+    #[expect(clippy::too_many_arguments)]
     pub(in crate::serve) fn enqueue(
         &self,
         nzb_bytes: &[u8],
@@ -44,130 +65,65 @@ impl Daemon {
         password: Option<&str>,
         origin: &str,
         allow_dupe: bool,
-    ) -> Result<String> {
-        let n = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let nzo_id = format!("SABnzbd_nzo_nzbfast{n}");
+    ) -> Result<Enqueued> {
+        self.enqueue_as(
+            None, nzb_bytes, name, category, priority, pp, password, origin, allow_dupe,
+        )
+    }
+
+    /// `enqueue` with the id chosen by the caller. Only
+    /// `recover_orphaned_spool` passes `Some`: an orphaned spool file is
+    /// named by the id its job was accepted under, and re-adopting it
+    /// under that id keeps an *arr's handle and the job's stream token
+    /// valid across the restart, and makes "recovered exactly once" a
+    /// plain id lookup. A recovered id is always below the restored
+    /// allocator (the wall-clock floor in `load_queue`), so it can never
+    /// be handed out again.
+    #[expect(clippy::too_many_arguments)]
+    pub(in crate::serve) fn enqueue_as(
+        &self,
+        id: Option<&str>,
+        nzb_bytes: &[u8],
+        name: &str,
+        category: &str,
+        priority: i32,
+        pp: Option<i64>,
+        password: Option<&str>,
+        origin: &str,
+        allow_dupe: bool,
+    ) -> Result<Enqueued> {
+        let nzo_id = match id {
+            Some(id) => id.to_string(),
+            None => format!(
+                "SABnzbd_nzo_nzbfast{}",
+                self.next_id.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
         let nzb = nzbkit::nzb::Nzb::parse(nzb_bytes)?;
-        let mut stem = name.trim_end_matches(".nzb").to_string();
-        // Archive password: an explicit param (SAB API) wins; the
-        // `Name{{password}}` convention comes OFF the display name either
-        // way (and the output folder - never leak a password into the
-        // filesystem); the NZB's own <meta type="password"> is the
-        // fallback (the engine would find it again at download time -
-        // capturing it here surfaces has_password to the UI).
-        let mut password: Option<String> = password.filter(|p| !p.is_empty()).map(str::to_string);
-        // All three name conventions - {{pw}}, password=pw, {pw} - are
-        // recognized and stripped (crate::smart::name_password).
-        if let Some((pw, clean)) = crate::smart::name_password(&stem) {
-            password.get_or_insert(pw);
-            stem = clean;
-        }
-        if password.is_none() {
-            password = nzb.password().map(str::to_string);
-        }
-        // Zip-packed post, spotted from the NZB's own file list before a
-        // single byte is fetched. We cannot unpack one, so saying it here
-        // costs the user a click instead of a download. Name-shaped
-        // evidence only - an obfuscated container has no name to read, and
-        // guessing from a subject line would cry wolf on ordinary posts.
-        let zip_packed = nzb
-            .files
-            .iter()
-            .filter_map(|f| f.filename_hint())
-            .any(nzbkit::zip::name_is_zip_shaped);
-        if zip_packed {
-            info!(
-                target: "queue",
-                "{nzo_id} looks zip-packed - store and deflate zips unpack \
-                 natively, an encrypted one too when the job has a password; an \
-                 exotic codec will arrive packed"
-            );
-        }
-        let total_bytes = nzb.eager_bytes();
-        // M23 Smart Folders: the first matching rule can retarget the
-        // category (= out_root subfolder) and request TV filing.
-        let mut category = category.to_string();
-        let mut tv_sort = false;
-        let mut smart_rule = String::new();
-        if let Some(r) =
-            crate::smart::first_match(&self.smart_folders.lock_ok(), &stem, total_bytes)
-        {
-            if !r.category.is_empty() {
-                category = r.category.clone();
-            }
-            tv_sort = r.tv_sort;
-            // Kept on the job: "why is this in Films?" is answerable only
-            // by the rule that decided it, and the rule list is editable.
-            smart_rule = r.name.clone();
-            info!(
-                target: "smart",
-                "rule {:?} matched {stem:?} → category {:?}{}",
-                r.name,
-                category,
-                if tv_sort { " + TV filing" } else { "" }
-            );
-        }
-        // `category` (the `cat=` request param) and `stem` (from the NZB
-        // name / `nzbname`) are untrusted and must never escape out_root:
-        // an absolute component replaces the base, and `..` is resolved by
-        // the OS at create/remove time - a crafted name plus a delete call
-        // could otherwise write to, or recursively delete, an arbitrary
-        // directory (bug sweep). Force each to a single contained path
-        // component before it ever touches the filesystem.
-        if !category.is_empty() {
-            category = nzbkit::disk::sanitize_filename(&category);
-        }
-        // §129 4a: consult the pre-queue hook - rename, recategorize,
-        // reprioritize, pick pp/script, or reject - before anything is
-        // published. Before the spool write (a rename names the spool
-        // file), before the add lock (a slow script must never
-        // serialize concurrent adds), and demoted via blocking_db
-        // (enqueue is reachable from tokio tasks). Fail-open by
-        // contract - see serve/prequeue.rs.
+        let AddIdentity {
+            mut stem,
+            password,
+            mut category,
+            total_bytes,
+            zip_packed,
+            tv_sort,
+            smart_rule,
+        } = self.resolve_add_identity(&nzb, &nzo_id, name, category, password);
         let mut priority = priority;
-        let mut hook_pp = None;
-        let mut hook_script = String::new();
-        let mut hook_reject = None;
-        if self.pre_queue_script.lock_ok().is_some() {
-            let mut groups: Vec<String> = Vec::new();
-            for f in &nzb.files {
-                for g in &f.groups {
-                    if !groups.contains(g) {
-                        groups.push(g.clone());
-                    }
-                }
-            }
-            let verdict = crate::persist::blocking_db(|| {
-                self.run_pre_queue(
-                    &nzo_id,
-                    origin,
-                    &stem,
-                    pp,
-                    &category,
-                    priority,
-                    total_bytes,
-                    &groups,
-                )
-            });
-            if let Some(v) = verdict {
-                if !v.accept {
-                    hook_reject = Some("rejected by the pre-queue script".to_string());
-                }
-                if let Some(n) = v.name {
-                    stem = n;
-                }
-                if let Some(c) = v.category {
-                    category = nzbkit::disk::sanitize_filename(&c);
-                }
-                if let Some(p) = v.priority {
-                    // The hook's priority is an EXPLICIT one: it also
-                    // suppresses the category default fill below.
-                    priority = p;
-                }
-                hook_pp = v.pp;
-                hook_script = v.script.unwrap_or_default();
-            }
-        }
+        let HookVerdict {
+            pp: hook_pp,
+            script: hook_script,
+            reject: hook_reject,
+        } = self.consult_pre_queue(
+            &nzb,
+            &nzo_id,
+            origin,
+            pp,
+            total_bytes,
+            &mut stem,
+            &mut category,
+            &mut priority,
+        );
         // Named after the release as well as the job id. A folder of
         // SABnzbd_nzo_nzbfast<n>.nzb files could not be matched to
         // anything a user had ever seen; the id stays first so the name
@@ -337,6 +293,7 @@ impl Daemon {
             identify: String::new(),
             media: None,
             postproc_secs: 0.0,
+            whyslow: None,
             log_mark: 0,
             log_end: 0,
             media_rejudge: false,
@@ -437,11 +394,11 @@ impl Daemon {
             // this job is the id-allocator bump, and the restore's
             // wall-clock floor already covers an allocator bump that
             // never landed.
-            let _ = self.history_upsert(std::slice::from_ref(&job));
+            let durable = self.history_upsert(std::slice::from_ref(&job));
             self.save_queue();
             self.life_emit_parked(&job);
             self.history_enforce_retention();
-            return Ok(nzo_id);
+            return Ok(self.enqueued(nzo_id, durable));
         }
         // §129 2d, dupe_action = "fail": the job never queues - it files
         // straight to history as Failed, through the same seam every
@@ -481,11 +438,11 @@ impl Daemon {
             // spelled out on the pre-queue REJECT arm above - this job
             // never queued either, so a kill between the two writes used
             // to lose it from both files.
-            let _ = self.history_upsert(std::slice::from_ref(&job));
+            let durable = self.history_upsert(std::slice::from_ref(&job));
             self.save_queue();
             self.life_emit_parked(&job);
             self.history_enforce_retention();
-            return Ok(nzo_id);
+            return Ok(self.enqueued(nzo_id, durable));
         }
         // §129 4a: the add joins the event ring and the queue in one
         // step, announced BEFORE the job is visible to anything that
@@ -600,10 +557,267 @@ impl Daemon {
         } else {
             info!(target: "queue", "added {nzo_id}");
         }
-        self.save_queue();
+        let durable = self.save_queue();
         // After the add is published and saved, never on its critical
         // path: a contended index costs this pairing, not the add.
         self.record_nzb_pairing(&pairing_name, origin, &nzb);
-        Ok(nzo_id)
+        Ok(self.enqueued(nzo_id, durable))
+    }
+
+    /// The one place an undurable accept is said out loud, so a caller
+    /// that has nothing to do about it need not repeat the warning.
+    fn enqueued(&self, nzo_id: String, durable: bool) -> Enqueued {
+        if !durable {
+            warn!(
+                target: "queue",
+                "{nzo_id} accepted, but its record could not be saved to {} - the job \
+                 runs from memory, and its spooled .nzb will be re-adopted at the \
+                 next start if the queue is never saved again before then",
+                self.spool.display()
+            );
+        }
+        Enqueued { nzo_id, durable }
+    }
+}
+
+impl Daemon {
+    /// TODO 218: pick a category for an add that named none, from what
+    /// the NZB carries. Two sources, in order:
+    ///
+    /// 1. `<meta type="category">` equal (case-insensitively) to a known
+    ///    category's name - zero configuration, the common case for the
+    ///    indexers that write the tag at all.
+    /// 2. Each category's `groups` patterns (`CatMeta::groups`,
+    ///    SABnzbd's "Indexer Categories / Groups"), tried against every
+    ///    meta category value and then every newsgroup, in the
+    ///    configured category order so the answer is stable.
+    ///
+    /// Returns the category and a short reason for the log. None when
+    /// nothing matches - the add then lands uncategorised, exactly as
+    /// before this existed.
+    pub(in crate::serve) fn infer_category(
+        &self,
+        nzb: &nzbkit::nzb::Nzb,
+    ) -> Option<(String, String)> {
+        let metas: Vec<&str> = nzb
+            .meta
+            .iter()
+            .filter(|(k, _)| k == "category")
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+            .collect();
+        let cats: Vec<String> = self
+            .cats
+            .lock_ok()
+            .iter()
+            .filter(|c| *c != "*")
+            .cloned()
+            .collect();
+        for m in &metas {
+            if let Some(c) = cats.iter().find(|c| c.eq_ignore_ascii_case(m)) {
+                return Some((c.clone(), format!("NZB meta category {m:?}")));
+            }
+        }
+        let mut groups: Vec<&str> = Vec::new();
+        for f in &nzb.files {
+            for g in &f.groups {
+                if !groups.contains(&g.as_str()) {
+                    groups.push(g);
+                }
+            }
+        }
+        let meta = self.cat_meta.lock_ok();
+        for c in &cats {
+            let Some(m) = meta.get(c) else { continue };
+            for pat in m.groups.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                if let Some(v) = metas.iter().find(|v| nzbkit::categories::pat_match(pat, v)) {
+                    return Some((c.clone(), format!("pattern {pat:?} on meta category {v:?}")));
+                }
+                if let Some(g) = groups
+                    .iter()
+                    .find(|g| nzbkit::categories::pat_match(pat, g))
+                {
+                    return Some((c.clone(), format!("pattern {pat:?} on group {g:?}")));
+                }
+            }
+        }
+        None
+    }
+
+    /// Everything an add settles about ITSELF, before a byte is spooled
+    /// and before the add lock: the display name, the archive password
+    /// carried in it, the category, and the two Smart Folders answers
+    /// that ride with them. Out of `enqueue` bodily under the size gate
+    /// (TODO 106) - nothing in here touches the queue, the spool or the
+    /// add lock, which is why it comes out whole.
+    fn resolve_add_identity(
+        &self,
+        nzb: &nzbkit::nzb::Nzb,
+        nzo_id: &str,
+        name: &str,
+        category: &str,
+        password: Option<&str>,
+    ) -> AddIdentity {
+        let mut stem = name.trim_end_matches(".nzb").to_string();
+        // Archive password: an explicit param (SAB API) wins; the
+        // `Name{{password}}` convention comes OFF the display name either
+        // way (and the output folder - never leak a password into the
+        // filesystem); the NZB's own <meta type="password"> is the
+        // fallback (the engine would find it again at download time -
+        // capturing it here surfaces has_password to the UI).
+        let mut password: Option<String> = password.filter(|p| !p.is_empty()).map(str::to_string);
+        // All three name conventions - {{pw}}, password=pw, {pw} - are
+        // recognized and stripped (crate::smart::name_password).
+        if let Some((pw, clean)) = crate::smart::name_password(&stem) {
+            password.get_or_insert(pw);
+            stem = clean;
+        }
+        if password.is_none() {
+            password = nzb.password().map(str::to_string);
+        }
+        // Zip-packed post, spotted from the NZB's own file list before a
+        // single byte is fetched. We cannot unpack one, so saying it here
+        // costs the user a click instead of a download. Name-shaped
+        // evidence only - an obfuscated container has no name to read, and
+        // guessing from a subject line would cry wolf on ordinary posts.
+        let zip_packed = nzb
+            .files
+            .iter()
+            .filter_map(|f| f.filename_hint())
+            .any(nzbkit::zip::name_is_zip_shaped);
+        if zip_packed {
+            info!(
+                target: "queue",
+                "{nzo_id} looks zip-packed - store and deflate zips unpack \
+                 natively, an encrypted one too when the job has a password; an \
+                 exotic codec will arrive packed"
+            );
+        }
+        let total_bytes = nzb.eager_bytes();
+        // TODO 218: an add that names no category takes one from the NZB
+        // itself - its `<meta type="category">` or its newsgroups -
+        // before Smart Folders get a say. An explicit `cat=` is never
+        // second-guessed, and a Smart Folder rule still overrides both.
+        let mut category = category.to_string();
+        if category.trim().is_empty()
+            && let Some((c, how)) = self.infer_category(nzb)
+        {
+            info!(target: "smart", "{stem:?} → category {c:?} ({how})");
+            category = c;
+        }
+        // M23 Smart Folders: the first matching rule can retarget the
+        // category (= out_root subfolder) and request TV filing.
+        let mut tv_sort = false;
+        let mut smart_rule = String::new();
+        if let Some(r) =
+            crate::smart::first_match(&self.smart_folders.lock_ok(), &stem, total_bytes)
+        {
+            if !r.category.is_empty() {
+                category = r.category.clone();
+            }
+            tv_sort = r.tv_sort;
+            // Kept on the job: "why is this in Films?" is answerable only
+            // by the rule that decided it, and the rule list is editable.
+            smart_rule = r.name.clone();
+            info!(
+                target: "smart",
+                "rule {:?} matched {stem:?} → category {:?}{}",
+                r.name,
+                category,
+                if tv_sort { " + TV filing" } else { "" }
+            );
+        }
+        // `category` (the `cat=` request param) and `stem` (from the NZB
+        // name / `nzbname`) are untrusted and must never escape out_root:
+        // an absolute component replaces the base, and `..` is resolved by
+        // the OS at create/remove time - a crafted name plus a delete call
+        // could otherwise write to, or recursively delete, an arbitrary
+        // directory (bug sweep). Force each to a single contained path
+        // component before it ever touches the filesystem.
+        if !category.is_empty() {
+            category = nzbkit::disk::sanitize_filename(&category);
+        }
+        AddIdentity {
+            stem,
+            password,
+            category,
+            total_bytes,
+            zip_packed,
+            tv_sort,
+            smart_rule,
+        }
+    }
+
+    /// §129 4a: what the pre-queue hook answered. `stem`, `category` and
+    /// `priority` are amended IN PLACE because rewriting them is the
+    /// hook's whole contract; the three fields the caller cannot derive
+    /// come back in the verdict. Out of `enqueue` under the size gate
+    /// (TODO 106).
+    fn consult_pre_queue(
+        &self,
+        nzb: &nzbkit::nzb::Nzb,
+        nzo_id: &str,
+        origin: &str,
+        pp: Option<i64>,
+        total_bytes: u64,
+        stem: &mut String,
+        category: &mut String,
+        priority: &mut i32,
+    ) -> HookVerdict {
+        // §129 4a: consult the pre-queue hook - rename, recategorize,
+        // reprioritize, pick pp/script, or reject - before anything is
+        // published. Before the spool write (a rename names the spool
+        // file), before the add lock (a slow script must never
+        // serialize concurrent adds), and demoted via blocking_db
+        // (enqueue is reachable from tokio tasks). Fail-open by
+        // contract - see serve/prequeue.rs.
+        let mut hook_pp: Option<i64> = None;
+        let mut hook_script = String::new();
+        let mut hook_reject: Option<String> = None;
+        if self.pre_queue_script.lock_ok().is_some() {
+            let mut groups: Vec<String> = Vec::new();
+            for f in &nzb.files {
+                for g in &f.groups {
+                    if !groups.contains(g) {
+                        groups.push(g.clone());
+                    }
+                }
+            }
+            let verdict = crate::persist::blocking_db(|| {
+                self.run_pre_queue(
+                    nzo_id,
+                    origin,
+                    stem,
+                    pp,
+                    category,
+                    *priority,
+                    total_bytes,
+                    &groups,
+                )
+            });
+            if let Some(v) = verdict {
+                if !v.accept {
+                    hook_reject = Some("rejected by the pre-queue script".to_string());
+                }
+                if let Some(n) = v.name {
+                    *stem = n;
+                }
+                if let Some(c) = v.category {
+                    *category = nzbkit::disk::sanitize_filename(&c);
+                }
+                if let Some(p) = v.priority {
+                    // The hook's priority is an EXPLICIT one: it also
+                    // suppresses the category default fill below.
+                    *priority = p;
+                }
+                hook_pp = v.pp;
+                hook_script = v.script.unwrap_or_default();
+            }
+        }
+        HookVerdict {
+            pp: hook_pp,
+            script: hook_script,
+            reject: hook_reject,
+        }
     }
 }

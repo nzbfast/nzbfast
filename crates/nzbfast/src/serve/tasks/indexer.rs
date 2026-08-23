@@ -987,6 +987,26 @@ use probe7z::probe_fetch;
 #[cfg(feature = "indexer")]
 pub(in crate::serve) use probe7z::{run_rar_probe, spawn_probe7z};
 
+// ---- TODO 198 tail: measured planner statistics ----------------------
+//
+// Its own file for probe7z's reason - this one is near the ceiling -
+// and because the leg is one subject with a long why. See
+// indexer/deep_stats.rs.
+#[cfg(feature = "indexer")]
+mod deep_stats;
+#[cfg(feature = "indexer")]
+pub(in crate::serve) use deep_stats::deep_stats_pass;
+
+// ---- TODO 26c A5: the compact segment storage rebuild ---------------
+//
+// Its own file for the same reason as deep_stats: this one is at the
+// ceiling, and the leg is one subject with a long why. See
+// indexer/segmig.rs.
+#[cfg(feature = "indexer")]
+mod segmig;
+#[cfg(feature = "indexer")]
+pub(in crate::serve) use segmig::segments_rebuild_pass;
+
 // ---- TODO 131 #6: the posted-NZB ingestion rung ----------------------
 
 /// Objects walked per tick. The measured census (research
@@ -1699,6 +1719,16 @@ async fn pesto_fetch_any(
     None
 }
 
+/// The token line phase A must stop at, so the linking half of the
+/// pesto lane cannot be starved by the fetching half. Half the bucket:
+/// the two phases cost about the same per unit of work (one article to
+/// read a sidecar, one to hash-confirm a payload), and whatever the
+/// reserved half goes unused carries into the next tick.
+#[cfg(feature = "indexer")]
+fn pesto_link_floor(tokens: f64) -> f64 {
+    tokens / 2.0
+}
+
 /// The pesto tiny-PAR2 naming worker (TODO 131, red-team 5a): a 60 s
 /// loop that fetches the family's tiny sidecar objects, parses them
 /// into recovery sets (deduped by set id), links each set backward to
@@ -1714,16 +1744,6 @@ async fn pesto_fetch_any(
 /// teevee - the daily tallies (`mode=pesto_stats`) are the early
 /// warning when that tool changes its message-id grammar, and the
 /// `index_pesto` switch is the kill for the whole lane.
-/// The token line phase A must stop at, so the linking half of the
-/// pesto lane cannot be starved by the fetching half. Half the bucket:
-/// the two phases cost about the same per unit of work (one article to
-/// read a sidecar, one to hash-confirm a payload), and whatever the
-/// reserved half goes unused carries into the next tick.
-#[cfg(feature = "indexer")]
-fn pesto_link_floor(tokens: f64) -> f64 {
-    tokens / 2.0
-}
-
 #[cfg(feature = "indexer")]
 pub(in crate::serve) fn spawn_pesto(daemon: &Arc<Daemon>, config: &std::path::Path) {
     use nzbkit::index::PESTO_GIVE_UP;
@@ -2270,17 +2290,139 @@ pub(in crate::serve) async fn reclassify_pending_rows(
     }
 }
 
-/// M31a retention prune and the query-planner statistics refresh - the
-/// two pieces of index upkeep that run between passes on their own
-/// clocks.
+/// The between-scan maintenance slice of one index pass: retention
+/// prune + planner statistics, one deferred picker index, one
+/// shatter-fold budget. Returns false when the pass must stand down
+/// (a job started), which the caller answers by handing back the pass
+/// gate.
 ///
-/// Throttled to once an hour (a kv timestamp) and skipped while a
-/// download is active, so it never fights for the write lock during a
-/// job. The stale-partial reaper runs whenever indexing is on; the age
-/// prune only when retention is enabled AND a max-age window is set.
-/// The caller owns the "indexing is on and maintenance is allowed"
-/// guard.
+/// Lifted out of `spawn_index_scan` under the size gate, alongside the
+/// four blocks of the same pass that already live here.
+///
+/// All three legs share ONE gate, and which gate that is was sweep 8's
+/// L12. Spot ingestion runs with a deliberately EMPTY group vector, so
+/// `has_groups` is false on a Spot-only install and every pass used to
+/// skip all three - including the deferred index build, which past the
+/// one-million-row inline threshold `schema.rs` does not create at open
+/// either. Complete-browse therefore kept its whole-table plan
+/// indefinitely rather than merely across a migration, and no amount of
+/// waiting could fix it.
+///
+/// The gate is `db_maintenance_ok` - either scan source live, database
+/// wanted, nothing downloading - and NOT `index_maintenance_ok`, which
+/// answers `Some("off")` in precisely this configuration and would
+/// leave every leg exactly as unreachable as it found them. Read that
+/// predicate's doc comment before touching any of this.
+///
+/// Retention, statistics and folding joined the picker build here on
+/// 22 Aug 2026 (TODO 199 item 5's policy half). The question was never
+/// whether a Spot-only database CAN be maintained but whether it
+/// should be, and the answer is that these are properties of the ROWS:
+/// `promote_spot` writes first-class release rows into the same
+/// `releases` table, clamping their posted date specifically so they
+/// cannot "dodge the retention prunes", and the wall, newznab and
+/// browse read them through the same planner. The size cap
+/// (`evict_between_passes`) has never been group-gated at all, so an
+/// age cap that was is the odd one out rather than the careful one.
+/// A Spot-only install that sets a retention window and gets nothing
+/// is a bug, and an index with no statistics plans `wall2` as a full
+/// table scan whichever source filled it - which is the 45 GB / 85 s
+/// card query of 2 Aug, and would be a strange thing to fix by
+/// building the picker indexes and then never analysing them.
+///
+/// The fold is the weakest of the three and is here for uniformity
+/// rather than for a Spot workload of its own: its members must be
+/// dark (`junk>=70`, unnamed, single-file), which a promoted spot card
+/// never is, so on a pure Spot install it costs one `MAX(id)` a pass
+/// and folds nothing. It earns its place on the install this
+/// configuration ACTUALLY describes - one that scanned groups and then
+/// switched the indexer off - where the dark rows are already there
+/// and nothing else will ever come back for them.
 #[cfg(feature = "indexer")]
+pub(in crate::serve) async fn maintenance_slice(
+    daemon2: &Arc<Daemon>,
+    has_groups: bool,
+    scan_spots: bool,
+    waiting: &(dyn Fn() -> bool + Sync),
+) -> bool {
+    // Re-asked between legs rather than once at the top: the reap runs
+    // to a 30 s pass budget, and a job that starts inside it must stop
+    // the two that follow. `waiting()` cannot carry that here - it is
+    // `scan_groups && ...`, so on a Spot-only install it is always
+    // false and the gate is the only stand-down there is.
+    let ok = || (has_groups || scan_spots) && daemon2.db_maintenance_ok();
+    if ok() {
+        retention_and_statistics(daemon2).await;
+        if waiting() {
+            return false;
+        }
+    }
+    if ok() {
+        picker_index_backfill(daemon2).await;
+        if waiting() {
+            return false;
+        }
+    }
+    // After the build, never before: a picker index that has just
+    // landed carries no `sqlite_stat1` row, which makes the next
+    // `PRAGMA optimize` re-sample its whole table and discard the deep
+    // samples. Measuring first would be work thrown away.
+    if ok() {
+        deep_stats_pass(daemon2).await;
+        if waiting() {
+            return false;
+        }
+    }
+    if ok() {
+        segments_rebuild_pass(daemon2).await;
+        if waiting() {
+            return false;
+        }
+    }
+    if ok() {
+        shatter_fold_pass(daemon2);
+        if waiting() {
+            return false;
+        }
+    }
+    if ok() {
+        enrich_unstamp_pass(daemon2);
+    }
+    true
+}
+
+/// TODO 26c: the one-off that puts back the titles a transient provider
+/// failure blanked, on installs that collected them before the enricher
+/// could tell a 429 from a "no such film".
+///
+/// Here rather than in the enrichment lane on purpose. It is DATABASE
+/// upkeep - one bounded walk of `titles` under the index write mutex,
+/// stamped done and never repeated - and the lanes are network workers
+/// that must not take that mutex for a walk. It also means it inherits
+/// the gate every other maintenance leg has: `db_maintenance_ok`, so it
+/// stands down for a download exactly as the retention reap does.
+///
+/// Cheap once finished: [`nzbkit::index::Index::titles_unstamp_blanked`]
+/// reads one kv key and returns.
+#[cfg(feature = "indexer")]
+pub(in crate::serve) fn enrich_unstamp_pass(daemon2: &Arc<Daemon>) {
+    // The same slice budget the shatter fold takes, and for the same
+    // reason: this holds the index writer, and a download that starts
+    // mid-walk should be waiting a second, not a table scan.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+    let Some((n, done)) = daemon2.with_index(|ix| ix.titles_unstamp_blanked(BUDGET).ok()) else {
+        return;
+    };
+    if n > 0 {
+        info!(
+            target: "wall",
+            "re-queued {n} title{} blanked by a past provider failure{}",
+            if n == 1 { "" } else { "s" },
+            if done { "" } else { " (more next pass)" }
+        );
+    }
+}
+
 /// One budgeted slice of the shatter fold per scan pass: merge dark
 /// rows shattered by per-article poster randomization (and group
 /// rotation) back into whole per-file releases. See
@@ -2313,6 +2455,20 @@ pub(in crate::serve) fn shatter_fold_pass(daemon2: &Arc<Daemon>) {
     }
 }
 
+/// M31a retention prune and the query-planner statistics refresh - the
+/// two pieces of index upkeep that run between passes on their own
+/// clocks.
+///
+/// Throttled to once an hour (a kv timestamp) and skipped while a
+/// download is active, so it never fights for the write lock during a
+/// job. The stale-partial reaper runs whenever a scan source is on; the
+/// age prune only when retention is enabled AND a max-age window is set.
+///
+/// The caller owns the entry guard (`maintenance_slice`), and it is
+/// `db_maintenance_ok`. The reap's own per-slice stand-down below has to
+/// ask the SAME question: with the indexing predicate there, a Spot-only
+/// install is admitted at the door and then breaks out before its first
+/// slice, which reaps nothing and never stamps the hourly clock.
 pub(in crate::serve) async fn retention_and_statistics(daemon2: &Arc<Daemon>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2343,7 +2499,15 @@ pub(in crate::serve) async fn retention_and_statistics(daemon2: &Arc<Daemon>) {
             // The same stand-down every other maintenance slice takes:
             // a download that starts mid-reap gets the mutex at the
             // next slice boundary rather than at the end of the reap.
-            if std::time::Instant::now() >= pass_end || !daemon2.index_maintenance_ok() {
+            // `db_maintenance_ok`, not `index_maintenance_ok` - the
+            // same correction as the entry gate, and the same trap.
+            // With the indexing predicate here, a Spot-only install
+            // entered the reap and broke out of it before the first
+            // slice: nothing pruned, `caught_up` false forever, and an
+            // hourly clock that never stamps. A gate that admits work
+            // and then refuses it is worse than one that never admits
+            // it, because the log says the pass ran.
+            if std::time::Instant::now() >= pass_end || !daemon2.db_maintenance_ok() {
                 break;
             }
             let slice = std::time::Instant::now() + PRUNE_SLICE;
@@ -2542,7 +2706,11 @@ pub(in crate::serve) async fn picker_index_backfill(daemon2: &Arc<Daemon>) {
     let Some(name) = daemon2.with_index(|ix| ix.missing_picker_index()) else {
         return;
     };
-    if !daemon2.index_maintenance_ok() {
+    // Sweep 8, L12: the SHARED-DATABASE predicate, not the indexing
+    // one - a Spot-only install has `index_enabled` false, which makes
+    // `index_maintenance_ok` permanently false and would leave this
+    // build unreachable forever on exactly the databases that need it.
+    if !daemon2.db_maintenance_ok() {
         return;
     }
     info!(
@@ -2642,3 +2810,17 @@ pub(in crate::serve) async fn evict_between_passes(daemon2: &Arc<Daemon>) {
         // until the deferred compact runs.
     }
 }
+
+// Sweep 8's L12 regression: the deferred picker-index build on a
+// Spot-only database, and the gate that decides it. A #[path] child so
+// this file stays inside its ceiling.
+#[cfg(all(test, feature = "indexer"))]
+#[path = "picker_index_tests.rs"]
+mod picker_index_tests;
+
+// Sweep 8's L7 gate: where the pass takes its one exact stats
+// recompute. Hooked here rather than from tasks.rs, which has no lines
+// to spare under the size gate.
+#[cfg(test)]
+#[path = "pass_order_tests.rs"]
+mod pass_order_tests;

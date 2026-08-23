@@ -162,6 +162,11 @@ pub struct Reconstructor {
     /// The dispatcher selected NTT retention at construction (the
     /// mid-flight budget/plan fallbacks can still land on the fold).
     ntt_selected: bool,
+    /// Memory-floor gauge charge for the syndrome rows (recovery blocks
+    /// x block_size, live from construction to back-substitution).
+    /// Released explicitly where finish drops the rows; the RAII drop
+    /// covers an abandoned Reconstructor.
+    syn_charge: crate::memgauge::Charge,
     /// TEST ONLY fault injection, from the `NttForce*` test paths.
     ntt_fault: NttFault,
 }
@@ -655,6 +660,13 @@ struct FeedBatch {
     arena: Vec<u8>,
     /// (base log k, arena offset, len) per slice.
     slices: Vec<(u32, usize, usize)>,
+    /// Memory-floor gauge (memgauge::Sub::RepairWork), grown as bytes
+    /// land in the arena and released when the batch drops - so batches
+    /// queued in the channel, merged for a fold, and NTT-retained all
+    /// stay attributed wherever they travel. Charged by LEN, not
+    /// capacity: a fresh 64 MB arena's untouched pages are not resident,
+    /// and the ram cost tracks the bytes actually written.
+    charge: crate::memgauge::Charge,
 }
 
 impl FeedBatch {
@@ -662,6 +674,7 @@ impl FeedBatch {
         FeedBatch {
             arena: Vec::with_capacity(bytes),
             slices: Vec::new(),
+            charge: crate::memgauge::Charge::new(crate::memgauge::Sub::RepairWork, 0),
         }
     }
 
@@ -669,6 +682,7 @@ impl FeedBatch {
         let off = self.arena.len();
         self.arena.extend_from_slice(data);
         self.slices.push((k, off, data.len()));
+        self.charge.grow(data.len() as u64);
     }
 }
 

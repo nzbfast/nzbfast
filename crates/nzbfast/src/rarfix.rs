@@ -3,7 +3,58 @@
 //! Split out of main.rs verbatim; behaviour unchanged.
 
 use crate::*;
+use tracing::{info, warn};
 
+/// Whether the external `unrar` subprocess may be spawned at all.
+///
+/// Closed for the whole unit-test build, deliberately. `unrar` resolves
+/// as a sibling of the running executable or off `$PATH` (tools.rs), so
+/// whether a unit test reaches this subprocess is a property of the
+/// MACHINE, not of the test - and no unit test can state which it wants,
+/// because it cannot install one and cannot skip on finding one. CI does
+/// not install `unrar` and the dev boxes have none, so the ladder in
+/// [`try_unrar_spent`] falls straight through the fallback to whatever
+/// rung sits below it, and TODO 211's split-container tests read that
+/// fall-through as the thing they are asserting. On a box that does have
+/// one, those same tests hand it the truncated part 1 of a byte split (a
+/// RAR head over a fraction of an archive) and then judge the rescue by
+/// whatever the failed subprocess left behind.
+///
+/// Closing it here STATES that assumption instead of inheriting it. It
+/// cannot move a result that is green in CI, because CI has no `unrar`
+/// to reach in the first place: it makes every other box agree with CI
+/// rather than changing what any test asserts. Nothing here is
+/// production behaviour - `cfg(test)` is the bin target's unit tests and
+/// nothing else.
+///
+/// It is not routed through `NZBFAST_TEST_FORBID_UNRAR` because a unit
+/// test cannot use that variable safely: env vars are process-global,
+/// `cargo test -p nzbfast --bin nzbfast` runs every unit test as a
+/// thread of ONE process, and edition 2024 makes `set_var` unsafe for
+/// exactly that reason. The variable stays what it has always been - the
+/// canary the integration suites set per SPAWNED child, where a process
+/// really is one test. The two sit at the SAME rung of
+/// [`try_unrar_spent`] and mean the same thing - the subprocess, and only
+/// the subprocess, is unavailable; only who sets them differs.
+///
+/// The subprocess itself belongs to those suites for the same reason,
+/// and they already say so out loud: the `prefer_external_unrar` route
+/// test skips itself with "unrar not installed" when `have("unrar")` is
+/// false (tests/daemon_unpackroute). A unit test has no such move.
+#[cfg(test)]
+fn external_unrar_closed() -> bool {
+    true
+}
+
+#[cfg(not(test))]
+fn external_unrar_closed() -> bool {
+    false
+}
+
+/// `cfg(test)` for the same reason [`crate::repair::reextract_dir`] is:
+/// every production caller now takes a `_why` form and keeps the
+/// ladder's reason, and what is left on the boolean is the tests.
+#[cfg(test)]
 pub(crate) fn try_unrar(dir: &std::path::Path, password: Option<&str>) -> bool {
     try_unrar_spent(dir, password).is_some()
 }
@@ -22,17 +73,64 @@ pub(crate) fn try_unrar(dir: &std::path::Path, password: Option<&str>) -> bool {
 /// diff could not prove the unpack published anything new, and no proof
 /// means no delete. A file the unpack itself just published is never
 /// reported as spent.
+///
+/// `cfg(test)` on the same terms as [`try_unrar`] above.
+#[cfg(test)]
 pub(crate) fn try_unrar_spent(
     dir: &std::path::Path,
     password: Option<&str>,
 ) -> Option<Vec<PathBuf>> {
-    // Test canary: encrypted-store e2e jobs must complete WITHOUT unrar
-    // (native decryption); reaching here with the canary set fails the
-    // job loudly instead of quietly proving nothing.
-    if std::env::var_os("NZBFAST_TEST_FORBID_UNRAR").is_some() {
-        println!("⚠ unrar invocation forbidden by NZBFAST_TEST_FORBID_UNRAR");
-        return None;
-    }
+    try_unrar_spent_why(dir, password).ok()
+}
+
+/// The disk unpack ladder's answer in full: what a success spent, or -
+/// on a refusal - why, when the refusal has a reason the JOB should
+/// fail with rather than the caller's own generic wording.
+///
+/// `Err(None)` is the ordinary failure and means exactly what
+/// [`try_unrar_spent`]'s `None` always meant: nothing here unpacked,
+/// every volume stays. Callers that compose a user-facing failure word
+/// that one themselves, because the ladder has nothing to add - the set
+/// is compressed, or damaged, or the password is wrong, and which of
+/// those it was is not knowable from here.
+///
+/// `Err(Some(why))` is the case this variant exists for: a refusal that
+/// is about the DISK and not the archive. Two rungs raise one - the
+/// native pass's bomb verdict and the [`preflight`] ahead of the unrar
+/// spawn - and both used to arrive at the caller as a bare `None`,
+/// which the tail then reported as "the verified volumes could not be
+/// unpacked (compressed set, or the password is wrong)". That is the
+/// exact wrong blame the 22 Aug 2026 incident was reported as, one
+/// layer down from where [`bomb_fallback`] had already fixed it: the
+/// console line was right and the job-level message the user and any
+/// *arr sees was not.
+///
+/// A REASON rather than a flag, and returned rather than kept in a
+/// thread-local ledger in the style of [`crate::resumeout`] /
+/// [`crate::eatvol`]: those two are ledgers because their state has to
+/// outlive a call and be consulted from inside a callback several
+/// frames down. This is one value, produced at the moment of the
+/// refusal and read by the immediate caller, so a return value keeps
+/// the whole story on one screen and cannot go stale - and staleness is
+/// a real hazard here, because `try_unrar` and the split rescue re-enter
+/// this ladder without ever reading a reason.
+pub(crate) fn try_unrar_spent_why(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> std::result::Result<Vec<PathBuf>, Option<String>> {
+    try_unrar_outcome(dir, password).map(|o| o.spent)
+}
+
+/// [`try_unrar_spent_why`] that also carries OUT the groups a successful
+/// run left packed, each with its volume names (TODO 164). The ladder
+/// tolerates a failed group beside one that produced - that is the decoy
+/// rule, see [`vouch`] - and only the level above, where the job's PAR2
+/// set is in scope, can tell a decoy from the vouched release. It needs
+/// the names to do it, and a display stem is not a name.
+pub(crate) fn try_unrar_outcome(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> std::result::Result<UnpackOutcome, Option<String>> {
     // Sibling binary, else the copy embedded in this executable, else
     // PATH (see tools.rs).
     let unrar = tools::resolve("unrar");
@@ -101,7 +199,7 @@ pub(crate) fn try_unrar_spent(
         // governs every named set, which is all it was ever about.
         let obf = collect_obfuscated_rar_volumes(dir).unwrap_or_default();
         if obf.is_empty() {
-            return None;
+            return Err(None);
         }
         // Depth 1, deliberately, where a named set here keeps its volumes:
         // every caller hands this SAME directory to the depth-1 nested pass
@@ -113,7 +211,13 @@ pub(crate) fn try_unrar_spent(
         // today, and it is `sweep_spent_obfuscated` doing it, so its three
         // refusals (a memberless `.rev`-shaped set, no before-snapshot,
         // nothing published) still decide each set on their own.
-        return extract_obfuscated_rar(dir, &obf, password, 1).then(Vec::new);
+        return extract_obfuscated_rar(dir, &obf, password, 1)
+            .ok()
+            .then(|| UnpackOutcome {
+                spent: Vec::new(),
+                packed: Vec::new(),
+            })
+            .ok_or(None);
     };
     // Taken before anything unpacks: the after-diff is the proof-of-output
     // a spent-volume deletion needs, and the filter that keeps a file the
@@ -127,7 +231,11 @@ pub(crate) fn try_unrar_spent(
             return Vec::new();
         };
         let published: std::collections::HashSet<&PathBuf> = after.difference(before).collect();
-        if published.is_empty() {
+        // A RESUMED member is proof too, and the diff cannot see it: its
+        // path was already in `before`, because the chase put the file
+        // there before this pass appended the rest. See
+        // [`crate::resumeout::finished_any`].
+        if published.is_empty() && !crate::resumeout::finished_any() {
             return Vec::new();
         }
         consumed
@@ -221,17 +329,18 @@ pub(crate) fn try_unrar_spent(
     // like routine noise ("a decoy failed, as decoys do"); the whole point
     // here is that a legitimate second set may be sitting in the output
     // directory, still packed, on a job that reported success.
-    let report_leftovers = |failed: &[String]| {
+    let report_leftovers = |failed: &[PackedGroup]| {
         if failed.is_empty() {
             return;
         }
-        println!(
-            "⚠ {} of {} archive set(s) in this directory did not unpack and are still \
+        warn!(
+            target: "extract",
+            "{} of {} archive set(s) in this directory did not unpack and are still \
              packed: {}. If one of those is the release (rather than a decoy or a \
              sample), it needs a password, a repair, or a newer unpacker.",
             failed.len(),
             groups.len(),
-            failed.join(", ")
+            vouch::packed_names(failed)
         );
     };
     // Native in-process extraction first (vendored rars fork - measured
@@ -240,7 +349,7 @@ pub(crate) fn try_unrar_spent(
     // `prefer_external_unrar` setting or its `NZBFAST_NO_NATIVE_UNRAR`
     // env override.
     if !nzbkit::extract::prefer_external_unrar() {
-        println!("unpacking archive natively…");
+        info!(target: "extract", "unpacking archive natively…");
         // §101: a directory holding more than one archive set must not
         // eat. The loop below calls the whole run successful if ANY
         // group produced, so a second group failing halfway has already
@@ -255,7 +364,8 @@ pub(crate) fn try_unrar_spent(
         let _single_set_only = (groups.len() > 1).then(|| crate::eatvol::EatArm::new(false));
         let mut consumed_all: Vec<PathBuf> = Vec::new();
         let mut produced = false;
-        let mut failed: Vec<String> = Vec::new();
+        let mut failed: Vec<PackedGroup> = Vec::new();
+        let mut bombed = false;
         for (stem, group) in &groups {
             let Some(group_first) = first_rar_volume(group) else {
                 continue;
@@ -275,19 +385,50 @@ pub(crate) fn try_unrar_spent(
             let pw = group_pw.as_deref().or(password);
             match try_rars_native(dir, &group_first, pw) {
                 Ok(consumed) => {
-                    println!("native unpack complete ✔ ({})", group_first.display());
+                    info!(target: "extract", "native unpack complete ✔ ({})", group_first.display());
                     consumed_all.extend(consumed);
                     produced = true;
                 }
                 Err(e) => {
-                    println!("⚠ native unpack failed for '{what}' ({e})");
-                    failed.push(what);
+                    warn!(target: "extract", "native unpack failed for '{what}' ({e})");
+                    let bomb = nzbkit::disk::bomb_verdict(&e.to_string());
+                    bombed |= bomb;
+                    let reason = bomb.then(bomb_failure);
+                    failed.push(PackedGroup::record(what, group, pw.is_some(), reason));
                 }
             }
         }
         if produced {
             report_leftovers(&failed);
-            return Some(spent(consumed_all));
+            return Ok(UnpackOutcome {
+                spent: spent(consumed_all),
+                packed: failed,
+            });
+        }
+        // A bomb verdict is the floor of this ladder, not a rung to pass.
+        // The native pass refused because finishing the set would not fit
+        // on the disk; the unrar subprocess below carries no budget of
+        // any kind, so handing it the same set writes until the device
+        // says ENOSPC - which is precisely the outcome both guards exist
+        // to prevent, and it arrives wearing unrar's exit 5 ("encrypted
+        // or damaged?"), blaming the archive for the disk. Measured
+        // 22 Aug 2026: a 2 GB-of-zeros RAR5 (88 KB posted) on a 730 MB
+        // volume was refused in-stream, refused again here, and then
+        // filled the volume anyway on the third rung.
+        //
+        // Refusing keeps the volumes, which is the whole point - freeing
+        // space and retrying unpacks them, where a filled disk leaves the
+        // user nothing to retry WITH.
+        if bombed {
+            warn!(
+                target: "extract",
+                "unpacking this archive needs more space than the disk has \
+                 (possible decompression bomb) - not retrying with unrar, volumes kept"
+            );
+            // …and the same thing to the CALLER, which is what turns a
+            // job failure that blamed the archive into one that names
+            // the disk. See [`try_unrar_spent_why`].
+            return Err(Some(bomb_failure()));
         }
         // §101: nothing produced, and under the eating mode the failed
         // pass may have consumed volumes on its way down - in which case
@@ -297,21 +438,52 @@ pub(crate) fn try_unrar_spent(
         // None into a job failure either way, but the log is the only
         // place this is explicable.
         if groups.iter().any(|(_, g)| g.iter().any(|p| !p.exists())) {
-            println!(
-                "⚠ volumes were consumed as they were read (the volume-eating unpack), \
+            warn!(
+                target: "extract",
+                "volumes were consumed as they were read (the volume-eating unpack), \
                  so there is nothing left for unrar to retry - a retry re-downloads the set"
             );
-            return None;
+            return Err(None);
         }
-        println!("falling back to unrar…");
+        info!(target: "extract", "falling back to unrar…");
     }
-    println!("unpacking archive with unrar…");
+    info!(target: "extract", "unpacking archive with unrar…");
     // One subprocess per stem group, on the same list and the same success
     // rule as the native pass above. The password resolves per GROUP here
     // too (U1/U2, same reasoning as the native loop above).
-    let unrar_group = |group_first: &PathBuf, group: &[PathBuf]| -> Option<Vec<PathBuf>> {
+    // The refusal carries whether the group was handed a password at all
+    // (the caller's or a harvested one): the level above reads a vouched
+    // encrypted leftover that never had one as LOCKED, not failed.
+    let unrar_group = |group_first: &PathBuf,
+                       group: &[PathBuf]|
+     -> std::result::Result<Vec<PathBuf>, (Option<String>, bool)> {
+        // Asked HERE, not at the top of this function, so that closing the
+        // hatch closes only the hatch: the native pass above still runs and
+        // still fails on the shapes it fails on, and every caller's ladder
+        // sees exactly the None a box with no `unrar` installed produces.
+        // See [`external_unrar_closed`].
+        if external_unrar_closed() {
+            warn!(target: "extract", "the external unrar fallback is closed for this build - volumes kept");
+            return Err((None, password.is_some()));
+        }
+        // The integration suites' canary, at the SAME rung and for the same
+        // reason. It sat at the top of this function until 22 Aug 2026,
+        // where it closed the native engine too - which is neither what
+        // its name says nor what twelve of its thirteen users want, and
+        // it made TODO 211's rescue rung untestable, because the rescue
+        // extracts the container it joined by calling straight back in
+        // here. Down here it lets a test say "this job used no external
+        // unpacker" without also saying "and no unpacker at all".
+        // The thirteenth wanted the whole ladder shut, and now says so:
+        // `NZBFAST_NO_NATIVE_UNRAR=1` beside the canary skips the native
+        // pass above by the documented route (daemon_retry).
+        if std::env::var_os("NZBFAST_TEST_FORBID_UNRAR").is_some() {
+            warn!(target: "extract", "unrar invocation forbidden by NZBFAST_TEST_FORBID_UNRAR");
+            return Err((None, password.is_some()));
+        }
         let group_pw = crate::unpack::resolve_rar_group_password(dir, group, password);
         let pw = group_pw.as_deref().or(password);
+        let refused = |why: Option<String>| Err((why, pw.is_some()));
         // `-p<pw>` must be a single argument; bare `-p` would prompt and hang.
         let parg = match pw {
             Some(p) if !p.is_empty() => format!("-p{p}"),
@@ -321,6 +493,20 @@ pub(crate) fn try_unrar_spent(
         // runs - the unpack can publish rar-named members of its own, and
         // those must never be mistaken for input volumes.
         let consumed = stem_volume_set(dir, group_first).unwrap_or_default();
+        // The bomb guard's floor, asked ahead of the spawn because this
+        // rung has no other way to have one. Under `prefer_external_unrar`
+        // the budgeted native pass above never ran, so nothing has yet
+        // measured this set against the disk - and the subprocess below
+        // will not, at any point, for any archive. See [`preflight`].
+        //
+        // The verdict travels OUT with the refusal, exactly as the
+        // native pass's does above: this rung is the only guard the
+        // `prefer_external_unrar` route has, so with a bare refusal the
+        // job's own message blames an archive that is fine. See
+        // [`try_unrar_spent_why`].
+        if preflight::unrar_would_bomb(dir, &consumed, pw) {
+            return refused(Some(bomb_failure()));
+        }
         // Same staging discipline as the native path: `-o+` overwrites without
         // asking, and unrar reads the volume set by path as it goes, so a member
         // named after a volume would destroy the set mid-extraction. The
@@ -329,8 +515,8 @@ pub(crate) fn try_unrar_spent(
         let staging = match ExtractStaging::new(dir) {
             Ok(s) => s,
             Err(e) => {
-                println!("⚠ could not create a staging directory ({e})");
-                return None;
+                warn!(target: "extract", "could not create a staging directory ({e})");
+                return refused(None);
             }
         };
         let dest_arg = {
@@ -351,26 +537,26 @@ pub(crate) fn try_unrar_spent(
             .status()
         {
             Ok(st) if st.success() && !staging.produced_anything() => {
-                println!("⚠ unrar exited 0 but extracted nothing - treating as a failure");
-                None
+                warn!(target: "extract", "unrar exited 0 but extracted nothing - treating as a failure");
+                refused(None)
             }
             Ok(st) if st.success() => match staging.publish_into(dir) {
                 Ok(()) => {
-                    println!("unrar complete ✔ ({})", group_first.display());
-                    Some(consumed)
+                    info!(target: "extract", "unrar complete ✔ ({})", group_first.display());
+                    Ok(consumed)
                 }
                 Err(e) => {
-                    println!("⚠ {e}");
-                    None
+                    warn!(target: "extract", "{e}");
+                    refused(None)
                 }
             },
             Ok(st) if pw.is_some() => {
-                println!("⚠ unrar exited with {st} - wrong password, or damaged volumes");
-                None
+                warn!(target: "extract", "unrar exited with {st} - wrong password, or damaged volumes");
+                refused(None)
             }
             Ok(st) => {
-                println!("⚠ unrar exited with {st} (encrypted or damaged?)");
-                None
+                warn!(target: "extract", "unrar exited with {st} (encrypted or damaged?)");
+                refused(None)
             }
             // "not runnable (No such file or directory (os error 2))" is what
             // a container user saw after the native path failed, and it names
@@ -378,42 +564,55 @@ pub(crate) fn try_unrar_spent(
             // on purpose (extraction is native), so ENOENT here is the common
             // case, not the exotic one, and it deserves its own sentence.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!(
-                    "⚠ unrar is not installed, so there was nothing to fall back to \
+                warn!(
+                    target: "extract",
+                    "unrar is not installed, so there was nothing to fall back to \
                      - volumes left on disk"
                 );
-                println!("  install unrar to enable this fallback, or unpack them by hand");
-                None
+                warn!(target: "extract", "install unrar to enable this fallback, or unpack them by hand");
+                refused(None)
             }
             Err(e) => {
-                println!("⚠ unrar not runnable ({e}) - volumes left on disk");
-                None
+                warn!(target: "extract", "unrar not runnable ({e}) - volumes left on disk");
+                refused(None)
             }
         }
     };
     let mut consumed_all: Vec<PathBuf> = Vec::new();
     let mut produced = false;
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed: Vec<PackedGroup> = Vec::new();
+    // Per GROUP, like the refusal itself: a directory holding a decoy
+    // bomb beside a real release still unpacks the release, and only a
+    // run where NOTHING produced can be reported as a disk refusal.
+    let mut bombed = false;
     for (stem, group) in &groups {
         let Some(group_first) = first_rar_volume(group) else {
             continue;
         };
         match unrar_group(&group_first, group) {
-            Some(consumed) => {
+            Ok(consumed) => {
                 consumed_all.extend(consumed);
                 produced = true;
             }
-            None => failed.push(if stem.is_empty() {
-                group_first.display().to_string()
-            } else {
-                stem.clone()
-            }),
+            Err((why, had_pw)) => {
+                bombed |= why.is_some();
+                let what = if stem.is_empty() {
+                    group_first.display().to_string()
+                } else {
+                    stem.clone()
+                };
+                failed.push(PackedGroup::record(what, group, had_pw, why));
+            }
         }
     }
     if produced {
         report_leftovers(&failed);
+        return Ok(UnpackOutcome {
+            spent: spent(consumed_all),
+            packed: failed,
+        });
     }
-    produced.then(|| spent(consumed_all))
+    Err(bombed.then(bomb_failure))
 }
 
 /// Part B of the 2026-07-29 one-pass spec: a set that just unpacked has
@@ -433,11 +632,13 @@ pub(crate) fn remove_spent_volumes(vols: &[PathBuf]) {
             // one "could not remove" warning per volume for a job that
             // did exactly what it was told.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => println!("⚠ could not remove spent volume {}: {e}", p.display()),
+            Err(e) => {
+                warn!(target: "extract", "could not remove spent volume {}: {e}", p.display())
+            }
         }
     }
     if removed > 0 {
-        println!("  removed {removed} volume file(s) after extraction");
+        info!(target: "extract", "removed {removed} volume file(s) after extraction");
     }
 }
 
@@ -448,68 +649,44 @@ pub(crate) fn remove_spent_volumes(vols: &[PathBuf]) {
 /// RAR5 RR repair does not re-checksum rebuilt shards on its own, but the
 /// native extraction path CRC-verifies every entry.
 ///
-/// Returns true only when extraction afterwards succeeds.
+/// Groups by stem and resolves the password PER GROUP, as both try_unrar
+/// rungs do. This rung took the caller's raw value straight into
+/// rr_repair_volume, so a set whose password lives in a harvested
+/// sidecar (the nested password-chain shape) failed every
+/// header-encrypted volume parse and the repair reported "could not
+/// save the set" on a set it could have saved (14 Aug sweep; the
+/// per-group resolve moved out of extract_one_level in U2/b1c20eea and
+/// this rung never got one).
+///
+/// The blind form: every volume gets the full pass. Where PAR2 has
+/// already verified the set, [`try_rar_rr_repair_hinted`] skips what it
+/// proved intact (TODO §11 (b), `rarfix/rrhint.rs`).
+///
+/// Returns true only when extraction afterwards succeeds. The bool form,
+/// kept for the tests; a caller that composes a job failure takes
+/// [`try_rar_rr_repair_why`] instead so the ladder's own reason survives,
+/// which since TODO §249 item 1 is all of them - hence `cfg(test)`, the
+/// same shape [`crate::repair::reextract_dir`] settled into.
+#[cfg(test)]
 pub(crate) fn try_rar_rr_repair(dir: &std::path::Path, password: Option<&str>) -> bool {
-    let volumes = match collect_rar_volumes(dir) {
-        Ok(volumes) if !volumes.is_empty() => volumes,
-        _ => return false,
-    };
-    println!(
-        "PAR2 exhausted - trying embedded RAR recovery records on {} volume(s)…",
-        volumes.len()
-    );
-    // Group by stem and resolve the password PER GROUP, as both try_unrar
-    // rungs do. This rung took the caller's raw value straight into
-    // rr_repair_volume, so a set whose password lives in a harvested
-    // sidecar (the nested password-chain shape) failed every
-    // header-encrypted volume parse and the repair reported "could not
-    // save the set" on a set it could have saved (14 Aug sweep; the
-    // per-group resolve moved out of extract_one_level in U2/b1c20eea and
-    // this rung never got one).
-    let mut by_stem: std::collections::BTreeMap<String, Vec<&PathBuf>> = Default::default();
-    {
-        use nzbkit::extract::release_stem;
-        for p in &volumes {
-            let stem = release_stem(
-                &p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase(),
-            )
-            .to_string();
-            by_stem.entry(stem).or_default().push(p);
-        }
-    }
-    let mut rewritten = 0usize;
-    let mut hard_failures = 0usize;
-    for group in by_stem.values() {
-        let owned: Vec<PathBuf> = group.iter().map(|p| (*p).clone()).collect();
-        let group_pw = crate::unpack::resolve_rar_group_password(dir, &owned, password);
-        let pw = group_pw.as_deref().or(password);
-        for path in group {
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            match rr_repair_volume(path, pw) {
-                Ok(true) => {
-                    println!("  ✔ {name} - rewritten from recovery record");
-                    rewritten += 1;
-                }
-                Ok(false) => println!("  – {name} - no recovery record"),
-                Err(e) => {
-                    println!("  ✘ {name} - {e}");
-                    hard_failures += 1;
-                }
-            }
-        }
-    }
-    if rewritten == 0 || hard_failures > 0 {
-        println!("⚠ recovery-record repair could not save the set");
-        return false;
-    }
-    try_unrar(dir, password)
+    try_rar_rr_repair_hinted(dir, password, None)
+}
+
+/// [`try_rar_rr_repair`] that also names WHY it refused, on the one
+/// class of refusal that is about the DISK rather than the archive.
+///
+/// Same contract as [`try_unrar_spent_why`], which this rung's
+/// extraction delegates to: `Err(None)` is the ordinary failure the
+/// caller words itself, `Err(Some(why))` is a bomb verdict that must be
+/// quoted rather than paraphrased. This closed the third and last rung
+/// of the named-RAR arm (TODO §249 item 1); see
+/// [`try_rar_rr_repair_hinted_why`] for what each attempt inside can
+/// raise.
+pub(crate) fn try_rar_rr_repair_why(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> std::result::Result<(), Option<String>> {
+    try_rar_rr_repair_hinted_why(dir, password, None)
 }
 
 /// Rebuild missing or destroyed RAR5 volumes from `.rev` recovery volumes
@@ -547,25 +724,25 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
         let source = match FileSource::open(path) {
             Ok(source) => source,
             Err(e) => {
-                println!("  – {name}: unreadable .rev ({e})");
+                warn!(target: "repair", "{name}: unreadable .rev ({e})");
                 continue;
             }
         };
         let meta = match rars::rar50::read_rev5_meta(&source) {
             Ok(meta) => meta,
             Err(e) => {
-                println!("  – {name}: unusable .rev ({e})");
+                warn!(target: "repair", "{name}: unusable .rev ({e})");
                 continue;
             }
         };
         match rars::rar50::verify_rev5_payload(&source, &meta) {
             Ok(true) => {}
             Ok(false) => {
-                println!("  – {name}: .rev payload fails its own checksum");
+                warn!(target: "repair", "{name}: .rev payload fails its own checksum");
                 continue;
             }
             Err(e) => {
-                println!("  – {name}: unreadable .rev payload ({e})");
+                warn!(target: "repair", "{name}: unreadable .rev payload ({e})");
                 continue;
             }
         }
@@ -604,8 +781,9 @@ pub(crate) fn try_rev_reconstruct(dir: &std::path::Path) -> bool {
         return false;
     }
     if groups.len() > 1 {
-        println!(
-            "  – {} independent .rev sets in this folder; trying each",
+        info!(
+            target: "repair",
+            "{} independent .rev sets in this folder; trying each",
             groups.len()
         );
     }
@@ -736,7 +914,8 @@ pub(crate) fn try_rev_group(
 
     let first = &rev_meta[keep[0]];
     let slots = first.meta.data_volumes.clone();
-    println!(
+    info!(
+        target: "repair",
         "trying .rev recovery volumes ({} rev file(s), {} data volume slot(s))…",
         keep.len(),
         slots.len()
@@ -764,12 +943,13 @@ pub(crate) fn try_rev_group(
         .filter(|&i| slot_path[i].is_none())
         .collect();
     if missing.is_empty() {
-        println!("  – all data volumes verify; .rev not needed");
+        info!(target: "repair", "all data volumes verify; .rev not needed");
         return false;
     }
     if missing.len() > keep.len() {
-        println!(
-            "  ✘ {} volume(s) missing but only {} usable .rev file(s) - unrepairable",
+        warn!(
+            target: "repair",
+            "✘ {} volume(s) missing but only {} usable .rev file(s) - unrepairable",
             missing.len(),
             keep.len()
         );
@@ -794,7 +974,7 @@ pub(crate) fn try_rev_group(
             Some(path) => match FileSource::open(path) {
                 Ok(source) => Some(source),
                 Err(e) => {
-                    println!("  ✘ {} became unreadable ({e})", path.display());
+                    warn!(target: "repair", "✘ {} became unreadable ({e})", path.display());
                     return false;
                 }
             },
@@ -840,14 +1020,14 @@ pub(crate) fn try_rev_group(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
-                    println!("  ✘ cannot stage a rebuild for slot {} ({e})", index + 1);
+                    warn!(target: "repair", "✘ cannot stage a rebuild for slot {} ({e})", index + 1);
                     cleanup_temps(&temps);
                     return false;
                 }
             }
         }
         let Some(made) = made else {
-            println!("  ✘ no free temp name for slot {}", index + 1);
+            warn!(target: "repair", "✘ no free temp name for slot {}", index + 1);
             cleanup_temps(&temps);
             return false;
         };
@@ -876,12 +1056,12 @@ pub(crate) fn try_rev_group(
         },
     );
     if let Err(e) = result {
-        println!("  ✘ .rev reconstruction failed ({e})");
+        warn!(target: "repair", "✘ .rev reconstruction failed ({e})");
         cleanup_temps(&temps);
         return false;
     }
     if let Some(e) = write_error {
-        println!("  ✘ .rev reconstruction could not be written ({e})");
+        warn!(target: "repair", "✘ .rev reconstruction could not be written ({e})");
         cleanup_temps(&temps);
         return false;
     }
@@ -892,8 +1072,9 @@ pub(crate) fn try_rev_group(
     for (slot, &index) in missing.iter().enumerate() {
         let (path, file) = &mut temps[slot];
         if let Err(e) = file.sync_all() {
-            println!(
-                "  ✘ could not flush the rebuild for slot {} ({e})",
+            warn!(
+                target: "repair",
+                "✘ could not flush the rebuild for slot {} ({e})",
                 index + 1
             );
             cleanup_temps(&temps);
@@ -902,15 +1083,16 @@ pub(crate) fn try_rev_group(
         match rars::recovery::stream::crc32_of(path) {
             Ok((crc, len)) if crc == slots[index].crc32 && len == slots[index].file_size => {}
             Ok(_) => {
-                println!(
-                    "  ✘ rebuilt slot {} fails its checksum - discarded",
+                warn!(
+                    target: "repair",
+                    "✘ rebuilt slot {} fails its checksum - discarded",
                     index + 1
                 );
                 cleanup_temps(&temps);
                 return false;
             }
             Err(e) => {
-                println!("  ✘ cannot verify the rebuild for slot {} ({e})", index + 1);
+                warn!(target: "repair", "✘ cannot verify the rebuild for slot {} ({e})", index + 1);
                 cleanup_temps(&temps);
                 return false;
             }
@@ -926,10 +1108,10 @@ pub(crate) fn try_rev_group(
         let target = dir.join(&name);
         match std::fs::rename(&temps[slot].0, &target) {
             Ok(()) => {
-                println!("  ✔ {name} - rebuilt from .rev");
+                info!(target: "repair", "✔ {name} - rebuilt from .rev");
                 rebuilt += 1;
             }
-            Err(e) => println!("  ✘ {name} - could not be published ({e})"),
+            Err(e) => warn!(target: "repair", "✘ {name} - could not be published ({e})"),
         }
     }
     cleanup_temps(&temps);
@@ -1169,451 +1351,42 @@ pub(crate) fn stem_volume_set(
     Ok(volumes)
 }
 
-/// Post-repair: run the store-mode extraction over repaired volume files
-/// on disk (a straight remap copy - repair already verified the bytes).
-/// A success also returns the volume files it read, so a finalize caller
-/// can delete exactly the spent set.
-pub(crate) fn try_rars_native(
-    dir: &std::path::Path,
-    first: &std::path::Path,
-    password: Option<&str>,
-) -> Result<Vec<PathBuf>> {
-    let volumes = stem_volume_set(dir, first)?;
-    if volumes.is_empty() {
-        anyhow::bail!(
-            "no volumes found for {}",
-            first.file_name().unwrap_or_default().to_string_lossy()
-        );
-    }
-    // Parse WITH the password: header-encrypted (-hp) volumes need it just
-    // to read their headers - without it every -hp set silently fell back
-    // to the unrar subprocess (and failed outright where unrar is absent).
-    let options = nzbkit::mem::rar_read_options(password.map(str::as_bytes));
-    // One parse session for the whole set: repeated (salt, kdf count)
-    // derivations run once instead of once per volume.
-    let mut parse = rars::ReadSession::new(options);
-    let archives = volumes
-        .iter()
-        .map(|path| parse.read_path(path))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("parsing volumes: {e}"))?;
-    // `volumes` and `archives` are the same set in the same order, which
-    // is what lets §101's eating mode delete each volume as the extractor
-    // finishes with it.
-    write_archives_to_spending(dir, &archives, password, &volumes)?;
-    Ok(volumes)
-}
+mod native;
+mod rrhint;
+pub(crate) use native::{try_rars_native, write_archives_to, write_archives_to_spending};
+#[cfg(test)]
+pub(crate) use rrhint::try_rar_rr_repair_hinted;
+pub(crate) use rrhint::{DamageHint, try_rar_rr_repair_hinted_why};
 
-/// Stream a parsed RAR volume set out to `dir` under each entry's real
-/// name, path-sanitized and bounded by the decompression-bomb guard.
-/// Shared by the named-set path and the obfuscated-set path.
-///
-/// Output lands in an `ExtractStaging` dir and is published into `dir`
-/// only once the whole set has decoded - the volumes being read are
-/// reopened by path for every range, so nothing may be created beside
-/// them while extraction runs.
-pub(crate) fn write_archives_to(
-    dir: &std::path::Path,
-    archives: &[rars::Archive],
-    password: Option<&str>,
-) -> Result<()> {
-    write_archives_to_spending(dir, archives, password, &[])
-}
+/// TODO 164: the leftovers a successful ladder run names, and the
+/// PAR2-vouching verdict the level above reaches on them.
+pub(crate) mod vouch;
+pub(crate) use vouch::{PackedGroup, UnpackOutcome};
 
-/// [`write_archives_to`] that also knows which FILE each archive was
-/// parsed from, so a job running under TODO 101's volume-eating mode can
-/// delete each one the moment the extractor is finished with it.
-///
-/// `sources[i]` must be the path `archives[i]` was read from; hand `&[]`
-/// when the mapping is not known and the eating path is skipped entirely.
-/// Eating additionally requires [`crate::eatvol::armed`] - the per-job
-/// arming the daemon does once all of §101's gates have passed - so this
-/// is inert for every ordinary unpack.
-pub(crate) fn write_archives_to_spending(
-    dir: &std::path::Path,
-    archives: &[rars::Archive],
-    password: Option<&str>,
-    sources: &[PathBuf],
-) -> Result<()> {
-    // Eating needs a source path for EVERY archive: a partial mapping
-    // would delete some volumes and keep others, which is the worst of
-    // both (space not really freed, retry-without-refetch already lost).
-    let eating = crate::eatvol::armed() && !sources.is_empty() && sources.len() == archives.len();
-    // Decompression-bomb guard: bound total extracted bytes at the target
-    // filesystem's free space minus a reserve, so a crafted archive that
-    // unpacks to far more than it downloaded (a store-mode "zip bomb")
-    // can't fill the disk. It never trips on a legitimate large extract
-    // that actually fits. Active wherever disk_stat answers, which is now
-    // every platform we ship - windows included, since GetDiskFreeSpaceExW
-    // landed; before that free_bytes was None there and this guard silently
-    // did nothing.
-    //
-    // Under eating the volume bytes come back one file at a time, and
-    // that is the entire point of the mode - so the guard has to grow as
-    // they do, or it reads the disk as it stands at the FIRST byte
-    // (which on a job that armed `low_disk` is nearly full by
-    // definition) and kills the extraction the mode exists to rescue.
-    //
-    // It grows on DELIVERY, never on promise: see [`BombBudget`] for the
-    // shape that pre-crediting `volume_bytes(sources)` broke, and why it
-    // broke it on the commonest set of all.
-    let budget = BombBudget::fixed(
-        crate::serve::free_bytes(dir)
-            .map(|free| free.saturating_sub(EXTRACT_RESERVE))
-            .unwrap_or(u64::MAX),
-    );
-    let credit = budget.credit_handle();
-    let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+/// `pub(crate)` for its predicate alone: `repair::repair_tests` pins the
+/// whole floor of the unpack ladder in one place, and this is the rung
+/// that has no verdict to read.
+pub(crate) mod preflight;
 
-    let staging = ExtractStaging::new(dir)?;
-    let stage_dir = staging.path().to_path_buf();
-    // The vendored extractor drops each entry writer AFTER deciding
-    // success on the decoded bytes, and BufWriter's Drop swallows its
-    // flush error - so an ENOSPC/EIO on the final buffered tail would
-    // publish a short file as a verified extraction (with the source
-    // volumes possibly already eaten). DeferredFlushWriter records the
-    // swallowed error here; checked below before publish.
-    let flush_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let entry_flush_err = flush_err.clone();
-    let open = move |meta: &rars::ExtractedEntryMeta| {
-        let target = sanitized_entry_path(&stage_dir, &meta.name_lossy()).ok_or_else(|| {
-            rars::Error::from(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "archive entry escapes output directory",
-            ))
-        })?;
-        if meta.is_directory {
-            std::fs::create_dir_all(&target)?;
-            return Ok(Box::new(std::io::sink()) as Box<dyn std::io::Write>);
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::io::BufWriter::new(std::fs::File::create(target)?);
-        Ok(Box::new(DeferredFlushWriter {
-            inner: BombGuardWriter {
-                inner: file,
-                written: written.clone(),
-                budget: budget.clone(),
-            },
-            failed: entry_flush_err.clone(),
-        }) as Box<dyn std::io::Write>)
-    };
-    if eating {
-        println!(
-            "unpacking {} volume(s), deleting each as it is used up…",
-            sources.len()
-        );
-        let mut eaten = 0usize;
-        let mut bytes = 0u64;
-        // A HARD delete, deliberately not the trash-aware helper: the
-        // whole promise of the mode is that the space comes back this
-        // instant, and a Trash on the same filesystem gives back nothing.
-        // The callback is only ever reached for a volume rars has
-        // finished reading - see the guarantees on
-        // `extract_volumes_to_with_progress`.
-        let consumed = |i: usize| {
-            let Some(path) = sources.get(i) else { return };
-            // symlink_metadata, and only single-link regular files
-            // count: unlinking a symlink or one name of a hardlinked
-            // file releases no data blocks, so crediting the target's
-            // length would let the guard spend space the disk never
-            // gave back - and meet real ENOSPC mid-extraction after
-            // the source names are gone.
-            let meta = std::fs::symlink_metadata(path).ok();
-            let size = match &meta {
-                Some(m) if m.is_file() && sole_link(m) => m.len(),
-                _ => 0,
-            };
-            match std::fs::remove_file(path) {
-                Ok(()) => {
-                    eaten += 1;
-                    bytes = bytes.saturating_add(size);
-                    // The space is back NOW, so the guard may spend it
-                    // now - and not one byte before. A volume we could
-                    // not remove credits nothing, which is exactly what
-                    // the warning below is about.
-                    credit.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-                }
-                // Not fatal: extraction has already read this volume, so
-                // a file we cannot remove costs space, not correctness.
-                Err(e) => println!("⚠ could not remove spent volume {}: {e}", path.display()),
-            }
-        };
-        let result = rars::extract_volumes_to_with_progress(
-            archives,
-            rars::ArchiveReadOptions::with_optional_password(password.map(str::as_bytes)),
-            open,
-            consumed,
-        );
-        if eaten > 0 {
-            println!(
-                "  freed {eaten} spent volume(s) during extraction ({:.1} GB)",
-                bytes as f64 / 1e9
-            );
-        }
-        result.map_err(|e| anyhow::anyhow!("{e}"))?;
-    } else {
-        rars::extract_volumes_to(archives, password.map(str::as_bytes), open)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-    }
-    if let Some(e) = flush_err.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        anyhow::bail!("extracted file could not be fully written to disk: {e}");
-    }
-    staging.publish_into(dir)
-}
+/// TODO 163 item 6's disk half: the tar arm of the post-pass.
+mod tar;
+pub(crate) use tar::{collect_tar_containers, extract_tar, first_tar_container, is_tar_container};
 
-/// True when the file has exactly one directory entry, so unlinking it
-/// actually releases its blocks. Non-unix hosts cannot cheaply ask, and
-/// hardlinked volume sets are a unix habit - treat single-link as true
-/// there.
-fn sole_link(m: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::MetadataExt::nlink(m) == 1
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = m;
-        true
-    }
-}
-
-/// If `name` is a split 7-Zip part (`<base>.7z.<NNN>`), return the shared
-/// base and the numeric part index.
-pub(crate) fn split_7z_part(name: &str) -> Option<(String, u32)> {
-    let (head, tail) = name.rsplit_once('.')?;
-    if tail.is_empty() || !tail.bytes().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    head.to_lowercase()
-        .ends_with(".7z")
-        .then(|| (head.to_string(), tail.parse().ok().unwrap_or(u32::MAX)))
-}
-
-/// Every 7-Zip job in `dir`: single `.7z` (or 7z-magic) containers, plus
-/// `.7z.NNN` split sets grouped and ordered by part index. Each job is
-/// the ordered list of on-disk parts that form one container.
-///
-/// The magic sniff accepts any extension except a named payload one
-/// (`nzbkit::extract::is_final_name` - a `.cb7` comic is the
-/// deliverable). It used to require an EMPTY extension, so an
-/// obfuscated container posted as `hash.bin` was invisible here: the
-/// disk post-pass walked past it, nothing extracted, and the job
-/// reported Completed holding one unopened archive. Obfuscation strips
-/// the meaning from an extension, not the extension itself.
-pub(crate) fn collect_sevenz_archives(dir: &std::path::Path) -> Result<Vec<Vec<PathBuf>>> {
-    use std::collections::BTreeMap;
-    let mut singles: Vec<PathBuf> = Vec::new();
-    let mut splits: BTreeMap<String, BTreeMap<u32, PathBuf>> = BTreeMap::new();
-    for e in std::fs::read_dir(dir)?.flatten() {
-        if !e.file_type().is_ok_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = e.path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        if let Some((base, num)) = split_7z_part(&name) {
-            splits.entry(base).or_default().insert(num, path);
-        } else if name.ends_with(".7z")
-            || (!nzbkit::extract::is_final_name(&name) && sevenz_magic(&path))
-        {
-            // Named, or obfuscated under any name at all - except a
-            // named payload file (`.cb7`), whose 7z bytes ARE the
-            // deliverable and must never be unpacked.
-            singles.push(path);
-        }
-    }
-    let mut jobs: Vec<Vec<PathBuf>> = singles.into_iter().map(|p| vec![p]).collect();
-    for (_base, parts) in splits {
-        jobs.push(parts.into_values().collect());
-    }
-    Ok(jobs)
-}
-
-/// Extract every 7-Zip job in `dir`. Split sets are concatenated into a
-/// scratch container first (7z multipart is a raw byte split). Returns
-/// true only if every job extracted.
-///
-/// Two separate scratch dirs per job, both outside the output namespace:
-/// one holds the joined container, the other collects members until the
-/// whole container has decoded. A `release.7z` carrying a member named
-/// `release.7z` would otherwise truncate the inode still backing its own
-/// reader - and putting the join temp beside the members would move that
-/// same hazard onto the joined copy.
-pub(crate) fn extract_sevenz(
-    dir: &std::path::Path,
-    jobs: &[Vec<PathBuf>],
-    password: Option<&str>,
-) -> bool {
-    let mut all_ok = true;
-    for parts in jobs.iter() {
-        // `join` stays alive for the whole iteration: dropping it removes
-        // the joined container the reader is still using.
-        let (out, join, container) = match prepare_sevenz_job(dir, parts) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("⚠ {e}");
-                all_ok = false;
-                continue;
-            }
-        };
-        println!("unpacking 7z archive natively…");
-        // Per CONTAINER, like the zip arm: one resolved value per level
-        // handed every 7z job the first job's password (Codex sweep G).
-        // A shortlist rather than a pick, because a probe that hit the
-        // 64 MB cap never reached the entry's checksum and cannot settle
-        // anything (sweep M) - the extraction does.
-        let cands = crate::unpack::sevenz_password_candidates(&container, dir, password);
-        let mut last: Option<String> = None;
-        let mut done = false;
-        // `publish_into` consumes its staging dir, so a retry needs a
-        // fresh one; the prepared dir is the first attempt's.
-        let mut prepared = Some(out);
-        for (pw, source) in &cands {
-            let out = match prepared
-                .take()
-                .map(Ok)
-                .unwrap_or_else(|| ExtractStaging::new(dir))
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    last = Some(e.to_string());
-                    break;
-                }
-            };
-            match extract_one_sevenz(out.path(), &container, pw.as_deref())
-                .and_then(|()| out.publish_into(dir))
-            {
-                Ok(()) => {
-                    if pw.is_some() && source != "job password" {
-                        println!("🔑 auto-unlocked with password from {source}");
-                    }
-                    println!("7z unpack complete ✔");
-                    done = true;
-                    break;
-                }
-                Err(e) => last = Some(e.to_string()),
-            }
-        }
-        if !done {
-            println!(
-                "⚠ 7z unpack failed ({})",
-                last.unwrap_or_else(|| "no candidate password opened it".into())
-            );
-            all_ok = false;
-        }
-        drop(join);
-    }
-    all_ok
-}
-
-/// Staging dirs + container path for one 7-Zip job: the output dir, the
-/// scratch dir holding the joined container (multipart sets only), and the
-/// container to read.
-pub(crate) fn prepare_sevenz_job(
-    dir: &std::path::Path,
-    parts: &[PathBuf],
-) -> Result<(ExtractStaging, Option<ExtractStaging>, PathBuf)> {
-    let out = ExtractStaging::new(dir)?;
-    if parts.len() == 1 {
-        return Ok((out, None, parts[0].clone()));
-    }
-    let scratch = ExtractStaging::new(dir)?;
-    let container = scratch.path().join("joined.7z");
-    concat_files(parts, &container)
-        .map_err(|e| anyhow::anyhow!("joining 7z split parts failed ({e})"))?;
-    Ok((out, Some(scratch), container))
-}
-
-/// Concatenate `parts` (already in order) into `dest`.
-pub(crate) fn concat_files(parts: &[PathBuf], dest: &std::path::Path) -> Result<()> {
-    let mut out = std::io::BufWriter::new(std::fs::File::create(dest)?);
-    for p in parts {
-        let mut f = std::fs::File::open(p)?;
-        std::io::copy(&mut f, &mut out)?;
-    }
-    use std::io::Write as _;
-    out.flush()?;
-    Ok(())
-}
-
-/// Extract one 7-Zip container into `out` (an `ExtractStaging` dir, never
-/// the directory holding the container), path-sanitized and bounded by the
-/// same decompression-bomb guard as the RAR path.
-pub(crate) fn extract_one_sevenz(
-    out: &std::path::Path,
-    container: &std::path::Path,
-    password: Option<&str>,
-) -> Result<()> {
-    use sevenz_rust2::{ArchiveReader, Password};
-    let pw = match password {
-        Some(p) if !p.is_empty() => Password::from(p),
-        _ => Password::empty(),
-    };
-    // The shared declared-size gate (nzbkit's nameprobe, TODO 156 item
-    // 5): ArchiveReader::open buffers the declared end header whole and
-    // decodes a packed one with the declared sizes as its only bounds,
-    // and a chased container that refused at the in-stream gate demotes
-    // to exactly this path - so the refusal here must be a named error,
-    // not an allocation. The declared variant also judges the CONTENT
-    // blocks' dictionary and PPMd declarations, which the extraction
-    // below would otherwise allocate unbounded. Malformed shapes fall
-    // through to the library's own cheap error, same as the probe
-    // halves of the gate.
-    if let Ok(mut probe) = std::fs::File::open(container)
-        && let Some(reason) = nzbkit::nameprobe::sevenz_disk_declared_bomb(&mut probe)
-    {
-        anyhow::bail!("{reason}");
-    }
-    let mut reader =
-        ArchiveReader::open(container, pw).map_err(|e| anyhow::anyhow!("opening 7z: {e}"))?;
-    // Staging sits on the same filesystem as the job directory, so this
-    // still measures the volume the payload lands on.
-    let budget = BombBudget::fixed(
-        crate::serve::free_bytes(out)
-            .map(|free| free.saturating_sub(EXTRACT_RESERVE))
-            .unwrap_or(u64::MAX),
-    );
-    let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    reader
-        .for_each_entries(|entry, rd| {
-            let target = sanitized_entry_path(out, &entry.name).ok_or_else(|| {
-                sevenz_rust2::Error::Other("archive entry escapes output directory".into())
-            })?;
-            if entry.is_directory {
-                std::fs::create_dir_all(&target)?;
-                return Ok(true);
-            }
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut w = BombGuardWriter {
-                inner: std::io::BufWriter::new(std::fs::File::create(&target)?),
-                written: written.clone(),
-                budget: budget.clone(),
-            };
-            std::io::copy(rd, &mut w)?;
-            use std::io::Write as _;
-            w.flush()?;
-            Ok(true)
-        })
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(())
-}
+mod sevenz;
+pub(crate) use sevenz::{
+    collect_sevenz_archives, concat_files, extract_sevenz, open_sevenz, sevenz_set_is_encrypted,
+    split_7z_part,
+};
 
 /// Extract every zip container in `dir`. Returns true only if every one
 /// produced its payload.
 ///
-/// Mirrors [`extract_sevenz`] with one deliberate difference: there is no
-/// join step. `nzbkit::zip::Archive` reads a multi-part set through one
-/// logical byte-space, so a split zip never needs a second copy on disk -
-/// which also means no scratch container can collide with a member of the
-/// archive it came from.
+/// Mirrors [`extract_sevenz`]: `nzbkit::zip::Archive` reads a multi-part
+/// set through one logical byte-space, so a split zip never needs a
+/// second copy on disk - which also means no scratch container can
+/// collide with a member of the archive it came from. The 7z arm joined
+/// its parts into a scratch copy until TODO 212 (22 Aug 2026) gave it the
+/// same shape.
 pub(crate) fn extract_zip(
     dir: &std::path::Path,
     jobs: &[nzbkit::zip::Finding],
@@ -1629,7 +1402,12 @@ pub(crate) fn extract_zip(
         // check byte accepts a wrong value once in 256 tries, so the
         // extraction below is what settles it (sweep F).
         let cands = crate::unpack::zip_password_candidates(dir, &job.parts, password);
-        println!("unpacking {} natively…", job.shape.label());
+        info!(target: "extract", "unpacking {} natively…", job.shape.label());
+        // TODO 205: one SET on the queue row's unpack lane, however many
+        // candidates this container takes - `extract_one_zip` reports
+        // each ATTEMPT, and only this call banks what the last one
+        // produced. Three tries at one zip must publish one total.
+        crate::unpackprog::begin_set();
         let mut last: Option<String> = None;
         let mut done = false;
         for (pw, source) in &cands {
@@ -1640,9 +1418,13 @@ pub(crate) fn extract_zip(
                     break;
                 }
             };
-            match extract_one_zip(out.path(), &job.parts, pw.as_deref())
-                .and_then(|()| {
-                    if out.produced_anything() {
+            match extract_one_zip(out.path(), dir, &job.parts, pw.as_deref())
+                .and_then(|resumed| {
+                    // Resumed members count as produced: their bytes are
+                    // in the output directory rather than in staging, so
+                    // an archive whose every entry resumed leaves this
+                    // dir empty having delivered the whole payload.
+                    if out.produced_anything() || resumed > 0 {
                         Ok(())
                     } else {
                         // "Succeeded" having written nothing is the silent
@@ -1654,10 +1436,13 @@ pub(crate) fn extract_zip(
                 .and_then(|()| out.publish_into(dir))
             {
                 Ok(()) => {
-                    if pw.is_some() && source != "job password" {
-                        println!("🔑 auto-unlocked with password from {source}");
+                    if pw.is_some()
+                        && source != "job password"
+                        && let Some(first) = job.parts.first()
+                    {
+                        crate::unpack::log_auto_unlocked(first, source);
                     }
-                    println!("zip unpack complete ✔");
+                    info!(target: "extract", "zip unpack complete ✔");
                     done = true;
                     break;
                 }
@@ -1665,8 +1450,9 @@ pub(crate) fn extract_zip(
             }
         }
         if !done {
-            println!(
-                "⚠ zip unpack failed ({})",
+            warn!(
+                target: "extract",
+                "zip unpack failed ({})",
                 last.unwrap_or_else(|| "no candidate password opened it".into())
             );
             all_ok = false;
@@ -1683,11 +1469,34 @@ pub(crate) fn extract_zip(
 /// decompression bomb, with one budget shared across the whole archive.
 /// Symlink entries are refused outright - their payload is a path, and
 /// materializing one plants a link pointing wherever the archive likes.
+///
+/// `publish` and the returned count are the resume ledger, exactly as in
+/// [`sevenz::extract_one_sevenz`]: a member a forfeited chase already
+/// wrote a good prefix of is appended to in place and never staged.
 pub(crate) fn extract_one_zip(
     out: &std::path::Path,
+    publish: &std::path::Path,
     parts: &[PathBuf],
     password: Option<&str>,
-) -> Result<()> {
+) -> Result<usize> {
+    // TODO 217's rewind, same shape as the RAR arm's: a resumed prefix
+    // that fails its verification aborts the pass from inside the entry
+    // writer; the ledger is then cleared and the pass runs once more
+    // from byte zero. This arm never eats its sources.
+    crate::resumeout::with_mismatch_retry(
+        || true,
+        |mismatch| zip_pass(out, publish, parts, password, mismatch),
+    )
+}
+
+/// One attempt of [`extract_one_zip`], split out for the rewind.
+fn zip_pass(
+    out: &std::path::Path,
+    publish: &std::path::Path,
+    parts: &[PathBuf],
+    password: Option<&str>,
+    mismatch: &crate::resumeout::MismatchFlag,
+) -> Result<usize> {
     let archive =
         nzbkit::zip::Archive::open(parts).map_err(|e| anyhow::anyhow!("opening zip: {e}"))?;
     let budget = BombBudget::fixed(
@@ -1755,8 +1564,9 @@ pub(crate) fn extract_one_zip(
     }
     if seen.len() != files.len() {
         let dropped = files.len() - seen.len();
-        println!(
-            "⚠ {dropped} zip entr{} resolve to a path another entry already \
+        warn!(
+            target: "extract",
+            "{dropped} zip entr{} resolve to a path another entry already \
              claims - extracting the last of each, as a one-at-a-time unpack would",
             if dropped == 1 { "y" } else { "ies" }
         );
@@ -1773,17 +1583,56 @@ pub(crate) fn extract_one_zip(
             hit
         });
     }
+    // The resume ledger, read on THIS thread - the pool below opens its
+    // entry writers on others, and the ledger is a thread-local. Taken
+    // after the duplicate-path fold above, so the member list is the set
+    // of entries that will actually be written and not the set the
+    // central directory declared.
+    let members: Vec<String> = files.iter().map(|(e, _)| e.name.clone()).collect();
+    let resume = crate::resumeout::plan_pass(publish, &members);
+    // TODO 205: the queue row's unpack lane over the nested pass, from
+    // the same counter the bomb guard already keeps. The total is taken
+    // from `files` rather than from the central directory, so it is the
+    // set of entries that will actually be written - the duplicate-path
+    // fold above has already run - and a resumed member's prefix is
+    // credited up front because this pass will not rewrite it.
+    crate::unpackprog::attempt(
+        &written,
+        files
+            .iter()
+            .fold(0u64, |acc, (e, _)| acc.saturating_add(e.size())),
+        resume
+            .values()
+            .fold(0u64, |acc, (_, len, _)| acc.saturating_add(*len)),
+    );
+    let resumed: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     // Entries are independent (each its own byte range, own output file,
     // positional reads through shared handles), so a multi-entry archive
     // decodes on a small pool - the same shape and bound as the encrypted
     // finish-decrypt's file fan-out. The bomb budget is shared across the
     // pool through the same atomic it always used.
     let one_entry = |e: &nzbkit::zip::Entry, target: &std::path::Path| -> Result<()> {
-        let mut w = BombGuardWriter {
-            inner: std::io::BufWriter::new(std::fs::File::create(target)?),
-            written: written.clone(),
-            budget: budget.clone(),
+        // Same seam as the 7z arm: a resumed member appends to its
+        // published file at the mark, everything else creates a fresh
+        // file in staging, and the two differ in nothing but the handle.
+        let (file, skip, crc) = match resume.get(e.name.as_str()) {
+            Some((path, len, crc)) => {
+                let f = crate::resumeout::open_at_mark(path, *len)?;
+                resumed.lock_ok().push(path.clone());
+                (f, *len, *crc)
+            }
+            None => (std::fs::File::create(target)?, 0, 0),
         };
+        let mut w = crate::resumeout::ResumeWriter::verified(
+            skip,
+            crc,
+            mismatch.clone(),
+            BombGuardWriter {
+                inner: std::io::BufWriter::new(file),
+                written: written.clone(),
+                budget: budget.clone(),
+            },
+        );
         archive
             .read_entry_to_with(e, &mut w, password)
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -1796,10 +1645,22 @@ pub(crate) fn extract_one_zip(
         .min(std::thread::available_parallelism().map_or(1, |n| n.get() / 2))
         .clamp(1, 4);
     if workers <= 1 {
+        // Not `?` in the loop: the resumed files have to be handed back
+        // to the ledger on the failure path too, and an early return
+        // would leave an appended-to partial armed with a length that no
+        // longer matches its mark - which the arm reads as somebody
+        // else's published payload and leaves on disk.
+        let mut res = Ok(());
         for (e, target) in &files {
-            one_entry(e, target)?;
+            res = one_entry(e, target);
+            if res.is_err() {
+                break;
+            }
         }
-        return Ok(());
+        let resumed = resumed.into_inner().unwrap_or_else(|p| p.into_inner());
+        crate::resumeout::finish(&resumed, res.is_ok());
+        res?;
+        return Ok(resumed.len());
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let first_err: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
@@ -1826,10 +1687,13 @@ pub(crate) fn extract_one_zip(
             });
         }
     });
-    if let Some(e) = first_err.into_inner().unwrap_or_else(|p| p.into_inner()) {
+    let err = first_err.into_inner().unwrap_or_else(|p| p.into_inner());
+    let resumed = resumed.into_inner().unwrap_or_else(|p| p.into_inner());
+    crate::resumeout::finish(&resumed, err.is_none());
+    if let Some(e) = err {
         return Err(e);
     }
-    Ok(())
+    Ok(resumed.len())
 }
 
 /// Headroom the decompression-bomb guard leaves free on the target
@@ -1938,9 +1802,20 @@ impl<W: std::io::Write> std::io::Write for BombGuardWriter<W> {
         let n = self.inner.write(buf)?;
         let total = self.written.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
         if total > self.budget.limit() {
-            return Err(std::io::Error::other(
-                "extraction exceeded available disk space (possible decompression bomb)",
-            ));
+            // Plain `other`, and deliberately NOT the `StorageFull` that
+            // `nzbkit::disk::WriteBudget::charge` raises for the identical
+            // message on the in-stream path. That kind exists purely so
+            // `storage_exhausted` classifies it and the fetch pool halts on
+            // the first trip; this is the disk path, run after the download,
+            // so there is no live fetch to halt. The error propagates
+            // straight up through anyhow and aborts the extraction on its
+            // own. Do not "fix" the two to match.
+            //
+            // The MESSAGE is shared, and deliberately so: the ladder in
+            // `try_unrar_spent` reads it back off the anyhow error to
+            // know that the next rung must not run (see
+            // [`nzbkit::disk::bomb_verdict`]).
+            return Err(std::io::Error::other(nzbkit::disk::BOMB_VERDICT));
         }
         Ok(n)
     }
@@ -2021,968 +1896,9 @@ mod rarfix_rev_recovery_tests;
 mod rarfix_numeric_volume_tests;
 
 #[cfg(test)]
-mod native_unrar_tests {
-    use super::*;
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-native-unrar-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn native_path_extracts_compressed_multivolume_set() {
-        use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
-        let dir = temp_dir("multivol");
-        let payload: Vec<u8> = (0..200_000u32)
-            .flat_map(|i| (i.wrapping_mul(2654435761)).to_le_bytes())
-            .collect();
-        let entries = [CompressedEntry {
-            name: b"inner/data.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0o100644, // Unix host: attributes are the file mode
-            host_os: 1,
-        }];
-        let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .max_payload_per_volume(64 * 1024)
-            .finish()
-            .unwrap();
-        assert!(volumes.len() > 1, "expected a multivolume set");
-        for (index, bytes) in volumes.iter().enumerate() {
-            std::fs::write(dir.join(format!("set.part{:02}.rar", index + 1)), bytes).unwrap();
-        }
-
-        assert!(try_unrar(&dir, None));
-        let extracted = std::fs::read(dir.join("inner").join("data.bin")).unwrap();
-        assert_eq!(extracted, payload);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A compressed, split, multivolume RAR5 set on disk - the shape
-    /// TODO 101 exists for. Returns the volume paths in set order.
-    fn write_multivolume_set(dir: &std::path::Path, payload: &[u8]) -> Vec<PathBuf> {
-        use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
-        let entries = [CompressedEntry {
-            name: b"inner/data.bin",
-            data: payload,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let volumes = Rar50VolumeWriter::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .max_payload_per_volume(64 * 1024)
-            .finish()
-            .unwrap();
-        assert!(volumes.len() > 1, "expected a multivolume set");
-        volumes
-            .iter()
-            .enumerate()
-            .map(|(index, bytes)| {
-                let p = dir.join(format!("set.part{:02}.rar", index + 1));
-                std::fs::write(&p, bytes).unwrap();
-                p
-            })
-            .collect()
-    }
-
-    /// TODO 101: with eating armed, a verified set extracts correctly AND
-    /// leaves no volume behind - the deletions happen DURING extraction,
-    /// which is what makes the peak one volume rather than two whole
-    /// copies. The payload check is the half that matters: a mode that
-    /// frees space by breaking the extraction would pass a "the volumes
-    /// are gone" assertion on its own.
-    #[test]
-    fn eating_extracts_the_payload_and_leaves_no_volume_behind() {
-        let dir = temp_dir("eat-volumes");
-        let payload: Vec<u8> = (0..200_000u32)
-            .flat_map(|i| (i.wrapping_mul(2654435761)).to_le_bytes())
-            .collect();
-        let volumes = write_multivolume_set(&dir, &payload);
-
-        let _arm = crate::eatvol::EatArm::new(
-            crate::eatvol::decide(
-                crate::eatvol::EatMode::Always,
-                true,
-                false,
-                crate::eatvol::forecast(&dir, crate::eatvol::volume_bytes(&volumes), false),
-            )
-            .eats(),
-        );
-        assert!(try_unrar(&dir, None));
-
-        let extracted = std::fs::read(dir.join("inner").join("data.bin")).unwrap();
-        assert_eq!(extracted, payload, "the payload must survive the eating");
-        for v in &volumes {
-            assert!(!v.exists(), "{} outlived the extraction", v.display());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Bug sweep 2026-08-06 (H1): the vendored extractor decides
-    /// success on the DECODED bytes and drops the entry writer
-    /// afterwards, and BufWriter's Drop swallows its flush error - so
-    /// an ENOSPC/EIO on the final buffered tail used to publish a
-    /// short file as a verified extraction. The deferred-flush wrapper
-    /// must catch what Drop would have swallowed.
-    #[test]
-    fn a_swallowed_flush_failure_is_recorded_not_lost() {
-        use std::io::Write as _;
-        struct FailingFlush;
-        impl std::io::Write for FailingFlush {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::other("no space left on device"))
-            }
-        }
-        let failed: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        {
-            let mut w = DeferredFlushWriter {
-                inner: std::io::BufWriter::new(FailingFlush),
-                failed: failed.clone(),
-            };
-            assert!(w.write_all(b"the final sub-8k tail").is_ok());
-            // Dropped without an explicit flush - exactly what the
-            // extractor does once the member's checksum has verified.
-        }
-        assert!(
-            failed.lock().unwrap().is_some(),
-            "the flush error vanished in Drop"
-        );
-    }
-
-    /// The bomb guard may only spend space that has actually come back.
-    ///
-    /// The eating path used to add the WHOLE volume set to the budget
-    /// before a byte was written, on the reasoning that the volumes were
-    /// about to be handed back. The engine does hand them back - but for
-    /// the commonest set of all (one member split across every volume)
-    /// it hands back NOTHING until the whole payload is written, because
-    /// a pending split holds every consumption callback. So the guard
-    /// waved through an extraction that could not fit and the real
-    /// filesystem stopped it instead: ENOSPC on a disk with nothing left.
-    ///
-    /// This is the accounting rule underneath that, tested directly -
-    /// a free-space seam is not reachable from a unit test, but the
-    /// arithmetic that made the seam wrong is.
-    #[test]
-    fn the_bomb_guard_credits_only_space_that_came_back() {
-        use std::io::Write as _;
-        let budget = BombBudget::fixed(1_000);
-        let credit = budget.credit_handle();
-        assert_eq!(budget.limit(), 1_000, "a promise is not space");
-
-        let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mut w = BombGuardWriter {
-            inner: Vec::new(),
-            written: written.clone(),
-            budget: budget.clone(),
-        };
-        assert!(w.write_all(&[0u8; 900]).is_ok());
-        // Still over the line, because nothing has been freed yet: this
-        // is exactly the write that used to be allowed on the strength
-        // of volumes that were still sitting on the disk.
-        assert!(
-            w.write_all(&[0u8; 200]).is_err(),
-            "the guard spent space the disk did not have"
-        );
-
-        // A volume actually removed credits its bytes, and only then.
-        credit.fetch_add(500, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(budget.limit(), 1_500);
-        let mut w2 = BombGuardWriter {
-            inner: Vec::new(),
-            written,
-            budget,
-        };
-        assert!(
-            w2.write_all(&[0u8; 300]).is_ok(),
-            "space that came back must be spendable"
-        );
-    }
-
-    /// The gate that matters most: an UNVERIFIED set is never eaten,
-    /// whatever the mode says - so a retry still has the volumes and
-    /// re-downloads nothing. Driven through `decide` rather than by
-    /// hand-setting the arm, because the composition of the two is the
-    /// thing that could regress.
-    #[test]
-    fn an_unverified_set_keeps_every_volume() {
-        let dir = temp_dir("eat-unverified");
-        let payload: Vec<u8> = (0..120_000u32)
-            .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
-            .collect();
-        let volumes = write_multivolume_set(&dir, &payload);
-
-        let _arm = crate::eatvol::EatArm::new(
-            crate::eatvol::decide(
-                // `always` plus a disk with nothing on it - every reason
-                // to eat except the one that counts.
-                crate::eatvol::EatMode::Always,
-                false,
-                true,
-                crate::eatvol::Forecast {
-                    free: 0,
-                    volumes: crate::eatvol::volume_bytes(&volumes),
-                    encrypted: true,
-                },
-            )
-            .eats(),
-        );
-        assert!(try_unrar(&dir, None));
-
-        assert_eq!(
-            std::fs::read(dir.join("inner").join("data.bin")).unwrap(),
-            payload
-        );
-        for v in &volumes {
-            assert!(v.exists(), "{} was eaten unverified", v.display());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Off is off. The same set, the same tight disk, consent given -
-    /// and nothing is touched during extraction, because the mode was
-    /// never turned on.
-    #[test]
-    fn the_off_mode_never_eats_however_tight_the_disk() {
-        let dir = temp_dir("eat-off");
-        let payload: Vec<u8> = (0..120_000u32)
-            .flat_map(|i| (i.wrapping_mul(2654435761)).to_le_bytes())
-            .collect();
-        let volumes = write_multivolume_set(&dir, &payload);
-
-        let _arm = crate::eatvol::EatArm::new(
-            crate::eatvol::decide(
-                crate::eatvol::EatMode::Off,
-                true,
-                true,
-                crate::eatvol::Forecast {
-                    free: 0,
-                    volumes: crate::eatvol::volume_bytes(&volumes),
-                    encrypted: true,
-                },
-            )
-            .eats(),
-        );
-        assert!(try_unrar(&dir, None));
-        for v in &volumes {
-            assert!(v.exists(), "{} was eaten with the mode off", v.display());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rr_repair_rescues_corrupted_volume_and_extracts() {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        let dir = temp_dir("rr-repair");
-        let payload: Vec<u8> = (0..150_000u32)
-            .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
-            .collect();
-        let entries = [CompressedEntry {
-            name: b"video.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let mut archive = Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .recovery_percent(Some(20))
-            .finish()
-            .unwrap();
-        // Corrupt a run of payload bytes well inside the archive.
-        let start = archive.len() / 3;
-        for byte in &mut archive[start..start + 2048] {
-            *byte ^= 0x5a;
-        }
-        let path = dir.join("set.rar");
-        std::fs::write(&path, &archive).unwrap();
-
-        assert!(try_rar_rr_repair(&dir, None));
-        let extracted = std::fs::read(dir.join("video.bin")).unwrap();
-        assert_eq!(extracted, payload);
-        assert!(!dir.join("set.rrtmp").exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rr_repair_raw_scan_rescues_a_volume_whose_headers_are_destroyed() {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        let dir = temp_dir("rr-raw-scan");
-        let payload: Vec<u8> = (0..80_000u32)
-            .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
-            .collect();
-        let entries = [CompressedEntry {
-            name: b"video.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let archive = Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .recovery_percent(Some(20))
-            .finish()
-            .unwrap();
-
-        // Wreck the headers so the archive cannot be parsed at all: this is
-        // the last-chance path that used to read the whole volume, clone it,
-        // and hand back a third copy.
-        let mut damaged = archive.clone();
-        for byte in &mut damaged[8..400] {
-            *byte ^= 0xa5;
-        }
-        let path = dir.join("set.rar");
-        std::fs::write(&path, &damaged).unwrap();
-        assert!(
-            rars::ArchiveReader::read_path_with_options(&path, rars::ArchiveReadOptions::default())
-                .is_err(),
-            "the test must actually exercise the raw-scan fallback"
-        );
-
-        assert!(try_rar_rr_repair(&dir, None));
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            archive,
-            "the raw scan must restore the volume byte for byte"
-        );
-        assert!(
-            !std::fs::read_dir(&dir)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().contains("rrtmp")),
-            "no repair temp may survive"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rr_repair_raw_scan_leaves_the_original_alone_when_it_cannot_repair() {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        let dir = temp_dir("rr-raw-fail");
-        let payload: Vec<u8> = (0..80_000u32)
-            .flat_map(|i| (i.wrapping_mul(2246822519)).to_le_bytes())
-            .collect();
-        let entries = [CompressedEntry {
-            name: b"video.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let archive = Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .recovery_percent(Some(1))
-            .finish()
-            .unwrap();
-
-        // Headers destroyed AND far more damage than 1% can cover.
-        let mut damaged = archive.clone();
-        let end = damaged.len() * 3 / 4;
-        for byte in &mut damaged[8..end] {
-            *byte ^= 0xa5;
-        }
-        let path = dir.join("set.rar");
-        std::fs::write(&path, &damaged).unwrap();
-
-        assert!(!try_rar_rr_repair(&dir, None));
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            damaged,
-            "a failed repair must leave the volume exactly as it found it"
-        );
-        assert!(
-            !std::fs::read_dir(&dir)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().contains("rrtmp")),
-            "no repair temp may survive a failure"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rr_repair_leaves_unrepairable_volume_untouched() {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        let dir = temp_dir("rr-unrepairable");
-        let payload: Vec<u8> = (0..100_000u32)
-            .flat_map(|i| (i.wrapping_mul(374761393)).to_le_bytes())
-            .collect();
-        let entries = [CompressedEntry {
-            name: b"video.bin",
-            data: &payload,
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let mut archive = Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .recovery_percent(Some(1))
-            .finish()
-            .unwrap();
-        // Corrupt far more than 1% RR can cover.
-        let end = archive.len() * 3 / 4;
-        for byte in &mut archive[64..end] {
-            *byte ^= 0xa5;
-        }
-        let corrupted = archive.clone();
-        let path = dir.join("set.rar");
-        std::fs::write(&path, &archive).unwrap();
-
-        assert!(!try_rar_rr_repair(&dir, None));
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            corrupted,
-            "original untouched"
-        );
-        assert!(!dir.join("set.rrtmp").exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rr_repair_skips_volumes_without_recovery_records() {
-        use rars::rar50::{CompressedEntry, Rar50Writer, WriterOptions};
-        let dir = temp_dir("rr-none");
-        let entries = [CompressedEntry {
-            name: b"data.bin",
-            data: b"hello recovery-less world",
-            mtime: None,
-            attributes: 0o100644,
-            host_os: 1,
-        }];
-        let archive = Rar50Writer::new(WriterOptions::default())
-            .compressed_entries(&entries)
-            .finish()
-            .unwrap();
-        std::fs::write(dir.join("set.rar"), &archive).unwrap();
-
-        assert!(!try_rar_rr_repair(&dir, None));
-        assert!(!dir.join("set.rrtmp").exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn entry_paths_cannot_escape_output_dir() {
-        let dir = std::path::Path::new("/tmp/out");
-        assert!(sanitized_entry_path(dir, "../evil").is_none());
-        assert!(sanitized_entry_path(dir, "a/../../evil").is_none());
-        assert!(sanitized_entry_path(dir, "/abs/path").map(|p| p.starts_with(dir)) == Some(true));
-        // Windows rejects the drive prefix outright; Unix keeps it as a
-        // benign "C:" subdirectory. Either way it must stay under dir.
-        let drive = sanitized_entry_path(dir, "C:\\evil");
-        assert!(drive.is_none() || drive.is_some_and(|p| p.starts_with(dir)));
-        assert_eq!(
-            sanitized_entry_path(dir, "sub\\file.bin"),
-            Some(dir.join("sub").join("file.bin"))
-        );
-        assert!(sanitized_entry_path(dir, "").is_none());
-    }
-
-    #[test]
-    fn drive_relative_component_cannot_escape_on_windows() {
-        let dir = std::path::Path::new("/tmp/out");
-        // A drive prefix only parses at byte 0, so these forms reach `push`
-        // as ordinary components and used to wipe the staging dir.
-        for name in ["sub/C:evil.dll", "x/D:payload.exe", "a\\b\\C:evil.dll"] {
-            let p = sanitized_entry_path_for(dir, name, true).expect("kept, not escaped");
-            assert!(p.starts_with(dir), "{name} escaped to {p:?}");
-            assert!(
-                !p.to_string_lossy().contains(':'),
-                "{name} kept a drive-relative colon"
-            );
-        }
-        // Unix keeps ':' (legal and common in release names) but still may
-        // not escape, and the ordinary success path is untouched.
-        let p = sanitized_entry_path_for(dir, "Movie: The Sequel/a.mkv", false).unwrap();
-        assert_eq!(p, dir.join("Movie: The Sequel").join("a.mkv"));
-    }
-}
-
-/// Zip disk extraction (the 7z path's twin). The reader itself is tested
-/// in `nzbkit::zip`; these cover the WIRING - what lands in the output
-/// directory, and the refusals that keep a hostile archive out of it.
+mod native_unrar_tests;
 #[cfg(test)]
-mod sevenz_extract_tests {
-    use std::path::PathBuf;
-
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nzbfast-7zx-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    /// The disk half of TODO 156 item 5's extract gate: a container
-    /// whose packed end header declares 512 MiB of decoded header (the
-    /// checked-in nzbkit bomb seed) is refused by name BEFORE
-    /// ArchiveReader::open decodes on the declaration's say-so. The
-    /// message assertion is what discriminates: with the gate neutered
-    /// the library errors on the garbage pack bytes as "opening 7z: …"
-    /// instead - after requesting the allocations the gate exists to
-    /// prevent. It matters here because a chased container that refused
-    /// at the in-stream gate demotes to exactly this path.
-    #[test]
-    fn a_bomb_declaring_sevenz_is_refused_by_name() {
-        let dir = tmp("bomb");
-        let container = dir.join("bomb.7z");
-        std::fs::copy(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../nzbkit/tests/fixtures/sevenz/bomb-container.7z"
-            ),
-            &container,
-        )
-        .unwrap();
-        let out = dir.join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        let err = super::extract_one_sevenz(&out, &container, None).unwrap_err();
-        assert!(
-            err.to_string().contains("oversized decode"),
-            "must die at the gate, not in the decoder: {err}"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The content half of the same gate (bug-sweep H1, 14 Aug): a
-    /// container whose CONTENT block declares a 384 MiB LZMA2
-    /// dictionary out of 16 packed bytes is refused by name before the
-    /// entry decode allocates it, and the zeroed-start shape (H2) is
-    /// refused before the library's end-header recovery scan can
-    /// decode an unverified packed header with no limit. Both messages
-    /// land verbatim in the job's failure detail.
-    #[test]
-    fn content_and_recovery_bombs_are_refused_by_name() {
-        let fixtures = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../nzbkit/tests/fixtures/sevenz"
-        );
-        let dir = tmp("content-bomb");
-        let out = dir.join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        let container = dir.join("content.7z");
-        std::fs::copy(format!("{fixtures}/bomb-content-dict.7z"), &container).unwrap();
-        let err = super::extract_one_sevenz(&out, &container, None).unwrap_err();
-        assert!(
-            err.to_string().contains("content declares decoder memory"),
-            "content bomb must die at the gate, not in the decoder: {err}"
-        );
-        let container = dir.join("zeroed.7z");
-        std::fs::copy(format!("{fixtures}/recovered-zero-start.bin"), &container).unwrap();
-        let err = super::extract_one_sevenz(&out, &container, None).unwrap_err();
-        assert!(
-            err.to_string().contains("start header geometry is zeroed"),
-            "zeroed start must refuse before the recovery scan: {err}"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod rrhint_tests;
 
 #[cfg(test)]
-mod zip_extract_tests {
-    use nzbkit::zip::fixtures::Spec;
-    use std::path::PathBuf;
-
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nzbfast-zipx-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn payload(n: usize, seed: u8) -> Vec<u8> {
-        (0..n)
-            .map(|i| (i as u8).wrapping_mul(23).wrapping_add(seed))
-            .collect()
-    }
-
-    /// The headline change: a zip payload used to FAIL the job with
-    /// "zip extraction is not built in". It now unpacks, and the
-    /// container is gone from the output because its payload replaced it.
-    #[test]
-    fn a_zip_payload_unpacks_into_the_output_directory() {
-        let dir = tmp("payload");
-        let movie = payload(120_000, 3);
-        let nfo = b"release info".to_vec();
-        let z = nzbkit::zip::fixtures::zip_of(&[
-            Spec::deflated("Some.Movie/movie.mkv", &movie),
-            Spec::stored("Some.Movie/info.nfo", &nfo),
-        ]);
-        std::fs::write(dir.join("payload.zip"), &z).unwrap();
-
-        let found = nzbkit::zip::scan(&dir);
-        assert_eq!(found.len(), 1);
-        assert!(super::extract_zip(&dir, &found, None), "zip should unpack");
-        assert_eq!(
-            std::fs::read(dir.join("Some.Movie/movie.mkv")).unwrap(),
-            movie
-        );
-        assert_eq!(std::fs::read(dir.join("Some.Movie/info.nfo")).unwrap(), nfo);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A self-extracting zip - a stub concatenated in front of a
-    /// container - reaches the disk pass by NAME (`zip::scan` never
-    /// magic-sniffs a named file), and the reader now follows the
-    /// archive's own offsets from where the archive actually starts.
-    /// The whole path has to hold, not just the parser: this is the
-    /// shape `unzip` reports as "extra bytes at beginning" and 7-Zip as
-    /// "the archive is open with offset". TODO 159 item 2.
-    #[test]
-    fn a_zip_behind_a_prepended_stub_unpacks_from_disk() {
-        let dir = tmp("stubzip");
-        let data = payload(80_000, 17);
-        let mut z = b"MZ stub bytes, not a zip".to_vec();
-        z.resize(511, 0);
-        z.extend_from_slice(&nzbkit::zip::fixtures::zip_of(&[Spec::deflated(
-            "Some.Movie/movie.mkv",
-            &data,
-        )]));
-        std::fs::write(dir.join("selfextract.zip"), &z).unwrap();
-
-        let found = nzbkit::zip::scan(&dir);
-        assert_eq!(found.len(), 1, "a named .zip is found whatever its head");
-        assert!(super::extract_zip(&dir, &found, None), "zip should unpack");
-        assert_eq!(
-            std::fs::read(dir.join("Some.Movie/movie.mkv")).unwrap(),
-            data
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Two entries that resolve to ONE output path must not be handed to
-    /// two workers at once.
-    ///
-    /// `a\b.bin` and `a/b.bin` are different names in the archive and the
-    /// same path here, because backslashes normalize to '/'. While
-    /// entries extracted one at a time the last writer simply won; on the
-    /// pool both called `File::create` on the same inode and wrote
-    /// concurrently, each checking only its own CRC and length, so both
-    /// reported success over a file holding a mixture of the two. The
-    /// surviving bytes must be exactly one entry's - the last, matching
-    /// the serial outcome - and never a blend.
-    #[test]
-    fn colliding_zip_entry_paths_do_not_race_one_output_file() {
-        let dir = tmp("collide");
-        // Big enough that a genuine race would interleave visibly rather
-        // than finishing inside one buffered write.
-        let first = payload(400_000, 1);
-        let last = payload(400_000, 200);
-        let z = nzbkit::zip::fixtures::zip_of(&[
-            Spec::stored("dup/a\\b.bin", &first),
-            Spec::stored("dup/a/b.bin", &last),
-        ]);
-        std::fs::write(dir.join("collide.zip"), &z).unwrap();
-
-        let found = nzbkit::zip::scan(&dir);
-        assert_eq!(found.len(), 1);
-        assert!(super::extract_zip(&dir, &found, None), "zip should unpack");
-        let got = std::fs::read(dir.join("dup/a/b.bin")).unwrap();
-        assert_eq!(
-            got.len(),
-            last.len(),
-            "the output is not one whole entry - two writers truncated each other"
-        );
-        assert_eq!(
-            got, last,
-            "expected the LAST entry, as a serial unpack gives"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Phase 3: an encrypted zip unpacks when the job carries the
-    /// password, in both schemes; without it (or with the wrong one)
-    /// the unpack fails and the container stays put for the user.
-    #[test]
-    fn an_encrypted_zip_unpacks_with_the_job_password() {
-        use nzbkit::zip::fixtures::Encrypt;
-        let movie = payload(80_000, 9);
-        for (tag, enc) in [
-            ("zc", Encrypt::ZipCrypto { password: "pw123" }),
-            (
-                "ae",
-                Encrypt::Ae {
-                    password: "pw123",
-                    strength: 3,
-                    vendor_version: 2,
-                },
-            ),
-        ] {
-            let dir = tmp(&format!("enc-{tag}"));
-            let z = nzbkit::zip::fixtures::zip_of(&[Spec {
-                encrypt: Some(enc),
-                ..Spec::deflated("movie.mkv", &movie)
-            }]);
-            std::fs::write(dir.join("payload.zip"), &z).unwrap();
-            let found = nzbkit::zip::scan(&dir);
-            assert!(
-                !super::extract_zip(&dir, &found, None),
-                "{tag}: no password must not unpack"
-            );
-            assert!(
-                !super::extract_zip(&dir, &found, Some("wrong")),
-                "{tag}: a wrong password must not unpack"
-            );
-            assert!(
-                !dir.join("movie.mkv").exists(),
-                "{tag}: nothing published on failure"
-            );
-            assert!(
-                super::extract_zip(&dir, &found, Some("pw123")),
-                "{tag}: the right password must unpack"
-            );
-            assert_eq!(
-                std::fs::read(dir.join("movie.mkv")).unwrap(),
-                movie,
-                "{tag}"
-            );
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    /// Zip-slip: an entry naming its way out of the output directory must
-    /// be refused, and nothing may be written outside it.
-    #[test]
-    fn an_entry_escaping_the_output_directory_is_refused() {
-        let dir = tmp("slip");
-        let inner = dir.join("inner");
-        std::fs::create_dir_all(&inner).unwrap();
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec::stored(
-            "../../escaped.txt",
-            b"should never land",
-        )]);
-        std::fs::write(inner.join("evil.zip"), &z).unwrap();
-
-        let found = nzbkit::zip::scan(&inner);
-        assert!(
-            !super::extract_zip(&inner, &found, None),
-            "zip-slip must not succeed"
-        );
-        assert!(
-            !dir.join("escaped.txt").exists(),
-            "wrote outside the output dir"
-        );
-        assert!(!inner.join("escaped.txt").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A symlink entry's payload is a PATH. Materializing one plants a
-    /// link pointing wherever the archive likes, so it is refused.
-    #[test]
-    fn a_symlink_entry_is_refused() {
-        let dir = tmp("link");
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec {
-            external: 0xA1FF_0000,
-            ..Spec::stored("link", b"/etc/passwd")
-        }]);
-        std::fs::write(dir.join("l.zip"), &z).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert!(
-            !super::extract_zip(&dir, &found, None),
-            "symlink entry must not extract"
-        );
-        assert!(!dir.join("link").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Damaged bytes must not be published: a wrong CRC fails the job
-    /// rather than landing a corrupt file that looks like success.
-    #[test]
-    fn a_damaged_entry_fails_instead_of_publishing() {
-        let dir = tmp("crc");
-        let data = payload(40_000, 7);
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec {
-            crc_override: Some(0x1234_5678),
-            ..Spec::stored("movie.mkv", &data)
-        }]);
-        std::fs::write(dir.join("d.zip"), &z).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert!(
-            !super::extract_zip(&dir, &found, None),
-            "a bad CRC must fail the unpack"
-        );
-        assert!(
-            !dir.join("movie.mkv").exists(),
-            "corrupt output was published"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A method we decline still reports honestly rather than opening
-    /// and producing nothing - and it names the codec.
-    #[test]
-    fn a_declined_method_fails_with_the_codec_named() {
-        let dir = tmp("zstd");
-        // zstd (93): bzip2 and then lzma stood here and are now decoded.
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec {
-            method: 93,
-            ..Spec::stored("movie.mkv", &payload(2_000, 9))
-        }]);
-        std::fs::write(dir.join("b.zip"), &z).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert!(!super::extract_zip(&dir, &found, None));
-        // The container survives for the user to unpack by hand.
-        assert!(dir.join("b.zip").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// `.cbz` and friends ARE zip containers but are the deliverable.
-    /// The collector must never hand one to the extractor.
-    #[test]
-    fn a_cbz_payload_is_never_unpacked() {
-        let dir = tmp("cbz");
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec::stored("page01.jpg", b"jpegbytes")]);
-        std::fs::write(dir.join("comic.cbz"), &z).unwrap();
-        assert!(
-            nzbkit::zip::scan(&dir).is_empty(),
-            "a .cbz must not be collected"
-        );
-        assert!(dir.join("comic.cbz").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The entry pass fans out on a small pool, so a many-entry archive
-    /// must land every payload byte-exact under its own name - distinct
-    /// content and sizes per entry so any cross-wiring of readers,
-    /// writers or CRCs fails loudly. Mixed store and deflate on purpose:
-    /// both methods ride the same pool.
-    #[test]
-    fn a_many_entry_zip_lands_every_payload_byte_exact() {
-        let dir = tmp("many");
-        let payloads: Vec<(String, Vec<u8>)> = (0..12u8)
-            .map(|i| {
-                (
-                    format!("d{}/file{i:02}.bin", i % 3),
-                    payload(
-                        30_000 + 1_733 * i as usize,
-                        i.wrapping_mul(37).wrapping_add(11),
-                    ),
-                )
-            })
-            .collect();
-        let specs: Vec<Spec> = payloads
-            .iter()
-            .enumerate()
-            .map(|(i, (n, p))| {
-                if i % 2 == 0 {
-                    Spec::stored(n, p)
-                } else {
-                    Spec::deflated(n, p)
-                }
-            })
-            .collect();
-        let z = nzbkit::zip::fixtures::zip_of(&specs);
-        std::fs::write(dir.join("payload.zip"), &z).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert_eq!(found.len(), 1);
-        assert!(super::extract_zip(&dir, &found, None), "zip should unpack");
-        for (n, p) in &payloads {
-            assert_eq!(&std::fs::read(dir.join(n)).unwrap(), p, "{n}");
-        }
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// One damaged entry among many condemns the whole archive: nothing
-    /// is published, however many siblings decoded cleanly on the pool.
-    #[test]
-    fn one_damaged_entry_among_many_publishes_nothing() {
-        let dir = tmp("many-crc");
-        let payloads: Vec<(String, Vec<u8>)> = (0..10u8)
-            .map(|i| {
-                (
-                    format!("file{i:02}.bin"),
-                    payload(25_000 + 900 * i as usize, i.wrapping_add(51)),
-                )
-            })
-            .collect();
-        let specs: Vec<Spec> = payloads
-            .iter()
-            .enumerate()
-            .map(|(i, (n, p))| Spec {
-                // Damage one entry in the middle of the set.
-                crc_override: (i == 6).then_some(0xDEAD_BEEF),
-                ..Spec::stored(n, p)
-            })
-            .collect();
-        let z = nzbkit::zip::fixtures::zip_of(&specs);
-        std::fs::write(dir.join("payload.zip"), &z).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert!(
-            !super::extract_zip(&dir, &found, None),
-            "a bad CRC anywhere must fail the unpack"
-        );
-        for (n, _) in &payloads {
-            assert!(!dir.join(n).exists(), "{n} was published from a failed set");
-        }
-        assert!(dir.join("payload.zip").exists(), "container must survive");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Hand-run timing rig for the multi-entry disk extraction, ignored
-    /// in normal runs (it writes gigabytes to the temp volume). Run
-    /// around perf changes with:
-    /// `cargo test -p nzbfast --bin nzbfast zip_multi_entry_bench -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn zip_multi_entry_bench() {
-        for (tag, entries, mib, deflate) in
-            [("store", 8usize, 192usize, false), ("deflate", 8, 64, true)]
-        {
-            let dir = tmp(&format!("bench-{tag}"));
-            let payloads: Vec<Vec<u8>> = (0..entries)
-                .map(|s| payload(mib << 20, (s as u8).wrapping_mul(31).wrapping_add(5)))
-                .collect();
-            let names: Vec<String> = (0..entries).map(|i| format!("part{i:02}.bin")).collect();
-            let specs: Vec<Spec> = payloads
-                .iter()
-                .zip(&names)
-                .map(|(p, n)| {
-                    if deflate {
-                        Spec::deflated(n, p)
-                    } else {
-                        Spec::stored(n, p)
-                    }
-                })
-                .collect();
-            let z = nzbkit::zip::fixtures::zip_of(&specs);
-            std::fs::write(dir.join("payload.zip"), &z).unwrap();
-            drop(z);
-            let found = nzbkit::zip::scan(&dir);
-            let t0 = std::time::Instant::now();
-            assert!(super::extract_zip(&dir, &found, None));
-            let dt = t0.elapsed();
-            println!(
-                "zip bench [{tag}]: {entries} x {mib} MiB unpacked in {:.2}s",
-                dt.as_secs_f64()
-            );
-            for (p, n) in payloads.iter().zip(&names) {
-                assert_eq!(&std::fs::read(dir.join(n)).unwrap(), p, "{n}");
-            }
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    /// A byte-split set extracts without a join step - and without ever
-    /// writing a second copy of the container to disk.
-    #[test]
-    fn a_split_zip_set_unpacks_without_a_scratch_copy() {
-        let dir = tmp("split");
-        let data = payload(90_000, 11);
-        let z = nzbkit::zip::fixtures::zip_of(&[Spec::deflated("movie.mkv", &data)]);
-        let cut = z.len() / 2;
-        std::fs::write(dir.join("m.zip.001"), &z[..cut]).unwrap();
-        std::fs::write(dir.join("m.zip.002"), &z[cut..]).unwrap();
-        let found = nzbkit::zip::scan(&dir);
-        assert_eq!(found.len(), 1);
-        assert!(super::extract_zip(&dir, &found, None));
-        assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod zip_extract_tests;

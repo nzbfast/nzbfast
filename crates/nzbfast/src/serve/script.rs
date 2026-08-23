@@ -328,8 +328,8 @@ fn drain(mut r: impl PipeRead, stop: &AtomicBool, mut sink: impl FnMut(&[u8])) {
 }
 
 /// The pre-§144 drain: ends only when the last writer closes the pipe.
-/// Windows keeps it (see [`run_capped`]), and unix falls back to it if
-/// the descriptor cannot be made non-blocking.
+/// Windows keeps it (see [`run_capped_inner`]), and unix falls back to it
+/// if the descriptor cannot be made non-blocking.
 #[cfg(not(unix))]
 fn drain(r: impl PipeRead, _stop: &AtomicBool, sink: impl FnMut(&[u8])) {
     drain_blocking(r, sink)
@@ -405,6 +405,14 @@ pub(super) struct ScriptFacts {
     nzb_path: PathBuf,
     dupe_key: String,
     pp_params: Vec<(String, String)>,
+    /// TV filing ran, so `out_dir` is the SHARED season folder rather
+    /// than this job's own - see [`Daemon::sab_files`], which is the one
+    /// thing in the SAB contract that has to care.
+    filed: bool,
+    /// The stem and tail filing wrote this release's episode files
+    /// under, for the same reason a filed delete needs them.
+    filed_stem: String,
+    filed_tail: crate::smart::FiledTail,
 }
 
 impl Daemon {
@@ -595,6 +603,55 @@ impl Daemon {
     }
 }
 
+/// How much JSON [`Daemon::sab_files`] will build. Well under the 128
+/// KiB a single environment variable gets on Linux, because the whole
+/// environment shares one `ARG_MAX` with the argv and the other three
+/// dozen variables this call site sets.
+const SAB_FILES_MAX_BYTES: usize = 64 << 10;
+
+/// How deep [`Daemon::sab_files`] descends. Our own extraction cannot
+/// nest at all (`sanitize_filename` maps the separators out of archive
+/// entry names), so this only ever bounds a tree something else built -
+/// and bounds the recursion with it, exactly as `prune_empty_dirs` does.
+const SAB_FILES_MAX_DEPTH: usize = 8;
+
+/// Every real file under `dir`, as a `/`-joined path relative to the
+/// root, handed to `visit(rel, lowercased_name)`. `visit` returns false
+/// to stop the walk.
+///
+/// Symlinks are classified, never followed: `is_real_dir` is the same
+/// guard the cleanup walkers use, and for the same reason - an `extras
+/// -> /media/shared` in a finished job must not put someone else's
+/// library into a variable we hand to a script.
+fn walk_job_files(
+    dir: &std::path::Path,
+    prefix: &str,
+    depth: usize,
+    visit: &mut impl FnMut(&str, &str) -> bool,
+) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let Some(name) = name.filter(|n| !n.starts_with('.')) else {
+            continue;
+        };
+        let rel = format!("{prefix}{name}");
+        if crate::smart::is_real_dir(&path) {
+            if depth + 1 < SAB_FILES_MAX_DEPTH
+                && !walk_job_files(&path, &format!("{rel}/"), depth + 1, visit)
+            {
+                return false;
+            }
+        } else if crate::smart::is_real_file(&path) && !visit(&rel, &name.to_ascii_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 impl Daemon {
     /// The record, read ONCE and fenced under the same hold. `None` is
     /// "this is no longer my job" and the chain does not start.
@@ -634,12 +691,95 @@ impl Daemon {
             nzb_path: j.nzb_path.clone(),
             dupe_key: j.dupe_key.clone().unwrap_or_default(),
             pp_params: j.pp_params.clone(),
+            filed: j.filed,
+            filed_stem: super::job::filed_stem(&j).to_string(),
+            // The legacy fallback a filed delete uses, for a record
+            // written before `filed_suffix` existed.
+            filed_tail: super::job::delete_tail(&j, || self.job_suffix(super::job::filed_stem(&j))),
         })
+    }
+
+    /// SABnzbd 5.1.0's `SAB_FILES`: "File paths created by the job,
+    /// paths are relative to `SAB_COMPLETE_DIR`", as a **JSON encoded
+    /// array** - which is SAB's documented format, and the reason this
+    /// ships a serialiser rather than a separator. A script that reads
+    /// it with `json.loads(os.environ["SAB_FILES"])` is the whole point
+    /// of matching them exactly; a delimiter of our own choosing would
+    /// have been worse than not shipping the variable, because every
+    /// such script would then split a filename containing the delimiter.
+    ///
+    /// `dir` is the CURRENT complete dir, not `facts.out_dir`: a chain
+    /// link ahead of this one can move the job with `[NZB] DIRECTORY=`,
+    /// and the paths have to stay relative to the directory the same
+    /// environment is about to name.
+    ///
+    /// Three narrowings, all of them things SAB does not have to think
+    /// about:
+    /// - A TV-filed job's directory is the SHARED `Show/Season NN`
+    ///   library folder (see [`Job::filed`]), so a plain listing would
+    ///   hand a script every episode of the season as though this job
+    ///   had produced them. Only this release's own files are listed,
+    ///   by the same ownership rule a filed delete uses.
+    /// - Dot-prefixed names are ours, not the job's: `.nzbfast.journal`
+    ///   is the resume record and `.nzbfast-trash` is the cleanup
+    ///   staging area. Same exclusion `diag.rs`'s payload walk makes.
+    /// - The list is CAPPED. A single environment variable has a hard
+    ///   OS limit (128 KiB per entry on Linux), and exceeding it does
+    ///   not truncate anything - it fails the `exec` outright, so a job
+    ///   with tens of thousands of files would stop running its
+    ///   post-processing script at all. Truncation is logged, and the
+    ///   array stays valid JSON either way.
+    fn sab_files(dir: &str, f: &ScriptFacts) -> String {
+        let root = std::path::Path::new(dir);
+        // Only while the directory is still the one filing wrote into:
+        // a script that moved the job somewhere else owns whatever is
+        // there now.
+        let filed = f.filed && root == f.out_dir;
+        // Only parsed when it will be asked: an unfiled job's directory
+        // is its own, so every file in it is the job's by definition.
+        let (bases, tail) = match filed {
+            true => (
+                crate::smart::filed_bases(&f.filed_stem),
+                f.filed_tail.lowered(),
+            ),
+            false => (Vec::new(), crate::smart::FiledTail::default()),
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut bytes = 2usize; // the brackets
+        let mut truncated = false;
+        walk_job_files(root, "", 0, &mut |rel: &str, name: &str| {
+            if filed && !crate::smart::is_filed_episode_file(name, &bases, &tail) {
+                return true;
+            }
+            // Worst case per entry: two quotes, a comma, and every byte
+            // of the path escaped to six. Sized against the escape so a
+            // pathological name cannot walk past the cap.
+            bytes += rel.len() * 6 + 3;
+            if bytes > SAB_FILES_MAX_BYTES {
+                truncated = true;
+                return false;
+            }
+            out.push(rel.to_string());
+            true
+        });
+        if truncated {
+            warn!(
+                target: "script",
+                "{}: SAB_FILES truncated at {} paths - the job produced more \
+                 than one environment variable can carry",
+                f.nzo_id,
+                out.len()
+            );
+        }
+        // Stable order: readdir's is arbitrary, and a script that diffs
+        // two runs of the same job should not see the list reshuffle.
+        out.sort();
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// One chain link's argv and environment: SABnzbd's contract, then
     /// NZBGet's, then the chain state the previous links left behind.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn script_command(
         &self,
         script: &std::path::Path,
@@ -676,6 +816,10 @@ impl Daemon {
             .env("SAB_BYTES", f.bytes.to_string())
             .env("SAB_URL", &f.failure_link)
             .env("SAB_VERSION", SAB_VERSION)
+            // §163 item 3. SAB 5.1.0 added this and third-party scripts
+            // have started reading it; the data was already at this call
+            // site, one readdir away.
+            .env("SAB_FILES", Self::sab_files(directory, f))
             // The NZBGet dialect of the same facts, so a VideoSort-class
             // extension script runs unmodified. PARSTATUS/UNPACKSTATUS
             // describe the one-pass engine in NZBGet's vocabulary:
@@ -750,3 +894,7 @@ fn per_mille(ok: bool, got: u64, total: u64) -> String {
     }
     (got.min(total) * 1000 / total).to_string()
 }
+
+#[cfg(test)]
+#[path = "script_tests.rs"]
+mod script_tests;

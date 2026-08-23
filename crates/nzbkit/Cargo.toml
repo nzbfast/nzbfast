@@ -41,7 +41,7 @@ webpki-roots = "1"
 aws-lc-rs = "1.17"
 rusqlite = { version = "0.40.1", features = ["bundled", "functions"], optional = true }
 rsa = "0.9"
-sha1 = { version = "0.10", features = ["oid"] }
+sha1 = { version = "0.11", features = ["oid"] }
 flate2 = "1"
 # Already in the tree for 7z (sevenz-rust2's bzip2 feature); named
 # directly so the zip reader can use the same decoder. Cargo dedupes,
@@ -52,13 +52,13 @@ bzip2 = "0.6"
 # dependency. `encoder` is for `zip::fixtures` (lib-visible for the
 # fuzz corpus, like bzip2's and flate2's always-present encoder
 # halves); nothing in the shipping call graph reaches it.
-lzma-rust2 = { version = "0.18", default-features = false, features = ["std", "encoder"] }
+lzma-rust2 = { version = "0.19", default-features = false, features = ["std", "encoder"] }
 # RAR5 encrypted store-mode sets: AES-256-CBC + PBKDF2-HMAC-SHA256
 # (RustCrypto - pure Rust, no new C in the tree).
-aes = "0.8"
-cbc = "0.1"
-hmac = "0.12"
-sha2 = "0.10"
+aes = "0.9"
+cbc = "0.2"
+hmac = "0.13"
+sha2 = "0.11"
 # Nested one-pass phase 2: the chasing decompressor drives the vendored
 # RAR engine's streaming reader over still-arriving inner volumes.
 rars = { path = "../../vendor/rars" }
@@ -76,6 +76,27 @@ sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256
 # MSVC and mingw) and md-5 falls back to soft off-x86, hence the gate.
 [target.'cfg(all(target_arch = "x86_64", not(target_os = "windows")))'.dependencies]
 md-5 = { version = "0.10", features = ["asm"] }
+
+# There is deliberately NO matching aarch64 `asm` entry for sha2 beside
+# the md-5 one above, and re-adding one is not possible: sha2 0.11 has
+# no `asm` feature. It was needed on sha2 0.10, which reached the
+# aarch64 SHA-256 extensions ONLY under that feature - gated in its
+# source as `all(feature = "asm", target_arch = "aarch64")` - so every
+# SHA-256 here ran soft on Apple Silicon and on the arm64 image, and a
+# target-gated entry (fe5c0a16b, 21 Aug 2026) bought 456 -> 2411 MiB/s.
+# sha2 0.11 does the same detection in its DEFAULT path instead
+# (`cpufeatures::new!(sha2_hwcap, "sha2")`, falling back to
+# soft::compress), so the wave that landed the same day subsumed that
+# entry and it was removed with it. The C sha2-asm crate, and the
+# Windows `compile_error!` the gate existed to dodge, are out of the
+# graph entirely now.
+#
+# Unchanged by any of it: this is not a throughput win. SHA-256 is not
+# on the per-byte download path (that is yEnc + md5 for PAR2 + crc32) -
+# it is tens of milliseconds off a KDF that runs once per encrypted
+# archive and is memoised in KDF_CACHE after that. And ARM64 Windows
+# still gets soft SHA-256, because cpufeatures answers a flat `false`
+# there whichever sha2 major asks it.
 
 # Kernel TLS (TODO §70), Linux only and off by default. Nothing links it
 # unless the `ktls` feature is built in AND `NZBFAST_KTLS=1` is set at
@@ -97,6 +118,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    # logtee's Windows size cap: GetFileType (is stdout really a file?)
+    # and GetFinalPathNameByHandleW (an APPEND handle cannot truncate
+    # itself, so the cap needs the path to open a second one).
+    "Win32_Storage_FileSystem",
 ] }
 
 [features]
@@ -131,7 +156,6 @@ rusqlite = { version = "0.40.1", features = ["hooks"] }
 # drivers' NZBFAST_REPAIR_TIMING / NZBFAST_FOLD_TRACE output would go
 # nowhere - which is what those drivers exist to print.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt"] }
-rand = "0.8"
 rcgen = { version = "0.14.9", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 # 7z test fixtures are written in-process (the writer needs the encoder
 # half of the crate; release builds keep it off).

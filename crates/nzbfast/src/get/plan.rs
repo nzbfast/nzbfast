@@ -11,6 +11,7 @@ use nzbkit::pool::ArticleReq;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
+use tracing::{info, warn};
 
 /// Everything the rest of the run needs from planning. Field names match
 /// the local bindings the inline code used; the orchestrator
@@ -246,6 +247,7 @@ pub(super) fn build_fetch_plan(
                 // Segment number = expected yEnc part; the CRC-retry
                 // gate uses it to spot a valid-but-wrong body.
                 part: seg.number,
+                file: idx as u32,
             };
             if is_par2_main {
                 par2_ids.push(req);
@@ -258,7 +260,7 @@ pub(super) fn build_fetch_plan(
         slot_arts.push((arts, enc_cum));
     }
     if dup_segments > 0 {
-        println!("  ⚠ NZB repeats {dup_segments} segment id(s) - each article is fetched once");
+        warn!(target: "get", "NZB repeats {dup_segments} segment id(s) - each article is fetched once");
     }
     // Publish the fetch plan before the first article can land. The
     // daemon zeroed both counters at the Downloading transition, and the
@@ -266,13 +268,15 @@ pub(super) fn build_fetch_plan(
     // to the old arithmetic, so the window between the two is covered.
     // `fetch_done` is the local handle either way: a CLI run has no hub
     // and pays one uncontended atomic add per terminal article.
-    let fetch_done = hub
+    let counters = hub.as_ref().map(|h| h.fetch_counters());
+    let fetch_done = counters
         .as_ref()
-        .map(|h| h.fetch_done.clone())
+        .map(|c| c.done.clone())
         .unwrap_or_default();
     if skipped_sample_arts > 0 {
-        println!(
-            "  ▸ skipping {} sample file(s) - {} article(s), {:.1} MB never fetched: {}",
+        info!(
+            target: "get",
+            "skipping {} sample file(s) - {} article(s), {:.1} MB never fetched: {}",
             skipped_sample_names.len(),
             skipped_sample_arts,
             skipped_sample_bytes as f64 / 1e6,
@@ -295,7 +299,9 @@ pub(super) fn build_fetch_plan(
         Ordering::Relaxed,
     );
     if let Some(h) = hub.as_ref() {
-        h.fetch_plan.store(plan_bytes, Ordering::Relaxed);
+        if let Some(c) = &counters {
+            c.plan.store(plan_bytes, Ordering::Relaxed);
+        }
         // §129 4b: the post's own age, for the LIVE verdict. The
         // youngest article is the newest date in the set, and the whole
         // set has to be dated for the answer to mean anything - an NZB
@@ -356,9 +362,25 @@ pub(super) fn build_fetch_plan(
     let mut ids = par2_ids;
     ids.extend(head_ids);
     ids.extend(data_ids);
+    // Memory-floor gauge (instrument-first): the plan's whole-job
+    // per-segment metadata, ESTIMATED from the structures' fixed costs.
+    // Per unique id: the one interned Arc<str> heap allocation (len + a
+    // 16 B Arc header), its id_to_slot entry (~48 B with hashbrown
+    // overhead), the manifest's unbracketed String copy (~len + 24 B),
+    // the seek ladder handle (24 B) and the pool's queued Work (~56 B).
+    // The r9_plan_rss ignored test measured ~9.4 MB per 100k segments
+    // for the plan's three holders; this estimate is the same order and
+    // exists so the summary can NAME the term rather than price it
+    // exactly.
+    {
+        let id_heap: u64 = id_to_slot.keys().map(|k| k.len() as u64 + 16).sum();
+        let per_entry = (id_to_slot.len() as u64) * (48 + 24 + 24 + 56);
+        nzbkit::memgauge::set_at_least(nzbkit::memgauge::Sub::JobMeta, id_heap * 2 + per_entry);
+    }
     if resuming {
-        println!(
-            "resuming: {} article(s) already on disk, {} to fetch",
+        info!(
+            target: "resume",
+            "{} article(s) already on disk, {} to fetch",
             completed.len(),
             ids.len()
         );
@@ -399,6 +421,10 @@ pub(super) struct Intake {
     pub(super) has_main: bool,
     pub(super) bootstrap_vol: Option<usize>,
     pub(super) resume_vols: HashMap<usize, PathBuf>,
+    /// §94 A: does this run replay its restored spans through the
+    /// one-pass path? Decided in `build_intake` because the restore
+    /// itself depends on it - see `resume_map_admitted`.
+    pub(super) resume_map: bool,
 }
 
 /// M29 routing: sink every predicted-gone server to one tier below the
@@ -468,6 +494,7 @@ pub(super) fn build_intake(
     nzb_path: &Path,
     out_dir: &Path,
     password: Option<String>,
+    no_extract: bool,
     hub: &Option<Arc<StreamHub>>,
 ) -> Result<Intake> {
     // This pre-header stretch (config read, NZB read+parse, journal
@@ -622,10 +649,26 @@ pub(super) fn build_intake(
     let (journal, resume_state) =
         crate::persist::blocking_db(|| nzbkit::journal::Journal::open(out_dir, &xml))?;
     let journal = Arc::new(journal);
+    // §94 A: the resume-mapping decision has to be made HERE, before
+    // the restore, not later in build_rig - because what it decides is
+    // whether the restore materialises volume files at all. A run that
+    // is going to replay the placements straight out of the outputs
+    // they already sit in must not have them copied into volumes first;
+    // that copy plus the read-back was a full extra pass over the
+    // resumed fraction.
+    //
+    // The byte count is the journal's own upper bound (every fragment
+    // of every placement record, before any of them are admitted), so
+    // the gate reads pessimistically, which is the right direction: it
+    // decides whether the replay can be held in RAM without breaching
+    // the held-span cap, and a set that cannot afford it takes the
+    // ordinary materialize-and-extract path instead of mapping, filling
+    // the cap and paying for the demote on top.
+    let resume_map = resume_map_admitted(&resume_state, out_dir, no_extract);
     // Plaintext-once (`D`) records re-encrypt through the password; with
     // no password those articles refetch instead - never guessed.
     let mut restored = crate::persist::blocking_db(|| {
-        nzbkit::journal::restore(out_dir, &resume_state, password.as_deref())
+        nzbkit::journal::restore_for(out_dir, &resume_state, password.as_deref(), !resume_map)
     });
     let mut completed = resume_state.completed;
     if !restored.ids.is_empty() {
@@ -634,8 +677,9 @@ pub(super) fn build_intake(
             .iter()
             .flat_map(|s| s.spans.iter().map(|&(_, l)| l))
             .sum();
-        println!(
-            "resume: restored {} article(s) ({:.1} MB) from previous run's output files",
+        info!(
+            target: "resume",
+            "restored {} article(s) ({:.1} MB) from previous run's output files",
             restored.ids.len(),
             moved as f64 / 1e6
         );
@@ -665,7 +709,8 @@ pub(super) fn build_intake(
     // to find the set's block size (nzb.rs).
     let bootstrap_vol: Option<usize> = if has_main { None } else { nzb.par2_seed_file() };
     if let Some(bi) = bootstrap_vol {
-        println!(
+        info!(
+            target: "par2",
             "no main .par2 in NZB - bootstrapping set from smallest volume ({:.1} MB)",
             nzb.files[bi].bytes() as f64 / 1e6
         );
@@ -708,7 +753,54 @@ pub(super) fn build_intake(
         has_main,
         bootstrap_vol,
         resume_vols,
+        resume_map,
     })
+}
+
+/// §94 A's admission gate, and the one place the answer is computed -
+/// `build_intake` needs it before the restore and `build_rig` needs the
+/// same answer afterwards, so it is decided once and carried on
+/// [`Intake`].
+///
+/// Map a resumed job in-stream unless the restored bytes cannot fit the
+/// held-span cap. A resumed run that maps and then breaches that cap
+/// pays for the attempt AND for the demote - it writes the replay into
+/// the output, materializes every volume, and runs the disk unpack on
+/// top, measured at 3.84x payload on a 512 MB budget against 2.59x for
+/// never having mapped at all. Declining up front lands it on exactly
+/// the path it would have taken before §94 A existed.
+///
+/// The estimate is deliberately the pessimistic one: every fragment of
+/// every placement record, before `restore` decides which articles are
+/// actually admissible, and against the whole cap rather than the ~40%
+/// of the replay that is held at the peak in practice.
+fn resume_map_admitted(
+    resume: &nzbkit::journal::ResumeState,
+    out_dir: &Path,
+    no_extract: bool,
+) -> bool {
+    if no_extract || std::env::var("NZBFAST_NO_RESUME_MAP").is_ok_and(|v| v == "1") {
+        return false;
+    }
+    let restored_bytes = resume.placement_bytes();
+    if restored_bytes == 0 {
+        // Nothing to replay: either a fresh run or a v1-form journal
+        // whose articles are all trusted in place. `resume_map` still
+        // says "map this run" - there is simply no replay to do.
+        return true;
+    }
+    let cap = nzbkit::mem::process_budget().holds_cap() as u64;
+    if restored_bytes <= cap {
+        return true;
+    }
+    info!(
+        target: "resume",
+        "{:.1} MB restored is over the {:.1} MB held-span budget - extracting from volumes on disk rather than mapping in-stream",
+        restored_bytes as f64 / 1e6,
+        cap as f64 / 1e6
+    );
+    let _ = out_dir;
+    false
 }
 
 /// The B4 small-RAM concurrency clamp and the rotational-output

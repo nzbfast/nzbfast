@@ -2,7 +2,7 @@
 //! the card SQL fragments, `browse_cards` and the wall tip. Bodies are
 //! verbatim moves from the old index.rs.
 
-use super::query::fts_match;
+use super::query::{fts_match, stem_fold_arm};
 use super::*;
 
 /// Answer to "has anything landed on the wall since I last looked?".
@@ -299,18 +299,16 @@ impl Index {
                 "({{}}id IN (SELECT rowid FROM rel_fts WHERE rel_fts MATCH {p}){leg})"
             ));
         } else if !q.q.trim().is_empty() {
-            const NS: &str = "REPLACE(REPLACE(REPLACE(LOWER({}stem),'.',' '),'_',' '),'-',' ')";
             // Every term must appear in the stem - but a people match
             // satisfies the whole query at once, so it wraps the lot
             // rather than being ANDed in term by term.
+            //
+            // Unicode fold on both sides (index/fold.rs, TODO 5 phase
+            // 2c): `stem_fold_arm`'s second half is spelled in it.
             let mut terms: Vec<String> = Vec::new();
-            for term in
-                q.q.to_ascii_lowercase()
-                    .replace(['.', '_', '-'], " ")
-                    .split_whitespace()
-            {
+            for term in fold::query(&q.q).split(' ').filter(|t| !t.is_empty()) {
                 let p = bind(&mut params, Box::new(term.to_string()));
-                terms.push(format!("{NS} LIKE '%' || {p} || '%'"));
+                terms.push(stem_fold_arm("{}", &p));
             }
             if !terms.is_empty() {
                 let leg = people_leg(&mut params);

@@ -8,7 +8,13 @@
 //! stop accepting output (an exec-orphaned pipe, a launcher that quit
 //! reading), and only the echo may ever block on it - the ring, and
 //! the daemon's own printing, must not. On non-unix the tee is a no-op
-//! and the ring stays empty (the dashboard says so).
+//! and the ring stays empty (the dashboard says so) - but the SIZE CAP
+//! still applies there, from the outside: `wincap` watches the file
+//! stdout is already pointed at instead of interposing on the way past,
+//! which is what keeps the one-stream invariant this whole module rests
+//! on (`nzbfast::logging` writes to stdout precisely so that the
+//! dashboard pane, the terminal and the packaging redirect are all one
+//! copy; a second file opened here would make them three).
 
 use crate::sync::MutexExt;
 use std::collections::VecDeque;
@@ -43,15 +49,44 @@ const DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 /// file past the cap, it is truncated in place with a notice line.
 /// NZBFAST_LOG_CAP_MB overrides (0 = uncapped).
 ///
-/// Read only by the unix reader thread, and unlike [`CAP`] it has no test
-/// of its own, so off unix it is not compiled at all.
-#[cfg(unix)]
+/// Read by the unix echo thread and by the Windows watcher (`wincap`).
+/// It was `#[cfg(unix)]` until 22 Aug 2026, and that is exactly why
+/// Gary's tray install had NO runtime cap at all: 90 MB of daemon.log
+/// in 27 h off a warning storm (TODO 165). The tray rotates the file
+/// only when it SPAWNS the daemon, so a process that stays up through
+/// the storm never reaches that rotation.
+#[cfg(any(unix, windows))]
 fn log_cap_bytes() -> u64 {
-    std::env::var("NZBFAST_LOG_CAP_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+    cap_from(std::env::var("NZBFAST_LOG_CAP_MB").ok().as_deref())
+}
+
+/// The cap in bytes for a raw `NZBFAST_LOG_CAP_MB` value.
+///
+/// Split off the environment read so the parse can be tested without
+/// mutating process env from a parallel suite. The fallback direction
+/// is the point: a value we cannot read falls back to the DEFAULT, not
+/// to uncapped, because the one thing this knob exists to prevent is a
+/// full disk.
+#[cfg(any(unix, windows, test))]
+fn cap_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(50)
         .saturating_mul(1 << 20)
+}
+
+/// The line a truncation leaves behind, so a file that starts in the
+/// middle of a session says why.
+///
+/// Shared by both platforms' truncation paths - the unix echo thread
+/// writes it down the fd it just rewound, the Windows watcher through
+/// the handle it reopened - because it is the string a user pastes into
+/// a bug report, and two spellings of it would be two things to grep.
+#[cfg(any(unix, windows, test))]
+fn cap_notice(cap: u64) -> String {
+    format!(
+        "[log] size cap {} MB reached - file truncated (NZBFAST_LOG_CAP_MB overrides)\n",
+        cap >> 20
+    )
 }
 
 static RING: OnceLock<Arc<Mutex<VecDeque<String>>>> = OnceLock::new();
@@ -84,7 +119,7 @@ enum Echoed {
     // one Mark sender are both unix-only install code, so over there the
     // payload is "read" and Mark is constructed; on windows+test neither
     // happens and the lint is right that nothing looks at them.
-    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
+    #[cfg_attr(all(test, not(unix)), expect(dead_code))]
     Line(Vec<u8>),
     #[cfg(unix)]
     Mark,
@@ -270,6 +305,184 @@ fn trim_newline(buf: &[u8]) -> &[u8] {
     &buf[..end]
 }
 
+/// The Windows half of the size cap.
+///
+/// There is no tee over here: nothing dup2s the process's own stdio onto
+/// a pipe, so no thread reads the log on its way past and the unix cap -
+/// which rides on the echo thread - has nowhere to live. The cap is
+/// applied from the OUTSIDE instead: a watcher checks the size of the
+/// file stdout is already pointed at and truncates it in place. That is
+/// the point rather than a compromise, because interposing here would
+/// mean opening our own copy of the log, and the dashboard pane, the
+/// terminal and the packaging redirect would stop being the same stream.
+///
+/// Truncating from outside is coherent with the tray's writer because
+/// the tray opens daemon.log in APPEND mode (`spawn_daemon` in
+/// crates/nzbtray/src/main.rs), and an append write lands at whatever
+/// the end of the file is at that moment - so it needs no rewind after
+/// the file shrinks under it. A plain `nzbfast serve > out.log` redirect
+/// DOES carry a file position, and that one is rewound directly, exactly
+/// the way the unix echo thread does it.
+#[cfg(windows)]
+mod wincap {
+    use std::fs::File;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::mem::ManuallyDrop;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// How often the watcher looks. A couple of handle queries a tick
+    /// and nothing else, so the poll itself costs nothing; the interval
+    /// only bounds the overshoot, and at the storm rate behind Gary's
+    /// 90 MB in 27 h (~55 KB/min) a tick is worth about 28 KB of slack
+    /// against a 50 MB cap.
+    const INTERVAL: Duration = Duration::from_secs(30);
+
+    /// One watcher per process, like the unix tee's `RING` guard:
+    /// [`super::install`] promises that a second call is a no-op.
+    static STARTED: AtomicBool = AtomicBool::new(false);
+
+    /// Start the watcher, if there is anything for it to watch.
+    ///
+    /// Returns without a thread when the cap is off or stdout and stderr
+    /// are both a console or a pipe - the interactive case, where there
+    /// is no file to grow and no reason to wake up every 30 s.
+    pub(super) fn spawn() {
+        let cap = super::log_cap_bytes();
+        if cap == 0 || STARTED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if !handles().into_iter().any(is_disk_file) {
+            return;
+        }
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(INTERVAL);
+                for h in handles() {
+                    cap_one(h, cap);
+                }
+            }
+        });
+    }
+
+    /// stdout and stderr, in that order.
+    ///
+    /// Resolved on every tick rather than captured once, because a
+    /// `RawHandle` is a raw pointer and would not cross into the thread;
+    /// they are process-global and do not move, so re-reading them is
+    /// free and is the honest thing anyway.
+    ///
+    /// Both are checked. The tray points them at the SAME file (a
+    /// `try_clone`, so one file object), where the second check simply
+    /// sees the length the first one just reset - and a shell that sent
+    /// them to two different files gets both capped.
+    fn handles() -> [RawHandle; 2] {
+        [
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ]
+    }
+
+    /// Borrow a handle as a `File` WITHOUT owning it - dropping the
+    /// `File` would close the process's own stdout.
+    fn borrow(h: RawHandle) -> ManuallyDrop<File> {
+        ManuallyDrop::new(unsafe { File::from_raw_handle(h) })
+    }
+
+    /// True when the handle names an ordinary file on disk.
+    ///
+    /// `GetFileType` and not just `metadata`: a console handle makes
+    /// `GetFileInformationByHandle` fail, but a named pipe can answer it,
+    /// and a pipe that reported a length would have this thread trying to
+    /// truncate the tray's IPC channel.
+    fn is_disk_file(h: RawHandle) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+        let kind = unsafe { GetFileType(h) };
+        kind == FILE_TYPE_DISK && borrow(h).metadata().map(|m| m.is_file()).unwrap_or(false)
+    }
+
+    /// Truncate the file behind `h` if it has passed `cap`, leaving the
+    /// notice line as the new first line. Lives apart from [`spawn`] so
+    /// its two truncation routes can be tested on a scratch file.
+    pub(super) fn cap_one(h: RawHandle, cap: u64) {
+        if cap == 0 || !is_disk_file(h) {
+            return;
+        }
+        let f = borrow(h);
+        let mut w: &File = &f;
+        if w.metadata().map(|m| m.len() <= cap).unwrap_or(true) {
+            return;
+        }
+        // A redirect (`> out.log`) was opened for writing and carries a
+        // file position: truncate through the handle and rewind it, the
+        // unix move. An APPEND handle - what the tray hands us - was
+        // opened WITHOUT `FILE_WRITE_DATA`, so Windows refuses `set_len`
+        // on it and the truncation has to go through a second handle on
+        // the same path. Nothing else is written through that second
+        // handle: the appends that follow find the new end of file on
+        // their own, which is why truncating under an append writer
+        // leaves no hole.
+        if w.set_len(0).is_ok() {
+            let _ = w.seek(SeekFrom::Start(0));
+            let _ = w.write_all(super::cap_notice(cap).as_bytes());
+            return;
+        }
+        let Some(path) = final_path(h) else {
+            return;
+        };
+        // The notice goes down `g` at offset 0, not down the append
+        // handle: an append write would land AFTER whatever the daemon
+        // printed in the microseconds since the truncation, and the
+        // point of the line is to be the first thing in the file. A
+        // print that does land in that window is overwritten - one
+        // garbled line, once, against a log that would otherwise have
+        // no explanation for starting where it does.
+        if let Ok(mut g) = std::fs::OpenOptions::new().write(true).open(&path)
+            && g.set_len(0).is_ok()
+        {
+            let _ = g.write_all(super::cap_notice(cap).as_bytes());
+        }
+    }
+
+    /// The path the file behind `h` lives at, so a handle that may not
+    /// truncate itself can be truncated through a second one.
+    ///
+    /// `VOLUME_NAME_DOS` gives the `\\?\C:\…` form, which every std path
+    /// call accepts. Both flags are zero; they are spelled out so the
+    /// call reads as what it asks for.
+    fn final_path(h: RawHandle) -> Option<PathBuf> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+        };
+        let mut buf = vec![0u16; 260];
+        loop {
+            // 0 is the only failure. Anything >= the buffer is the size
+            // it wants (not counting the terminator), so grow and ask
+            // again rather than guessing at MAX_PATH - the tray's data
+            // dir sits under a user profile name of any length.
+            let n = unsafe {
+                GetFinalPathNameByHandleW(
+                    h,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
+            };
+            if n == 0 {
+                return None;
+            }
+            if (n as usize) < buf.len() {
+                buf.truncate(n as usize);
+                return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+            }
+            buf = vec![0u16; n as usize + 1];
+        }
+    }
+}
+
 /// Install the tee. Call once, early; further calls are no-ops.
 pub fn install() {
     #[cfg(unix)]
@@ -343,13 +556,7 @@ pub fn install() {
                                 use std::io::Seek;
                                 let _ = echo.set_len(0);
                                 let _ = echo.seek(std::io::SeekFrom::Start(0));
-                                let _ = echo.write_all(
-                                    format!(
-                                        "[log] size cap {} MB reached - file truncated (NZBFAST_LOG_CAP_MB overrides)\n",
-                                        cap >> 20
-                                    )
-                                    .as_bytes(),
-                                );
+                                let _ = echo.write_all(cap_notice(cap).as_bytes());
                             }
                         }
                     }
@@ -403,6 +610,14 @@ pub fn install() {
             libc::atexit(drain_at_exit);
         }
         let _ = RING.set(ring);
+    }
+    // No tee off unix, but the SIZE CAP is not a unix concern: the tray
+    // redirects stdout at daemon.log and rotates it only at spawn, so a
+    // long-lived daemon in a warning storm grew it without bound (TODO
+    // 165). The watcher caps that same file rather than opening one.
+    #[cfg(windows)]
+    {
+        wincap::spawn();
     }
 }
 
@@ -478,7 +693,9 @@ pub fn drain() {
 
 #[cfg(test)]
 mod tests {
-    use super::{CAP, ECHO_DROPPED, between_span, capture, ring_line, span_len};
+    use super::{
+        CAP, ECHO_DROPPED, between_span, cap_from, cap_notice, capture, ring_line, span_len,
+    };
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -580,5 +797,112 @@ mod tests {
         let out = ring_line(b"unpacking \xFF.rar\n");
         assert!(out.starts_with("unpacking ") && out.ends_with(".rar"));
         assert!(out.contains('\u{FFFD}'));
+    }
+
+    /// The knob the disk's life depends on, and the direction it fails
+    /// in. Parsed off a string rather than off the environment because
+    /// the suite runs in parallel and `set_var` is process-global.
+    #[test]
+    fn an_unreadable_cap_falls_back_to_the_default_not_to_uncapped() {
+        assert_eq!(cap_from(None), 50 << 20, "unset = the documented 50 MB");
+        assert_eq!(cap_from(Some("200")), 200 << 20);
+        // The documented escape hatch, and the ONE way to get no cap.
+        assert_eq!(cap_from(Some("0")), 0);
+        // Anything we cannot read is a typo, not a request for an
+        // unbounded log: `50m`, an empty value, a negative.
+        for bad in ["50m", "", " 50", "-1", "fifty"] {
+            assert_eq!(cap_from(Some(bad)), 50 << 20, "{bad:?}");
+        }
+        // A value big enough to overflow the shift saturates rather than
+        // wrapping to a tiny cap that would truncate the log constantly.
+        assert_eq!(cap_from(Some(&u64::MAX.to_string())), u64::MAX);
+    }
+
+    /// Both platforms leave the SAME line behind, because it is what a
+    /// user greps for after finding their log starts mid-session.
+    #[test]
+    fn the_truncation_notice_names_the_cap_and_the_override() {
+        let n = cap_notice(50 << 20);
+        assert_eq!(
+            n,
+            "[log] size cap 50 MB reached - file truncated (NZBFAST_LOG_CAP_MB overrides)\n"
+        );
+        // It is written as the file's first line, so it has to end one.
+        assert!(n.ends_with('\n'));
+        assert!(cap_notice(200 << 20).contains("200 MB"));
+    }
+
+    /// The Windows cap, on a scratch file standing in for a redirected
+    /// stdout. Both routes are exercised, because they are not the same
+    /// code and the one that matters in the field is the second: the
+    /// tray opens daemon.log in APPEND mode, and an append handle has no
+    /// `FILE_WRITE_DATA`, so `set_len` on it is refused and the
+    /// truncation has to go through a freshly opened handle on the path.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_cap_truncates_both_a_redirect_and_an_append_handle() {
+        use std::io::Write;
+        use std::os::windows::io::AsRawHandle;
+
+        let cap: u64 = 1 << 20;
+        for (n, append) in [(0u32, false), (1u32, true)] {
+            let path =
+                std::env::temp_dir().join(format!("nzbfast-logcap-{}-{n}.log", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(append)
+                .write(!append)
+                .open(&path)
+                .expect("scratch log");
+            f.write_all(&vec![b'x'; (cap as usize) + 4096])
+                .expect("fill");
+            f.flush().expect("flush");
+            assert!(std::fs::metadata(&path).unwrap().len() > cap);
+
+            super::wincap::cap_one(f.as_raw_handle(), cap);
+            let after = std::fs::read_to_string(&path).expect("read back");
+            assert!(
+                after.starts_with("[log] size cap 1 MB reached"),
+                "append={append}: {after:?}"
+            );
+
+            // And the writer keeps writing INTO the same file, at the new
+            // end - an append handle finds it by itself, a redirect was
+            // rewound. Either way there is no hole where the old bytes
+            // were, which is the whole point of truncating in place.
+            f.write_all(b"after\n").expect("write on");
+            f.flush().expect("flush");
+            let after = std::fs::read_to_string(&path).expect("read back");
+            assert!(after.ends_with("after\n"), "append={append}: {after:?}");
+            assert!(
+                (after.len() as u64) < cap,
+                "append={append}: {} bytes",
+                after.len()
+            );
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A cap of 0 is uncapped, and the truncation path has to honour
+    /// that too - not only [`super::wincap::spawn`], which declines to
+    /// start a watcher at all.
+    #[cfg(windows)]
+    #[test]
+    fn a_zero_cap_never_truncates_on_windows() {
+        use std::io::Write;
+        use std::os::windows::io::AsRawHandle;
+
+        let path =
+            std::env::temp_dir().join(format!("nzbfast-logcap-zero-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut f = std::fs::File::create(&path).expect("scratch log");
+        f.write_all(b"kept\n").expect("fill");
+        f.flush().expect("flush");
+        super::wincap::cap_one(f.as_raw_handle(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+        drop(f);
+        let _ = std::fs::remove_file(&path);
     }
 }
