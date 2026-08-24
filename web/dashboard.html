@@ -7487,13 +7487,31 @@ function probeBody(id){
   if(v&&v.hdr&&v.hdr.format&&v.hdr.format!=='SDR') head.push(`<b>${esc(v.hdr.format)}</b>`);
   const line=(label,items)=>items.length
     ? `<div><span class="dim">${esc(label)}</span> ${items.join(' <span class="dim">·</span> ')}</div>` : '';
-  const vids=(m.video||[]).map(x=>esc([x.codec, x.profile, x.level&&('L'+x.level),
-      x.bit_depth&&(x.bit_depth+'-bit')].filter(Boolean).join(' ')));
-  const auds=(m.audio||[]).map(x=>esc([x.codec, x.channel_layout, probeLang(x.lang)]
-      .filter(Boolean).join(' ')));
-  const subs=(m.subtitles||[]).map(x=>esc([x.codec, probeLang(x.lang),
+  // One descriptor per track, so tracks that describe identically print
+  // identically - and a release carrying forty subtitle tracks that all
+  // decline to state a language printed that same phrase forty times,
+  // which is what the reader actually sees rather than "forty tracks"
+  // (reported 24 Aug 2026). Collapse RUNS of equal descriptors, not every
+  // equal descriptor in the list: "eng · fre · eng" is three tracks in
+  // that order and must not read as "eng ×2 · fre". A run of one is left
+  // exactly as it was, so a normal file's line does not change at all.
+  // The bare &times;N carries no catalogue key, following the resolution
+  // in `head` above rather than inventing a phrase to translate.
+  const runs=a=>{
+    const o=[];
+    for(const s of a){
+      const last=o[o.length-1];
+      if(last&&last.s===s) last.n++; else o.push({s,n:1});
+    }
+    return o.map(r=>r.n>1?`${r.s} <span class="dim">&times;${r.n}</span>`:r.s);
+  };
+  const vids=runs((m.video||[]).map(x=>esc([x.codec, x.profile, x.level&&('L'+x.level),
+      x.bit_depth&&(x.bit_depth+'-bit')].filter(Boolean).join(' '))));
+  const auds=runs((m.audio||[]).map(x=>esc([x.codec, x.channel_layout, probeLang(x.lang)]
+      .filter(Boolean).join(' '))));
+  const subs=runs((m.subtitles||[]).map(x=>esc([x.codec, probeLang(x.lang),
       x.forced?t('probe.forced','forced'):'',
-      x.kind==='bitmap'?t('probe.picture','picture'):''].filter(Boolean).join(' ')));
+      x.kind==='bitmap'?t('probe.picture','picture'):''].filter(Boolean).join(' '))));
   return `<div style="font-size:12.5px;line-height:1.6">
     <div>${head.join(' <span class="dim">·</span> ')}</div>
     ${line(t('probe.video','Video'),vids)}
@@ -9822,7 +9840,7 @@ function reportBlock(s){
 const JOBFILES={};                         // nzo_id -> {at, j, busy}
 const JF_FOLD={rec:new Set(), all:new Set()};   // per-job: repair set, long list
 const JF_CAP=25;                           // payload rows before "show all"
-function jfFetch(id, live){
+function jfFetch(id, live, tail){
   const e=JOBFILES[id]||(JOBFILES[id]={});
   if(e.busy) return;
   if(e.at&&(!live||performance.now()-e.at<2500)) return;
@@ -9846,7 +9864,7 @@ function jfFetch(id, live){
       // The queue re-renders on the 1 Hz tick, which repaints a live row
       // for free; a queued one is never re-fetched, so it needs the nudge.
       const box=document.getElementById('jf-'+id);
-      if(box) setHtml(box, jfBody(id, live));
+      if(box) setHtml(box, jfBody(id, live, tail));
     });
 }
 // The engine's own word for the row, which is the precise one - `status`
@@ -9858,9 +9876,18 @@ const JF_STATE={queued:['drawer.fs.queued','waiting'], active:['drawer.fs.active
   complete:['drawer.fs.complete','done'], deferred:['drawer.fs.deferred','skipped'],
   damaged:['drawer.fs.damaged','damaged'], recovery:['drawer.fs.recovery','repair data']};
 function jfState(w){ const e=JF_STATE[w]; return e?t(e[0],e[1]):(w||''); }
-function jfRow(id,f,live){
+function jfRow(id,f,live,bare){
   const b=+f.bytes||0, left=Math.max(0,Math.min(b,+f.bytes_left||0)), got=b-left;
   const st=f.state||f.status||'';
+  // A tail job the daemon can no longer describe (see jfBody): the name
+  // and the declared size are the only two things in this row that are
+  // still true. Everything else would be the NZB's "nothing has started
+  // yet" reading of a job that has finished downloading - an empty bar
+  // and the word "waiting" against a file that is already on the disk -
+  // so the row says less rather than something false.
+  if(bare) return `<div class="drow${f.recovery?' jfrec':''}">
+    <span class="dname" title="${escA(f.filename||'')}">${esc(f.filename||'')}</span>
+    <span class="dim mono nowrap" style="margin-inline-start:auto">${fmtSize(b)}</span></div>`;
   // Offer the promote only where the queue could honour it: the running
   // job, something still owed, and a row that HAS queued articles. A
   // row whose state is "recovery" has no slot at all - the plan never
@@ -9876,7 +9903,7 @@ function jfRow(id,f,live){
       onclick="event.stopPropagation();promoteFile('${escA(id)}','${escA(f.nzf_id||f.id||'')}',this)">&#9195;</button>`:'')+
   `</div>`;
 }
-function jfBody(id,live){
+function jfBody(id,live,tail){
   const j=(JOBFILES[id]||{}).j;
   // No answer yet, or an answer with no listing in it (the daemon was
   // unreachable): the same "still reading" line either way, because a
@@ -9888,8 +9915,19 @@ function jfBody(id,live){
   // hidden, because a listing that silently omits it does not describe
   // the post.
   const rec=j.files.filter(f=>f.recovery), pay=j.files.filter(f=>!f.recovery);
+  // Which of the two answers this is. A job with a plan - running, or
+  // one whose tail the daemon still holds the counters for - reports
+  // per-segment figures on every row; a job answered from its spooled
+  // .nzb reports names, sizes and nothing else, and its rows all read
+  // "queued". That is the truth for a job waiting to start and a lie
+  // for one that is repairing, so in the TAIL the rows go bare instead.
+  // Rare by construction - the daemon retires a run's table into the
+  // tail rather than dropping it - and this is what it looks like when
+  // it happens anyway, a daemon restarted mid-tail being the case to
+  // picture.
+  const bare=!!tail&&!j.files.some(f=>'segments_remaining' in f);
   const clip=!JF_FOLD.all.has(id)&&pay.length>JF_CAP;
-  let h=(clip?pay.slice(0,JF_CAP):pay).map(f=>jfRow(id,f,live)).join('');
+  let h=(clip?pay.slice(0,JF_CAP):pay).map(f=>jfRow(id,f,live,bare)).join('');
   if(pay.length>JF_CAP)
     h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('all','${escA(id)}')">${
       clip?esc(t('drawer.files.more','show all ({n})',{n:pay.length})):esc(t('drawer.files.less','show fewer'))}</button>`;
@@ -9897,7 +9935,7 @@ function jfBody(id,live){
     const open=JF_FOLD.rec.has(id);
     h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('rec','${escA(id)}')">${
       open?'&#9662;':'&#9656;'} ${esc(t('drawer.files.rec','repair files ({n})',{n:rec.length}))}</button>`;
-    if(open) h+=rec.map(f=>jfRow(id,f,live)).join('');
+    if(open) h+=rec.map(f=>jfRow(id,f,live,bare)).join('');
   }
   return h;
 }
@@ -9908,10 +9946,27 @@ function jfFold(which,id){
 }
 // The list renders from the cache, so the 1 Hz rebuild restores whatever
 // the last answer was instead of flashing back to "reading…" every tick.
-function jfHtml(id,live){
-  jfFetch(id,live);
+// Jobs whose listing this page has already re-read on the phase change,
+// so the one-shot below fires on the transition and not every tick.
+const JF_TAILED=new Set();
+function jfHtml(id,live,tail){
+  // A non-live listing is fetched exactly ONCE (see jfFetch), which is
+  // right for both of its cases - an NZB's contents do not change, and
+  // neither do the figures of a job that has stopped downloading. The
+  // seam between them is the phase change: a job that entered its tail
+  // with the drawer already open is holding rows read while articles
+  // were still in flight, and would go on showing them for as long as
+  // the drawer stayed open. Re-read once, here, rather than putting the
+  // tail on a poll for an answer that cannot move again.
+  //
+  // It also makes the tail drawer say the same thing however you got to
+  // it. Without this, a drawer opened DURING the tail and one left open
+  // ACROSS the transition show different listings of the same job,
+  // which is worse than either of them being a little behind.
+  if(tail&&!JF_TAILED.has(id)){ JF_TAILED.add(id); if(JOBFILES[id]) JOBFILES[id].at=0; }
+  jfFetch(id,live,tail);
   return `<div class="jfhead">${esc(t('drawer.files.head','what this post contains'))}</div>`+
-    `<div id="jf-${escA(id)}">${jfBody(id,live)}</div>`;
+    `<div id="jf-${escA(id)}">${jfBody(id,live,tail)}</div>`;
 }
 // "Download this file next", to the extent the queue can honour it.
 async function promoteFile(nzo,nzf,btn){
@@ -10001,8 +10056,24 @@ function drawerHtml(s){
   if(isTail(s)){
     const v=(lastStats||{}).verify||{};
     const vline=(s.status!=='Moving'&&v.blocks_total>0)?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verifying')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
+    // TODO 274 (e): and WHAT arrived, which is the live question in the
+    // tail and the one the sentence above cannot answer. The per-file
+    // state word separates "damaged" - articles that never came - from
+    // "skipped", a choice that is not damage, from "done"; a block count
+    // says none of that, and a user watching Repairing is asking exactly
+    // it. The daemon keeps the run's own counters for the length of the
+    // tail, so these are the download's own figures and not a re-reading
+    // of the NZB.
+    //
+    // live:false, and not because the tail is cheap to poll: `live` is
+    // what offers the promote button (jfRow), and there is nothing left
+    // to reorder - every article of this job has been issued, so
+    // promote_file would answer "moved 0" on every row it appeared on.
+    // The third argument is what the fetch cadence and the stale-row
+    // guards key off (jfHtml).
     return `<div style="font-size:12.5px">${t('drawer.finishing','Downloaded. {phase} - nothing more is being downloaded for this job.',{phase:esc(tStatus(s.status))})}</div>`
       +vline
+      +`<div style="margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">${jfHtml(s.nzo_id,false,true)}</div>`
       +(dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'')
       +mediaWarnBlock(s.media)+altSwitchBlock(s)+healthDetail(s.health)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`

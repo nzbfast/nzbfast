@@ -12,7 +12,34 @@ jobs:
   build-and-test:
     if: github.repository == 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60, raised from 45 on 24 Aug 2026, and it is a STOPGAP with a
+    # measured replacement already identified - see below.
+    #
+    # This job had never once finished inside 45 minutes. It only looked
+    # like it did because it FAILED FAST: linux-tarballs.sh has been red
+    # on every public PR since it was wired in (it executes a scanner
+    # that is deliberately stripped from the public export), so the run
+    # stopped before the expensive tail. Fix that gate and the job runs
+    # to completion, reaches clippy, and is cancelled at 45.3 minutes.
+    #
+    # WHERE THE TIME GOES, measured on run 32768611010: `test (nzbfast,
+    # single-threaded)` 30.1 min, `test (workspace minus nzbfast)`
+    # 9.7 min, build 2.1, clippy 2.0, cache restore 0.4. So 40 of the 45
+    # are the two test steps and the cache is HITTING - this is not a
+    # cold-build problem.
+    #
+    # THE REAL FIX, and why it is not in this commit. The serial step is
+    # `--test-threads=1` over the whole package, which is a blanket
+    # answer to a narrow problem: a plain parallel `cargo test` flakes
+    # (see the note on that step). `.config/nextest.toml` already solves
+    # it properly with per-binary `max-threads = 1` test groups, and the
+    # private CI runs THE SAME TESTS in four sharded jobs at ~2.5-3.6
+    # min each off one archive. That config is NOT in PUBLIC_MANIFEST,
+    # so the public gate cannot use it and blanket serialisation is the
+    # only safe option here today. Shipping it and switching this job to
+    # nextest is the ~25-minute saving; it wants its own change and its
+    # own verification cycle, because each cycle here costs 45 minutes.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: toolchain

@@ -484,37 +484,38 @@ fn indexer_mock(routes: impl FnOnce(&str) -> Vec<(String, String)>) -> String {
     url
 }
 
-/// Item 8 end to end, and item 6 inside it.
+/// The candidate the mock below offers that must WIN: a genuine repost
+/// of the same episode, on articles of its own.
+const FRESH_POST: &str = "Some.Show.S01E05.1080p.WEB.H264-GOOD";
+
+/// Item 8's whole stage, shared by the two tests that walk the path end
+/// to end: a daemon with the hunt switched on, the request a park would
+/// have queued for a job that failed with nothing held, and a newznab
+/// mock offering three candidates.
 ///
-/// A job the user added themselves fails terminally with nothing held.
-/// The search returns three candidates: one is the SAME POST (it shares
-/// the failed job's message-ids), one is a genuine repost of the same
-/// episode, and one is a different episode entirely that outranks both
-/// on quality and would win the sort if the identity filter ever let it
-/// through. The same-post one must be refused - it would fail
-/// identically and burn a copy of the budget proving it - and the
-/// survivor must land on the queue RUNNABLE, not parked as a duplicate
-/// of the release it is replacing.
-#[test]
-fn a_replacement_is_found_and_the_same_post_is_refused() {
-    let dir = tdir("path");
-    let d = test_daemon(&dir);
+/// One is the SAME POST (it carries the failed job's own message-ids),
+/// one is [`FRESH_POST`], and one is a different episode entirely that
+/// outranks both on quality and would win the sort if the identity
+/// filter ever let it through.
+///
+/// The same post OUTRANKS the survivor on quality, so the ranker reaches
+/// it FIRST and the admission test is what stops it. Ranked the other
+/// way round the survivor would simply win the sort and both tests would
+/// pass without ever fetching the same post, which is the shape of a
+/// green test that checks nothing.
+fn staged_hunt(dir: &Path) -> (Arc<Daemon>, HuntRequest) {
+    let d = test_daemon(dir);
     d.alt.auto_search.store(true, Ordering::Relaxed);
     d.alt.max_copies.store(4, Ordering::Relaxed);
 
     // The dead job's own articles. A candidate carrying these is the
     // same post however different its release name looks.
     let dead_ids = ["d1@x", "d2@x", "d3@x", "d4@x"];
-    let r = req(&dir, STEM, "dashboard", REPAIR_FAIL, 400, &dead_ids);
+    let r = req(dir, STEM, "dashboard", REPAIR_FAIL, 400, &dead_ids);
 
-    // The same post OUTRANKS the survivor on quality, so the ranker
-    // reaches it FIRST and the admission test is what stops it. Ranked
-    // the other way round the survivor would simply win the sort and
-    // this test would pass without ever fetching the same post, which is
-    // the shape of a green test that checks nothing.
     let same_post = "Some.Show.S01E05.2160p.WEB.H265-SAME";
-    let fresh_post = "Some.Show.S01E05.1080p.WEB.H264-GOOD";
     let wrong_ep = "Some.Show.S01E06.2160p.REMUX.H265-WRONG";
+    let fresh_post = FRESH_POST;
     let url = indexer_mock(|base| {
         let feed = format!(
             r#"<?xml version="1.0"?><rss><channel>
@@ -541,13 +542,28 @@ fn a_replacement_is_found_and_the_same_post_is_refused() {
 
     d.indexers.lock_ok().push(crate::newznab::IndexerConfig {
         name: "mock".into(),
-        url: url.clone(),
+        url,
         apikey: "k".into(),
         enabled: true,
         priority: 0,
         hits_per_day: 0,
         grabs_per_day: 0,
     });
+    (d, r)
+}
+
+/// Item 8 end to end, and item 6 inside it.
+///
+/// A job the user added themselves fails terminally with nothing held.
+/// The same-post candidate must be refused - it would fail identically
+/// and burn a copy of the budget proving it - and the survivor must land
+/// on the queue RUNNABLE, not parked as a duplicate of the release it is
+/// replacing.
+#[test]
+fn a_replacement_is_found_and_the_same_post_is_refused() {
+    let dir = tdir("path");
+    let (d, r) = staged_hunt(&dir);
+    let fresh_post = FRESH_POST;
 
     assert_eq!(d.hunt_one(&r), Ok(()));
 
@@ -569,6 +585,92 @@ fn a_replacement_is_found_and_the_same_post_is_refused() {
         origin,
         &hunt_origin(&target_keys(&crate::wall::parse_release(STEM))[0]),
         "the replacement records which target its bytes went on"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §282 item 14 on the hunt road: BOTH rows say what happened.
+///
+/// Item 14 was built for the two roads that run inside `park_gen` - the
+/// automatic promotion of a held spare, and item 12's offer clicked -
+/// and the hunt landed later the same day stamping none of its four
+/// fields. So the one road that switches releases without the user
+/// having asked for anything at all was the one that rendered no clause
+/// anywhere: `switch_lines` returns an empty Vec when the fields are
+/// blank, and every surface reads them through it. The reader item 14
+/// names in its own note - "watching an unfamiliar release name download
+/// right now" - is exactly what a hunt produces.
+///
+/// Both directions are asserted, because they are stamped in different
+/// places and by different means: the NEW row from the request the
+/// worker is holding, and the ABANDONED row through
+/// `history_upsert_if_present` against a record that was filed into
+/// history before the worker ever ran.
+#[test]
+fn a_hunted_replacement_says_what_it_replaced_and_why() {
+    let dir = tdir("item14");
+    let (d, r) = staged_hunt(&dir);
+
+    // The failed job as park left it: filed into history, which is where
+    // the worker has to find it. `history_upsert_if_present` matches by
+    // Arc identity against this very list, so a record only reachable by
+    // id would silently persist nothing.
+    let failed = Arc::new(Mutex::new(
+        job_from_json(&serde_json::json!({
+            "nzo_id": r.nzo_id, "name": STEM, "origin": "dashboard",
+            "state": "Failed", "fail_message": r.fail_message,
+            "out_dir": dir.join("dead").to_string_lossy(),
+            "nzb_path": r.nzb_path.to_string_lossy(),
+        }))
+        .expect("failed job"),
+    ));
+    d.history.lock_ok().push(failed.clone());
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let replacement = d.queue.lock_ok().front().cloned().expect("a replacement");
+    let lines = crate::serve::altcand::switch_lines(&replacement.lock_ok());
+    assert!(
+        !lines.is_empty(),
+        "a hunted replacement must say what it replaced, as the other two roads do"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .find(|(k, _)| *k == "replaced")
+            .map(|(_, v)| v.as_str()),
+        Some(STEM),
+        "the clause names the release that failed: {lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .find(|(k, _)| *k == "replaced because")
+            .map(|(_, v)| v.as_str()),
+        Some(REPAIR_FAIL),
+        "...and why it was abandoned: {lines:?}"
+    );
+    // The nzo_id half is what links the two rows once the names have
+    // scrolled out of sight.
+    assert_eq!(replacement.lock_ok().alt_from, r.nzo_id);
+
+    // The mirror, on the row the user actually clicked and will go
+    // looking for in history.
+    let back = crate::serve::altcand::switch_lines(&failed.lock_ok());
+    assert_eq!(
+        back.iter()
+            .find(|(k, _)| *k == "replaced by")
+            .map(|(_, v)| v.as_str()),
+        Some(FRESH_POST),
+        "the abandoned row must name what took its place: {back:?}"
+    );
+    // ...and durably: the record is in history, so the late mutation has
+    // to reach history.jsonl or it is gone at the next start.
+    let store =
+        std::fs::read_to_string(dir.join("spool").join("history.jsonl")).unwrap_or_default();
+    assert!(
+        store.contains(FRESH_POST),
+        "the abandoned row's clause has to be persisted, not only held in memory"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

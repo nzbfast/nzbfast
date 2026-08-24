@@ -81,9 +81,10 @@ mod outage;
 // NOT Windows-specific, and windows-clippy is not the only job passing
 // `-p nzbfast-ffi`. BOTH clippy steps in ci-private.yml pass it, and the
 // Linux `check` one failed on the identical two errors minutes earlier
-// on 24 Aug 2026. It read as a Windows red only because
-// `tools/windows-verdict.py` digs a real verdict out from under main's
-// cancellations for the Windows jobs and nothing does that for `check`.
+// on 24 Aug 2026. It read as a Windows red only because the verdict tool
+// that digs a real conclusion out from under main's cancellations was
+// rostered on the Windows jobs alone, and nothing did that for `check`.
+// Closed the same day: `tools/ci-verdict.py` rosters the Linux jobs too.
 // The flag is what pulls nzbfast's LIB target into the lint at all; the
 // host clippy line in CLAUDE.md lacked it and gained it in 470efe74d.
 pub(crate) use outage::*;

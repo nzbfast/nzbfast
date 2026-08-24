@@ -622,7 +622,15 @@ pub(super) fn reset_hub_for_job(
     // strong Arc per FileSlot, which would pin the previous job's whole
     // slot array. The owner tag already keeps a stale table from ever
     // being READ against this job.
-    *d.hub.job_files.lock_ok() = None;
+    //
+    // TODO 274 (e): it is RETIRED rather than dropped. Job N's tail
+    // overlaps this download by design, and a listing is the question
+    // that tail is worth asking - so the counters are read out into a
+    // frozen copy, which pins none of the above, and N's `get_files`
+    // answers from that until N parks. Dropping it outright is what had
+    // `mode=get_files` fall through to parsing N's spooled `.nzb` and
+    // report every file of a fully downloaded job as never started.
+    d.hub.retire_job_files();
 }
 
 /// The pool-facing figures of a job, taken off the hub while the hub is

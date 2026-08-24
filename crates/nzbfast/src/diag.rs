@@ -539,33 +539,22 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
             // a payload that was 99.2% whole. The cause goes in front of
             // the counts; the counts follow, unchanged, in the census
             // clause below.
-            // TWO sources of evidence, and they are not alternatives.
-            // The census counts what the DOWNLOAD saw, on the eager
-            // path, where a recovery file that got a slot dies like any
-            // other article. The seam is §282 item 4's verdict out of
-            // the repair ladder, which is where a DEFERRED volume's
-            // fetch happens - and where the incident's recovery set
-            // actually died.
-            //
-            // Selecting between them on `recovery_segments > 0` was
-            // wrong on the shape the seam exists for, and wrong in the
-            // way that reads worst. A conventionally named set gives
-            // `get::plan` no `Par2Volume` to slot, so that counter is 1
-            // - the main index, which ARRIVED - while
-            // `recovery_unusable()` is 0, and the sentence came out
-            // "0 of the post's 1 PAR2 recovery segment(s) are missing
-            // or damaged, so the 1 file(s) that came up short have no
-            // parity left to rebuild them from", which contradicts
-            // itself in the same breath. Found by §283 item 13's
-            // end-to-end assertion the day the seam was wired.
-            //
-            // So the census speaks when it has something to say, the
-            // verdict speaks when there is one, and both speak when
-            // both are true - the eager half and the deferred half of
-            // one recovery set can fail in the same job and each is a
-            // different remedy. `recovery_casualty` guarantees at least
-            // one arm: it needs `mostly_gone` (which cannot hold with
-            // `recovery_unusable()` at zero) or the seam.
+            // TWO sources of evidence, NOT alternatives: the census is
+            // the eager path (a recovery file that got a slot, dying
+            // like any other article), the seam is §282 item 4's
+            // verdict out of the repair ladder, where a DEFERRED
+            // volume's fetch happens. Both can fail in one job and each
+            // is a different remedy, so each speaks when it has
+            // something to say. Selecting on `recovery_segments > 0`
+            // was wrong on the very shape the seam exists for: a
+            // conventionally named set gets no `Par2Volume` slot, so
+            // that counter is 1 for the index that ARRIVED while
+            // `recovery_unusable()` is 0, and the sentence read "0 of
+            // the post's 1 ... are missing or damaged, so ... have no
+            // parity left to rebuild them from". `recovery_casualty`
+            // guarantees at least one arm - `mostly_gone` cannot hold
+            // with `recovery_unusable()` at zero. Full story in TODO
+            // §282 item 17; found by §283 item 13's assertion.
             let census = (causes.recovery_unusable() > 0).then(|| {
                 format!(
                     "{} of the post's {} PAR2 recovery segment(s) are missing or damaged",
@@ -574,9 +563,14 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                 )
             });
             // The seam's wording: a verdict about the SOURCE, with no
-            // segment census behind it to quote.
-            const UNOBTAINABLE: &str = "the PAR2 recovery volumes could not be fetched from any server that \
-                 has the post";
+            // segment census behind it to quote. "this repair needed"
+            // is SCOPE, for the overlap arm: unqualified, it lands
+            // after a census saying 4% and reads as walking that
+            // census back. Exact rather than decorative - `Unservable`
+            // measures the volumes `fetch_volumes` asked for, a subset
+            // of the set chosen for the damage in hand.
+            const UNOBTAINABLE: &str = "the PAR2 recovery volumes this repair needed could not be fetched from \
+                 any server that has the post";
             let lost = match (census, causes.recovery_unobtainable) {
                 (Some(c), true) => format!("{c}, and {UNOBTAINABLE}"),
                 (Some(c), false) => c,
@@ -2041,12 +2035,14 @@ mod main_tests {
         );
     }
 
-    /// Both halves of one recovery set fail, and both are said.
+    /// A download-time census and a repair-time verdict, both true.
     ///
-    /// The eager half and the deferred half are different remedies -
-    /// one is articles this post has lost, the other is a source that
-    /// will not serve what it still has - so a message that picks one
-    /// and drops the other sends half the users to the wrong place.
+    /// NOT two disjoint populations: an obfuscated volume gets a slot,
+    /// is charged to the census when the sniff flips it, and is then
+    /// re-fetched by the ladder. Two MEASUREMENTS at different times by
+    /// different machinery, and two remedies - articles this post has
+    /// lost, against a source that will not serve what remains - so
+    /// dropping either sends half the readers to the wrong place.
     #[test]
     fn an_eager_census_and_a_repair_side_verdict_are_both_stated() {
         let msg = super::incomplete_reason(
@@ -2069,6 +2065,11 @@ mod main_tests {
         assert!(
             msg.contains("could not be fetched from any server that has the post"),
             "and so must the verdict: {msg}"
+        );
+        // SCOPED: unqualified, it reads as walking the 4% census back.
+        assert!(
+            msg.contains("the PAR2 recovery volumes this repair needed"),
+            "the verdict must say which volumes it means beside a census: {msg}"
         );
     }
 

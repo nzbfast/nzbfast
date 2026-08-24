@@ -727,8 +727,8 @@ jobs:
         # tag pinned in the install step above.
         run: cargo deny --locked check
   # -------------------------------------------------------------------
-  # THE LAST KNOWN WINDOWS VERDICT. Not a gate on this commit - a gate on
-  # the branch, recomputed on every push.
+  # THE LAST KNOWN VERDICT, PER JOB. Not a gate on this commit - a gate
+  # on the branch, recomputed on every push.
   #
   # Everything above `env:` says the cancellation regime on main is
   # arithmetic and is staying. Re-measured 23 Aug 2026 over 60
@@ -741,25 +741,44 @@ jobs:
   # What that regime costs is not coverage, it is VISIBILITY. A red run
   # is buried under about ten cancelled runs inside fifteen minutes, and
   # a cancelled run does not read as a red run - it reads as nothing at
-  # all, so main's tip shows grey rather than red. Twice now that has
-  # cost real work: on 21 Aug windows-build was red on main long enough
-  # for a fresh lane to branch off the red (1af79f81b), and on 23 Aug
+  # all, so main's tip shows grey rather than red. Three times now that
+  # has cost real work: on 21 Aug windows-build was red on main long
+  # enough for a fresh lane to branch off the red (1af79f81b); on 23 Aug
   # windows-clippy and windows-arm64 were red for about an hour
   # (ca523cf0e 18:28Z to the fix 804be72b9 at ~19:25Z), found only
-  # because a human went looking.
+  # because a human went looking; and on 24 Aug the Linux `check` job
+  # was red on the SAME two private_interfaces errors as windows-clippy,
+  # minutes EARLIER, and was never reported at all.
   #
-  # `suites-ran` at the bottom of this file cannot report either. It
-  # fires only on parent `failure` AND child `skipped`, deliberately,
+  # THAT THIRD ONE IS WHY THIS JOB IS NOT WINDOWS-ONLY, which it was
+  # until 24 Aug 2026. Both clippy steps in this file pass
+  # `-p nzbfast-ffi`, and that package is what makes the lint reachable
+  # at all, so both jobs failed - runs 32762315942 (check) and
+  # 32763803428 (windows-clippy). Only the second was ever reported,
+  # because only the second had a verdict tool, so a target-independent
+  # lint was written up as a Windows problem and chased through a
+  # Windows-only local recipe. Nothing in the argument above is
+  # Windows-specific; the roster was only ever where the tool started.
+  #
+  # `suites-ran` at the bottom of this file cannot report any of them.
+  # It fires only on parent `failure` AND child `skipped`, deliberately,
   # because `cancelled -> skipped` was 328 of 400 job rows and firing on
-  # it would red every superseded push. And it does not look at
+  # it would red every superseded push. It does not look at
   # windows-clippy or windows-arm64 at all: those two are LEAF jobs, no
-  # `needs:` anywhere names them, so nothing aggregates them.
+  # `needs:` anywhere names them, so nothing aggregates them. And what it
+  # does say about `check` is per-RUN rather than sticky - the next push
+  # clears it whatever the code did - so it never puts a red on the tip,
+  # which is the thing a lane about to branch is reading.
   #
-  # So this job asks a different question. For each of the four Windows
-  # jobs it walks main's runs newest-first and reports the first REAL
-  # conclusion it finds, stepping over `cancelled` and `skipped` because
-  # those carry no verdict about the code, and it is red while any of
-  # those four answers is a failure.
+  # So this job asks a different question. For every job in the script's
+  # roster - the four Windows ones, plus `check`, its matrix, and the
+  # Linux gate jobs - it walks main's runs newest-first and reports the
+  # first REAL conclusion it finds, stepping over `cancelled` and
+  # `skipped` because those carry no verdict about the code, and it is
+  # red while any of those answers is a failure. The roster is held to
+  # this file rather than to memory: a job here that the script neither
+  # judges nor excuses is a refusal naming it, which is what stops the
+  # Linux half going unwatched a second time.
   #
   # THE PROPERTY THAT MAKES IT WORK IS STICKINESS. The answer is about
   # main, not about the run computing it, so while Windows is red EVERY
@@ -773,7 +792,7 @@ jobs:
   # it is what a lane about to branch is looking at. The WORKFLOW RUN
   # ROW in the Actions list does NOT: GitHub gives `cancelled`
   # precedence over `failure` at run level, so a run holding a red
-  # windows-verdict and any cancelled job at all still reports
+  # ci-verdict and any cancelled job at all still reports
   # `cancelled`, and on this main there is nearly always a cancelled
   # job. Verified 23 Aug 2026 on run 32655056916 (4abf45ec): jobs
   # 13 success / 1 failure / 2 cancelled / 4 skipped, run conclusion
@@ -794,11 +813,13 @@ jobs:
   # would instead red the run of whichever lane pushed next, for
   # something they did not cause and usually cannot fix, which is how a
   # gate gets muted. The branching lane is served by running
-  # `tools/windows-verdict.py` by hand, which is the same script this
-  # step runs and needs no checkout of anything else.
+  # `tools/ci-verdict.py` by hand, which is the same script this step
+  # runs and needs no checkout of anything else.
   #
   # COST: one API call for the run list plus one per run walked, six
-  # wide, stopping as soon as all four jobs have an answer. Measured on
+  # wide, stopping as soon as every rostered job has an answer. A run of
+  # docs-only pushes skips the build jobs, so the walk goes deeper then;
+  # it is still bounded by --limit. Measured on
   # the runner in the first run that had it (32665973254, b1532aa66,
   # 23 Aug 2026): 6 s for the step, selftest included, and 10 s for the
   # whole job. That is in the same band as `i18n-gate` above and well
@@ -806,7 +827,7 @@ jobs:
   # so it reaches a verdict on essentially every push - which is what
   # stickiness needs to be worth anything.
   # -------------------------------------------------------------------
-  windows-verdict:
+  ci-verdict:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -818,7 +839,7 @@ jobs:
       contents: read
       actions: read
     concurrency:
-      group: ci-windows-verdict-${{ github.ref }}
+      group: ci-verdict-${{ github.ref }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -828,15 +849,18 @@ jobs:
       # - and BOTH ways of getting it wrong are invisible. Count
       # `cancelled` as a verdict and it reports a red main permanently;
       # stop at the first row it sees and it reports a green one forever.
-      # Neither looks like a broken script. The eleven frozen-JSON cases
-      # drive both directions plus the shard fold.
-      - name: windows verdict
+      # Neither looks like a broken script, and neither is a roster that
+      # has quietly stopped covering a job - that one reports the job it
+      # forgot as green forever. The eighteen frozen-JSON cases drive
+      # every direction, plus both matrix folds, plus the roster held
+      # against this file.
+      - name: ci verdict
         env:
           # The script resolves the repo from GITHUB_REPOSITORY, which
           # Actions sets, so the private repo's name is never written
           # into a file that ships to the public tree.
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/windows-verdict.py --selftest && python3 tools/windows-verdict.py
+        run: python3 tools/ci-verdict.py --selftest && python3 tools/ci-verdict.py
 
   # ===================================================================
   # LINUX: the build-free gates + clippy + the one build, then four
@@ -903,10 +927,10 @@ jobs:
   # already gate on `needs.<build job>.outputs.archive == 'success'`,
   # and a skipped job has empty outputs, so they skip with it.
   # `suites-ran` stays green too - it errors only on parent `failure`
-  # AND child `skipped`, never on a skip of both. `windows-verdict`
-  # walks back through runs for the last REAL Windows conclusion and
-  # treats skipped as no-verdict, which is exactly right here; at worst
-  # it emits a warning, which is not fatal.
+  # AND child `skipped`, never on a skip of both. `ci-verdict` walks
+  # back through runs for the last REAL conclusion per job and treats
+  # skipped as no-verdict, which is exactly right here; at worst it
+  # emits a warning, which is not fatal.
   # ===================================================================
   changes:
     if: github.repository != 'nzbfast/nzbfast'
@@ -2240,8 +2264,9 @@ jobs:
   # step people are told to confirm - `workspace suite` - is still the
   # step that decides it. It is SIX jobs since 23 Aug 2026, so the rows
   # read `windows-unit (1)` .. `windows-unit (6)`; a filter on the prefix
-  # still finds them, and `windows-verdict` folds the suffix generically
-  # rather than by a hardcoded count. Confirm ALL SIX reached success
+  # still finds them, and `ci-verdict` folds the suffix generically
+  # rather than by a hardcoded count - the same fold that carries
+  # `linux-tests (1)` .. `(4)`. Confirm ALL SIX reached success
   # before claiming
   # Windows coverage - `skipped` and `failure` mean opposite things and
   # the first one reads at a glance like Windows is fine. That

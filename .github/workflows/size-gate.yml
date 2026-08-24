@@ -188,7 +188,7 @@
 # Twenty-one is `tools/bg-token-gate.py`, added 24 Aug 2026, and the
 # numbering runs one behind the job count from here on: the payload-id
 # gate landed the same day and was wired without a number, so there are
-# twenty-four steps below and twenty-one numbers above. Its subject is
+# twenty-six steps below and twenty-three numbers above. Its subject is
 # `--bg`, the page ground, DEFINED once in web/ui-tokens.html and
 # hand-copied into five sites that cannot read a custom property - the
 # dashboard's and the wall's media-scoped <meta name="theme-color">
@@ -207,11 +207,67 @@
 # see the red. The fifth site is the argument for its roster arm: the
 # survey that commissioned this gate named four, and the mac window's
 # ground - a real copy, in float channels - was not among them.
+# Twenty-two is `tools/claude-clippy-gate.py`, added 24 Aug 2026, and it
+# is the first gate in this family whose subject is the INSTRUCTIONS
+# rather than the code. CLAUDE.md tells a session "this exact line is
+# what gates a push" and it says it TWICE - a host clippy line in its
+# numbered gate list, and a Windows one quoted inside the entry about
+# unix-only symbols. ci-private.yml runs clippy twice too, in `check` and
+# in `windows-clippy`. Nothing held the four in step. Both CI steps
+# gained `-p nzbfast-ffi` on 23 Aug 2026 and neither documented copy did,
+# and on 24 Aug a size-gate lift (9abdb5817) re-exported a `&Daemon`
+# signature out of `serve`, which raises `Daemon`'s effective visibility
+# to public and put its `pub` fields in scope for `private_interfaces`.
+# The lib stopped compiling. That commit's message records re-running
+# clippy on the host AND against x86_64-pc-windows-gnu, both green,
+# because without nzbfast-ffi - the only crate that turns nzbfast's `ffi`
+# feature on - the lib target is never compiled and the lint has no
+# public surface to judge. main was red for hours with every documented
+# gate green, and THREE lanes converged on the fix independently. This is
+# the failure mode this file exists for, one level up: not a lane that
+# skipped a gate, a lane that ran the documented gate and was told the
+# wrong thing. It compares a TOKEN SET and not a string, because the four
+# spellings are legitimately formatted differently and a gate that is red
+# on a rewrap gets loosened until it means nothing; and a block, job or
+# step it cannot LOCATE is a refusal naming the anchor, because "it found
+# nothing, so the tree is clean" is the rubber stamp the two generator
+# gates above already demonstrated. Measured against 82cb74636^ - the
+# tree as it stood while main was red - it reports four differences,
+# including a `--locked` gap on both documented copies that no incident
+# report ever named. Here rather than in ci-private for the same reason
+# as everything above it, and with more force: the lane that edits a
+# clippy step is the lane that should be told the documented line no
+# longer matches it.
+# Twenty-three is `tools/ci-verdict.py --selftest`, added 24 Aug 2026, and
+# it is the only step in this file that runs a script's SELFTEST and not
+# the script. That is deliberate and load-bearing. `ci-verdict.py` with no
+# argument is a statement about MAIN'S state - it walks the Actions API
+# for the newest real conclusion per job, because a red on main is buried
+# under about ten cancelled runs inside fifteen minutes - so running it
+# here would red whichever lane pushed next for something they did not
+# cause, which is how a gate gets muted. Its own placement is argued at
+# the `ci-verdict` job in ci-private.yml and has not changed. The SELFTEST
+# is a different subject: pure frozen JSON plus one file read, no network,
+# no `gh` auth, about 0.2 s, and case 16 of it holds that script's ROSTER
+# against ci-private.yml's job list in both directions - a job the tool
+# neither judges nor excuses is a refusal naming it, and so is a rostered
+# job that has vanished from the file. That refusal belongs on the
+# author's push for the reason every entry above gives: whoever ADDS a job
+# to ci-private.yml is the one person who knows whether its red belongs on
+# main's tip, and on main alone they would learn it from the next lane's
+# run. The roster was Windows-only until 24 Aug 2026, which is exactly the
+# defect it now refuses: the Linux `check` job was red on the same two
+# `private_interfaces` errors as windows-clippy, minutes earlier, and
+# nothing reported it, so a target-independent lint was written up as a
+# Windows problem. Nothing had CHECKED that the roster covered the
+# workflow. It needs no new `paths:` entry - `**/*.py` and
+# `.github/workflows/ci-private.yml` are both already triggers below, and
+# they are exactly the pair of files that can break it.
 # Each gate is its own job with its own concurrency group, so one cannot
 # starve or cancel another, and each verdict shows up under its own name
 # on the commit.
 #
-# The `paths:` filter is the union of what the twenty-four scripts actually
+# The `paths:` filter is the union of what the twenty-six scripts actually
 # read, worked out from the scripts rather than guessed, because a push
 # the filter skips is a push the gates silently miss:
 #
@@ -282,6 +338,13 @@
 #     CI never runs, so a lockfile bump can never change this verdict and
 #     naming it here would be a trigger worked out by guessing rather
 #     than from the script.
+#   - `.github/workflows/ci-private.yml`: the clippy-doc gate's other
+#     half. Nothing else in this filter reaches a workflow file, so
+#     without this entry a lane could move a clippy step and the gate
+#     that exists to notice would never run. Its FIRST half is the repo's
+#     root markdown, already covered by `*.md` above and left to it for
+#     the same reason the provenance gate's subject is: that filename is
+#     agent vocabulary and this file ships to the public repo verbatim.
 #   - `.claude/tools/memory-gate.py`, `.claude/tools/hooks-gate.py`: the
 #     memory and hooks gates' own subjects, named explicitly rather than
 #     left to `**/*.py` to reach - that pattern's coverage of a
@@ -289,7 +352,7 @@
 #     above provably reaches its subject the file still names it
 #     separately (see the harness/i18n case just below), so a dot-prefixed
 #     path gets no less.
-#   - the twenty-four gate scripts and this file. `crates/**` and `**/*.rs`
+#   - the twenty-six gate scripts and this file. `crates/**` and `**/*.rs`
 #     already carry the harness gate's whole subject, so it adds only its
 #     own script to the list, and `**/*.py` already reaches
 #     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
@@ -370,6 +433,8 @@ on:
       - 'macapp/**'
       - 'tools/payload-id-gate.py'
       - 'tools/bg-token-gate.py'
+      - 'tools/claude-clippy-gate.py'
+      - '.github/workflows/ci-private.yml'
       - 'web/ui-tokens.html'
       - 'web/site.webmanifest'
       - 'web/i18n/manual-check.py'
@@ -382,15 +447,22 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out twenty-four
+# Every job below is the same shape, deliberately spelled out twenty-six
 # times rather than as a matrix, so each step's `run:` line is the bare
 # script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of twenty-two of the twenty-four; the memory
-# and hooks gates have no ci-private line to match, see "Eighteen" above.
+# about what passes - true of twenty-two of the twenty-six. The memory
+# and hooks gates have no ci-private line to match, see "Eighteen" above,
+# and neither does the clippy-doc gate, which is wired here alone - this
+# file runs on main's pushes too, so nothing is lost by that. The
+# ci-verdict roster job is the fourth and the only one that DELIBERATELY
+# differs: ci-private runs `--selftest && <the gate>`, this runs the
+# selftest ALONE, because the gate half is a statement about main's state
+# and would red the next lane. See "Twenty-three" above - that asymmetry
+# is the design, not drift, so do not "fix" it by appending the gate.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With twenty-four jobs that
+# in the run, so one slow leg kills the fast one. With twenty-six jobs that
 # is no longer hypothetical - a per-job group means the overflow gate's
 # selftest can never take the lock gate's verdict down with it.
 #
@@ -822,3 +894,59 @@ jobs:
       # Same two arms as the memory gate above.
       - name: hooks gate
         run: test -x .claude/tools/hooks-gate.py && .claude/tools/hooks-gate.py --selftest && .claude/tools/hooks-gate.py --hook
+  claude-clippy-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: claude-clippy-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # CLAUDE.md documents the clippy gate twice and ci-private runs it
+      # twice, and until 24 Aug 2026 nothing held the four in step - see
+      # "Twenty-two" at the top of this file for the day main was red
+      # with every documented gate green. `--selftest` first, and here it
+      # is the gate rather than the house habit: what this protects
+      # against is an extractor that has quietly stopped matching, which
+      # reads as a clean tree forever. Every arm is driven by a fixture
+      # that must go red, including the two shapes that must NOT be - both
+      # sides moved together in one commit, and a pure rewrap of the
+      # CLAUDE.md copy.
+      - name: clippy doc gate
+        run: tools/claude-clippy-gate.py --selftest && tools/claude-clippy-gate.py
+
+  ci-verdict-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-verdict-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--selftest` ONLY, and that is the whole design of this job
+      # rather than an economy. `tools/ci-verdict.py` with no argument
+      # is a statement about MAIN'S state - it walks the Actions API for
+      # the newest real conclusion per job - so running it here would
+      # red whichever lane pushed next for something they did not cause
+      # and cannot fix, which is how a gate gets muted. That placement
+      # decision is argued at the `ci-verdict` job in ci-private.yml and
+      # it has not changed.
+      #
+      # The selftest is a different thing entirely: pure frozen JSON
+      # plus ONE file read, no network and no `gh` auth, about 0.2 s.
+      # Case 16 of it holds the script's roster against ci-private.yml's
+      # job list in BOTH directions - a job the tool neither judges nor
+      # excuses is a refusal naming it, and so is a rostered job that has
+      # vanished from the file. That refusal is the thing worth having on
+      # the AUTHOR's push: whoever ADDS a job to ci-private.yml is the
+      # one person who knows whether its red belongs on main's tip, and
+      # on main alone they learn it from the next lane's run instead.
+      # Same argument the flatpak pin gate's tree mode was moved here on.
+      #
+      # It needs no new `paths:` entry: `**/*.py` and
+      # `.github/workflows/ci-private.yml` are both already triggers
+      # above, which is exactly the pair of files that can break it.
+      - name: ci verdict roster
+        run: python3 tools/ci-verdict.py --selftest

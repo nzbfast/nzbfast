@@ -454,6 +454,16 @@ pub(super) fn why_from_fail(msg: &str) -> String {
 /// Plain text and assembled here rather than in `report.rs` so the
 /// history row, the drawer and the report cannot drift into three
 /// different accounts of one switch.
+///
+/// THREE producers stamp the fields this reads, one per road by which a
+/// release the user did not click can start downloading:
+/// `daemon_park::promote_held_alternative` (a held spare promoted
+/// automatically), [`Daemon::alt_switch`] (item 12's offer, clicked),
+/// and `hunt::Daemon::stamp_hunt_switch` (section C's search). A fourth
+/// road would have to stamp them too, or it renders no clause at all -
+/// which is what section C did until 24 Aug 2026, because it lands its
+/// replacement on a worker thread rather than inside `park_gen` and so
+/// shared none of the code the first two do.
 pub(super) fn switch_lines(j: &Job) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if !j.alt_from_name.is_empty() {

@@ -40,9 +40,21 @@
 //!    identically AND burns a copy of the budget, so the message-id sets
 //!    are compared before anything is enqueued.
 //!
-//! The whole feature is OFF by default and there is no way to switch it
-//! on from Settings yet: the keys are §282 item 13 and are a separate
-//! piece of work. [`HuntPolicy`] is the seam they will fill.
+//! The whole feature is OFF by default, and it IS switchable from
+//! Settings - `alt_auto_search`, beside `alt_max_copies` and
+//! `alt_max_extra_bytes`, read through [`Daemon::hunt_policy`].
+//!
+//! This paragraph claimed the opposite until 24 Aug 2026 ("no way to
+//! switch it on from Settings yet: the keys are §282 item 13 and are a
+//! separate piece of work"), and it was never true: item 13's keys
+//! landed in `c1c30adab` at 11:54, 48 minutes BEFORE this file did, so
+//! the header was written against a tree that had already moved. The
+//! merge that pointed the code at the real settings (`bcd67456d`)
+//! rewired `hunt_policy` and left the header alone. Worth the space
+//! because of what a lie in this position costs: it reads as a standing
+//! invitation to go and build the settings keys, and §282 section C is
+//! already the part of this backlog that got BUILT TWICE by two lanes
+//! in one afternoon.
 
 use super::giveup::target_keys;
 use super::*;
@@ -924,10 +936,16 @@ impl Daemon {
                     "{}: {} could not complete, so {} was queued in its place ({})",
                     e.nzo_id, req.name, cand.stem, origin
                 );
-                // §282 item 14 will want this in the report and the
-                // history row too; the event ring is what an open
-                // dashboard toasts off, so the switch is visible the
-                // moment it happens rather than only in the log.
+                // §282 item 14, BOTH halves: the new row records what
+                // it replaced and why, the abandoned row records what
+                // replaced it, and `altcand::switch_lines` renders them
+                // on every surface. Before the emit, so a subscriber
+                // that reads the queue on the event finds the clause
+                // already there.
+                self.stamp_hunt_switch(req, &e.nzo_id, &cand.stem);
+                // The event ring is what an open dashboard toasts off,
+                // so the switch is visible the moment it happens rather
+                // than only in the log.
                 self.life_emit(
                     "job.replaced",
                     json!({
@@ -944,6 +962,89 @@ impl Daemon {
                 warn!(target: "queue", "hunt: enqueue {}: {e}", cand.stem);
                 false
             }
+        }
+    }
+
+    /// §282 item 14 on the HUNT road: record the switch on both rows, so
+    /// `altcand::switch_lines` renders for a hunted replacement exactly
+    /// as it does for a promoted spare and for a clicked offer.
+    ///
+    /// Item 14 was built for the two roads that run inside `park_gen`
+    /// and stamped neither half here, which left the hunt - the one road
+    /// that produces a switch the user did nothing at all to ask for -
+    /// as the only one that said nothing anywhere. The reader item 14
+    /// names in its own note is "watching an unfamiliar release name
+    /// download right now", and that is precisely what a hunt produces.
+    ///
+    /// **Why this is a second write and not a field on the add.**
+    /// `enqueue` builds the `Job` itself and has already saved the queue
+    /// by the time it answers, so the clause costs one more write and
+    /// one more save - the shape `stamp_refeed_depth` and
+    /// `enqueue_fetched`'s failure-link stamp both take, and for the
+    /// same reason: without the save a restart in the window loses the
+    /// clause off a row that is going to run.
+    ///
+    /// **Both halves, or neither.** They are stamped only when the
+    /// replacement really reached the QUEUE. `enqueue` answers `Ok` for
+    /// an add it filed straight to history instead - a pre-queue script
+    /// REJECT is the live shape - and a row that failed before it ran
+    /// replaced nothing, so telling the abandoned row it was "replaced
+    /// by" that is worse than saying nothing at all.
+    ///
+    /// **The abandoned row is the harder half, and it IS stamped.** The
+    /// two older producers run inside `park_gen`, synchronously, with
+    /// the failed job in hand; this one runs on the hunt worker some
+    /// time later, by which point the record has been filed into history
+    /// and may have been deleted or retried since.
+    /// `history_upsert_if_present` is exactly the primitive for that -
+    /// it is how the mover and the unlock task persist a late mutation -
+    /// and its `Arc::ptr_eq` check under `HIST_IO` is what stops a
+    /// delete that landed in the gap being resurrected by this append.
+    /// A record no longer in history is simply not stamped, which is the
+    /// honest answer: it was deleted or retried, and neither wants a
+    /// "replaced by" clause.
+    fn stamp_hunt_switch(&self, req: &HuntRequest, new_id: &str, new_name: &str) {
+        // The CLAUSE carries `why_from_fail`'s stripped form, the same
+        // call `promote_held_alternative` makes: the raw `fail_message`
+        // is what an operator pastes into a bug report, and its build
+        // stamp in the middle of "replaced X because Y" is noise about
+        // the wrong build. The `job.replaced` event keeps the raw form,
+        // as the promote path's `reason` does.
+        let why = crate::serve::altcand::why_from_fail(&req.fail_message);
+        let stamped = {
+            let q = self.queue.lock_ok();
+            match q.iter().find(|j| j.lock_ok().nzo_id == new_id) {
+                Some(job) => {
+                    let mut g = job.lock_ok();
+                    g.alt_from = req.nzo_id.clone();
+                    g.alt_from_name = req.name.clone();
+                    g.alt_why = why;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !stamped {
+            return;
+        }
+        self.save_queue();
+        // ...and the abandoned row learns what replaced it. The lookup
+        // and the write share ONE hold of the history lock, which is
+        // what makes "it was in history when this was written" true
+        // rather than likely: `retry` removes a record under that same
+        // lock, so this either precedes the removal or finds nothing.
+        let failed = {
+            let h = self.history.lock_ok();
+            let found = h.iter().find(|j| j.lock_ok().nzo_id == req.nzo_id).cloned();
+            if let Some(j) = &found {
+                j.lock_ok().alt_to_name = new_name.to_string();
+            }
+            found
+        };
+        // With NO job lock held, and outside the history lock:
+        // `history_upsert_if_present` takes both itself.
+        if let Some(failed) = failed {
+            let _ = self.history_upsert_if_present(&failed);
         }
     }
 }

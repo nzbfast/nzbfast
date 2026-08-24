@@ -704,6 +704,16 @@ async fn finish(st: &mut Runner, run: Running) {
     // the counters and `started_at` are the successor's, and only the
     // drain-side counter is this job's to clear.
     let handed_over = detached.is_some();
+    // TODO 274 (e): this run's per-file counters have stopped moving, so
+    // read them one final time for the tail that is about to start. Only
+    // the hand-over path has anything to do here - it retired this table
+    // at the successor's start, which is DURING this drain, and the rows
+    // still in flight at that instant would otherwise read "downloading"
+    // for the whole tail, directly under the drawer's own sentence
+    // saying nothing more is being downloaded. On the plain path the
+    // table is still on the hub and is frozen exactly when the next job
+    // starts, so this is a no-op there.
+    d.hub.settle_tail_files(&nzo_id);
     // Network wall time stops where the PIPELINE said it did, never
     // here: bytes÷seconds is the history's average speed, a stalled
     // tail once inflated a 72 s download to a recorded 121 s, and

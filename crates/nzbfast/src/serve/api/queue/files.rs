@@ -29,12 +29,48 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
     // makes this safe to consult before the record lookup - a stale
     // table belongs to a different id and simply does not match.
     if let Some(t) = d.hub.job_files_for(nzo_id) {
-        return Some(t.rows.iter().map(|r| live_row(&t, r)).collect());
+        let counts = |r: &crate::streamhub::JobFileRow| {
+            r.slot
+                .and_then(|i| t.slots.get(i))
+                .map(|s| crate::streamhub::FileSlotCounts::of(s))
+        };
+        return Some(
+            t.rows
+                .iter()
+                .map(|r| live_row(r, counts(r).as_ref()))
+                .collect(),
+        );
     }
     let path = d.queue.lock_ok().iter().find_map(|j| {
         let g = j.lock_ok();
         (g.nzo_id == nzo_id).then(|| g.nzb_path.clone())
     })?;
+    // TODO 274 (e): a job PAST its network phase, whose table the next
+    // job's start retired into `hub.tail_files`. Its rows are the run's
+    // own counters, so the tail says which files arrived whole, which
+    // lost articles and which were declined - the question a user
+    // watching Repairing is actually asking, and the one the parse
+    // below cannot answer at all.
+    //
+    // Gated on the tail phase and not merely on the entry existing. A
+    // retired entry outlives its job by design (it is bounded by a cap,
+    // not by a park hook), and a RETRY re-queues the same nzo_id: a
+    // listing keyed on the id alone would report the previous run's
+    // damage against a job that has not started. `tail_phase` is the
+    // same test the queue payload's status word comes from, so the
+    // listing and the row it appears under can never disagree.
+    if let Some(t) = d
+        .tail_phase(nzo_id)
+        .and_then(|_| d.hub.tail_files_for(nzo_id))
+    {
+        return Some(
+            t.rows
+                .iter()
+                .zip(t.counts.iter())
+                .map(|(r, c)| live_row(r, c.as_ref()))
+                .collect(),
+        );
+    }
     // A queued job answers from the file it was spooled from. Read on
     // the request thread like `/jobnzb` does, and unreadable or
     // unparseable is an empty listing rather than a 500 - the record
@@ -106,16 +142,24 @@ fn queued_row(r: &crate::streamhub::JobFileRow, recovery: bool) -> Value {
     Value::Object(o)
 }
 
-/// A file of the ACTIVE job, with the slot counters overlaid.
+/// A file of a job that HAS a plan, with the slot counters overlaid.
 ///
 /// A row with no slot is an NZB-classified recovery volume: the plan
 /// never queued its articles, and repair fetches them only if it needs
 /// them. Reported rather than hidden - a listing that silently omits
 /// the recovery set does not describe the post.
-fn live_row(t: &crate::streamhub::JobFiles, r: &crate::streamhub::JobFileRow) -> Value {
-    use std::sync::atomic::Ordering;
+///
+/// One builder for both the active run and a retired one (TODO 274 e),
+/// which is why the counters arrive as a value rather than being read
+/// off a slot here: a second renderer for the tail would be a second
+/// place for the state words to drift, and the tail's whole point is
+/// that they are the SAME words the download reported.
+fn live_row(
+    r: &crate::streamhub::JobFileRow,
+    c: Option<&crate::streamhub::FileSlotCounts>,
+) -> Value {
     let mut o = base_row(r);
-    let Some(s) = r.slot.and_then(|i| t.slots.get(i)) else {
+    let Some(s) = c else {
         o.insert("mbleft".into(), json!(mb(r.bytes)));
         o.insert("bytes_left".into(), json!(r.bytes));
         o.insert("status".into(), json!("queued"));
@@ -123,12 +167,8 @@ fn live_row(t: &crate::streamhub::JobFiles, r: &crate::streamhub::JobFileRow) ->
         o.insert("recovery".into(), json!(true));
         return Value::Object(o);
     };
-    let total = s.total_segments;
-    let remaining = s.remaining.load(Ordering::Relaxed);
-    let missing = s.missing.load(Ordering::Relaxed);
-    let deferred = s.deferred.load(Ordering::Relaxed);
-    let abandoned = s.abandoned.load(Ordering::Relaxed);
-    let errors = s.errors.load(Ordering::Relaxed);
+    let (total, remaining, missing) = (s.total_segments, s.remaining, s.missing);
+    let (deferred, abandoned, errors) = (s.deferred, s.abandoned, s.errors);
     // Everything accounted for that is neither still owed nor a
     // non-arrival. Saturating rather than trusted: these are five
     // independent atomics and a reader can land between two of them.
@@ -182,7 +222,7 @@ fn live_row(t: &crate::streamhub::JobFiles, r: &crate::streamhub::JobFileRow) ->
     o.insert("segments_deferred".into(), json!(deferred));
     o.insert("segments_abandoned".into(), json!(abandoned));
     o.insert("decode_errors".into(), json!(errors));
-    o.insert("recovery".into(), json!(s.is_par2()));
+    o.insert("recovery".into(), json!(s.is_par2));
     o.insert("sample_skipped".into(), json!(s.sample_skipped));
     Value::Object(o)
 }
@@ -245,3 +285,7 @@ pub(super) fn promote_arm(
         Some(moved) => json!({"status": true, "moved": moved, "nzf_id": row.id}),
     }
 }
+
+#[cfg(test)]
+#[path = "files_tests.rs"]
+mod files_tests;

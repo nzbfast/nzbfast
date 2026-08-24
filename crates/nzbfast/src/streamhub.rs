@@ -293,7 +293,46 @@ pub(crate) struct StreamHub {
     /// fact captured once at plan time or a handle the pipeline already
     /// owns, so a reader takes no lock the download path waits on.
     pub job_files: std::sync::Mutex<Option<(String, Arc<JobFiles>)>>,
+    /// TODO 274 (e): the same table for jobs whose network phase is
+    /// OVER but whose TAIL is still running, frozen at the moment the
+    /// hub was handed to the next job.
+    ///
+    /// The cell above is the ACTIVE run's and is replaced at every job
+    /// start, which is the correct lifetime for a promote target - and
+    /// the wrong one for a listing. Job N's tail overlaps job N+1's
+    /// download by design (`tasks/worker.rs`), so from the instant N+1
+    /// claims the hub, `mode=get_files` for N fell through to parsing
+    /// N's spooled `.nzb`: 88 rows reading "queued, 0 bytes of 63 MB"
+    /// for a job that had downloaded every one of them and was
+    /// repairing. Measured on the live daemon 24 Aug 2026 - all 264
+    /// polls of a 4.5-minute Repairing tail answered that way, never
+    /// once with the run's own counters.
+    ///
+    /// FROZEN and not the `Arc`, which is the whole reason this is a
+    /// second field rather than a longer lease on the first. `JobFiles`
+    /// holds a strong `SeekCtl` - every message-id of the run, plus the
+    /// extractor graph - and a strong `Arc` per `FileSlot`; keeping it
+    /// past the handover would pin all of that for the length of a tail
+    /// and, since nothing but a later job start writes here, for the
+    /// whole idle stretch after the LAST job of a queue. A
+    /// [`JobFilesFrozen`] is plain data: the same rows with the
+    /// counters read out once.
+    ///
+    /// Capped rather than pruned against the queue, because that is the
+    /// only bound that needs no second lock and no park hook. The read
+    /// side is gated on the job having a queue row AND a tail phase
+    /// (`api/queue/files.rs`), so an entry whose job is gone answers
+    /// nobody; what the cap bounds is the residue, which is a few
+    /// hundred kilobytes of rows at the sizes real posts have.
+    pub tail_files: std::sync::Mutex<Vec<(String, TailTable)>>,
 }
+
+/// How many finished runs' tables [`StreamHub::retire_job_files`] keeps.
+///
+/// Two tails run at once by default (`postproc_jobs`), and a third can
+/// exist for the moment a fourth job starts before the first two have
+/// parked, so this is that plus headroom - not a tuning knob.
+const TAIL_FILES_KEPT: usize = 4;
 
 /// The per-file surface `mode=get_files` reports and
 /// `mode=queue&name=promote_file` acts on, built once when the run
@@ -327,6 +366,165 @@ pub(crate) struct JobFileRow {
     /// Index into `slots`, or None for an NZB-classified recovery volume
     /// that was never given one.
     pub(crate) slot: Option<usize>,
+}
+
+/// One [`FileSlot`](crate::unpack::FileSlot)'s counters, read out at an
+/// instant instead of reached through the slot.
+///
+/// Every field is a plain copy of the atomic beside it, so the whole
+/// struct is one consistent-enough reading in the same sense a live
+/// caller gets: five independent atomics, and a reader can land between
+/// two of them. The API's arithmetic saturates for exactly that reason
+/// and does so identically on both sides, because both sides go through
+/// the same row builder.
+pub(crate) struct FileSlotCounts {
+    pub(crate) total_segments: usize,
+    pub(crate) remaining: usize,
+    pub(crate) missing: usize,
+    pub(crate) deferred: usize,
+    pub(crate) abandoned: usize,
+    pub(crate) errors: usize,
+    /// Recovery data by ANY route, which is what `FileSlot::is_par2`
+    /// answers - the in-stream magic sniff can set it after the slot was
+    /// built, so this must be read at freeze time and not derived from
+    /// the NZB's classification.
+    pub(crate) is_par2: bool,
+    pub(crate) sample_skipped: bool,
+}
+
+impl FileSlotCounts {
+    pub(crate) fn of(s: &crate::unpack::FileSlot) -> Self {
+        use std::sync::atomic::Ordering;
+        Self {
+            total_segments: s.total_segments,
+            remaining: s.remaining.load(Ordering::Relaxed),
+            missing: s.missing.load(Ordering::Relaxed),
+            deferred: s.deferred.load(Ordering::Relaxed),
+            abandoned: s.abandoned.load(Ordering::Relaxed),
+            errors: s.errors.load(Ordering::Relaxed),
+            is_par2: s.is_par2(),
+            sample_skipped: s.sample_skipped,
+        }
+    }
+}
+
+/// A run's per-file table as it stood when the hub was handed on - the
+/// listing half of [`JobFiles`] with nothing live left in it.
+///
+/// No promotion half, deliberately: the articles of a job past its
+/// network phase have all been issued, so there is nothing to reorder
+/// and `promote_file` answers "not the active job" here exactly as it
+/// did before. That is also what lets this hold no `QueueControl`.
+pub(crate) struct JobFilesFrozen {
+    pub(crate) rows: Vec<JobFileRow>,
+    /// Aligned with `rows` - `None` where the row had no slot, which is
+    /// an NZB-classified recovery volume the plan never queued.
+    pub(crate) counts: Vec<Option<FileSlotCounts>>,
+}
+
+impl JobFiles {
+    /// This table with its counters read out, ready to outlive the run.
+    pub(crate) fn freeze(&self) -> JobFilesFrozen {
+        freeze_rows(&self.rows, &self.slots)
+    }
+}
+
+/// The listing half of a [`JobFiles`], copied out of the live run.
+///
+/// Free rather than a method so it can be driven from a test: a
+/// `JobFiles` cannot be built without a `SeekCtl`, and a `SeekCtl`
+/// cannot be built without an `Extractor` and the pool's queue handle -
+/// none of which this reads.
+pub(crate) fn freeze_rows(
+    rows: &[JobFileRow],
+    slots: &[Arc<crate::unpack::FileSlot>],
+) -> JobFilesFrozen {
+    JobFilesFrozen {
+        counts: rows
+            .iter()
+            .map(|r| {
+                r.slot
+                    .and_then(|i| slots.get(i))
+                    .map(|s| FileSlotCounts::of(s))
+            })
+            .collect(),
+        rows: rows
+            .iter()
+            .map(|r| JobFileRow {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                bytes: r.bytes,
+                segments: r.segments,
+                slot: r.slot,
+            })
+            .collect(),
+    }
+}
+
+/// One retired run's entry: the rows as the API will report them, plus -
+/// briefly - the slots they were read from.
+///
+/// The second field is what makes the FIRST one exact, and it is the
+/// only reason this is a struct. A run is retired when the NEXT job
+/// claims the hub, and on the hand-over path that is DURING its drain:
+/// measured on the live daemon 24 Aug 2026, 7 of an 88-file post's rows
+/// still read "downloading" at that instant, so the tail drawer printed
+/// seven files as in flight directly under a sentence saying nothing
+/// more was being downloaded. Keeping the slots until the run's network
+/// phase actually ends (`tasks/worker.rs` `finish`, which runs on both
+/// transition paths and only once `net_rx` has resolved) lets the rows
+/// be read again at the instant they stop moving.
+///
+/// The SLOTS and not the whole `JobFiles`: the table's `SeekCtl` is the
+/// heavy half - every message-id of the run plus the extractor graph -
+/// and nothing here needs it, so it is dropped at the retire rather
+/// than held across the drain. What is held is a vector of counter
+/// blocks the job's own pipeline is using anyway for the whole of that
+/// window, and it is dropped the moment the window closes.
+pub(crate) struct TailTable {
+    pub(crate) frozen: Arc<JobFilesFrozen>,
+    /// `Some` only between the retire and the run's network drain.
+    draining: Option<Vec<Arc<crate::unpack::FileSlot>>>,
+}
+
+impl TailTable {
+    /// An entry with nothing left draining, for a test that wants the
+    /// settled shape without a run to take it from. Production builds
+    /// these only in [`StreamHub::retire_job_files`], which always has
+    /// slots to keep.
+    #[cfg(test)]
+    pub(crate) fn settled(frozen: Arc<JobFilesFrozen>) -> Self {
+        Self {
+            frozen,
+            draining: None,
+        }
+    }
+
+    /// Read the counters again, now that they have stopped moving, and
+    /// let the slots go. Idempotent: a run settled twice, or one
+    /// retired after its drain (the plain path), keeps the reading it
+    /// already has.
+    fn settle(&mut self) {
+        if let Some(slots) = self.draining.take() {
+            self.frozen = Arc::new(freeze_rows(&self.frozen.rows, &slots));
+        }
+    }
+}
+
+/// The bookkeeping half of [`StreamHub::retire_job_files`], separated
+/// for the same reason [`freeze_rows`] is: what it has to get right -
+/// the replace and the cap - needs nothing but the vector.
+pub(crate) fn keep_tail_table(g: &mut Vec<(String, TailTable)>, owner: String, t: TailTable) {
+    // Replace rather than append on a repeat: a job whose run is
+    // retired twice (a retry that never reached its own plan publish)
+    // must not sit in here under two ids, with the reader taking
+    // whichever it happens to find first.
+    g.retain(|(tag, _)| *tag != owner);
+    g.push((owner, t));
+    // Oldest out, so the cap can never evict the tail that is running
+    // now in favour of one that has parked.
+    let over = g.len().saturating_sub(TAIL_FILES_KEPT);
+    g.drain(..over);
 }
 
 impl JobFiles {
@@ -476,6 +674,79 @@ impl StreamHub {
         let g = self.job_files.lock_ok();
         let (tag, t) = g.as_ref()?;
         (tag == owner).then(|| t.clone())
+    }
+
+    /// TODO 274 (e): take the active table off the hub and keep a frozen
+    /// copy for the tail of the job that owned it.
+    ///
+    /// Called where the previous job's table used to be simply dropped -
+    /// at the next job's start (`tasks/runner.rs`), which is the one
+    /// place that runs on BOTH transition paths: the cross-job
+    /// hand-over, and the plain one where the runner awaits the drain
+    /// first. The owner comes out of the cell rather than being passed
+    /// in, because the caller knows the id of the job STARTING and this
+    /// is about the one that stopped.
+    ///
+    /// The freeze taken HERE is exact on the plain path, where the
+    /// runner has already awaited the drain, and early on the hand-over
+    /// path, where the outgoing job's last in-flight articles are still
+    /// landing. `TailTable` carries the slots across that gap and
+    /// [`Self::settle_tail_files`] reads them again at the drain, which
+    /// is what makes the second case exact too; this freeze is the
+    /// value the entry holds until then, and the belt if the settle
+    /// never comes.
+    pub fn retire_job_files(&self) {
+        let Some((owner, t)) = self.job_files.lock_ok().take() else {
+            return;
+        };
+        let mut g = self.tail_files.lock_ok();
+        // Belt for the entry [`Self::settle_tail_files`] never reached -
+        // a run torn down before its drain resolved. Its slots go here
+        // rather than living to the cap's eviction.
+        for (_, e) in g.iter_mut() {
+            e.settle();
+        }
+        keep_tail_table(
+            &mut g,
+            owner,
+            TailTable {
+                frozen: Arc::new(t.freeze()),
+                draining: Some(t.slots.clone()),
+            },
+        );
+    }
+
+    /// TODO 274 (e): `owner`'s network phase has ended - read its
+    /// counters one last time and drop the slots they came from.
+    ///
+    /// Called from the runner's `finish`, which is entered only once the
+    /// run's `net_rx` has resolved and runs on both transition paths.
+    /// A no-op for a run retired AFTER its drain, which is every run on
+    /// the plain path: those were exact when they were frozen.
+    pub fn settle_tail_files(&self, owner: &str) {
+        if let Some((_, e)) = self
+            .tail_files
+            .lock_ok()
+            .iter_mut()
+            .find(|(tag, _)| tag == owner)
+        {
+            e.settle();
+        }
+    }
+
+    /// TODO 274 (e): the frozen table of a job whose tail is running,
+    /// when it belongs to `owner`.
+    ///
+    /// Same ownership rule as [`Self::job_files_for`], and the caller
+    /// must ALSO have established that the job is past its network phase
+    /// - an entry outlives its job by design (see `tail_files`), and
+    /// answering a re-queued retry from its previous run's counters
+    /// would report a job that has not started as already complete.
+    pub fn tail_files_for(&self, owner: &str) -> Option<Arc<JobFilesFrozen>> {
+        let g = self.tail_files.lock_ok();
+        g.iter()
+            .find(|(tag, _)| tag == owner)
+            .map(|(_, t)| t.frozen.clone())
     }
 
     /// The late-attached password, when it belongs to `owner` - same
@@ -797,3 +1068,7 @@ impl SeekCtl {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "streamhub_tailfiles_tests.rs"]
+mod streamhub_tailfiles_tests;
