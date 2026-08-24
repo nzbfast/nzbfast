@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Por que é rápido</p>
-    <h2>Cerca de 97% dos downloads de usenet em uma única passagem</h2>
+    <h2>Cerca de 95% dos downloads de usenet em uma única passagem</h2>
     <p class="lead">Medimos o que a usenet realmente publica antes de decidir o que otimizar,
     e uma ideia sozinha faz a maior parte do trabalho. Tudo é medido em
     <a href="benchmarks.pt.html">nosso benchmark log</a> com comandos que você mesmo pode reexecutar.</p>
@@ -77,9 +77,11 @@
         para seus deslocamentos finais e verificados por PAR2 a partir dos mesmos buffers. O
         arquivo compactado é extraído <i>durante</i> o download, então seus volumes nunca existem
         como arquivos. Isso vale para arquivos simples, <b>criptografados</b>, aninhados e 7z, o que é
-        <a href="benchmarks.pt.html#census">cerca de 97% de tudo o que é publicado, em volume</a>.
-        Só arquivos genuinamente comprimidos ainda precisam de uma segunda
-        passagem.</p></div>
+        <a href="benchmarks.pt.html#census">cerca de 95% de tudo o que é publicado, em volume</a>.
+
+        Arquivos genuinamente comprimidos também são descompactados enquanto chegam, e só
+        recorrem a uma segunda passagem quando o conjunto é grande demais para caber na memória
+        durante a descompactação.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilidade por união</h3>
         <p>Um artigo só conta como "ausente" quando <i>todo</i> backbone configurado o recusou.
         A contabilidade exata por bloco declara o trabalho COMPLETE, REPAIRABLE ou IMPOSSIBLE antes de

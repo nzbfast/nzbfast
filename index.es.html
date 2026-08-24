@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Por qué es rápido</p>
-    <h2>Cerca del 97% de las descargas de usenet en una sola pasada</h2>
+    <h2>Cerca del 95% de las descargas de usenet en una sola pasada</h2>
     <p class="lead">Medimos lo que usenet publica realmente antes de decidir qué optimizar,
     y una sola idea hace la mayor parte del trabajo. Todo está medido en
     <a href="benchmarks.es.html">el registro de benchmarks</a> con comandos que puedes volver a ejecutar.</p>
@@ -77,9 +77,11 @@
         offsets finales y se verifican con PAR2 desde esos mismos búferes. El archivo comprimido se
         extrae <i>durante</i> la descarga, así que sus volúmenes nunca existen como archivos. Eso
         vale para las publicaciones normales, <b>cifradas</b>, anidadas y 7z, que son
-        <a href="benchmarks.es.html#census">cerca del 97% de todo lo publicado, por volumen</a>.
-        Solo los archivos realmente comprimidos necesitan todavía una
-        segunda pasada.</p></div>
+        <a href="benchmarks.es.html#census">cerca del 95% de todo lo publicado, por volumen</a>.
+
+        Los archivos realmente comprimidos también se descomprimen según van llegando, y solo
+        recurren a una segunda pasada cuando el conjunto es demasiado grande para mantenerlo en
+        memoria mientras se descomprime.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilidad por unión</h3>
         <p>Un artículo solo está «ausente» cuando <i>todos</i> los backbones configurados lo han
         rechazado. Una contabilidad exacta por bloque decide COMPLETO / REPARABLE / IMPOSIBLE antes

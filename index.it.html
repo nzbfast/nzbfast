@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Perché è veloce</p>
-    <h2>Circa il 97% dei download usenet in una sola passata</h2>
+    <h2>Circa il 95% dei download usenet in una sola passata</h2>
     <p class="lead">Abbiamo misurato cosa viene davvero pubblicato su usenet prima di decidere
     cosa ottimizzare, e un'idea da sola fa quasi tutto il lavoro. Tutto è misurato nel
     <a href="benchmarks.it.html">log dei benchmark</a> con comandi riproducibili.</p>
@@ -77,8 +77,10 @@
         offset finali e verificati PAR2 dagli stessi buffer. L'archivio viene estratto
         <i>durante</i> il download, così i suoi volumi non esistono mai come file. Vale per gli
         archivi semplici, <b>cifrati</b>, annidati e 7z, cioè <a href="benchmarks.it.html#census">circa
-        il 97% di tutto ciò che viene pubblicato, in volume</a>. Solo gli archivi davvero
-        compressi richiedono ancora una seconda passata.</p></div>
+        il 95% di tutto ciò che viene pubblicato, in volume</a>.
+        Anche gli archivi davvero compressi vengono estratti mentre arrivano, e ricorrono a una
+        seconda passata solo quando il set è troppo grande per stare in memoria durante la
+        decompressione.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilità in unione</h3>
         <p>Un articolo è «mancante» solo quando <i>ogni</i> backbone configurato lo ha rifiutato.
         Una contabilità esatta al blocco decide COMPLETO / RIPARABILE / IMPOSSIBILE prima di

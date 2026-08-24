@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Hvorfor den er rask</p>
-    <h2>Omtrent 97 % av alle usenet-nedlastinger i én omgang</h2>
+    <h2>Omtrent 95 % av alle usenet-nedlastinger i én omgang</h2>
     <p class="lead">Vi målte hva som faktisk postes på usenet før vi bestemte hva som skulle
     optimaliseres, og én idé gjør mesteparten av jobben. Alt er målt i
     <a href="benchmarks.nb.html">benchmark-loggen</a> med kommandoer du kan kjøre på nytt.</p>
@@ -77,8 +77,10 @@
         og PAR2-verifiseres fra de samme bufferne. Arkivet pakkes ut <i>underveis</i> i
         nedlastingen, så volumene dets finnes aldri som filer i det hele tatt. Det gjelder
         vanlige, <b>krypterte</b>, nøstede og 7z-arkiver, som er <a href="benchmarks.nb.html#census">omtrent
-        97 % av alt som postes, målt i volum</a>. Bare genuint komprimerte arkiver
-        trenger fortsatt en andre omgang.</p></div>
+        95 % av alt som postes, målt i volum</a>.
+        Genuint komprimerte arkiver pakkes også ut mens de kommer inn, og faller først tilbake
+        til en andre omgang når settet er for stort til å holdes i minnet mens det
+        dekomprimeres.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-tilgjengelighet</h3>
         <p>En artikkel «mangler» bare når <i>hver</i> konfigurerte backbone har avvist
         den. Blokk-eksakt regnskap avgjør COMPLETE / REPAIRABLE / IMPOSSIBLE før det

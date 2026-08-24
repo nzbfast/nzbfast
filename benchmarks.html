@@ -62,7 +62,7 @@
     <h2>The setup</h2>
     <ul class="plain">
       <li><b>Clients:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, all on the same machine per scenario (Apple M-series boxes: "Europe" M1 Ultra on 10&nbsp;GbE, "East Coast" M3 Ultra ~2.4-3.0 Gbps line). The headline provider legs (35, 77 and 190 GB) were re-measured 31 July 2026 on the shipping nzbfast build with all five clients, every leg over TLS. A few older legs remain and say so; they understate the shipping build rather than flatter it.</li>
-      <li><b>Fairness:</b> same 6 providers × 8 connections, TLS everywhere, legs run back-to-back interleaved. Every competitor tuned to its documented best: SABnzbd got <code>pipelining_requests=8</code> (<b>it ships 1, i.e. unpipelined</b>; that setting alone took its 190 GB time from 24m24s to 19m02s), NZBGet got ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb its documented config.</li>
+      <li><b>Fairness:</b> same 6 providers × 8 connections, TLS everywhere, legs run back-to-back interleaved. Every competitor tuned to its documented best: SABnzbd got <code>pipelining_requests=8</code> (<b>it ships 1, i.e. unpipelined</b>; that setting alone took its 190 GB time from 24m24s to 19m02s), NZBGet got ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb its documented config. The 10 and 11 August 2026 rounds ran five providers rather than six and say so; five became our standard on 20 August 2026, so a six-provider figure on this page is not directly comparable with a newer five-provider one.</li>
       <li><b>End state:</b> a verified, extracted, usable file, not "download finished". That's what you actually wait for.</li>
       <li><b>Reproducibility:</b> every claim is dated and measured the same way: elapsed time + interface byte counters + process-tree peak RSS, 1-2 s resolution. Where a leg runs on a publicly posted NZB, we name it so you can run it yourself.</li>
     </ul>
@@ -80,7 +80,7 @@
     the free space the job demands before it will start, the memory it holds while it runs, and
     whether the data was ever checked.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>34.5 GB obfuscated release, every client on its newest build</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>34.5 GB obfuscated release, every client on its newest build (7 August 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>time to usable file</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">no usable file&sup1;</td></tr>
         <tr><td>peak memory (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -91,7 +91,7 @@
     <p class="note" style="text-align:start"><b>Measured against</b> SABnzbd 5.1.0RC2, NZBGet
     26.3-testing, Weaver 0.7.8 and rustnzb 1.3.9 on 7 August 2026: East Coast M3 Ultra, six
     providers, all TLS, two runs per client with the order reversed on the second so line drift
-    cancels. &sup1; rustnzb moved 36 GB of wire, reported the job done, and left a 1 GB archive
+    cancels. All four of those rival builds have since been superseded; these rows keep the builds they raced and get re-raced rather than edited. &sup1; rustnzb moved 36 GB of wire, reported the job done, and left a 1 GB archive
     part with no video extracted, so its cheap-looking cells are the cost of not finishing.</p>
 
     <p><b>Where our margin on that job actually is.</b> We raced SABnzbd's 5.1.0 stable on the
@@ -222,11 +222,10 @@
     clients ran the same night on the same line, alternating client by client inside each round, so
     the provider envelope - which moves two to threefold minute to minute - cancels instead of
     favouring whoever happened to run first. Every leg started only after a live check showed all
-    six servers authenticated, and competitor builds are the current shipping ones.
+    six servers authenticated, and competitor builds were the shipping ones on that day.
     &sup1; rustnzb pulled 186.5 GB, 16.8 GB more than the payload, and left <b>no output file at
     all</b>; its disk figures are small because nothing was ever produced. This reproduces an
-    identical result recorded against it earlier, and follows from its documented setting of not
-    unpacking as it goes. &middot; &sup2; nzbfast's memory follows its <em>configured budget</em>,
+    identical result recorded against it earlier. &middot; &sup2; nzbfast's memory follows its <em>configured budget</em>,
     not the job: the default auto budget peaked at 1.1 GB, and capped at <b>1 GB</b> the same job
     still completes (see the low-memory ladder below). On an earlier East Coast round
     (~2.4-3.0 Gbps line) the same scenario ran 9m 00s against +30% and +111%; the gap holds across
@@ -404,7 +403,7 @@
     </table></div>
     <p class="note" style="text-align:start">nzbfast finishes first among the clients that
     deliver all three payloads. ¹ rustnzb's column is a DNF, not a result: its clock stopped first (138 s on 1.3.4,
-    125 s on the current 1.3.9, raced to give it its best chance) because it shipped the 35 GB
+    125 s on 1.3.9, the newest at the time, raced to give it its best chance) because it shipped the 35 GB
     job as raw obfuscated volumes marked <i>Completed</i> - no rename, no extraction, both
     versions (see the tracking section below). A finish line it did not reach cannot be
     compared with clients that did, so every cell in that column is marked invalid rather
@@ -986,7 +985,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Direct unpack still materialises the volumes first:
     2× writes and 2× disk. ⁵ rustnzb shipped obfuscated volumes marked "Completed" in our round
-    (its unpack also hangs with RARLab unrar unless disabled). ⁶ GPL-3.0-or-later.
+    (its unpack also hangs with RARLab unrar unless disabled). Measured on 1.3.4 and 1.3.9; rustnzb fixed this upstream in 1.4.5, so this cell stays pinned to the builds we raced until a round replaces it. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; its measured rows (verify, extract, disk, memory) come from our 31 July
     instrumented round, its capability cells marked "-" are features we have not assessed rather
     than confirmed absences; it speaks an NZBGet-compatible RPC, which is how our harness drives
@@ -1157,8 +1156,7 @@
     measured the same drop: identical download times on both versions, and
     post-processing falling from the par2 verify to nothing. What RC2 gives up is the
     check itself - on an undamaged set it no longer verifies the data at all, while
-    nzbfast verifies every block as it arrives, with no extra pass. The stable tables
-    on this page keep 5.0.4 until 5.1.0 ships.</p>
+    nzbfast verifies every block as it arrives, with no extra pass. The stable tables on this page still carry 5.0.4: 5.1.0 shipped as a stable on 10 August 2026 and 5.1.1 after it, so those tables are pinned to a superseded build and are owed a re-race rather than an edit.</p>
 
     <p>rustnzb moves fastest of all - five releases between our pinned 1.3.4 (18 July) and
     1.3.9 (28 July) - so we built 1.3.9 from source and re-raced it the same day. Its
@@ -1211,7 +1209,7 @@
   round, the low-memory ladder, the East Coast rows) predate late-July engine work and understate
   the current build rather than flatter it. We are also preparing test files whose NZBs we can
   publish, so the provider legs become independently reproducible in the way the client-ceiling
-  and component legs already are.</p>
+  and component legs already are. Client builds have moved on since these rounds: SABnzbd shipped 5.1.0 and then 5.1.1, and rustnzb fixed the obfuscated-release failure our tables record in its 1.4.5. Those re-races are owed, and until they run the tables keep the builds they raced.</p>
 </div></footer>
 
 </body>

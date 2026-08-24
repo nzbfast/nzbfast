@@ -68,7 +68,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Pourquoi c’est rapide</p>
-    <h2>Environ 97% des téléchargements usenet en une seule passe</h2>
+    <h2>Environ 95% des téléchargements usenet en une seule passe</h2>
     <p class="lead">Nous avons mesuré ce qu’usenet poste réellement avant de décider quoi
     optimiser, et une seule idée fait l’essentiel du travail. Tout est mesuré dans
     <a href="benchmarks.fr.html">le journal de benchmarks</a> avec des commandes que vous pouvez relancer vous-même.</p>
@@ -78,9 +78,11 @@
         position finale, et vérifiés en PAR2 depuis les mêmes tampons. L’archive est extraite
         <i>pendant</i> le téléchargement, ses volumes n’existent donc jamais sous forme de
         fichiers. Cela vaut pour les archives simples, <b>chiffrées</b>, imbriquées et 7z, soit
-        <a href="benchmarks.fr.html#census">environ 97% de tout ce qui est posté, en volume</a>.
-        Seules les archives réellement compressées exigent encore une
-        seconde passe.</p></div>
+        <a href="benchmarks.fr.html#census">environ 95% de tout ce qui est posté, en volume</a>.
+
+        Les archives réellement compressées se décompressent elles aussi au fil de leur arrivée,
+        et ne demandent une seconde passe que lorsque le lot est trop gros pour tenir en mémoire
+        pendant la décompression.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Disponibilité en union</h3>
         <p>Un article n’est « manquant » que lorsque <i>chaque</i> backbone configuré l’a refusé.
         Un décompte au bloc près tranche COMPLET / RÉPARABLE / IMPOSSIBLE avant de gaspiller le

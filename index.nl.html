@@ -68,7 +68,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Waarom het snel is</p>
-    <h2>Ongeveer 97% van alle usenet-downloads in één doorgang</h2>
+    <h2>Ongeveer 95% van alle usenet-downloads in één doorgang</h2>
     <p class="lead">We hebben eerst gemeten wat er op usenet daadwerkelijk gepost wordt voordat
     we besloten wat we zouden optimaliseren, en één idee doet het meeste werk. Alles ervan is gemeten in
     <a href="benchmarks.nl.html">de benchmarklog</a> met commando's die je zelf opnieuw kunt draaien.</p>
@@ -78,8 +78,10 @@
         offsets en PAR2-geverifieerd vanuit dezelfde buffers. Het archief wordt <i>tijdens</i> de
         download uitgepakt, dus de volumes bestaan nooit als bestand. Dat geldt voor gewone,
         <b>versleutelde</b>, geneste en 7z-archieven, samen <a href="benchmarks.nl.html#census">zo'n
-        97% van alles wat gepost wordt, naar volume</a>. Alleen echt gecomprimeerde archieven
-        hebben nog een tweede doorgang nodig.</p></div>
+        95% van alles wat gepost wordt, naar volume</a>.
+        Ook echt gecomprimeerde archieven worden tijdens het binnenkomen uitgepakt; ze vallen
+        pas terug op een tweede doorgang als de set te groot is om tijdens het uitpakken in het
+        geheugen te houden.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-beschikbaarheid</h3>
         <p>Een artikel is pas "ontbrekend" als <i>élke</i> ingestelde backbone het heeft geweigerd.
         Blok-exacte boekhouding bepaalt COMPLEET / HERSTELBAAR / ONMOGELIJK voordat er bytes

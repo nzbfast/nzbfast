@@ -58,7 +58,7 @@
     <h2>O setup</h2>
     <ul class="plain">
       <li><b>Clientes:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, todos na mesma máquina por cenário (máquinas Apple da série M: "Europa" M1 Ultra em 10&nbsp;GbE, "costa leste" M3 Ultra em linha de ~2,4-3,0 Gbps). Os legs de provedor de destaque (35, 77 e 190 GB) foram medidos de novo em 31 de julho de 2026 na versão distribuída do nzbfast, com os cinco clientes e cada leg sobre TLS. Restam alguns legs mais antigos, e eles dizem isso; subestimam a versão distribuída em vez de favorecê-la.</li>
-      <li><b>Justiça:</b> os mesmos 6 provedores × 8 conexões, TLS em toda parte, legs executados um atrás do outro de forma intercalada. Cada concorrente ajustado ao seu melhor documentado: o SABnzbd recebeu <code>pipelining_requests=8</code> (<b>ele vem com 1, ou seja, sem pipeline</b>; só esse ajuste tirou seu tempo de 190 GB de 24m24s para 19m02s), o NZBGet recebeu ArticleCache/DirectWrite/DirectUnpack/ParQuick, o rustnzb sua configuração documentada.</li>
+      <li><b>Justiça:</b> os mesmos 6 provedores × 8 conexões, TLS em toda parte, legs executados um atrás do outro de forma intercalada. Cada concorrente ajustado ao seu melhor documentado: o SABnzbd recebeu <code>pipelining_requests=8</code> (<b>ele vem com 1, ou seja, sem pipeline</b>; só esse ajuste tirou seu tempo de 190 GB de 24m24s para 19m02s), o NZBGet recebeu ArticleCache/DirectWrite/DirectUnpack/ParQuick, o rustnzb sua configuração documentada. As rondas de 10 e 11 de agosto de 2026 correram com cinco provedores em vez de seis e dizem-no; cinco passou a ser o nosso padrão em 20 de agosto de 2026, pelo que um número de seis provedores nesta página não é diretamente comparável com um mais recente de cinco.</li>
       <li><b>Estado final:</b> um arquivo verificado, extraído e utilizável, não "download concluído". É por isso que você de fato espera.</li>
       <li><b>Reprodutibilidade:</b> cada afirmação é datada e medida do mesmo jeito: tempo decorrido + contadores de bytes da interface + pico de RSS da árvore de processos, com resolução de 1-2 s. Quando um leg usa um NZB público, dizemos qual é, para que você mesmo possa executá-lo.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>O que um trabalho custa a você, e o que uma mudança de pós-processamento não consegue mover</h2>
     <p class="lead">Os clientes mudam, e uma mudança no que um cliente faz <em>depois</em> do download pode mover um tempo final sem que seu caminho de rede se mexa. Foi o que aconteceu em agosto de 2026, e é por isso que cada tabela desta página agora nomeia as versões contra as quais correu e o dia em que rodou. O que uma nota de versão não consegue mover é o resto da conta: os bytes gravados no seu disco, o espaço livre que o trabalho exige antes mesmo de começar, a memória que ele segura enquanto roda e se os dados chegaram a ser conferidos.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Lançamento ofuscado de 34.5 GB, cada cliente na sua build mais recente</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>Lançamento ofuscado de 34.5 GB, cada cliente na sua build mais recente (7 de agosto de 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>tempo até arquivo utilizável</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">nenhum arquivo utilizável&sup1;</td></tr>
         <tr><td>pico de memória (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>espaço livre necessário</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Medido contra</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 e rustnzb 1.3.9 em 7 de agosto de 2026: M3 Ultra da costa leste, seis provedores, tudo em TLS, duas execuções por cliente com a ordem invertida na segunda para que a deriva da linha se cancele. &sup1; o rustnzb moveu 36 GB pelo fio, deu o trabalho por concluído e deixou uma parte de arquivo de 1 GB sem nenhum vídeo extraído, então suas células de aparência econômica são o custo de não terminar.</p>
+    <p class="note" style="text-align:start"><b>Medido contra</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 e rustnzb 1.3.9 em 7 de agosto de 2026: M3 Ultra da costa leste, seis provedores, tudo em TLS, duas execuções por cliente com a ordem invertida na segunda para que a deriva da linha se cancele. As quatro builds rivais já foram substituídas desde então; estas linhas mantêm as builds contra as quais correram e são recorridas em vez de editadas. &sup1; o rustnzb moveu 36 GB pelo fio, deu o trabalho por concluído e deixou uma parte de arquivo de 1 GB sem nenhum vídeo extraído, então suas células de aparência econômica são o custo de não terminar.</p>
 
     <p><b>De onde vem realmente a nossa margem nesse trabalho.</b> Corremos a estável 5.1.0 do SABnzbd na noite em que saiu, 10 de agosto de 2026. O histórico dele separa um trabalho num download e numa passagem de pós-processamento, e nesta versão ofuscada o download leva <b>31 s</b> nas duas definições de ligações que experimentámos, exatamente o tempo total do nzbfast no mesmo corpus, na mesma noite, na mesma linha. Aqui não descarregamos mais depressa do que ele e não o afirmamos: contra a estável atual na sua própria melhor definição a diferença é de <b>+19%</b>, e esses +19% são a passagem de pós-processamento dele mais o custo de arranque e de consulta, não o fio. O que uma mudança de pós-processamento não alcança é o resto da ronda: <b>241&ndash;334 MB</b> de memória contra 1,380&ndash;1,827 MB, e <b>32.4 GB</b> de tráfego de disco contra 65&ndash;99 GB. São estas as colunas a ler.</p>
 
@@ -157,11 +157,10 @@
     clientes rodaram na mesma noite na mesma linha, alternando cliente a cliente dentro de cada rodada, para
     que o envelope do provedor - que varia de duas a três vezes de minuto a minuto - se cancele em vez de
     favorecer quem calhou de rodar primeiro. Cada leg só começou depois de uma checagem ao vivo mostrar os
-    seis servidores autenticados, e as builds dos concorrentes são as versões distribuídas atuais.
+    seis servidores autenticados, e as builds dos concorrentes eram as versões distribuídas nesse dia.
     &sup1; o rustnzb puxou 186,5 GB, 16,8 GB a mais que o conteúdo, e não deixou <b>nenhum arquivo de
     saída</b>; seus números de disco são pequenos porque nada chegou a ser produzido. Isso reproduz um
-    resultado idêntico registrado contra ele anteriormente, e decorre da sua configuração documentada de não
-    desempacotar durante o download. &middot; &sup2; a memória do nzbfast segue seu <em>orçamento
+    resultado idêntico registrado contra ele anteriormente. &middot; &sup2; a memória do nzbfast segue seu <em>orçamento
     configurado</em>, não o trabalho: o orçamento automático padrão teve pico de 1,1 GB e, limitado a
     <b>1 GB</b>, o mesmo trabalho ainda termina (veja a escada de pouca memória abaixo). Na rodada anterior
     da costa leste (linha de ~2,4-3,0 Gbps), o mesmo cenário rodou 9m 00s contra +30% e +111%; a diferença
@@ -298,7 +297,7 @@
         <tr><td>linha ociosa (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">O nzbfast termina primeiro entre os clientes que entregam as três cargas úteis. ¹ A coluna do rustnzb é uma desistência, não um resultado: o relógio dele parou primeiro (138 s no 1.3.4, 125 s no atual 1.3.9, corrido para lhe dar a melhor chance) porque entregou o trabalho de 35 GB como volumes ofuscados brutos marcados <i>Completed</i> - sem renomear, sem extrair, nas duas versões (veja a seção de acompanhamento mais abaixo). Uma linha de chegada que ele não cruzou não pode ser comparada com a de clientes que cruzaram, então cada célula daquela coluna está marcada como inválida em vez de rápida. O SABnzbd deixa de novo a linha <b>apagada 63% da corrida</b> durante o pós-processamento em série - o único número aqui que se manteve estável em todas as versões desta tabela. O NZBGet nunca fica ocioso, mas paga a extração concorrente no tempo final. ² A nossa própria parcela de ociosidade é honesta e atual, e é o número que mais se moveu: dois dos seis provedores estavam indisponíveis nesta rodada, e a sobreposição entre trabalhos precisa de um servidor livre para rodar o seguinte - esta medição flagrou o motor montando o próximo trabalho sobre um servidor morto, e a correção que se seguiu faz algo melhor do que recuar: quando todos os servidores livres se recusam a responder, o motor toma emprestada uma fatia limitada de conexões dos ocupados e mantém a sobreposição. Reensaiado em 2 de agosto de 2026 no mesmo estado de provedor morto: as lacunas no meio da corrida que compunham esta célula desapareceram (49 s de ociosidade entre trabalhos antes, menos de 6 s agora), com o trabalho seguinte rodando inteiramente sobre conexões emprestadas. Na variante de resiliência (um trabalho com cabeçalhos RAR cifrados, rodada mais antiga), a fila do SABnzbd travou no trabalho cifrado e só 1 de 3 trabalhos chegou a terminar; o nzbfast o estacionou com uma mensagem clara e concluiu o resto.</p>
+    <p class="note" style="text-align:start">O nzbfast termina primeiro entre os clientes que entregam as três cargas úteis. ¹ A coluna do rustnzb é uma desistência, não um resultado: o relógio dele parou primeiro (138 s no 1.3.4, 125 s na 1.3.9, a mais recente na altura, corrido para lhe dar a melhor chance) porque entregou o trabalho de 35 GB como volumes ofuscados brutos marcados <i>Completed</i> - sem renomear, sem extrair, nas duas versões (veja a seção de acompanhamento mais abaixo). Uma linha de chegada que ele não cruzou não pode ser comparada com a de clientes que cruzaram, então cada célula daquela coluna está marcada como inválida em vez de rápida. O SABnzbd deixa de novo a linha <b>apagada 63% da corrida</b> durante o pós-processamento em série - o único número aqui que se manteve estável em todas as versões desta tabela. O NZBGet nunca fica ocioso, mas paga a extração concorrente no tempo final. ² A nossa própria parcela de ociosidade é honesta e atual, e é o número que mais se moveu: dois dos seis provedores estavam indisponíveis nesta rodada, e a sobreposição entre trabalhos precisa de um servidor livre para rodar o seguinte - esta medição flagrou o motor montando o próximo trabalho sobre um servidor morto, e a correção que se seguiu faz algo melhor do que recuar: quando todos os servidores livres se recusam a responder, o motor toma emprestada uma fatia limitada de conexões dos ocupados e mantém a sobreposição. Reensaiado em 2 de agosto de 2026 no mesmo estado de provedor morto: as lacunas no meio da corrida que compunham esta célula desapareceram (49 s de ociosidade entre trabalhos antes, menos de 6 s agora), com o trabalho seguinte rodando inteiramente sobre conexões emprestadas. Na variante de resiliência (um trabalho com cabeçalhos RAR cifrados, rodada mais antiga), a fila do SABnzbd travou no trabalho cifrado e só 1 de 3 trabalhos chegou a terminar; o nzbfast o estacionou com uma mensagem clara e concluiu o resto.</p>
   </div>
 </section>
 
@@ -713,7 +712,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ A extração direta ainda materializa os volumes primeiro:
     2× escritas e 2× disco. ⁵ o rustnzb entregou volumes ofuscados marcados como "Concluído" na nossa rodada
-    (sua extração também trava com o unrar da RARLab a menos que desativada). ⁶ GPL-3.0-or-later.
+    (sua extração também trava com o unrar da RARLab a menos que desativada). Medido em 1.3.4 e 1.3.9; o rustnzb corrigiu isto a montante na 1.4.5, por isso esta célula fica presa às builds que corremos até que uma ronda a substitua. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; as suas linhas medidas (verificação, extração, disco, memória) vêm da nossa rodada
     instrumentada de 31 de julho, e as células de capacidade marcadas com "-" são recursos que não avaliamos,
     e não ausências confirmadas; ele fala um RPC compatível com o NZBGet, que é como a nossa bancada o conduz,
@@ -849,8 +848,7 @@
     engatar, mediu a mesma queda: tempos de download idênticos nas duas versões, e o pós-processamento
     caindo da verificação par2 para nada. O que a RC2 abre mão é da própria verificação - em um
     conjunto sem danos, ela já não verifica os dados de forma alguma, enquanto o nzbfast verifica cada
-    bloco à medida que chega, sem passagem extra. As tabelas estáveis desta página mantêm a 5.0.4 até
-    a 5.1.0 sair.</p>
+    bloco à medida que chega, sem passagem extra. As tabelas estáveis desta página ainda trazem a 5.0.4: a 5.1.0 saiu como estável em 10 de agosto de 2026 e a 5.1.1 depois dela, portanto essas tabelas estão presas a uma build ultrapassada e pedem uma nova corrida, não uma edição.</p>
 
     <p>O rustnzb se move mais rápido do que todos - cinco versões entre o nosso 1.3.4 fixado (18 de julho) e o 1.3.9 (28 de julho) - por isso compilamos o 1.3.9 a partir do código-fonte e o recorremos no mesmo dia. O registro de mudanças promete correções para exatamente o que as nossas tabelas relatam («tornar a extração direta confiável», «rejeitar trabalhos concluídos sem saída utilizável»): medido, a release ofuscada de 35&nbsp;GB continua chegando como volumes brutos marcados <i>pronto</i>, tanto no trabalho isolado quanto na fila. O que mudou foi custo e ritmo: tempos cerca de 10% mais rápidos, e o remoer que saturava o processador que medimos no 1.3.4 esteve ausente de todas as etapas no 1.3.9 - embora uma repetição do 1.3.4 no mesmo dia também tenha medido baixo, então esse custo depende das condições em vez de ter sido resolvido pela versão, e não o citamos em lugar nenhum como um número único.</p>
 
@@ -887,7 +885,7 @@
   antigos que restam (a rodada da fila, a escada de pouca memória, as linhas da costa leste) são
   anteriores ao trabalho de motor do fim de julho e subestimam a versão atual em vez de favorecê-la.
   Também estamos preparando arquivos de teste cujos NZBs possamos publicar, para que os legs de provedor
-  fiquem reproduzíveis de forma independente como já são o teto do cliente e os legs de componentes.</p>
+  fiquem reproduzíveis de forma independente como já são o teto do cliente e os legs de componentes. As builds dos clientes avançaram desde estas rondas: a SABnzbd lançou a 5.1.0 e depois a 5.1.1, e o rustnzb corrigiu na sua 1.4.5 a falha com as publicações ofuscadas que as nossas tabelas registam. Essas novas corridas estão em dívida e, até correrem, as tabelas mantêm as builds contra as quais correram.</p>
 </div></footer>
 
 </body>

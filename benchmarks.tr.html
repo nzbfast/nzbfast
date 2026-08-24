@@ -58,7 +58,7 @@
     <h2>Kurulum</h2>
     <ul class="plain">
       <li><b>İstemciler:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, senaryo başına hepsi aynı makinede (Apple M serisi kutular: 10&nbsp;GbE'de "Avrupa" M1 Ultra, "Doğu Yakası" M3 Ultra ~2.4-3.0 Gbps hat). Manşet sağlayıcı ayakları (35, 77 ve 190 GB) 31 Temmuz 2026'da, dağıtılan nzbfast derlemesi ve beş istemcinin tamamıyla, her ayak TLS üzerinden olacak şekilde yeniden ölçüldü. Birkaç eski ayak duruyor ve bunu kendisi belirtiyor; dağıtılan derlemeyi pohpohlamak yerine olduğundan düşük gösteriyorlar.</li>
-      <li><b>Adalet:</b> aynı 6 sağlayıcı × 8 bağlantı, her yerde TLS, ayaklar art arda iç içe çalışır. Her rakip belgelenmiş en iyisine ince ayar edildi: SABnzbd <code>pipelining_requests=8</code> aldı (<b>1 gönderiyor, yani işlem hattısız</b>; yalnızca o ayar 190 GB süresini 24m24s'ten 19m02s'e çekti), NZBGet ArticleCache/DirectWrite/DirectUnpack/ParQuick aldı, rustnzb belgelenmiş yapılandırmasını.</li>
+      <li><b>Adalet:</b> aynı 6 sağlayıcı × 8 bağlantı, her yerde TLS, ayaklar art arda iç içe çalışır. Her rakip belgelenmiş en iyisine ince ayar edildi: SABnzbd <code>pipelining_requests=8</code> aldı (<b>1 gönderiyor, yani işlem hattısız</b>; yalnızca o ayar 190 GB süresini 24m24s'ten 19m02s'e çekti), NZBGet ArticleCache/DirectWrite/DirectUnpack/ParQuick aldı, rustnzb belgelenmiş yapılandırmasını. 10 ve 11 Ağustos 2026 turları altı yerine beş sağlayıcıyla koştu ve bunu belirtiyor; beş, 20 Ağustos 2026'da standardımız oldu, dolayısıyla bu sayfadaki altı sağlayıcılı bir rakam, daha yeni beş sağlayıcılı bir rakamla doğrudan karşılaştırılamaz.</li>
       <li><b>Son durum:</b> doğrulanmış, çıkarılmış, kullanılabilir bir dosya, "indirme bitti" değil. Asıl beklediğin şey budur.</li>
       <li><b>Yeniden üretilebilirlik:</b> her iddia tarihlidir ve aynı yöntemle ölçülür: geçen süre + arayüz bayt sayaçları + süreç ağacı zirve RSS, 1-2 s çözünürlük. Bir ayak herkese açık olarak gönderilmiş bir NZB üzerinde çalışıyorsa, kendiniz de çalıştırabilesiniz diye onu adıyla belirtiyoruz.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>Bir iş size neye mal olur ve bir işlem sonrası değişikliğinin oynatamayacağı şeyler</h2>
     <p class="lead">İstemciler değişmeye devam ediyor ve bir istemcinin indirme <em>sonrasında</em> yaptığı işteki bir değişiklik, ağ yolu hiç kıpırdamadan bitiş süresini oynatabiliyor. Ağustos 2026'da tam olarak bu oldu; bu yüzden bu sayfadaki her tablo artık karşısında koştuğu sürümleri ve koştuğu günü adlandırıyor. Bir sürüm notunun oynatamayacağı şey ise faturanın geri kalanı: diskinize yazılan baytlar, işin daha başlamadan önce talep ettiği boş alan, çalışırken tuttuğu bellek ve verinin hiç kontrol edilip edilmediği.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>34.5 GB'lık şaşırtılmış yayın, her istemci en yeni yapısıyla</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>34.5 GB'lık şaşırtılmış yayın, her istemci en yeni yapısıyla (7 Ağustos 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>kullanılabilir dosyaya süre</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">kullanılabilir dosya yok&sup1;</td></tr>
         <tr><td>zirve bellek (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>gereken boş alan</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.3.9, 7 Ağustos 2026: doğu yakası M3 Ultra, altı sağlayıcı, tamamı TLS, istemci başına iki çalıştırma ve ikincisinde hat kayması birbirini götürsün diye ters sıra. &sup1; rustnzb hat üzerinde 36 GB taşıdı, işi bitti diye bildirdi ve hiç video çıkarmadan 1 GB'lık bir arşiv parçası bıraktı; yani ucuz görünen hücreleri, işi bitirmemenin bedeli.</p>
+    <p class="note" style="text-align:start"><b>Şunlara karşı ölçüldü:</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ve rustnzb 1.3.9, 7 Ağustos 2026: doğu yakası M3 Ultra, altı sağlayıcı, tamamı TLS, istemci başına iki çalıştırma ve ikincisinde hat kayması birbirini götürsün diye ters sıra. Bu dört rakip yapının dördü de o tarihten sonra eskidi; bu satırlar yarıştıkları yapıları korur ve düzenlenmek yerine yeniden yarıştırılır. &sup1; rustnzb hat üzerinde 36 GB taşıdı, işi bitti diye bildirdi ve hiç video çıkarmadan 1 GB'lık bir arşiv parçası bıraktı; yani ucuz görünen hücreleri, işi bitirmemenin bedeli.</p>
 
     <p><b>O işteki farkımız aslında nereden geliyor.</b> SABnzbd'nin 5.1.0 kararlı sürümünü çıktığı akşam, 10 Ağustos 2026'da koşturduk. Kendi geçmiş kaydı bir işi indirme ve indirme sonrası geçiş olarak ikiye ayırıyor ve bu belirsizleştirilmiş sürümde indirme, denediğimiz her iki bağlantı ayarında da <b>31 s</b> sürüyor; bu, aynı korpusta, aynı gece, aynı hatta nzbfast'in toplam süresinin tamamı. Yani burada ondan daha hızlı indirmiyoruz ve indirdiğimizi de söylemiyoruz: güncel kararlı sürüme karşı, o kendi en iyi ayarındayken fark <b>+19%</b> ve bu +19%, onun indirme sonrası geçişi artı açılış ve yoklama maliyeti, hat değil. İndirme sonrası bir değişikliğin ulaşamadığı şey turun geri kalanı: <b>241&ndash;334 MB</b> belleğe karşı 1,380&ndash;1,827 MB ve <b>32.4 GB</b> disk trafiğine karşı 65&ndash;99 GB. Okunacak sütunlar bunlar.</p>
 
@@ -170,11 +170,10 @@
     Beş istemcinin tamamı aynı gece aynı hatta, her tur içinde istemci istemci dönüşümlü olarak
     çalıştı; böylece dakikadan dakikaya iki ila üç kat oynayan sağlayıcı zarfı, ilk çalışma
     şansına kim erdiyse onu kayırmak yerine birbirini götürüyor. Her ayak ancak canlı bir kontrol
-    altı sunucunun da kimlik doğrulamasının geçtiğini gösterdikten sonra başladı ve rakip
-    derlemeler güncel dağıtılan sürümler. &sup1; rustnzb yükten 16.8 GB fazla olmak üzere
+    altı sunucunun da kimlik doğrulamasının geçtiğini gösterdikten sonra başladı ve rakip derlemeler o gün dağıtılan sürümlerdi. &sup1; rustnzb yükten 16.8 GB fazla olmak üzere
     186.5 GB çekti ve geriye <b>hiçbir çıktı dosyası</b> bırakmadı; disk rakamları küçük, çünkü
     ortaya hiçbir şey çıkmadı. Bu, daha önce ona karşı kaydedilen birebir aynı sonucu yeniden
-    üretiyor ve giderken açmama yönündeki belgelenmiş ayarından kaynaklanıyor. &middot; &sup2;
+    üretiyor. &middot; &sup2;
     nzbfast'in belleği işi değil, <em>yapılandırılmış bütçesini</em> izler: varsayılan otomatik
     bütçe 1.1 GB'ta zirve yaptı ve <b>1 GB</b>'a kelepçelendiğinde aynı iş yine tamamlanır
     (aşağıdaki az bellek merdivenine bak). Daha önceki Doğu Yakası turunda (~2.4-3.0 Gbps hat)
@@ -310,7 +309,7 @@
         <tr><td>hat boşta (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast, üç yükü de teslim eden istemciler arasında ilk bitiren. ¹ rustnzb'nin sütunu bir sonuç değil, bir terk: saati ilk durdu (1.3.4'te 138 s, en iyi şansı verilmek üzere koşulan güncel 1.3.9'da 125 s) çünkü 35 GB'lık işi <i>Completed</i> işaretli ham gizlenmiş birimler olarak teslim etti - yeniden adlandırma yok, çıkarma yok, her iki sürümde de (aşağıdaki izleme bölümüne bakın). Geçmediği bir bitiş çizgisi, geçen istemcilerle karşılaştırılamaz, dolayısıyla o sütundaki her hücre hızlı değil geçersiz olarak işaretlendi. SABnzbd yine seri son işleme sırasında hattı <b>koşunun 63%'ünde karanlık</b> bırakıyor - buradaki, bu tablonun her kesitinde sabit kalmış tek sayı. NZBGet hiç boşta kalmıyor ama eşzamanlı çıkarmanın bedelini bitiş süresinde ödüyor. ² Kendi boşta payımız dürüst ve güncel, ve en çok hareket eden sayı bu: bu turda altı sağlayıcıdan ikisi kullanılamıyordu, ve işler arası örtüşme, bir sonraki işi üzerinde koşturacak boş bir sunucuya ihtiyaç duyuyor - bu ölçüm, motoru bir sonraki işi ölü bir sunucu üzerine inşa ederken yakaladı, ve ardından gelen düzeltme geri çekilmekten daha iyisini yapıyor: boştaki her sunucu yanıt vermeyi reddettiğinde motor, meşgul sunuculardan sınırlı bir dilim bağlantı ödünç alıyor ve örtüşmeyi koruyor. 2 Ağustos 2026'da aynı ölü-sağlayıcı durumunda yeniden uzun süreli koşuldu: bu hücreyi oluşturan koşu ortası boşluklar kayboldu (o zaman işler arasında 49 s boşta, şimdi 6 s'nin altında), sonraki iş tümüyle ödünç bağlantılar üzerinde ilerledi. Dayanıklılık türevinde (şifreli RAR başlıklı bir iş, daha eski tur) SABnzbd'nin kuyruğu şifreli işte takıldı ve 3 işten yalnızca 1'i tamamlandı; nzbfast onu net bir iletiyle park etti ve gerisini bitirdi.</p>
+    <p class="note" style="text-align:start">nzbfast, üç yükü de teslim eden istemciler arasında ilk bitiren. ¹ rustnzb'nin sütunu bir sonuç değil, bir terk: saati ilk durdu (1.3.4'te 138 s, en iyi şansı verilmek üzere koşulan, o zamanki en yeni sürüm 1.3.9'da 125 s) çünkü 35 GB'lık işi <i>Completed</i> işaretli ham gizlenmiş birimler olarak teslim etti - yeniden adlandırma yok, çıkarma yok, her iki sürümde de (aşağıdaki izleme bölümüne bakın). Geçmediği bir bitiş çizgisi, geçen istemcilerle karşılaştırılamaz, dolayısıyla o sütundaki her hücre hızlı değil geçersiz olarak işaretlendi. SABnzbd yine seri son işleme sırasında hattı <b>koşunun 63%'ünde karanlık</b> bırakıyor - buradaki, bu tablonun her kesitinde sabit kalmış tek sayı. NZBGet hiç boşta kalmıyor ama eşzamanlı çıkarmanın bedelini bitiş süresinde ödüyor. ² Kendi boşta payımız dürüst ve güncel, ve en çok hareket eden sayı bu: bu turda altı sağlayıcıdan ikisi kullanılamıyordu, ve işler arası örtüşme, bir sonraki işi üzerinde koşturacak boş bir sunucuya ihtiyaç duyuyor - bu ölçüm, motoru bir sonraki işi ölü bir sunucu üzerine inşa ederken yakaladı, ve ardından gelen düzeltme geri çekilmekten daha iyisini yapıyor: boştaki her sunucu yanıt vermeyi reddettiğinde motor, meşgul sunuculardan sınırlı bir dilim bağlantı ödünç alıyor ve örtüşmeyi koruyor. 2 Ağustos 2026'da aynı ölü-sağlayıcı durumunda yeniden uzun süreli koşuldu: bu hücreyi oluşturan koşu ortası boşluklar kayboldu (o zaman işler arasında 49 s boşta, şimdi 6 s'nin altında), sonraki iş tümüyle ödünç bağlantılar üzerinde ilerledi. Dayanıklılık türevinde (şifreli RAR başlıklı bir iş, daha eski tur) SABnzbd'nin kuyruğu şifreli işte takıldı ve 3 işten yalnızca 1'i tamamlandı; nzbfast onu net bir iletiyle park etti ve gerisini bitirdi.</p>
   </div>
 </section>
 
@@ -806,7 +805,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Doğrudan açma yine de önce birimleri gerçekleştirir:
     2× yazma ve 2× disk. ⁵ rustnzb turumuzda "Completed" olarak işaretli gizlenmiş birimleri gönderdi
-    (açması ayrıca devre dışı bırakılmazsa RARLab unrar ile takılır). ⁶ GPL-3.0-or-later.
+    (açması ayrıca devre dışı bırakılmazsa RARLab unrar ile takılır). 1.3.4 ve 1.3.9 üzerinde ölçüldü; rustnzb bunu 1.4.5 sürümünde giderdi, bu yüzden bu hücre yeni bir tur onu değiştirene kadar yarıştırdığımız yapılara sabitli kalır. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; ölçülen satırları (doğrulama, çıkarma, disk, bellek) 31 Temmuz'daki ölçüm
     aletli turumuzdan geliyor, "-" işaretli yetenek hücreleri ise doğrulanmış eksiklikler değil
     henüz değerlendirmediğimiz özelliklerdir; NZBGet uyumlu bir RPC konuşuyor ve düzeneğimiz onu
@@ -943,7 +942,7 @@
     indirme süreleri iki sürümde de aynı, son işleme ise par2 doğrulamasından sıfıra
     iniyor. RC2'nin vazgeçtiği şey denetimin kendisi - hasarsız bir sette artık veriyi
     hiç doğrulamıyor; nzbfast ise her bloğu geldiği anda, ek bir geçiş olmadan doğruluyor.
-    Bu sayfadaki kararlı tablolar 5.1.0 çıkana kadar 5.0.4'te kalıyor.</p>
+    Bu sayfadaki kararlı tablolar hâlâ 5.0.4'te: 5.1.0 10 Ağustos 2026'da kararlı olarak çıktı, ardından 5.1.1 geldi; yani bu tablolar aşılmış bir yapıya sabitli ve düzenlenmek değil yeniden yarıştırılmak gerekiyor.</p>
 
     <p>rustnzb hepsinden hızlı ilerliyor - sabitlediğimiz 1.3.4 (18 Temmuz) ile 1.3.9 (28 Temmuz) arasında beş yayım - bu yüzden 1.3.9'u kaynaktan derleyip aynı gün yeniden koştuk. Değişiklik günlüğü tam da tablolarımızın bildirdiği şeyler için düzeltmeler vaat ediyor ("doğrudan çıkarmayı güvenilir kıl", "kullanılabilir çıktısı olmayan tamamlanmış işleri reddet"): ölçüldüğünde, gizlenmiş 35&nbsp;GB'lık yayım hem tek işte hem kuyrukta hâlâ <i>bitti</i> işaretli ham birimler olarak geliyor. Değişen şey maliyet ve tempo: süreler yaklaşık 10% daha hızlı ve 1.3.4'te ölçtüğümüz işlemciyi dolduran öğütme her 1.3.9 ayağında yoktu - gerçi aynı gün yapılan bir 1.3.4 yeniden koşusu da düşük ölçtü, dolayısıyla bu maliyet sürümle giderilmiş olmaktan çok koşullara bağlı ve onu hiçbir yerde tek bir sayı olarak vermiyoruz.</p>
 
@@ -982,7 +981,7 @@
   sonundaki motor çalışmasından öncedir ve güncel derlemeyi pohpohlamak yerine olduğundan düşük
   gösterir. Hasarlı gönderi turu bu sayfanın geri kalanından daha yenidir ve kendi başına durur: <b>11 Ağustos 2026</b>, nzbfast 1.0.24 ve 1.0.23, SABnzbd 5.1.0 stable, NZBGet 26.3-testing, rustnzb 1.4.4 ve Weaver 0.7.8 ile birlikte yarıştı; sunucu başına 20 bağlantıyla 56 turluk tek bir dönüşümlü turda altı kol. Bitiren 53 turun her biri, bilinen doğru özgün dosyayla bayt bayt özdeş bir dosya üretti; örneklemle değil, her turda boyut ve MD5 ile denetlendi. Ayrıca NZB'lerini yayımlayabileceğimiz test dosyaları hazırlıyoruz, böylece sağlayıcı
   ayakları da istemci tavanı ve bileşen ayaklarının zaten olduğu gibi bağımsız olarak yeniden
-  üretilebilir hâle gelecek.</p>
+  üretilebilir hâle gelecek. İstemci yapıları bu turlardan bu yana ilerledi: SABnzbd 5.1.0'ı, ardından 5.1.1'i yayımladı; rustnzb ise tablolarımızın kaydettiği gizlenmiş yayın başarısızlığını 1.4.5 sürümünde giderdi. Bu yeniden yarışlar borçtur ve koşulana kadar tablolar yarıştıkları yapıları korur.</p>
 </div></footer>
 
 </body>

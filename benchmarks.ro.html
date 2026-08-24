@@ -58,7 +58,7 @@
     <h2>Configurația</h2>
     <ul class="plain">
       <li><b>Clienți:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, toți pe aceeași mașină per scenariu (mașini Apple din seria M: „Europa” M1 Ultra pe 10&nbsp;GbE, „Coasta de Est” M3 Ultra pe o linie de ~2.4-3.0 Gbps). Probele principale pe provideri (35, 77 și 190 GB) au fost măsurate din nou pe 31 iulie 2026, pe versiunea publicată a nzbfast, cu toți cei cinci clienți, fiecare probă peste TLS. Câteva probe mai vechi au rămas și o spun ca atare; ele subestimează versiunea publicată în loc să o flateze.</li>
-      <li><b>Corectitudine:</b> aceiași 6 provideri × 8 conexiuni, TLS peste tot, probele rulate una după alta, intercalat. Fiecare concurent reglat la maximul său documentat: SABnzbd a primit <code>pipelining_requests=8</code> (<b>vine cu 1, adică fără pipelining</b>; doar acea setare i-a redus timpul pe 190 GB de la 24m24s la 19m02s), NZBGet a primit ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb configurația sa documentată.</li>
+      <li><b>Corectitudine:</b> aceiași 6 provideri × 8 conexiuni, TLS peste tot, probele rulate una după alta, intercalat. Fiecare concurent reglat la maximul său documentat: SABnzbd a primit <code>pipelining_requests=8</code> (<b>vine cu 1, adică fără pipelining</b>; doar acea setare i-a redus timpul pe 190 GB de la 24m24s la 19m02s), NZBGet a primit ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb configurația sa documentată. Rundele din 10 și 11 august 2026 au rulat pe cinci provideri, nu pe șase, și o spun; cinci a devenit standardul nostru pe 20 august 2026, așa că o cifră cu șase provideri de pe această pagină nu este direct comparabilă cu una mai nouă, cu cinci.</li>
       <li><b>Stare finală:</b> un fișier verificat, extras, utilizabil, nu „descărcare terminată”. Asta e ce aștepți de fapt.</li>
       <li><b>Reproductibilitate:</b> fiecare afirmație este datată și măsurată la fel: timp scurs + contoare de octeți pe interfață + RSS de vârf pe arborele de procese, rezoluție 1-2 s. Acolo unde o probă rulează pe un NZB postat public, îl numim, ca să îl poți rula și tu.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>Cât te costă un job și ce nu poate muta o schimbare de post-procesare</h2>
     <p class="lead">Clienții se schimbă, iar o schimbare în ce face un client <em>după</em> descărcare poate muta un timp final fără ca drumul lui prin rețea să se miște deloc. Asta s-a întâmplat în august 2026, motiv pentru care fiecare tabel din pagină numește acum versiunile față de care a rulat și ziua în care a rulat. Ce nu poate muta o notă de versiune este restul notei de plată: octeții scriși pe discul tău, spațiul liber pe care jobul îl cere înainte să pornească, memoria pe care o ține cât rulează și dacă datele au fost vreodată verificate.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Lansare ofuscată de 34.5 GB, fiecare client în cea mai nouă versiune a lui</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>Lansare ofuscată de 34.5 GB, fiecare client în cea mai nouă versiune a lui (7 august 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>timp până la fișierul utilizabil</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">niciun fișier utilizabil&sup1;</td></tr>
         <tr><td>memorie de vârf (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>spațiu liber necesar</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Măsurat față de</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.3.9 pe 7 august 2026: M3 Ultra de pe coasta de est, șase provideri, totul pe TLS, două rulări per client, cu ordinea inversată la a doua ca variația liniei să se anuleze. &sup1; rustnzb a mutat 36 GB pe fir, a raportat jobul terminat și a lăsat o parte de arhivă de 1 GB fără niciun video extras, așa că celulele lui aparent ieftine sunt costul de a nu termina.</p>
+    <p class="note" style="text-align:start"><b>Măsurat față de</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 și rustnzb 1.3.9 pe 7 august 2026: M3 Ultra de pe coasta de est, șase provideri, totul pe TLS, două rulări per client, cu ordinea inversată la a doua ca variația liniei să se anuleze. Toate cele patru build-uri rivale au fost între timp depășite; aceste rânduri păstrează build-urile cu care au rulat și se rulează din nou în loc să fie editate. &sup1; rustnzb a mutat 36 GB pe fir, a raportat jobul terminat și a lăsat o parte de arhivă de 1 GB fără niciun video extras, așa că celulele lui aparent ieftine sunt costul de a nu termina.</p>
 
     <p><b>De unde vine de fapt marja noastră la acel job.</b> Am rulat versiunea stabilă 5.1.0 a SABnzbd chiar în seara în care a apărut, 10 august 2026. Propriul ei istoric împarte un job într-o descărcare și o trecere de post-procesare, iar pe această versiune ofuscată descărcarea durează <b>31 s</b> la ambele setări de conexiuni încercate, adică exact tot timpul nzbfast pe același corpus, în aceeași seară, pe aceeași linie. Deci aici nu descărcăm mai repede decât ea și nici nu pretindem asta: față de versiunea stabilă actuală la propriul ei optim, diferența este de <b>+19%</b>, iar acei +19% sunt trecerea ei de post-procesare plus costul de pornire și de interogare, nu firul. Ce nu poate atinge o schimbare de post-procesare este restul rundei: <b>241&ndash;334 MB</b> de memorie față de 1,380&ndash;1,827 MB și <b>32.4 GB</b> de trafic pe disc față de 65&ndash;99 GB. Acestea sunt coloanele de citit.</p>
 
@@ -158,11 +158,10 @@
     interiorul fiecărei runde, astfel încât anvelopa providerului - care variază de două până la
     trei ori de la un minut la altul - se anulează în loc să îl favorizeze pe cine s-a întâmplat să
     ruleze primul. Fiecare probă a pornit doar după ce o verificare în direct a arătat toate cele
-    șase servere autentificate, iar versiunile concurenților sunt cele publicate în prezent.
+    șase servere autentificate, iar versiunile concurenților erau cele publicate în acea zi.
     &sup1; rustnzb a tras 186.5 GB, cu 16.8 GB mai mult decât sarcina utilă, și nu a lăsat <b>niciun
     fișier de ieșire</b>; cifrele sale de disc sunt mici pentru că nu s-a produs niciodată nimic.
-    Aceasta reproduce un rezultat identic înregistrat împotriva lui mai devreme și decurge din
-    setarea sa documentată de a nu dezarhiva din mers. &middot; &sup2; memoria nzbfast urmează
+    Aceasta reproduce un rezultat identic înregistrat împotriva lui mai devreme. &middot; &sup2; memoria nzbfast urmează
     <em>bugetul configurat</em>, nu jobul: bugetul auto implicit a atins un vârf de 1.1 GB, iar
     limitat la <b>1 GB</b> același job tot se finalizează (vezi scara de memorie redusă mai jos).
     Într-o rundă anterioară de pe Coasta de Est (linie de ~2.4-3.0 Gbps), același scenariu a rulat
@@ -300,7 +299,7 @@
         <tr><td>linie inactivă (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast termină primul dintre clienții care livrează toate cele trei sarcini utile. ¹ Coloana rustnzb este un abandon, nu un rezultat: ceasul său s-a oprit primul (138 s pe 1.3.4, 125 s pe actualul 1.3.9, rulat ca să îi dăm cea mai bună șansă) pentru că a livrat sarcina de 35 GB ca volume ofuscate brute marcate <i>Completed</i> - fără redenumire, fără extragere, în ambele versiuni (vedeți secțiunea de urmărire de mai jos). O linie de sosire pe care nu a trecut-o nu poate fi comparată cu a clienților care au trecut-o, așa că fiecare celulă din acea coloană este marcată drept nevalidă, nu rapidă. SABnzbd lasă din nou linia <b>întunecată 63% din cursă</b> în timpul post-procesării seriale - singura cifră de aici care a rămas stabilă în fiecare variantă a acestui tabel. NZBGet nu stă niciodată degeaba, dar plătește extragerea concurentă în timpul său final. ² Propria noastră proporție de inactivitate este onestă și actuală, și este cifra care s-a mișcat cel mai mult: doi dintre cei șase furnizori au fost indisponibili în această rundă, iar suprapunerea între sarcini are nevoie de un server liber pe care să ruleze sarcina următoare - această măsurătoare a surprins motorul construind sarcina următoare pe unul mort, iar remedierea care a urmat face ceva mai bun decât să se retragă: când fiecare server liber refuză să răspundă, motorul împrumută o felie limitată de conexiuni de la serverele ocupate și păstrează suprapunerea. Retestat în anduranță pe 2 august 2026, în aceeași stare cu furnizori căzuți: golurile din mijlocul rulării care alcătuiau această celulă au dispărut (49 s de inactivitate între sarcini atunci, sub 6 s acum), cu sarcina următoare mergând în întregime pe conexiuni împrumutate. În varianta de reziliență (o sarcină cu anteturi RAR criptate, rundă mai veche), coada SABnzbd s-a blocat pe sarcina criptată și doar 1 din 3 sarcini a ajuns vreodată la capăt; nzbfast a parcat-o cu un mesaj clar și a terminat restul.</p>
+    <p class="note" style="text-align:start">nzbfast termină primul dintre clienții care livrează toate cele trei sarcini utile. ¹ Coloana rustnzb este un abandon, nu un rezultat: ceasul său s-a oprit primul (138 s pe 1.3.4, 125 s pe 1.3.9, cea mai nouă atunci, rulat ca să îi dăm cea mai bună șansă) pentru că a livrat sarcina de 35 GB ca volume ofuscate brute marcate <i>Completed</i> - fără redenumire, fără extragere, în ambele versiuni (vedeți secțiunea de urmărire de mai jos). O linie de sosire pe care nu a trecut-o nu poate fi comparată cu a clienților care au trecut-o, așa că fiecare celulă din acea coloană este marcată drept nevalidă, nu rapidă. SABnzbd lasă din nou linia <b>întunecată 63% din cursă</b> în timpul post-procesării seriale - singura cifră de aici care a rămas stabilă în fiecare variantă a acestui tabel. NZBGet nu stă niciodată degeaba, dar plătește extragerea concurentă în timpul său final. ² Propria noastră proporție de inactivitate este onestă și actuală, și este cifra care s-a mișcat cel mai mult: doi dintre cei șase furnizori au fost indisponibili în această rundă, iar suprapunerea între sarcini are nevoie de un server liber pe care să ruleze sarcina următoare - această măsurătoare a surprins motorul construind sarcina următoare pe unul mort, iar remedierea care a urmat face ceva mai bun decât să se retragă: când fiecare server liber refuză să răspundă, motorul împrumută o felie limitată de conexiuni de la serverele ocupate și păstrează suprapunerea. Retestat în anduranță pe 2 august 2026, în aceeași stare cu furnizori căzuți: golurile din mijlocul rulării care alcătuiau această celulă au dispărut (49 s de inactivitate între sarcini atunci, sub 6 s acum), cu sarcina următoare mergând în întregime pe conexiuni împrumutate. În varianta de reziliență (o sarcină cu anteturi RAR criptate, rundă mai veche), coada SABnzbd s-a blocat pe sarcina criptată și doar 1 din 3 sarcini a ajuns vreodată la capăt; nzbfast a parcat-o cu un mesaj clar și a terminat restul.</p>
   </div>
 </section>
 
@@ -721,7 +720,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Dezarhivarea directă tot materializează întâi volumele:
     2× scrieri și 2× disc. ⁵ rustnzb a livrat volume obfuscate marcate „Completed” în runda noastră
-    (dezarhivarea sa se și blochează cu unrar RARLab dacă nu e dezactivată). ⁶ GPL-3.0-or-later.
+    (dezarhivarea sa se și blochează cu unrar RARLab dacă nu e dezactivată). Măsurat pe 1.3.4 și 1.3.9; rustnzb a rezolvat asta în amonte în 1.4.5, așa că această celulă rămâne fixată pe build-urile cu care am rulat până când o rundă o înlocuiește. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; rândurile sale măsurate (verificare, extragere, disc, memorie) provin din runda
     noastră instrumentată din 31 iulie, iar celulele sale de capabilitate marcate cu „-” sunt funcții
     pe care nu le-am evaluat, nu absențe confirmate; vorbește un RPC compatibil cu NZBGet, prin care
@@ -857,8 +856,7 @@
     poate activa, a măsurat aceeași scădere: timpi de descărcare identici pe ambele versiuni, iar
     post-procesarea coboară de la verificarea par2 la nimic. Ceea ce cedează RC2 este chiar
     verificarea - pe un set nedeteriorat nu mai verifică datele deloc, în timp ce nzbfast verifică
-    fiecare bloc pe măsură ce sosește, fără o trecere suplimentară. Tabelele stabile de pe această
-    pagină păstrează 5.0.4 până la lansarea lui 5.1.0.</p>
+    fiecare bloc pe măsură ce sosește, fără o trecere suplimentară. Tabelele stabile de pe această pagină păstrează încă 5.0.4: 5.1.0 a apărut ca stabilă pe 10 august 2026, iar 5.1.1 după ea, așa că acele tabele sunt fixate pe un build depășit și cer o nouă rulare, nu o editare.</p>
 
     <p>rustnzb se mișcă cel mai repede dintre toți - cinci lansări între 1.3.4 fixat de noi (18 iulie) și 1.3.9 (28 iulie) - așa că am compilat 1.3.9 din sursă și l-am recurs în aceeași zi. Jurnalul său de modificări promite corecturi exact pentru ceea ce raportează tabelele noastre („fă extragerea directă fiabilă”, „respinge sarcinile finalizate fără ieșire utilizabilă”): măsurat, lansarea ofuscată de 35&nbsp;GB tot sosește ca volume brute marcate <i>gata</i>, atât la sarcina izolată, cât și în coadă. Ce s-a schimbat sunt costul și ritmul: timpi cu circa 10% mai rapizi, iar măcinarea care satura procesorul, măsurată pe 1.3.4, a lipsit din fiecare etapă pe 1.3.9 - deși o reluare a lui 1.3.4 în aceeași zi a măsurat tot jos, deci acel cost depinde de condiții, nu este rezolvat de versiune, și nu îl cităm nicăieri ca o cifră unică.</p>
 
@@ -897,7 +895,7 @@
   anterioare lucrărilor de motor de la sfârșitul lui iulie și subestimează versiunea curentă în loc
   să o flateze. Pregătim de asemenea fișiere de test ale căror NZB-uri le putem publica, astfel
   încât probele pe provideri să devină reproductibile independent, așa cum sunt deja cele pentru
-  plafonul clientului și pentru componente.</p>
+  plafonul clientului și pentru componente. Build-urile clienților au avansat de la aceste runde: SABnzbd a lansat 5.1.0 și apoi 5.1.1, iar rustnzb a rezolvat în 1.4.5 eșecul pe lansările obfuscate pe care tabelele noastre îl consemnează. Acele rulări noi sunt datorate, iar până atunci tabelele păstrează build-urile cu care au rulat.</p>
 </div></footer>
 
 </body>

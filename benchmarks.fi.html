@@ -58,7 +58,7 @@
     <h2>Koeasetelma</h2>
     <ul class="plain">
       <li><b>Asiakkaat:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, kaikki samalla koneella per skenaario (Apple M-sarjan koneet: ”Eurooppa” M1 Ultra 10&nbsp;GbE:llä, ”itärannikko” M3 Ultra ~2.4-3.0 Gbps -linja). Otsikkotason palveluntarjoajaosuudet (35, 77 ja 190 GB) mitattiin uudelleen 31. heinäkuuta 2026 julkaistulla nzbfast-käännöksellä kaikilla viidellä asiakkaalla, jokainen osuus TLS:n yli. Muutama vanhempi osuus on yhä jäljellä ja kertoo siitä itse; ne aliarvioivat julkaistun version sen sijaan että imartelisivat sitä.</li>
-      <li><b>Reiluus:</b> samat 6 palveluntarjoajaa × 8 yhteyttä, TLS kaikkialla, osuudet ajettu peräkkäin lomitettuina. Jokainen kilpailija viritetty dokumentoituun parhaimpaansa: SABnzbd sai <code>pipelining_requests=8</code> (<b>se toimitetaan arvolla 1, eli liukuhihnoittamattomana</b>; pelkkä tuo asetus vei sen 190 GB:n ajan 24m24s:stä 19m02s:iin), NZBGet sai ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb dokumentoidun määrityksensä.</li>
+      <li><b>Reiluus:</b> samat 6 palveluntarjoajaa × 8 yhteyttä, TLS kaikkialla, osuudet ajettu peräkkäin lomitettuina. Jokainen kilpailija viritetty dokumentoituun parhaimpaansa: SABnzbd sai <code>pipelining_requests=8</code> (<b>se toimitetaan arvolla 1, eli liukuhihnoittamattomana</b>; pelkkä tuo asetus vei sen 190 GB:n ajan 24m24s:stä 19m02s:iin), NZBGet sai ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb dokumentoidun määrityksensä. 10. ja 11. elokuuta 2026 ajetut kierrokset käyttivät kuuden sijaan viittä palveluntarjoajaa ja kertovat sen; viidestä tuli standardimme 20. elokuuta 2026, joten kuuden tarjoajan luku tällä sivulla ei ole suoraan verrattavissa uudempaan viiden tarjoajan lukuun.</li>
       <li><b>Lopputila:</b> varmistettu, purettu, käyttökelpoinen tiedosto, ei ”lataus valmis”. Sitä oikeasti odotat.</li>
       <li><b>Toistettavuus:</b> jokainen väite on päivätty ja mitattu samalla tavalla: kulunut aika + rajapinnan tavulaskurit + prosessipuun huippu-RSS, 1-2 s:n tarkkuudella. Kun osuus ajetaan julkisesti postatulla NZB:llä, nimeämme sen, jotta voit ajaa sen itse.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>Mitä työ sinulle maksaa, ja mitä jälkikäsittelyn muutos ei voi siirtää</h2>
     <p class="lead">Asiakkaat muuttuvat, ja muutos siinä, mitä asiakas tekee latauksen <em>jälkeen</em>, voi siirtää lopetusaikaa ilman että sen verkkopolku liikkuu lainkaan. Niin kävi elokuussa 2026, ja siksi jokainen tämän sivun taulukko nimeää nyt versiot, joita vastaan se ajettiin, ja päivän, jona se ajettiin. Mitä julkaisutiedote ei voi siirtää, on loppu laskusta: levylle kirjoitetut tavut, vapaa tila, jonka työ vaatii ennen kuin se edes käynnistyy, muisti, jota se pitää ajon ajan, ja se, tarkistettiinko data koskaan.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Hämärretty 34.5 GB:n julkaisu, jokainen asiakas uusimmassa käännöksessään</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>Hämärretty 34.5 GB:n julkaisu, jokainen asiakas uusimmassa käännöksessään (7. elokuuta 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>aika käyttökelpoiseen tiedostoon</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">ei käyttökelpoista tiedostoa&sup1;</td></tr>
         <tr><td>huippu-RSS</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>tarvittava vapaa tila</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ja rustnzb 1.3.9 7. elokuuta 2026: itärannikon M3 Ultra, kuusi palveluntarjoajaa, kaikki TLS:llä, kaksi ajoa asiakasta kohti, jälkimmäisessä järjestys käännettynä niin että linjan vaihtelu kumoutuu. &sup1; rustnzb siirsi 36 GB linjaa pitkin, ilmoitti työn valmiiksi ja jätti 1 GB:n arkiston osan ilman purettua videota, joten sen halvalta näyttävät solut ovat hinta siitä, ettei työ valmistunut.</p>
+    <p class="note" style="text-align:start"><b>Mitattu vastaan</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ja rustnzb 1.3.9 7. elokuuta 2026: itärannikon M3 Ultra, kuusi palveluntarjoajaa, kaikki TLS:llä, kaksi ajoa asiakasta kohti, jälkimmäisessä järjestys käännettynä niin että linjan vaihtelu kumoutuu. Kaikki neljä kilpailijan buildia ovat sittemmin vanhentuneet; nämä rivit säilyttävät ne buildit, joita vastaan ne ajettiin, ja ne ajetaan uudelleen sen sijaan että niitä muokattaisiin. &sup1; rustnzb siirsi 36 GB linjaa pitkin, ilmoitti työn valmiiksi ja jätti 1 GB:n arkiston osan ilman purettua videota, joten sen halvalta näyttävät solut ovat hinta siitä, ettei työ valmistunut.</p>
 
     <p><b>Mistä eromme tässä työssä oikeasti tulee.</b> Ajoimme SABnzbdin 5.1.0-vakaan samana iltana kun se julkaistiin, 10. elokuuta 2026. Sen oma historia jakaa työn lataukseen ja jälkikäsittelyajoon, ja tässä hämärretyssä julkaisussa lataus kestää <b>31 s</b> molemmilla kokeilluilla yhteysasetuksilla, mikä on nzbfastin koko aika samalla aineistolla, samana iltana, samalla linjalla. Emme siis lataa täällä sitä nopeammin emmekä väitä niin: nykyistä vakaata vastaan sen omalla parhaalla asetuksella ero on <b>+19%</b>, ja nuo +19% ovat sen jälkikäsittelyajo sekä käynnistys- ja kyselykulut, ei johto. Mihin jälkikäsittelyn muutos ei yllä, on kierroksen loppuosa: <b>241&ndash;334 MB</b> muistia vastaan 1,380&ndash;1,827 MB, ja <b>32.4 GB</b> levyliikennettä vastaan 65&ndash;99 GB. Nämä ovat ne sarakkeet, joita kannattaa lukea.</p>
 
@@ -157,11 +157,9 @@
     asiakasta ajettiin samana yönä samalla linjalla, vuorotellen asiakas kerrallaan jokaisen kierroksen
     sisällä, joten palveluntarjoajan vaihtelu - joka heiluu kaksin-kolminkertaiseksi minuutista toiseen -
     kumoutuu sen sijaan, että se suosisi sitä, joka sattui ajamaan ensin. Jokainen osuus käynnistettiin vasta,
-    kun reaaliaikainen tarkistus näytti kaikkien kuuden palvelimen kirjautuneen, ja kilpailijoiden käännökset
-    ovat nykyiset julkaistut versiot. &sup1; rustnzb veti 186.5 GB, 16.8 GB enemmän kuin hyötykuorma, eikä
+    kun reaaliaikainen tarkistus näytti kaikkien kuuden palvelimen kirjautuneen, ja kilpailijoiden käännökset olivat sinä päivänä julkaistut versiot. &sup1; rustnzb veti 186.5 GB, 16.8 GB enemmän kuin hyötykuorma, eikä
     jättänyt <b>lainkaan tulostetiedostoa</b>; sen levyluvut ovat pieniä, koska mitään ei koskaan syntynyt.
-    Tämä toistaa aiemmin sitä vastaan kirjatun identtisen tuloksen ja seuraa sen dokumentoidusta asetuksesta
-    olla purkamatta latauksen edetessä. &middot; &sup2; nzbfastin muisti
+    Tämä toistaa aiemmin sitä vastaan kirjatun identtisen tuloksen. &middot; &sup2; nzbfastin muisti
     seuraa sen <em>määritettyä budjettia</em>, ei työtä: oletusarvoinen autobudjetti huipentui 1.1 GB:iin, ja
     rajattuna <b>1 GB</b>:iin sama työ valmistuu yhä (katso vähämuistiporras alla). Aiemmalla itärannikon
     kierroksella (~2.4-3.0 Gbps -linja) sama skenaario ajoi 9m 00s vs. +30% ja +111%; ero pitää
@@ -296,7 +294,7 @@
         <tr><td>linja jouten (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast valmistuu ensimmäisenä niistä asiakasohjelmista, jotka toimittavat kaikki kolme hyötykuormaa. ¹ rustnzbin sarake on keskeytys, ei tulos: sen kello pysähtyi ensimmäisenä (138 s versiossa 1.3.4, 125 s nykyisessä 1.3.9:ssä, ajettuna sille parhaan mahdollisuuden antamiseksi), koska se toimitti 35 GB:n työn raakoina hämärrettyinä osina merkinnällä <i>Completed</i> - ei uudelleennimeämistä, ei purkua, molemmissa versioissa (katso seurantaosio alempana). Maalilinjaa, jota se ei ylittänyt, ei voi verrata asiakasohjelmiin, jotka ylittivät sen, joten jokainen tuon sarakkeen solu on merkitty pätemättömäksi eikä nopeaksi. SABnzbd jättää linjan jälleen <b>pimeäksi 63% ajosta</b> sarjamuotoisen jälkikäsittelyn aikana - ainoa tämän taulukon luku, joka on pysynyt vakaana jokaisessa leikkauksessa. NZBGet ei ole koskaan joutilaana mutta maksaa rinnakkaisen purkamisen loppuajassaan. ² Oma joutokäyntiosuutemme on rehellinen ja ajantasainen, ja se on luku, joka liikkui eniten: kaksi kuudesta palveluntarjoajasta ei ollut käytettävissä tällä kierroksella, ja töiden välinen limitys tarvitsee vapaan palvelimen, jolla seuraava työ ajetaan - tämä mittaus tavoitti moottorin rakentamassa seuraavaa työtä kuolleen palvelimen varaan, ja sitä seurannut korjaus tekee jotakin parempaa kuin vetäytymisen: kun yksikään vapaa palvelin ei vastaa, moottori lainaa rajatun siivun yhteyksiä kiireisiltä palvelimilta ja pitää limityksen. Mitattu uudelleen 2. elokuuta 2026 samassa kuolleiden palveluntarjoajien tilassa: kesken ajon syntyneet aukot, joista tämä solu muodostui, ovat poissa (49 s joutokäyntiä töiden välillä silloin, alle 6 s nyt), ja jatkotyö kulkee kokonaan lainatuilla yhteyksillä. Sietokykyvariantissa (yksi työ salatuin RAR-otsakkein, vanhempi kierros) SABnzbdin jono juuttui salattuun työhön ja vain 1 työ 3:sta valmistui koskaan; nzbfast pysäköi sen selkeällä viestillä ja sai loput valmiiksi.</p>
+    <p class="note" style="text-align:start">nzbfast valmistuu ensimmäisenä niistä asiakasohjelmista, jotka toimittavat kaikki kolme hyötykuormaa. ¹ rustnzbin sarake on keskeytys, ei tulos: sen kello pysähtyi ensimmäisenä (138 s versiossa 1.3.4, 125 s versiossa 1.3.9, tuolloin uusimmassa, ajettuna sille parhaan mahdollisuuden antamiseksi), koska se toimitti 35 GB:n työn raakoina hämärrettyinä osina merkinnällä <i>Completed</i> - ei uudelleennimeämistä, ei purkua, molemmissa versioissa (katso seurantaosio alempana). Maalilinjaa, jota se ei ylittänyt, ei voi verrata asiakasohjelmiin, jotka ylittivät sen, joten jokainen tuon sarakkeen solu on merkitty pätemättömäksi eikä nopeaksi. SABnzbd jättää linjan jälleen <b>pimeäksi 63% ajosta</b> sarjamuotoisen jälkikäsittelyn aikana - ainoa tämän taulukon luku, joka on pysynyt vakaana jokaisessa leikkauksessa. NZBGet ei ole koskaan joutilaana mutta maksaa rinnakkaisen purkamisen loppuajassaan. ² Oma joutokäyntiosuutemme on rehellinen ja ajantasainen, ja se on luku, joka liikkui eniten: kaksi kuudesta palveluntarjoajasta ei ollut käytettävissä tällä kierroksella, ja töiden välinen limitys tarvitsee vapaan palvelimen, jolla seuraava työ ajetaan - tämä mittaus tavoitti moottorin rakentamassa seuraavaa työtä kuolleen palvelimen varaan, ja sitä seurannut korjaus tekee jotakin parempaa kuin vetäytymisen: kun yksikään vapaa palvelin ei vastaa, moottori lainaa rajatun siivun yhteyksiä kiireisiltä palvelimilta ja pitää limityksen. Mitattu uudelleen 2. elokuuta 2026 samassa kuolleiden palveluntarjoajien tilassa: kesken ajon syntyneet aukot, joista tämä solu muodostui, ovat poissa (49 s joutokäyntiä töiden välillä silloin, alle 6 s nyt), ja jatkotyö kulkee kokonaan lainatuilla yhteyksillä. Sietokykyvariantissa (yksi työ salatuin RAR-otsakkein, vanhempi kierros) SABnzbdin jono juuttui salattuun työhön ja vain 1 työ 3:sta valmistui koskaan; nzbfast pysäköi sen selkeällä viestillä ja sai loput valmiiksi.</p>
   </div>
 </section>
 
@@ -713,7 +711,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Suora purku kirjoittaa osat silti ensin levylle:
     2× kirjoitusta ja 2× levyä. ⁵ rustnzb toimitti peiteltyjä osia merkittynä ”valmiiksi” kierroksellamme
-    (sen purku myös jumittuu RARLab unrarin kanssa, ellei sitä poisteta käytöstä). ⁶ GPL-3.0-or-later.
+    (sen purku myös jumittuu RARLab unrarin kanssa, ellei sitä poisteta käytöstä). Mitattu versioilla 1.3.4 ja 1.3.9; rustnzb korjasi tämän versiossa 1.4.5, joten tämä solu pysyy kiinnitettynä ajettuihin buildeihin, kunnes uusi kierros korvaa sen. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; sen mitatut rivit (varmistus, purku, levy, muisti) tulevat 31. heinäkuuta
     ajetusta instrumentoidusta kierroksesta, ja sen ”-”-merkityt kyvykkyyssolut ovat ominaisuuksia,
     joita emme ole arvioineet, eivät vahvistettuja puutteita; se puhuu NZBGet-yhteensopivaa RPC:tä,
@@ -850,8 +848,7 @@
     saman pudotuksen: identtiset latausajat molemmilla versioilla, ja jälkikäsittely putoaa
     par2-varmistuksesta olemattomiin. Se mistä RC2 luopuu on itse tarkistus - ehjällä
     aineistolla se ei enää varmista dataa lainkaan, kun taas nzbfast varmistaa jokaisen lohkon
-    sitä mukaa kuin se saapuu, ilman ylimääräistä läpimenoa. Tämän sivun vakaat taulukot
-    pitävät 5.0.4:n kunnes 5.1.0 julkaistaan.</p>
+    sitä mukaa kuin se saapuu, ilman ylimääräistä läpimenoa. Tämän sivun vakaat taulukot pitävät yhä 5.0.4:n: 5.1.0 julkaistiin vakaana 10. elokuuta 2026 ja 5.1.1 sen jälkeen, joten taulukot on kiinnitetty vanhentuneeseen buildiin ja ne on ajettava uudelleen, ei muokattava.</p>
 
     <p>rustnzb liikkuu nopeimmin kaikista - viisi julkaisua kiinnitetyn 1.3.4:n (18. heinäkuuta) ja 1.3.9:n (28. heinäkuuta) välillä - joten käänsimme 1.3.9:n lähdekoodista ja ajoimme sen uudelleen samana päivänä. Sen muutosloki lupaa korjauksia juuri siihen, mitä taulukkomme raportoivat (”tee suorasta purusta luotettava”, ”hylkää valmistuneet työt ilman käyttökelpoista tulosta”): mitattuna hämärretty 35&nbsp;GB:n julkaisu saapuu yhä raakoina osina merkinnällä <i>valmis</i>, sekä yksittäisessä työssä että jonossa. Mikä muuttui, on kustannus ja tahti: ajat noin 10% nopeampia, ja suorittimen kyllästävä jauhanta, jonka mittasimme versiossa 1.3.4, puuttui jokaiselta 1.3.9:n osuudelta - joskin saman päivän 1.3.4:n uusinta-ajo mittasi myös matalalta, joten tuo kustannus riippuu olosuhteista eikä ole version korjaama, emmekä esitä sitä missään yhtenä lukuna.</p>
 
@@ -889,7 +886,7 @@
   rivit) ovat heinäkuun loppupuolen moottorityötä vanhempia ja aliarvioivat nykyisen käännöksen sen
   sijaan että imartelisivat sitä. Valmistelemme myös testitiedostoja, joiden NZB:t voimme julkaista,
   jotta palveluntarjoajaosuuksista tulee itsenäisesti toistettavia samalla tavalla kuin
-  asiakaskatto- ja komponenttiosuuksista jo on.</p>
+  asiakaskatto- ja komponenttiosuuksista jo on. Asiakasohjelmien buildit ovat menneet näiden kierrosten jälkeen eteenpäin: SABnzbd julkaisi 5.1.0:n ja sitten 5.1.1:n, ja rustnzb korjasi versiossa 1.4.5 sen peiteltyjen julkaisujen epäonnistumisen, jonka taulukkomme kirjaavat. Nuo uusinta-ajot ovat velkaa, ja siihen asti taulukot pitävät ne buildit, joita vastaan ne ajettiin.</p>
 </div></footer>
 
 </body>

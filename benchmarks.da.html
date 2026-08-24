@@ -58,7 +58,7 @@
     <h2>Opsætningen</h2>
     <ul class="plain">
       <li><b>Klienter:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, alle på samme maskine pr. scenarie (Apple M-serie-maskiner: "Europa" M1 Ultra på 10&nbsp;GbE, "østkysten" M3 Ultra ~2.4-3.0 Gbps-linje). De vigtigste udbyderben (35, 77 og 190 GB) blev målt igen 31. juli 2026 på den udgivne nzbfast-build med alle fem klienter, hvert eneste ben over TLS. Et par ældre ben er tilbage og siger det selv; de undervurderer den udgivne build i stedet for at smigre den.</li>
-      <li><b>Fairness:</b> samme 6 udbydere × 8 forbindelser, TLS overalt, ben kørt ryg mod ryg og flettet. Hver konkurrent tunet til sit dokumenterede bedste: SABnzbd fik <code>pipelining_requests=8</code> (<b>den leveres med 1, dvs. upipelinet</b>; alene den indstilling bragte dens 190 GB-tid fra 24m24s til 19m02s), NZBGet fik ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb sin dokumenterede konfiguration.</li>
+      <li><b>Fairness:</b> samme 6 udbydere × 8 forbindelser, TLS overalt, ben kørt ryg mod ryg og flettet. Hver konkurrent tunet til sit dokumenterede bedste: SABnzbd fik <code>pipelining_requests=8</code> (<b>den leveres med 1, dvs. upipelinet</b>; alene den indstilling bragte dens 190 GB-tid fra 24m24s til 19m02s), NZBGet fik ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb sin dokumenterede konfiguration. Runderne den 10. og 11. august 2026 kørte fem udbydere i stedet for seks og siger det; fem blev vores standard den 20. august 2026, så et tal med seks udbydere på denne side kan ikke sammenlignes direkte med et nyere tal med fem.</li>
       <li><b>Sluttilstand:</b> en verificeret, udpakket, brugbar fil, ikke "download færdig". Det er det, du faktisk venter på.</li>
       <li><b>Reproducerbarhed:</b> hver påstand er dateret og målt på samme måde: forløbet tid + interface-byte-tællere + top-RSS for procestræet, 1-2 s opløsning. Hvor et ben kører på en offentligt lagt NZB, nævner vi den, så du selv kan køre den.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>Hvad et job koster dig, og hvad en ændret efterbehandling ikke kan flytte</h2>
     <p class="lead">Klienter ændrer sig, og en ændring i, hvad en klient gør <em>efter</em> download, kan flytte en sluttid, uden at dens netværkssti rører sig overhovedet. Det skete i august 2026, og derfor nævner hver tabel på denne side nu de versioner, den kørte mod, og den dag, den kørte. Det, en udgivelsesnote ikke kan flytte, er resten af regningen: de byte, der skrives til din disk, den frie plads, jobbet kræver, før det overhovedet starter, den hukommelse, det holder undervejs, og om dataene nogensinde blev kontrolleret.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Sløret 34.5 GB-udgivelse, hver klient i sit nyeste build</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>Sløret 34.5 GB-udgivelse, hver klient i sit nyeste build (7. august 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>tid til brugbar fil</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">ingen brugbar fil&sup1;</td></tr>
         <tr><td>maksimal hukommelse (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>nødvendig fri plads</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Målt mod</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 og rustnzb 1.3.9 den 7. august 2026: M3 Ultra på østkysten, seks udbydere, alt over TLS, to kørsler pr. klient med omvendt rækkefølge i den anden, så linjedrift ophæves. &sup1; rustnzb flyttede 36 GB over ledningen, meldte jobbet færdigt og efterlod en 1 GB arkivdel uden udpakket video, så dens billigt udseende celler er prisen for ikke at blive færdig.</p>
+    <p class="note" style="text-align:start"><b>Målt mod</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 og rustnzb 1.3.9 den 7. august 2026: M3 Ultra på østkysten, seks udbydere, alt over TLS, to kørsler pr. klient med omvendt rækkefølge i den anden, så linjedrift ophæves. Alle fire konkurrentbuilds er siden blevet afløst; disse rækker beholder de builds, de kørte imod, og køres om i stedet for at blive redigeret. &sup1; rustnzb flyttede 36 GB over ledningen, meldte jobbet færdigt og efterlod en 1 GB arkivdel uden udpakket video, så dens billigt udseende celler er prisen for ikke at blive færdig.</p>
 
     <p><b>Hvor vores forspring på det job faktisk ligger.</b> Vi kørte SABnzbds 5.1.0-stabile samme aften, som den udkom, den 10. august 2026. Dens egen historik deler et job op i en download og en efterbehandlingspassage, og på denne slørede udgivelse tager downloaden <b>31 s</b> ved begge de forbindelsesindstillinger, vi prøvede, hvilket er hele nzbfasts tid på samme korpus, samme aften, samme linje. Vi downloader altså ikke hurtigere end den her, og vi påstår det ikke: mod den aktuelle stabile ved dens eget bedste er afstanden <b>+19%</b>, og de +19% er dens efterbehandlingspassage plus opstarts- og forespørgselsomkostninger, ikke ledningen. Det, en ændring i efterbehandlingen ikke kan nå, er resten af runden: <b>241&ndash;334 MB</b> hukommelse mod 1,380&ndash;1,827 MB, og <b>32.4 GB</b> disktrafik mod 65&ndash;99 GB. Det er de kolonner, man skal læse.</p>
 
@@ -157,11 +157,9 @@
     klienter kørte samme nat på samme linje, skiftevis klient for klient inden for hver runde, så
     udbyder-konvolutten - som svinger to til tre gange fra minut til minut - udligner sig i stedet
     for at favorisere den, der tilfældigvis kørte først. Hvert ben startede først, efter at et
-    live-tjek viste alle seks servere autentificeret, og konkurrenternes builds er de aktuelle
-    udgivne. &sup1; rustnzb trak 186.5 GB, 16.8 GB mere end indholdet, og efterlod <b>slet ingen
+    live-tjek viste alle seks servere autentificeret, og konkurrenternes builds var de udgivne den dag. &sup1; rustnzb trak 186.5 GB, 16.8 GB mere end indholdet, og efterlod <b>slet ingen
     output-fil</b>; dens disktal er små, fordi der aldrig blev produceret noget. Det gentager et
-    identisk resultat målt mod den tidligere og følger af dens dokumenterede indstilling om ikke at
-    udpakke undervejs. &middot; &sup2; nzbfasts hukommelse følger sit <em>konfigurerede budget</em>,
+    identisk resultat målt mod den tidligere. &middot; &sup2; nzbfasts hukommelse følger sit <em>konfigurerede budget</em>,
     ikke jobbet: standard-auto-budgettet toppede på 1.1 GB, og begrænset til <b>1 GB</b> fuldføres
     samme job stadig (se lav-hukommelses-stigen nedenfor). På en tidligere østkyst-runde
     (~2.4-3.0 Gbps-linje) kørte samme scenarie 9m 00s mod +30% og +111%; forspringet holder på
@@ -296,7 +294,7 @@
         <tr><td>linje i tomgang (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast bliver færdig først blandt de klienter, der leverer alle tre nyttelaster. ¹ rustnzbs kolonne er en udgåen, ikke et resultat: dets ur stoppede først (138 s på 1.3.4, 125 s på det nuværende 1.3.9, kørt for at give det den bedste chance), fordi det afleverede 35 GB-jobbet som rå slørede arkivdele markeret <i>Completed</i> - ingen omdøbning, ingen udpakning, i begge versioner (se opfølgningsafsnittet længere nede). En målstreg, det ikke nåede, kan ikke sammenlignes med klienter, der gjorde, så hver celle i den kolonne er markeret ugyldig i stedet for hurtig. SABnzbd lader igen linjen ligge <b>mørk 63% af løbet</b> under seriel efterbehandling - det eneste tal her, der har stået stabilt gennem hver udgave af denne tabel. NZBGet hviler aldrig, men betaler den samtidige udpakning på sluttiden. ² Vores egen tomgangsandel er ærlig og aktuel, og det er det tal, der har flyttet sig mest: to af de seks udbydere var utilgængelige denne runde, og overlappet mellem job kræver en ledig server at køre det næste job på - denne måling fangede motoren i at bygge det næste job på en død server, og rettelsen, der fulgte, gør noget bedre end at trække sig: når hver ledig server nægter at svare, låner motoren en afgrænset skive forbindelser fra de travle og beholder overlappet. Kørt om igen 2. august 2026 i samme tilstand med døde udbydere: hullerne midt i løbet, som denne celle bestod af, er væk (49 s tomgang mellem job dengang, under 6 s nu), med det efterfølgende job kørende helt på lånte forbindelser. I modstandsdygtighedsvarianten (ét job med krypterede RAR-headere, ældre runde) satte SABnzbds kø sig fast på det krypterede job, og kun 1 af 3 job blev nogensinde færdigt; nzbfast parkerede det med en klar besked og gjorde resten færdigt.</p>
+    <p class="note" style="text-align:start">nzbfast bliver færdig først blandt de klienter, der leverer alle tre nyttelaster. ¹ rustnzbs kolonne er en udgåen, ikke et resultat: dets ur stoppede først (138 s på 1.3.4, 125 s på 1.3.9, det nyeste dengang, kørt for at give det den bedste chance), fordi det afleverede 35 GB-jobbet som rå slørede arkivdele markeret <i>Completed</i> - ingen omdøbning, ingen udpakning, i begge versioner (se opfølgningsafsnittet længere nede). En målstreg, det ikke nåede, kan ikke sammenlignes med klienter, der gjorde, så hver celle i den kolonne er markeret ugyldig i stedet for hurtig. SABnzbd lader igen linjen ligge <b>mørk 63% af løbet</b> under seriel efterbehandling - det eneste tal her, der har stået stabilt gennem hver udgave af denne tabel. NZBGet hviler aldrig, men betaler den samtidige udpakning på sluttiden. ² Vores egen tomgangsandel er ærlig og aktuel, og det er det tal, der har flyttet sig mest: to af de seks udbydere var utilgængelige denne runde, og overlappet mellem job kræver en ledig server at køre det næste job på - denne måling fangede motoren i at bygge det næste job på en død server, og rettelsen, der fulgte, gør noget bedre end at trække sig: når hver ledig server nægter at svare, låner motoren en afgrænset skive forbindelser fra de travle og beholder overlappet. Kørt om igen 2. august 2026 i samme tilstand med døde udbydere: hullerne midt i løbet, som denne celle bestod af, er væk (49 s tomgang mellem job dengang, under 6 s nu), med det efterfølgende job kørende helt på lånte forbindelser. I modstandsdygtighedsvarianten (ét job med krypterede RAR-headere, ældre runde) satte SABnzbds kø sig fast på det krypterede job, og kun 1 af 3 job blev nogensinde færdigt; nzbfast parkerede det med en klar besked og gjorde resten færdigt.</p>
   </div>
 </section>
 
@@ -711,7 +709,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Direkte udpakning materialiserer stadig volumenerne først:
     2× skrivninger og 2× disk. ⁵ rustnzb leverede obfuskerede volumener markeret "Completed" i vores runde
-    (dens udpakning hænger også med RARLab-unrar, medmindre den er slået fra). ⁶ GPL-3.0-or-later.
+    (dens udpakning hænger også med RARLab-unrar, medmindre den er slået fra). Målt på 1.3.4 og 1.3.9; rustnzb rettede det opstrøms i 1.4.5, så denne celle er fastholdt på de builds, vi kørte, indtil en ny runde erstatter den. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; dens målte rækker (verificering, udpakning, disk, hukommelse) kommer fra vores
     instrumenterede runde 31. juli, og dens formåen-celler markeret "-" er funktioner, vi ikke har
     vurderet, frem for bekræftede mangler; den taler en NZBGet-kompatibel RPC, som er den måde, vores
@@ -845,8 +843,7 @@
     samme fald: identiske downloadtider på begge versioner, og efterbehandling der falder fra
     par2-verifikationen til ingenting. Det, RC2 giver afkald på, er selve kontrollen - på et
     ubeskadiget sæt verificerer det slet ikke længere dataene, mens nzbfast verificerer hver blok,
-    efterhånden som den ankommer, uden et ekstra gennemløb. De stabile tabeller på denne side
-    beholder 5.0.4, indtil 5.1.0 udkommer.</p>
+    efterhånden som den ankommer, uden et ekstra gennemløb. De stabile tabeller på denne side har stadig 5.0.4: 5.1.0 udkom som stabil den 10. august 2026 og 5.1.1 efter den, så tabellerne er fastholdt på en afløst build og skal køres om, ikke redigeres.</p>
 
     <p>rustnzb bevæger sig hurtigst af alle - fem udgivelser mellem vores fastlåste 1.3.4 (18. juli) og 1.3.9 (28. juli) - så vi byggede 1.3.9 fra kildekoden og kørte det om samme dag. Dets ændringslog lover rettelser for præcis det, vores tabeller rapporterer (»gøre direkte udpakning pålidelig«, »afvise fuldførte job uden brugbart output«): målt ankommer den slørede 35&nbsp;GB-udgivelse stadig som rå arkivdele markeret <i>færdigt</i>, både på det enkelte job og i køen. Det, der ændrede sig, er omkostning og tempo: tider omkring 10% hurtigere, og den processormættende malen, vi målte på 1.3.4, manglede i hver etape på 1.3.9 - selv om en gentagelse af 1.3.4 samme dag også målte lavt, så den omkostning afhænger af forholdene frem for at være løst af versionen, og vi anfører den intet sted som ét enkelt tal.</p>
 
@@ -883,7 +880,7 @@
   lav-hukommelses-stigen, østkyst-rækkerne) ligger før arbejdet på motoren sidst i juli og
   undervurderer den nuværende build frem for at smigre den. Vi forbereder også testfiler, hvis
   NZB-filer vi kan offentliggøre, så udbyderbenene bliver uafhængigt reproducerbare på samme måde
-  som klientlofts- og komponentbenene allerede er.</p>
+  som klientlofts- og komponentbenene allerede er. Klientbuilds er rykket videre siden disse runder: SABnzbd udsendte 5.1.0 og derefter 5.1.1, og rustnzb rettede i 1.4.5 den fejl på obfuskerede udgivelser, som vores tabeller registrerer. De omkørsler skylder vi, og indtil de køres, beholder tabellerne de builds, de kørte imod.</p>
 </div></footer>
 
 </body>

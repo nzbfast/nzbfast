@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Warum es schnell ist</p>
-    <h2>Rund 97 % der Usenet-Downloads in einem einzigen Durchlauf</h2>
+    <h2>Rund 95 % der Usenet-Downloads in einem einzigen Durchlauf</h2>
     <p class="lead">Wir haben gemessen, was im Usenet tatsächlich gepostet wird, bevor wir
     entschieden haben, was wir optimieren, und eine Idee erledigt den Großteil der Arbeit.
     Alles davon ist im
@@ -78,9 +78,11 @@
         endgültigen Offsets geschrieben und aus denselben Puffern PAR2-geprüft. Das Archiv wird
         <i>während</i> des Downloads entpackt, seine Volumes existieren also nie als Dateien.
         Das gilt für einfache, <b>verschlüsselte</b>, verschachtelte und 7z-Archive, also
-        <a href="benchmarks.de.html#census">rund 97 % von allem, was gepostet wird, nach
-        Volumen</a>. Nur echt komprimierte Archive brauchen noch einen zweiten
-        Durchlauf.</p></div>
+        <a href="benchmarks.de.html#census">rund 95 % von allem, was gepostet wird, nach
+        Volumen</a>.
+        Echt komprimierte Archive werden ebenfalls schon beim Eintreffen entpackt und fallen
+        erst dann auf einen zweiten Durchlauf zurück, wenn der Satz zu groß ist, um ihn während
+        des Dekomprimierens im Speicher zu halten.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-Verfügbarkeit</h3>
         <p>Ein Artikel gilt erst als „fehlend“, wenn <i>jedes</i> konfigurierte Backbone ihn
         verweigert hat. Blockgenaue Buchführung entscheidet VOLLSTÄNDIG / REPARIERBAR / UNMÖGLICH,

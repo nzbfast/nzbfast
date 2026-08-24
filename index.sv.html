@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Varför den är snabb</p>
-    <h2>Ungefär 97 % av alla usenet-nedladdningar i ett enda pass</h2>
+    <h2>Ungefär 95 % av alla usenet-nedladdningar i ett enda pass</h2>
     <p class="lead">Vi mätte vad usenet faktiskt postar innan vi bestämde vad som skulle optimeras,
     och en enda idé gör det mesta av jobbet. Allt är uppmätt i
     <a href="benchmarks.sv.html">benchmark-loggen</a> med kommandon du kan köra om.</p>
@@ -77,8 +77,10 @@
         och PAR2-verifieras ur samma buffertar. Arkivet packas upp <i>under</i> nedladdningen,
         så dess volymer existerar aldrig som filer över huvud taget. Det gäller vanliga,
         <b>krypterade</b>, nästlade och 7z-arkiv, vilket är <a href="benchmarks.sv.html#census">ungefär
-        97 % av allt som postas, räknat i volym</a>. Bara genuint komprimerade arkiv
-        behöver fortfarande ett andra pass.</p></div>
+        95 % av allt som postas, räknat i volym</a>.
+        Även genuint komprimerade arkiv packas upp medan de kommer in, och faller tillbaka på
+        ett andra pass först när uppsättningen är för stor för att hållas i minnet medan den
+        packas upp.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union-tillgänglighet</h3>
         <p>En artikel räknas som "saknad" först när <i>varje</i> konfigurerad backbone har
         tackat nej. Blockexakt bokföring avgör COMPLETE, REPAIRABLE eller IMPOSSIBLE innan byte

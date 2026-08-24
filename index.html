@@ -67,7 +67,7 @@
 <section>
   <div class="wrap">
     <p class="kicker">Why it's fast</p>
-    <h2>About 97% of usenet downloads in a single pass</h2>
+    <h2>About 95% of usenet downloads in a single pass</h2>
     <p class="lead">We measured what usenet actually posts before deciding what to optimise,
     and one idea does most of the work. All of it is measured in
     <a href="benchmarks.html">the benchmark log</a> with commands you can re-run.</p>
@@ -77,8 +77,9 @@
         and PAR2-verified out of the same buffers. The archive is extracted <i>during</i> the
         download, so its volumes never exist as files at all. That holds for plain,
         <b>encrypted</b>, nested and 7z archives, which is <a href="benchmarks.html#census">about
-        97% of everything posted, by volume</a>. Only genuinely compressed archives still
-        need a second pass.</p></div>
+        95% of everything posted, by volume</a>. Genuinely compressed archives unpack as they
+        arrive too, and only fall back to a second pass when the set is too large to hold in
+        memory while it decompresses.</p></div>
       <div class="card"><span class="ic">🕸️</span><h3>Union availability</h3>
         <p>An article counts as "missing" only once <i>every</i> configured backbone has
         turned it down. Block-exact accounting calls the job COMPLETE, REPAIRABLE or

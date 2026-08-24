@@ -58,7 +58,7 @@
     <h2>De opzet</h2>
     <ul class="plain">
       <li><b>Clients:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, allemaal op dezelfde machine per scenario (Apple M-serie machines: "Europa" M1 Ultra op 10&nbsp;GbE, "oostkust VS" M3 Ultra ~2.4-3.0 Gbps-lijn). De providerlegs met de koppen (35, 77 en 190 GB) zijn op 31 juli 2026 opnieuw gemeten op de uitgeleverde nzbfast-build met alle vijf de clients, elke leg over TLS. Een paar oudere legs blijven staan en zeggen dat er ook bij; ze onderschatten de uitgeleverde build in plaats van hem te vleien.</li>
-      <li><b>Eerlijkheid:</b> dezelfde 6 providers × 8 verbindingen, overal TLS, legs afwisselend achter elkaar uitgevoerd. Elke concurrent afgesteld op z'n gedocumenteerde optimum: SABnzbd kreeg <code>pipelining_requests=8</code> (<b>standaard staat die op 1, dus ongepipelined</b>; alleen die instelling al bracht z'n 190 GB-tijd terug van 24m24s naar 19m02s), NZBGet kreeg ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb z'n gedocumenteerde config.</li>
+      <li><b>Eerlijkheid:</b> dezelfde 6 providers × 8 verbindingen, overal TLS, legs afwisselend achter elkaar uitgevoerd. Elke concurrent afgesteld op z'n gedocumenteerde optimum: SABnzbd kreeg <code>pipelining_requests=8</code> (<b>standaard staat die op 1, dus ongepipelined</b>; alleen die instelling al bracht z'n 190 GB-tijd terug van 24m24s naar 19m02s), NZBGet kreeg ArticleCache/DirectWrite/DirectUnpack/ParQuick, rustnzb z'n gedocumenteerde config. De rondes van 10 en 11 augustus 2026 draaiden vijf providers in plaats van zes en zeggen dat ook; vijf werd op 20 augustus 2026 onze standaard, dus een cijfer met zes providers op deze pagina is niet rechtstreeks vergelijkbaar met een nieuwer cijfer met vijf.</li>
       <li><b>Eindtoestand:</b> een geverifieerd, uitgepakt, bruikbaar bestand, niet "download klaar". Daar wacht je namelijk echt op.</li>
       <li><b>Reproduceerbaarheid:</b> elke claim is gedateerd en op dezelfde manier gemeten: verstreken tijd + interface-bytetellers + piek-RSS van de processtructuur, resolutie van 1-2 s. Waar een leg op een publiek geplaatste NZB draait, noemen we die erbij zodat u hem zelf kunt draaien.</li>
     </ul>
@@ -71,7 +71,7 @@
     <h2>Wat een taak je kost, en wat een verandering in nabewerking niet kan verschuiven</h2>
     <p class="lead">Clients blijven veranderen, en een verandering in wat een client <em>na</em> de download doet kan een eindtijd verschuiven zonder dat zijn netwerkpad ook maar beweegt. Dat gebeurde in augustus 2026, en daarom noemt elke tabel op deze pagina nu de versies waartegen hij liep en de dag waarop hij liep. Wat een release-notitie niet kan verschuiven is de rest van de rekening: de bytes die naar je schijf worden geschreven, de vrije ruimte die de taak eist voordat hij überhaupt start, het geheugen dat hij vasthoudt terwijl hij loopt, en of de data ooit is gecontroleerd.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Geobfusceerde release van 34.5 GB, elke client in zijn nieuwste build</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>Geobfusceerde release van 34.5 GB, elke client in zijn nieuwste build (7 augustus 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
       <tbody>
         <tr><td>tijd tot bruikbaar bestand</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">geen bruikbaar bestand&sup1;</td></tr>
         <tr><td>piekgeheugen (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
@@ -79,7 +79,7 @@
         <tr><td>benodigde vrije ruimte</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>Gemeten tegen</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.3.9 op 7 augustus 2026: M3 Ultra oostkust, zes providers, alles over TLS, twee runs per client met de volgorde omgedraaid bij de tweede zodat lijndrift wegvalt. &sup1; rustnzb verplaatste 36 GB over de lijn, meldde de taak als klaar en liet een archiefdeel van 1 GB achter zonder uitgepakte video; zijn zuinig ogende cellen zijn de prijs van niet afmaken.</p>
+    <p class="note" style="text-align:start"><b>Gemeten tegen</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 en rustnzb 1.3.9 op 7 augustus 2026: M3 Ultra oostkust, zes providers, alles over TLS, twee runs per client met de volgorde omgedraaid bij de tweede zodat lijndrift wegvalt. Alle vier de rivaliserende builds zijn inmiddels achterhaald; deze rijen behouden de builds waartegen ze liepen en worden opnieuw gedraaid in plaats van bewerkt. &sup1; rustnzb verplaatste 36 GB over de lijn, meldde de taak als klaar en liet een archiefdeel van 1 GB achter zonder uitgepakte video; zijn zuinig ogende cellen zijn de prijs van niet afmaken.</p>
 
     <p><b>Waar onze marge op die taak echt vandaan komt.</b> We hebben SABnzbds 5.1.0-stable laten lopen op de avond dat hij uitkwam, 10 augustus 2026. Zijn eigen geschiedenis splitst een taak in een download en een nabewerkingsronde, en op deze versluierde release duurt de download <b>31 s</b> bij allebei de verbindingsinstellingen die we probeerden, precies de hele looptijd van nzbfast op hetzelfde corpus, dezelfde nacht, dezelfde lijn. We downloaden hier dus niet sneller dan hij en beweren dat ook niet: tegen de huidige stable op zijn eigen beste instelling is het verschil <b>+19%</b>, en die +19% is zijn nabewerkingsronde plus opstart- en pollkosten, niet de lijn. Wat een verandering in nabewerking niet bereikt, is de rest van de ronde: <b>241&ndash;334 MB</b> geheugen tegen 1,380&ndash;1,827 MB, en <b>32.4 GB</b> schijfverkeer tegen 65&ndash;99 GB. Dat zijn de kolommen om te lezen.</p>
 
@@ -157,11 +157,9 @@
     vijf de clients draaiden dezelfde avond op dezelfde lijn, afwisselend client voor client binnen elke
     ronde, zodat de provider-envelop - die van minuut tot minuut twee- tot drievoudig beweegt - wegvalt
     in plaats van te bevoordelen wie toevallig als eerste draaide. Elke leg startte pas nadat een live
-    controle liet zien dat alle zes de servers geauthenticeerd waren, en de concurrerende builds zijn de
-    huidige uitgeleverde versies. &sup1; rustnzb haalde 186.5 GB binnen, 16.8 GB meer dan de payload, en
+    controle liet zien dat alle zes de servers geauthenticeerd waren, en de concurrerende builds waren de uitgeleverde versies van die dag. &sup1; rustnzb haalde 186.5 GB binnen, 16.8 GB meer dan de payload, en
     liet <b>helemaal geen uitvoerbestand</b> achter; z'n schijfcijfers zijn klein omdat er nooit iets is
-    geproduceerd. Dit reproduceert een identiek resultaat dat eerder tegen deze client is opgetekend, en
-    volgt uit z'n gedocumenteerde instelling om niet tijdens de download uit te pakken. &middot; &sup2;
+    geproduceerd. Dit reproduceert een identiek resultaat dat eerder tegen deze client is opgetekend. &middot; &sup2;
     het geheugen van nzbfast volgt z'n <em>ingestelde budget</em>, niet de taak: het standaard
     auto-budget piekte op 1.1 GB, en begrensd op <b>1 GB</b> voltooit dezelfde taak nog steeds (zie de
     low-memory-ladder hieronder). In een eerdere oostkust-VS-ronde (~2.4-3.0 Gbps-lijn) draaide
@@ -297,7 +295,7 @@
         <tr><td>lijn inactief (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">nzbfast is als eerste klaar onder de clients die alle drie de payloads leveren. ¹ De kolom van rustnzb is een opgave, geen resultaat: zijn klok stopte het eerst (138 s op 1.3.4, 125 s op het huidige 1.3.9, gereden om het zijn beste kans te geven) omdat het de taak van 35 GB afleverde als ruwe versluierde volumes gemarkeerd als <i>Completed</i> - geen hernoeming, geen uitpakken, in beide versies (zie het volgdeel hieronder). Een finish die het niet haalde valt niet te vergelijken met clients die dat wel deden, dus elke cel in die kolom is als ongeldig gemarkeerd in plaats van als snel. SABnzbd laat de lijn opnieuw <b>63% van de rit donker</b> tijdens seriële nabewerking - het enige cijfer hier dat stabiel is gebleven in elke versie van deze tabel. NZBGet ligt nooit stil maar betaalt het gelijktijdige uitpakken in zijn eindtijd. ² Ons eigen aandeel stilstand is eerlijk en actueel, en het is het cijfer dat het meest is bewogen: twee van de zes providers waren deze ronde niet beschikbaar, en overlap tussen taken heeft een vrije server nodig om de volgende taak op te draaien - deze meting betrapte de motor erop dat hij de volgende taak op een dode server opbouwde, en de fix die volgde doet iets beters dan terugtreden: wanneer elke vrije server weigert te antwoorden, leent de motor een begrensd deel van de verbindingen van de bezige servers en behoudt de overlap. Opnieuw doorgemeten op 2 augustus 2026 in dezelfde toestand met dode provider: de gaten halverwege de rit die deze cel vormden zijn weg (toen 49 s stilstand tussen taken, nu onder de 6 s), waarbij de vervolgtaak volledig op geleende verbindingen draait. In de veerkrachtvariant (één taak met versleutelde RAR-headers, oudere ronde) liep de wachtrij van SABnzbd vast op de versleutelde taak en werd maar 1 van de 3 taken ooit klaar; nzbfast parkeerde hem met een duidelijke melding en maakte de rest af.</p>
+    <p class="note" style="text-align:start">nzbfast is als eerste klaar onder de clients die alle drie de payloads leveren. ¹ De kolom van rustnzb is een opgave, geen resultaat: zijn klok stopte het eerst (138 s op 1.3.4, 125 s op 1.3.9, toen de nieuwste, gereden om het zijn beste kans te geven) omdat het de taak van 35 GB afleverde als ruwe versluierde volumes gemarkeerd als <i>Completed</i> - geen hernoeming, geen uitpakken, in beide versies (zie het volgdeel hieronder). Een finish die het niet haalde valt niet te vergelijken met clients die dat wel deden, dus elke cel in die kolom is als ongeldig gemarkeerd in plaats van als snel. SABnzbd laat de lijn opnieuw <b>63% van de rit donker</b> tijdens seriële nabewerking - het enige cijfer hier dat stabiel is gebleven in elke versie van deze tabel. NZBGet ligt nooit stil maar betaalt het gelijktijdige uitpakken in zijn eindtijd. ² Ons eigen aandeel stilstand is eerlijk en actueel, en het is het cijfer dat het meest is bewogen: twee van de zes providers waren deze ronde niet beschikbaar, en overlap tussen taken heeft een vrije server nodig om de volgende taak op te draaien - deze meting betrapte de motor erop dat hij de volgende taak op een dode server opbouwde, en de fix die volgde doet iets beters dan terugtreden: wanneer elke vrije server weigert te antwoorden, leent de motor een begrensd deel van de verbindingen van de bezige servers en behoudt de overlap. Opnieuw doorgemeten op 2 augustus 2026 in dezelfde toestand met dode provider: de gaten halverwege de rit die deze cel vormden zijn weg (toen 49 s stilstand tussen taken, nu onder de 6 s), waarbij de vervolgtaak volledig op geleende verbindingen draait. In de veerkrachtvariant (één taak met versleutelde RAR-headers, oudere ronde) liep de wachtrij van SABnzbd vast op de versleutelde taak en werd maar 1 van de 3 taken ooit klaar; nzbfast parkeerde hem met een duidelijke melding en maakte de rest af.</p>
   </div>
 </section>
 
@@ -712,7 +710,7 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Direct unpack materialiseert de volumes eerst alsnog:
     2× schrijven en 2× schijf. ⁵ rustnzb leverde geobfusceerde volumes gemarkeerd als "Completed" in onze
-    ronde (z'n uitpakken loopt bovendien vast met RARLab-unrar tenzij uitgeschakeld). ⁶ GPL-3.0-or-later.
+    ronde (z'n uitpakken loopt bovendien vast met RARLab-unrar tenzij uitgeschakeld). Gemeten op 1.3.4 en 1.3.9; rustnzb heeft dit upstream verholpen in 1.4.5, dus deze cel blijft vastgezet op de builds die we draaiden tot een ronde hem vervangt. ⁶ GPL-3.0-or-later.
     ⁷ Weaver v0.7.5; z'n gemeten rijen (verificatie, uitpakken, schijf, geheugen) komen uit onze
     geïnstrumenteerde ronde van 31 juli, en de cellen met "-" zijn functies die we niet hebben beoordeeld
     en niet bevestigde afwezigheden; het spreekt een NZBGet-compatibele RPC, waarmee onze testbank het
@@ -847,8 +845,7 @@
     aanslaan, mat dezelfde daling: identieke downloadtijden op beide versies, en nabewerking die
     terugvalt van de par2-verificatie naar niets. Wat RC2 opgeeft is de controle zelf - op een
     onbeschadigde set verifieert het de data helemaal niet meer, terwijl nzbfast elk blok
-    verifieert zodra het binnenkomt, zonder extra doorgang. De stabiele tabellen op deze pagina
-    houden 5.0.4 aan tot 5.1.0 verschijnt.</p>
+    verifieert zodra het binnenkomt, zonder extra doorgang. De stabiele tabellen op deze pagina houden nog 5.0.4 aan: 5.1.0 verscheen als stabiel op 10 augustus 2026 en 5.1.1 daarna, dus die tabellen zijn vastgezet op een achterhaalde build en moeten opnieuw gedraaid worden, niet bewerkt.</p>
 
     <p>rustnzb beweegt het snelst van allemaal - vijf uitgaven tussen ons vastgezette 1.3.4 (18 juli) en 1.3.9 (28 juli) - dus bouwden we 1.3.9 uit de broncode en reden het dezelfde dag opnieuw. Zijn wijzigingslijst belooft oplossingen voor precies wat onze tabellen melden („direct uitpakken betrouwbaar maken”, „voltooide taken zonder bruikbare uitvoer weigeren”): gemeten komt de versluierde release van 35&nbsp;GB nog steeds binnen als ruwe volumes gemarkeerd als <i>klaar</i>, zowel bij de losse taak als in de wachtrij. Wat wel veranderde zijn kosten en tempo: tijden ongeveer 10% sneller, en het processorverzadigende gemaal dat we op 1.3.4 maten ontbrak in elke etappe op 1.3.9 - al mat een herhaling van 1.3.4 dezelfde dag ook laag, dus die kosten hangen af van de omstandigheden in plaats van dat de versie ze heeft verholpen, en we noemen ze nergens als één cijfer.</p>
 
@@ -886,7 +883,7 @@
   legs (de wachtrijronde, de low-memory-ladder, de rijen van de oostkust VS) dateren van vóór het
   enginewerk van eind juli en onderschatten de huidige build in plaats van hem te vleien. We bereiden ook
   testbestanden voor waarvan we de NZBs kunnen publiceren, zodat de providerlegs onafhankelijk
-  reproduceerbaar worden zoals het clientplafond en de componentlegs dat al zijn.</p>
+  reproduceerbaar worden zoals het clientplafond en de componentlegs dat al zijn. De builds van de clients zijn sinds deze rondes verder gegaan: SABnzbd bracht 5.1.0 uit en daarna 5.1.1, en rustnzb verhielp in 1.4.5 de fout bij geobfusceerde releases die onze tabellen vastleggen. Die hernieuwde rondes staan open, en tot ze draaien houden de tabellen de builds die ze hebben gedraaid.</p>
 </div></footer>
 
 </body>
