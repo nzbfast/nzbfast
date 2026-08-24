@@ -135,7 +135,7 @@ fn a_bomb_verdict_forecloses_the_unpack_ladder() {
         // that arms the min-free hold, which returns the job to the
         // queue to wait for space it can never have enough of.
         assert!(
-            !crate::serve::job::disk_full_failure(&msg),
+            !crate::failkind::disk_full_failure(&msg),
             "a bomb must not be held for free space: {msg}"
         );
     }
@@ -184,7 +184,7 @@ fn a_bomb_verdict_forecloses_the_unpack_ladder() {
     );
     assert!(nzbkit::disk::bomb_verdict(&named), "{named}");
     assert!(
-        !crate::serve::job::disk_full_failure(&named),
+        !crate::failkind::disk_full_failure(&named),
         "a bomb must not be held for free space: {named}"
     );
 
@@ -228,7 +228,7 @@ fn a_bomb_verdict_forecloses_the_unpack_ladder() {
             "'{generic}' already reads as a bomb, so preferring the reason proves nothing"
         );
         assert!(
-            !crate::serve::job::disk_full_failure(generic),
+            !crate::failkind::disk_full_failure(generic),
             "'{generic}' would arm the min-free hold"
         );
         // The rule itself: a named reason wins, and nothing else does.

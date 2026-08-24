@@ -126,7 +126,7 @@ fn unpack_pass(
     // shape that pre-crediting `volume_bytes(sources)` broke, and why it
     // broke it on the commonest set of all.
     let budget = BombBudget::fixed(
-        crate::serve::free_bytes(dir)
+        crate::diskfree::free_bytes(dir)
             .map(|free| free.saturating_sub(EXTRACT_RESERVE))
             .unwrap_or(u64::MAX),
     );

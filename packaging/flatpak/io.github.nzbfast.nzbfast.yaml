@@ -141,8 +141,8 @@ modules:
       - install -Dm644 LICENSE -t /app/share/licenses/io.github.nzbfast.nzbfast
     sources:
       - type: archive
-        url: https://github.com/nzbfast/nzbfast/archive/refs/tags/v1.2.1.tar.gz
-        sha256: 5dc4514643ab79042498e1785ff4449258fb54dc436596ad55743c7c7f72caeb
+        url: https://github.com/nzbfast/nzbfast/archive/refs/tags/v1.2.2.tar.gz
+        sha256: 0d9ec7d5ddae0818f737cc506ed5dd30c09917966fa1805c333e7e4c1afbd4ed
         # `json` rather than `anitya`: nzbfast is not registered on
         # release-monitoring.org, and this needs no registration - it
         # reads the GitHub releases API directly. The tags carry a `v`

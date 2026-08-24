@@ -2018,7 +2018,14 @@ impl Shared {
     /// buffered (a ~0 ms sample); the floor keeps the budget honest
     /// against that collapse.
     fn ttfb_budget(&self, idx: usize) -> Duration {
-        Duration::from_millis(ttfb_budget_ms(self.ttfb_ms[idx].load(Ordering::Relaxed)))
+        let mut ms = ttfb_budget_ms(self.ttfb_ms[idx].load(Ordering::Relaxed));
+        // A sole-server fleet has nowhere to re-place a killed article,
+        // so it budgets against a doubled floor - see
+        // [`pacing::sole_server_floor_ms`] for the measurement.
+        if self.ttfb_ms.len() == 1 {
+            ms = ms.max(pacing::sole_server_floor_ms());
+        }
+        Duration::from_millis(ms)
     }
 
     /// TTFB-suspicion bound for a server (TODO 115): see

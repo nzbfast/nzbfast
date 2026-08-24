@@ -256,7 +256,16 @@ mod status_line_tests {
     /// it replaced.
     #[test]
     fn status_stays_small_enough_to_move() {
-        assert_eq!(std::mem::size_of::<Status>(), STATUS_INLINE + 16);
+        // The overhead over the inline buffer is a length and a
+        // discriminant-plus-padding word, so it is TWO POINTER WIDTHS
+        // and not a constant 16: that literal was the 64-bit answer
+        // written on a 64-bit box, and it took the `armv7-cross`
+        // nightly job red from 21 Aug 2026 (6514 of 6515 passing, this
+        // the only failure) where the same struct measures 96, not 104.
+        assert_eq!(
+            std::mem::size_of::<Status>(),
+            STATUS_INLINE + 2 * std::mem::size_of::<usize>()
+        );
         assert!(std::mem::size_of::<Status>() <= 128);
     }
 

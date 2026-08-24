@@ -224,7 +224,7 @@ pub(crate) fn forecast(dir: &Path, volume_bytes: u64, encrypted: bool) -> Foreca
         // OTHER finishing jobs have registered they still need on this
         // filesystem (`lanegate`); a job's own registration is excluded,
         // so the single-tail arithmetic is unchanged.
-        free: crate::serve::free_bytes(dir)
+        free: crate::diskfree::free_bytes(dir)
             .map(|f| f.saturating_sub(crate::lanegate::other_need(dir)))
             .unwrap_or(u64::MAX),
         volumes: volume_bytes,

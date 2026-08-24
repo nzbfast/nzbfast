@@ -223,8 +223,9 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
     // and sits this out; either way both take the default route to the
     // same link on any normal machine.
     let (link_host, link_port) = (probe_servers[0].host.clone(), probe_servers[0].port);
-    let mut link_probe =
-        tokio::task::spawn_blocking(move || crate::serve::probe_local_link(&link_host, link_port));
+    let mut link_probe = tokio::task::spawn_blocking(move || {
+        crate::locallink::probe_local_link(&link_host, link_port)
+    });
     print!(
         "network: probing {} server(s) for 8s on {conns} connections… ",
         probe_servers.len()

@@ -1067,7 +1067,7 @@ fn provider_rate_probe() {
                   &props=claims|labels|descriptions&languages=en|mul&ids=Q83495|Q42|Q1|Q2|Q3"
                 .to_string(),
         };
-        match crate::serve::shared_enrich_agent()
+        match crate::netfetch::shared_enrich_agent()
             .get(&url)
             .set("User-Agent", WIKI_UA)
             .timeout(std::time::Duration::from_secs(10))

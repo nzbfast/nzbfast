@@ -865,15 +865,30 @@ async fn prefer_external_unrar_setting_ignored_for_obfuscated_sets() {
         // println!s: logtee still ringed them, but bare and unfiltered,
         // so `NZBFAST_LOG=extract=info` could not turn them up and the
         // warnings were indistinguishable from progress.
-        let ring = http(port, "/api?mode=log&value=2000&apikey=sekrit&output=json", None);
-        assert!(
-            ring.contains("[extract] unpacking 1 obfuscated RAR set"),
-            "stamped [extract] line missing from the log ring:\n{ring}"
-        );
-        assert!(
-            ring.contains("[extract] native unpack complete"),
-            "stamped [extract] completion missing from the log ring:\n{ring}"
-        );
+        // UNIX ONLY, and the gate is the point rather than an
+        // exclusion. The ring is fed by the tee, and there is no tee on
+        // Windows BY DESIGN: `crates/nzbkit/src/logtee.rs` says so in
+        // as many words - nothing dup2s the process's own stdio onto a
+        // pipe over there, so `RING` is never populated, `active()` is
+        // always false, and `mode=log` answers
+        // `{"capturing":false,"lines":[]}` however well the extract
+        // went. The dashboard pane reads the daemon.log FALLBACK on
+        // Windows instead. Ungated, these two asserts asked Windows for
+        // a capability it does not have and took the whole
+        // `windows-daemon` nightly job red from 23 Aug 2026. The lines
+        // themselves are already proven above off the job log, which is
+        // the platform-neutral half of this test.
+        if cfg!(unix) {
+            let ring = http(port, "/api?mode=log&value=2000&apikey=sekrit&output=json", None);
+            assert!(
+                ring.contains("[extract] unpacking 1 obfuscated RAR set"),
+                "stamped [extract] line missing from the log ring:\n{ring}"
+            );
+            assert!(
+                ring.contains("[extract] native unpack complete"),
+                "stamped [extract] completion missing from the log ring:\n{ring}"
+            );
+        }
 
         fn find(dir: &Path, name: &str) -> bool {
             std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {

@@ -1060,7 +1060,7 @@ pub(crate) fn bomb_fallback<'a>(reasons: impl IntoIterator<Item = &'a str>) -> O
 /// keep at every site, and neither is visible from a literal: it has to
 /// CARRY [`nzbkit::disk::BOMB_VERDICT`] (so `bomb_verdict` still reads
 /// as true off a job failure quoted back into the ladder), and it must
-/// NOT read as a disk-full to [`crate::serve::job::disk_full_failure`]
+/// NOT read as a disk-full to [`crate::failkind::disk_full_failure`]
 /// (which arms the min-free hold and would requeue the job to wait for
 /// space it can never have enough of). `bomb_fallback` above is the
 /// demote-side site; [`crate::rarfix::try_unrar_spent_why`] is the two
@@ -1199,8 +1199,8 @@ mod main_tests {
         // Still Transport: the run was cut off, and with parity present a
         // retry can still finish it.
         assert_eq!(
-            crate::serve::fail_kind(&both),
-            crate::serve::FailKind::Transport
+            crate::failkind::fail_kind(&both),
+            crate::failkind::FailKind::Transport
         );
     }
 
@@ -1228,8 +1228,8 @@ mod main_tests {
         );
         assert!(dead.contains("no PAR2 recovery data"), "{dead}");
         assert!(dead.contains("another version is the answer"), "{dead}");
-        let kind = crate::serve::fail_kind(&dead);
-        assert_eq!(kind, crate::serve::FailKind::MissingArticles);
+        let kind = crate::failkind::fail_kind(&dead);
+        assert_eq!(kind, crate::failkind::FailKind::MissingArticles);
         assert!(
             kind.transient(),
             "this must stay retryable: a brand-new post 430s everywhere until it \
@@ -1273,8 +1273,8 @@ mod main_tests {
             "the message has to deny the inference it used to invite: {stalled}"
         );
         assert_eq!(
-            crate::serve::fail_kind(&stalled),
-            crate::serve::FailKind::Transport,
+            crate::failkind::fail_kind(&stalled),
+            crate::failkind::FailKind::Transport,
             "a stall must classify as Transport - MissingArticles reports the release \
              to the indexer as dead and makes the user sit out a propagation wait for \
              a fault on their own machine"
@@ -1307,8 +1307,8 @@ mod main_tests {
         );
         assert!(real.starts_with("download incomplete"), "{real}");
         assert_eq!(
-            crate::serve::fail_kind(&real),
-            crate::serve::FailKind::MissingArticles
+            crate::failkind::fail_kind(&real),
+            crate::failkind::FailKind::MissingArticles
         );
     }
 
@@ -1373,8 +1373,8 @@ mod main_tests {
         // the *arr health mapping key on it.
         assert!(msg.starts_with("download incomplete"), "{msg}");
         assert_eq!(
-            crate::serve::fail_kind(&msg),
-            crate::serve::FailKind::MissingArticles
+            crate::failkind::fail_kind(&msg),
+            crate::failkind::FailKind::MissingArticles
         );
 
         // Control: the identical run with every server present all the
@@ -1410,8 +1410,8 @@ mod main_tests {
         let whole = super::incomplete_reason(94, 0, &gone_shape(&[]));
         assert!(whole.starts_with("post is gone"), "{whole}");
         assert_eq!(
-            crate::serve::fail_kind(&whole),
-            crate::serve::FailKind::Gone
+            crate::failkind::fail_kind(&whole),
+            crate::failkind::FailKind::Gone
         );
 
         let short_quorum = super::incomplete_reason(94, 0, &gone_shape(&left));
@@ -1424,8 +1424,8 @@ mod main_tests {
             "{short_quorum}"
         );
         // And it keeps its retry: Gone never retries, MissingArticles does.
-        let kind = crate::serve::fail_kind(&short_quorum);
-        assert_eq!(kind, crate::serve::FailKind::MissingArticles);
+        let kind = crate::failkind::fail_kind(&short_quorum);
+        assert_eq!(kind, crate::failkind::FailKind::MissingArticles);
         assert!(kind.transient(), "{short_quorum}");
         assert!(
             !super::missing_articles_proven_stale(&short_quorum),
@@ -1474,8 +1474,8 @@ mod main_tests {
             "a plain 430 is not a takedown: {a}"
         );
         assert_eq!(
-            crate::serve::fail_kind(&a),
-            crate::serve::FailKind::Transport,
+            crate::failkind::fail_kind(&a),
+            crate::failkind::FailKind::Transport,
             "the indexer must not hear about a healthy release: {a}"
         );
 
@@ -1499,8 +1499,8 @@ mod main_tests {
             b.starts_with("post is gone"),
             "one transport failure on a parity article must not un-kill a dead post: {b}"
         );
-        let kind = crate::serve::fail_kind(&b);
-        assert_eq!(kind, crate::serve::FailKind::Gone);
+        let kind = crate::failkind::fail_kind(&b);
+        assert_eq!(kind, crate::failkind::FailKind::Gone);
         assert!(
             !kind.transient(),
             "a gone post must not spend the same minutes again: {b}"

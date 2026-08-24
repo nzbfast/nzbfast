@@ -1144,7 +1144,9 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
     // Ours, not SAB's, and off unless a client asks for it by name: a
     // row whose job is in a live pipeline state rides the page wherever
     // it sits in the queue. `pick_job` runs Force and High ahead of
-    // queue order and never MOVES the job (see `apply_priority`), so
+    // queue order, and skips paused, held and deferred rows wherever
+    // they sit (a priority WRITE moves its row now - see
+    // `reposition_for_priority` - but a pick does not), so
     // what is on the wire can be row 9000 of 15000 - and a client that
     // pages from the top would then draw "what is running" off a page
     // with nothing running in it. The dashboard sends this; no SAB
@@ -2133,13 +2135,22 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 // skipping it forever. That hold is precisely what
                 // the UI tells the user to raise the priority to
                 // release.
-                for j in d.queue.lock_ok().iter() {
+                let mut q = d.queue.lock_ok();
+                // Same two passes as the SAB facade's priority arm: the
+                // repositioning reorders the deque, so it runs after
+                // the pass that finds and writes the targets.
+                let mut moved: Vec<String> = Vec::new();
+                for j in q.iter() {
                     let mut g = j.lock_ok();
                     if ids.contains(&nzo_int(&g.nzo_id))
                         && super::api::queue::apply_priority(d, &mut g, prio)
                     {
                         ok = true;
+                        moved.push(g.nzo_id.clone());
                     }
+                }
+                for id in &moved {
+                    super::api::queue::reposition_for_priority(&mut q, id);
                 }
             }
             "HistoryDelete" | "HistoryFinalDelete" => {
@@ -2474,6 +2485,16 @@ pub(super) fn handle_jsonrpc(
         }
         "append" => jr_append(d, &params, &ua_hdr),
         "editqueue" => jr_editqueue(d, &params, &mut rpc_error),
+        // TODO 274 built the per-file listing the SAB side now serves
+        // as `mode=get_files`, and this arm STAYS an empty list rather
+        // than being filled from it. NZBGet's file handle is an integer
+        // in a queue-wide namespace, and the same integer is what its
+        // `editqueue` File* commands take - none of which this facade
+        // implements. Minting integers for a listing whose ids no
+        // command here accepts hands a client rows it cannot act on and
+        // a namespace we would then have to keep stable across
+        // restarts; the empty list is at least an honest answer to
+        // "what can I do per file over JSON-RPC", which is nothing.
         "listfiles" => json!([]),
         "postqueue" => json!([]),
         // We have one pause, covering the whole pipeline - there is no

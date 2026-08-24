@@ -1121,8 +1121,8 @@ fn watch_signature_follows_links_and_fails_closed() {
 #[cfg(any(unix, windows))]
 #[test]
 fn disk_stat_measures_the_volume_holding_a_path() {
-    let (free, total) =
-        super::disk_stat(&std::env::temp_dir()).expect("the temp dir is on a real filesystem");
+    let (free, total) = crate::diskfree::disk_stat(&std::env::temp_dir())
+        .expect("the temp dir is on a real filesystem");
     assert!(total > 0, "a mounted volume has a size");
     assert!(free <= total, "free {free} exceeds total {total}");
 }

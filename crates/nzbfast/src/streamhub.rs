@@ -283,6 +283,126 @@ pub(crate) struct StreamHub {
     /// A2 playback contract: what the byte-serving path has had to do
     /// for the player, for the mobile clients' health overlay.
     pub stream_stats: Arc<StreamStats>,
+    /// TODO 274 (issue #51): the ACTIVE run's per-file table, tagged
+    /// with its owning nzo_id exactly like `extractor` above and for the
+    /// same reason - the API reads it beside a job record it looked up
+    /// separately, so the tag is what stops one job's rows being
+    /// reported under another job's id across a transition.
+    ///
+    /// Reporting and promotion only. Everything in it is either an NZB
+    /// fact captured once at plan time or a handle the pipeline already
+    /// owns, so a reader takes no lock the download path waits on.
+    pub job_files: std::sync::Mutex<Option<(String, Arc<JobFiles>)>>,
+}
+
+/// The per-file surface `mode=get_files` reports and
+/// `mode=queue&name=promote_file` acts on, built once when the run
+/// publishes its control surfaces.
+///
+/// `rows` is in NZB file order and covers EVERY file the NZB declares,
+/// including the recovery volumes that were never scheduled - those
+/// carry `slot: None`, which is the honest answer for a file with no
+/// articles queued rather than a row left out of the listing.
+pub(crate) struct JobFiles {
+    pub(crate) rows: Vec<JobFileRow>,
+    /// Aligned with `SeekCtl::slot_articles`, so a row's `slot` indexes
+    /// both.
+    pub(crate) slots: Vec<Arc<crate::unpack::FileSlot>>,
+    /// The run's article ladder plus its queue handle: promotion is
+    /// `slot_articles[slot]` handed to `QueueControl::promote_opts`.
+    pub(crate) seek: Arc<SeekCtl>,
+}
+
+/// One NZB file as the API reports it - the parts that come from the
+/// NZB and never change, with the live counters reached through `slot`.
+pub(crate) struct JobFileRow {
+    /// Opaque, stable, and NOT the name: see `job_file_id`.
+    pub(crate) id: String,
+    /// The poster's filename hint, else the subject line.
+    pub(crate) name: String,
+    /// Encoded bytes as the NZB declares them - the unit the queue's own
+    /// denominator is quoted in.
+    pub(crate) bytes: u64,
+    pub(crate) segments: usize,
+    /// Index into `slots`, or None for an NZB-classified recovery volume
+    /// that was never given one.
+    pub(crate) slot: Option<usize>,
+}
+
+impl JobFiles {
+    /// Move every still-pending article of the file at `row` to the
+    /// front of the queue, and report how many moved.
+    ///
+    /// Best effort by construction, and that is the contract the API
+    /// promises rather than an implementation detail: `promote_opts`
+    /// reorders what is still PENDING and leaves in-flight work alone,
+    /// takes the queue mutex with a bounded try, and answers 0 rather
+    /// than waiting if it misses. A file whose articles have all been
+    /// issued therefore moves nothing, correctly.
+    ///
+    /// `engage_stream: false`, matching the extractor's offset-0 probe
+    /// rather than the player: engaging stream mode flips the whole pool
+    /// into shallow pipelines for the linger window, and a promote that
+    /// covers a whole file is not the latency-critical playhead read
+    /// that trade was measured for. Ordering is what the caller asked
+    /// for; pipeline depth is not.
+    ///
+    /// `None` when the row names a recovery volume with no slot - there
+    /// is no queued work to move, which is a different answer from
+    /// "moved nothing".
+    pub(crate) fn promote_row(&self, row: &JobFileRow) -> Option<usize> {
+        let slot = row.slot?;
+        let ids: Vec<Arc<str>> = self
+            .seek
+            .slot_articles
+            .get(slot)?
+            .0
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect();
+        Some(self.seek.ctl.promote_opts(&ids, false))
+    }
+}
+
+/// The opaque per-file handle the API hands out, as 16 lowercase hex.
+///
+/// A digest of the file's POSITION in the NZB plus its first
+/// message-id, and never the name: names in an NZB are neither unique
+/// nor stable (an obfuscated post has none worth the word), and keying
+/// a row by one is the defect `watch_fail_id` was written for - two
+/// indistinguishable rows, with iteration order deciding which one an
+/// action lands on. The position alone would not survive being read
+/// against a different NZB; the message-id alone repeats in a
+/// malformed post. Together they are unique within the job and
+/// identical whether derived from the spooled `.nzb` of a queued job or
+/// from the running plan, which is what lets a client list a job while
+/// it waits and promote once it starts.
+pub(crate) fn job_file_id(idx: usize, f: &nzbkit::nzb::NzbFile) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(idx.to_string().as_bytes());
+    h.update(b"\n");
+    h.update(
+        f.segments
+            .first()
+            .map(|s| s.message_id.as_bytes())
+            .unwrap_or_default(),
+    );
+    hex::encode(h.finalize())[..16].to_string()
+}
+
+/// The NZB-side half of a [`JobFileRow`], shared by the running job's
+/// table and the listing a QUEUED job answers straight from its spooled
+/// `.nzb` - both must produce the same id for the same file or a client
+/// that listed early cannot act later.
+pub(crate) fn job_file_row(idx: usize, f: &nzbkit::nzb::NzbFile) -> JobFileRow {
+    JobFileRow {
+        id: job_file_id(idx, f),
+        name: f.filename_hint().unwrap_or(f.subject.as_str()).to_string(),
+        bytes: f.bytes(),
+        segments: f.segments.len() + f.dropped_segments,
+        slot: None,
+    }
 }
 
 /// Counters the /stream read path keeps so a client can show WHY
@@ -346,6 +466,16 @@ impl StreamHub {
             Some(id) if id != owner => None,
             _ => Some(ex.clone()),
         }
+    }
+
+    /// TODO 274: the ACTIVE run's per-file table, when it belongs to
+    /// `owner` - same ownership rule as [`Self::extractor_for`], and the
+    /// same single-lock owner-check-and-clone, so a job transition can
+    /// never answer one job's `get_files` with another job's rows.
+    pub fn job_files_for(&self, owner: &str) -> Option<Arc<JobFiles>> {
+        let g = self.job_files.lock_ok();
+        let (tag, t) = g.as_ref()?;
+        (tag == owner).then(|| t.clone())
     }
 
     /// The late-attached password, when it belongs to `owner` - same

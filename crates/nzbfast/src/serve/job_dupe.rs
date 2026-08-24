@@ -50,24 +50,11 @@ pub(in crate::serve) fn exact_dupe_key(name: &str) -> String {
         .join(" ")
 }
 
-/// Reduce a release name to its bare letter/digit sequence, lowercased,
-/// with every separator and decoration collapsed to a single space.
-///
-/// Unicode-aware, and that is the whole point: an ASCII-only filter
-/// erased every non-Latin letter, so `電影甲.2024.1080p.WEB-DL.x264-GRP`
-/// and `電影乙.2024.1080p.WEB-DL.x264-GRP` reduced to the SAME key and
-/// collided as duplicates, while an all-CJK name reduced to the empty
-/// string - an identity so unspecific that the exact-duplicate check
-/// has to refuse it, so a genuine re-send of that release was admitted
-/// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
-/// they always did; `to_lowercase` differs from `to_ascii_lowercase`
-/// only on characters the old filter was deleting anyway.
-pub(crate) fn flatten_name(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect()
-}
+// `flatten_name` moved to `crate::smart` (TODO 276 item 3) - it is the
+// house release-name reduction and `newznab::release_ident` wanted it,
+// which made the indexer depend on the daemon. Re-exported so every
+// caller in here still spells it `flatten_name`.
+pub(crate) use crate::smart::flatten_name;
 
 pub(in crate::serve) fn dupe_key(name: &str) -> Option<String> {
     // Full non-alphanumeric flattening (not just ./_/-): friendly-named

@@ -256,7 +256,7 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
    cell rather than in .selcol, which is 26px and already holds the
    expander. Aligned to the text it selects, not to the row. */
 #ltable tr.grp .gsel{margin-inline-end:8px;vertical-align:middle}
-#ltable input[type=checkbox]{accent-color:var(--acc);margin:0;vertical-align:middle}
+#ltable input[type=checkbox]{accent-color:var(--acc);margin:0;vertical-align:middle;cursor:pointer}
 /* Under-name badge row: only facts the index holds (par2, source group,
    decoded). DrunkenSlug's pattern - extras ride as badges, not columns. */
 #ltable .brow{display:flex;gap:5px;margin-top:2px;overflow:hidden}
@@ -2894,6 +2894,10 @@ document.querySelector('#ltable thead').addEventListener('keydown',e=>{
 });
 document.querySelector('#ltable thead').addEventListener('click',e=>{
   if(e.target.closest('#selAll')) return;
+  // Whole header cell = the select-all box, same near-miss fix as the
+  // body cells; click() fires its change handler.
+  const hc=e.target.closest('th.selcol');
+  if(hc){ const c=hc.querySelector('#selAll'); if(c){ c.click(); } return; }
   const th=e.target.closest('th.sortable'); if(!th) return;
   const sel=document.getElementById('lsort');
   if(sel.value===th.dataset.lsort||
@@ -4169,6 +4173,16 @@ for(const id of ['wall','strips']) document.getElementById(id).addEventListener(
 // interpolated into an inline onclick JS-string, where an attacker-supplied
 // key with a quote could break out.
 document.getElementById('lbody').addEventListener('click', e=>{
+  // The whole select cell stands in for its ~13px checkbox - the same
+  // near-miss fix the dashboard's queue and history carry. click() on
+  // the input toggles it AND fires the delegated change handler above,
+  // so the selection set stays the single source of truth. Cells with
+  // no box (spot rows, expander cells) fall through untouched.
+  const sc=e.target.closest('td.selcol');
+  if(sc&&e.target.tagName!=='INPUT'){
+    const c=sc.querySelector('input[type=checkbox]');
+    if(c){ c.click(); return; }
+  }
   // Empty-state "Show incomplete": lift the filter through its own
   // change handler, so the cache invalidation there runs too.
   const a=e.target.closest('[data-show-inc]');

@@ -106,6 +106,7 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
                     base,
                     s.pin_connections,
                     apply_knees.then(|| store.get(&s.host)).flatten(),
+                    now,
                 )
             };
             json!({

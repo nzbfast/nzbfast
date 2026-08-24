@@ -135,7 +135,7 @@ fn url_for(query: &str) -> Option<String> {
 }
 
 fn fetch(url: &str) -> Vec<XrelRelease> {
-    match crate::serve::shared_enrich_agent()
+    match crate::netfetch::shared_enrich_agent()
         .get(url)
         .timeout(std::time::Duration::from_secs(10))
         .call()

@@ -1459,9 +1459,40 @@ fn mark_tls_full_host(host: &str) {
     tls_full_hosts().lock_ok().insert(host.to_string());
 }
 
-/// The trust anchors: webpki's built-in roots plus anything in
-/// `NZBFAST_EXTRA_CA`. Built once.
-fn tls_roots() -> rustls::RootCertStore {
+/// The PEM file the extra trust anchors are read from, or `None`:
+/// [`set_extra_ca`] first, then `NZBFAST_EXTRA_CA`. Both name a PATH -
+/// neither turns verification off, and no third spelling does either.
+fn extra_ca_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = extra_ca_override().lock_ok().clone() {
+        return Some(p);
+    }
+    std::env::var_os("NZBFAST_EXTRA_CA").map(std::path::PathBuf::from)
+}
+
+fn extra_ca_override() -> &'static std::sync::Mutex<Option<std::path::PathBuf>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Point the extra trust anchors at `path`, or clear them with `None`,
+/// without writing the environment.
+///
+/// Same anchors and the same opt-in-by-explicit-path rule as
+/// `NZBFAST_EXTRA_CA`, which this overrides while it is set. It exists
+/// because `std::env::set_var` is sound only where nothing else reads
+/// the environment, which `crates/nzbkit/tests/integration/` - one
+/// binary of twenty-odd modules on parallel threads, all reading
+/// `NZBFAST_*` - is not. Changing the anchors after a connection has
+/// been made takes effect: [`tls_client_config`] keys its cache on this
+/// path.
+pub fn set_extra_ca(path: Option<std::path::PathBuf>) {
+    *extra_ca_override().lock_ok() = path;
+}
+
+/// The trust anchors: webpki's built-in roots plus anything in the PEM
+/// file at `extra_ca`. Built once per distinct `extra_ca`.
+fn tls_roots(extra_ca: Option<&std::path::Path>) -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     // Extra trust anchors from a PEM file, ADDED to the webpki set,
@@ -1470,11 +1501,11 @@ fn tls_roots() -> rustls::RootCertStore {
     // (mockserve's self-signed cert). Opt-in by explicit path - this is
     // deliberately not a "skip verification" switch, which is the thing
     // that quietly ships and then never gets turned back off.
-    let Some(p) = std::env::var_os("NZBFAST_EXTRA_CA") else {
+    let Some(p) = extra_ca else {
         return roots;
     };
     use rustls::pki_types::pem::PemObject;
-    match rustls::pki_types::CertificateDer::pem_file_iter(&p) {
+    match rustls::pki_types::CertificateDer::pem_file_iter(p) {
         Err(e) => warn!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {e}"),
         Ok(it) => {
             let mut added = 0usize;
@@ -1508,16 +1539,29 @@ fn ktls_wanted() -> bool {
     }
 }
 
-/// One shared ClientConfig per suite policy, for the life of the
-/// process: rustls keeps its session ticket cache inside the config, so
-/// sharing it enables TLS session RESUMPTION on reconnects (abbreviated
-/// handshake - one less round-trip and no fresh key exchange per
-/// connection). Two of them, because the AES-128 offer needs a full-list
-/// fallback for any server that cannot do it.
+/// One shared ClientConfig per (suite policy, trust anchors), for the
+/// life of the process: rustls keeps its session ticket cache inside the
+/// config, so sharing it enables TLS session RESUMPTION on reconnects
+/// (abbreviated handshake - one less round-trip and no fresh key
+/// exchange per connection). Two suite policies, because the AES-128
+/// offer needs a full-list fallback for any server that cannot do it.
+///
+/// KEYED BY THE EXTRA-CA PATH, and that half is not an optimisation.
+/// This was two `OnceLock`s, so the FIRST caller to want a config
+/// latched the trust anchors for the whole process and every later one
+/// silently got them - a `tls_roots()` read that could never happen
+/// again, however the path changed underneath it. Production never
+/// notices, since it sets the path once before anything connects, which
+/// is exactly why nothing reported it: it surfaces only where two things
+/// in one process legitimately need different anchors, and there the
+/// second one simply cannot connect. A process pointed at N distinct CA
+/// paths holds up to 2N configs; production's N is 1.
 fn tls_client_config(pin_fast_suite: bool) -> Arc<rustls::ClientConfig> {
-    static LEAN: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
-    static FULL: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
-    let build = |pin_fast_suite: bool| {
+    type Key = (bool, Option<std::path::PathBuf>);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Key, Arc<rustls::ClientConfig>>>,
+    > = std::sync::OnceLock::new();
+    let build = |pin_fast_suite: bool, extra_ca: Option<&std::path::Path>| {
         // Name the crypto provider explicitly. The dependency tree links
         // BOTH aws-lc-rs and ring (a transitive dep pulled ring in), so
         // rustls can no longer auto-select a process default - plain
@@ -1529,7 +1573,7 @@ fn tls_client_config(pin_fast_suite: bool) -> Arc<rustls::ClientConfig> {
         )))
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports safe default protocol versions")
-        .with_root_certificates(tls_roots())
+        .with_root_certificates(tls_roots(extra_ca))
         .with_no_client_auth();
         // Kernel TLS needs the negotiated traffic secrets after the
         // handshake, and rustls will only part with them when it was
@@ -1539,11 +1583,17 @@ fn tls_client_config(pin_fast_suite: bool) -> Arc<rustls::ClientConfig> {
         cfg.enable_secret_extraction = ktls_wanted();
         Arc::new(cfg)
     };
-    if pin_fast_suite {
-        LEAN.get_or_init(|| build(true)).clone()
-    } else {
-        FULL.get_or_init(|| build(false)).clone()
+    let key: Key = (pin_fast_suite, extra_ca_path());
+    // Built under the lock, so two connects racing the same key build
+    // one config rather than two - which is the whole point of sharing
+    // it, since a second config would start with an empty ticket cache.
+    let mut cache = CACHE.get_or_init(Default::default).lock_ok();
+    if let Some(cfg) = cache.get(&key) {
+        return cfg.clone();
     }
+    let cfg = build(pin_fast_suite, key.1.as_deref());
+    cache.insert(key, cfg.clone());
+    cfg
 }
 
 /// Kernel TLS: after the rustls handshake, hand the traffic keys to the
@@ -3118,6 +3168,7 @@ impl Connection {
 #[cfg(test)]
 mod tls_provider_tests {
     use super::tls_provider;
+    use std::sync::Arc;
 
     fn is_chacha(s: &rustls::SupportedCipherSuite) -> bool {
         format!("{:?}", s.suite()).contains("CHACHA20")
@@ -3199,6 +3250,48 @@ mod tls_provider_tests {
         // Extractable traffic secrets are for kTLS and nothing else, so
         // a process that did not ask for kTLS must not have them.
         assert_eq!(cfg.enable_secret_extraction, super::ktls_wanted());
+    }
+
+    /// The cached config must follow the trust anchors, not latch them.
+    ///
+    /// Sharing one config per suite policy is what gets session
+    /// resumption, so the SAME anchors must still hand back the SAME
+    /// `Arc`: equality would pass on an implementation that rebuilt a
+    /// config every call and quietly lost the ticket cache, hence
+    /// `Arc::ptr_eq`. Two DIFFERENT anchors must hand back two configs;
+    /// before the key carried the path, the second caller got the first
+    /// one's roots and could not connect.
+    ///
+    /// The paths deliberately do not exist: `tls_roots` warns and
+    /// returns the plain webpki set for an unreadable file, so every
+    /// config here is equivalent to the default one and cannot affect a
+    /// neighbour in the same process. Cleared again at the end for the
+    /// same reason.
+    #[test]
+    fn the_config_cache_follows_the_trust_anchors() {
+        let dir = std::env::temp_dir();
+        let a = dir.join("nzbkit-no-such-ca-a.pem");
+        let b = dir.join("nzbkit-no-such-ca-b.pem");
+
+        super::set_extra_ca(Some(a.clone()));
+        let first = super::tls_client_config(true);
+        let again = super::tls_client_config(true);
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the same anchors must share one config, ticket cache included"
+        );
+
+        super::set_extra_ca(Some(b));
+        let other = super::tls_client_config(true);
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "different anchors must not be served the first caller's config"
+        );
+
+        super::set_extra_ca(Some(a));
+        let back = super::tls_client_config(true);
+        super::set_extra_ca(None);
+        assert!(Arc::ptr_eq(&first, &back), "the first config must survive");
     }
 
     /// The fallback path must stay a superset - it is what rescues a

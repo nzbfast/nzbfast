@@ -45,7 +45,7 @@
 //! PROCESS regardless of which binary it lives in, so these tests are as
 //! isolated from each other as they were when each had its own
 //! executable. What DOES change is a plain `cargo test -p nzbkit
-//! --test integration`, which now puts all 27 modules in one process -
+//! --test integration`, which now puts every module in one process -
 //! and that is a gain, not a risk: it is the only way the "test A leaves
 //! process-global state that test B reads" class is visible at all, the
 //! class CLAUDE.md's `unit-one-process` note exists for. Verified green
@@ -67,7 +67,7 @@
 //! numbers these three exist to produce would stop meaning anything.
 //! A test that instruments the allocator needs its own executable.
 //!
-//! AND FOUR STAY OUT BECAUSE THEY ASSERT ON PROCESS-GLOBAL PRODUCT
+//! AND THREE STAY OUT BECAUSE THEY ASSERT ON PROCESS-GLOBAL PRODUCT
 //! STATE, which is the second rule this merge discovered and the one
 //! worth reading before adding a `mod` line below.
 //!
@@ -80,7 +80,6 @@
 //! process; it simply had no way to be wrong while every target was
 //! its own executable. `rate_floor` asserts on the session-end census,
 //! also process-global, and read all zeros beside its neighbours.
-//! `tls` fails intermittently in-process under parallel threads.
 //!
 //! These pass under nextest either way, because nextest gives every
 //! test its own process - which is exactly why the coupling was
@@ -88,6 +87,29 @@
 //! shows it (CLAUDE.md's `unit-one-process` note is about this class).
 //! Do NOT "fix" one of these by merging it and running only nextest.
 //! A test whose subject is a process-global needs its own executable.
+//!
+//! `tls` WAS A FOURTH AND IS NOT ANY MORE, on 23 Aug 2026, and the
+//! difference is the reason this paragraph exists rather than a note
+//! saying it flakes. Its symptom was identical to the three above - red
+//! in-process under parallel threads, green under nextest - and its
+//! cause was not in the test at all. Both TLS modules bring a private
+//! CA, and `tls_client_config` cached the built config in two
+//! `OnceLock`s, so the FIRST connection anywhere in the process latched
+//! its trust anchors and every later one silently got them: a second CA
+//! was read, ignored, and could not connect. That is the client's
+//! defect, not the suite's, and it was never only about tests - an
+//! embedder pointing the client at a new CA after its first connection
+//! had exactly the same silence. The cache is keyed by the CA path now
+//! (see `tls_client_config` in `crates/nzbkit/src/nntp.rs`), the two
+//! modules take a guard from `tls_env` so that only one CA is in force
+//! at a time, and neither uses `std::env::set_var` any more - the
+//! `unsafe` on that call was justified by "the only test in this
+//! binary", which is a claim a merge falsifies.
+//!
+//! So the rule above is worth reading in both directions: ask whether
+//! the process-global belongs to the TEST or to the PRODUCT before
+//! concluding that the test needs its own executable. Three of these
+//! four really did own theirs. The fourth was reporting a bug.
 //!
 //! `conn_tuner` stays its own target on purpose: its
 //! `required-features = ["heavy-tests"]` gate (TODO 116b) is per-target,
@@ -134,4 +156,6 @@ mod provider_demote_rig;
 mod scoreboard_parity_measure;
 mod steer_rig;
 mod store_promote_cost;
+mod tls;
 mod tls_chaos;
+mod tls_env;

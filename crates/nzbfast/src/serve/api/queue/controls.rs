@@ -214,6 +214,45 @@ fn fire_delete_abort(d: &Arc<Daemon>, stopped: &[String]) -> bool {
 /// [`apply_pause`]: priority decides what starts NEXT, and clearing the
 /// deferral and health waiver on a finished record is meaningless. A
 /// held duplicate has never started, so that guard can never claim one.
+/// Move a job whose priority just changed to the position it will
+/// actually run in: the end of its new priority group (the first QUEUED
+/// row with a lower priority; rows that are not Queued - active,
+/// finishing - keep their place).
+///
+/// `pick_job` has always run Force and High ahead of queue order, but
+/// nothing moved the ROW - so the dashboard's ⏫ toasted "Downloads
+/// next" while the row sat exactly where it was, and the queue every
+/// client renders showed an order the scheduler was not going to
+/// follow. SAB moves the row on a priority write; now so do we. Both
+/// priority arms (the SAB facade and the JSON-RPC GroupSetPriority)
+/// call this after `apply_priority` lands, under the same queue lock.
+pub(in crate::serve) fn reposition_for_priority(
+    q: &mut std::collections::VecDeque<Arc<Mutex<Job>>>,
+    id: &str,
+) {
+    let Some(from) = q.iter().position(|j| j.lock_ok().nzo_id == id) else {
+        return;
+    };
+    let prio = {
+        let g = q[from].lock_ok();
+        // Only a queued row moves: the active download's position is
+        // where the work is, and the switch arm refuses to move it too.
+        if g.state != JobState::Queued {
+            return;
+        }
+        g.priority
+    };
+    let Some(job) = q.remove(from) else { return };
+    let to = q
+        .iter()
+        .position(|j| {
+            let o = j.lock_ok();
+            o.state == JobState::Queued && !o.tombstone && o.priority < prio
+        })
+        .unwrap_or(q.len());
+    q.insert(to, job);
+}
+
 pub(in crate::serve) fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) -> bool {
     if g.state == JobState::Completed || finishing_tail(d, g) {
         return false;

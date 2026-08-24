@@ -7,11 +7,13 @@ use super::ApiCtx;
 // histstore already call - a child module must not change a caller.
 mod caps;
 mod controls;
+mod files;
 mod payload;
 
 use caps::{cap_payload, planned_servers};
 pub(in crate::serve) use controls::{
-    apply_pause, apply_priority, note_queue_idle_unless_active, stop_deleted_transfer,
+    apply_pause, apply_priority, note_queue_idle_unless_active, reposition_for_priority,
+    stop_deleted_transfer,
 };
 use payload::{m_history, m_queue};
 
@@ -1654,6 +1656,12 @@ pub(in crate::serve) fn dispatch(
         // nothing else in the API forces the write, and the user's real
         // question ("did it stick this time?") had no way to be asked.
         "queue_save" => return m_queue_save(d, req, params, ctx, api_body),
+        // TODO 274 (issue #51): per-file inspection, SAB-shaped. The
+        // reporter builds one client against three backends, so the
+        // surface is `get_files` where SAB puts it and the file
+        // operation hangs off `mode=queue` where SAB puts its own -
+        // see api/queue/files.rs.
+        "get_files" => return files::m_get_files(d, req, params, ctx, api_body),
         "queue" => return m_queue(d, req, params, ctx, api_body),
         "history" => return m_history(d, req, params, ctx, api_body),
         "dashboard" => return m_dashboard(d, req, params, ctx, api_body),

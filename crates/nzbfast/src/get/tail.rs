@@ -1883,7 +1883,7 @@ mod tests {
     /// green while the chain was not.
     #[test]
     fn recovery_only_damage_keeps_its_retry() {
-        use crate::serve::{FailKind, fail_kind};
+        use crate::failkind::{FailKind, fail_kind};
         let d = tdir("recoveryonly");
         let msg = run_finish_recovery(&d, 0, 0, 4).unwrap_err().to_string();
         assert!(

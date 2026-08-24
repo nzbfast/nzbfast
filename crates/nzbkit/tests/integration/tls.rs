@@ -13,12 +13,17 @@
 //! whatever plaintext rustls had already decrypted (the greeting is
 //! nearly always in that flight).
 //!
-//! Its own test binary on purpose: the trust anchors are read from
-//! `NZBFAST_EXTRA_CA` exactly once per process, when the first
-//! `ClientConfig` is built, so a test that sets it has to be the only
-//! thing in the process that can build one.
+//! It brings its own CA, which is process-wide state: see
+//! `crate::tls_env`, whose guard is what keeps this module and
+//! `tls_chaos` from being each other's trust anchors. This file was its
+//! own test binary until 23 Aug 2026 for exactly that reason, and the
+//! reason turned out to be a defect in the client rather than a fact
+//! about tests - `tls_client_config` latched the anchors of whoever
+//! built the first config, so a second CA in the same process was
+//! silently ignored. The cache is keyed by the CA path now.
 
-mod scratch;
+use crate::scratch;
+use crate::tls_env;
 
 use std::sync::Arc;
 
@@ -77,11 +82,9 @@ async fn downloads_a_body_over_tls() {
     let _scratch = scratch::ScratchDir::attach(&dir);
     let (cert, key, ca) = cert_chain(&dir);
 
-    // SAFETY: this is the only test in this binary, and it runs before
-    // anything here has built a `ClientConfig` - the one thing that
-    // reads this variable. Nothing else in the process is reading the
-    // environment concurrently.
-    unsafe { std::env::set_var("NZBFAST_EXTRA_CA", &ca) };
+    // Ours for the rest of the test. The guard serialises this module
+    // against `tls_chaos`, which brings a CA of its own.
+    let _ca = tls_env::extra_ca(std::path::Path::new(&ca));
 
     let port = free_port();
     let set = Arc::new(BenchSet::new(1, 2 << 20, 128 << 10));

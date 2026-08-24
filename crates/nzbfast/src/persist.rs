@@ -232,7 +232,46 @@ pub(crate) fn load_json_config(path: &Path) -> Option<Value> {
 /// `block_in_place` would panic, so the closure just runs inline there,
 /// which is the old behaviour in the contexts where it was already
 /// fine.
+///
+/// THE BODY IS OUTLINED BEHIND `blocking_db_dyn`, AND THAT IS A COMPILE
+/// COST FIX, NOT A STYLE ONE (TODO 276, 24 Aug 2026). `block_in_place`
+/// is generic over the closure, so before this every instantiation of
+/// this function monomorphised tokio's ENTIRE task harness -
+/// `cancel_task<BlockingTask<Box<closure in block_in_place<closure in
+/// ...>>>>` and its whole vtable neighbourhood, about ninety symbols a
+/// site. The 12 generic `with_index*` helpers in
+/// `serve/daemon_index.rs` all call through here and have 264 call
+/// sites between them, which put 11,220 of the test binary's 21,629
+/// task-harness instantiations - 52% - and 2,767 KB of machine code
+/// into that one 1,904-line file, 11.5% of nzbfast's own text.
+///
+/// `&mut dyn FnMut()` is itself `FnMut`, so the outlined form gives
+/// `block_in_place` exactly ONE instantiation for the whole crate while
+/// the generic wrapper above keeps every caller's signature. Measured
+/// in CI's profile, control against treatment on one box: the
+/// `nzbfast "bin" (test)` unit 42.49 s -> 31.71 s of CPU, `nzbfast
+/// "bin"` 31.71 s -> 23.15 s, whole-build CPU 124.9 s -> 105.6 s, and
+/// `cargo nextest archive` (the exact CI step) -13.7% wall / -13.2%
+/// CPU at `-j4`, which is the runner's core count. Text symbols
+/// 129,355 -> 105,055.
+///
+/// DO NOT "SIMPLIFY" THIS BACK to a single generic body: it reads as
+/// one indirection too many and it is worth 13% of the CI build. The
+/// runtime cost is one indirect call in front of work whose next act is
+/// a SQLite transaction. The `Option` dance is what bridges the
+/// caller's `FnOnce` to the `FnMut` a `dyn` receiver needs; `take()`
+/// panics if anything ever calls the shim twice, which `block_in_place`
+/// does not.
 pub(crate) fn blocking_db<T>(f: impl FnOnce() -> T) -> T {
+    let mut f = Some(f);
+    let mut out: Option<T> = None;
+    blocking_db_dyn(&mut || out = Some((f.take().expect("shim called twice"))()));
+    out.expect("blocking_db_dyn did not run the closure")
+}
+
+/// The non-generic half of [`blocking_db`] - see its note for why the
+/// split exists and what it is worth.
+fn blocking_db_dyn(f: &mut dyn FnMut()) {
     match tokio::runtime::Handle::try_current() {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(f)

@@ -80,6 +80,7 @@ mod fault_contract;
 mod firstrun_key;
 mod groups_api;
 mod interests;
+mod job_files;
 mod library;
 mod log_daemon;
 mod log_lanes;

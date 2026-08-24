@@ -62,16 +62,44 @@ fi
 
 echo "2. the upload gate"
 # A leak the pattern scanner cannot see: an account name nobody listed.
-python3 - "$WORK" <<'PY'
-import subprocess, sys, os
+#
+# BUILT WITH python's tarfile, NOT by shelling out to tar, and that is
+# not a style preference. This block used to pass `--uid --gid --uname
+# --gname`, which is the BSDTAR spelling: build-linux-tarballs.sh picks
+# between that and GNU's `--owner=0 --group=0 --numeric-owner` by
+# sniffing `tar --version`, because the two dialects disagree. The test
+# hardcoded one side of that same fork, so it only ever worked on a Mac -
+# on the Linux runner GNU tar answers `unrecognized option '--uid'`, the
+# fixture is never created, and the four checks below fail as a CASCADE
+# off a missing file, none of them naming the real cause. Green on every
+# developer box and red in CI from the day it was wired in. tarfile
+# writes the member header fields directly, so there is no dialect to
+# get wrong and the fixture is identical on either platform.
+if ! python3 - "$WORK" <<'PY'
+import sys, os, tarfile
 work = sys.argv[1]
-subprocess.run(["tar", "--uid", "1001", "--gid", "1001",
-                "--uname", "runner", "--gname", "docker",
-                "-czf", os.path.join(work, "leak-linux-x64.tar.gz"),
-                "-C", os.path.join(work, "src"), "inner"],
-               check=True, env={**os.environ, "COPYFILE_DISABLE": "1"})
+src = os.path.join(work, "src", "inner", "f.txt")
+with tarfile.open(os.path.join(work, "leak-linux-x64.tar.gz"), "w:gz") as t:
+    ti = t.gettarinfo(src, arcname="inner/f.txt")
+    # The whole point of the fixture: an owner identity in the header.
+    ti.uid, ti.gid, ti.uname, ti.gname = 1001, 1001, "runner", "docker"
+    with open(src, "rb") as fh:
+        t.addfile(ti, fh)
 PY
+then
+    bad "could not build the leak fixture"
+    echo; echo "passed: $PASS  failed: $FAIL"; exit 1
+fi
 cp "$WORK/clean.tar.gz" "$WORK/ok-linux-x64.tar.gz"
+
+# Both fixtures must EXIST before the gate checks below mean anything.
+# Without this a fixture that failed to build becomes four failures that
+# all read as gate problems, which is how the dialect bug above went
+# unread in CI logs.
+for a in "$WORK/leak-linux-x64.tar.gz" "$WORK/ok-linux-x64.tar.gz"; do
+    [ -s "$a" ] || { bad "fixture missing: $(basename "$a")"
+                     echo; echo "passed: $PASS  failed: $FAIL"; exit 1; }
+done
 
 # Two things run BEFORE the owner gate. The scan-stamp check is one, and
 # is stamped for below. The other is the release-account check, the very

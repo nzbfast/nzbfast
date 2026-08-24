@@ -296,7 +296,9 @@ pub(crate) async fn get_with_progress(
     // The seek/promote ladder and the hub publish: see install_seek in
     // get/vrig.rs. slot_arts is taken - the SeekCtl owns it from here.
     let seek_names = install_seek(
+        &nzb,
         &slots,
+        &slot_file,
         &mut slot_arts,
         &queue_ctl,
         &abort_flag,

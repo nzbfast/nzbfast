@@ -136,7 +136,7 @@ pub(crate) fn unrar_would_bomb(
     password: Option<&str>,
 ) -> bool {
     let declared = declared_unpacked_size(volumes, password).unwrap_or(0);
-    let free = crate::serve::free_bytes(dir);
+    let free = crate::diskfree::free_bytes(dir);
     if !declared_exceeds_free(declared, free) {
         return false;
     }

@@ -617,6 +617,12 @@ pub(super) fn reset_hub_for_job(
     // happens to overwrite it - or forever, if the fetch
     // errors first or the daemon idles.
     *d.hub.seek.lock_ok() = None;
+    // TODO 274: and the per-file table, for the same reason twice over -
+    // it holds a strong SeekCtl (so the extractor graph again) and a
+    // strong Arc per FileSlot, which would pin the previous job's whole
+    // slot array. The owner tag already keeps a stale table from ever
+    // being READ against this job.
+    *d.hub.job_files.lock_ok() = None;
 }
 
 /// The pool-facing figures of a job, taken off the hub while the hub is

@@ -422,6 +422,63 @@ fn pick_job_priority_desc_then_fifo() {
 }
 
 #[test]
+fn priority_write_moves_the_row_to_its_run_position() {
+    with_daemon("priomove", |d| {
+        {
+            let mut q = d.queue.lock_ok();
+            let active = jv("dl", "active", serde_json::json!({"priority": 0}));
+            active.lock_ok().state = JobState::Downloading;
+            q.push_back(active);
+            q.push_back(jv(
+                "b",
+                "forced-earlier",
+                serde_json::json!({"priority": 2}),
+            ));
+            q.push_back(jv("a", "plain", serde_json::json!({"priority": 0})));
+            q.push_back(jv("c", "forced-now", serde_json::json!({"priority": 0})));
+        }
+        let order = |q: &std::collections::VecDeque<Arc<Mutex<Job>>>| -> Vec<String> {
+            q.iter().map(|j| j.lock_ok().nzo_id.clone()).collect()
+        };
+        // ⏫ on the last row: both priority arms write through
+        // apply_priority and then reposition. The row lands after the
+        // active download and the earlier Force job - exactly where
+        // pick_job will run it - instead of staying at the tail while
+        // the toast said "Downloads next".
+        {
+            let mut q = d.queue.lock_ok();
+            {
+                let job = q
+                    .iter()
+                    .find(|j| j.lock_ok().nzo_id == "c")
+                    .unwrap()
+                    .clone();
+                let mut g = job.lock_ok();
+                assert!(crate::serve::api::queue::apply_priority(d, &mut g, 2));
+            }
+            crate::serve::api::queue::reposition_for_priority(&mut q, "c");
+            assert_eq!(order(&q), ["dl", "b", "c", "a"]);
+            // The active row never moves, whatever is written.
+            crate::serve::api::queue::reposition_for_priority(&mut q, "dl");
+            assert_eq!(order(&q), ["dl", "b", "c", "a"]);
+            // Dropping a Force back to Normal sends it behind its new
+            // group's earlier arrivals, same rule downward.
+            {
+                let job = q
+                    .iter()
+                    .find(|j| j.lock_ok().nzo_id == "b")
+                    .unwrap()
+                    .clone();
+                let mut g = job.lock_ok();
+                assert!(crate::serve::api::queue::apply_priority(d, &mut g, 0));
+            }
+            crate::serve::api::queue::reposition_for_priority(&mut q, "b");
+            assert_eq!(order(&q), ["dl", "c", "a", "b"]);
+        }
+    });
+}
+
+#[test]
 fn pick_job_force_runs_through_a_queue_pause() {
     with_daemon("pickforce", |d| {
         {

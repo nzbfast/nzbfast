@@ -111,18 +111,48 @@ pub(super) async fn build_fleet(
     let live_tune = hub.as_ref().is_some_and(|h| {
         h.live_tune.load(std::sync::atomic::Ordering::Relaxed) || crate::conntune::live_tune_on()
     });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Would a stored knee cap this host, and how old is the number doing
+    // it? Both notes below need the same answer, so it is computed once.
+    // A pinned server is not capped, so it must not be announced as
+    // capped - these lines are the ONLY explanation a user gets for a
+    // number they did not choose, and printing one for a number they DID
+    // choose is worse than printing nothing.
+    let cap_state = |s: &nzbkit::config::ServerConfig| {
+        let t = tuned.get(&s.host)?;
+        let asked = crate::conntune::effective_limit(connections, s.connections);
+        (!s.pin_connections && !t.suspect && t.connections > 0 && t.connections < asked).then_some(
+            (
+                t,
+                asked,
+                crate::conntune::age_str(crate::conntune::age_secs(t, now)),
+            ),
+        )
+    };
     let tuned_note: Vec<String> = cfg_all
         .servers
         .iter()
         .filter_map(|s| {
-            let t = tuned.get(&s.host)?;
-            let asked = crate::conntune::effective_limit(connections, s.connections);
-            // A pinned server is not capped, so it must not be announced
-            // as capped - this line is the ONLY explanation a user gets
-            // for a number they did not choose, and printing it for a
-            // number they DID choose is worse than printing nothing.
-            (!s.pin_connections && !t.suspect && t.connections > 0 && t.connections < asked)
-                .then(|| format!("{} capped at {} of {asked}", s.host, t.connections))
+            let (t, asked, age) =
+                cap_state(s).filter(|(t, ..)| !crate::conntune::is_expired(t, now))?;
+            // Name the sample's AGE, always. This line used to end
+            // "(measured sweet spot)", which reads as the provider's
+            // verdict rather than as our own probe of it - and a knee is
+            // exactly as good as it is recent. A bench leg spent an hour
+            // on 23 Aug 2026 working out why a provider was granting 32
+            // before finding a fifteen-day-old entry saying so; the age
+            // was on disk the whole time and nothing ever printed it.
+            let overdue = match crate::conntune::is_stale(t, now) {
+                true => ", overdue for re-measurement",
+                false => "",
+            };
+            Some(format!(
+                "{} capped at {} of {asked}, probed {age} ago{overdue}",
+                s.host, t.connections
+            ))
         })
         .collect();
     // With the live controller on, the knee SEEDS instead of capping -
@@ -130,8 +160,32 @@ pub(super) async fn build_fleet(
     // pinned-server exclusion exists to avoid.
     if !live_tune && !tuned_note.is_empty() {
         let note = tuned_note.join(" · ");
-        info!(target: "tune", "connection auto-tune: {note} (measured sweet spot; \
-             Settings → Auto-tune connections turns this off)");
+        info!(target: "tune", "connection auto-tune: {note} (our own probe of this \
+             provider, not a limit it stated; Settings → Auto-tune connections turns \
+             this off)");
+    }
+    // The other half of the same honesty: a knee old enough to have
+    // stopped applying (`conntune::EXPIRE_SECS`) leaves the job on the
+    // user's own count. That is the right number and a SILENT change to
+    // one, so say which cap went away and how old it was - otherwise the
+    // next person to read conntune.json derives a cap that no longer
+    // governs, which is the mirror image of the trap above.
+    let expired_note: Vec<String> = cfg_all
+        .servers
+        .iter()
+        .filter_map(|s| {
+            let (t, asked, age) =
+                cap_state(s).filter(|(t, ..)| crate::conntune::is_expired(t, now))?;
+            Some(format!(
+                "{} measured {} connections {age} ago and nothing has re-measured it \
+                 since, so it is no longer capping: this job uses the {asked} you set",
+                s.host, t.connections
+            ))
+        })
+        .collect();
+    if !live_tune && !expired_note.is_empty() {
+        let note = expired_note.join(" · ");
+        info!(target: "tune", "connection auto-tune: {note}");
     }
     // Config is reloaded for every daemon job, while the warm pool lives
     // across jobs. Reconcile the cache before building the new fleet so
@@ -199,10 +253,6 @@ pub(super) async fn build_fleet(
         .unwrap_or(0);
     let line_share = crate::conntune::line_cap_share(cfg_all.servers.len());
     let seed_bucket = crate::conntune::bucket_of(crate::conntune::local_hour());
-    let seed_now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     let mut servers: Vec<_> = cfg_all
         .servers
         .iter()
@@ -215,19 +265,35 @@ pub(super) async fn build_fleet(
                 && !s.pin_connections
                 && share < base
             {
+                // §275 item 2: the escape this line names must be one a
+                // user can actually reach. It used to name only
+                // NZBFAST_LINE_CAP=0, an env var that needs a daemon
+                // restart; the designed per-server escape is the pin
+                // (it bypasses this cap, the conntune knee AND the live
+                // walker, all three guard on `pin_connections`), and it
+                // is a dashboard edit. Found the hard way on a
+                // giganews-only box whose 25-socket cap WAS the rate:
+                // cold giganews serves ~10-13 Mbps per connection, so
+                // the fleet cap held ~0.35 Gbps on a line that had
+                // recorded a 2.5 Gbps peak the same half hour.
                 info!(target: "tune", "line cap: {} {share} of {base} (fleet cap {line_cap} \
-                       across {} servers; NZBFAST_LINE_CAP=0 turns this off)",
+                       across {} servers; pin this server's connections in Settings to \
+                       lift it for that server, or NZBFAST_LINE_CAP=0 turns it off)",
                       s.host, cfg_all.servers.len());
                 base = share;
             }
-            let applied =
-                crate::conntune::applied_connections(base, s.pin_connections, tuned.get(&s.host));
+            let applied = crate::conntune::applied_connections(
+                base,
+                s.pin_connections,
+                tuned.get(&s.host),
+                now,
+            );
             let (conns, live_target) = match (live_tune && !s.pin_connections && base > 1, hub) {
                 (true, Some(h)) => {
                     let seed = crate::conntune::seed_connections(
                         seed_store.get(&s.host),
                         seed_bucket,
-                        seed_now,
+                        now,
                         base,
                     );
                     let t = h

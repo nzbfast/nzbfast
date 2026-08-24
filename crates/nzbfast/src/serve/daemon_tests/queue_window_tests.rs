@@ -66,8 +66,10 @@ fn seed(d: &Arc<Daemon>) {
             extra,
         );
         // The one on the wire, deliberately at the END of the queue:
-        // `pick_job` runs Force and High out of queue order and never
-        // moves the row, so this is a shape the real daemon reaches,
+        // `pick_job` runs Force and High out of queue order and skips
+        // paused, held and deferred rows wherever they sit (only a
+        // priority WRITE moves a row - `reposition_for_priority`), so
+        // this is a shape the real daemon reaches,
         // and it is the whole reason `pin_live` exists. Set on the job
         // rather than through the wire value - `job_from_json` reads a
         // persisted Downloading back as Queued on purpose (a job caught

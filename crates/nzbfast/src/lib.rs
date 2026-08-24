@@ -37,9 +37,17 @@ use tracing::info;
 mod chaos_serve;
 mod conntune;
 mod diag;
+// Free-space measurement, hoisted out of serve/ by TODO 276 item 3 so
+// eatvol, get, lanegate and rarfix can ask it without depending on the
+// daemon.
+mod diskfree;
 mod eatvol;
 #[cfg(feature = "indexer")]
 mod gates;
+// The failure-message classifier, hoisted out of serve/ by TODO 276
+// item 3 so `diag` (and everything under it) stops depending on the
+// daemon. Pure `&str` in, small value out.
+mod failkind;
 mod get;
 #[cfg(feature = "indexer")]
 mod groups;
@@ -53,8 +61,14 @@ mod interests;
 mod lanegate;
 // TODO 151 (issue #36): external list sources for the watchlist.
 mod listsrc;
+// Which interface carries our traffic and how fast it is. Hoisted out of
+// serve/ by TODO 276 item 3 so the CLI sysbench can ask without the daemon.
+mod locallink;
 pub mod logging;
 mod nettools;
+// Outbound HTTP for third-party URLs - the SSRF guard, the shared agents
+// and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
+mod netfetch;
 mod newznab;
 mod notify;
 #[cfg(feature = "indexer")]
@@ -73,6 +87,9 @@ mod scan;
 pub mod serve;
 mod setup;
 mod sfx;
+// Human size/rate strings ("900Mb" -> bytes). Hoisted out of serve/ by
+// TODO 276 item 3 - gates, rss and smart all parse them.
+mod sizes;
 mod smart;
 mod splitjoin;
 mod srrdb;

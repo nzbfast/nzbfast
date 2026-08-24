@@ -393,7 +393,7 @@ fn wikidata_candidates(years: (u32, u32), minutes: u32, lang: Option<&str>) -> S
     let sparql = wikidata_sparql(years, minutes, lang);
     ratelimit::acquire(Provider::WikidataQlever);
     let url = format!("{QLEVER}?query={}", percent_encode(&sparql));
-    let resp = crate::serve::shared_enrich_agent()
+    let resp = crate::netfetch::shared_enrich_agent()
         .get(&url)
         .set("Accept", "application/sparql-results+json")
         .timeout(std::time::Duration::from_secs(30))
@@ -551,7 +551,7 @@ fn tmdb_candidates(key: &str, years: (u32, u32), minutes: u32, lang: Option<&str
             url.push_str(&format!("&with_original_language={l}"));
         }
         ratelimit::acquire(Provider::Tmdb);
-        let body = match crate::serve::shared_enrich_agent()
+        let body = match crate::netfetch::shared_enrich_agent()
             .get(&url)
             .timeout(std::time::Duration::from_secs(15))
             .call()
@@ -673,7 +673,7 @@ const DETAIL_BUDGET: usize = 20;
 fn tmdb_runtime(key: &str, id: i64) -> Option<Option<u32>> {
     ratelimit::acquire(Provider::Tmdb);
     let url = format!("https://api.themoviedb.org/3/movie/{id}?api_key={key}");
-    let body = crate::serve::shared_enrich_agent()
+    let body = crate::netfetch::shared_enrich_agent()
         .get(&url)
         .timeout(std::time::Duration::from_secs(15))
         .call()

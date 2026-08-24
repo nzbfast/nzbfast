@@ -208,13 +208,23 @@ pub(super) async fn sample_one_group(
 /// AWAITS it, which is the only thing that makes that pass sequential;
 /// dropping it there is what put seven concurrent sockets on one account
 /// in the 23 Aug 2026 incident.
+///
+/// The handle resolves to true when the sample was refused for the
+/// ACCOUNT being out of connections (§275 item 4). The idle gate can
+/// only see this daemon's own downloads; a bench leg or another machine
+/// on the same account is invisible to it, and when that is what is
+/// holding the slots, every remaining group in the pass fails the same
+/// way. The 23-24 Aug 2026 log carried 301 `502 Too many connections`
+/// lines from exactly that - the pass marched the whole group list
+/// against an account a bench round was using. The awaiting caller
+/// breaks instead; the API caller drops the handle and never reads it.
 #[cfg(feature = "indexer")]
 pub(super) fn kick_group_sample(
     d: &Arc<Daemon>,
     config: PathBuf,
     group: String,
     posts: u64,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<tokio::task::JoinHandle<bool>> {
     {
         let mut inflight = d.group_sampling.lock_ok();
         if !inflight.insert(group.clone()) {
@@ -248,10 +258,31 @@ pub(super) fn kick_group_sample(
                 }
                 *d.group_stats.lock_ok() = next;
             }
-            Err(e) => info!(target: "groups", "sample of {group} failed: {e}"),
+            Err(e) => {
+                info!(target: "groups", "sample of {group} failed: {e}");
+                let limit = is_conn_limit_err(&e);
+                d.group_sampling.lock_ok().remove(&group);
+                return limit;
+            }
         }
         d.group_sampling.lock_ok().remove(&group);
+        false
     }))
+}
+
+/// Does this sample failure mean the ACCOUNT is out of connections?
+///
+/// NNTP 502 is the refusal providers use for a connection cap
+/// ("502 Too many connections."), and it surfaces here wrapped as
+/// "authentication failed: 502 ...". Matched on the code rather than
+/// the phrase because the phrase is the provider's own copy; 502 also
+/// covers "access denied" shapes, which is accepted - a pass that backs
+/// off an hour on a misclassified refusal costs 150 samples of
+/// housekeeping, where marching on against a capped account costs a
+/// refused dial per group.
+#[cfg(feature = "indexer")]
+pub(super) fn is_conn_limit_err(e: &str) -> bool {
+    e.contains("502")
 }
 
 /// Groups profiled per hourly tick by the background pass.
@@ -307,6 +338,30 @@ pub(super) fn should_burst_profiles(
     profiled < BURST_PROFILE_TARGET
         && burst_samples < BURST_MAX_SAMPLES
         && since_start_secs < BURST_WINDOW_SECS
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod conn_limit_tests {
+    use super::is_conn_limit_err;
+
+    /// §275 item 4: the shapes the pass must break on are the ones the
+    /// 23-24 Aug 2026 log actually carried, wrapped exactly as
+    /// `sample_one_group` surfaces them.
+    #[test]
+    fn the_pass_breaks_on_an_account_out_of_connections() {
+        assert!(is_conn_limit_err(
+            "authentication failed: 502 Too many connections."
+        ));
+        assert!(is_conn_limit_err("502 Access denied"));
+        // Everything else keeps the pass marching: these are per-group
+        // or transient, and the next group can still succeed.
+        assert!(!is_conn_limit_err("timed out"));
+        assert!(!is_conn_limit_err("411 no such newsgroup"));
+        assert!(!is_conn_limit_err("connection reset by peer"));
+        assert!(!is_conn_limit_err(
+            "authentication failed: 481 wrong password"
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "indexer"))]
@@ -442,7 +497,20 @@ pub(super) async fn sample_top_groups(d: &Arc<Daemon>, config: &Path, burst: boo
         // not a stuck one - and the tick loop sleeps its hour AFTER this
         // returns, so a long pass delays the next one rather than
         // stacking on it.
-        let _ = sample.await;
+        // §275 item 4: a connection-limit refusal ends the PASS, not
+        // just the sample. The account has no free slots and the idle
+        // gate cannot see who holds them (a bench leg, another machine),
+        // so the remaining groups would fail identically - 301 logged
+        // `502` lines across 23-24 Aug 2026 were this loop marching on.
+        // The next hourly tick retries; nothing is marked unsampleable.
+        if sample.await.unwrap_or(false) {
+            info!(
+                target: "groups",
+                "the account is out of connections (something else is using it); \
+                 ending this sampling pass, the next one retries in an hour"
+            );
+            break;
+        }
         done += 1;
         // Space them out. This is housekeeping, not a job - and when the
         // pool is downloading through the same account, housekeeping that

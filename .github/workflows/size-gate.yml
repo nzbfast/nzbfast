@@ -318,6 +318,7 @@ on:
       - 'packaging/flatpak/**'
       - 'tools/flatpak-pin-gate.py'
       - 'tools/harness-gate.py'
+      - 'tools/index-lock-gate.py'
       - 'web/i18n/manual-check.py'
       - 'web/i18n/site-check.py'
       - 'web/i18n/site-crosslink.py'
@@ -533,6 +534,25 @@ jobs:
       # fixture the call-shaped one does not, so nobody widens it back.
       - name: harness dead-item gate
         run: tools/harness-gate.py --selftest && tools/harness-gate.py
+  index-lock-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: index-lock-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # TODO 166: no HTTP worker may park unbounded on the index write
+      # mutex. Here rather than only in ci-private because this one fires
+      # on ordinary handler work - the sixteenth site was a Clear button -
+      # and a new site should be red on the AUTHOR's push, not on the next
+      # lane's. `--selftest` first: the gate's whole value is firing on a
+      # NEW site, and a scanner that quietly stops matching reports a clean
+      # tree forever, which is what nav-regen's dead picker arm did for
+      # months.
+      - name: index lock gate
+        run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
   manual-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

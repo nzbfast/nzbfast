@@ -130,7 +130,7 @@ fn fetch(crc: u32) -> (Option<SrrHit>, bool) {
     // Upper hex, no separator, as the endpoint's own examples write it.
     let url = format!("https://api.srrdb.com/v1/search/archive-crc:{crc:08X}");
     ratelimit::acquire(Provider::Srrdb);
-    let resp = crate::serve::shared_enrich_agent()
+    let resp = crate::netfetch::shared_enrich_agent()
         .get(&url)
         .timeout(std::time::Duration::from_secs(10))
         .call();

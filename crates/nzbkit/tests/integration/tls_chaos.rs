@@ -36,14 +36,13 @@
 //! carries the detail. A stalled session is now a named failure
 //! (`check_peer_classified`) rather than 30 s of anonymous wall.
 //!
-//! One test in this binary on purpose, like `tests/tls.rs`: the trust
-//! anchors are read from `NZBFAST_EXTRA_CA` exactly once per process,
-//! when the first `ClientConfig` is built, so the process that sets it
-//! cannot have another test racing that read. The four shapes run
-//! sequentially inside it and every verdict is collected, so one broken
-//! shape still reports the other three.
+//! One test, and the five shapes run sequentially inside it with every
+//! verdict collected, so one broken shape still reports the other four.
+//! It brings its own CA, which is process-wide state shared with the
+//! `tls` module - `crate::tls_env` is what orders the two.
 
 use crate::scratch;
+use crate::tls_env;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -629,10 +628,9 @@ fn tls_fault_shapes() {
     let _scratch = scratch::ScratchDir::attach(&dir);
     let certs = cert_chain(&dir);
 
-    // SAFETY: this is the only test in this binary and nothing here has
-    // built a `ClientConfig` yet - that is the one thing that reads this
-    // variable, once, for the life of the process.
-    unsafe { std::env::set_var("NZBFAST_EXTRA_CA", &certs.ca) };
+    // Ours for the rest of the test; see the guard's own file for why
+    // this is not `set_var` any more.
+    let _ca = tls_env::extra_ca(&certs.ca);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

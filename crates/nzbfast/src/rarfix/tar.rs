@@ -223,7 +223,7 @@ fn tar_pass(
     // Staging sits on the same filesystem as the job directory, so this
     // still measures the volume the payload lands on.
     let budget = BombBudget::fixed(
-        crate::serve::free_bytes(out)
+        crate::diskfree::free_bytes(out)
             .map(|free| free.saturating_sub(EXTRACT_RESERVE))
             .unwrap_or(u64::MAX),
     );

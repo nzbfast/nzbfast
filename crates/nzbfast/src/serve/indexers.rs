@@ -6,6 +6,10 @@
 //! only visibility changed.
 
 use super::*;
+// `redact_url_creds` moved to `crate::netfetch` (TODO 276 item 3); three
+// callers spell it `super::indexers::redact_url_creds`, so it is re-exported
+// by name here rather than only through the glob.
+pub(crate) use crate::netfetch::redact_url_creds;
 
 /// M35 pull-search runtime state, one lock for all of it: the caps
 /// cache, the per-day usage counters, limit backoffs, and the
@@ -335,84 +339,6 @@ pub(super) fn redact_apikey(s: &str) -> String {
             .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
             .unwrap_or(tail.len());
         rest = &tail[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Cut every URL in a message down to `scheme://host`, dropping userinfo,
-/// path and query.
-///
-/// [`redact_apikey`] guards the SEARCH path, where we built the URL and
-/// therefore know the credential is spelled `apikey=`. The GRAB path has
-/// no such guarantee: the NZB link comes out of the indexer's own XML,
-/// and sites spell their credential `apikey`, `api_key`, `r`, `i`, or
-/// put it in the path. Blanking one parameter name there is a guess.
-/// The host is the only part of such a URL worth showing a user anyway -
-/// it names who failed - so everything after it goes.
-///
-/// A URL is found by its `://`, not by the two lowercase spellings we
-/// happen to write ourselves. This used to search for `http://` and
-/// `https://` literally, which meant `HTTPS://idx.example/x?apikey=SECRET`
-/// went through untouched: the rest of the URL layer compares schemes
-/// with `eq_ignore_ascii_case` (`url_host`, `failure_link_allowed`), so a
-/// mixed-case link out of an indexer's `X-DNZB-FailureLink` header, or a
-/// feed URL an autocapitalising phone keyboard saved, passes every gate
-/// and dies in `fetch_head` - whose refusal names the WHOLE url and is
-/// logged, exported and returned to the browser. The same literal search
-/// left `ftp://user:pw@host/p` unredacted, which `set_feeds` accepts.
-pub(crate) fn redact_url_creds(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(sep) = rest.find("://") {
-        // Walk back over the scheme. RFC 3986 spells it
-        // ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) and every one of
-        // those is ASCII, so scanning bytes can never land mid-codepoint
-        // (these strings come out of response headers and indexer XML,
-        // so that matters).
-        let bytes = rest.as_bytes();
-        let mut p = sep;
-        while p > 0
-            && matches!(bytes[p - 1],
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.')
-        {
-            p -= 1;
-        }
-        // A scheme starts with a letter, so drop any leading digits or
-        // punctuation the walk-back picked up. It also stops at the
-        // first byte that cannot be in a scheme, so "failed at http://x"
-        // keeps its "failed at ".
-        while p < sep && !bytes[p].is_ascii_alphabetic() {
-            p += 1;
-        }
-        if p == sep {
-            // A bare `://` with no scheme in front of it is prose, not a
-            // URL. Copy it through and look past it.
-            out.push_str(&rest[..sep + 3]);
-            rest = &rest[sep + 3..];
-            continue;
-        }
-        out.push_str(&rest[..p]);
-        let url = &rest[p..];
-        let scheme_len = sep - p + 3;
-        // The authority ends at the first path/query/fragment character,
-        // or at whatever ends the URL inside a longer sentence.
-        let after = &url[scheme_len..];
-        let end = after
-            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
-            .unwrap_or(after.len());
-        let authority = &after[..end];
-        // Userinfo (user:pass@host) is a credential too.
-        let host = authority.rsplit('@').next().unwrap_or(authority);
-        out.push_str(&url[..scheme_len]);
-        out.push_str(host);
-        // Anything else attached to the URL is dropped, up to whitespace.
-        let tail = &after[end..];
-        let stop = tail.find(char::is_whitespace).unwrap_or(tail.len());
-        if stop > 0 {
-            out.push_str("/...");
-        }
-        rest = &tail[stop..];
     }
     out.push_str(rest);
     out

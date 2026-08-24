@@ -2281,6 +2281,31 @@ fn a_pre_byte_timeout_widens_past_the_budget_that_expired() {
     assert_eq!(ttfb_budget_ms(escalated_ttfb_ms(1_000)), 8_000);
 }
 
+/// §275 item 5: a sole-server fleet budgets against a doubled floor,
+/// because its pre-byte kill has no other server to re-place the
+/// article on - it re-dials the same provider and pays a handshake to
+/// repeat the question. Watched live 24 Aug 2026 on a giganews-only
+/// daemon: 972 of 1,002 reconnects in one job were "our pre-byte
+/// budget" against a provider whose cold-spool articles take seconds
+/// to first byte.
+#[test]
+fn a_sole_server_fleet_budgets_against_a_doubled_floor() {
+    let min = ADAPTIVE_FIRST_BYTE_MIN.as_millis() as u64;
+    let max = ADAPTIVE_FIRST_BYTE_MAX.as_millis() as u64;
+    // Double the floor, still inside the ceiling.
+    assert_eq!(sole_server_floor_ms(), (2 * min).min(max));
+    assert!(sole_server_floor_ms() <= max);
+    // The application is max(), so a budget the EWMA already carried
+    // above the doubled floor is untouched - only floor-bound budgets
+    // move. (The max() itself lives in Shared::ttfb_budget; what is
+    // pinned here is the two numbers it chooses between.)
+    assert!(ttfb_budget_ms(5_000).max(sole_server_floor_ms()) == ttfb_budget_ms(5_000));
+    assert_eq!(
+        ttfb_budget_ms(1).max(sole_server_floor_ms()),
+        sole_server_floor_ms()
+    );
+}
+
 #[test]
 fn session_backoff_grows_then_caps() {
     let cfg = PoolConfig {

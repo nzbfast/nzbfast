@@ -304,25 +304,40 @@ pub(crate) fn try_rar_rr_repair_hinted_why(
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
     }
-    if try_unrar_spent_why(dir, password).is_ok() {
+    let first = try_unrar_spent_why(dir, password);
+    if first.is_ok() {
         return Ok(());
     }
-    // Deliberately NOT `return Err(why)` here, even on a named one. This
-    // rung has a SECOND attempt below and the control flow is unchanged
-    // by §249 item 1 - only the reason it carries out is new. Ending the
-    // rung on a first-pass verdict was written and backed out: it is
-    // defensible (the pass below rewrites volumes and hands them to an
-    // engine that just refused for want of space, which is the rule
-    // `unpack::unpack_named_rar` states for the rungs below IT), but it
-    // is a behaviour change that would fail a job the second pass can
-    // still save. The narrow case is real: the hint can be wrong, and a
-    // volume it wrongly vouched for is exactly what the second pass
-    // repairs. So the second attempt's answer is the one that goes out,
-    // as it always was, and the disk-fill question is registered in §249
-    // rather than settled in passing.
+    // Nothing was skipped, so there is no second pass to run and no
+    // better-informed answer coming: this attempt's reason IS the rung's
+    // reason. It used to be dropped for a bare `Err(None)` here, which
+    // made §249 item 1's plumbing unreachable on the blind form - and the
+    // blind form is the ONLY one `unpack::unpack_named_rar` calls, so a
+    // bomb verdict raised by the named-RAR arm's third rung never once
+    // reached a job message. Measured 24 Aug 2026 by
+    // `daemon_bomb::a_bomb_on_the_recovery_record_rung_reaches_the_job_message`,
+    // which is red against this line restored: the job read "an archive
+    // in the output directory could not be unpacked" while the console
+    // three lines up named the disk. That is the same wrong blame §249
+    // and the 22 Aug 2026 incident are about, one rung further down.
+    //
+    // The HINTED form keeps the old behaviour below, and deliberately.
     if stats.skipped.is_empty() {
-        return Err(None);
+        return first.map(|_| ());
     }
+    // Deliberately NOT `return first.map(|_| ())` here, even on a named
+    // reason. This rung has a SECOND attempt below and the control flow
+    // is unchanged by §249 item 1 - only the reason it carries out is
+    // new. Ending the rung on a first-pass verdict was written and
+    // backed out: it is defensible (the pass below rewrites volumes and
+    // hands them to an engine that just refused for want of space, which
+    // is the rule `unpack::unpack_named_rar` states for the rungs below
+    // IT), but it is a behaviour change that would fail a job the second
+    // pass can still save. The narrow case is real: the hint can be
+    // wrong, and a volume it wrongly vouched for is exactly what the
+    // second pass repairs. So the second attempt's answer is the one
+    // that goes out, as it always was, and the disk-fill question is
+    // registered in §249 rather than settled in passing.
     // The hint was wrong somewhere (or the damage sits in a volume it
     // vouched for - a write that never landed reads differently from
     // the bytes the verifier saw). Full pass over what was skipped.

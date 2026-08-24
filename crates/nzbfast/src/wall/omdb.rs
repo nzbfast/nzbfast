@@ -256,7 +256,7 @@ pub fn omdb_signup(email: &str) -> Result<(), String> {
         // The same shared agent the GET below rides, so the whole
         // three-round-trip WebForms dance reuses one connection rather
         // than handshaking afresh for each postback.
-        crate::serve::shared_enrich_agent()
+        crate::netfetch::shared_enrich_agent()
             .post(URL)
             .set("Content-Type", "application/x-www-form-urlencoded")
             .timeout(std::time::Duration::from_secs(15))
@@ -265,7 +265,7 @@ pub fn omdb_signup(email: &str) -> Result<(), String> {
             .into_string()
             .map_err(|e| e.to_string())
     };
-    let mut page = crate::serve::shared_enrich_agent()
+    let mut page = crate::netfetch::shared_enrich_agent()
         .get(URL)
         .timeout(std::time::Duration::from_secs(15))
         .call()

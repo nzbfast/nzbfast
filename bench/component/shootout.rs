@@ -423,7 +423,28 @@ fn main() {
             }
             let entry = voldir.join(sh.entry);
             let want = expected.get(sh.payload).expect("manifest key");
-            for tool in &tools {
+            // Rotate the tool order by round. THE POSITION IN THE ROUND IS
+            // WORTH ~1.5% AND A FIXED ORDER HANDS ALL OF IT TO THE SAME ARM.
+            // Measured 23 Aug 2026 by racing prodrar against a byte-identical
+            // COPY of itself, 15 rounds on the solid shape: the arm that ran
+            // first won 6 of 15 and its median leg was 1.0165x the second
+            // arm's, on 1.450 against 1.433 at the minimum. Identical
+            // binaries. The mechanism is the leg that precedes yours - the
+            // first arm starts while the previous leg's 1 GB output is still
+            // being torn down by APFS, the second arm does not - and the
+            // prewarm cannot undo it because prewarm runs OUTSIDE the timed
+            // region. It is far below the 1.2x-5x margins this rig publishes
+            // against other extractors, which is why it went unnoticed, and
+            // it is the same size as an our-build-versus-our-build delta,
+            // which is what it broke: a two-arm A/B read off this harness
+            // with a fixed order reported a 2-5% regression on solid that
+            // instruction counts then showed did not exist (the newer build
+            // retires 0.14% FEWER instructions at level cycles and RSS).
+            // Rotation is by round index rather than randomised so a rerun
+            // of the same command is still the same experiment.
+            let order: Vec<&String> =
+                tools.iter().cycle().skip(round % tools.len()).take(tools.len()).collect();
+            for tool in order {
                 let bin = bins.get(tool).cloned().unwrap_or_else(|| tool.clone());
                 let out = work.join(format!("out-{}-{}", sh.name, tool));
                 let _ = fs::remove_dir_all(&out);

@@ -216,7 +216,7 @@ pub fn tmdb_lookup(api_key: &str, kind: &Kind, title: &str, year: u32) -> Option
         return None;
     }
     ratelimit::acquire(Provider::Tmdb);
-    let resp = match crate::serve::shared_enrich_agent()
+    let resp = match crate::netfetch::shared_enrich_agent()
         .get(&url)
         .timeout(std::time::Duration::from_secs(10))
         .call()
@@ -283,7 +283,7 @@ fn get_json(p: Provider, url: &str) -> Option<serde_json::Value> {
         return None;
     }
     ratelimit::acquire(p);
-    let resp = match crate::serve::shared_enrich_agent()
+    let resp = match crate::netfetch::shared_enrich_agent()
         .get(url)
         .timeout(std::time::Duration::from_secs(10))
         .call()
@@ -802,7 +802,7 @@ fn get_json_ua(p: Provider, url: &str) -> Option<serde_json::Value> {
     const BACKOFF_SECS: [u64; 2] = [5, 15];
     for attempt in 0..=BACKOFF_SECS.len() {
         ratelimit::acquire(p);
-        match crate::serve::shared_enrich_agent()
+        match crate::netfetch::shared_enrich_agent()
             .get(url)
             .set("User-Agent", WIKI_UA)
             .timeout(std::time::Duration::from_secs(10))
@@ -1176,7 +1176,7 @@ pub fn anilist_lookup(title: &str) -> Option<TitleMeta> {
         return None;
     }
     ratelimit::acquire(Provider::AniList);
-    let resp = match crate::serve::shared_enrich_agent()
+    let resp = match crate::netfetch::shared_enrich_agent()
         .post("https://graphql.anilist.co")
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(10))
@@ -1263,7 +1263,7 @@ fn get_json_paced(p: Provider, url: &str) -> Option<serde_json::Value> {
     const BACKOFF_SECS: [u64; 3] = [5, 15, 30];
     for attempt in 0..=BACKOFF_SECS.len() {
         ratelimit::acquire(p);
-        match crate::serve::shared_enrich_agent()
+        match crate::netfetch::shared_enrich_agent()
             .get(url)
             .set("User-Agent", WIKI_UA)
             .timeout(std::time::Duration::from_secs(10))
@@ -1672,7 +1672,7 @@ pub fn parse_imdb_ratings(tsv: &str, min_votes: u64) -> Vec<(String, f64, u64)> 
 /// Download + gunzip the daily IMDb ratings snapshot (keyless; IMDb's
 /// official non-commercial datasets - credited in the wall footer).
 pub fn imdb_ratings_fetch() -> Option<Vec<(String, f64, u64)>> {
-    let resp = crate::serve::shared_enrich_agent()
+    let resp = crate::netfetch::shared_enrich_agent()
         .get("https://datasets.imdbws.com/title.ratings.tsv.gz")
         .timeout(std::time::Duration::from_secs(120))
         .call()
@@ -1723,7 +1723,7 @@ pub fn fetch_image_res(url: &str) -> Result<Vec<u8>, ArtMiss> {
     }
     // 15 s, as when this built its own agent: the shared one's default is
     // longer, and an art fetch should not inherit it.
-    let resp = crate::serve::shared_enrich_agent()
+    let resp = crate::netfetch::shared_enrich_agent()
         .get(url)
         .timeout(std::time::Duration::from_secs(15))
         .call()
@@ -1918,7 +1918,7 @@ pub fn wikidata_filmography(qid: &str) -> Option<Vec<FilmoEntry>> {
          }} LIMIT 400"
     );
     ratelimit::acquire(Provider::WikidataSparql);
-    let resp = crate::serve::shared_enrich_agent()
+    let resp = crate::netfetch::shared_enrich_agent()
         .get(&format!(
             "https://query.wikidata.org/sparql?query={}",
             percent_encode(&query)

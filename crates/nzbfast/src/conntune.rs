@@ -29,6 +29,38 @@ pub const STALE_SECS: u64 = 7 * 86_400;
 /// time shouldn't survive corroboration).
 pub const SUSPECT_STALE_SECS: u64 = 6 * 3600;
 
+/// How long a stored knee may go UNREFRESHED before jobs stop capping
+/// with it.
+///
+/// [`STALE_SECS`] is the re-probe appointment, and until 23 Aug 2026 the
+/// re-prober was the only thing that read it (serve/tasks/tuner.rs).
+/// Nothing consulted it where the knee is APPLIED, so on a box where the
+/// idle prober never runs - a plain CLI `nzbfast get`, or a daemon whose
+/// queue is never idle - one ladder capped every future job forever.
+/// Measured on a bench box that day: a `granted: 32` entry written
+/// FIFTEEN days earlier was still capping a leg that asked for 48, and
+/// the same account handed out 64 the moment the knee was pinned away
+/// with no refusals at all. The account's real grant had moved and
+/// nothing in the product could ever notice.
+///
+/// FOUR missed appointments, written as a multiple of the clock the
+/// prober already keeps rather than as a number of its own - it is not a
+/// new measurement claim, it is "nobody has re-measured this four times
+/// running". A daemon that probes never reaches it, because it refreshes
+/// at the first appointment; so this only lifts the cap on the boxes
+/// that have no prober, and what it lifts them to is the count the user
+/// typed, which is the state every never-probed install already ships
+/// in.
+///
+/// Deliberately NOT one appointment. A daemon that spent a week busy,
+/// paused or switched off holds a knee that is merely DUE, not
+/// disproven, and dropping a correct cap costs real speed: asking a
+/// provider for more sockets than it will grant measured 3-4x SLOWER
+/// than asking for the knee (module header). Between one appointment and
+/// four the knee still caps, and every surface that shows it says how
+/// old it is instead of presenting it as the provider's own verdict.
+pub const EXPIRE_SECS: u64 = STALE_SECS * 4;
+
 /// A live-tuner bucket expires after this long unread by fresh
 /// evidence (conn-tuning design §4). Expired buckets are ignored for
 /// seeding - they fall through to an adjacent bucket, then the ladder
@@ -557,13 +589,69 @@ pub struct Tuned {
 ///
 /// A SUSPECT knee is not applied either - it is a low reading still
 /// waiting for a second probe to agree with it.
-pub fn applied_connections(base: usize, pinned: bool, tuned: Option<&Tuned>) -> usize {
+///
+/// Nor is an EXPIRED one; see [`EXPIRE_SECS`] for why a
+/// measurement nothing has refreshed in four re-probe intervals stops
+/// counting as one, and why the fallback is the user's own number rather
+/// than some decayed fraction of the knee.
+pub fn applied_connections(base: usize, pinned: bool, tuned: Option<&Tuned>, now: u64) -> usize {
     if pinned {
         return base;
     }
     match tuned {
-        Some(t) if t.connections > 0 && !t.suspect => base.min(t.connections),
+        Some(t) if knee_applies(t, now) => base.min(t.connections),
         _ => base,
+    }
+}
+
+/// Age of a stored measurement, or `None` when the entry carries no
+/// probe time at all.
+///
+/// `checked: 0` is not "just now". It is an entry no ladder ever
+/// timestamped - one [`note_capped`] created for a provider that has
+/// never been probed, or a hand-written file. Those carry
+/// `connections: 0` and are ignored by every knee consumer anyway, but
+/// an untimestamped entry that DID carry a number could not be vouched
+/// for as fresh, so the readers below treat unknown as expired rather
+/// than as new.
+pub fn age_secs(t: &Tuned, now: u64) -> Option<u64> {
+    (t.checked > 0).then(|| now.saturating_sub(t.checked))
+}
+
+/// Past its re-probe appointment ([`STALE_SECS`]) but still applied.
+/// Every surface that shows such a knee says how old it is.
+pub fn is_stale(t: &Tuned, now: u64) -> bool {
+    age_secs(t, now).is_none_or(|a| a > STALE_SECS)
+}
+
+/// Past [`EXPIRE_SECS`]: no longer applied to jobs at all.
+pub fn is_expired(t: &Tuned, now: u64) -> bool {
+    age_secs(t, now).is_none_or(|a| a > EXPIRE_SECS)
+}
+
+/// Whether a stored knee is one a job may cap with: it has a number, it
+/// is not still awaiting corroboration, and it has been re-measured
+/// recently enough to still be a statement about this provider.
+///
+/// The dashboard mirrors this predicate in JS (the Providers card and
+/// the Settings server row both decide whether to say "auto-tuned"
+/// with it), so a term added here has to be added there too or a row
+/// announces a cap that no longer exists.
+pub fn knee_applies(t: &Tuned, now: u64) -> bool {
+    t.connections > 0 && !t.suspect && !is_expired(t, now)
+}
+
+/// A stored knee's age, for a log line or a chip.
+///
+/// Whole days once it is past one, hours below that, and never a bare
+/// count of seconds: the question a reader has is "is this number about
+/// my provider TODAY", and that is a question about days.
+pub fn age_str(age: Option<u64>) -> String {
+    match age {
+        None => "unknown age".to_string(),
+        Some(s) if s < 3_600 => format!("{}m", s / 60),
+        Some(s) if s < 86_400 => format!("{}h", s / 3_600),
+        Some(s) => format!("{}d", s / 86_400),
     }
 }
 
@@ -1262,7 +1350,7 @@ mod tests {
         assert_eq!(b.checked, NOW + 60);
         // The knee half stays empty, so nothing here can cap a job.
         assert_eq!(t.connections, 0);
-        assert_eq!(applied_connections(20, false, Some(t)), 20);
+        assert_eq!(applied_connections(20, false, Some(t), NOW), 20);
         // ...and the ceiling sweep has nothing to reopen on it.
         assert_eq!(reopen_low_knees(&cfg, |_| Some(40)), Reopened::default());
         // Evidence does not survive an expiry gap: a bucket coming
@@ -1574,13 +1662,16 @@ mod tests {
         assert_eq!(out.connections, 9);
     }
 
+    /// `checked: NOW` rather than 0, because an entry no ladder ever
+    /// timestamped is EXPIRED (`is_expired`) and would be waved through
+    /// by every assertion below for the wrong reason.
     fn knee(n: usize, suspect: bool) -> Tuned {
         Tuned {
             connections: n,
             granted: n,
             asked: n,
             gbps: 1.0,
-            checked: 0,
+            checked: NOW,
             source: "auto".into(),
             suspect,
             limit: 50,
@@ -1598,12 +1689,12 @@ mod tests {
     fn a_pinned_server_ignores_the_knee() {
         let low = knee(6, false);
         assert_eq!(
-            applied_connections(40, false, Some(&low)),
+            applied_connections(40, false, Some(&low), NOW),
             6,
             "unpinned: capped"
         );
         assert_eq!(
-            applied_connections(40, true, Some(&low)),
+            applied_connections(40, true, Some(&low), NOW),
             40,
             "pinned: the user wins"
         );
@@ -1614,24 +1705,124 @@ mod tests {
     /// global setting capped by this server's limit.
     #[test]
     fn a_pin_does_not_raise_the_ceiling() {
-        assert_eq!(applied_connections(8, true, Some(&knee(30, false))), 8);
-        assert_eq!(applied_connections(8, true, None), 8);
+        assert_eq!(applied_connections(8, true, Some(&knee(30, false)), NOW), 8);
+        assert_eq!(applied_connections(8, true, None, NOW), 8);
     }
 
     /// Unpinned behaviour is untouched, including the suspect rule.
     #[test]
     fn an_unpinned_server_still_obeys_a_trusted_knee_only() {
         assert_eq!(
-            applied_connections(40, false, Some(&knee(6, true))),
+            applied_connections(40, false, Some(&knee(6, true)), NOW),
             40,
             "suspect: not applied"
         );
         assert_eq!(
-            applied_connections(40, false, Some(&knee(0, false))),
+            applied_connections(40, false, Some(&knee(0, false)), NOW),
             40,
             "no knee recorded"
         );
-        assert_eq!(applied_connections(40, false, None), 40);
+        assert_eq!(applied_connections(40, false, None, NOW), 40);
+    }
+
+    /// THE DEFECT (23 Aug 2026): `STALE_SECS` existed from the start and
+    /// only the daemon's idle re-prober ever read it. Nothing consulted
+    /// it where the knee is APPLIED, so on a box whose prober never runs
+    /// - a plain CLI `nzbfast get`, a daemon that is never idle - one
+    /// ladder capped every job forever. Measured on a bench box: a knee
+    /// of 32 written FIFTEEN days earlier still capping a leg that asked
+    /// for 48, while the account granted 64 the moment it was pinned
+    /// away.
+    ///
+    /// A knee past its appointment still caps (a busy daemon's knee is
+    /// due, not disproven). One past `EXPIRE_SECS` does not.
+    #[test]
+    fn an_expired_knee_does_not_silently_cap() {
+        let aged = |secs: u64| Tuned {
+            checked: NOW - secs,
+            ..knee(32, false)
+        };
+        assert_eq!(
+            applied_connections(48, false, Some(&aged(3_600)), NOW),
+            32,
+            "fresh: capped"
+        );
+        assert_eq!(
+            applied_connections(48, false, Some(&aged(STALE_SECS + 1)), NOW),
+            32,
+            "overdue but not disproven: still capped"
+        );
+        assert_eq!(
+            applied_connections(48, false, Some(&aged(EXPIRE_SECS + 1)), NOW),
+            48,
+            "four missed appointments: the user's own number, not the knee"
+        );
+        // The measured instance, to the day.
+        assert_eq!(
+            applied_connections(48, false, Some(&aged(15 * 86_400)), NOW),
+            32,
+            "15d is stale, not expired - the log line is what saves this one"
+        );
+        // An entry no ladder timestamped cannot be vouched for as fresh.
+        assert_eq!(
+            applied_connections(
+                48,
+                false,
+                Some(&Tuned {
+                    checked: 0,
+                    ..knee(32, false)
+                }),
+                NOW
+            ),
+            48,
+            "no probe time: treated as expired, not as new"
+        );
+        // A clock that went backwards (NTP step, a restored home
+        // directory) must not read as an age of half a century.
+        assert_eq!(
+            applied_connections(
+                48,
+                false,
+                Some(&Tuned {
+                    checked: NOW + 600,
+                    ..knee(32, false)
+                }),
+                NOW
+            ),
+            32,
+            "a knee stamped in the future is not expired"
+        );
+    }
+
+    /// The three-way verdict every surface reads, held to its own
+    /// boundaries so a future edit cannot quietly move one of them.
+    #[test]
+    fn stale_and_expired_are_separate_verdicts() {
+        let aged = |secs: u64| Tuned {
+            checked: NOW - secs,
+            ..knee(8, false)
+        };
+        assert!(!is_stale(&aged(STALE_SECS), NOW));
+        assert!(is_stale(&aged(STALE_SECS + 1), NOW));
+        assert!(!is_expired(&aged(STALE_SECS + 1), NOW));
+        assert!(!is_expired(&aged(EXPIRE_SECS), NOW));
+        assert!(is_expired(&aged(EXPIRE_SECS + 1), NOW));
+        // Unknown age fails both, in the safe direction.
+        let untimed = Tuned {
+            checked: 0,
+            ..knee(8, false)
+        };
+        assert!(is_stale(&untimed, NOW) && is_expired(&untimed, NOW));
+        assert_eq!(age_secs(&untimed, NOW), None);
+        assert_eq!(age_str(None), "unknown age");
+        assert_eq!(age_str(age_secs(&aged(15 * 86_400), NOW)), "15d");
+        assert_eq!(age_str(age_secs(&aged(5 * 3_600), NOW)), "5h");
+        assert_eq!(age_str(age_secs(&aged(120), NOW)), "2m");
+        // Suspect and expired are independent reasons to stand down.
+        assert!(!knee_applies(&aged(EXPIRE_SECS + 1), NOW));
+        assert!(knee_applies(&aged(1), NOW));
+        assert!(!knee_applies(&knee(8, true), NOW));
+        assert!(!knee_applies(&knee(0, false), NOW));
     }
 
     fn step(connections: usize, gbps: f64) -> nzbkit::sysbench::LadderStep {

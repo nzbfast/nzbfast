@@ -659,7 +659,7 @@ fn person_facts(qids: &[String]) -> HashMap<String, PersonFacts> {
     // The query service is a third Wikimedia service with its own
     // bucket, and every other network call in this file is paced.
     ratelimit::acquire(Provider::WikidataSparql);
-    let Some(body) = crate::serve::shared_enrich_agent()
+    let Some(body) = crate::netfetch::shared_enrich_agent()
         .get(&format!(
             "https://query.wikidata.org/sparql?query={}",
             percent_encode(&query)

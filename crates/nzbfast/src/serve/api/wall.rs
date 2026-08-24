@@ -741,6 +741,12 @@ fn m_wall_refresh(
             // the ONLY thing that requeues a title for enrichment, so on
             // a refused reset that destroyed every poster with nothing
             // left to re-fetch them, and said `"status": true`.
+            // index-lock-gate: TODO 166 classifies this one BY VALUE - the
+            // `value=all` reset only. An explicit admin action the user
+            // asked for, so waiting for the writer is the honest answer.
+            // The `value=blanked` arm below is NOT covered: it went to
+            // `index_write_checked`, and it is why this waiver is scoped
+            // to the call and not to the handler.
             let n = d.with_index(|ix| ix.titles_reset_all().ok());
             let Some(n) = n else {
                 warn!(target: "wall", "metadata reset refused - the art cache is untouched");

@@ -323,7 +323,7 @@ pub(super) fn build_rig(
     // ENOSPC's job (which halts with the right verdict and keeps the
     // journal). The same bound the preallocation ceiling above uses, for
     // the same reason and with the same untrusted-attribute guard.
-    if let Some(free) = crate::serve::free_bytes(out_dir) {
+    if let Some(free) = crate::diskfree::free_bytes(out_dir) {
         extractor.set_extract_budget(instream_extract_budget(
             free,
             crate::repair::volume_prealloc_cap(nzb),
@@ -403,11 +403,14 @@ pub(super) fn build_rig(
 
 /// Build the M11 seek-promotion ladder, wire the extractor's promote
 /// hook through a weak ref, and publish the run's control surfaces
-/// (extractor, verifier, seek, abort, queue ctl) on the hub. Returns
-/// the SeekCtl clone the decode consumers register observed names on.
+/// (extractor, verifier, seek, abort, queue ctl, per-file table) on the
+/// hub. Returns the SeekCtl clone the decode consumers register observed
+/// names on.
 #[expect(clippy::too_many_arguments)]
 pub(super) fn install_seek(
+    nzb: &nzbkit::nzb::Nzb,
     slots: &[Arc<FileSlot>],
+    slot_file: &[usize],
     slot_arts: &mut Vec<(Vec<(u64, std::sync::Arc<str>)>, u64)>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
     abort_flag: &Arc<std::sync::atomic::AtomicBool>,
@@ -501,12 +504,37 @@ pub(super) fn install_seek(
             (wire, cur(Sub::RawOut) + cur(Sub::OutOut))
         })),
     );
+    // TODO 274: the per-file table the API reports and promotes
+    // through. Built HERE because this is the one place that holds the
+    // NZB, the slots and the article ladder at once, and built ONCE
+    // because a listing poll must not re-parse anything. The rows cover
+    // every NZB file in NZB order; `slot_file` runs the other way (slot
+    // -> file), so it is inverted onto the rows rather than kept.
+    let job_files = {
+        let mut rows: Vec<crate::streamhub::JobFileRow> = nzb
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| crate::streamhub::job_file_row(i, f))
+            .collect();
+        for (si, &fi) in slot_file.iter().enumerate() {
+            if let Some(r) = rows.get_mut(fi) {
+                r.slot = Some(si);
+            }
+        }
+        Arc::new(crate::streamhub::JobFiles {
+            rows,
+            slots: slots.to_vec(),
+            seek: seek.clone(),
+        })
+    };
     if let Some(h) = &hub {
         *h.extractor.lock_ok() = Some((stream_owner.to_string(), extractor.clone()));
         *h.verifier.lock_ok() = Some(verifier.clone());
         *h.seek.lock_ok() = Some(seek);
         *h.abort.lock_ok() = Some(abort_flag.clone());
         *h.queue_ctl.lock_ok() = Some(queue_ctl.clone());
+        *h.job_files.lock_ok() = Some((stream_owner.to_string(), job_files));
     }
     seek_names
 }

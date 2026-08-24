@@ -597,6 +597,10 @@ fn m_debug_hold_index(
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30)
             .min(120);
+        // index-lock-gate: TODO 166 - the `debug_hold_index` test
+        // fixture, whose entire purpose is to hold the write mutex
+        // so the daemon_indexbusy legs can prove the bounded doors
+        // report busy rather than parking.
         let held = d
             .with_index(|_| {
                 std::thread::sleep(std::time::Duration::from_secs(secs));
@@ -749,6 +753,8 @@ fn m_index_compact(
                                "error": "busy - retry when no download or scan is running"})
         } else {
             let before = std::fs::metadata(&d.index_db).map(|m| m.len()).unwrap_or(0);
+            // index-lock-gate: TODO 166 - an explicit admin compact. The
+            // user asked for the work; waiting for it is the honest answer.
             let ok = d.with_index(|ix| ix.compact().ok()).is_some();
             let after = std::fs::metadata(&d.index_db).map(|m| m.len()).unwrap_or(0);
             let freed = before.saturating_sub(after);
@@ -782,6 +788,9 @@ fn m_index_shrink_to(
                 // file takes once compacted. bytes_* below
                 // still report the file itself, which is what
                 // the user sees in Finder.
+                // index-lock-gate: TODO 166 - an explicit admin shrink, and
+                // these two readouts are part of the same action, reporting
+                // on work that blocks anyway.
                 let live = d.with_index(|ix| ix.live_bytes().ok()).unwrap_or(0);
                 let before = d.with_index(|ix| ix.db_bytes().ok()).unwrap_or(0);
                 if live <= target {
@@ -856,6 +865,9 @@ fn m_index_evict_now(
                                "error": "index_max_bytes is 0 (unlimited) - set a cap first"})
         } else {
             let cap = d.index_max_bytes.load(Ordering::Relaxed);
+            // index-lock-gate: TODO 166 - an explicit admin eviction, and
+            // these two readouts are part of the same action, reporting on
+            // work that blocks anyway.
             let before = d.with_index(|ix| ix.db_bytes().ok()).unwrap_or(0);
             let live = d.with_index(|ix| ix.live_bytes().ok()).unwrap_or(0);
             match d.evict_pass() {

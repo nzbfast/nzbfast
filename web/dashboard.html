@@ -755,7 +755,11 @@ body.dense #dashview .chgrip{display:none}
    Queue and History, plus the bulk bar that appears once something is
    selected. The bar is static markup (never re-rendered), so open
    selects survive the 1 Hz tick. */
-#queue .selcol,#hist .selcol{width:26px;padding-inline-end:0}
+/* The whole cell is the click target (selCellClick), not just the 13px
+   native box - a near-miss used to fall through to the row's onclick and
+   fold the drawer open instead of ticking. The cursor says so. */
+#queue .selcol,#hist .selcol{width:30px;padding-inline-end:0;cursor:pointer}
+#queue .selcol input,#hist .selcol input{cursor:pointer}
 .bulkbar{display:none;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:12.5px}
 .bulkbar.on{display:flex}
 .bulkbar .count{color:var(--dim);white-space:nowrap}
@@ -861,9 +865,16 @@ button.whychip:hover .ic,button.whychip:focus-visible .ic{opacity:1}
    narrow column - the break is now the layout's decision, not a tag. */
 .srv .util{font-size:11px;color:var(--dim);margin-inline-start:6px}
 .srv .gb{text-align:end;color:var(--dim);font-variant-numeric:tabular-nums}
-/* Queue: draggable rows + the per-download detail drawer. */
-#queue tbody tr[draggable="true"]{cursor:grab}
-#queue tbody tr.dragging{opacity:.45}
+/* Queue: draggable rows + the per-download detail drawer. The drag is
+   pointer-driven (no HTML5 DnD ghost): the real row rides under the
+   cursor, lifted above its neighbours - a transform makes the tr its
+   own stacking context, so no z-index dance is needed. */
+#queue tbody tr[data-drag="1"]{cursor:grab}
+#queue tbody tr.dragging{cursor:grabbing}
+#queue tbody tr.dragging td{background:var(--surface-2);box-shadow:0 4px 14px rgba(0,0,0,.35)}
+/* While a row is in hand nothing may highlight - the pointer sweeps
+   across every row on the way. */
+body.qdragsel{user-select:none;-webkit-user-select:none}
 #queue tbody tr.open td{border-bottom:none}
 /* A dotted release name is one unbreakable token, so an over-long one
    used to widen the whole table past its card and paint out of bounds
@@ -2136,7 +2147,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <button class="ghost mini" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
   <button class="ghost mini" onclick="selClear('q')" data-i18n="sel.clear">Clear selection</button>
 </div>
-  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table>
+  <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol" onclick="selCellClick(event,'q',this)"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table>
   <div id="queueMore" style="margin-top:6px"></div></div>
   <div class="cardgrip" data-card="queueCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
@@ -2256,7 +2267,7 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   <button class="ghost mini" onclick="hBulkDeleteFiles()" data-i18n-title="sel.hfiles.title" title="Remove the selected entries AND delete their downloaded files from disk" data-i18n="sel.delfiles">Remove + delete files</button>
   <button class="ghost mini" onclick="selClear('h')" data-i18n="sel.clear">Clear selection</button>
 </div>
-  <div class="cardscroll"><table id="hist"><thead><tr><th class="selcol"><input type="checkbox" id="hSelAll" onclick="selAllClick(this,'h')" data-i18n-title="sel.h.all" title="Select every history entry listed" aria-label="Select every history entry listed"></th><th data-i18n="col.name">Name</th><th class="hsize" data-i18n="col.size">Size</th><th class="hacts"></th></tr></thead><tbody></tbody></table>
+  <div class="cardscroll"><table id="hist"><thead><tr><th class="selcol" onclick="selCellClick(event,'h',this)"><input type="checkbox" id="hSelAll" onclick="selAllClick(this,'h')" data-i18n-title="sel.h.all" title="Select every history entry listed" aria-label="Select every history entry listed"></th><th data-i18n="col.name">Name</th><th class="hsize" data-i18n="col.size">Size</th><th class="hacts"></th></tr></thead><tbody></tbody></table>
   <div id="histMore" style="margin-top:6px"></div></div>
   <div class="cardgrip" id="histGrip" data-card="histCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
@@ -2542,7 +2553,12 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_oracle_route" onchange="setCfg('oracle_route',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.oraclesample">Availability checks while idle<span class="hint" data-i18n="set.speed.oraclesample.hint">while nothing is downloading, ask each server about a few articles of indexed releases and remember the answers: that is the picture the setting above reads, and what lets a dead post be recognised before you queue it. Counted per server per hour; 0 turns the checking off. Default 300. Needs the built-in indexer, and stands down entirely while a download runs</span></label>
     <input class="txt sm" type="number" min="0" max="3600" id="s_oracle_sample" onchange="setCfg('oracle_sample',this.value)"></div>
-  <div class="row" data-adv="1"><label data-i18n="set.speed.autoconn">Auto-tune connections<span class="hint" data-i18n="set.speed.autoconn.hint">while idle, measure each provider's connection sweet spot and cap downloads at it: asking a provider for too many sockets can be several times SLOWER than the right number. Set a Line speed below and every result is also scored against it, so you can see how close your providers get and what is worth changing</span></label>
+  <!-- §275 item 3: the toggle is read at fleet build, so flipping it
+       changes nothing about the job already running - which reads as
+       "the toggle is broken" to anyone watching the live rate. Same
+       badge (and same already-translated key) the Connections card
+       carries for the same reason. -->
+  <div class="row" data-adv="1"><label data-i18n="set.speed.autoconn">Auto-tune connections<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.speed.autoconn.hint">while idle, measure each provider's connection sweet spot and cap downloads at it: asking a provider for too many sockets can be several times SLOWER than the right number. Set a Line speed below and every result is also scored against it, so you can see how close your providers get and what is worth changing</span></label>
     <input type="checkbox" id="s_auto_conn" onchange="setCfg('auto_connections',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.speed.updchecks">Check for updates<span class="hint" data-i18n="set.speed.updchecks.hint">show a notice when a new version is published: nzbfast never downloads or installs updates by itself; off = never check at all</span></label>
     <input type="checkbox" id="s_update_checks" onchange="setCfg('update_checks',this.checked?1:0)"></div>
@@ -6715,7 +6731,7 @@ function renderHistory(slots){
       return `<tr class="item ${cls}" data-id="${escA(s.nzo_id)}" onclick="toggleHistRow(this)" tabindex="0"
         onkeydown="if((event.key==='Enter'||event.key===' ')&&event.target===this){event.preventDefault();toggleHistRow(this);}"
         ondblclick="openItem('${s.nzo_id}','file')" oncontextmenu="return histMenu(event,'${s.nzo_id}',${retryable})">
-        <td class="selcol"><input type="checkbox" class="rowsel" data-sel="${escA(s.nzo_id)}"${hSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'h',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.name}))}"></td>
+        <td class="selcol" onclick="selCellClick(event,'h',this)" ondblclick="event.stopPropagation()"><input type="checkbox" class="rowsel" data-sel="${escA(s.nzo_id)}"${hSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'h',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.name}))}"></td>
         <td class="hname"><span class="nm"><span class="caret">▶</span><span class="sdot" role="img" title="${escA(dotLabel)}" aria-label="${escA(dotLabel)}"></span><span class="nmtxt" data-full="${escA(s.name)}">${esc(s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.category)}${originGlyph(s.origin)}${needsPw?` <span class="warn">· ${t('hist.needpw','needs a password')}</span>`:''}${split?` <span class="warn">· ${t('hist.split','part of it did not move')}</span>`:''}${moveFail?` <span class="warn">· ${t('hist.movefail','not moved to its destination')}</span>`:''}${movingNow?` <span class="dim">· ${t('hist.moving','moving to its destination…')}</span>`:''}</span></span></td>
         <td class="hsize"><span class="nowrap">${s.bytes!=null?fmtSize(s.bytes):esc(s.size||'')}</span>${st}</td>
         <td class="hacts" style="text-align:end">${ctl}</td></tr>`;
@@ -8154,9 +8170,13 @@ function pipeline(s,mbps,queued,done,failed){
       // ~25 MB/s on a 900 Mbps line, every job). Shown only when a knee
       // is genuinely IN FORCE: toggle on, knee not suspect, and the
       // budget actually at or below it.
+      // Through tuneApplies, which carries the EXPIRY term as well: a
+      // knee nothing has re-measured for four re-probe intervals stops
+      // capping jobs, and a row still crediting it would be explaining
+      // a number with something that no longer sets it.
       const kn=srvAutoConn?srvTuned[sv.host]:null, asked=srvAsked[sv.host]||0;
-      const tuned=(kn&&!kn.suspect&&kn.connections>0&&kn.connections<asked&&sv.budget<=kn.connections)
-        ? ` · <span class="dim" title="${escA(t('prov.tuned.title','auto-tune measured this provider is fastest at {n} connections, so downloads use {n} rather than the {m} you set: asking a provider for more than it will grant is often several times slower. Turn it off in Settings, under Auto-tune connections.',{n:kn.connections,m:asked}))}">${t('prov.tuned','auto-tuned from {m}',{m:asked})}</span>`
+      const tuned=(tuneApplies(kn)&&kn.connections<asked&&sv.budget<=kn.connections)
+        ? ` · <span class="dim" title="${escA(t('prov.tuned.title','auto-tune measured this provider is fastest at {n} connections, so downloads use {n} rather than the {m} you set: asking a provider for more than it will grant is often several times slower. Turn it off in Settings, under Auto-tune connections.',{n:kn.connections,m:asked}))}">${t('prov.tuned','auto-tuned from {m}',{m:asked})}</span>${tuneAgeChip(kn)}`
         : '';
       return `<div class="srv" data-host="${escA(sv.host)}">
         <span class="host" title="${escA(sv.host)}"><span class="sw" aria-hidden="true" style="background:${col}"></span>${esc(sv.host.replace(/^(news|reader)\./,''))}</span>
@@ -8838,8 +8858,8 @@ function renderQueue(){
       :dl&&s.activity==='indexwait'?t('queue.act.indexwait.short','index busy'):'';
     // §129 2f: the checkbox renders its state straight from the Set, so
     // selection survives every setHtml tbody re-render by construction.
-    const selBox=`<td class="selcol"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
-    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" draggable="${dl||tail?'false':'true'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
+    const selBox=`<td class="selcol" onclick="selCellClick(event,'q',this)" ondblclick="event.stopPropagation()"><input type="checkbox" class="rowsel" data-sel="${s.nzo_id}"${qSel.has(s.nzo_id)?' checked':''} onclick="selClick(event,'q',this)" aria-label="${escA(t('sel.row','Select {name}',{name:s.filename||s.name}))}"></td>`;
+    return `<tr class="qrow${open?' open':''}" data-id="${s.nzo_id}" data-i="${i}" data-drag="${dl||tail?'0':'1'}" tabindex="0" role="button" aria-expanded="${open}">${selBox}<td>${esc(s.filename||s.name)}${identName(s)}${mediaBadge(s.media)}${shapeBadge(s.archive_shape)}${catBadge(s.cat)}${originGlyph(s.origin)}${ruleBadge(s)}${pz?' '+pzLabel:''}${tail?` <span class="dim">· ${tailWord}</span>`:''}${defer}</td><td class="nowrap">${fmtMB(s.mb)}</td>
       <td class="nowrap dim"${tail?` title="${escA(t('queue.left.done','nothing left to download - every byte is in; this row is finishing'))}"`:''}>${tail?'-':fmtMB(s.mbleft)}</td><td class="nowrap mono" title="${escA(wtail?t('queue.eta.tail','not stuck: downloading is finished, and anything packed has been unpacked - the row leaves the queue once the last files are written'):tail||actWord?t('queue.eta.finishing','the download is done - this is the work that follows it'):dl?t('queue.eta.active','time to finish this download'):t('queue.eta.queued','estimated finish, once the items ahead complete'))}">${tail?`<span class="dim">${tailWord}</span>`:actWord?`<span class="dim">${actWord}</span>`:pz?'-':fmtEta(eta)}</td>
       <td><div class="bar"><i style="width:${s.percentage}%"></i></div>${actSub(s)}</td>
       <td class="nowrap" style="text-align:end">${ctl}</td></tr>`+
@@ -9492,38 +9512,106 @@ async function qMove(id, delta){
     const again=tb.querySelector(`tr.qrow[data-id="${tr.dataset.id}"]`);
     if(again) again.focus();
   });
-  tb.addEventListener('dragstart', e=>{
+  // Pointer-driven drag-to-reorder. The HTML5 DnD path this replaces
+  // moved a browser-rendered ghost while the rows snapped instantly, so
+  // reordering read as fiddly and half the users never found it. Here
+  // the REAL row rides under the cursor; when it crosses a neighbour's
+  // midpoint the two trade places and the neighbour slides into its new
+  // slot (a FLIP: the DOM swap is instant, the eye sees the glide), and
+  // on release the row settles where it sits. Mouse and pen only: a
+  // touch drag cannot be told from a scroll without stealing pan from
+  // the whole table, so touch keeps the ↑/↓ buttons this path rides
+  // beside. A 6px slack keeps plain clicks (drawer toggle) intact.
+  let qdrag=null;   // armed/live drag: {tr, sy, adj, on, pid}
+  const isQrow=el=>!!(el&&el.classList&&el.classList.contains('qrow'));
+  tb.addEventListener('pointerdown', e=>{
+    if(e.button!==0||qdrag) return;
+    if(e.pointerType!=='mouse'&&e.pointerType!=='pen') return;
+    if(e.target.closest('button,select,input,a,label,td.selcol')) return;
     const tr=e.target.closest('tr.qrow');
-    if(!tr||tr.getAttribute('draggable')!=='true'){ e.preventDefault(); return; }
+    if(!tr||tr.dataset.drag!=='1') return;
+    qdrag={tr, sy:e.clientY, adj:0, on:false, pid:e.pointerId};
+  });
+  const qdragStart=()=>{
+    // The repaint hold (qDragging) only engages here, so the 1 Hz tick
+    // may have replaced the armed row during the 6px slack - re-find it
+    // by id, and stand down if it left the queue entirely.
+    if(!qdrag.tr.isConnected){
+      const again=tb.querySelector(`tr.qrow[data-id="${qdrag.tr.dataset.id}"]`);
+      if(!again){ qdrag=null; return; }
+      qdrag.tr=again;
+    }
+    const {tr}=qdrag;
     // Drawers don't travel with a row - close any open one for the drag.
     openDrawer=null;
     tb.querySelectorAll('tr.drawer').forEach(d=>d.remove());
     tb.querySelectorAll('tr.open').forEach(d=>d.classList.remove('open'));
-    qDragging=tr; tr.classList.add('dragging');
-    e.dataTransfer.effectAllowed='move';
-    try{ e.dataTransfer.setData('text/plain', tr.dataset.id); }catch(_){}
-  });
-  tb.addEventListener('dragover', e=>{
-    if(!qDragging) return;
-    e.preventDefault(); e.dataTransfer.dropEffect='move';
-    const tr=e.target.closest('tr.qrow');
-    if(!tr||tr===qDragging) return;
-    const r=tr.getBoundingClientRect();
-    tr.parentNode.insertBefore(qDragging, e.clientY>r.top+r.height/2 ? tr.nextSibling : tr);
-  });
-  tb.addEventListener('drop', e=>e.preventDefault());
-  tb.addEventListener('dragend', async ()=>{
-    const tr=qDragging; if(!tr) return;
+    qDragging=tr;                     // renderQueue holds its repaint
+    tr.classList.add('dragging');
+    document.body.classList.add('qdragsel');
+    try{ tr.setPointerCapture(qdrag.pid); }catch(_){}
+    qdrag.on=true;
+  };
+  // A displaced neighbour slides from where it WAS to where it now
+  // sits; the dragged row's own transform is set every move, so only
+  // the neighbour needs the animation.
+  const qMakeWay=(row,fromDy)=>{
+    if(REDUCED) return;
+    row.animate([{transform:`translateY(${fromDy}px)`},{transform:'translateY(0)'}],
+      {duration:130,easing:'ease-out'});
+  };
+  window.addEventListener('pointermove', e=>{
+    if(!qdrag||e.pointerId!==qdrag.pid) return;
+    if(!qdrag.on){ if(Math.abs(e.clientY-qdrag.sy)<6) return; qdragStart(); if(!qdrag) return; }
+    e.preventDefault();
+    const {tr}=qdrag;
+    // Cross a neighbour's midpoint and the rows trade places; `adj`
+    // absorbs the flow shift so the dragged row stays pinned under the
+    // pointer across the swap. Loops, because one fast sweep can cross
+    // several rows between two pointer events.
+    for(;;){
+      const prev=tr.previousElementSibling, next=tr.nextElementSibling;
+      if(isQrow(prev)&&e.clientY<prev.getBoundingClientRect().top+prev.offsetHeight/2){
+        const h=tr.offsetHeight;
+        tb.insertBefore(tr,prev);
+        qdrag.adj+=prev.offsetHeight;
+        qMakeWay(prev,-h);
+        continue;
+      }
+      if(isQrow(next)&&e.clientY>next.getBoundingClientRect().top+next.offsetHeight/2){
+        const h=tr.offsetHeight;
+        tb.insertBefore(tr,next.nextSibling);
+        qdrag.adj-=next.offsetHeight;
+        qMakeWay(next,h);
+        continue;
+      }
+      break;
+    }
+    tr.style.transform=`translateY(${e.clientY-qdrag.sy+qdrag.adj}px)`;
+  },{passive:false});
+  const qdragFinish=async commit=>{
+    const st=qdrag; qdrag=null;
+    if(!st||!st.on) return;           // armed but never left the slack: a click
+    const {tr}=st;
     qDragging=null; dragEndAt=performance.now();
     tr.classList.remove('dragging');
+    document.body.classList.remove('qdragsel');
+    // Settle: slide from wherever the pointer let go into the slot the
+    // row now owns.
+    const dy=/-?[\d.]+/.exec(tr.style.transform||'');
+    tr.style.transform='';
+    if(dy&&!REDUCED) tr.animate([{transform:`translateY(${dy[0]}px)`},{transform:'translateY(0)'}],
+      {duration:140,easing:'ease-out'});
     const to=[...tb.querySelectorAll('tr.qrow')].indexOf(tr);
     tb.__h=null;                       // DOM was hand-mutated - force a redraw
-    if(to>=0 && to!==+tr.dataset.i){
+    if(commit && to>=0 && to!==+tr.dataset.i){
       const j=await api('queue',`&name=switch&value=${tr.dataset.id}&value2=${to}`);
       if(!j.status) toast(tErr(j.error)||t('toast.movefail','Could not move the item.'), true);
     }
     tick();
-  });
+  };
+  window.addEventListener('pointerup', e=>{ if(qdrag&&e.pointerId===qdrag.pid) qdragFinish(true); });
+  window.addEventListener('pointercancel', e=>{ if(qdrag&&e.pointerId===qdrag.pid) qdragFinish(false); });
 }
 // M23 watchlist: editor rows ↔ the daemon's watchlist JSON, with a live
 // per-item status line fed by mode=watchlist_status.
@@ -10563,6 +10651,19 @@ function selClick(e,list,c){
   } else if(c.checked) s.add(c.dataset.sel); else s.delete(c.dataset.sel);
   selAnchor[list]=c.dataset.sel;
   updateSelBar(list); selAnnounce(list);
+}
+// The whole .selcol cell stands in for its checkbox: the native box is
+// ~13px and everything around it belonged to the row's onclick, so a
+// near-miss opened the drawer instead of ticking. A click anywhere in
+// the cell toggles the box and runs the same handler (shift-ranges
+// included); a click ON the input returns here having already run its
+// own inline handler, so it must not toggle twice.
+function selCellClick(e,list,cell){
+  e.stopPropagation();
+  const c=cell.querySelector('input[type=checkbox]');
+  if(!c||e.target===c) return;
+  c.checked=!c.checked;
+  if(c.classList.contains('rowsel')) selClick(e,list,c); else selAllClick(c,list);
 }
 // Header box: covers every listed row (the queue is served whole; for
 // history that is the rendered window - exactly what the eye can check).
@@ -13169,6 +13270,27 @@ addEventListener('drop', e=>{
 
 // --- Settings view (M16): read get_config, write mode=config / server_* ---
 let inSettings=false, srvList=[], srvEditIdx=-1, srvTuned={}, srvAutoConn=false;
+// Mirrors conntune::STALE_SECS / EXPIRE_SECS / knee_applies
+// (crates/nzbfast/src/conntune.rs). A stored knee past its re-probe
+// appointment still caps jobs and every surface says how old it is; one
+// past FOUR appointments is not applied at all, so a row that goes on
+// saying "auto-tuned from 24" is announcing a cap that no longer exists
+// - the same lie the suspect and pinned exclusions below are for. An
+// entry with no probe time (checked 0) cannot be vouched for as fresh
+// and counts as expired, exactly as it does in Rust.
+const TUNE_STALE_D=7, TUNE_EXPIRE_D=TUNE_STALE_D*4;
+function tuneAgeDays(kn){return kn&&kn.checked>0?Math.max(0,(Date.now()/1000-kn.checked)/86400):null;}
+function tuneStale(kn){const d=tuneAgeDays(kn);return d===null||d>TUNE_STALE_D;}
+function tuneExpired(kn){const d=tuneAgeDays(kn);return d===null||d>TUNE_EXPIRE_D;}
+function tuneApplies(kn){return !!kn&&kn.connections>0&&!kn.suspect&&!tuneExpired(kn);}
+// The chip that says how old the measurement behind a cap is. Only
+// past the appointment: TODO 184's rule is that a healthy row is
+// unchanged and the clause appears when there is something to say.
+function tuneAgeChip(kn){
+  return tuneStale(kn)&&tuneAgeDays(kn)!==null
+    ? ` · <span class="dim">${t('prov.tuned.age','measured {d}d ago',{d:Math.floor(tuneAgeDays(kn))})}</span>`
+    : '';
+}
 // host → the connection count a job would ask this server for if nothing
 // capped it: the smaller of the global Connections setting and the
 // server's own configured count. The Providers card needs it to say
@@ -15197,8 +15319,14 @@ function renderServers(){
     // a row claiming auto-tune had measured 32 as fastest (10 Aug).
     // That case is the global setting's doing, and the row must send
     // the user to the right knob.
+    // EXPIRY (conntune::EXPIRE_SECS) is the third exclusion, beside
+    // suspect and pinned, and the only one whose cause is the calendar:
+    // a knee nothing has re-measured in four re-probe intervals stops
+    // capping jobs, so "auto-tuned to 6" would be describing a cap that
+    // is no longer in force. This row is the tuner's state surface, so
+    // it says what the number WAS instead of going silent.
     const kn0=srvTuned[s.host];
-    const tv=(srvAutoConn&&kn0&&!kn0.suspect&&kn0.connections>0)?kn0.connections:0;
+    const tv=(srvAutoConn&&tuneApplies(kn0))?kn0.connections:0;
     const asked0=srvAsked[s.host]||0;
     // dim, not warn: a measured optimum is a fact, not a problem to fix.
     // A pinned server never has its knee applied (the pin is a statement
@@ -15207,7 +15335,10 @@ function renderServers(){
     // Connections setting still caps a pinned server, so that branch stays.
     let tuneNote='';
     if(tv&&!s.pin_connections&&tv<asked0){
-      tuneNote=` · <span class="dim" title="${escA(t('set.srv.tuned.title','auto-connections measured this provider is fastest at {n} sockets: more were slower. Turn off auto-connections (Connection tuning) to use your set value.',{n:tv}))}">${t('set.srv.tuned','auto-tuned to {n}',{n:tv})}</span>`;
+      tuneNote=` · <span class="dim" title="${escA(t('set.srv.tuned.title','auto-connections measured this provider is fastest at {n} sockets: more were slower. Turn off auto-connections (Connection tuning) to use your set value.',{n:tv}))}">${t('set.srv.tuned','auto-tuned to {n}',{n:tv})}</span>${tuneAgeChip(kn0)}`;
+    }else if(srvAutoConn&&kn0&&kn0.connections>0&&!kn0.suspect&&!s.pin_connections
+             &&kn0.connections<asked0&&tuneExpired(kn0)&&tuneAgeDays(kn0)!==null){
+      tuneNote=` · <span class="dim">${t('set.srv.tuned.old','last measured {n} connections {d}d ago, too old to apply',{n:kn0.connections,d:Math.floor(tuneAgeDays(kn0))})}</span>`;
     }else if(asked0&&asked0<s.connections){
       tuneNote=` · <span class="dim" title="${escA(t('set.srv.capset.title','downloads use at most {n} connections per server, from the Connections setting in Settings; this account allows {m}. Raise Connections to use more of its allowance.',{n:asked0,m:s.connections}))}">${t('set.srv.capset','capped at {n} by the Connections setting',{n:asked0})}</span>`;
     }

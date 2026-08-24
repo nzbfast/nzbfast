@@ -2137,9 +2137,14 @@ pub(super) use job_wire::{job_from_json, job_json};
 
 // How a job fails and what happens next, moved out bodily (TODO 106) and
 // re-exported so every caller still names `job::fail_kind` and friends.
+//
+// The classifier half now lives at `crate::failkind` (TODO 276 item 3)
+// and is re-exported from HERE rather than imported at each use site, so
+// the ~90 callers inside `serve` that reach these names through this
+// module's glob are untouched by the move.
 #[path = "job_fail.rs"]
 mod job_fail;
-pub(crate) use job_fail::{
+pub(crate) use crate::failkind::{
     FailKind, RETRY_WHY_PROPAGATION, RETRY_WHY_TRANSPORT, disk_full_failure,
     disk_full_mid_download, fail_action, fail_hint, fail_kind, fail_kind_token,
 };
@@ -2151,15 +2156,16 @@ pub(super) use job_fail::{auto_retry_eligible, merge_notify_tokens, post_job_pla
 pub(super) use job_fail::post_job_duties;
 
 // The duplicate-detection keys, moved out bodily (TODO 106) and re-exported:
-// `serve` reaches them through its own glob of this module, and
-// `crate::serve::job::flatten_name` is spelled out in newznab.rs.
+// `serve` reaches them through its own glob of this module.
+//
+// `flatten_name` is NOT in this list any more. It moved to `crate::smart`
+// in TODO 276 item 3 - `newznab::release_ident` was its one caller outside
+// `serve`, and reaching in here for it was the last of the sixteen
+// references that held `serve` inside a 146,591-line dependency cycle.
+// `job_dupe` re-exports it from its new home, so the keys below still read
+// as one unit.
 #[path = "job_dupe.rs"]
 mod job_dupe;
-// Indexer-only: the one caller outside this module is `newznab::release_ident`,
-// which is itself `#[cfg(feature = "indexer")]`. The function is reached
-// unqualified through `serve`'s glob either way.
-#[cfg(feature = "indexer")]
-pub(crate) use job_dupe::flatten_name;
 pub(super) use job_dupe::{dupe_key, exact_dupe_key, is_proper};
 // Same shape: `dated_key` is only called by `dupe_key` beside it, and by the
 // dated-post cases in `job_tests`.

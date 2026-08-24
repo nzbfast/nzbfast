@@ -3932,8 +3932,9 @@ async fn conntune_caps_connections() {
     std::fs::write(
         cfg.with_file_name("conntune.json"),
         format!(
-            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":1,\"source\":\"auto\"}}}}",
-            srv.addr.ip()
+            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":{},\"source\":\"auto\"}}}}",
+            srv.addr.ip(),
+            unix_now()
         ),
     )
     .unwrap();
@@ -3946,6 +3947,13 @@ async fn conntune_caps_connections() {
     assert!(
         log.contains("connection auto-tune: 127.0.0.1 capped at 1 of "),
         "tuned cap not applied:\n{log}"
+    );
+    // The age is part of the line: it used to end "(measured sweet
+    // spot)", which reads as the provider's verdict rather than as our
+    // own probe of it.
+    assert!(
+        log.contains(", probed 0m ago") || log.contains(", probed 1m ago"),
+        "cap note does not name the sample's age:\n{log}"
     );
     assert_eq!(std::fs::read(fx.dir.join("out/t.bin")).unwrap(), data);
 }
@@ -3963,8 +3971,9 @@ async fn suspect_conntune_knee_is_not_applied() {
     std::fs::write(
         cfg.with_file_name("conntune.json"),
         format!(
-            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":1,\"source\":\"auto\",\"suspect\":true}}}}",
-            srv.addr.ip()
+            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":{},\"source\":\"auto\",\"suspect\":true}}}}",
+            srv.addr.ip(),
+            unix_now()
         ),
     )
     .unwrap();
@@ -3996,8 +4005,9 @@ async fn auto_connections_off_lifts_the_conntune_cap() {
     std::fs::write(
         cfg.with_file_name("conntune.json"),
         format!(
-            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":1,\"source\":\"auto\"}}}}",
-            srv.addr.ip()
+            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":{},\"source\":\"auto\"}}}}",
+            srv.addr.ip(),
+            unix_now()
         ),
     )
     .unwrap();
@@ -4015,6 +4025,52 @@ async fn auto_connections_off_lifts_the_conntune_cap() {
     assert!(
         !log.contains("connection auto-tune:"),
         "knee applied with auto_connections off:\n{log}"
+    );
+    assert_eq!(std::fs::read(fx.dir.join("out/t.bin")).unwrap(), data);
+}
+
+/// A knee nothing has re-measured in four re-probe intervals
+/// (`conntune::EXPIRE_SECS`) must stop capping.
+///
+/// The defect, measured on a bench box 23 Aug 2026: `STALE_SECS` was
+/// read by the daemon's idle re-prober and by nothing else, so on a box
+/// whose prober never runs - this test IS one, a plain CLI `get` - one
+/// ladder capped every future job for good. The instance was a
+/// fifteen-day-old `granted: 32` still holding a leg asking for 48 to
+/// 32, on an account that handed out 64 the moment the knee was pinned
+/// away. The store is the same shape as the applied-cap test above; the
+/// only difference is the clock, which is the whole point.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_conntune_knee_stops_capping() {
+    let mut fx = Fixture::new("conntune_expired");
+    let data = payload(300_000, 24);
+    fx.add_file("t.bin", &data, 40_000);
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    std::fs::write(
+        cfg.with_file_name("conntune.json"),
+        format!(
+            "{{\"{}\":{{\"connections\":1,\"granted\":1,\"gbps\":0.5,\"checked\":{},\"source\":\"auto\"}}}}",
+            srv.addr.ip(),
+            unix_now() - (29 * 86_400)
+        ),
+    )
+    .unwrap();
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+    assert!(ok, "{log}");
+    assert!(
+        !log.contains("capped at 1 of "),
+        "a 29-day-old knee is still capping:\n{log}"
+    );
+    // Not applied is not the same as not said. The number the job runs
+    // at changed, and the only place a user could ever see why is here.
+    assert!(
+        log.contains("no longer capping"),
+        "the lifted cap was lifted silently:\n{log}"
     );
     assert_eq!(std::fs::read(fx.dir.join("out/t.bin")).unwrap(), data);
 }

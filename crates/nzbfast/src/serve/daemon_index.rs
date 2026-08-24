@@ -162,6 +162,10 @@ impl Daemon {
             // A failed resolver query fails the WHOLE assembly: dropping
             // just this category's keys would hand evict_to a set that
             // no longer protects it.
+            // index-lock-gate: TODO 166 - assembling the protected set is
+            // part of the evict/shrink admin action, and its only callers
+            // are `evict_to` and the background maintenance pass. The user
+            // asked for the work; waiting for it is the honest answer.
             self.with_index(|ix| {
                 for kind in &whole_custom {
                     match ix.title_keys_for_kind(kind) {
@@ -198,6 +202,8 @@ impl Daemon {
             .filter(|(_, n)| !n.is_empty())
             .collect();
         if !yearless.is_empty() {
+            // index-lock-gate: TODO 166 - the other half of the same
+            // protected-set assembly. See the note above.
             self.with_index(|ix| {
                 for (kind, norm) in &yearless {
                     let q = nzbkit::index::BrowseQuery {
@@ -283,6 +289,11 @@ impl Daemon {
         let n_prot = protected.title_keys.len() + protected.release_ids.len();
         // The whole set, uncapped - see EVICT_MAX_PASSES for why there is
         // no longer a ceiling here.
+        // index-lock-gate: TODO 166 - eviction itself, reached from
+        // `index_shrink_to` and `index_evict_now`, both of which that
+        // section classifies as explicit admin actions. This one cannot be
+        // bounded anyway: the engine holds the write handle for the whole
+        // pass, so refusing to wait would refuse the action.
         let Some(mut rep) = self.with_index(|ix| ix.evict_to(target, &policy, &protected).ok())
         else {
             return EvictOutcome::Unavailable;
@@ -296,6 +307,8 @@ impl Daemon {
             if rep.blocked || rep.live_after <= target {
                 break;
             }
+            // index-lock-gate: TODO 166 - the continuation passes of the
+            // same admin eviction. See the note above.
             let Some(more) = self.with_index(|ix| ix.evict_to(target, &policy, &protected).ok())
             else {
                 break;
@@ -381,6 +394,8 @@ impl Daemon {
         // once compacted, so it is the honest thing to hold to a promise
         // about disk. The user-facing readout still shows the file size;
         // see index_stats.
+        // index-lock-gate: TODO 166 - the readout that decides whether the
+        // admin eviction has anything to do, on the action's own path.
         match self.with_index(|ix| ix.live_bytes().ok()) {
             None => EvictOutcome::Unavailable,
             Some(now) if now <= cap => EvictOutcome::Nothing,

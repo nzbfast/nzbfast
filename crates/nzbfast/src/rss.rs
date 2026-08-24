@@ -565,7 +565,7 @@ fn term_matches_at(term: &str, item: &FeedItem, now: i64) -> bool {
                 .and_then(|r| r.trim_start().strip_prefix(op))
         };
         if let Some(rest) = after("size") {
-            if let Some(n) = crate::serve::parse_size(rest.trim()) {
+            if let Some(n) = crate::sizes::parse_size(rest.trim()) {
                 return if gt { item.size > n } else { item.size < n };
             }
             return false;
@@ -1383,7 +1383,7 @@ mod tests {
     #[test]
     fn a_recorded_feed_failure_carries_no_apikey() {
         let raw = "https://idx.example/rss?apikey=DEADBEEF&t=tv: status code 403";
-        let h = FeedHealth::failed(99, raw, crate::serve::redact_url_creds);
+        let h = FeedHealth::failed(99, raw, crate::netfetch::redact_url_creds);
         assert!(!h.last_error.contains("DEADBEEF"), "{}", h.last_error);
         assert!(!h.last_error.contains("apikey"), "{}", h.last_error);
         // Still worth reading: the host and what went wrong survive.

@@ -1500,7 +1500,7 @@ fn zip_pass(
     let archive =
         nzbkit::zip::Archive::open(parts).map_err(|e| anyhow::anyhow!("opening zip: {e}"))?;
     let budget = BombBudget::fixed(
-        crate::serve::free_bytes(out)
+        crate::diskfree::free_bytes(out)
             .map(|free| free.saturating_sub(EXTRACT_RESERVE))
             .unwrap_or(u64::MAX),
     );

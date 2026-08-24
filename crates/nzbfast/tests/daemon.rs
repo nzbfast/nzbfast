@@ -3374,6 +3374,13 @@ async fn queue_switch_reorders() {
             None,
         );
         assert!(r.contains("\"status\":true"), "{r}");
+        // A priority write moves the ROW to where it will run (see
+        // `reposition_for_priority`): b is now the only High job, so it
+        // is at the front - the order every client renders is the order
+        // pick_job follows, instead of a toast promising "next" over a
+        // row that never moved.
+        let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+        assert_eq!(order(&q), vec![b.clone(), a.clone(), c.clone()], "{q}");
         // c (Normal) to the end first: no bump anywhere but the front.
         let r = http(
             port,
@@ -3391,7 +3398,7 @@ async fn queue_switch_reorders() {
         );
         assert!(r.contains("\"status\":true") && r.contains("\"position\":0"), "{r}");
         let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
-        assert_eq!(order(&q), vec![c.clone(), a.clone(), b.clone()], "{q}");
+        assert_eq!(order(&q), vec![c.clone(), b.clone(), a.clone()], "{q}");
         assert_eq!(prio_of(&q, &c), "High", "{q}");
         assert_eq!(prio_of(&q, &a), "Normal", "{q}");
     })
@@ -10178,7 +10185,11 @@ async fn a_relative_out_is_reported_absolute() {
     .await;
     let port = d.port;
     let want = real.join("complete");
-    let want = want.to_string_lossy().into_owned();
+    // Windows reports cwd's 8.3 short name where `canonicalize` gives
+    // the long `\\?\` name: compare RESOLVED paths, not spellings.
+    std::fs::create_dir_all(&want).unwrap();
+    let want = std::fs::canonicalize(&want).unwrap();
+    let same_dir = |got: &str| std::fs::canonicalize(got).is_ok_and(|p| p == want);
 
     let c = http(port, "/api?mode=get_config&output=json", None);
     let v: serde_json::Value =
@@ -10190,9 +10201,9 @@ async fn a_relative_out_is_reported_absolute() {
         Path::new(got).is_absolute(),
         "get_config must answer an ABSOLUTE complete_dir, got {got:?}"
     );
-    assert_eq!(
-        got, want,
-        "complete_dir must resolve against the daemon's cwd"
+    assert!(
+        same_dir(got),
+        "complete_dir must resolve against cwd: {got:?}"
     );
 
     // Both fullstatus spellings, same resolution.
@@ -10207,9 +10218,9 @@ async fn a_relative_out_is_reported_absolute() {
             Path::new(got).is_absolute(),
             "fullstatus {key} must be ABSOLUTE, got {got:?}"
         );
-        assert_eq!(
-            got, want,
-            "fullstatus {key} must resolve against the daemon's cwd"
+        assert!(
+            same_dir(got),
+            "fullstatus {key} must resolve against cwd: {got:?}"
         );
     }
 

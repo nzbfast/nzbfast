@@ -65,7 +65,7 @@ fn de_size<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
             if s.trim().is_empty() {
                 return Ok(0);
             }
-            crate::serve::parse_size(s).ok_or_else(|| E::custom(format!("bad size {s:?}")))
+            crate::sizes::parse_size(s).ok_or_else(|| E::custom(format!("bad size {s:?}")))
         }
     }
     d.deserialize_any(V)
@@ -666,6 +666,28 @@ impl Default for FiledDelete {
 /// the one filing would write today, plus the one an older build wrote
 /// for the same release when the show name reshapes (see
 /// [`legacy_tv_path`]). Empty when the stem doesn't name one episode.
+// Moved here from `serve/job_dupe.rs` by TODO 276 item 3: reducing a
+// release name to its identity key is what this module is for, and the
+// duplicate check is only one of its two callers.
+/// Reduce a release name to its bare letter/digit sequence, lowercased,
+/// with every separator and decoration collapsed to a single space.
+///
+/// Unicode-aware, and that is the whole point: an ASCII-only filter
+/// erased every non-Latin letter, so `電影甲.2024.1080p.WEB-DL.x264-GRP`
+/// and `電影乙.2024.1080p.WEB-DL.x264-GRP` reduced to the SAME key and
+/// collided as duplicates, while an all-CJK name reduced to the empty
+/// string - an identity so unspecific that the exact-duplicate check
+/// has to refuse it, so a genuine re-send of that release was admitted
+/// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
+/// they always did; `to_lowercase` differs from `to_ascii_lowercase`
+/// only on characters the old filter was deleting anyway.
+pub(crate) fn flatten_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect()
+}
+
 pub(crate) fn filed_bases(stem: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(2);
     for path in [tv_path(stem), legacy_tv_path(stem)] {

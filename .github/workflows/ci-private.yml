@@ -54,7 +54,7 @@
 #     -q '.jobs[] | "\(.name) \(.conclusion)"'
 # is the honest query, and `gh run list` alone is not. There are more
 # job names now, and the sharded ones carry a matrix suffix -
-# `windows-unit (1)` through `windows-unit (4)`.
+# `windows-unit (1)` through `windows-unit (6)`.
 #
 # That query is necessary and it is not sufficient, which is the half
 # this file got wrong for three weeks. Reading per job tells you the
@@ -788,8 +788,133 @@ jobs:
   # shards. The gates that do NOT need this job's toolchain or its
   # cache left on 22 Aug 2026 - see the section at the top of `jobs:`.
   # ===================================================================
-  check:
+  # ===================================================================
+  # DOES THIS PUSH TOUCH ANYTHING THE COMPILER CAN SEE?
+  #
+  # Added 23 Aug 2026. The long note above `env:` costs three cadence
+  # options and declines all three, and it is right about each - but it
+  # is answering "how do we get more runner slots", and there is a
+  # cheaper question it never asks: how many of these pushes needed a
+  # build at all.
+  #
+  # Measured over the last 40 non-merge commits on main: 22 of them
+  # touch nothing outside docs/, website/ and the
+  # root *.md files. TODO.md alone is 18 of the last 60. Every one of
+  # those started `check` (~11 min) and `windows-build` (~15 min, at 2x
+  # private-repo billing) to prove that a markdown file does not break
+  # a Rust build. Verified rather than assumed: 5ddb0bbae touched two
+  # root markdown notes and one research script, nothing else, and ran a
+  # full 12-step windows-build and 27-step check.
+  #
+  # THAT IS ALSO THE CADENCE FIX THE NOTE ABOVE COULD NOT FIND. Its
+  # arithmetic is that a gate reaches a verdict only if the JOB is
+  # shorter than the PUSH CADENCE, and it measured `check` at 3/20 and
+  # windows-build at 2/20 because main takes a push every ~2.5 min. But
+  # the cadence that matters to a build job is the cadence of pushes
+  # that START one. Take slightly over half of them out and the
+  # effective cadence for the build legs roughly doubles, with no
+  # runner bought and nothing cancelled that was going to say anything.
+  # It also gives back the queue wait the note measured on the critical
+  # path (median 4.4 min before windows-build even starts), which is
+  # time a release push spends behind somebody's TODO edit.
+  #
+  # FAIL-SAFE BY CONSTRUCTION, and this is the half to preserve. The
+  # allowlist is of paths proven inert, and ANY other path - plus any
+  # error, any missing before-sha, a force push, or a compare the API
+  # truncates - votes BUILD. A wrong answer costs a build we did not
+  # need; it can never cost a build we did.
+  #
+  # WHY EACH ENTRY IS INERT, checked rather than assumed:
+  #   - nothing under docs/ or website/ is reachable from
+  #     any `include_str!`/`include_bytes!` in crates/ or vendor/ (web/
+  #     IS, via `concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/...")`,
+  #     which is why web/** is NOT here and forces a build);
+  #   - the only runtime path joins in the whole test tree are
+  #     crates/nzbfast/tests/leak-soak-baseline.json. The first is why
+  #     are under paths that already force a build;
+  #   - only ROOT *.md is inert. A nested one could be include_str!'d.
+  #
+  # AND NO GATE IS LOST, which is the other thing that had to be true
+  # before this was safe. `check` still runs 13 build-free gates as
+  # steps, but every one of them is ALSO a job in size-gate.yml, which
+  # triggers on its own paths - `*.md`, `**/*.py`, `**/*.sh`, `**/*.zsh`,
+  # `website/**`, `docs/MANUAL.html` among them - on every branch push,
+  # not just main. So a docs-only or bench-script-only push still gets
+  # size, lock, doc, ref, overflow, bench2j, leg-warn, par2, provenance,
+  # iface, win-portability, waiver and harness. What it stops paying for
+  # is clippy and the test archive, which are Rust and nothing else.
+  #
+  # The dependent shards need no change: linux-tests and windows-unit
+  # already gate on `needs.<build job>.outputs.archive == 'success'`,
+  # and a skipped job has empty outputs, so they skip with it.
+  # `suites-ran` stays green too - it errors only on parent `failure`
+  # AND child `skipped`, never on a skip of both. `windows-verdict`
+  # walks back through runs for the last REAL Windows conclusion and
+  # treats skipped as no-verdict, which is exactly right here; at worst
+  # it emits a warning, which is not fatal.
+  # ===================================================================
+  changes:
     if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      # No checkout: the compare API answers this in one request, where
+      # a `git diff` would need the history both shas are on, i.e. a
+      # full-depth clone of this repo on every push to save a build on
+      # half of them.
+      - name: classify the changed paths
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          say() { echo "build=$1" >> "$GITHUB_OUTPUT"; echo "verdict: build=$1 ($2)"; }
+          case "${BEFORE:-}" in
+            ""|0000000000000000000000000000000000000000)
+              say true "no usable before-sha (first push, or forced)"; exit 0 ;;
+          esac
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${AFTER}" --jq '.files[].filename') || {
+            say true "compare API failed"; exit 0; }
+          if [ -z "$files" ]; then say true "compare returned no files"; exit 0; fi
+          n=$(printf '%s\n' "$files" | grep -c '' | tr -d ' ')
+          # The compare endpoint caps its file list at 300. At the cap we
+          # cannot know what is not listed, so we build.
+          if [ "$n" -ge 300 ]; then say true "compare truncates at 300 files (saw $n)"; exit 0; fi
+          echo "changed files ($n):"
+          printf '%s\n' "$files" | while IFS= read -r x; do echo "  $x"; done
+          # `printf '%s\n'`, NOT `printf '%s'`, on all three lines above
+          # and below. Without the trailing newline `while read` never
+          # executes its body for the LAST line, so a single-file push
+          # classified as inert no matter what it touched - and this gate
+          # fails in the UNSAFE direction when that happens, skipping a
+          # build that was needed. Caught by a table of ten path shapes
+          # run against this exact loop before it landed; every one
+          # answered `false`.
+          verdict=skip
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|website/*) ;;
+              */*)   echo "FORCE $f"; verdict=build; break ;;
+              *.md)  ;;
+              *)     echo "FORCE $f"; verdict=build; break ;;
+            esac
+          done < <(printf '%s\n' "$files")
+          if [ "$verdict" = build ]; then
+            say true "a changed path is visible to the compiler"
+          else
+            say false "every changed path is inert for the compiler"
+          fi
+
+  check:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # WAS 22 minutes on the release commit (run 31980160964: 25m14s
@@ -1281,6 +1406,18 @@ jobs:
       - name: harness dead-item gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/harness-gate.py --selftest && tools/harness-gate.py
+      # TODO 166: no HTTP worker may park unbounded on the index write
+      # mutex - the tip watcher holds it for a whole header-ingest
+      # transaction, and four workers queued behind a 62 s hold is how one
+      # dashboard tab wedged the daemon on 28 Jul 2026. §166 shipped the
+      # bounded door and ticked its boxes, then a SIXTEENTH site turned up
+      # nine days later because that census was a grep of two files. This
+      # asks the reachability question instead. Also a job in
+      # size-gate.yml, which runs on every branch push. Private repo only,
+      # like the gates above.
+      - name: index lock gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
       - name: clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # No escapes: every warning blocks. The categories still allowed
@@ -1880,7 +2017,8 @@ jobs:
   # compile nothing.
   # ===================================================================
   windows-build:
-    if: github.repository != 'nzbfast/nzbfast'
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 45
     concurrency:
@@ -2029,9 +2167,11 @@ jobs:
   # The name `windows-unit` is kept, because every handoff doc, memory
   # note and `gh api .../jobs` recipe in this project names it, and the
   # step people are told to confirm - `workspace suite` - is still the
-  # step that decides it. It is four jobs now, so the rows read
-  # `windows-unit (1)` .. `windows-unit (4)`; a filter on the prefix
-  # still finds them. Confirm ALL FOUR reached success before claiming
+  # step that decides it. It is SIX jobs since 23 Aug 2026, so the rows
+  # read `windows-unit (1)` .. `windows-unit (6)`; a filter on the prefix
+  # still finds them, and `windows-verdict` folds the suffix generically
+  # rather than by a hardcoded count. Confirm ALL SIX reached success
+  # before claiming
   # Windows coverage - `skipped` and `failure` mean opposite things and
   # the first one reads at a glance like Windows is fine. That
   # confirmation is no longer only yours to remember: `suites-ran` at
@@ -2043,6 +2183,39 @@ jobs:
   # target/. NZBFAST_LAN_TESTS is deliberately NOT set - it opens an
   # all-interfaces listener, which on Windows raises the Defender
   # Firewall dialog, and a hosted runner has nobody to click it.
+  # SIX SHARDS, NOT FOUR, since 23 Aug 2026 - and Linux deliberately
+  # stays at four. Two things had to become true before this was worth
+  # anything, and both did on the same day.
+  #
+  # The rars opt-level override removed the long pole: one test used to
+  # be 272s of a 452s shard, and no amount of sharding can cut a shard
+  # below its longest single test. The slowest test on any Windows shard
+  # is now 16.3s, so the shard wall is finally just the sum divided by
+  # the shard count, which is the only regime where adding shards pays.
+  #
+  # And the archive halved when nzbkit's test targets were folded
+  # together (220 MB to 115 MB), so a shard's artifact download went
+  # from ~12s to ~2.5s. Shard overhead is what caps how far this can go,
+  # and it just got cheaper.
+  #
+  # Measured on run 32671981725, the four shards' own test walls were
+  # 245 / 304 / 153 / 234 s, summing to 936s. That spread is the point:
+  # `--partition count:` balances by test COUNT and nothing balances by
+  # TIME, so the slowest shard was 70s above what an even split of the
+  # same work would cost. More shards does not fix the imbalance, it
+  # shrinks what the imbalance is a fraction OF. At six the even split
+  # is ~156s against ~234s at four.
+  #
+  # The cost is honest and worth stating: two more Windows runners at 2x
+  # private-repo billing, and total runner-seconds go UP slightly even
+  # as wall goes down. That is the trade being made deliberately - the
+  # `changes` gate above roughly halved how many runs reach this job at
+  # all, and this spends a little of that back where it shortens the
+  # critical path.
+  #
+  # Linux is left at four because it is not on that path: `check` plus
+  # its slowest shard is ~861s against Windows' ~1262s, so shortening it
+  # buys nothing and would only add cost.
   windows-unit:
     if: ${{ !cancelled() && github.repository != 'nzbfast/nzbfast' && needs.windows-build.outputs.archive == 'success' }}
     needs: windows-build
@@ -2051,7 +2224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     concurrency:
       group: ci-windows-unit-${{ github.ref }}-${{ matrix.shard }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -2136,14 +2309,14 @@ jobs:
             exit 1
           fi
           echo "workspace matches the build job: $got"
-      - name: workspace suite (shard ${{ matrix.shard }}/4)
+      - name: workspace suite (shard ${{ matrix.shard }}/6)
         shell: bash
         run: |
           cargo-nextest nextest run --profile ci \
             --archive-file nextest-archive.tar.zst \
             --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
             --workspace-remap "$GITHUB_WORKSPACE" \
-            --partition count:${{ matrix.shard }}/4 \
+            --partition count:${{ matrix.shard }}/6 \
             -E "$NT_EXCLUDE"
 
   # The clippy gate that CANNOT run on Linux. Until this step existed,
@@ -2184,7 +2357,8 @@ jobs:
   # an exit-0 lint run as proof until a positive control has shown the
   # harness can fail.
   windows-clippy:
-    if: github.repository != 'nzbfast/nzbfast'
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 45
     concurrency:
@@ -2279,7 +2453,8 @@ jobs:
   # not restore one; what it pays is a dependency compile for aarch64 in
   # check mode, which is what it always paid.
   windows-arm64:
-    if: github.repository != 'nzbfast/nzbfast'
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 45
     concurrency:
@@ -2406,7 +2581,8 @@ jobs:
   #
   # `--locked`, as at every other cargo gate in this file.
   slim-check:
-    if: github.repository != 'nzbfast/nzbfast'
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

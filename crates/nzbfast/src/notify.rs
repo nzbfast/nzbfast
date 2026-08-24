@@ -14,7 +14,7 @@
 //! A notification target is `http://192.168.1.40:8080` or
 //! `http://localhost:32400` essentially every time, so this is one of
 //! the few outbound paths that MUST work against private addresses. It
-//! still goes through [`crate::serve::ssrf_safe_agent`], because that
+//! still goes through [`crate::netfetch::ssrf_safe_agent`], because that
 //! guard is not a private-address blocker: it allows loopback, LAN and
 //! CGNAT (self-hosted indexers and Tailscale live there) and refuses
 //! only link-local and the cloud metadata endpoints, which no media
@@ -29,8 +29,6 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use serde::{Deserialize, Serialize};
-
-use crate::serve::{Job, JobState};
 
 /// How long any one notification may take before we give up on it. These
 /// are LAN calls to a media server; a library scan returns immediately
@@ -212,31 +210,6 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// The job's facts, taken from a hold the CALLER already owns.
-    ///
-    /// It used to take the Arc and lock for itself, which read the
-    /// record wherever the caller happened to have got to. The post-job
-    /// hooks decide their whole fan-out under one hold and then run on
-    /// the blocking pool, where a pp-script can hold the thread for
-    /// minutes - so the send described whatever the record had become by
-    /// then: for a job deleted and retried mid-script, a "Failed" event
-    /// with an empty error naming the RETRY's directory (Codex sweep 3,
-    /// H3). One hold, one snapshot, and nothing to drift.
-    pub fn from_locked(j: &Job) -> Ctx {
-        let ok = j.state == JobState::Completed;
-        Ctx {
-            name: j.name.clone(),
-            status: if ok { "Completed" } else { "Failed" },
-            category: j.category.clone(),
-            dir: j.out_dir.to_string_lossy().into_owned(),
-            bytes: j.total_bytes,
-            error: j.fail_message.clone(),
-            nzo_id: j.nzo_id.clone(),
-            event: if ok { "completed" } else { "failed" }.into(),
-            repaired: j.bad_blocks.unwrap_or(0) > 0,
-        }
-    }
-
     /// §129 2e: a non-job event (the disk or quota guard firing), for
     /// targets routed onto those tokens. The message rides in `name`
     /// so every template placeholder still means something.
@@ -485,7 +458,7 @@ pub fn test(t: &Target) -> Result<u16, String> {
 /// the module note: the guard still permits the LAN and loopback
 /// addresses these targets actually live on.
 fn agent() -> ureq::Agent {
-    crate::serve::ssrf_safe_agent(0, TIMEOUT.as_secs())
+    crate::netfetch::ssrf_safe_agent(0, TIMEOUT.as_secs())
 }
 
 /// Build and send one notification. Returns the HTTP status on success.
@@ -837,7 +810,7 @@ mod smtp {
         }
         if addrs
             .iter()
-            .any(|a| crate::serve::is_forbidden_fetch_ip(a.ip()))
+            .any(|a| crate::netfetch::is_forbidden_fetch_ip(a.ip()))
         {
             return Err("refusing to connect to an internal address".into());
         }

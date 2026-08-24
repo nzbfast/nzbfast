@@ -322,7 +322,7 @@ pub(crate) fn admit_unpack(dir: &Path, needed: u64, margin: u64) -> NeedGuard {
     let vol = vol_key(dir);
     let mut said = false;
     loop {
-        let free = crate::serve::free_bytes(dir).unwrap_or(u64::MAX);
+        let free = crate::diskfree::free_bytes(dir).unwrap_or(u64::MAX);
         if let Some(guard) = try_admit(vol, needed, margin, free) {
             return guard;
         }

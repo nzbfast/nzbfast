@@ -116,6 +116,29 @@ pub(super) fn ttfb_budget_ms(ewma_ms: u64) -> u64 {
     (4 * ewma_ms).clamp(adaptive_first_byte_min_ms(), adaptive_first_byte_max_ms())
 }
 
+/// The pre-byte floor a SOLE-server fleet budgets against: double the
+/// configured floor, still inside the ceiling (§275 item 5).
+///
+/// The kill this budget arms exists to re-place a stalled article on a
+/// better server. With one enabled server there is no better server:
+/// the kill re-dials the SAME provider and pays a TLS handshake to ask
+/// it the same question, so the only stall worth cutting early is a
+/// genuinely dead session - and the ceiling still cuts those. Watched
+/// live 24 Aug 2026 on a giganews-only daemon: 972 of 1,002 reconnects
+/// in one job summary were "our pre-byte budget", on a provider whose
+/// cold-spool articles legitimately take seconds to first byte. The
+/// 14 Aug floor A/B priced a doubling at ~4 s on the pure dead-air rig
+/// and nothing on a clean one, and that price was paid against fleets
+/// that COULD steal the work; alone, the doubling buys back roughly
+/// half the self-inflicted teardowns for even less.
+///
+/// On top of the configured floor, so `NZBFAST_TTFB_FLOOR_MS` still
+/// moves both cases together; capped at the ceiling so a raised floor
+/// cannot invert the clamp.
+pub(super) fn sole_server_floor_ms() -> u64 {
+    (2 * adaptive_first_byte_min_ms()).min(adaptive_first_byte_max_ms())
+}
+
 /// The pre-byte FLOOR, `NZBFAST_TTFB_FLOOR_MS` (default 4 s, raised
 /// from 2 s on 14 Aug 2026).
 ///

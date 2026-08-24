@@ -437,6 +437,12 @@ pub(super) fn m_queue(
             // The two remote-app arms live in remote.rs (§18): rename
             // (which is also how SAB spells set-password, value3) and
             // whole-queue sort. LunaSea sends both.
+            // TODO 274 (issue #51): "download this file next", best
+            // effort. The arm is one line because the whole transaction
+            // is a queue reorder in `files::promote_arm` - keeping it
+            // there is also what holds `m_queue` under the §106
+            // function ceiling.
+            Some("promote_file") => super::files::promote_arm(d, params),
             Some("rename") => super::super::remote::rename_arm(d, params),
             Some("sort") => super::super::remote::sort_arm(d, params),
             Some("change_complete_action") => super::super::remote::complete_action_arm(params),
@@ -458,12 +464,25 @@ pub(super) fn m_queue(
                 };
                 let mut n = 0;
                 let mut finishing = 0;
-                for j in d.queue.lock_ok().iter().filter(|j| hit(j)) {
-                    let mut g = j.lock_ok();
-                    if apply_priority(d, &mut g, prio) {
-                        n += 1;
-                    } else {
-                        finishing += 1;
+                {
+                    let mut q = d.queue.lock_ok();
+                    // Two passes under the one lock: write the
+                    // priorities, then move each row to where it will
+                    // now run (see `reposition_for_priority`) - the
+                    // moves reorder the deque, so they cannot share the
+                    // iteration that finds the targets.
+                    let mut moved: Vec<String> = Vec::new();
+                    for j in q.iter().filter(|j| hit(j)) {
+                        let mut g = j.lock_ok();
+                        if apply_priority(d, &mut g, prio) {
+                            n += 1;
+                            moved.push(g.nzo_id.clone());
+                        } else {
+                            finishing += 1;
+                        }
+                    }
+                    for id in &moved {
+                        reposition_for_priority(&mut q, id);
                     }
                 }
                 if n > 0 {

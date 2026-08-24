@@ -239,7 +239,7 @@ impl Daemon {
         // instead: an empty error and the retry's output directory,
         // routed to the targets that subscribe to the wrong outcome
         // (sweep 3, H3).
-        let cx = crate::notify::Ctx::from_locked(&g);
+        let cx = notify_ctx_for(&g);
         Some(PostJobOwed {
             script,
             targets,
@@ -785,6 +785,37 @@ fn post_event(p: &Pending) -> Result<u16, SendErr> {
         Err(ureq::Error::Transport(t)) => {
             Err(SendErr::Transient(crate::notify::transport_brief(&t)))
         }
+    }
+}
+
+/// The job's facts, taken from a hold the CALLER already owns.
+///
+/// It lives HERE and not on `notify::Ctx` (TODO 276 item 3): reading a
+/// `Job` was the only thing `crate::notify` needed from `serve`, and it
+/// held the whole notification module inside the daemon's dependency
+/// cycle for one constructor with one caller. `Ctx`'s fields are all
+/// `pub`, so the struct literal reads the same from this side.
+///
+/// It used to take the Arc and lock for itself, which read the
+/// record wherever the caller happened to have got to. The post-job
+/// hooks decide their whole fan-out under one hold and then run on
+/// the blocking pool, where a pp-script can hold the thread for
+/// minutes - so the send described whatever the record had become by
+/// then: for a job deleted and retried mid-script, a "Failed" event
+/// with an empty error naming the RETRY's directory (Codex sweep 3,
+/// H3). One hold, one snapshot, and nothing to drift.
+pub(super) fn notify_ctx_for(j: &Job) -> crate::notify::Ctx {
+    let ok = j.state == JobState::Completed;
+    crate::notify::Ctx {
+        name: j.name.clone(),
+        status: if ok { "Completed" } else { "Failed" },
+        category: j.category.clone(),
+        dir: j.out_dir.to_string_lossy().into_owned(),
+        bytes: j.total_bytes,
+        error: j.fail_message.clone(),
+        nzo_id: j.nzo_id.clone(),
+        event: if ok { "completed" } else { "failed" }.into(),
+        repaired: j.bad_blocks.unwrap_or(0) > 0,
     }
 }
 

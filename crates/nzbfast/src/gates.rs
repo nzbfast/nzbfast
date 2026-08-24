@@ -68,7 +68,7 @@ impl Gates {
     pub fn from_json(text: &str) -> anyhow::Result<Gates> {
         let g: Gates = serde_json::from_str(text)?;
         for s in [&g.min_size, &g.max_size].into_iter().flatten() {
-            let n = crate::serve::parse_size(s)
+            let n = crate::sizes::parse_size(s)
                 .ok_or_else(|| anyhow::anyhow!("gates: can't parse size {s:?}"))?;
             // REJECT rather than clamp, because there is no safe value to
             // clamp to: pushing `max` down to MAX_SIZE_BYTES is harmless,
@@ -101,7 +101,7 @@ impl Gates {
     pub fn size_bounds(&self) -> (u64, u64) {
         let p = |o: &Option<String>| {
             o.as_deref()
-                .and_then(crate::serve::parse_size)
+                .and_then(crate::sizes::parse_size)
                 .filter(|n| *n <= MAX_SIZE_BYTES)
                 .unwrap_or(0)
         };
@@ -277,7 +277,7 @@ mod tests {
     fn oversized_size_gates_are_rejected_and_never_wrap() {
         // parse_size saturates at u64::MAX here - the exact value the old
         // code handed straight to `as i64`.
-        assert_eq!(crate::serve::parse_size("99999999T"), Some(u64::MAX));
+        assert_eq!(crate::sizes::parse_size("99999999T"), Some(u64::MAX));
         assert_eq!(u64::MAX as i64, -1, "…which is a negative SQLite bound");
 
         for s in ["99999999T", "10000000T", "18446744073709551615"] {

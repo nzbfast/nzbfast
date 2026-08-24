@@ -246,7 +246,7 @@ pub(crate) fn reextract_dir_outcome(
     if posted > 0 {
         ex.set_prealloc_ceiling(posted);
     }
-    if let Some(free) = crate::serve::free_bytes(dir) {
+    if let Some(free) = crate::diskfree::free_bytes(dir) {
         ex.set_extract_budget(free.saturating_sub(EXTRACT_RESERVE));
     }
     if let Some(pw) = password {

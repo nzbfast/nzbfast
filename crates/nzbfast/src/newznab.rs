@@ -537,7 +537,7 @@ pub fn release_ident(title: &str) -> String {
         Some((i, _)) if t[i..].eq_ignore_ascii_case(".nzb") => &t[..i],
         _ => t,
     };
-    let flat = crate::serve::job::flatten_name(t);
+    let flat = crate::smart::flatten_name(t);
     let ident = flat.split_whitespace().collect::<Vec<_>>().join(" ");
     // A title with no letter or digit anywhere in it reduces to nothing,
     // and an empty identity would fold every such title into one row.

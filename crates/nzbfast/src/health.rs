@@ -413,7 +413,7 @@ pub(crate) fn failure_clause(h: &PostHealth) -> Option<String> {
 /// passed [`PostHealth::no_server_can_supply`].
 ///
 /// The opening clause is `post is gone`, which
-/// [`crate::serve::fail_kind`] classifies as [`crate::serve::FailKind`]
+/// [`crate::failkind::fail_kind`] classifies as [`crate::failkind::FailKind`]
 /// `::Gone` - the same class a completed download that proved every
 /// article absent lands in, and the class that matters here for three
 /// separate reasons: it is NOT transient, so `park` arms no automatic
