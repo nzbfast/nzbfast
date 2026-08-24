@@ -67,7 +67,6 @@ async fn unpack_failure_retries_without_refetching() {
         segs.len()
     );
     let srv = MockServer::start(articles, Chaos::default()).await;
-    let served = srv.served.clone();
     let body_log = srv.body_log.clone();
 
     let mut xml = format!(
@@ -211,7 +210,12 @@ async fn unpack_failure_retries_without_refetching() {
         // The retry. It fails again - the unpacker is still forbidden -
         // which is the point: the assertion is about the NETWORK, not
         // about the job reaching green.
-        let served_before = served.load(std::sync::atomic::Ordering::Relaxed);
+        // `body_log.len()`, NOT `served`: the mock logs an id when the
+        // request ARRIVES and increments `served` only once the body is
+        // fully written, so a `served` mark indexes `body_log` somewhere
+        // INSIDE the previous leg and blames this one for articles it
+        // never asked for.
+        let asked_before = body_log.lock().unwrap().len();
         let r = http(
             port,
             &format!("/api?mode=retry&value={nzo}&apikey=sekrit&output=json"),
@@ -228,7 +232,7 @@ async fn unpack_failure_retries_without_refetching() {
             "an ordinary failed retry must reuse its own directory"
         );
 
-        let refetched: Vec<String> = body_log.lock().unwrap()[served_before as usize..].to_vec();
+        let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         // Measured with the journal deleted between the two runs (the
         // positive control this test was built against): the retry then
         // refetches 7 of 7. With it, only the head article - whose bytes
@@ -262,7 +266,12 @@ async fn unpack_failure_retries_without_refetching() {
             .collect::<String>()
             .parse()
             .unwrap_or_else(|e| panic!("no numeric id in {nzo}: {e}"));
-        let served_before = served.load(std::sync::atomic::Ordering::Relaxed);
+        // `body_log.len()`, NOT `served`: the mock logs an id when the
+        // request ARRIVES and increments `served` only once the body is
+        // fully written, so a `served` mark indexes `body_log` somewhere
+        // INSIDE the previous leg and blames this one for articles it
+        // never asked for.
+        let asked_before = body_log.lock().unwrap().len();
         let body = format!(
             "{{\"method\":\"editqueue\",\"params\":[\"HistoryRetry\",\"\",[{nzbid}]],\"id\":1}}"
         );
@@ -287,7 +296,7 @@ async fn unpack_failure_retries_without_refetching() {
             failed_dir.to_string_lossy(),
             "the facade retry must reuse the directory too"
         );
-        let refetched: Vec<String> = body_log.lock().unwrap()[served_before as usize..].to_vec();
+        let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         let leaked: Vec<&String> = refetched.iter().filter(|id| recorded.contains(*id)).collect();
         assert!(
             leaked.is_empty(),

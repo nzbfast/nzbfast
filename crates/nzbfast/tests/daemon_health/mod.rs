@@ -143,7 +143,7 @@ async fn health_giveup_needs_every_server_to_confirm() {
                 "a job one server never answered about was given up on\n{h}"
             );
             let st = slot()["status"].as_str().unwrap_or_default().to_string();
-            if st == "Downloading" || st == "Fetching" || h.contains(&id) {
+            if st == "Downloading" || st == "Fetching" || history_has(&h, &id) {
                 started = true;
                 break;
             }
@@ -214,12 +214,15 @@ async fn health_giveup_needs_every_server_to_confirm() {
         let mut h2 = String::new();
         for _ in 0..600 {
             h2 = http(port, "/api?mode=history&output=json", None);
-            if h2.contains(&id2) {
+            if history_has(&h2, &id2) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        assert!(h2.contains(&id2), "the second job never finished: {h2}");
+        assert!(
+            history_has(&h2, &id2),
+            "the second job never finished: {h2}"
+        );
         let v: serde_json::Value = serde_json::from_str(&h2).unwrap();
         let row = v["history"]["slots"]
             .as_array()
@@ -445,7 +448,7 @@ async fn preflight_scores_a_dead_recovery_set_apart_from_a_live_payload() {
         // recovery set is not a dead post. The payload is whole, nothing
         // needs repairing, and the job finishes.
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains(&id), "the job left the queue: {q}");
+        assert!(queue_has(&q, &id), "the job left the queue: {q}");
         assert!(!q.contains("\"Failed\""), "a verdict failed a job: {q}");
         http(port, "/api?mode=resume&output=json", None);
         for _ in 0..600 {
@@ -454,7 +457,7 @@ async fn preflight_scores_a_dead_recovery_set_apart_from_a_live_payload() {
                 !hist.contains("\"Failed\""),
                 "the job failed over a recovery set it never needed\n{hist}"
             );
-            if hist.contains(&id) && hist.contains("\"Completed\"") {
+            if history_slot(&hist, &id)["status"] == "Completed" {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));

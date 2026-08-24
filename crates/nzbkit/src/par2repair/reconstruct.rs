@@ -8,6 +8,26 @@
 
 use super::*;
 
+/// The one place [`MAX_REPAIR_DIM`] is spelled as a refusal, so the two
+/// callers cannot drift in wording or in which side of the boundary they
+/// admit. [`Reconstructor::new_with_path`] is the backstop every route
+/// funnels through; `repair_dir_set_inner` calls it EARLIER, once its
+/// missing set is final, because the backstop sits behind
+/// `load_selected_recovery`, which pins one `block_size` buffer per
+/// missing block - `m x block_size` bytes read and held only to be
+/// dropped when the backstop refuses. At the cap that is the 256 MB the
+/// constant budgets for; above it, it is whatever the set declares.
+pub(super) fn check_repair_dim(m: usize) -> Result<(), RepairError> {
+    // See MAX_REPAIR_DIM's docs: a crafted set declaring tens of
+    // thousands of missing blocks is a repair-time DoS, not a repair.
+    if m > MAX_REPAIR_DIM {
+        return Err(RepairError::Malformed(format!(
+            "{m} missing blocks exceeds the repair-matrix cap ({MAX_REPAIR_DIM})"
+        )));
+    }
+    Ok(())
+}
+
 impl Reconstructor {
     /// `recovery` payloads are only READ here (widened into the u16
     /// syndrome rows before the fold worker spawns), so borrowed slices
@@ -43,14 +63,12 @@ impl Reconstructor {
                 missing.len()
             )));
         }
-        // See MAX_REPAIR_DIM's docs: a crafted set declaring tens of
-        // thousands of missing blocks is a repair-time DoS, not a repair.
-        if missing.len() > MAX_REPAIR_DIM {
-            return Err(RepairError::Malformed(format!(
-                "{} missing blocks exceeds the repair-matrix cap ({MAX_REPAIR_DIM})",
-                missing.len()
-            )));
-        }
+        // The backstop every repair route funnels through - the mapped
+        // driver, the disk driver and any direct caller. The disk driver
+        // ALSO checks it earlier (see `check_repair_dim`); this one is
+        // what makes the cap a property of the engine rather than of
+        // whoever remembered to ask.
+        check_repair_dim(missing.len())?;
         let base_logs = input_base_logs(n_inputs)?;
         if let Some(&j) = missing.iter().find(|&&j| j >= n_inputs) {
             return Err(RepairError::Malformed(format!(

@@ -40,15 +40,22 @@
 
 use super::*;
 
-/// How many spares one grab holds.
+/// How many spares one grab holds WITH NO SETTING SAVED - the default
+/// `alt_hold_count` is initialised from, and no longer a second answer
+/// beside it.
 ///
-/// §282 item 13 is the settings chip and owns the real surface
-/// (`alt_hold_count`, and its own argument about what the default should
-/// be). Until it lands this constant is the whole of it, and it is a
-/// constant rather than a literal so that chip has one seam to wire
-/// rather than a search to run. Two is cheap: two NZB files, no payload,
-/// and two rows the queue already knows how to render.
-#[cfg(feature = "indexer")]
+/// §282 item 13's setting is the live surface and item 19 decided its
+/// value; this constant is where that value is written down.
+/// `altcand::AltSettings::default` reads it, the grab-time hold reads
+/// the SETTING, and so the two cannot disagree - which is the whole
+/// reason this stayed a constant rather than becoming a literal at
+/// either end. Two is cheap: two NZB files, no payload, and two rows the
+/// queue already knows how to render.
+///
+/// NOT `#[cfg(feature = "indexer")]`, though the only thing that ACTS on
+/// it is the indexer-only grab-time hold. `AltSettings` is not gated -
+/// the setting is readable and settable on a slim build like every other
+/// key - so gating this would take the slim build's default with it.
 pub(in crate::serve) const SPARE_HOLD_COUNT: usize = 2;
 
 /// How many candidate NZBs one grab may FETCH while trying to fill those

@@ -1061,7 +1061,9 @@ utlåtande fortsätter tillägget orört och loggen säger varför.</p>
 <p>Varje jobbmilstolpe är en versionerad händelse: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(ett automatiskt nytt försök har köat om en misslyckad nedladdning) och
+(ett automatiskt nytt försök har köat om en misslyckad nedladdning),
+<code>job.switched</code> (ett jobb som inte kunde slutföras ersattes av en
+alternativ kopia som hölls undan för det) och
 <code>job.delete_kept</code> (en radering tog bort posten men kunde inte ta bort
 dess filer), plus <code>watch.picked</code> (en .nzb hämtades ur bevakningsmappen),
 <code>nzb.refeed</code> (en färdig nedladdnings egen NZB-fil lades i kön, pausad), <code>watchlist.upgraded</code> (en uppgradering från bevakningslistan landade och

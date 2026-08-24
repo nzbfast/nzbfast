@@ -260,6 +260,18 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
             > 0,
         "the NZB's declared bytes are reported: {queued:?}"
     );
+    // The recovery set is told apart BEFORE the job starts, from the
+    // NZB's own classification (`NzbFile::kind`) rather than from a slot
+    // that does not exist yet - the same call `get/plan.rs` makes when it
+    // decides not to queue a volume's articles at all. A client that
+    // could not see it here counts the par2 set as payload, and on a
+    // typical post that is a third of the rows.
+    for name in ["pack.par2", "pack.vol000+01.par2"] {
+        assert_eq!(row(&queued, name)["recovery"], true, "{queued:?}");
+    }
+    for name in ["pack.part01.rar", "pack.part02.rar"] {
+        assert_eq!(row(&queued, name)["recovery"], false, "{queued:?}");
+    }
 
     // Promotion needs a queue to reorder, and a paused job has none.
     // Refused in words rather than silently doing nothing.

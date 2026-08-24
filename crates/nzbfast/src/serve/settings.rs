@@ -413,6 +413,25 @@ pub(super) const SPEED: &[Setting] = &[
     rw("post_health_fail", |c| {
         json!(c.d.post_health_fail.load(Ordering::Relaxed))
     }),
+    // §282 item 13. Five rows, all defaulting to "hold nothing and ask
+    // before spending a second copy" - the argument for every default is
+    // on `altcand::AltSettings`. Nothing here touches `post_health_fail`
+    // above, which stays OFF (issue #29, §138).
+    rw("alt_hold_count", |c| {
+        json!(c.d.alt.hold_count.load(Ordering::Relaxed))
+    }),
+    rw("alt_auto_switch", |c| {
+        json!(c.d.alt.auto_switch.load(Ordering::Relaxed))
+    }),
+    rw("alt_auto_search", |c| {
+        json!(c.d.alt.auto_search.load(Ordering::Relaxed))
+    }),
+    rw("alt_max_copies", |c| {
+        json!(c.d.alt.max_copies.load(Ordering::Relaxed))
+    }),
+    rw("alt_max_extra_bytes", |c| {
+        json!(c.d.alt.max_extra_bytes.load(Ordering::Relaxed))
+    }),
     rw("wall_hide_adult", |c| {
         json!(c.d.wall_hide_adult.load(Ordering::Relaxed))
     }),
@@ -1242,6 +1261,39 @@ pub(super) fn apply_setting(
             let on = flag();
             d.post_health_fail.store(on, Ordering::Relaxed);
             (true, json!(on))
+        }
+        // §282 item 13. The two counts are clamped rather than refused:
+        // both arrive from a number input, and a value out of range is a
+        // typo, not an instruction to stop honouring the setting.
+        // `alt_max_extra_bytes` takes the same size vocabulary every
+        // other byte setting on this page takes, and 0 means unlimited -
+        // which is the right answer on a flat-rate account and the wrong
+        // one on a block account, where the ceiling has to be consulted
+        // whatever it says (see `altcand::AltSettings`).
+        "alt_hold_count" => {
+            let n = (uint()? as u32).min(10);
+            d.alt.hold_count.store(n, Ordering::Relaxed);
+            (true, json!(n))
+        }
+        "alt_auto_switch" => {
+            let on = flag();
+            d.alt.auto_switch.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
+        "alt_auto_search" => {
+            let on = flag();
+            d.alt.auto_search.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
+        "alt_max_copies" => {
+            let n = (uint()? as u32).clamp(1, 10);
+            d.alt.max_copies.store(n, Ordering::Relaxed);
+            (true, json!(n))
+        }
+        "alt_max_extra_bytes" => {
+            let n = size()?;
+            d.alt.max_extra_bytes.store(n, Ordering::Relaxed);
+            (true, json!(n))
         }
         "wall_hide_adult" => {
             let on = flag();

@@ -692,6 +692,9 @@ struct SlotCtx {
     pw_wanted: Option<String>,
     /// §77: whether the health sink is switched on at all.
     health_defer: bool,
+    /// §282 item 12: the held alternates, read once before the queue
+    /// lock - see `PreLock::alt_held`.
+    alt_held: Vec<crate::serve::altcand::HeldSpare>,
     /// Free bytes on the output disk, for the per-row unpack-space check.
     free_now: Option<u64>,
     /// Wall-clock seconds, for deriving each row's absolute `time_added`
@@ -744,6 +747,7 @@ fn slot_json(
         live_shape,
         pw_wanted,
         health_defer,
+        alt_held,
         free_now,
         now_unix,
         speed_bps,
@@ -1047,6 +1051,27 @@ fn slot_json(
             }
             v
         }),
+        // §282 item 14: what this row replaced and why, on the QUEUE row
+        // and not only in history. The reader this exists for is
+        // watching an unfamiliar release name download RIGHT NOW - by
+        // the time the record reaches history the question has already
+        // been asked. Ours, like `alt_offer` below it; empty on every
+        // row that replaced nothing.
+        "alt_from_name": j.alt_from_name,
+        "alt_why": j.alt_why,
+        "alt_to_name": j.alt_to_name,
+        // §282 item 12: the switch this row offers, or null - which is
+        // every row on every ordinary queue. Present only once something
+        // has CONCLUDED the job cannot finish, and it carries the reason
+        // as a token plus the daemon's own sentence for it, so a verdict
+        // the dashboard has no translation for yet still reads. The
+        // spares are the rows a click can actually promote; an empty
+        // list is still an offer, because the notice is the half that
+        // was missing.
+        //
+        // Nothing here starts, stops or fails anything: the switch is
+        // `mode=alt_switch` and it happens on a click.
+        "alt_offer": crate::serve::altcand::offer_json(j, alt_held),
         "zip_packed": j.zip_packed,
         "archive_shape": shape,
         // Ours, like the keys around it: bytes the output disk
@@ -1090,6 +1115,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         live_shape,
         pw_wanted,
         health_defer,
+        alt_held,
         disk_now,
         free_now,
         now_unix,
@@ -1160,6 +1186,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         live_shape,
         pw_wanted,
         health_defer,
+        alt_held,
         free_now,
         now_unix,
         speed_bps,

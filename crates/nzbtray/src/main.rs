@@ -437,6 +437,187 @@ mod probe_body {
         }
     }
 
+    /// Does this install display speeds in bits rather than bytes?
+    ///
+    /// The dashboard's `unit_bits` setting, read straight out of
+    /// settings.json the way [`apikey`] reads its key from the same file.
+    /// A tooltip that said MB/s while every number on the dashboard said
+    /// Mb/s would be the bits/bytes mess the unit convention exists to
+    /// stop, and reading the file costs nothing next to the API call the
+    /// tip is already making. Absent or unreadable = the daemon's own
+    /// default, bytes.
+    pub fn unit_bits(data_dir: &Path) -> bool {
+        let read = || -> Option<bool> {
+            let s = std::fs::read_to_string(data_dir.join("settings.json")).ok()?;
+            let v: Value = serde_json::from_str(&s).ok()?;
+            v.get("unit_bits")?.as_bool()
+        };
+        read().unwrap_or(false)
+    }
+
+    /// A speed, in the dashboard's own units and to its own precision.
+    ///
+    /// The Rust twin of the dashboard's one speed formatter (rateParts in
+    /// web/dashboard.html): bytes below 1000 MB/s print whole, above it
+    /// they roll to GB/s with two decimals, and the bits arm is the same
+    /// shape on the value times eight. The tray cannot call that
+    /// function, so the rule is written out again here.
+    ///
+    /// THIS IS NOT THE ONLY TWIN, and the sentence that said so stood
+    /// here for seven minutes: rateText in
+    /// macapp/Sources/NzbFast/StatusItem.swift is the mac menu bar's copy
+    /// of the same four thresholds, landed the same afternoon by a lane
+    /// that could not see this one (c6a2f8ecd 24 Aug 2026 17:13:14Z,
+    /// 27cc66897 17:20:30Z). So there are THREE: the
+    /// dashboard's, which is canonical, and one per native surface that
+    /// cannot reach it. Move a threshold in any of them and the other two
+    /// move in the same commit - a menu bar reading GB/s beside a
+    /// dashboard reading MB/s is exactly the bits/bytes mess the unit
+    /// convention exists to stop. Do not grow a FOURTH: a native surface
+    /// that needs a rate calls one of these.
+    ///
+    /// Unit symbols stay English here. Everything else the tray draws -
+    /// every menu item, every balloon - is English too; the localised
+    /// symbols belong to the dashboard's `unit()` and its catalogues.
+    pub fn fmt_rate(mb_per_sec: f64, bits: bool) -> String {
+        let (v, d, u) = if bits {
+            let mb = mb_per_sec * 8.0;
+            if mb >= 1000.0 {
+                (mb / 1000.0, 2, "Gb/s")
+            } else {
+                (mb, 0, "Mb/s")
+            }
+        } else if mb_per_sec >= 1000.0 {
+            (mb_per_sec / 1000.0, 2, "GB/s")
+        } else {
+            (mb_per_sec, 0, "MB/s")
+        };
+        format!("{v:.d$} {u}", d = d as usize)
+    }
+
+    /// Below this the queue is not moving bytes in any sense a status
+    /// line can report, so the line drops the field rather than print
+    /// "0 MB/s", which reads as broken rather than as busy. The
+    /// post-network tail - verifying, repairing, unpacking - sits here
+    /// for minutes at a time on a job that is perfectly healthy, so
+    /// this is the common case and not the edge.
+    ///
+    /// It is not a promise that the printed number is never 0:
+    /// [`fmt_rate`] prints MB/s whole, so anything under half a
+    /// megabyte a second still rounds down to it. That is what the
+    /// dashboard shows for the same sample, and one rounding rule
+    /// across the product is worth more than a second one invented in
+    /// the wrappers. The floor is only about telling "stopped" from
+    /// "slow".
+    ///
+    /// The mac menu bar applies the same floor for the same reason; see
+    /// the wording note on [`tip_from_queue`].
+    const RATE_FLOOR_MBPS: f64 = 0.05;
+
+    /// The tray tooltip, from the body of one `mode=queue` call.
+    ///
+    /// What the user wants off a hover is the answer to "is it doing
+    /// anything, how much of it, and how fast", and that is the order
+    /// the line puts them in:
+    ///
+    /// ```text
+    /// nzbfast - Downloading · 3 jobs · 42 MB/s
+    /// nzbfast - Downloading · 2 jobs      (the tail: nothing measurable moving)
+    /// nzbfast - Paused · 4 jobs
+    /// nzbfast - Offline · 4 jobs
+    /// nzbfast - Idle
+    /// ```
+    ///
+    /// THE SAME LINE IS DRAWN BY THE MAC MENU BAR, and keeping the two
+    /// in one voice is the whole point of the shape above: stateLine in
+    /// macapp/Sources/NzbFast/StatusItem.swift builds these same three
+    /// fields in this same order with this same separator, and differs
+    /// only in dropping the `nzbfast - ` prefix - it hangs under a menu
+    /// whose title already says the name, where this one labels a
+    /// nameless icon in a tray of nameless icons. The two landed hours
+    /// apart on 24 Aug 2026 from lanes that could not see each other
+    /// (c6a2f8ecd here, 27cc66897 there) and described the same five
+    /// states in different words, different field order and different
+    /// case; a user with both saw the product say two things. Change the
+    /// wording in one and change it in the other, in the same commit.
+    ///
+    /// The three fields, and the rules that decide whether each appears:
+    ///
+    /// * The STATE WORD is the daemon's own (`status` in the queue body
+    ///   is one of Downloading / Idle / Paused), so the tooltip cannot
+    ///   drift from what the dashboard's rows say. `offline` OUTRANKS
+    ///   it: the two are different states - paused keeps indexing and
+    ///   keeps the account occupied, offline hangs up and does neither -
+    ///   and offline is the one that explains the silence, so it takes
+    ///   the word. The derived fallback exists only for a body with no
+    ///   `status` at all.
+    /// * The COUNT is omitted at zero rather than printed as "0 jobs",
+    ///   which is a phrase for saying nothing loudly. `noofslots` is the
+    ///   queue length AFTER the caller's category / nzo_ids filter; the
+    ///   tray sends neither, so for it the two are the same number.
+    /// * The RATE appears only while the queue is actually downloading
+    ///   and something measurable is moving (see [`RATE_FLOOR_MBPS`]).
+    ///
+    /// None when the body is not a queue answer at all (an error page, a
+    /// refusal), which the caller shows as the plain product name.
+    pub fn tip_from_queue(q: &Value, bits: bool) -> Option<String> {
+        let q = q.get("queue")?;
+        let n = q.get("noofslots").and_then(Value::as_u64)?;
+        // kB/s, as a string (the SAB field is decimal kilobytes, so
+        // MB/s is a further thousand down).
+        let mbps = q
+            .get("kbpersec")
+            .and_then(Value::as_str)
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 1000.0;
+        let flag = |k: &str| q.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let (offline, paused) = (flag("offline"), flag("paused"));
+        let state = if offline {
+            "Offline"
+        } else {
+            match q.get("status").and_then(Value::as_str).map(str::trim) {
+                Some(s) if !s.is_empty() => s,
+                _ if paused => "Paused",
+                _ if n == 0 => "Idle",
+                _ => "Downloading",
+            }
+        };
+        // The literal, not `app::MSG_TITLE`: that const lives in the
+        // win32 half, which does not compile on the machines these
+        // tests run on.
+        let mut tip = format!("nzbfast - {state}");
+        if n > 0 {
+            let s = if n == 1 { "" } else { "s" };
+            tip.push_str(&format!(" · {n} job{s}"));
+        }
+        if !paused && !offline && mbps >= RATE_FLOOR_MBPS {
+            tip.push_str(&format!(" · {}", fmt_rate(mbps, bits)));
+        }
+        Some(tip)
+    }
+
+    /// A string as a win32 fixed-buffer wants it: UTF-16, NUL-terminated,
+    /// never longer than `cap` units in total.
+    ///
+    /// The shell's buffers are arrays, not pointers, and an over-long copy
+    /// that fills the array leaves no room for the terminator - the shell
+    /// then reads whatever follows it in the struct. Truncating is also
+    /// not a plain `take`: a cut between the halves of a surrogate pair
+    /// leaves a lone unit that renders as a replacement glyph, so the
+    /// orphan comes back off.
+    pub fn wide_capped(s: &str, cap: usize) -> Vec<u16> {
+        if cap == 0 {
+            return Vec::new();
+        }
+        let mut v: Vec<u16> = s.encode_utf16().take(cap - 1).collect();
+        if v.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+            v.pop();
+        }
+        v.push(0);
+        v
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
@@ -875,6 +1056,178 @@ mod probe_body {
                 "{a}"
             );
         }
+
+        /// The hover tooltip, which is the only live number the tray
+        /// shows without opening a browser. Every arm of it, because the
+        /// win32 half cannot be run on the machines these tests run on.
+        #[test]
+        fn the_tooltip_says_what_the_queue_is_doing() {
+            use super::tip_from_queue;
+            let q = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+            let tip = |body: &str| tip_from_queue(&q(body), false).unwrap();
+
+            // The field separator is spelled as its codepoint below, on
+            // purpose: a middle dot, a period and a bullet are the same
+            // three pixels in a diff, and this is the one place the
+            // choice between them is pinned.
+            //
+            // Downloading: what it is doing, how much of it, how fast.
+            // The mac menu bar draws this same line without the name in
+            // front of it - see the note on tip_from_queue.
+            assert_eq!(
+                tip(
+                    r#"{"queue":{"noofslots":3,"kbpersec":"42300","paused":false,
+                        "status":"Downloading"}}"#
+                ),
+                "nzbfast - Downloading \u{b7} 3 jobs \u{b7} 42 MB/s"
+            );
+            // One job is one job, not "1 jobs".
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":1,"kbpersec":"42300","status":"Downloading"}}"#),
+                "nzbfast - Downloading \u{b7} 1 job \u{b7} 42 MB/s"
+            );
+            // A rate over 1000 MB/s rolls to GB/s with two decimals, as
+            // the dashboard's own formatter does.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":1,"kbpersec":"1250000","status":"Downloading"}}"#),
+                "nzbfast - Downloading \u{b7} 1 job \u{b7} 1.25 GB/s"
+            );
+            // Bits, for an install whose dashboard is set that way.
+            assert_eq!(
+                tip_from_queue(
+                    &q(r#"{"queue":{"noofslots":1,"kbpersec":"42300","status":"Downloading"}}"#),
+                    true
+                )
+                .unwrap(),
+                "nzbfast - Downloading \u{b7} 1 job \u{b7} 338 Mb/s"
+            );
+            // On the wire with nothing measurable moving - verifying,
+            // repairing, unpacking. "0 MB/s" would read as broken, so
+            // the field is dropped and the state word carries the line.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":2,"kbpersec":"0","status":"Downloading"}}"#),
+                "nzbfast - Downloading \u{b7} 2 jobs"
+            );
+            // ...and 0.04 MB/s is that same case, not a rate: it prints
+            // as "0 MB/s" and the floor is what stops it.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":2,"kbpersec":"40","status":"Downloading"}}"#),
+                "nzbfast - Downloading \u{b7} 2 jobs"
+            );
+            // The three resting states. Offline and paused are different
+            // things and the dashboard shows them separately, so the
+            // tooltip does too.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":0,"kbpersec":"0","status":"Idle"}}"#),
+                "nzbfast - Idle"
+            );
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":0,"paused":true,"status":"Paused"}}"#),
+                "nzbfast - Paused"
+            );
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":4,"paused":true,"status":"Paused"}}"#),
+                "nzbfast - Paused \u{b7} 4 jobs"
+            );
+            // A paused queue keeps no rate, whatever the last sample
+            // said - the daemon's own word for it is Paused, and a
+            // speed beside it would contradict the word.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":4,"paused":true,"kbpersec":"42300",
+                        "status":"Paused"}}"#),
+                "nzbfast - Paused \u{b7} 4 jobs"
+            );
+            // Offline outranks paused: pausing while offline is true of
+            // both, and offline is the one that explains the silence. It
+            // outranks the daemon's `status` word too.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":4,"paused":true,"offline":true,
+                        "status":"Paused"}}"#),
+                "nzbfast - Offline \u{b7} 4 jobs"
+            );
+            // No `status` at all - an older daemon, or a body trimmed by
+            // something in the middle. The word is derived rather than
+            // left blank, because a line starting with the separator is
+            // the one shape that reads as a bug.
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":3,"kbpersec":"42300"}}"#),
+                "nzbfast - Downloading \u{b7} 3 jobs \u{b7} 42 MB/s"
+            );
+            assert_eq!(tip(r#"{"queue":{"noofslots":0}}"#), "nzbfast - Idle");
+            assert_eq!(
+                tip(r#"{"queue":{"noofslots":2,"paused":true}}"#),
+                "nzbfast - Paused \u{b7} 2 jobs"
+            );
+
+            // Not a queue answer at all: an auth refusal, an error page,
+            // a body with no count. The caller falls back to the plain
+            // name rather than printing half a sentence.
+            for body in [
+                r#"{"status":false,"error":"API Key Required"}"#,
+                r#"{"queue":{}}"#,
+                "{}",
+            ] {
+                assert!(tip_from_queue(&q(body), false).is_none(), "{body}");
+            }
+
+            // Every arm fits the 64-unit tooltip buffer with room to
+            // spare, so a real tip is never the truncation case.
+            let long = tip(r#"{"queue":{"noofslots":999999,"kbpersec":"1250000",
+                    "status":"Downloading"}}"#);
+            assert!(long.chars().count() < 60, "{long}");
+        }
+
+        /// The tooltip follows the dashboard's bits/bytes setting,
+        /// which lives in the same settings.json the API key comes out
+        /// of. A default install, an install that never touched the
+        /// control and an unreadable file all mean bytes.
+        #[test]
+        fn the_unit_setting_comes_out_of_settings_json() {
+            use super::unit_bits;
+            assert!(!unit_bits(&data_dir("units-none", None, None)));
+            assert!(!unit_bits(&data_dir(
+                "units-off",
+                Some(r#"{"unit_bits":false}"#),
+                None
+            )));
+            assert!(unit_bits(&data_dir(
+                "units-on",
+                Some(r#"{"unit_bits":true}"#),
+                None
+            )));
+            // A value of the wrong type is not a preference.
+            assert!(!unit_bits(&data_dir(
+                "units-junk",
+                Some(r#"{"unit_bits":"yes"}"#),
+                None
+            )));
+            assert!(!unit_bits(&data_dir(
+                "units-broken",
+                Some("not json"),
+                None
+            )));
+        }
+
+        /// The win32 fixed buffers are arrays: an over-long copy that
+        /// fills one leaves no NUL and the shell reads past the string.
+        #[test]
+        fn a_capped_wide_string_always_ends_in_a_nul() {
+            use super::wide_capped;
+            assert_eq!(wide_capped("hi", 8), vec![104, 105, 0]);
+            // Exactly full, and one past.
+            assert_eq!(wide_capped("abc", 4), vec![97, 98, 99, 0]);
+            let cut = wide_capped("abcdef", 4);
+            assert_eq!(cut, vec![97, 98, 99, 0]);
+            assert_eq!(cut.len(), 4);
+            // A cut through a surrogate pair drops the orphan rather
+            // than leaving a replacement glyph in the tooltip.
+            let pair = wide_capped("ab\u{1F680}", 4);
+            assert_eq!(pair, vec![97, 98, 0], "the lone high surrogate came off");
+            // ...and a whole pair that fits is kept (four units + NUL).
+            assert_eq!(wide_capped("ab\u{1F680}", 5).len(), 5);
+            // Degenerate cap: no room for even a terminator.
+            assert!(wide_capped("abc", 0).is_empty());
+        }
     }
 }
 
@@ -907,6 +1260,26 @@ mod app {
     /// duplicated; a test in the daemon pins the pair together.
     const KEYLESS_MARKER: &str = "nzbfast cannot start: API key file";
     const TIMER_CHILD: usize = 1;
+    /// Tooltip length, in UTF-16 units INCLUDING the terminator.
+    ///
+    /// The array is 128 and a modern shell reads all of it; 64 is the
+    /// documented floor (the limit for the older, smaller form of the
+    /// struct), and the smaller of the two is what a tray with nothing
+    /// long to say should hold itself to. Every tip this one builds is
+    /// under 60, which a test in `probe_body` pins, so this is a guard
+    /// against a future tip growing rather than a working limit.
+    const TIP_UNITS: usize = 64;
+    /// Shortest gap between two tooltip refreshes. The refresh is
+    /// hover-driven, and a hover is a stream of WM_MOUSEMOVEs, so
+    /// without this one pass of the cursor would fire a request per
+    /// mouse position.
+    const TIP_MIN_GAP: Duration = Duration::from_millis(1500);
+    /// How long a tooltip refresh may wait on the daemon. It runs ON the
+    /// message pump, so this is also the longest the tray can appear
+    /// stuck when the engine is wedged. Loopback to our own daemon
+    /// answers in single-digit milliseconds; the menu's own refresh has
+    /// blocked for up to 900 ms since the menu existed.
+    const TIP_TIMEOUT_MS: u64 = 500;
 
     /// Window class + title of the hidden message window, shared by the
     /// running tray and the `--quit` helper that has to find it.
@@ -941,6 +1314,10 @@ mod app {
         child_dead: bool,
         /// Last state seen when the menu opened - picks the Pause/Resume label.
         paused: bool,
+        /// When the tooltip was last refreshed, for the hover throttle
+        /// (see [`refresh_tip`]). None = never, so the first hover of
+        /// the session always asks.
+        tip_at: Option<Instant>,
         data_dir: PathBuf,
         out_dir: PathBuf,
         exe_dir: PathBuf,
@@ -1769,8 +2146,7 @@ mod app {
                 h as HICON
             }
         };
-        let tip = w("nzbfast");
-        n.szTip[..tip.len()].copy_from_slice(&tip);
+        put_w(&mut n.szTip, MSG_TITLE, TIP_UNITS);
         // SAFETY: FFI call; &n points at a live local NOTIFYICONDATAW
         // with cbSize set (see nid) for the duration of the call.
         unsafe { Shell_NotifyIconW(NIM_ADD, &n) };
@@ -1782,14 +2158,84 @@ mod app {
         unsafe { Shell_NotifyIconW(NIM_DELETE, &nid(hwnd)) };
     }
 
+    /// Copy a string into one of the shell's fixed UTF-16 buffers.
+    ///
+    /// `cap` is what the SHELL will read, which is not always the
+    /// array's length: see [`TIP_UNITS`]. `probe_body::wide_capped`
+    /// guarantees the result fits and is terminated - the arms that used
+    /// to be written inline here truncated with a plain `min`, which
+    /// fills the array and leaves the shell reading whatever follows the
+    /// string in the struct.
+    fn put_w(dst: &mut [u16], s: &str, cap: usize) {
+        let v = crate::probe_body::wide_capped(s, cap.min(dst.len()));
+        dst[..v.len()].copy_from_slice(&v);
+    }
+
+    /// Put a live reading behind the tray icon's tooltip.
+    ///
+    /// Hover-driven, so nothing polls: the shell delivers WM_MOUSEMOVE
+    /// through the icon's callback the moment the cursor enters it, and
+    /// the tooltip is not drawn until the hover delay has elapsed - so a
+    /// refresh started here lands before the text is shown. That is the
+    /// same moment NIN_POPUPOPEN would give us without asking the icon
+    /// to speak NOTIFYICON_VERSION_4, which would also move every mouse
+    /// event into the low word of `lParam` and rewrite the click and
+    /// menu contract this tray has always used.
+    ///
+    /// `force` skips the throttle for a state change the user just made
+    /// themselves, where a stale tooltip reads as a failed command.
+    ///
+    /// The queue body answers the Pause/Resume label too, so the state
+    /// the menu draws from is refreshed here rather than fetched twice.
+    /// A daemon that does not answer in time leaves the plain product
+    /// name, never a half-built sentence.
+    fn refresh_tip(hwnd: HWND, force: bool) {
+        let Some((port, data_dir)) = APP.with(|a| {
+            let mut a = a.borrow_mut();
+            let app = a.as_mut()?;
+            let due = force || app.tip_at.is_none_or(|t| t.elapsed() >= TIP_MIN_GAP);
+            // Stamped before the request, not after: the pump is
+            // single-threaded, so a slow answer must not let the
+            // mousemoves queued behind it each start another one.
+            due.then(|| {
+                app.tip_at = Some(Instant::now());
+                (app.port, app.data_dir.clone())
+            })
+        }) else {
+            return;
+        };
+        let q = api_get(port, &data_dir, "queue", TIP_TIMEOUT_MS);
+        if let Some(p) = q
+            .as_ref()
+            .and_then(|v| v.pointer("/queue/paused"))
+            .and_then(Value::as_bool)
+        {
+            APP.with(|a| {
+                if let Some(app) = a.borrow_mut().as_mut() {
+                    app.paused = p;
+                }
+            });
+        }
+        let tip = q
+            .as_ref()
+            .and_then(|v| {
+                crate::probe_body::tip_from_queue(v, crate::probe_body::unit_bits(&data_dir))
+            })
+            .unwrap_or_else(|| MSG_TITLE.to_string());
+        let mut n = nid(hwnd);
+        n.uFlags = NIF_TIP;
+        put_w(&mut n.szTip, &tip, TIP_UNITS);
+        // SAFETY: FFI call; &n points at a live local NOTIFYICONDATAW
+        // with cbSize set (see nid) for the duration of the call.
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &n) };
+    }
+
     fn balloon(hwnd: HWND, title: &str, text: &str) {
         let mut n = nid(hwnd);
         n.uFlags = NIF_INFO;
         n.dwInfoFlags = NIIF_INFO;
-        let t = w(title);
-        let x = w(text);
-        n.szInfoTitle[..t.len().min(64)].copy_from_slice(&t[..t.len().min(64)]);
-        n.szInfo[..x.len().min(256)].copy_from_slice(&x[..x.len().min(256)]);
+        put_w(&mut n.szInfoTitle, title, 64);
+        put_w(&mut n.szInfo, text, 256);
         // SAFETY: FFI call; &n points at a live local NOTIFYICONDATAW
         // with cbSize set (see nid) for the duration of the call.
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &n) };
@@ -1896,6 +2342,9 @@ mod app {
                 let mode = if paused { "resume" } else { "pause" };
                 if api_get(port, data_dir, mode, 2000).is_some() {
                     APP.with(|a| a.borrow_mut().as_mut().unwrap().paused = !paused);
+                    // The user just changed the state; the next hover
+                    // must not still describe the old one.
+                    refresh_tip(hwnd, true);
                 }
             }
             ID_AUTOSTART => set_autostart(!autostart_enabled()),
@@ -1995,6 +2444,11 @@ mod app {
                             ));
                         }
                         WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                        // The cursor entered the icon: there are a few
+                        // hundred milliseconds before the shell draws
+                        // the tooltip, which is enough to put a live
+                        // reading in it. Throttled inside.
+                        WM_MOUSEMOVE => refresh_tip(hwnd, false),
                         _ => {}
                     }
                     0
@@ -2263,6 +2717,7 @@ mod app {
                 child,
                 child_dead: false,
                 paused: false,
+                tip_at: None,
                 data_dir: data_dir.clone(),
                 out_dir,
                 exe_dir,
@@ -2306,6 +2761,21 @@ mod app {
                 &data_dir,
                 proof(port, &data_dir),
             ));
+        }
+        // ...and say where it went. The window that just opened is an
+        // ordinary browser tab, so a user who closes it has no reason to
+        // think the download engine is still there, or that the tray
+        // icon is the way back to it. Only on a genuine first run: an
+        // upgrade takes the `--open` arm above and has been told this
+        // once already.
+        if first_run {
+            balloon(
+                hwnd,
+                "nzbfast is in your tray",
+                "It keeps running here after you close the page. Double-click the tray icon \
+                 to open the dashboard again, or bookmark it in your browser - it is an \
+                 ordinary web page. Hover the icon for the current speed.",
+            );
         }
 
         // SAFETY: MSG is windows-sys's #[repr(C)] mirror of the

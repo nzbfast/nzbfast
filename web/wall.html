@@ -1,6 +1,20 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>nzbfast · wall</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The colour the browser paints its own chrome with around this page:
+     the address bar on Android, the title bar of an installed window, the
+     status bar on iOS. Without it that chrome is white, which on the dark
+     default reads as a bright band welded to the top of a dark app.
+     The two values ARE the palette's --bg (ui-tokens.html): #eef0f5 light,
+     #0e1014 dark. They cannot BE var(--bg) - a meta tag is read before any
+     stylesheet and takes no custom property - so if that token ever moves,
+     move these with it.
+     This follows the OS preference only. An explicit theme choice (the
+     data-theme attribute the pre-paint script sets) is not reflected here;
+     that belongs with the rest of the installed-window work rather than in
+     a meta tag. -->
+<meta name="theme-color" content="#eef0f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
 <!-- Same real PNG icons as the dashboard - see the note there. The wall is
      the same app on the same origin, so it takes the app mark rather than
      its own emoji. -->
@@ -26,6 +40,20 @@ __NZBFAST_UI_TOKENS__
 <style>
 *{box-sizing:border-box}
 html{scrollbar-color:color-mix(in srgb,var(--fg) 26%,transparent) var(--bg)}
+/* Native feel, the wall's share of it - the same reasoning written out at
+   length in dashboard.html. The wall is mostly artwork and titles, so the
+   two that earn their place here are the ground not rubber-banding under
+   a poster grid, and a poster not lifting off the page as a draggable
+   file when someone meant to flick the grid sideways. Card titles, the
+   detail sheet's text and every figure in it stay selectable. */
+html{overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+.bar,.bar .nav{user-select:none;-webkit-user-select:none}
+img{-webkit-user-drag:none}
+a.pill:focus:not(:focus-visible),button:focus:not(:focus-visible){outline:none}
+/* Belt to the braces above: `user-select:none` on an ancestor reaches
+   INTO a form field on some engines, and an input you cannot select
+   inside is worse than any of this is worth. */
+input,textarea{user-select:text;-webkit-user-select:text}
 body{margin:0;background:var(--bg);color:var(--fg);
   font:14px/1.5 -apple-system,BlinkMacSystemFont,system-ui,Segoe UI,sans-serif;
   -webkit-font-smoothing:antialiased}

@@ -226,6 +226,19 @@ impl Daemon {
             line(&mut o, "password", "required, and none worked");
         }
         line(&mut o, "still packed", &j.unpack_blocked_by);
+        // §282 item 14. Both attempts, on whichever of the two rows the
+        // reader happens to have opened: what was tried, why it was
+        // abandoned, what replaced it. Nothing is printed for the
+        // overwhelming majority of downloads, which replaced nothing and
+        // were replaced by nothing.
+        //
+        // These three are on the report's fixed field list like every
+        // other line here - the module note above is the rule, and a
+        // release name is exactly the kind of thing that has to be
+        // asked for by name rather than swept in.
+        for (k, v) in super::altcand::switch_lines(&j) {
+            line(&mut o, k, v);
+        }
 
         o.push_str("\n== timings ==\n");
         line(&mut o, "added", secs(j.queued_unix));

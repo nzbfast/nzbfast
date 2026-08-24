@@ -771,6 +771,17 @@ pub(super) fn m_indexer_grab(
 /// of the release it just grabbed.
 #[cfg(feature = "indexer")]
 fn hold_search_spares(d: &Arc<Daemon>, primary: &str, grabbed: &IndexerHit) {
+    // §282 items 13/19: HOW MANY is the user's answer, not this file's.
+    // Asked before the candidate walk because 0 genuinely means "hold
+    // nothing" - it must not take the indexer lock, rank a search or
+    // spawn an aux thread to arrive at that. The default behind it is
+    // `spare::SPARE_HOLD_COUNT`, which `AltSettings::default` is
+    // initialised from, so an install that has never touched the setting
+    // behaves exactly as it did before there was one.
+    let want = d.alt.hold_count.load(Ordering::Relaxed) as usize;
+    if want == 0 {
+        return;
+    }
     let cands: Vec<spare::SpareCandidate> = {
         let rt = d.indexer_rt.lock_ok();
         let mut rows: Vec<(u32, &String, &IndexerHit)> = rt
@@ -805,7 +816,7 @@ fn hold_search_spares(d: &Arc<Daemon>, primary: &str, grabbed: &IndexerHit) {
     let primary = primary.to_string();
     crate::serve::spawn_aux("spare-hold", move || {
         let Some(d) = dw.upgrade() else { return };
-        let held = d.hold_spares_with(&primary, &cands, spare::SPARE_HOLD_COUNT, |c| {
+        let held = d.hold_spares_with(&primary, &cands, want, |c| {
             let hit = {
                 let rt = d.indexer_rt.lock_ok();
                 rt.results

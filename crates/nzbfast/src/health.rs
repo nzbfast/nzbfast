@@ -240,6 +240,35 @@ impl RecoveryHealth {
     pub(crate) fn doubtful(&self) -> bool {
         self.bucket != Bucket::Green
     }
+
+    /// §282 item 12: is the recovery set UNOBTAINABLE, as strongly as
+    /// this evidence can say it? The incident this whole section is
+    /// written against, in one predicate.
+    ///
+    /// Deliberately the same four clauses as
+    /// [`PostHealth::no_server_can_supply`], and for the same reasons -
+    /// every configured server answered (a silent host had no say),
+    /// every sampled recovery article was missing, `servers > 0` so an
+    /// empty fleet is never unanimous, and the propagation age gate
+    /// rides in via Red. Red on its own is nowhere near enough: it needs
+    /// only `absent > 0` among the hosts that answered, which is a fleet
+    /// having a bad minute as readily as a dead recovery set.
+    ///
+    /// WHAT THIS IS FOR, and what it is NOT for. It is read by
+    /// `serve::altcand` to put a notice and a button on the queue row,
+    /// which the user then clicks or ignores. It is NOT a give-up
+    /// predicate and must never become one: `post_health_fail` is OFF by
+    /// default as a public commitment on issue #29 (§138), it reads the
+    /// PAYLOAD fields only, and `score_recovery`'s own header says
+    /// nothing it returns may fail a job. Offering somebody a button is
+    /// not failing their download.
+    pub(crate) fn unobtainable(&self) -> bool {
+        self.bucket == Bucket::Red
+            && self.servers > 0
+            && self.answered == self.servers
+            && self.sampled > 0
+            && self.absent == self.sampled
+    }
 }
 
 impl PostHealth {

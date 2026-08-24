@@ -551,3 +551,260 @@ async fn an_unservable_recovery_set_declines_as_short_not_malformed() {
          provider:\n{log}"
     );
 }
+
+/// Payload bytes with no repeating block, which this file's two §282
+/// legs need and `payload` cannot give them.
+///
+/// `payload(n, seed)` is `(i as u8) * 37 + seed + (i >> 9) as u8`: the
+/// first term has period 256, the second advances every 512 bytes and
+/// wraps after 256 of those, so the whole sequence REPEATS every 128 KB
+/// exactly. PAR2 repair's sliding scan adopts blocks by content, and a
+/// block with an identical twin every 128 KB is adoptable from anywhere
+/// else in the file - so a hole punched in such a payload heals with no
+/// parity at all, and both legs below green with the recovery set never
+/// consulted. Measured 24 Aug 2026: "54 block(s) adopted from
+/// r.part2.rar", repair complete, job exit 0.
+///
+/// That adoption is a real and good feature (it is one of the two ways
+/// `par2repair` goes past par2cmdline). It just makes the fixture
+/// unable to state the thing these legs are about. An xorshift64
+/// sequence has no twin inside a 900 kB file, so the only route to a
+/// repair is the recovery set - which is the whole premise.
+fn aperiodic(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// The §282 incident fixture: a post whose PAYLOAD serves and whose
+/// RECOVERY VOLUMES do not.
+///
+/// `rar_release`'s own recovery set is posted in 60 kB articles, which
+/// at this geometry is three or four articles for the whole set - below
+/// `VolumeYield`'s sample floor, and rightly so: a ratio over four
+/// articles is not evidence about a provider. So the recovery here goes
+/// out in 2 kB articles, which is what a real 1.35 GB recovery set
+/// looks like from the yield gate's point of view (the incident's fetch
+/// asked for 1293 articles) without making the fixture big. The PAYLOAD
+/// articles shrink too, for a different reason - see below.
+///
+/// The redundancy is the default 20%: what matters is that the damage
+/// needs recovery, not how much of it there is.
+fn recovery_starved_release(tag: &str) -> (Fixture, Vec<u8>) {
+    let mut fx = Fixture::new(tag);
+    let inner = aperiodic(900_000, 0x0000_0282);
+    let vols = [
+        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
+        fixtures::rar5_volume_n(
+            &[("movie.mkv", 900_000, &inner[350_001..700_001], true, true)],
+            1,
+        ),
+        fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[700_001..], true, false)], 2),
+    ];
+    let names = ["r.part1.rar", "r.part2.rar", "r.part3.rar"];
+    // 12 kB payload articles rather than `rar_release`'s 60 kB, so that
+    // losing two of them is ~2.5% of the post and not 12%. §282 item
+    // 17's rung will not call the parity the casualty unless the
+    // payload is PROVEN mostly intact (a twentieth or less short) - a
+    // run that lost an eighth of its payload has no business being told
+    // the payload was fine - and the incident's own loss was 0.21%.
+    for (name, vol) in names.iter().zip(&vols) {
+        fx.add_file(name, vol, 12_000);
+    }
+    // ...and 2 kB recovery articles, so the whole set is enough of them
+    // for a yield RATIO to be evidence. See the fn doc.
+    assert!(fx.add_par2(20, &names, 2_000), "par2 create failed");
+    (fx, inner)
+}
+
+/// §282 item 4, end to end: a provider that will not serve this post's
+/// recovery set must not be asked for MORE of it.
+///
+/// This is the live incident of 24 Aug 2026 shrunk to loopback. There,
+/// a repair asked for 1024 MB of recovery, 68.9 MB arrived (6.7%, 1206
+/// article failures), and the daemon's answer was to fetch all seven
+/// remaining volumes - 2755 seconds of post-processing against a 743
+/// second download, on a payload that was 99.8% intact. Here the
+/// recovery volumes 430 outright and the payload is short two articles,
+/// which is the same fact with the noise taken out.
+///
+/// Three things are pinned, and the NEGATIVE one is the finding:
+///
+/// - the escalation is REFUSED, so "repair short - fetching all" never
+///   prints. That string is asserted PRESENT by the two legs above, on
+///   fixtures whose recovery serves; between them they say the gate
+///   fires on the shape it is for and on nothing else.
+/// - the console names which of the post's two halves failed, in the
+///   yield that proved it.
+/// - the job FAILS, promptly, rather than grinding through every
+///   remaining volume first.
+///
+/// - and the sentence the USER reads names the recovery set, not the
+///   payload. On this shape - and on the incident's, which is why - the
+///   payload is genuinely short too, so `finish_job` takes its
+///   `download incomplete` arm, which outranks the repair-shortfall arm
+///   and is right to: `fail_kind` classifies on the opening. §282 item
+///   17 built the rung inside that arm and left
+///   `LossCauses::recovery_unobtainable` as an explicit seam for this
+///   item's verdict; `RepairShortfall::Unservable` is what now sets it,
+///   and this assertion is the end-to-end proof that the two halves
+///   meet. Without the seam the counters are all zero here BY
+///   CONSTRUCTION - `get::plan` never puts a named `Par2Volume` in the
+///   main plan, so every one of these failures happened in a
+///   repair-side fetch with no `FileSlot` to charge.
+///
+/// The shortfall arm's own wording, for a job whose payload IS whole,
+/// is exercised by `failure_arms_are_ranked` in get/tail.rs.
+///
+/// The par2 index itself keeps serving: without it the set never
+/// activates and the job fails long before any of this.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_set_the_source_will_not_serve_stops_the_escalation() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (fx, _inner) = recovery_starved_release("unservable-recovery");
+    let art = |needle: &str, suffix: &str| {
+        fx.articles
+            .keys()
+            .find(|k| k.contains(needle) && k.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no article matching {needle}{suffix}"))
+            .clone()
+    };
+    // Every article of every recovery VOLUME is gone; the index is not
+    // a volume and keeps serving.
+    let mut missing: std::collections::HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("vol") && k.contains("par2"))
+        .cloned()
+        .collect();
+    assert!(
+        missing.len() >= 16,
+        "the fixture must post enough recovery articles for a yield RATIO to be \
+         evidence - got {}",
+        missing.len()
+    );
+    // ...and the payload is short two articles, so a repair is needed.
+    missing.insert(art("r_part2_rar", "-3@mock>"));
+    missing.insert(art("r_part2_rar", "-5@mock>"));
+
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            missing,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+
+    assert!(
+        !ok,
+        "a post with no obtainable recovery cannot succeed:\n{log}"
+    );
+    assert!(
+        !log.contains("repair short - fetching all"),
+        "the escalation asked a provider that had just refused this recovery set for \
+         the rest of it - that is the whole finding:\n{log}"
+    );
+    assert!(
+        log.contains("recovery unusable"),
+        "nothing named the recovery set as the thing that failed:\n{log}"
+    );
+    assert!(
+        log.contains("recovery article(s) arrived"),
+        "the verdict must carry the yield that produced it:\n{log}"
+    );
+    assert!(
+        log.contains("the recovery data is what failed, not the payload"),
+        "the yield verdict never reached item 17's rung, so the user is still being \
+         told a 99%-intact payload is the casualty:\n{log}"
+    );
+}
+
+/// §282 item 16: `install par2cmdline` must not be the advice when
+/// par2cmdline could not have helped.
+///
+/// On the incident the line above it read "native repair: 145 block(s)
+/// damaged, only 0 recovery block(s) on disk". Reed-Solomon cannot
+/// invent data, so the external binary would have failed on the same
+/// arithmetic - and the message instead sent its reader off to ask why
+/// nzbfast needs an external par2 at all. It does not: `par2repair` is
+/// a complete in-process implementation and the external binary is a
+/// correctness backstop for a native BUG plus the `MAX_REPAIR_DIM`
+/// guard, neither of which is what a parity-less set hit.
+///
+/// Same fixture as the leg above, with `PATH` emptied so nothing
+/// resolves `par2` - which is exactly the native-only install the
+/// message is aimed at. Native repair is left ON here, unlike the two
+/// legs at the top of this file: its Unrepairable verdict is the input
+/// the message now switches on.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_recovery_on_disk_does_not_advertise_par2cmdline() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (fx, _inner) = recovery_starved_release("no-recovery-no-advice");
+    let art = |needle: &str, suffix: &str| {
+        fx.articles
+            .keys()
+            .find(|k| k.contains(needle) && k.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no article matching {needle}{suffix}"))
+            .clone()
+    };
+    let mut missing: std::collections::HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("vol") && k.contains("par2"))
+        .cloned()
+        .collect();
+    missing.insert(art("r_part2_rar", "-3@mock>"));
+    missing.insert(art("r_part2_rar", "-5@mock>"));
+
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            missing,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, _ok) =
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[("PATH", "")]))
+            .await
+            .unwrap();
+
+    assert!(
+        log.contains("recovery block(s) on disk"),
+        "the native pass must have reached its Unrepairable verdict for this leg to \
+         mean anything:\n{log}"
+    );
+    assert!(
+        !log.contains("install par2cmdline"),
+        "a set with no parity on disk was told to go and install a tool that would \
+         have failed identically:\n{log}"
+    );
+    assert!(
+        log.contains("could not have helped"),
+        "the honest replacement message never printed:\n{log}"
+    );
+}

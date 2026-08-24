@@ -1117,7 +1117,9 @@ l'aggiunta procede intatta e il log dice perché.</p>
 <p>Ogni traguardo di un job è un evento versionato: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(un nuovo tentativo automatico ha rimesso in coda un download fallito) e
+(un nuovo tentativo automatico ha rimesso in coda un download fallito),
+<code>job.switched</code> (un lavoro che non poteva completarsi è stato
+sostituito da una copia alternativa tenuta da parte per esso) e
 <code>job.delete_kept</code> (un'eliminazione ha rimosso il record ma non è
 riuscita a rimuoverne i file), più <code>watch.picked</code> (un .nzb è stato
 prelevato dalla cartella sorvegliata), <code>nzb.refeed</code> (il file NZB di un download concluso è stato aggiunto alla coda, in pausa), <code>watchlist.upgraded</code> (un

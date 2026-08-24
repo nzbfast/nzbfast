@@ -348,6 +348,29 @@ fn m_change_cat(
     })
 }
 
+/// §282 item 12. `value` is the download that cannot finish, `alt` the
+/// held spare to run instead. Both must still be in the queue and the
+/// spare must be held against that job - see `Daemon::alt_switch`, which
+/// does the whole thing under one hold of the queue.
+///
+/// The refusals come back as `error` for the toast rather than as a
+/// status code: every one of them means the queue moved under the tab,
+/// and the sentence says what to do about it.
+fn m_alt_switch(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    let id = params.get("value").cloned().unwrap_or_default();
+    let alt = params.get("alt").cloned().unwrap_or_default();
+    Some(match d.alt_switch(&id, &alt) {
+        Some(err) => json!({"status": false, "error": err}),
+        None => json!({"status": true, "nzo_id": alt}),
+    })
+}
+
 fn m_eat_volumes(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -1585,6 +1608,12 @@ pub(in crate::serve) fn dispatch(
         // Refused outright unless the mode is `low_disk`, so a stale
         // dashboard tab cannot arm a job on a daemon whose setting has
         // since gone back to `off`. `always` needs no per-job answer.
+        // §282 item 12: switch a doomed download for a spare that is
+        // already held for it. Nothing on this path searches, and
+        // nothing on it runs without this call - the queue row draws
+        // the notice and the button from `alt_offer`, and the user
+        // clicks.
+        "alt_switch" => return m_alt_switch(d, req, params, ctx, api_body),
         "eat_volumes" => return m_eat_volumes(d, req, params, ctx, api_body),
         // M24: attach an archive password to a job. Queued jobs
         // use it at completion; a history job flagged

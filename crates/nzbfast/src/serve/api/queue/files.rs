@@ -46,7 +46,16 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
             nzb.files
                 .iter()
                 .enumerate()
-                .map(|(i, f)| queued_row(&crate::streamhub::job_file_row(i, f)))
+                .map(|(i, f)| {
+                    // The NZB's own classification, which is the same one
+                    // the plan will apply the moment this job starts
+                    // (`get/plan.rs` reads `kind()` too). Without it a
+                    // queued listing calls the recovery set payload, and a
+                    // reader counting "what did I queue" counts a par2 set
+                    // that may be a third of the rows.
+                    let rec = !matches!(f.kind(), nzbkit::nzb::FileKind::Data);
+                    queued_row(&crate::streamhub::job_file_row(i, f), rec)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -79,12 +88,21 @@ fn base_row(r: &crate::streamhub::JobFileRow) -> serde_json::Map<String, Value> 
 /// `status` is SAB's word for "nothing of this has moved yet", which is
 /// exactly true of every file of a job that has not started; `state` is
 /// ours and says the same thing without borrowing SAB's vocabulary.
-fn queued_row(r: &crate::streamhub::JobFileRow) -> Value {
+///
+/// `recovery` is the ONE judgement this side does make, and it is the
+/// NZB's rather than ours: a `.par2` that wears a volume suffix is data
+/// the job fetches only if repair asks for it, whichever job it is. The
+/// row carries it on both sides so a client need not learn two shapes -
+/// `state` stays "queued" rather than borrowing the live side's
+/// "recovery" word, because nothing about this job has been decided yet
+/// and a volume of a job that never starts was never declined.
+fn queued_row(r: &crate::streamhub::JobFileRow, recovery: bool) -> Value {
     let mut o = base_row(r);
     o.insert("mbleft".into(), json!(mb(r.bytes)));
     o.insert("bytes_left".into(), json!(r.bytes));
     o.insert("status".into(), json!("queued"));
     o.insert("state".into(), json!("queued"));
+    o.insert("recovery".into(), json!(recovery));
     Value::Object(o)
 }
 

@@ -1,0 +1,203 @@
+# Compile the Mac app wrapper. Nothing else in CI ever has.
+#
+# `macapp/` is the AppKit + WKWebView wrapper that owns the bundled
+# engine - seven files and a couple of thousand lines of AppKit Swift,
+# the process a Mac user actually launches. Until this job landed, 24 Aug
+# 2026, no workflow in this repo compiled a single line of it:
+#
+#     git grep -n "swift build\|macapp\|make-app" origin/main -- .github/
+#
+# returned nothing. Every gate in the numbered list in CLAUDE.md is
+# about crates/, web/, docs/, website/, packaging/ or research/, and not
+# one of them can see a Swift syntax error, a bad selector, or a call to
+# an API the deployment target does not have. `macapp` IS in
+# packaging/PUBLIC_MANIFEST, so leak-check.sh reads these files - but
+# only for private vocabulary, never for whether they build. The app is
+# assembled by macapp/make-app.sh, which is hand-run out of
+# packaging/build-bundles.sh at release time, so the FIRST thing that
+# would ever have caught a broken wrapper was somebody cutting a
+# release.
+#
+# That is not hypothetical traffic. On 24 Aug 2026 three separate
+# sessions landed changes under macapp/Sources/NzbFast/ inside about an
+# hour - 8914d0d6e (DashboardWindow.swift), 27cc66897 (the menu bar
+# item: StatusItem.swift, MenuBarIcon.swift, AppDelegate.swift,
+# Daemon.swift, new files among them) and 9e2433cd5 (a comment
+# correction). Each compiled only because its author happened to run
+# `swift build` by hand. A lane that did not would have reddened
+# nothing.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN FILE, AND NOT size-gate.yml OR ci-private.yml
+#
+# size-gate.yml is where the cheap gates live BECAUSE it runs on every
+# branch push, which is the property that puts a red on the author's
+# push instead of on the next lane's. Its header earns that placement
+# with one argument, in its own words: no build, no toolchain, no cargo
+# cache, no target dir, so "checkout plus the script is the whole job".
+# A macOS runner and a Swift toolchain falsify that sentence. Worse,
+# that workflow's `on: push: paths:` list is a UNION covering
+# `crates/**`, `**/*.py`, `**/*.sh` and `*.md`, so a job added there
+# would spin a macOS runner on very nearly every push in the repo, and
+# holding it back would need a compare-API classifier job of the kind
+# ci-private's `changes` carries - a second moving part, with its own
+# failure modes, to recover a property that `on: paths:` already gives
+# for free.
+#
+# ci-private.yml is main-only, which is cheaper and would still catch
+# most of it (sessions fast-forward main directly here rather than
+# opening PRs, so a push to main IS usually the author's push). It was
+# not chosen for the reason its own header measures at length: on a main
+# taking a push every ~90 seconds, a job in that file is routinely
+# queued or superseded, and its verdict sits behind the ~18 minutes of
+# toolchain, fmt, clippy and unit suites in `check`. An 8 second Swift
+# build does not belong behind that.
+#
+# So: a dedicated workflow, on every branch, with a NATIVE path filter.
+# The cost objection to the every-branch placement evaporates once the
+# trigger is scoped - this spends macOS runner minutes only on a push
+# that touched the thing it compiles, which is a handful of pushes a
+# week. macOS runners are not new to this repo (release.yml and
+# provenance-release.yml both use macos-latest), but until now they ran
+# on tags alone, never per push.
+#
+# The path filter is COMPLETE for what this job does, and that is worth
+# saying because a path-filtered gate is only as good as its list.
+# macapp/Package.swift declares no dependencies and the sources carry no
+# `#if` and no arch conditionals, so nothing outside macapp/ can change
+# whether `swift build` succeeds. make-app.sh's OTHER half - the
+# universal release engine it lipos in from cargo - is a crates/ concern
+# and is covered by the Rust jobs.
+#
+# ---------------------------------------------------------------------
+# WHAT IT RUNS, AND WHAT IT DELIBERATELY DOES NOT
+#
+# A debug `swift build`, native arch. Measured cold on a dev Mac with
+# `.build` removed: 8.1 s wall. That is the cheapest thing that would
+# have caught a Swift compile error, which is the class this exists for.
+#
+# NOT `./macapp/make-app.sh`: it builds a universal RELEASE engine first
+# (two cargo release targets) unless handed a prebuilt ENGINE, then
+# codesigns a bundle. Minutes, for no additional compile coverage of the
+# Swift.
+#
+# NOT `swift build -c release --arch arm64 --arch x86_64`, the wrapper
+# half of make-app.sh. It compiles the same sources twice; with no arch
+# conditionals anywhere in the tree there is no error it can find that
+# the native debug build cannot. If an arch-specific `#if` is ever added
+# to macapp/, revisit this line - that is the change that would make the
+# universal build worth its minutes.
+#
+# NOT a test suite. macapp has no tests, and inventing them is a
+# different piece of work.
+#
+# NOT a formatter or a linter. The repo has no Swift formatter today and
+# `cargo fmt` does not cover .swift, so adding one would be a new
+# convention imposed on an existing tree of that size, with its own diff
+# and its own argument to make. It does not ride in on a build job.
+#
+# ---------------------------------------------------------------------
+# WARNINGS ARE NOT FAILURES HERE, ON PURPOSE
+#
+# The tree emits two warnings from Daemon.swift today - NSLock
+# `lock()`/`unlock()` "unavailable from asynchronous contexts", which
+# the compiler itself notes is an error in the Swift 6 language mode.
+# Package.swift pins `.swiftLanguageMode(.v5)` deliberately, with a
+# comment saying why. Whether the quit path's threading should be
+# reworked to satisfy Swift 6 is a real question and a separate one;
+# this job must not pre-empt it. `swift build` exits non-zero on an
+# error and zero on a warning, and NOTHING here passes
+# `-warnings-as-errors`. Do not add it as a rider on some later edit.
+#
+# ---------------------------------------------------------------------
+# VERIFIED RED, ON A REAL RUNNER, BEFORE IT LANDED
+#
+# A gate that cannot fail is a rubber stamp, so this one was measured
+# rather than reasoned about - the method a probe branch, deleted after,
+# that TODO 116.4b and the `suites-ran` guard in ci-private.yml both use.
+# Two pushes to `probe/macapp-ci-red` on 24 Aug 2026:
+#
+#   run 32759690424  one planted type error  -> macapp-build FAILED, 34 s
+#                    (`swift build` red, canary step never reached)
+#   run 32759779074  the error removed       -> macapp-build SUCCESS, 50 s
+#                    (both Daemon.swift warnings present and tolerated,
+#                     `Build complete! (20.68s)`, canary step green)
+#
+# The runner was Swift 6.3.3, arm64-apple-macosx26.0. The canary's OWN
+# guard was verified the other way locally, by neutering the planted
+# error to something valid: it printed the ::error:: line and exited 1.
+# `git status` is clean after both directions.
+name: macapp
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'macapp/**'
+      - '.github/workflows/macapp.yml'
+  pull_request:
+    paths:
+      - 'macapp/**'
+      - '.github/workflows/macapp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macapp-build:
+    # No `github.repository` guard. Unlike the gates in size-gate.yml
+    # this needs no private tooling, macapp/ ships wholesale in
+    # PUBLIC_MANIFEST, and a broken wrapper is exactly as broken on the
+    # public repo - where standard runners are free - as it is here.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    concurrency:
+      group: macapp-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a toolchain
+      # bump rather than against the diff. Package.swift is
+      # swift-tools-version 6.0 with a .macOS(.v14) deployment target.
+      - name: swift version
+        run: swift --version
+
+      # DELIBERATELY UNCACHED. There is no actions/cache for `.build`
+      # here and there should not be: SwiftPM re-emits nothing for an
+      # unchanged module, so a stale or partially-restored cache is the
+      # one way this step could report success without having compiled
+      # the code in front of it. A cold build is 8 seconds; a cache
+      # would save less than it risks.
+      - name: swift build
+        run: cd macapp && swift build
+
+      # THE CANARY. A gate that cannot fail is a rubber stamp, and this
+      # repo keeps growing gates because that failure mode is silent by
+      # construction (see the dead picker arm in web/i18n/nav-regen.py,
+      # and the three canaries in leak-check.yml this follows). A clean
+      # `swift build` looks identical whether it compiled the tree or
+      # skipped it, so prove the compiler is in the loop by planting an
+      # error it must refuse.
+      #
+      # Runs AFTER the real build, and removes the file on every path,
+      # so a failure here can never be mistaken for the real build's.
+      # The error is a type mismatch inside a function body rather than
+      # at top level: main.swift owns top-level code, so a top-level
+      # canary would fail for a reason other than the one intended.
+      - name: prove the build step can actually fail
+        run: |
+          set -uo pipefail
+          cd macapp
+          cat > Sources/NzbFast/build_canary.swift <<'SWIFT'
+          private func nzbfastBuildCanary() { let _: Int = "not an int" }
+          SWIFT
+          if swift build > /tmp/macapp-canary.log 2>&1; then
+            rm -f Sources/NzbFast/build_canary.swift
+            echo "::error::swift build PASSED a planted type error - this job is not compiling anything"
+            exit 1
+          fi
+          rm -f Sources/NzbFast/build_canary.swift
+          grep -m1 'error:' /tmp/macapp-canary.log || true
+          echo "canary refused as expected"

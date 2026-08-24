@@ -582,6 +582,14 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         // in both, so one template reads either.
         "retries": j.retries,
         "library": j.library,
+        // §282 item 14: what this row replaced, why, and what replaced
+        // it. Empty on every job that did neither, which is almost all
+        // of them - the row renders the clause only when there is one.
+        // Both directions ride BOTH row shapes, or the list and its
+        // drawer would tell two different stories about one switch.
+        "alt_from_name": j.alt_from_name,
+        "alt_why": j.alt_why,
+        "alt_to_name": j.alt_to_name,
         "fail_message": if deleted { STORAGE_DELETED_MSG } else { j.fail_message.as_str() },
         // A deleted-storage row is a LOCAL fact (the post is fine) and
         // the one thing worth offering is a fresh download - "show the
@@ -778,6 +786,14 @@ fn history_row(d: &Daemon, j: &Job) -> Value {
             "status": if deleted { "Failed" } else {
                 match j.state { JobState::Completed => "Completed", JobState::Failed => "Failed", _ => "Queued" }
             },
+            // §282 item 14: what this row replaced, why, and what replaced
+            // it. Empty on every job that did neither, which is almost all
+            // of them - the row renders the clause only when there is one.
+            // Both directions ride BOTH row shapes, or the list and its
+            // drawer would tell two different stories about one switch.
+            "alt_from_name": j.alt_from_name,
+            "alt_why": j.alt_why,
+            "alt_to_name": j.alt_to_name,
             "fail_message": if deleted { STORAGE_DELETED_MSG } else { j.fail_message.as_str() },
             "fail_detail": j.fail_detail,
             // This failure was a full disk, decided by the same

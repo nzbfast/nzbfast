@@ -130,7 +130,7 @@ async fn a_history_only_spool_still_raises_the_id_floor() {
         // The history row was restored, so the daemon knows ids are in
         // use - and must not hand this job one of them.
         let h = http(port_a, "/api?mode=history&apikey=sekrit&output=json", None);
-        assert!(h.contains(COLLIDER), "the history row was not restored: {h}");
+        assert!(history_has(&h, COLLIDER), "the history row was not restored: {h}");
         assert_ne!(
             id, COLLIDER,
             "a history-only restore re-minted an id that already carries a \
@@ -149,10 +149,13 @@ async fn a_history_only_spool_still_raises_the_id_floor() {
     let port_b = b.port;
     tokio::task::spawn_blocking(move || {
         let h = http(port_b, "/api?mode=history&apikey=sekrit&output=json", None);
-        assert!(h.contains(COLLIDER), "the seeded history row is gone: {h}");
+        assert!(
+            history_has(&h, COLLIDER),
+            "the seeded history row is gone: {h}"
+        );
         let q = http(port_b, "/api?mode=queue&apikey=sekrit&output=json", None);
         assert!(
-            q.contains(&new_id) || h.contains(&new_id),
+            queue_has(&q, &new_id) || history_has(&h, &new_id),
             "the enqueued job is gone after the restart:\nqueue {q}\nhistory {h}"
         );
     })

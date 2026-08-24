@@ -427,6 +427,24 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
     if let Some(v) = saved.get("post_health_fail").and_then(Value::as_bool) {
         daemon.post_health_fail.store(v, Ordering::Relaxed);
     }
+    // §282 item 13. The third list settings_catalogue.rs pins: a key
+    // missing here works until the daemon restarts and then quietly
+    // reverts, with nothing logged either way.
+    if let Some(v) = saved.get("alt_hold_count").and_then(Value::as_u64) {
+        daemon.alt.hold_count.store(v as u32, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("alt_auto_switch").and_then(Value::as_bool) {
+        daemon.alt.auto_switch.store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("alt_auto_search").and_then(Value::as_bool) {
+        daemon.alt.auto_search.store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("alt_max_copies").and_then(Value::as_u64) {
+        daemon.alt.max_copies.store(v as u32, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("alt_max_extra_bytes").and_then(Value::as_u64) {
+        daemon.alt.max_extra_bytes.store(v, Ordering::Relaxed);
+    }
     if let Some(v) = saved.get("auto_prefetch").and_then(Value::as_bool) {
         daemon.auto_prefetch.store(v, Ordering::Relaxed);
     }
@@ -2137,6 +2155,7 @@ fn build_daemon(
         auto_defer: std::sync::atomic::AtomicBool::new(true),
         post_health: std::sync::atomic::AtomicBool::new(true),
         post_health_defer: std::sync::atomic::AtomicBool::new(true),
+        alt: Default::default(),
         post_health_fail: std::sync::atomic::AtomicBool::new(false),
         auto_prefetch: std::sync::atomic::AtomicBool::new(true),
         race_stragglers: std::sync::atomic::AtomicBool::new(true),

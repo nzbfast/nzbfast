@@ -1056,7 +1056,9 @@ dom, fortsetter tillegget urørt, og loggen sier hvorfor.</p>
 <p>Hver jobbmilepæl er en versjonert hendelse: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(et automatisk nytt forsøk har lagt en mislykket nedlasting i kø igjen) og
+(et automatisk nytt forsøk har lagt en mislykket nedlasting i kø igjen),
+<code>job.switched</code> (en jobb som ikke kunne fullføres ble erstattet av en
+alternativ kopi som var holdt av til den) og
 <code>job.delete_kept</code> (en sletting fjernet oppføringen, men fikk ikke
 fjernet filene dens), pluss <code>watch.picked</code> (en .nzb ble hentet ut av
 overvåkingsmappen), <code>nzb.refeed</code> (en ferdig nedlastings egen NZB-fil ble lagt i køen på pause), <code>watchlist.upgraded</code> (en oppgradering fra

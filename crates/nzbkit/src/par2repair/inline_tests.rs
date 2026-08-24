@@ -1231,3 +1231,57 @@ fn parallel_invert_matches_serial_and_reports_singular() {
     sing[m - 1] = sing[0].clone(); // duplicate row: singular
     assert!(matches!(invert(sing), Err(RepairError::SingularMatrix)));
 }
+
+/// [`MAX_REPAIR_DIM`] is the repair-time DoS ceiling, and TODO §283 item
+/// 14 doubted it was enforced anywhere but the mapped planner in
+/// `crates/nzbfast/src/repair.rs` - which only DECLINES its own route and
+/// falls through to the disk one. It is enforced here, in the engine
+/// constructor all three routes funnel through, and nothing pinned the
+/// boundary until this test.
+///
+/// Measured on an M3 Ultra, release, 24 Aug 2026, so the ceiling's own
+/// arithmetic is on the record rather than extrapolated: AT the cap a
+/// consecutive-exponent set (the Vandermonde shortcut, O(m^2)) inverts in
+/// 62 ms, and a GAPPED one - recovery packets themselves lost, so
+/// Gauss-Jordan O(m^3) - takes 23.7 s. That is the worst case the
+/// constant deliberately admits. One doubling costs 8x, so the spec's own
+/// 32768-slice bound would be ~25 minutes and ~4.3 GB, which is exactly
+/// the "pin multiple GB and run for hours" the doc block describes.
+///
+/// Both arms are gate-isolated rather than run for real: each asserts
+/// WHICH refusal comes back, so a later edit that moves the cap behind
+/// another check fails here instead of quietly costing the 23.7 s.
+#[test]
+fn the_repair_matrix_cap_binds_at_exactly_max_repair_dim() {
+    let bs = 2usize;
+    // One over: refused, and refused BEFORE the per-slice length check -
+    // the recovery buffers here are the wrong size on purpose, so a cap
+    // that ever moved below the syndrome-widening loop would report that
+    // instead, having already allocated m of them.
+    let over = MAX_REPAIR_DIM + 1;
+    let missing: Vec<usize> = (0..over).collect();
+    let recovery: Vec<(u32, Vec<u8>)> = (0..over as u32).map(|e| (e, vec![0u8; bs + 2])).collect();
+    let Err(err) = Reconstructor::new(bs, MAX_INPUT_SLICES, &missing, &recovery) else {
+        panic!("one block over the cap must be refused");
+    };
+    assert!(
+        matches!(&err, RepairError::Malformed(m)
+            if m.contains(&format!("{over} missing blocks")) && m.contains("repair-matrix cap")),
+        "the cap must be the reported reason, not a later check: {err}"
+    );
+    // Exactly at the cap: NOT refused by the cap. Proven by the next gate
+    // down answering instead - `n_inputs` is deliberately far too small
+    // for these indices, so the only way to reach that message is to have
+    // cleared the dimension check at m == MAX_REPAIR_DIM.
+    let missing: Vec<usize> = (0..MAX_REPAIR_DIM).collect();
+    let recovery: Vec<(u32, Vec<u8>)> = (0..MAX_REPAIR_DIM as u32)
+        .map(|e| (e, vec![0u8; bs]))
+        .collect();
+    let Err(err) = Reconstructor::new(bs, 16, &missing, &recovery) else {
+        panic!("16 inputs cannot hold slice 16");
+    };
+    assert!(
+        matches!(&err, RepairError::Malformed(m) if m.contains("out of range")),
+        "the cap must admit exactly MAX_REPAIR_DIM, not one under: {err}"
+    );
+}

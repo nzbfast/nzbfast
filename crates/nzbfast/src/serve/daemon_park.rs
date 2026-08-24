@@ -790,26 +790,6 @@ impl Daemon {
     /// same answer (Fable sweep 15 Aug). `None` keeps the old behaviour
     /// exactly.
     pub(in crate::serve) fn park_gen(&self, job: Arc<Mutex<Job>>, gen0: Option<(u32, u64)>) {
-        /// Was this held row held against the job that just failed?
-        ///
-        /// The `dupe_key` filter alone asks "same title", which is what
-        /// `smart` admission judges on and is therefore the same
-        /// question there. Under `dupe_scope = "exact"` it is NOT: a
-        /// different release of the same episode is admitted and runs,
-        /// so its failure promoted rows held against a still-completed
-        /// original (Codex sweep K). An empty `held_for` is a row from
-        /// before the field existed and keeps the old behaviour: for
-        /// those rows only, the caller's `dupe_key` filter is the whole
-        /// gate. A row that NAMES the failed job outranks the key
-        /// comparison - the alias arm of the duplicate check holds a
-        /// job whose key spells the show differently, and requiring
-        /// the keys to also match would park that row forever.
-        fn held_against(g: &Job, failed_id: &str, failed_key: &str) -> bool {
-            if g.held_for.is_empty() {
-                return g.dupe_key.as_deref() == Some(failed_key);
-            }
-            g.held_for == failed_id
-        }
         let (id, failed, key, nzb_path, demote, stale) = {
             let g = job.lock_ok();
             (
@@ -1164,70 +1144,7 @@ impl Daemon {
             && !armed_auto_retry
             && let Some(key) = key
         {
-            // BEST, not first. Breaking at the first match promoted
-            // whichever alternative happened to be added earliest, so
-            // a 720p held before a 2160p won and the 2160p stayed
-            // parked for good - the user ended up with the worst copy
-            // of the three while two better ones sat in the queue.
-            // Rank them the way the watchlist ranks candidates, so
-            // "best" means the same thing in both places.
-            // Collect the held candidates under the queue lock (a few
-            // Arc + name clones), then rank them AFTER it is released:
-            // parse_release is real parsing work, and running it under
-            // the lock scaled with the number of held duplicates while
-            // every API request waited (issue #38 follow-up).
-            //
-            // The spool path rides along for TODO 282 item 6: `spare`
-            // reads both NZBs to refuse a candidate that is the SAME
-            // POST as the job that just failed - a byte-different NZB
-            // of identical articles, which fails identically and shows
-            // the user the same failure twice. It also breaks a rank tie
-            // toward a candidate on a different group and poster (item
-            // 7). Both degrade to the pre-282 pure-rank pick when a
-            // spool file cannot be read; see `spare::best_alternative`.
-            let candidates: Vec<(Arc<Mutex<Job>>, String, PathBuf)> = self
-                .queue
-                .lock_ok()
-                .iter()
-                .filter_map(|j| {
-                    let g = j.lock_ok();
-                    (g.priority == -3 && g.paused && held_against(&g, &id, &key))
-                        .then(|| (j.clone(), g.name.clone(), g.nzb_path.clone()))
-                })
-                .collect();
-            let named: Vec<(String, PathBuf)> = candidates
-                .iter()
-                .map(|(_, n, p)| (n.clone(), p.clone()))
-                .collect();
-            let promoted = spare::best_alternative(&nzb_path, &named).and_then(|(i, rank)| {
-                let j = &candidates[i].0;
-                let mut g = j.lock_ok();
-                // Re-check now that the queue lock has been dropped and
-                // retaken a world away: a delete landing in the gap sets
-                // tombstone, and promoting a just-deleted alternative
-                // would start downloading the very title the user
-                // cancelled.
-                (g.priority == -3 && g.paused && !g.tombstone && held_against(&g, &id, &key)).then(
-                    || {
-                        g.paused = false;
-                        g.priority = 0;
-                        info!(
-                            target: "queue",
-                            "{} promoted (best held duplicate of failed {id}, rank {rank})",
-                            g.nzo_id
-                        );
-                        g.nzo_id.clone()
-                    },
-                )
-            });
-            // The spares that did NOT win are still held against a job
-            // that has just left the queue, so nothing will ever park it
-            // again and `held_against` can never match them. Point them
-            // at the row that took its place, or a grab that held two
-            // spares only ever tries one.
-            if let Some(next) = promoted {
-                self.repoint_spares(&id, &next);
-            }
+            self.promote_held_alternative(&job, &id, &key, &nzb_path);
         }
         // TODO 282 item 5's other half: a job that COMPLETED (or that
         // the user deleted) has nothing left for a spare to be a spare
@@ -1244,6 +1161,176 @@ impl Daemon {
         // the queue row.
         self.save_queue_soon();
         self.note_queue_idle();
+    }
+
+    /// §282 item 18 / M14f: the original finally failed, so promote the
+    /// best spare held against it and SAY SO on the lifecycle ring.
+    ///
+    /// Split out of [`Self::park_gen`], which was 428 lines and within
+    /// sight of the size gate's 500-line function ceiling; nothing else
+    /// calls it and the gates it runs behind stay in `park_gen` where
+    /// the tombstone and auto-retry facts live.
+    ///
+    /// Gated on the `alt_auto_switch` setting (§282 item 19), which
+    /// ships ON: promoting a spare we already hold spends no bytes
+    /// beyond the payload the user already asked for, so the away case
+    /// gets a working download rather than a failed one. Switched OFF,
+    /// the spare is not lost - it stays held at priority -3 for §282
+    /// item 12's dashboard notice to offer on a click.
+    ///
+    /// **THE GATE REACHES FURTHER THAN §282, AND THAT IS THE ONE THING
+    /// TO KNOW ABOUT IT.** M14f is older than every part of this
+    /// section: a user who deliberately queued two NZBs of one release
+    /// has always had the second run when the first failed, with no
+    /// setting involved. Turning `alt_auto_switch` off now switches
+    /// that off too, and it does so silently - the second row simply
+    /// stays parked, which looks like nothing happening rather than
+    /// like a setting taking effect. Deliberate, and the alternative
+    /// was worse: gating only the §282 promotions would leave one of
+    /// the two ways a held copy gets promoted without asking outside
+    /// the switch that says it governs exactly that, and the shipped
+    /// copy for the key ("when a download turns out to be one that
+    /// cannot finish, start the best copy already being held for it")
+    /// describes a failed job as squarely as it describes a terminal
+    /// verdict. If this is ever reconsidered, reconsider it as a
+    /// behaviour change to a shipped path and not as a default.
+    ///
+    /// **The event.** `job.switched` is a plain dotted `job.*` kind, so
+    /// every wildcard webhook subscriber picks it up with no
+    /// configuration (`hooks::wants_lifecycle`), and it carries what
+    /// §282 item 18 asked for: what was abandoned (`replaces`,
+    /// `replaces_name`), what replaced it (`nzo_id`, `name`), and why
+    /// (`reason`, the failed job's own `fail_message`). The hunt half of
+    /// that item - a `job.hunt_*` pair - is deliberately NOT emitted
+    /// here: §282 section C is not built, and an event that can never
+    /// fire is a vocabulary entry nobody can test.
+    fn promote_held_alternative(
+        &self,
+        failed: &Arc<Mutex<Job>>,
+        id: &str,
+        key: &str,
+        nzb_path: &Path,
+    ) {
+        if !self.alt.auto_switch.load(Ordering::Relaxed) {
+            return;
+        }
+        // §282 item 14's half, read off the FAILED record before
+        // anything is promoted: the clause names it, and by the time the
+        // winner is chosen the queue lock has been dropped and retaken a
+        // world away. Read ONCE here rather than again at the emit, so
+        // no job lock is held across `life_emit` (below). The event
+        // carries the raw `fail_message` because it is what an operator
+        // pastes into a bug report; the CLAUSE carries `why_from_fail`'s
+        // stripped form, because a build stamp in the middle of
+        // "replaced X because Y" is noise about the wrong build.
+        let (failed_name, fail_message) = {
+            let g = failed.lock_ok();
+            (g.name.clone(), g.fail_message.clone())
+        };
+        let failed_why = crate::serve::altcand::why_from_fail(&fail_message);
+        // BEST, not first. Breaking at the first match promoted
+        // whichever alternative happened to be added earliest, so
+        // a 720p held before a 2160p won and the 2160p stayed
+        // parked for good - the user ended up with the worst copy
+        // of the three while two better ones sat in the queue.
+        // Rank them the way the watchlist ranks candidates, so
+        // "best" means the same thing in both places.
+        // Collect the held candidates under the queue lock (a few
+        // Arc + name clones), then rank them AFTER it is released:
+        // parse_release is real parsing work, and running it under
+        // the lock scaled with the number of held duplicates while
+        // every API request waited (issue #38 follow-up).
+        //
+        // The spool path rides along for TODO 282 item 6: `spare`
+        // reads both NZBs to refuse a candidate that is the SAME
+        // POST as the job that just failed - a byte-different NZB
+        // of identical articles, which fails identically and shows
+        // the user the same failure twice. It also breaks a rank tie
+        // toward a candidate on a different group and poster (item
+        // 7). Both degrade to the pre-282 pure-rank pick when a
+        // spool file cannot be read; see `spare::best_alternative`.
+        let candidates: Vec<(Arc<Mutex<Job>>, String, PathBuf)> = self
+            .queue
+            .lock_ok()
+            .iter()
+            .filter_map(|j| {
+                let g = j.lock_ok();
+                (g.priority == -3 && g.paused && held_against(&g, id, key))
+                    .then(|| (j.clone(), g.name.clone(), g.nzb_path.clone()))
+            })
+            .collect();
+        let named: Vec<(String, PathBuf)> = candidates
+            .iter()
+            .map(|(_, n, p)| (n.clone(), p.clone()))
+            .collect();
+        let promoted = spare::best_alternative(nzb_path, &named).and_then(|(i, rank)| {
+            let j = &candidates[i].0;
+            let mut g = j.lock_ok();
+            // Re-check now that the queue lock has been dropped and
+            // retaken a world away: a delete landing in the gap sets
+            // tombstone, and promoting a just-deleted alternative
+            // would start downloading the very title the user
+            // cancelled.
+            (g.priority == -3 && g.paused && !g.tombstone && held_against(&g, id, key)).then(|| {
+                g.paused = false;
+                g.priority = 0;
+                // §282 item 14: the promotion is a SWITCH, and until now
+                // it said so nowhere the user could read. What they saw
+                // was a file arriving under a release name they never
+                // clicked, with the row they did click sitting in
+                // history saying only that it failed - which is a bug
+                // report, not a feature. Stamp both halves: this row
+                // records what it replaced and why, the failed row
+                // records what replaced it (below), and
+                // `altcand::switch_lines` is the one place every surface
+                // reads them from.
+                g.alt_from = id.to_string();
+                g.alt_from_name = failed_name.clone();
+                g.alt_why = failed_why.clone();
+                info!(
+                    target: "queue",
+                    "{} promoted (best held duplicate of failed {id}, rank {rank})",
+                    g.nzo_id
+                );
+                (g.nzo_id.clone(), g.name.clone(), g.category.clone(), rank)
+            })
+        });
+        let Some((nzo_id, name, category, rank)) = promoted else {
+            return;
+        };
+        // The spares that did NOT win are still held against a job
+        // that has just left the queue, so nothing will ever park it
+        // again and `held_against` can never match them. Point them
+        // at the row that took its place, or a grab that held two
+        // spares only ever tries one.
+        self.repoint_spares(id, &nzo_id);
+        // ...and the failed row learns what replaced it HERE, which is
+        // after its own history upsert - the one fact about it that is
+        // not known in time for that write. So it takes one more append,
+        // and only when a promotion actually happened.
+        // `_if_present` rather than `history_upsert`: a delete landing in
+        // between must not resurrect the record.
+        failed.lock_ok().alt_to_name = name.clone();
+        let _ = self.history_upsert_if_present(failed);
+        // Last, and with no job lock held: `life_emit` takes the ring
+        // lock and then offers the event to the webhook dispatcher, and
+        // no job mutex may be held across either (the rule
+        // `life_emit_parked` states for the same reason). The
+        // announcement also follows the durable record rather than
+        // racing it - a subscriber that reads history on the event finds
+        // the switch already written.
+        self.life_emit(
+            "job.switched",
+            json!({
+                "nzo_id": nzo_id,
+                "name": name,
+                "category": category,
+                "rank": rank,
+                "replaces": id,
+                "replaces_name": failed_name,
+                "reason": fail_message,
+            }),
+        );
     }
 
     /// §129 4a: `queue.idle`, if the queue has just become idle. Idle =
@@ -1356,6 +1443,27 @@ impl Daemon {
             let _ = crate::persist::write_atomic(&path, text.as_bytes());
         }
     }
+}
+
+/// Was this held row held against the job that just failed?
+///
+/// The `dupe_key` filter alone asks "same title", which is what
+/// `smart` admission judges on and is therefore the same
+/// question there. Under `dupe_scope = "exact"` it is NOT: a
+/// different release of the same episode is admitted and runs,
+/// so its failure promoted rows held against a still-completed
+/// original (Codex sweep K). An empty `held_for` is a row from
+/// before the field existed and keeps the old behaviour: for
+/// those rows only, the caller's `dupe_key` filter is the whole
+/// gate. A row that NAMES the failed job outranks the key
+/// comparison - the alias arm of the duplicate check holds a
+/// job whose key spells the show differently, and requiring
+/// the keys to also match would park that row forever.
+fn held_against(g: &Job, failed_id: &str, failed_key: &str) -> bool {
+    if g.held_for.is_empty() {
+        return g.dupe_key.as_deref() == Some(failed_key);
+    }
+    g.held_for == failed_id
 }
 
 #[cfg(test)]

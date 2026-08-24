@@ -17,7 +17,7 @@ use tracing::{info, warn};
 pub(super) struct SettleVerdict {
     pub(super) all_good: bool,
     pub(super) reextract_failed: Option<String>,
-    pub(super) repair_shortfall: Option<(usize, usize)>,
+    pub(super) repair_shortfall: Option<crate::repair::RepairShortfall>,
     pub(super) deferred_renames: Vec<(usize, String)>,
     /// The on-disk names this job's verified-name publishes have already
     /// taken, carried past `extractor.finish()` so the deferred renames in
@@ -62,7 +62,7 @@ pub(super) struct SettleVerdict {
 struct RepairOutcome {
     all_good: bool,
     reextract_failed: Option<String>,
-    repair_shortfall: Option<(usize, usize)>,
+    repair_shortfall: Option<crate::repair::RepairShortfall>,
     unhealed_slots: Option<Vec<usize>>,
 }
 
@@ -387,9 +387,11 @@ async fn settle_with_set(
     // archive" asked the user to go and find in a log ring what the
     // sentence could simply have said.
     let mut reextract_failed: Option<String> = None;
-    // (needed, have) when repair died on recovery-block arithmetic - the
-    // counts belong in the fail message, not just the console log.
-    let mut repair_shortfall: Option<(usize, usize)> = None;
+    // Set when repair died on the recovery set - too little parity
+    // declared, or a provider that would not serve the parity that is.
+    // The arithmetic belongs in the fail message, not just the console
+    // log. See [`crate::repair::RepairShortfall`].
+    let mut repair_shortfall: Option<crate::repair::RepairShortfall> = None;
     // TODO 159 item 1 - see `SettleVerdict::unhealed_slots`. Only the
     // repair pass ever gets to claim this: the clean-download arm below
     // fails on `incomplete`/`derrs` alone, which name no slot and prove
@@ -791,7 +793,7 @@ async fn run_set_repair(
 ) -> Result<RepairOutcome> {
     let mut all_good;
     let mut reextract_failed: Option<String> = None;
-    let mut repair_shortfall: Option<(usize, usize)> = None;
+    let mut repair_shortfall: Option<crate::repair::RepairShortfall> = None;
     note_activity("repairing");
     // §129: one repair at a time across concurrent tails. The token
     // above already says "repairing", so a queued wait reads truthfully;
@@ -816,6 +818,10 @@ async fn run_set_repair(
     // are the same blocks for the same damage, already on disk, and
     // re-planning would only buy them again (23 Aug 2026).
     let mut mapped_fetched: Vec<usize> = Vec::new();
+    // §282 item 4: what the mapped attempt's own recovery fetch asked
+    // this provider for and what came back. A decline hands it to
+    // `fetch_and_repair` so the same refusal is not bought twice.
+    let mut mapped_yield: Option<crate::repair::VolumeYield> = None;
     let mapped_ok = if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_none() {
         try_mapped_repair(
             servers,
@@ -831,6 +837,7 @@ async fn run_set_repair(
             missing_files,
             &mut recreated_names,
             &mut mapped_fetched,
+            &mut mapped_yield,
             // Fast verify is the default and CRC32 is what the
             // in-stream path trusts too; an operator who turned
             // it off is asking for MD5 everywhere, including
@@ -968,6 +975,7 @@ async fn run_set_repair(
             already,
             sniffed_vols,
             &mapped_fetched,
+            mapped_yield,
             buf_pool.clone(),
             extractor,
             &mut repair_shortfall,
@@ -1250,8 +1258,13 @@ async fn disk_par2_fallback(
     mut all_good: bool,
     mut repaired: bool,
     mut uncovered_after_par2: Vec<String>,
-    mut repair_shortfall: Option<(usize, usize)>,
-) -> (bool, bool, Vec<String>, Option<(usize, usize)>) {
+    mut repair_shortfall: Option<crate::repair::RepairShortfall>,
+) -> (
+    bool,
+    bool,
+    Vec<String>,
+    Option<crate::repair::RepairShortfall>,
+) {
     if !dir_has_par2(out_dir).unwrap_or(false) {
         return (all_good, repaired, uncovered_after_par2, repair_shortfall);
     }
@@ -1343,7 +1356,7 @@ async fn disk_par2_fallback(
                     target: "par2",
                     "UNREPAIRABLE - need {needed} recovery block(s), have {have}"
                 );
-                repair_shortfall = Some((needed, have));
+                repair_shortfall = Some(crate::repair::RepairShortfall::Blocks { needed, have });
                 every_set_ok = false;
             }
             Err(e) => {
@@ -1579,7 +1592,7 @@ async fn settle_without_set(
     // rung at the end of this function. `None` on every other path, which
     // is what this arm returned unconditionally before §249 item 1.
     let mut reextract_failed: Option<String> = None;
-    let mut repair_shortfall: Option<(usize, usize)> = None;
+    let mut repair_shortfall: Option<crate::repair::RepairShortfall> = None;
     // See [`SettleVerdict::repaired`]. Raised at each of this path's two
     // in-place rewriters, rather than set unconditionally: this is the
     // arm a post with NO recovery data at all takes, and on that post

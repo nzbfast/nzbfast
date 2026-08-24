@@ -683,6 +683,7 @@ pub struct Daemon {
     /// the sample was wrong; ending a release on them takes the far
     /// stricter bar below.
     pub post_health_defer: std::sync::atomic::AtomicBool,
+    pub alt: super::altcand::AltSettings, // §282 items 12/13; docs on the type
     /// TODO §138 live setting `post_health_fail`, OFF by default and the
     /// ONLY thing in §77 that may fail a job - bar and why on
     /// [`crate::health::PostHealth::no_server_can_supply`].

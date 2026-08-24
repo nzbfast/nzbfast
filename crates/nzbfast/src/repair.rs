@@ -387,9 +387,52 @@ mod sidefetch;
 // sidefetch.rs names the type, they only call `total()` / `for_file()`
 // on what the driver hands back, and an unused re-export is a warning.
 pub(crate) use sidefetch::{
-    SideCancel, VolumeOpen, fetch_volume_articles, fetch_volume_articles_with, fetch_volumes,
-    side_pool_servers, vol_count_from_name, volume_prealloc_cap, volume_reqs,
+    SideCancel, VolumeOpen, VolumeYield, fetch_volume_articles, fetch_volume_articles_with,
+    fetch_volumes, side_pool_servers, vol_count_from_name, volume_prealloc_cap, volume_reqs,
 };
+
+/// Why a PAR2 repair could not complete, when the reason is arithmetic
+/// about the RECOVERY SET rather than a bad byte anywhere.
+///
+/// The one class of repair failure whose numbers belong in the job's
+/// own fail message and not just the console: the user is owed which of
+/// the two halves of the post let them down, because the answers are
+/// opposite. `Blocks` means the poster shipped too little parity for
+/// the damage and no provider could have helped. `Unservable` means the
+/// parity is declared, is the right size, and this provider will not
+/// hand it over - the payload may be all but perfect (99.8% on the
+/// §282 incident), and an alternate source is the whole remedy.
+///
+/// Both spellings carry "repair could not complete", so both classify
+/// [`crate::failkind::FailKind::Unrepairable`]: transient enough for
+/// the one automatic retry, and hinting `search` rather than `retry`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RepairShortfall {
+    /// The NZB does not declare enough recovery blocks to cover the
+    /// damage, whatever the provider does.
+    Blocks { needed: usize, have: usize },
+    /// §282 item 4: the volumes are declared and the source will not
+    /// serve them. Carries the measured yield that said so.
+    Unservable(VolumeYield),
+}
+
+impl RepairShortfall {
+    /// The clause the job's fail message states this shortfall in, put
+    /// after "verification failed and PAR2 repair could not complete".
+    pub(crate) fn clause(&self) -> String {
+        match self {
+            RepairShortfall::Blocks { needed, have } => {
+                format!("{needed} recovery block(s) needed but the NZB only carries {have}")
+            }
+            RepairShortfall::Unservable(y) => format!(
+                "the recovery data for this post could not be fetched from your \
+                 provider ({}). The payload is not the problem here, so a different \
+                 source for the same release is what would fix it",
+                y.describe()
+            ),
+        }
+    }
+}
 
 /// Candidate recovery volumes of the NZB: (file idx, declared slices,
 /// encoded bytes). Unknown counts get a conservative size-based estimate.
@@ -533,6 +576,15 @@ pub(crate) async fn try_mapped_repair(
     // volumes came back short, so banking any of them would strand
     // its missing slices behind a refetch that never happens.
     fetched_out: &mut Vec<usize>,
+    // §282 item 4: filled with what this call's recovery fetch asked
+    // for and what came back, whether it landed whole or not. A
+    // DECLINE hands it to [`fetch_and_repair`] as `mapped_yield`,
+    // which is the only way that function can know the source has
+    // already been asked for exactly these volumes and refused them -
+    // its own plan is the same `pick_volumes` over the same
+    // candidates, so without this it buys the identical failure a
+    // second time before the escalation buys it a third.
+    yield_out: &mut Option<VolumeYield>,
     // The operator asked for FULL verification rather than fast: the
     // self-prove re-reads untouched files with MD5 too, not just their
     // per-block CRC32s.
@@ -752,7 +804,7 @@ pub(crate) async fn try_mapped_repair(
         // and discarded). Handing the selection over instead costs
         // nothing and is only sound for a COMPLETE pull - see
         // `fetched_out`.
-        let partial_failures = cpu
+        let pulled = cpu
             .without_permit(fetch_volumes(
                 servers,
                 nzb,
@@ -762,8 +814,9 @@ pub(crate) async fn try_mapped_repair(
                 cancel,
             ))
             .await?;
-        fetch_failures = partial_failures;
-        if partial_failures == 0 {
+        *yield_out = Some(pulled);
+        fetch_failures = pulled.failed as usize;
+        if pulled.failed == 0 {
             fetched_out.extend_from_slice(&fetched_files);
         }
     }
@@ -1109,6 +1162,36 @@ fn publish_external_coverage(extractor: &nzbkit::extract::Extractor, verified: &
     }
 }
 
+/// Why the in-process Reed-Solomon pass did not finish the job - which
+/// is what decides what the par2cmdline fallback is allowed to CLAIM
+/// about itself. §282 item 16.
+///
+/// `nzbkit::par2repair` is a complete GF(2^16) implementation that goes
+/// past par2cmdline in two documented ways (recovery volumes hidden
+/// under junk names, found by packet magic where par2cmdline only loads
+/// packets from files with ".par2" in the name; and identified-but-
+/// damaged targets rescanned when damage still exceeds recovery). The
+/// external binary is a CORRECTNESS BACKSTOP for a native bug - the
+/// native path is self-proving, so it declines rather than shipping bad
+/// bytes - plus the one real capability limit, `MAX_REPAIR_DIM`.
+///
+/// None of that applies to a set with no parity on disk, and telling a
+/// user to install a tool in that case is telling them the wrong thing:
+/// on the §282 incident the line above it read "145 block(s) damaged,
+/// only 0 recovery block(s) on disk", and no par2 implementation can
+/// rebuild data it has no parity for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeVerdict {
+    /// The set is whole. Nothing below this runs.
+    Done,
+    /// The damage outruns the recovery blocks ON DISK. par2cmdline
+    /// reads the same directory and would reach the same arithmetic.
+    NoRecovery { needed: usize, have: usize },
+    /// A native bug, the repair-dimension guard, an I/O error, or the
+    /// kill switch: the cases the external backstop exists for.
+    Backstop,
+}
+
 /// Damaged path: fetch the cheapest set of recovery volumes covering
 /// `needed` blocks (exact-fit by declared slice counts), then hand the
 /// directory to par2cmdline for Reed-Solomon repair.
@@ -1129,23 +1212,49 @@ pub(crate) async fn fetch_and_repair(
     // pull with failures), which is the whole of this function's
     // behaviour before 23 Aug 2026.
     banked: &[usize],
+    // §282 item 4: what a declined [`try_mapped_repair`] measured about
+    // this provider's willingness to serve this recovery set - its
+    // `yield_out`. `None` when nothing was fetched there (no mapped
+    // attempt, or a decline before its fetch).
+    mapped_yield: Option<VolumeYield>,
     buf_pool: Arc<nzbkit::pool::BufPool>,
     // Parked around every EXTERNAL par2 invocation - par2cmdline cannot open
     // a file we hold (see `run_external_par2`). Native repair never needs
     // this: it is in-process and reads through our own handles.
     extractor: &nzbkit::extract::Extractor,
-    // Set to (needed, have) when the NZB simply does not carry enough
-    // recovery blocks - the one repair failure whose arithmetic belongs
-    // in the job's fail message, not just the console.
-    shortfall: &mut Option<(usize, usize)>,
+    // Set when the repair died on the RECOVERY SET rather than on a bad
+    // byte - too little parity declared, or a provider that will not
+    // serve the parity that is. The arithmetic belongs in the job's
+    // fail message, not just the console. See [`RepairShortfall`].
+    shortfall: &mut Option<RepairShortfall>,
     // The owner's side-fetch cancel handle - see [`SideCancel`].
     cancel: Option<&SideCancel>,
     // The caller's heavy-CPU permit, handed back for the duration of
     // both recovery fetches below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
 ) -> Result<bool> {
+    // §282 item 4: the most recent measurement of whether this source
+    // will serve this recovery set at all. Seeded from the declined
+    // mapped attempt, overwritten by this function's own fetch, and read
+    // at every point below that would otherwise ask for MORE.
+    let mut wire = mapped_yield.unwrap_or_default();
+    if wire.source_will_not_serve() {
+        // The mapped attempt already asked this provider for these
+        // volumes - its plan is this same `pick_volumes` over this same
+        // candidate list for this same `needed` - and got a fraction of
+        // them back. Buying the identical failure again is where the
+        // §282 incident spent its first 229 seconds; the repair engines
+        // below still run against whatever DID reach disk, which costs
+        // nothing and is the only thing left that could still work.
+        warn!(
+            target: "repair",
+            "recovery unusable: {} on the volumes this repair needs - not \
+             re-asking the same source for them",
+            wire.describe()
+        );
+    }
     let mut fetched_files: Vec<usize> = Vec::new();
-    if needed > 0 {
+    if needed > 0 && !wire.source_will_not_serve() {
         let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
         let have: usize = vols.iter().map(|v| v.1).sum();
         if have < needed {
@@ -1153,7 +1262,7 @@ pub(crate) async fn fetch_and_repair(
                 target: "repair",
                 "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
             );
-            *shortfall = Some((needed, have));
+            *shortfall = Some(RepairShortfall::Blocks { needed, have });
             return Ok(false);
         }
 
@@ -1203,7 +1312,7 @@ pub(crate) async fn fetch_and_repair(
                 dl_blocks,
                 dl_bytes as f64 / 1e6
             );
-            let failures = cpu
+            let pulled = cpu
                 .without_permit(fetch_volumes(
                     servers,
                     nzb,
@@ -1213,7 +1322,8 @@ pub(crate) async fn fetch_and_repair(
                     cancel,
                 ))
                 .await?;
-            if failures > 0 {
+            wire = pulled;
+            if pulled.failed > 0 {
                 // At least one chosen volume landed PARTIAL, and the
                 // batch count cannot say which - so none of the batch
                 // may enter the escalation's exclusion list below (only
@@ -1233,9 +1343,9 @@ pub(crate) async fn fetch_and_repair(
     // PLACE (no volume rewrite). Self-proving: success requires every
     // patched file to match its PAR2 whole-file MD5, so a native bug can
     // never ship bad bytes - it falls through to par2cmdline instead.
-    let native_repair = || -> bool {
+    let native_repair = || -> NativeVerdict {
         if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_some() {
-            return false;
+            return NativeVerdict::Backstop;
         }
         let t0 = Instant::now();
         use nzbkit::par2repair::{RepairStatus, repair_dir};
@@ -1246,7 +1356,7 @@ pub(crate) async fn fetch_and_repair(
                     "repair complete in {:.2?} ✔ (native - set already verifies on disk)",
                     t0.elapsed()
                 );
-                true
+                NativeVerdict::Done
             }
             Ok(RepairStatus::Repaired(r)) => {
                 // `r.blocks_rebuilt` is what `repair_dir`'s own verify
@@ -1309,22 +1419,23 @@ pub(crate) async fn fetch_and_repair(
                         )
                     },
                 );
-                true
+                NativeVerdict::Done
             }
             Ok(RepairStatus::Unrepairable { needed, have }) => {
                 warn!(
                     target: "repair",
                     "native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk"
                 );
-                false
+                NativeVerdict::NoRecovery { needed, have }
             }
             Err(e) => {
                 warn!(target: "repair", "native repair failed ({e}) - falling back to par2cmdline");
-                false
+                NativeVerdict::Backstop
             }
         }
     };
-    if native_repair() {
+    let native = native_repair();
+    if native == NativeVerdict::Done {
         return Ok(true);
     }
 
@@ -1414,12 +1525,45 @@ pub(crate) async fn fetch_and_repair(
                 // no external par2 on PATH or next to the executable.
                 // Left as None: a binary that could not be spawned will
                 // not spawn on the second pass either.
-                warn!(
-                    target: "repair",
-                    "no external par2 was runnable ({e}) - install par2cmdline \
-                     (e.g. brew install par2) or place a par2 binary next to nzbfast; \
-                     continuing with native repair alone"
-                );
+                //
+                // §282 item 16: what to SAY about that depends entirely
+                // on why the native pass declined. Advertising
+                // par2cmdline to somebody whose set has no parity on
+                // disk sends them to install a tool that would have
+                // failed on the same arithmetic. On the incident job it
+                // sent the reader off to ask why nzbfast needs an
+                // external par2 at all, which is the wrong question and
+                // one this message caused: see [`NativeVerdict`].
+                //
+                // "on this process's PATH" and not "on this machine",
+                // which is a second wrong claim the old line made and
+                // §282 item 4's notes measured: par2cmdline WAS
+                // installed on the incident box, at a Homebrew prefix,
+                // and `tools::resolve` falls back to the bare name -
+                // i.e. $PATH, which under launchd is
+                // /usr/bin:/bin:/usr/sbin:/sbin. So the hatch is
+                // unreachable on every Homebrew macOS install run as a
+                // service, and the old remedy was one the reader had
+                // already followed. Widening the search to a Homebrew
+                // prefix is a separate judgement (that directory is
+                // user-writable and the result is spawned), so this
+                // says what is true rather than pretending otherwise.
+                match native {
+                    NativeVerdict::NoRecovery { needed, have } => warn!(
+                        target: "repair",
+                        "no external par2 on this process's PATH ({e}), and it could \
+                         not have helped: {needed} block(s) are damaged with only \
+                         {have} recovery block(s) on disk, and no par2 implementation \
+                         can rebuild data it has no parity for. What is missing here \
+                         is recovery data, not a tool"
+                    ),
+                    _ => warn!(
+                        target: "repair",
+                        "no external par2 was runnable ({e}) - install par2cmdline \
+                         (e.g. brew install par2) or place a par2 binary next to nzbfast; \
+                         continuing with native repair alone"
+                    ),
+                }
             }
         }
     }
@@ -1434,6 +1578,30 @@ pub(crate) async fn fetch_and_repair(
     if remaining.is_empty() {
         return Ok(false);
     }
+    // §282 item 4: the escalation's premise is that par2's own damage
+    // accounting ran a little ahead of the block ledger's, so a little
+    // more parity closes the gap. That premise needs a source that
+    // SERVES parity. When the fetch above measured otherwise, the
+    // remaining volumes come back at the same fraction - the incident
+    // asked for 1024 MB, got 6.7% of it, and answered by asking for all
+    // seven remaining volumes, which is where 46 minutes of
+    // post-processing went against a payload that was 99.8% intact.
+    //
+    // A yield gate, NOT a timeout: §146 owns "this is taking too long"
+    // and prices it against a 2x parity margin. Nothing here switches
+    // on throughput, and a slow provider that is actually serving walks
+    // straight past this.
+    if wire.source_will_not_serve() {
+        warn!(
+            target: "repair",
+            "recovery unusable: {} - not escalating to the {} remaining volume(s). \
+             This provider will not serve this post's recovery set",
+            wire.describe(),
+            remaining.len()
+        );
+        *shortfall = Some(RepairShortfall::Unservable(wire));
+        return Ok(false);
+    }
     info!(
         target: "repair",
         "repair short - fetching all {} remaining volume(s)",
@@ -1443,7 +1611,7 @@ pub(crate) async fn fetch_and_repair(
         servers, nzb, out_dir, &buf_pool, &remaining, cancel,
     ))
     .await?;
-    if native_repair() {
+    if native_repair() == NativeVerdict::Done {
         return Ok(true);
     }
     if let Some((bin, arg, extras)) = external

@@ -47,6 +47,11 @@ use daemon::*;
 mod wire;
 use wire::*;
 
+// serve/altcand.rs: §282 alternate candidates - the settings, the queue
+// row's offer and the switch. Inherent methods on `Daemon` plus free
+// helpers, so no glob is needed.
+mod altcand;
+
 // serve/dupe.rs: inherent methods on `Daemon`, so no glob is needed.
 mod dupe;
 

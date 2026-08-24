@@ -11,7 +11,7 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
 
-use crate::harness::{Daemon, serve};
+use crate::harness::{Daemon, history_slot, queue_has, serve};
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
@@ -423,11 +423,11 @@ async fn unauthenticated_stream_cannot_start_parked_job() {
         // and not a single article body fetched.
         let q = http(port, "/api?mode=queue&output=json&apikey=sesame", None);
         assert!(
-            !q.contains(&id),
+            !queue_has(&q, &id),
             "job must not be queued by unauthenticated /stream: {q}"
         );
         let h = http(port, "/api?mode=history&output=json&apikey=sesame", None);
-        assert!(h.contains(&id) && h.contains("\"Completed\""), "{h}");
+        assert!(history_slot(&h, &id)["status"] == "Completed", "{h}");
         assert_eq!(
             served.load(std::sync::atomic::Ordering::Relaxed),
             0,

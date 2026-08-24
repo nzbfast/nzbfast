@@ -1002,6 +1002,105 @@ pub(super) fn stop_mem_sampler(run: u64) {
 #[path = "workers_mem_sampler_tests.rs"]
 mod mem_sampler_tests;
 
+/// §282 item 3: the standing inputs the rate ticker needs to project
+/// this run's damage forward, gathered once at spawn.
+///
+/// The projection itself is [`project_damage`]; everything here is
+/// either fixed for the run (the NZB, the slot→file map, the recovery
+/// blocks the post declares) or read live off the verifier.
+pub(super) struct DamageWatch {
+    pub(super) nzb: Arc<Nzb>,
+    pub(super) slot_file: Vec<usize>,
+    pub(super) verifier: Arc<nzbkit::live::LiveVerifier>,
+    /// Recovery blocks the NZB's volume NAMES declare, summed over
+    /// every volume - [`spec_ladder`]'s own count, which is what the
+    /// post PROMISES rather than what has reached disk.
+    pub(super) declared_blocks: usize,
+}
+
+/// What the run is on course to finish with. §282 item 3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DamageProjection {
+    /// Payload segments terminally resolved so far, and the plan's
+    /// total - the fraction the projection is extrapolated from.
+    pub(super) resolved: usize,
+    pub(super) planned: usize,
+    /// Blocks of the recovery set the damage so far already costs.
+    pub(super) now: usize,
+    /// Where that lands at the end of the run.
+    pub(super) projected: usize,
+    /// Recovery blocks the NZB declares, for the comparison.
+    pub(super) declared: usize,
+}
+
+/// Share of the plan that must have resolved before extrapolating from
+/// it means anything. Two terminal misses in the first hundred articles
+/// of a 20,000-article post are not a rate.
+const PROJECT_MIN_FRACTION: f64 = 0.05;
+
+/// ...and the absolute floor under that, because a 5% sample of a small
+/// post is a handful of articles.
+const PROJECT_MIN_MISSES: usize = 8;
+
+/// How far past the declared recovery a projection must land before it
+/// is worth saying out loud.
+///
+/// The same 2x the §146 tail give-up prices its trade at, and it is
+/// carrying the same uncertainty: `now` is a worst-case ceiling (each
+/// slot's misses bounded by its own LARGEST declared segment, see
+/// [`par_race_missing_blocks`]), the loss rate is a sample, and
+/// `declared` is read off volume names rather than off packets.
+///
+/// It is also the calibration this item was explicitly warned about.
+/// On the two §282 incident jobs a payload projection MUST NOT fire:
+/// 0.79% and 0.21% loss against 255 declared recovery blocks project to
+/// roughly 270 and 96 damaged blocks, and 270 against 255 is a job that
+/// repairs comfortably in practice - it was the recovery set that was
+/// fiction, not the payload, which is what item 4's yield gate is for.
+/// At 2x neither fires, and that is the test of this number: a
+/// projection that fired on those two jobs would be WRONG, not early.
+const PROJECT_MARGIN: usize = 2;
+
+/// §282 item 3: is this run on course to be unrepairable?
+///
+/// The same arithmetic `par_race_missing_blocks` and the tail give-up
+/// already do at the END of a run, moved to the middle and made
+/// predictive. At payload fraction `f = resolved / planned` the misses
+/// so far cost `now` blocks, so the whole run lands near `now / f`,
+/// plus whatever in-stream verification has already found bad. Compare
+/// that against the recovery blocks the post declares.
+///
+/// `None` unless the sample is worth extrapolating from AND the answer
+/// clears [`PROJECT_MARGIN`]. Held still here, out of the ticker, so
+/// the calibration is something a test can drive rather than something
+/// a log has to be read for.
+pub(super) fn project_damage(
+    resolved: usize,
+    planned: usize,
+    now: usize,
+    live_bad: usize,
+    declared: usize,
+) -> Option<DamageProjection> {
+    if planned == 0 || resolved == 0 || now == 0 {
+        return None;
+    }
+    let f = resolved as f64 / planned as f64;
+    if f < PROJECT_MIN_FRACTION || now < PROJECT_MIN_MISSES {
+        return None;
+    }
+    // Saturating rather than wrapping: `now / f` on a 1-in-20 sample of
+    // a huge post is a large number and the comparison below is the
+    // only thing that reads it.
+    let projected = ((now as f64 / f).ceil() as usize).saturating_add(live_bad);
+    (projected >= declared.saturating_mul(PROJECT_MARGIN)).then_some(DamageProjection {
+        resolved,
+        planned,
+        now,
+        projected,
+        declared,
+    })
+}
+
 // Live rate ticker (2 s), driven by the consumer-side decoded counter.
 // Missing-article churn shows too: a mostly-taken-down post decodes
 // nothing while the pool grinds through 430s, and without the count
@@ -1010,9 +1109,19 @@ mod mem_sampler_tests;
 pub(super) fn spawn_rate_ticker(
     ticker_bytes: Arc<AtomicU64>,
     ticker_slots: Vec<Arc<FileSlot>>,
+    // §282 item 3. The ticker is the home for the projection because it
+    // is the one watcher every job gets: the speculative prefetch is
+    // gated off whenever a quota is configured and never spawns on a
+    // post with no volumes, and a post that cannot be repaired is
+    // exactly as worth saying under a quota.
+    watch: DamageWatch,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last = 0u64;
+        // Said ONCE. The projection is monotone in practice, and an
+        // operator who has been told the run is doomed does not need it
+        // every two seconds for the next ten minutes.
+        let mut doom_said = false;
         // Divide by the REAL elapsed time, and skip missed ticks. The
         // default interval behavior is Burst: a ticker starved of the
         // runtime for N seconds fires every missed tick back-to-back on
@@ -1048,8 +1157,59 @@ pub(super) fn spawn_rate_ticker(
                 now as f64 / 1e9
             );
             last = now;
+            if !doom_said && let Some(p) = watch.project(&ticker_slots) {
+                doom_said = true;
+                warn!(
+                    target: "repair",
+                    "projection: {} terminal miss(es) at {:.0}% of the plan damage \
+                     {} recovery block(s) and project to about {} by the end, against \
+                     the {} block(s) this post declares - it is on course to be \
+                     unrepairable from this source",
+                    missing,
+                    p.resolved as f64 / p.planned as f64 * 100.0,
+                    p.now,
+                    p.projected,
+                    p.declared
+                );
+            }
         }
     })
+}
+
+impl DamageWatch {
+    /// This tick's projection, or `None` while the run still looks
+    /// survivable.
+    ///
+    /// `None` until the recovery set activates, which is where the
+    /// block size comes from - a damage figure in blocks cannot be
+    /// stated before then, and the `[par2] set live: ... block size N`
+    /// line is the moment it can. Nothing is lost by waiting: on the
+    /// §282 incident that line landed within seconds of the first
+    /// article, and the counter it reads climbs for the whole run.
+    fn project(&self, slots: &[Arc<FileSlot>]) -> Option<DamageProjection> {
+        let set = self.verifier.set()?;
+        let block = set.block_size.max(1) as usize;
+        // PAYLOAD only, both halves of the fraction. A recovery volume
+        // is deferred rather than downloaded on the normal route, so
+        // its segments are neither progress nor damage - and a sample
+        // the user asked to skip was never queued at all.
+        let (mut resolved, mut planned) = (0usize, 0usize);
+        for s in slots.iter().filter(|s| !s.is_par2() && !s.sample_skipped) {
+            planned += s.total_segments;
+            resolved += s
+                .total_segments
+                .saturating_sub(s.remaining.load(Ordering::Relaxed));
+        }
+        let now = par_race_missing_blocks(block, slots, &self.slot_file, &self.nzb);
+        let (_, live_bad) = self.verifier.live_counts();
+        project_damage(
+            resolved,
+            planned,
+            now,
+            live_bad as usize,
+            self.declared_blocks,
+        )
+    }
 }
 
 /// A storage-exhaustion write error halts the fetch. Classifies
@@ -2649,3 +2809,6 @@ mod par_race_tests;
 
 #[cfg(test)]
 mod spec_ladder_tests;
+
+#[cfg(test)]
+mod damage_projection_tests;

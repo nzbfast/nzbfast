@@ -395,8 +395,18 @@ pub(crate) async fn get_with_progress(
     // PAR2 wants every byte of RAM it can get (§A1).
     drop(id_to_slot);
 
-    // Live rate ticker: see spawn_rate_ticker.
-    let ticker = spawn_rate_ticker(decoded_bytes.clone(), slots.clone());
+    // Live rate ticker: see spawn_rate_ticker. It also carries §282
+    // item 3's running damage projection - see `DamageWatch`.
+    let ticker = spawn_rate_ticker(
+        decoded_bytes.clone(),
+        slots.clone(),
+        workers::DamageWatch {
+            nzb: nzb.clone(),
+            slot_file: slot_file.clone(),
+            verifier: verifier.clone(),
+            declared_blocks: workers::spec_ladder(&nzb).iter().map(|&(_, c, _)| c).sum(),
+        },
+    );
 
     // Memory-floor attribution sampler; owns this job's peak record and
     // is retired BY TOKEN in print_mem_summary (tail.rs) after the

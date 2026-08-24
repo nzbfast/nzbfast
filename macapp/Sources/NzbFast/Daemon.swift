@@ -935,4 +935,90 @@ final class Daemon {
         if (obj["status"] as? Bool) == true { return nil }
         return (obj["error"] as? String) ?? "rejected"
     }
+    // MARK: menu bar status
+
+    /// One queue poll, reduced to what the menu bar item and the Dock
+    /// badge draw.
+    struct QueueStatus {
+        let paused: Bool
+        /// Deliberately separate from `paused`, as the daemon keeps it:
+        /// offline means every provider connection is hung up so another
+        /// machine can have the account, and the two look identical from
+        /// the queue's point of view while meaning different things.
+        let offline: Bool
+        /// MB/s, decimal. `kbpersec` / 1000, exactly as
+        /// web/dashboard.html derives its own base speed number.
+        let mbps: Double
+        /// SAB's `noofslots`: the whole queue. Counted BEFORE the
+        /// caller's window in sabcompat/walk.rs, so it stays honest
+        /// however few rows we ask for below.
+        let slots: Int
+        /// SAB's own word for the queue: Paused, Idle or Downloading.
+        let status: String
+    }
+
+    /// Poll mode=queue for the handful of numbers the status item shows.
+    ///
+    /// `start=0&limit=1` because we want the header, not the rows. The
+    /// walk has to visit every job either way (the byte totals beside
+    /// `noofslots` are summed on that one pass, which is what keeps them
+    /// describing the same instant), but without a window it would also
+    /// serialise a JSON row per job every few seconds for a menu nobody
+    /// may have open. nil means the daemon did not answer.
+    func queueStatus() async -> QueueStatus? {
+        var req = URLRequest(url: apiURL("queue", "start=0&limit=1"))
+        req.timeoutInterval = 2
+        guard let (data, _) = try? await Daemon.loopback.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let q = obj["queue"] as? [String: Any]
+        else { return nil }
+        // A STRING on the wire - SAB's own type for this field - so it
+        // is parsed rather than cast.
+        let kb = (q["kbpersec"] as? String).flatMap(Double.init) ?? 0
+        return QueueStatus(
+            paused: (q["paused"] as? Bool) ?? false,
+            offline: (q["offline"] as? Bool) ?? false,
+            mbps: kb / 1000,
+            slots: (q["noofslots"] as? Int) ?? 0,
+            status: (q["status"] as? String) ?? "")
+    }
+
+    /// mode=pause / mode=resume: the same two calls the dashboard's own
+    /// header button makes.
+    ///
+    /// Pause is the GRACEFUL one, which is the default and is what we
+    /// want here: in-flight articles finish and nothing re-downloads on
+    /// resume. The abrupt form is `pause&value2=now`, which frees the
+    /// line immediately at the cost of re-fetching whatever was in
+    /// flight - a real choice, but not one to make on someone's behalf
+    /// from a menu bar toggle with no way to say which it did.
+    ///
+    /// Returns true when the daemon accepted.
+    @discardableResult
+    func setPaused(_ want: Bool) async -> Bool {
+        var req = URLRequest(url: apiURL(want ? "pause" : "resume"))
+        req.timeoutInterval = 5
+        guard let (data, _) = try? await Daemon.loopback.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return (obj["status"] as? Bool) == true
+    }
+
+    /// `unit_bits`, the daemon setting that swaps MB/s for Mb/s
+    /// everywhere a rate is printed.
+    ///
+    /// Read out of settings.json rather than fetched, for the same
+    /// reason `apiKey` above is: that file is where the engine itself
+    /// loads this flag from at startup (serve/startup.rs), so it is the
+    /// same answer, and mode=get_config is a large body to pull every
+    /// few seconds for one bool. Absent or unparseable means false,
+    /// which is both the shipped default and what the engine does with
+    /// the same file.
+    var unitBits: Bool {
+        let settings = dataDir.appendingPathComponent("settings.json")
+        guard let data = try? Data(contentsOf: settings),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return (obj["unit_bits"] as? Bool) ?? false
+    }
 }

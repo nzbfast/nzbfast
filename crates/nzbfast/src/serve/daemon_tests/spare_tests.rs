@@ -161,6 +161,52 @@ fn a_candidate_that_is_the_same_post_is_refused_admission() {
     });
 }
 
+/// §282 items 13/19: `alt_hold_count = 0` means HOLD NOTHING, and the
+/// walk must reach that answer without spending a grab to get there.
+///
+/// The count became a live setting when item 19 wired
+/// `alt_hold_count` to this walk, and 0 is a value the user can
+/// actually set - the number input goes down to it and the settings
+/// copy offers it ("0 keeps none"). A `want` of 0 that still fetched
+/// the first candidate before discovering it had nowhere to put it
+/// would spend one metered indexer grab per download on a feature the
+/// user has switched OFF, which is the one cost this whole section is
+/// careful about.
+///
+/// So the assertion that matters is the THIRD one: not merely that
+/// nothing is held, but that nothing was ASKED FOR. Held-but-not-fetched
+/// and not-fetched-at-all look identical from the queue.
+#[cfg(feature = "indexer")]
+#[test]
+fn a_hold_count_of_zero_holds_nothing_and_fetches_nothing() {
+    with_daemon("spare-zero", |d| {
+        let primary = nzb_of("poster-a", "alt.binaries.one", &["a1@x", "a2@x", "a3@x"]);
+        let cands = [
+            (
+                "Show.Name.S01E01.2160p.WEB-GRPB",
+                nzb_of("poster-b", "alt.binaries.two", &["b1@x", "b2@x", "b3@x"]),
+            ),
+            (
+                "Show.Name.S01E01.720p.WEB-GRPC",
+                nzb_of("poster-c", "alt.binaries.three", &["c1@x", "c2@x", "c3@x"]),
+            ),
+        ];
+        let (primary_id, held, asked) = grab_and_hold(d, &primary, &cands, 0);
+        assert_eq!(held, 0, "a zero hold count holds nothing");
+        assert!(
+            asked.is_empty(),
+            "and must not spend a metered indexer grab to find that out: {asked:?}"
+        );
+        let rows = queue_rows(d);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the grab itself and nothing beside it: {rows:?}"
+        );
+        assert_eq!(rows[0].0, primary_id);
+    });
+}
+
 /// Two spares that are the same post as EACH OTHER are as useless as two
 /// copies of the grab, so the second is refused too.
 #[cfg(feature = "indexer")]

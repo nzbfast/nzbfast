@@ -18,6 +18,10 @@ use super::*;
 #[path = "daemon_tests/dupe_tests.rs"]
 mod dupe_tests;
 
+// §282 section D: the queue row's offer and the switch behind it.
+#[path = "daemon_tests/altcand_tests.rs"]
+mod altcand_tests;
+
 #[path = "daemon_tests/notice_tests.rs"]
 mod notice_tests;
 

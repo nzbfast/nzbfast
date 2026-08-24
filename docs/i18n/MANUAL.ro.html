@@ -1081,7 +1081,9 @@ spune de ce.</p>
 <p>Fiecare etapă a unui job este un eveniment versionat: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(o reîncercare automată a repus în coadă o descărcare eșuată) și
+(o reîncercare automată a repus în coadă o descărcare eșuată),
+<code>job.switched</code> (o sarcină care nu s-a putut finaliza a fost înlocuită
+cu o copie alternativă păstrată pentru ea) și
 <code>job.delete_kept</code> (o ștergere a înlăturat înregistrarea, dar nu i-a
 putut înlătura fișierele), plus <code>watch.picked</code> (un .nzb a fost luat din
 folderul urmărit), <code>nzb.refeed</code> (fișierul NZB al unei descărcări încheiate a fost adăugat în coadă, în pauză), <code>watchlist.upgraded</code> (o îmbunătățire din lista de

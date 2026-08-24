@@ -1,6 +1,20 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>nzbfast</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The colour the browser paints its own chrome with around this page:
+     the address bar on Android, the title bar of an installed window, the
+     status bar on iOS. Without it that chrome is white, which on the dark
+     default reads as a bright band welded to the top of a dark app.
+     The two values ARE the palette's --bg (ui-tokens.html): #eef0f5 light,
+     #0e1014 dark. They cannot BE var(--bg) - a meta tag is read before any
+     stylesheet and takes no custom property - so if that token ever moves,
+     move these with it.
+     This follows the OS preference only. An explicit theme choice (the
+     data-theme attribute the pre-paint script sets) is not reflected here;
+     that belongs with the rest of the installed-window work rather than in
+     a meta tag. -->
+<meta name="theme-color" content="#eef0f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
 <!-- Real PNG icons, not a `data:` emoji. An emoji favicon draws in the tab
      strip but leaves the OS nothing to build a desktop or taskbar shortcut
      from, so Windows fell back to a generated letter tile. The daemon serves
@@ -24,6 +38,55 @@ __NZBFAST_UI_TOKENS__
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,system-ui,Segoe UI,sans-serif;
   background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+/* ---- Native feel ------------------------------------------------------
+   The small things that say "application" rather than "document": the
+   ground does not rubber-band away from the content, chrome text does not
+   highlight when you sweep a selection across it, a tap does not flash a
+   grey rectangle, and artwork does not lift off the page as a draggable
+   file. Everything the user might actually want to COPY - table cells,
+   log and history text, <code>, the live figures in a card heading - is
+   left alone, which is why each rule below names its chrome instead of
+   starting at the root and carving exceptions back out.
+
+   DELIBERATELY NOT HERE: `cursor:default` on buttons. A native macOS
+   button does show an arrow, but this page sets `cursor:pointer` at 41
+   sites, each one a decision about a control that does not otherwise look
+   like one (a row, a summary, a dotted-underline chip). Overriding all of
+   them buys one kind of native and spends the affordance that tells
+   people those things can be clicked at all. Chrome that is TEXT does get
+   it, because the alternative there is an I-beam over a heading nobody
+   can type into. */
+html{overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+header,.card>h3,.setrail,.legend,#hiddenBar,.hd-bar{user-select:none;-webkit-user-select:none}
+header,.card>h3{cursor:default}
+/* ...but a heading's live figures are facts people quote - the queue
+   count, the provider summary, the history totals - and the drag code one
+   level up already treats these spans as the selectable part of a
+   heading (see initLayout: a press on a CHILD of the h3 does not arm a
+   card drag, precisely so they stay selectable). */
+.card>h3 .dim,.card>h3 .mono{user-select:text;-webkit-user-select:text;cursor:auto}
+/* Same argument for the version in the header: it is the first thing any
+   bug report asks for. */
+header .v{user-select:text;-webkit-user-select:text}
+/* A settings label is chrome; the hint under it is prose, and hints carry
+   the things worth copying - a URL, a filename, an environment variable. */
+.row>label{user-select:none;-webkit-user-select:none;cursor:default}
+.row>label .hint{user-select:text;-webkit-user-select:text;cursor:auto}
+/* A focus ring answers the keyboard, not the mouse. Browsers already draw
+   buttons this way; saying so keeps it true for the controls that carry a
+   focus rule of their own. Text fields are NOT included: a ring on a
+   clicked input is correct everywhere, native included. */
+button:focus:not(:focus-visible),a.pill:focus:not(:focus-visible){outline:none}
+/* Scoped to <img> and no wider. The icons are inline <svg><use>, which
+   never drag as an image anyway, and a -webkit-user-drag on one WOULD
+   matter: the card grip, the queue rows and the table headings are all
+   HTML5 drag sources, and this property on the glyph under the pointer is
+   enough to stop a drag from ever starting. */
+img{-webkit-user-drag:none}
+/* Belt to the braces above: `user-select:none` on an ancestor reaches
+   INTO a form field on some engines, and an input you cannot select
+   inside is worse than any of this is worth. */
+input,textarea{user-select:text;-webkit-user-select:text}
 /* §5 2c CJK: the i18n loader stamps <html lang>, so these fire only for CJK
    locales - Latin/Cyrillic/Greek locales keep the stack above untouched.
    Per-platform system fonts: Hiragino (macOS), Yu Gothic UI/Meiryo (Windows),
@@ -887,6 +950,12 @@ tr.drawer:hover{background:transparent}
 .drow{display:flex;gap:10px;align-items:center;padding:2px 0;font-size:12.5px}
 .drow .dname{flex:0 0 42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .drow .bar{flex:1;height:7px}
+.drow .jfst{flex:0 0 auto;min-width:66px;text-align:end;font-size:11.5px}
+.drow .jfpr{flex:0 0 auto;margin:0;padding:0 5px;font-size:11px;line-height:1.5}
+.drow.jfrec .dname{opacity:.7}
+.jfhead{font-size:11px;color:var(--dim);margin:0 0 3px}
+.jfhead.two{margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)}
+.jfmore{margin:4px 0 2px;margin-inline-start:0}
 .dsrv{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:8px;font-size:12px;color:var(--dim)}
 .dsrv b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
 .dgrid{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12.5px;max-width:420px}
@@ -1385,6 +1454,13 @@ body.histcolor #hist tbody tr.fail .nmtxt{color:var(--bad)}
 #finishbar.on{display:block}
 #finishbar button{margin-inline-start:6px}
 #finishbar .cd{font-variant-numeric:tabular-nums;font-weight:600}
+/* Wrapper strip. Same shape as the three notices above it, and the same
+   contract: one line across the top of the page, never a modal. */
+#appnotice{display:none;padding:8px 16px;border-bottom:1px solid var(--line);
+  font-size:12px;color:var(--dim)}
+#appnotice.on{display:block}
+#appnotice a{color:var(--acc);margin-inline-start:6px}
+#appnotice button{margin-inline-start:6px}
 #durnotice{display:none;padding:8px 16px;border-bottom:1px solid var(--line);
   font-size:12px;color:var(--fg);background:color-mix(in srgb,var(--warn) 13%,transparent)}
 #durnotice.on{display:block}
@@ -1865,6 +1941,47 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
   #toast{max-width:calc(100vw - 28px);bottom:calc(16px + env(safe-area-inset-bottom,0px))}
   #ctxmenu{max-width:calc(100vw - 16px)}
 }
+/* Window Controls Overlay. An installed Chromium PWA whose manifest asks
+   for it draws the page all the way UP INTO the title bar and hands back
+   the strip the window buttons do NOT occupy as
+   env(titlebar-area-x/y/width/height). Everything here is inside that
+   query, which matches nowhere else: a plain tab, a standalone-mode
+   install, the mac wrapper and every non-Chromium browser keep exactly
+   the layout they had, with no class to set and no script to run.
+   The header's first row rises into the strip; whatever wraps past it
+   flows down into the page as before, so a narrow window degrades the
+   same way it always did rather than clipping controls into a 33px band.
+   --wcoL / --wcoR are MEASURED by wcoSync(), because the env() values are
+   viewport-relative while this header sits inside a centred .wrap - the
+   raw env is only right when those two left edges coincide. The env()
+   fallbacks below are what applies until the first measurement lands
+   (and if navigator.windowControlsOverlay is ever absent while the media
+   query matches), which is correct at every window width under the
+   .wrap's max-width and never worse than today. */
+@media (display-mode: window-controls-overlay){
+  .wrap{padding-top:env(titlebar-area-y,0px)}
+  header{margin-left:var(--wcoL,env(titlebar-area-x,0px));
+    margin-right:var(--wcoR,0px);
+    min-height:var(--wcoH,env(titlebar-area-height,33px));
+    /* The empty room in the header IS the title bar's drag handle. There
+       is no other one: a WCO window that marks nothing draggable can be
+       moved only by its edges. */
+    -webkit-app-region:drag;app-region:drag}
+  /* ...and every control inside it has to opt back out, or it cannot be
+     clicked at all - a drag region swallows the press. Anything
+     interactive that joins the header belongs on this list. */
+  header a,header button,header select,header input,header label,
+  header .pill,header .selwrap,header .logo,header .v,
+  header #busyChips>*{-webkit-app-region:no-drag;app-region:no-drag}
+}
+/* The mac wrapper (macapp/) hosts this page in a WKWebView whose window
+   has a transparent, full-size-content title bar, so the page paints to
+   the very top of the window and the traffic lights sit over it. AppKit
+   still owns the clicks in that strip - a control drawn under it cannot
+   be pressed - so the page owes it a top inset. 34px is the 28pt title
+   bar plus a hair of breathing room; the class is set from the user-agent
+   marker during parse, so it lands before the first paint. */
+html.macapp .wrap{padding-top:34px}
 </style>
 <!-- Your own CSS, from `custom.css` in the config folder (issue #31). LAST
      in the head on purpose: it loads after every built-in rule, so an
@@ -1967,6 +2084,24 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 <div id="keynotice"></div>
 <div id="opennotice"></div>
 <div id="durnotice"></div>
+<!-- The mac app is a WKWebView over this same page, and nothing on screen
+     ever said so - which left the one thing a wrapper takes away (a URL
+     you can bookmark, a tab you can keep, a browser you already trust)
+     looking like a thing nzbfast does not have. Shown ONLY inside that
+     wrapper, which identifies itself with an `NzbFastApp/<version>`
+     suffix on the User-Agent (macapp/Sources/NzbFast/DashboardWindow.swift);
+     in a real browser the reader is already where this would send them.
+     Dismissed for good, per browser profile - the address does not go
+     with it, it has a permanent home in Settings > Remote access.
+     target=_blank is the mechanism and not decoration: the wrapper's
+     createWebViewWith delegate hands every _blank navigation to
+     NSWorkspace, i.e. to the default browser. -->
+<div id="appnotice">
+  <span data-i18n="app.wrap.body">This dashboard is an ordinary web page as well as an app window. Open it in your browser to keep it in a tab and bookmark it.</span>
+  <a id="appOpenLink" href="/" target="_blank" rel="noopener" onclick="return appOpenHref(this)" data-i18n="app.wrap.open">Open in browser</a>
+  <span data-i18n="app.wrap.menu">It is in the menu bar too, under View → Open in Browser (Cmd-B).</span>
+  <button class="ghost mini" onclick="dismissAppNotice()" data-i18n="app.wrap.got">Got it</button>
+</div>
 
 <div id="dashview">
 
@@ -2543,12 +2678,27 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_race_stragglers" onchange="setCfg('race_stragglers',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.speed.adaptive">Adaptive connection timeouts<span class="hint" data-i18n="set.speed.adaptive.hint">a connection that goes quiet is cut in seconds instead of half a minute, judged against that server's usual response time; a slow but alive transfer is never cut. In fault tests it cleared dead-air stalls about 4x sooner, helped further when a whole server went mute, and dropped nothing on a spiky but healthy link</span></label>
     <input type="checkbox" id="s_adaptive_timeouts" onchange="setCfg('adaptive_timeouts',this.checked?1:0)"></div>
-  <div class="row"><label data-i18n="set.speed.posthealth">Check posts before downloading<span class="hint" data-i18n="set.speed.posthealth.hint">while nothing is downloading, ask every server about a few of each queued post's articles and mark the row with the answer: a post your providers no longer carry is worth knowing about before the bandwidth is spent, not at 97%. Costs a few dozen tiny requests per job. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches</span></label>
+  <div class="row"><label data-i18n="set.speed.posthealth">Check posts before downloading<span class="hint" data-i18n="set.speed.posthealth.hint">while nothing is downloading, ask every server about a few of each queued post's articles and mark the row with the answer: a post your providers no longer carry is worth knowing about before the bandwidth is spent, not at 97%. Costs a few dozen tiny requests per job, plus a short read of the post's repair data, which is skipped on a prepaid block account. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches</span></label>
     <input type="checkbox" id="s_post_health" onchange="setCfg('post_health',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.posthealthdefer">Healthy-looking posts start first<span class="hint" data-i18n="set.speed.posthealthdefer.hint">a job whose check came back bad waits behind items of the same priority that checked out better. It only changes the ORDER: nothing is removed, paused or failed, and forcing a job or raising its priority overrides it. On by default: a post uploaded moments ago can look missing everywhere too, but it only waits behind healthier items and still downloads</span></label>
     <input type="checkbox" id="s_post_health_defer" onchange="setCfg('post_health_defer',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.posthealthfail">Give up on posts no server can supply<span class="hint" data-i18n="set.speed.posthealthfail.hint">a job fails without downloading when EVERY one of your servers said EVERY sampled article was missing and the post is too old for that to be propagation. Sonarr or Radarr then blocklists the release and looks for another one straight away, instead of waiting out a download that cannot finish. Off by default and deliberately hard to trigger: one silent server, or one article still present, and the job runs as normal. Even so, a provider having a bad five minutes can look exactly like a dead post, so turn this on only if you would rather lose the occasional good release than spend the bandwidth. Needs the check above</span></label>
     <input type="checkbox" id="s_post_health_fail" onchange="setCfg('post_health_fail',this.checked?1:0)"></div>
+  <!-- §282 item 13: alternate candidates. Five keys beside the
+       post-health ones because they answer the question those raise -
+       "this post looks bad" is only useful if something can be done
+       about it. NOTHING here may flip "Give up on posts no server can
+       supply" above, which stays off (issue #29). -->
+  <div class="row" data-adv="1"><label data-i18n="set.alt.hold">Alternate copies to hold<span class="hint" data-i18n="set.alt.hold.hint">when a download is grabbed from a search, keep this many of the next-best matches ready as backups. Only the small .nzb files are kept - a few kilobytes each - and nothing is downloaded from them unless a copy is switched to. 0 keeps none; 2 or 3 is plenty</span></label>
+    <input class="txt sm" type="number" min="0" max="10" id="s_alt_hold_count" onchange="setCfg('alt_hold_count',this.value)"></div>
+  <div class="row" data-adv="1"><label data-i18n="set.alt.autoswitch">Switch to a held copy without asking<span class="hint" data-i18n="set.alt.autoswitch.hint">when a download turns out to be one that cannot finish, start the best copy already being held for it instead of putting a button on the queue row. It spends no more than the download you already asked for, because the release is the one you chose and the backup .nzb is already on disk</span></label>
+    <input type="checkbox" id="s_alt_auto_switch" onchange="setCfg('alt_auto_switch',this.checked?1:0)"></div>
+  <div class="row" data-adv="1"><label data-i18n="set.alt.autosearch">Look for a replacement when none is held<span class="hint" data-i18n="set.alt.autosearch.hint">off unless you turn it on. Searching spends new traffic on a release you did not pick, so this one asks first by default. Never done for a download Sonarr or Radarr sent: they blocklist and re-search themselves, and two of you hunting one episode gets it grabbed twice</span></label>
+    <input type="checkbox" id="s_alt_auto_search" onchange="setCfg('alt_auto_search',this.checked?1:0)"></div>
+  <div class="row" data-adv="1"><label data-i18n="set.alt.maxcopies">Most copies to try<span class="hint" data-i18n="set.alt.maxcopies.hint">how many copies of one release this may spend in total, the first attempt included. Stops a title nobody can supply from being tried all night</span></label>
+    <input class="txt sm" type="number" min="1" max="10" id="s_alt_max_copies" onchange="setCfg('alt_max_copies',this.value)"></div>
+  <div class="row" data-adv="1"><label data-i18n="set.alt.maxbytes">Most extra traffic to spend<span class="hint" data-i18n="set.alt.maxbytes.hint">a ceiling on what switching copies may add on top of the download you asked for: e.g. 20G, or 0 for no limit. 0 is the right answer on an unmetered account and the wrong one on a block account, where every byte of a second copy is paid for</span></label>
+    <input class="txt sm" id="s_alt_max_extra_bytes" data-i18n-placeholder="set.alt.maxbytes.ph" placeholder="0" onchange="setCfg('alt_max_extra_bytes',this.value)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.oracleroute">Providers the oracle says are gone go last<span class="hint" data-i18n="set.speed.oracleroute.hint">experimental: when the availability check is confident a provider's backbone has lost a release (takedown), that provider is asked LAST for that download instead of first. It only changes the ORDER: nothing is removed, so a written-off provider is still asked once every other server has missed the article, and a wrong call costs a little time rather than the download. Off by default</span></label>
     <input type="checkbox" id="s_oracle_route" onchange="setCfg('oracle_route',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.speed.oraclesample">Availability checks while idle<span class="hint" data-i18n="set.speed.oraclesample.hint">while nothing is downloading, ask each server about a few articles of indexed releases and remember the answers: that is the picture the setting above reads, and what lets a dead post be recognised before you queue it. Counted per server per hour; 0 turns the checking off. Default 300. Needs the built-in indexer, and stands down entirely while a download runs</span></label>
@@ -3179,6 +3329,19 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 
 <div class="card set" data-sg="system" data-sk="remote">
   <h3 data-i18n="set.remote.title">Remote access <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400" data-i18n="set.remote.sub">· phone &amp; away-from-home</span></h3>
+  <!-- The address of the page you are reading, which sounds too obvious
+       to state until you are reading it inside the mac app, where there
+       is no address bar to read it from. Permanent, and shown in every
+       browser: this is also the answer to "what do I bookmark?" and to
+       "what do I put in Sonarr?" for anyone on this machine. Keyless on
+       purpose - it is meant to be copied, pasted and screenshotted, and
+       the API key belongs in the Security card below rather than in a
+       string that travels. -->
+  <div class="row"><label data-i18n="set.remote.here">This dashboard's address<span class="hint" data-i18n="set.remote.here.hint">what to type into a browser on this machine, and what to bookmark there. Other machines on your network want one of the addresses below instead.</span></label>
+    <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <code id="dashAddr"></code>
+      <button class="ghost mini" onclick="copyStartUrl(this)" data-i18n="open.copy">Copy</button>
+    </span></div>
   <div id="remoteUrls" style="display:flex;gap:22px;flex-wrap:wrap;margin:4px 0 10px"></div>
   <div class="warn" id="remoteOpenNote" style="display:none;font-size:12.5px;margin:0 0 10px" data-i18n="set.remote.opennote">No API key is set: anyone on your network can control nzbfast at these addresses. Set one in Security below.</div>
   <div class="dim" style="font-size:12.5px;line-height:1.55" data-i18n-html="set.remote.body">
@@ -3770,6 +3933,21 @@ if(!IDX_ON){
     document.body.classList.add('nowatch');
   }
 }
+// Same no-flash reasoning, for the mac wrapper's merged title bar. The
+// wrapper window is .fullSizeContentView with a transparent title bar, so
+// this page paints under the traffic lights and has to inset itself (see
+// html.macapp in the stylesheet). The user-agent marker is the signal:
+// macapp sets applicationNameForUserAgent, which is the one thing a
+// WKWebView can say about itself that Safari does not also say.
+//
+// This is the SAME test as `IN_APP_WRAPPER` further down, deliberately
+// spelled twice rather than shared. That one is a `const` in this script,
+// so it is in its temporal dead zone up here - and up here is where this
+// has to be, because a class that decides the page's top inset must land
+// before the first paint or the whole page visibly jumps 34px on load.
+// Same regex byte for byte, leading space and trailing slash included, so
+// the two can never disagree about what counts as the wrapper.
+if(/ NzbFastApp\//.test(navigator.userAgent)) document.documentElement.classList.add('macapp');
 const LOCALES=['en','fr','de','it','es','nl','pt','sv','da','nb','fi','tr','ro','ru','pl','cs','uk','el','ja','he','ar','fa','hu','sk','hr','sr','bg','sl'];
 // [native name, English name] for every tag in LOCALES - the single source
 // for both Settings → Interface language selects, which are populated below
@@ -4139,6 +4317,62 @@ let urlKey = '';
   q.delete('apikey');
   const qs = q.toString();
   history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+})();
+
+// ---- "this is also a web page" ----------------------------------------
+// The mac app is a WKWebView over this exact page. That is a good deal
+// for the person who wants an icon in the Dock, and it silently takes
+// away the three things a browser was giving them - a URL, a bookmark,
+// and a tab that outlives the window - without ever saying that they are
+// still available. So say it, once.
+//
+// ONLY inside the wrapper. In a browser the reader is already where this
+// strip would send them, and a notice telling you to do what you are
+// doing is furniture on the first read. The wrapper identifies itself
+// with an `NzbFastApp/<version>` suffix on the User-Agent, appended by
+// `applicationNameForUserAgent` in DashboardWindow.swift; the token is
+// matched with its leading space and trailing slash so it cannot be hit
+// by a UA that merely contains the word.
+//
+// Dismissal is per browser profile and permanent (localStorage, not
+// sessionStorage): this is an offer, and an offer repeated at someone
+// every launch has become a nag by the third one. Nothing is lost by
+// dismissing it - the address has a permanent row in Settings > Remote
+// access, and View > Open in Browser (Cmd-B) is always in the menu bar.
+const IN_APP_WRAPPER = / NzbFastApp\//.test(navigator.userAgent);
+function dismissAppNotice(){
+  try{ localStorage.nzbfastAppNoticeSeen = '1'; }catch(_){}
+  const el = document.getElementById('appnotice');
+  if(el) el.classList.remove('on');
+}
+// The one sanctioned key-in-a-URL: a launch key, which the page it lands
+// on adopts and then scrubs out of the address bar with replaceState
+// (§61d). Without it the browser meets a prompt for a credential it has
+// never seen, which is the whole reason the launcher hands one over on
+// first run. Omitted on a keyless install, where there is nothing to
+// hand over.
+//
+// Built at CLICK time as well as at show time. `key` can still change
+// after this runs - a stored key that turns out to be refused is
+// replaced by the one that arrived in our own URL - and the href a
+// browser follows is whatever it holds at the moment of the click.
+function appOpenHref(a){
+  a.href = location.origin + '/' + (key ? '?apikey=' + encodeURIComponent(key) : '');
+  return true;
+}
+(function(){
+  // Settings > Remote access shows this in every browser, wrapper or not:
+  // "what do I bookmark" is a fair question from a normal tab too.
+  const d = document.getElementById('dashAddr');
+  if(d) d.textContent = location.origin;
+  if(!IN_APP_WRAPPER) return;
+  let seen = false;
+  try{ seen = localStorage.nzbfastAppNoticeSeen === '1'; }catch(_){}
+  if(seen) return;
+  const el = document.getElementById('appnotice'); if(!el) return;
+  const a = document.getElementById('appOpenLink');
+  if(a) appOpenHref(a);
+  el.classList.add('on');
 })();
 // ...and the same first run when the daemon opened the browser ITSELF.
 // There the URL is a child process's argv, which on Linux is a
@@ -4797,6 +5031,30 @@ function gb(n){ return num(n/1e9,2); }
 // truth: the hero number, fmtRate(), chart captions and the bench/tuning
 // panel all pass through it, so nothing can drift to a rogue unit again.
 // Byte SIZES (downloaded, RAM, disk) never toggle - storage is always bytes.
+//
+// THE PAGE IS NOT THE WHOLE PRODUCT ANY MORE, and this is the sentence a
+// lane about to move a threshold has to read. Two native surfaces draw a
+// live speed and neither can call into this file, so each carries a
+// hand-written twin of rateParts' four thresholds:
+//
+//   macapp/Sources/NzbFast/StatusItem.swift   rateText()   (27cc66897)
+//   crates/nzbtray/src/main.rs                fmt_rate()   (c6a2f8ecd)
+//
+// Both landed on 24 Aug 2026, seven minutes apart, from lanes that could
+// not see each other - so assume the next wrapper (Android, then iOS)
+// writes a fourth without asking. This one is canonical and the others
+// follow it: move a threshold here and move it there in the SAME commit,
+// or a menu bar reads GB/s beside a dashboard reading MB/s, which is the
+// bits/bytes mess this whole section exists to stop. Both twins name this
+// function and each other in their own doc comments; there is no gate
+// holding the three together, on purpose - three short functions do not
+// earn a scanner that would have to parse Swift, Rust and this file for a
+// pair of numbers - so the cross-references ARE the mechanism. Keep them
+// pointing at each other.
+//
+// What does NOT cross to the twins is unit() below: both wrappers ship
+// English-only native menus with no catalogue, so the localised symbols
+// stay a dashboard concern.
 let UNIT_BITS = false;
 // Unit SYMBOLS are localisable: a locale that writes data units differently
 // (French octet → Mo/Go/To/Mbit/s; Cyrillic → МБ/ГБ/Мбит/с) overrides these
@@ -6355,6 +6613,62 @@ function healthDetail(h){
     `<div class="dim" style="margin-top:4px">${t('drawer.health.hint','Advisory only. A post that was uploaded moments ago looks exactly like one that is gone, so nzbfast never blocks, pauses or fails a job because of this check. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches.')}</div>`+
     `</div>`;
 }
+// §282 item 12: the engine has concluded this download cannot finish,
+// and the row says so and offers the way out. The two halves are
+// deliberately separate - the notice is worth having on its own, and it
+// is the half that was missing from the incident this was designed
+// against ("it never told me up front that it could not finish").
+//
+// The REASON arrives as a token plus the daemon's own sentence for it.
+// Render the token when we know it, fall back to the sentence when we do
+// not: a verdict added on the daemon side then reads in English for the
+// one release before its catalogue key exists, instead of not at all.
+function altReason(o){
+  return o.reason==='recovery'
+    ? t('queue.alt.why.recovery','the repair data for this post cannot be fetched from your provider')
+    : o.reason==='gone'
+    ? t('queue.alt.why.gone','no server you have set up still carries this post')
+    : (o.detail||'');
+}
+// Nothing here starts, stops or fails anything. The button is the whole
+// mechanism, and with no spare held there is no button - saying so, and
+// naming the setting that would have kept one, is the honest answer.
+function altOfferBlock(s){
+  const o=s&&s.alt_offer;
+  if(!o) return '';
+  const sp=o.spares||[];
+  // The short translated line, then the daemon's own evidence sentence
+  // under it in the dim tier. The evidence is English until a locale
+  // grows the numbers into its own grammar, and it is the half a user
+  // checking the claim actually reads - the counts, the server tally
+  // and the age.
+  const head=`<div class="bad" style="font-size:12px;margin-top:7px">${t('drawer.alt.title','This download cannot finish:')} ${esc(altReason(o))}`
+    +(o.detail&&o.detail!==altReason(o)?`<div class="dim" style="margin-top:4px">${esc(o.detail)}</div>`:'');
+  if(!sp.length) return head+`<div class="dim" style="margin-top:4px">${
+    t('drawer.alt.none','No alternate copy is being held for this release, so there is nothing to switch to. Set "Alternate copies to hold" in Settings and future grabs keep a spare NZB or two ready for exactly this - they are a few kilobytes each and nothing downloads them.')}</div></div>`;
+  return head+sp.map(a=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altSwitch('${escA(s.nzo_id)}','${escA(a.nzo_id)}')">${
+      t('drawer.alt.switch','Switch to this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(a.name)}</span></div>`).join('')
+    +`<div class="dim" style="margin-top:4px">${
+      t('drawer.alt.hint','Switching ends this download - it moves to history with the reason above - and starts the copy you picked instead. Nothing happens until you click.')}</div></div>`;
+}
+async function altSwitch(id,alt){
+  const j=await api('alt_switch',`&value=${encodeURIComponent(id)}&alt=${encodeURIComponent(alt)}`);
+  if(j.status) toast(t('toast.altswitched','Switched to the alternate copy.'));
+  else toast(tErr(j.error)||t('toast.altfail','That switch is no longer possible.'), true);
+  tick();
+}
+// §282 item 14: what this row replaced, why, and what replaced it. Shown
+// on BOTH rows of a switch, because either one can be the one the user
+// opens - and the reader this exists for is the one looking at a file
+// whose release name they never clicked.
+function altSwitchBlock(s){
+  if(!s) return '';
+  const out=[];
+  if(s.alt_from_name) out.push(t('drawer.altfrom','Downloaded instead of {name}, which was abandoned: {why}',
+    {name:esc(s.alt_from_name), why:esc(s.alt_why||'')}));
+  if(s.alt_to_name) out.push(t('drawer.altto','Replaced by {name}, which was downloaded instead.',{name:esc(s.alt_to_name)}));
+  return out.length?`<div class="dim" style="font-size:12px;margin-top:7px">${out.join('<br>')}</div>`:'';
+}
 function healthBadge(h){
   if(!h||!h.bucket) return '';
   const w=healthWorse(h), b=w?w.bucket:h.bucket;
@@ -6704,6 +7018,14 @@ function renderHistory(slots){
           ?t('hist.moveretry','not moved yet - trying again in {m} min',{m:Math.max(1,Math.ceil((s.auto_retry_at*1000-Date.now())/60000))})
           :t('hist.movestopped','not moved - automatic retries have stopped'))}</span>`);
       }
+      // §282 item 14: this row is one half of a switch. Said on the
+      // LIST, not only in the drawer, because the reader it exists for
+      // is somebody scanning history for the release name they clicked
+      // and finding one they did not.
+      if(s.alt_from_name)
+        sub.push(`<span class="dim">${esc(t('hist.altfrom','instead of {name}',{name:s.alt_from_name}))}</span>`);
+      if(s.alt_to_name)
+        sub.push(`<span class="dim">${esc(t('hist.altto','replaced by {name}',{name:s.alt_to_name}))}</span>`);
       // U8: a disk-full failure gets its space verdict ON the row, not
       // just in the drawer - the ↻ beside it is the verb, this is
       // whether it can work yet. Live: the span re-renders every poll
@@ -7671,6 +7993,14 @@ async function toggleHistRow(tr){
     const att=s.retries>0?` <span class="dim">${esc(t('hist.attempt','attempt {n}',{n:s.retries+1}))}</span>`:'';
     rows.push([t('hist.why','Reason'), esc(s.fail_message)+att]);
   }
+  // §282 item 14, opened out: what was tried, why it was abandoned,
+  // what replaced it. One row for whichever half of the switch this
+  // record is - a job that replaced nothing and was replaced by nothing
+  // gets neither, which is almost every job.
+  if(s.alt_from_name) rows.push([t('hist.alt.head','Switched from'),
+    esc(t('hist.alt.from','{name}, abandoned because: {why}',{name:s.alt_from_name,why:s.alt_why||''}))]);
+  if(s.alt_to_name) rows.push([t('hist.alt.head2','Switched to'),
+    esc(t('hist.alt.to','{name} was downloaded instead of this one.',{name:s.alt_to_name}))]);
   // M32: the daemon has already decided to try again, and it decided the
   // DELAY from the cause (auto_retry_why) - a stalled link waits two
   // minutes, a propagation gap waits twenty. Saying both is what turns a
@@ -8850,6 +9180,11 @@ function renderQueue(){
       // parts plus the extracted files - and the daemon says the output
       // disk is short. Said the moment the shape is known, not at 96%.
       (s.space_short>0?` <span class="warn" title="${escA(t('queue.space.title','This set unpacks after the download, so the disk must hold the archive parts plus the extracted files - about {gb} GB more than is free right now. Free some space before the download finishes, or the unpack will fail.',{gb:(s.space_short/1e9).toFixed(1)}))}">· ${t('queue.space','low disk for unpack')}</span>`:'')+
+      // §282 item 12: something has CONCLUDED this download cannot
+      // finish, which is a different claim from the advisory badge
+      // below it and is the one the user was never told. The row says
+      // so; opening the row is where the reason and the switch are.
+      (s.alt_offer?` <span class="bad" title="${escA(t('queue.alt.title','This download cannot finish. Open the row for the reason, and to switch to another copy if one is being held.'))}">· ${t('queue.alt','cannot finish')}</span>`:'')+
       // What the servers said about this post before the download
       // started (§77). Advisory: it colours the row, it never holds
       // the job back on its own.
@@ -9365,6 +9700,151 @@ function reportBlock(s){
     <button class="ghost mini" style="margin-inline-start:0" onclick="event.stopPropagation();jobReport('${escA(s.nzo_id)}')">🧾 ${esc(t('menu.report','Create report'))}</button>
     <div class="dim" style="margin-top:4px">${esc(t('rep.what','Everything about this one download as text you can paste into a support thread: what it is, which servers it used, what the NZB contained, and this job\'s own log lines. Your usernames, passwords and API keys are not in it, and your home folder is written as ~.'))}</div></div>`;
 }
+// ---------------------------------------------------------------------
+// TODO 274: the drawer's file list, read from the per-file API
+// ---------------------------------------------------------------------
+// `mode=get_files` lists what the POST CONTAINS - one row per file the
+// NZB declares, in NZB order, with a stable opaque handle each. That is
+// the question the drawer is opened to ask ("what is in this download,
+// and how much of each do I have"), and it is the only listing of the
+// two that can answer a job which has not started yet. The extractor's
+// writer list underneath answers a different question - how far through
+// writing each OUTPUT file the unpack is, which for a RAR set is the
+// payload names and not the volumes - so both are kept and each one
+// says which it is. They were one unlabelled list before, and it was
+// the second question wearing the first one's heading.
+//
+// Cadence. The ACTIVE job's table is built once at job start and read
+// without taking a lock, so re-asking on a slow tick costs nothing. A
+// QUEUED job is answered by PARSING its spooled .nzb on the request
+// thread, so that one is fetched exactly once and never re-polled - and
+// it does not need to be, since an NZB's contents do not change. The
+// moment the job starts, `live` flips and the fetch above takes over
+// with a table to read instead of a file to parse.
+const JOBFILES={};                         // nzo_id -> {at, j, busy}
+const JF_FOLD={rec:new Set(), all:new Set()};   // per-job: repair set, long list
+const JF_CAP=25;                           // payload rows before "show all"
+function jfFetch(id, live){
+  const e=JOBFILES[id]||(JOBFILES[id]={});
+  if(e.busy) return;
+  if(e.at&&(!live||performance.now()-e.at<2500)) return;
+  e.busy=true;
+  // The catch is load-bearing rather than tidy: `busy` is what stops a
+  // second request going out, so a rejection that skipped the clear
+  // would leave this job's listing stuck on "reading…" for the life of
+  // the page with nothing to say why. api() answers a dead daemon with
+  // a body rather than a throw, so this arm is for the auth handoff it
+  // awaits ahead of the request.
+  api('get_files',`&value=${encodeURIComponent(id)}`)
+    .catch(()=>fetchFail())
+    .then(j=>{
+      e.busy=false; e.j=j;
+      // Stamped only on an answer that CARRIES a listing. A body with no
+      // `files` key at all never reached a working daemon (the daemon's
+      // own "unknown nzo_id" refusal carries an empty one), and stamping
+      // that would freeze a queued job's drawer on "reading…" for good,
+      // since that side is fetched exactly once.
+      if(j&&j.files) e.at=performance.now();
+      // The queue re-renders on the 1 Hz tick, which repaints a live row
+      // for free; a queued one is never re-fetched, so it needs the nudge.
+      const box=document.getElementById('jf-'+id);
+      if(box) setHtml(box, jfBody(id, live));
+    });
+}
+// The engine's own word for the row, which is the precise one - `status`
+// beside it is held to SAB's three words for clients and says less.
+// "deferred" is a CHOICE rather than damage (a skipped sample, a volume
+// identified as recovery data while it arrived), so it must not read as
+// a fault; "damaged" is the one that does.
+const JF_STATE={queued:['drawer.fs.queued','waiting'], active:['drawer.fs.active','downloading'],
+  complete:['drawer.fs.complete','done'], deferred:['drawer.fs.deferred','skipped'],
+  damaged:['drawer.fs.damaged','damaged'], recovery:['drawer.fs.recovery','repair data']};
+function jfState(w){ const e=JF_STATE[w]; return e?t(e[0],e[1]):(w||''); }
+function jfRow(id,f,live){
+  const b=+f.bytes||0, left=Math.max(0,Math.min(b,+f.bytes_left||0)), got=b-left;
+  const st=f.state||f.status||'';
+  // Offer the promote only where the queue could honour it: the running
+  // job, something still owed, and a row that HAS queued articles. A
+  // row whose state is "recovery" has no slot at all - the plan never
+  // queued it, and the API refuses it in those words - so a button there
+  // would be a control that always fails.
+  const can=live&&left>0&&st!=='recovery'&&st!=='deferred';
+  return `<div class="drow${f.recovery?' jfrec':''}">
+    <span class="dname" title="${escA(f.filename||'')}">${esc(f.filename||'')}</span>
+    <div class="bar"><i style="width:${(b?100*got/b:0).toFixed(1)}%"></i></div>
+    <span class="dim mono nowrap">${fmtSize(got)} / ${fmtSize(b)}</span>
+    <span class="jfst dim">${esc(jfState(st))}</span>`+
+    (can?`<button class="ghost mini jfpr" title="${escA(t('drawer.files.promote','Download this file next'))}"
+      onclick="event.stopPropagation();promoteFile('${escA(id)}','${escA(f.nzf_id||f.id||'')}',this)">&#9195;</button>`:'')+
+  `</div>`;
+}
+function jfBody(id,live){
+  const j=(JOBFILES[id]||{}).j;
+  // No answer yet, or an answer with no listing in it (the daemon was
+  // unreachable): the same "still reading" line either way, because a
+  // one-second network hiccup must not read as "this post is empty".
+  if(!j||!j.files) return `<div class="dim" style="font-size:12.5px">${esc(t('drawer.readingfiles','reading file list…'))}</div>`;
+  if(!j.files.length) return `<div class="dim" style="font-size:12.5px">${esc(t('drawer.files.empty','No files are listed for this download.'))}</div>`;
+  // The repair set can be half the rows of a post and is not what
+  // anyone opened the drawer to read, so it folds - counted rather than
+  // hidden, because a listing that silently omits it does not describe
+  // the post.
+  const rec=j.files.filter(f=>f.recovery), pay=j.files.filter(f=>!f.recovery);
+  const clip=!JF_FOLD.all.has(id)&&pay.length>JF_CAP;
+  let h=(clip?pay.slice(0,JF_CAP):pay).map(f=>jfRow(id,f,live)).join('');
+  if(pay.length>JF_CAP)
+    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('all','${escA(id)}')">${
+      clip?esc(t('drawer.files.more','show all ({n})',{n:pay.length})):esc(t('drawer.files.less','show fewer'))}</button>`;
+  if(rec.length){
+    const open=JF_FOLD.rec.has(id);
+    h+=`<button class="ghost mini jfmore" onclick="event.stopPropagation();jfFold('rec','${escA(id)}')">${
+      open?'&#9662;':'&#9656;'} ${esc(t('drawer.files.rec','repair files ({n})',{n:rec.length}))}</button>`;
+    if(open) h+=rec.map(f=>jfRow(id,f,live)).join('');
+  }
+  return h;
+}
+function jfFold(which,id){
+  const set=JF_FOLD[which];
+  if(set.has(id)) set.delete(id); else set.add(id);
+  renderQueue();
+}
+// The list renders from the cache, so the 1 Hz rebuild restores whatever
+// the last answer was instead of flashing back to "reading…" every tick.
+function jfHtml(id,live){
+  jfFetch(id,live);
+  return `<div class="jfhead">${esc(t('drawer.files.head','what this post contains'))}</div>`+
+    `<div id="jf-${escA(id)}">${jfBody(id,live)}</div>`;
+}
+// "Download this file next", to the extent the queue can honour it.
+async function promoteFile(nzo,nzf,btn){
+  if(btn) btn.disabled=true;
+  const e=JOBFILES[nzo]||{};
+  const row=((e.j&&e.j.files)||[]).find(f=>(f.nzf_id||f.id)===nzf)||{};
+  const name=row.filename||'';
+  const j=await api('queue',`&name=promote_file&value=${encodeURIComponent(nzo)}&value2=${encodeURIComponent(nzf)}`);
+  if(btn) btn.disabled=false;
+  if(j.status){
+    // moved:0 IS NOT A FAILURE and must not read as one. It means every
+    // article of this file has already been handed to a connection:
+    // there is nothing left in the pending queue to move ahead of
+    // anything, so the file is already as early as the queue can put it.
+    toast(j.moved>0
+      ? t('toast.promote.ok','Moved {name} to the front of the queue.',{name})
+      : t('toast.promote.none','Nothing left to move: every part of {name} has already been asked for.',{name}));
+    // The reorder changes what arrives next; re-read rather than sitting
+    // on a listing the button just made stale.
+    if(JOBFILES[nzo]) JOBFILES[nzo].at=0;
+    return;
+  }
+  // The daemon's three refusals, each said in words a reader can act on.
+  // They are different answers, not one failure: two of them mean the
+  // button should not have been offered, and the third is a statement
+  // about how repair data is fetched.
+  const say={'not the active job':t('toast.promote.notactive','Only the download that is running now can be reordered.'),
+    'unknown file id':t('toast.promote.unknown','That file is no longer part of this download.'),
+    'file has no queued articles':t('toast.promote.norepair','Repair files are fetched only if they turn out to be needed, so there is nothing to move.')};
+  toast(say[j.error]||tErr(j.error)||t('err.rejected','rejected'), true);
+}
 function drawerHtml(s){
   const st=lastStats||{};
   // Where this job came from - empty when the record predates the field
@@ -9378,12 +9858,22 @@ function drawerHtml(s){
     // "1.07 GB" tally of it in one panel. The per-server split below
     // stays decimal SI: that is network volume, and it matches the
     // Providers card that totals the same bytes.
-    const files=(st.files||[]).map(f=>{
+    //
+    // Two lists, because they are two facts. jfHtml is the POST - every
+    // file the NZB declares, with a promote on the ones the queue can
+    // still reorder. The block under it is the extractor's writers,
+    // which exist only while an unpack is running and are the OUTPUT
+    // files it is writing; that list used to be the whole drawer and
+    // wore no label, so a RAR set showed the payload names under a
+    // heading a reader took to mean the volumes.
+    const wr=(st.files||[]).map(f=>{
       const pct=f.size?Math.min(100,100*f.written/f.size):0;
       return `<div class="drow"><span class="dname" title="${escA(f.name)}">${esc(f.name)}</span>
         <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
         <span class="dim mono nowrap">${fmtSize(f.written)} / ${fmtSize(f.size)}</span></div>`;
-    }).join('')||`<div class="dim" style="font-size:12.5px">${t('drawer.readingfiles','reading file list…')}</div>`;
+    }).join('');
+    const files=jfHtml(s.nzo_id,true)+
+      (wr?`<div class="jfhead two">${esc(t('drawer.files.unpack','being unpacked right now'))}</div>${wr}`:'');
     const v=st.verify||{};
     const vline=v.blocks_total>0?`<div class="dim" style="font-size:12px;margin-top:7px">${t('lane.verify','verifying')} ${v.blocks_done}/${v.blocks_total} ${t('drawer.blocks','blocks')}${v.blocks_bad?` · <span class="bad">${t('lane.bad','{n} bad',{n:v.blocks_bad})}</span>`:' · '+t('tile.clean','clean')}</div>`:'';
     const srv=(st.servers||[]).map(x=>({host:x.host,b:Math.max(0,(x.bytes||0)-(jobBase.bytes[x.host]||0))})).filter(x=>x.b>0);
@@ -9400,7 +9890,7 @@ function drawerHtml(s){
     // send, and a preview probe below can be tall enough to push a
     // footer off the screen entirely. The other two branches have no
     // panel, so there it IS the foot.
-    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+pwBlock(s)
+    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+altSwitchBlock(s)+pwBlock(s)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
       +(previewMode==='off'?'':probeHtml(s.nzo_id));
   }
@@ -9416,7 +9906,7 @@ function drawerHtml(s){
     return `<div style="font-size:12.5px">${t('drawer.finishing','Downloaded. {phase} - nothing more is being downloaded for this job.',{phase:esc(tStatus(s.status))})}</div>`
       +vline
       +(dol?`<div class="dim" style="font-size:12px;margin-top:7px">${t('drawer.origin','added by')} ${originIconHtml(s.origin)}${esc(dol)}</div>`:'')
-      +mediaWarnBlock(s.media)+healthDetail(s.health)
+      +mediaWarnBlock(s.media)+altSwitchBlock(s)+healthDetail(s.health)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
       +reportBlock(s);
   }
@@ -9448,6 +9938,13 @@ function drawerHtml(s){
       ${dol?`<span class="dim">${t('drawer.origin','added by')}</span><span>${originIconHtml(s.origin)}${esc(dol)}</span>`:''}
       ${s.nzb_path?`<span class="dim">${t('drawer.nzbfile','NZB file')}</span><span class="mono" style="word-break:break-all;font-size:11.5px">${esc(s.nzb_path)} ${nzbBlock(s)}</span>`:''}
     </div>`+
+    // The same listing the running job gets, which this branch had none
+    // of: get_files answers a queued job from its own spooled .nzb, so
+    // "what did I actually queue" is answerable before it starts - which
+    // is the moment it is worth most, since it is still cheap to remove.
+    // No promote here: the daemon downloads one job at a time, so there
+    // is no pending queue of this job's to reorder yet.
+    `<div style="margin-top:9px;padding-top:7px;border-top:1px dashed var(--line)">${jfHtml(s.nzo_id,false)}</div>`+
     // A stopped or paused job keeps whatever its download already read,
     // and that is exactly when the warning matters most: this is the
     // moment the user decides whether to resume it at all.
@@ -9459,6 +9956,8 @@ function drawerHtml(s){
     // queue comes back on its own, and saying so is what stops someone
     // deleting a job whose data is entirely intact.
     storagePauseBlock(s)+
+    altOfferBlock(s)+
+    altSwitchBlock(s)+
     healthDetail(s.health)+
     (s.prefetching?`<div class="ok" style="font-size:12px;margin-top:7px">${t('drawer.prefetch2','Prefetching on idle servers: {s} landed while the active download runs.',{s:fmtMB(s.prefetched_mb||0)})}
       <span class="dim">${t('drawer.prefetch.hint',"If it can't finish there, the progress is kept and the normal download resumes from it.")}</span></div>`:'')+
@@ -13233,6 +13732,66 @@ if(_pick) _pick.addEventListener('change', async ()=>{
 });
 addEventListener('click', e=>{ if(e.target && (e.target.classList?.contains('idlepick')||e.target.id==='addNzbBtn')) _pick.click(); });
 
+// ---- Installed-app extras ------------------------------------------
+// Two Chromium-PWA features. Both are no-ops in a plain tab, in the mac
+// wrapper, and in every browser that does not implement them: the media
+// query below matches nowhere else, and the launch queue is feature
+// tested. Neither adds a user-visible string.
+
+// Window Controls Overlay: measure the two insets the stylesheet cannot.
+// env(titlebar-area-x) is measured from the VIEWPORT's left edge, while
+// the header lives inside a .wrap that is centred and padded, so the raw
+// env over-indents the header by the .wrap's own left inset (and says
+// nothing at all about the right-hand controls Windows puts there).
+// getTitlebarAreaRect() is in the same coordinate space as
+// getBoundingClientRect(), so the difference is the honest answer.
+const WCO_MQ=matchMedia('(display-mode: window-controls-overlay)');
+function wcoSync(){
+  if(!WCO_MQ.matches) return;
+  const r=navigator.windowControlsOverlay?.getTitlebarAreaRect?.();
+  const wrap=document.querySelector('.wrap');
+  // A zero-width rect is what Chromium reports while the overlay is off;
+  // trusting it would pin the header's right margin to the full width.
+  if(!r||!r.width||!wrap) return;
+  const w=wrap.getBoundingClientRect(), cs=getComputedStyle(wrap);
+  // The .wrap's CONTENT box, which is where the header's margins start
+  // from. Reading the wrap rather than the header keeps this stable: the
+  // header already carries the margins a previous pass set.
+  const left=w.left+(parseFloat(cs.paddingLeft)||0);
+  const right=w.right-(parseFloat(cs.paddingRight)||0);
+  const st=document.documentElement.style;
+  st.setProperty('--wcoL', Math.max(0, r.x-left)+'px');
+  st.setProperty('--wcoR', Math.max(0, right-(r.x+r.width))+'px');
+  st.setProperty('--wcoH', r.height+'px');
+}
+wcoSync();
+WCO_MQ.addEventListener('change', wcoSync);
+// Fires on every window resize and whenever the overlay is toggled - the
+// controls keep their size, so their share of the strip changes with the
+// width and the measurement above has to be redone.
+navigator.windowControlsOverlay?.addEventListener?.('geometrychange', wcoSync);
+// A resize that does not change the overlay geometry still moves the
+// centred .wrap under it, so re-measure on the window too.
+addEventListener('resize', wcoSync);
+
+// .nzb file handling. The manifest registers the installed app for the
+// type; Chromium then hands the opened files to this consumer instead of
+// navigating to them. They go through the SAME uploadNzbs() the file
+// picker and the drop target use, so the API key, the expired-key retry,
+// the "ask where this goes" panel and every toast come along for free.
+if('launchQueue' in window && typeof LaunchParams!=='undefined' && 'files' in LaunchParams.prototype){
+  launchQueue.setConsumer(async params=>{
+    if(!params||!params.files||!params.files.length) return;
+    const files=[];
+    for(const h of params.files){
+      // One unreadable handle must not take the rest of the launch with
+      // it - a multi-select can be part stale.
+      try{ files.push(await h.getFile()); }catch(e){}
+    }
+    if(files.length) uploadNzbs(files);
+  });
+}
+
 // NZBLNK links (nzblnk.info). Some boards hand out a "nzblnk:?h=..."
 // link instead of an .nzb file, because the post's own names are
 // scrambled and there is no file to link to yet. The link carries a
@@ -14109,6 +14668,20 @@ async function loadSettings(){
   if(phd&&document.activeElement!==phd) phd.checked=!!c.post_health_defer;
   const phf=document.getElementById('s_post_health_fail');
   if(phf&&document.activeElement!==phf) phf.checked=!!c.post_health_fail;
+  // §282 item 13. Same activeElement guard as every control above: a
+  // poll landing while the user is mid-edit must not overwrite what
+  // they are typing.
+  for(const [id,key] of [['s_alt_hold_count','alt_hold_count'],
+                         ['s_alt_max_copies','alt_max_copies'],
+                         ['s_alt_max_extra_bytes','alt_max_extra_bytes']]){
+    const el=document.getElementById(id);
+    if(el&&document.activeElement!==el) el.value=c[key]!=null?c[key]:'';
+  }
+  for(const [id,key] of [['s_alt_auto_switch','alt_auto_switch'],
+                         ['s_alt_auto_search','alt_auto_search']]){
+    const el=document.getElementById(id);
+    if(el&&document.activeElement!==el) el.checked=!!c[key];
+  }
   [['s_auto_rename',c.auto_rename],['s_rename_resolution',c.rename_resolution],
    ['s_rename_vcodec',c.rename_vcodec],['s_rename_acodec',c.rename_acodec],
    ['s_rename_source',c.rename_source],['s_rename_group',c.rename_group],

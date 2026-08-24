@@ -171,6 +171,15 @@ Object.assign(out, {
   'chip.moving.hint': 'moving files',
   'chip.maintenance.hint': 'database upkeep',
   'chip.measuring.hint': 'measuring connections',
+  // TODO 274 drawer file list: the engine's per-file state word, rendered
+  // via t(...JF_STATE[state]) from the token the daemon sent, so the key
+  // is a table lookup at the call site and the scrape cannot see it.
+  'drawer.fs.queued': 'waiting',
+  'drawer.fs.active': 'downloading',
+  'drawer.fs.complete': 'done',
+  'drawer.fs.deferred': 'skipped',
+  'drawer.fs.damaged': 'damaged',
+  'drawer.fs.recovery': 'repair data',
   // tErr(): fixed daemon error strings (serve.rs), keyed by wire text
   'err.unknown nzo_id': 'unknown nzo_id',
   'err.empty password': 'empty password',

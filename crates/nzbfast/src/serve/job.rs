@@ -354,6 +354,27 @@ pub struct Job {
     /// Stored as the bare NAME, not a sentence: the dashboard has to
     /// compose the message in the user's own language.
     pub unpack_blocked_by: String,
+    /// §282 item 14: the job this one REPLACED, when an alternate
+    /// candidate was switched to. The nzo_id, so history can link the
+    /// two rows; empty on every job that replaced nothing, which is
+    /// almost all of them.
+    pub alt_from: String,
+    /// ...and its release NAME, which is the half the user actually
+    /// needs. Kept separately rather than looked up: the abandoned row
+    /// can be deleted, or aged out of history by retention, and the
+    /// sentence "this replaced X" must still read.
+    pub alt_from_name: String,
+    /// Why the abandoned job was abandoned, in the words the user was
+    /// shown when they were offered the switch. Item 14's whole point is
+    /// that a file with a release name nobody clicked is a bug report
+    /// waiting to happen, and "what replaced it" without "why" only
+    /// answers half of it.
+    pub alt_why: String,
+    /// The mirror on the ABANDONED row: the name that replaced it. Both
+    /// directions are stored because either row can be the one the user
+    /// opens, and a history record that knows only its own half sends
+    /// them looking for the other.
+    pub alt_to_name: String,
     /// UX §18: the move to `move_completed` failed part way and left the
     /// payload split. This is the SOURCE directory that still holds
     /// files; `out_dir` has already followed the bytes that did move,

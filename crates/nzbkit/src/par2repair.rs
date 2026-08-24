@@ -75,6 +75,7 @@ pub const MAX_INPUT_SLICES: usize = 32768;
 /// near 256 MB. An extreme legitimate repair can still use par2cmdline.
 /// Public for the same pre-repair planners as [`MAX_INPUT_SLICES`].
 pub const MAX_REPAIR_DIM: usize = 8192;
+
 /// Present-slice bytes buffered between threaded syndrome flushes.
 const BATCH_BYTES: usize = 64 << 20;
 
@@ -2687,6 +2688,14 @@ fn repair_dir_set_inner(
             have: by_exp.len(),
         });
     }
+    // `missing` is final here - adoption has already subtracted every
+    // block it found, and a set that adoption brings back UNDER the cap
+    // is a legitimate repair, which is why this cannot move any earlier.
+    // The shortfall verdict above stays first: "you do not have enough
+    // recovery data" is the more useful answer when both are true, and
+    // it is the order `Reconstructor::new_with_path` would have reached
+    // on its own. What this buys over that backstop is the load below.
+    reconstruct::check_repair_dim(needed)?;
     let recovery = if needed > 0 {
         match load_selected_recovery(cat, &mut by_exp, needed, bs, !fresh)? {
             Some(loaded) => loaded,

@@ -61,6 +61,30 @@ else
 fi
 
 echo "2. the upload gate"
+# PRIVATE-ONLY FROM HERE, and this guard is why the public runner went
+# red. scan-release-assets.sh and private-patterns.txt are DELIBERATELY
+# stripped from the public export - publish-public.sh says "the scanner
+# literally contains the private vocabulary it greps for" - and two
+# SIBLING tests of that scanner (scan-release-assets-patterns.sh,
+# leak-check-paths.sh) are stripped alongside it. This test was missed,
+# so on the public repo it ran four checks against a file that is not
+# there and reported them as gate failures. Invisible until the tar
+# dialect cascade above was fixed and stopped masking it.
+#
+# Skipped rather than deleted from the export, because section 1 IS
+# meaningful publicly: build-linux-tarballs.sh ships, and its owner
+# flags are exactly the thing a public contributor could break. Same
+# shape as the e2e suites' have_par2() guard - say so out loud, do not
+# quietly pass.
+if [ ! -f packaging/scan-release-assets.sh ]; then
+    echo "  skip - packaging/scan-release-assets.sh is not in this checkout."
+    echo "         It is publish tooling and is private-only, so the upload"
+    echo "         gate cannot be exercised here. Section 1 above still ran."
+    echo
+    echo "passed: $PASS  failed: $FAIL"
+    [ "$FAIL" -eq 0 ]
+    exit
+fi
 # A leak the pattern scanner cannot see: an account name nobody listed.
 #
 # BUILT WITH python's tarfile, NOT by shelling out to tar, and that is

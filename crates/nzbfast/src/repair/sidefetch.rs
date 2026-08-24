@@ -88,16 +88,104 @@ pub(crate) fn vol_count_from_name(name: &str) -> Option<usize> {
     nzbkit::nzb::par2_vol_count(name)
 }
 
+/// What one recovery side-fetch asked a provider for, and what it got.
+///
+/// §282 item 4. Before 24 Aug 2026 a recovery fetch handed its caller a
+/// bare failure COUNT, and every caller read it as a boolean: zero means
+/// the volumes are whole, nonzero means at least one is partial. That
+/// answers "may this batch be excluded from the escalation" and nothing
+/// else - and the escalation is the decision that actually costs money.
+///
+/// The live incident this exists for (§282, 24 Aug 2026): a fetch asked
+/// for 1024 MB of recovery data and 68.9 MB arrived, 1206 article
+/// failures against a payload that was 99.8% intact. The daemon read
+/// "nonzero" and escalated to every remaining volume from the same
+/// provider, three times over, for 46 minutes. A ratio says what a
+/// boolean cannot: this source is not short of a few articles, it will
+/// not serve this recovery set at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VolumeYield {
+    /// Articles this fetch was responsible for - every segment of every
+    /// chosen volume, including the ones `volume_reqs` did not put on
+    /// the wire because an earlier file already owned the message id.
+    pub(crate) asked: u32,
+    /// Of those, the ones that produced no bytes. Counted the same way,
+    /// so an omitted duplicate is a failure here exactly as it is for
+    /// the "did this volume land whole" question - see [`volume_reqs`].
+    pub(crate) failed: u32,
+}
+
+/// §282 item 4: the share of a recovery fetch's articles that must
+/// arrive before asking the SAME source for the rest is worth the wall
+/// clock.
+///
+/// The escalation's premise is that par2's own damage accounting can
+/// run ahead of the block ledger's, so a little more parity closes a
+/// small gap. It buys the remaining volumes from the provider that just
+/// answered the last request, so at measured yield `f` those volumes
+/// come back at about `f` too. One half is where "short a few articles"
+/// stops being a fair reading and "this source will not serve this set"
+/// starts; the incident measured 6.7%, an order of magnitude under it,
+/// and the one shape the e2e suite pins as a legitimate partial - a
+/// single lost article of one large volume - is up near 99%.
+pub(crate) const MIN_RECOVERY_YIELD: f64 = 0.5;
+
+/// Requested articles below which a yield RATIO is noise rather than
+/// evidence: one lost article of a two-article volume is 50% and says
+/// nothing at all about the source.
+pub(crate) const MIN_RECOVERY_YIELD_SAMPLE: u32 = 16;
+
+impl VolumeYield {
+    /// Articles that produced bytes.
+    pub(crate) fn delivered(&self) -> u32 {
+        self.asked.saturating_sub(self.failed)
+    }
+
+    /// Delivered over asked, or 1.0 for a fetch that asked for nothing
+    /// (an empty ask has demonstrated nothing about the source, and the
+    /// safe reading of "nothing demonstrated" is "carry on").
+    pub(crate) fn fraction(&self) -> f64 {
+        if self.asked == 0 {
+            return 1.0;
+        }
+        f64::from(self.delivered()) / f64::from(self.asked)
+    }
+
+    /// §282 item 4: has this source demonstrated it will not serve this
+    /// recovery set? A terminal verdict on the job, and the trigger for
+    /// hunting an alternate once §282 section C lands.
+    ///
+    /// Deliberately NOT a timeout. §146's tail give-up already owns
+    /// "this is taking too long" and reasons about it with a 2x parity
+    /// margin; conflating the two would let a slow-but-serving provider
+    /// be declared dead, which is the §275 mistake wearing a new hat.
+    /// This fires only on what the wire actually returned.
+    pub(crate) fn source_will_not_serve(&self) -> bool {
+        self.asked >= MIN_RECOVERY_YIELD_SAMPLE && self.fraction() < MIN_RECOVERY_YIELD
+    }
+
+    /// The clause a log line or a job verdict states this in.
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "{} of {} recovery article(s) arrived ({:.1}%)",
+            self.delivered(),
+            self.asked,
+            self.fraction() * 100.0
+        )
+    }
+}
+
 /// Download the chosen recovery volumes to `out_dir` (same decode→pwrite
 /// path as the main run). Shared by the disk repair path and the mapped
 /// (into-the-output) path.
 ///
-/// Returns the article-failure count. `Ok(0)` is the only value that
-/// means every chosen volume landed whole; any nonzero count means at
-/// least one of them is PARTIAL, and only a complete volume may ever
-/// enter a whole-file exclusion list (the escalation fetch strips
-/// excluded files, so excluding a partial one makes its missing slices
-/// unreachable for the rest of the job).
+/// Returns what was asked for beside what failed. `failed == 0` is the
+/// only value that means every chosen volume landed whole; any nonzero
+/// count means at least one of them is PARTIAL, and only a complete
+/// volume may ever enter a whole-file exclusion list (the escalation
+/// fetch strips excluded files, so excluding a partial one makes its
+/// missing slices unreachable for the rest of the job). The `asked`
+/// half is §282 item 4's: see [`VolumeYield`].
 pub(crate) async fn fetch_volumes(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     nzb: &Nzb,
@@ -105,7 +193,7 @@ pub(crate) async fn fetch_volumes(
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     file_indexes: &[usize],
     cancel: Option<&SideCancel>,
-) -> Result<usize> {
+) -> Result<VolumeYield> {
     let mut ids: Vec<nzbkit::pool::ArticleReq> = Vec::new();
     let mut id_to_file: std::collections::HashMap<Arc<str>, usize> =
         std::collections::HashMap::new();
@@ -113,6 +201,11 @@ pub(crate) async fn fetch_volumes(
     for &fi in file_indexes {
         omitted = omitted.saturating_add(volume_reqs(nzb, fi, &mut ids, &mut id_to_file));
     }
+    // The omitted duplicates never reach the wire, so they are in the
+    // ask (this fetch was responsible for them) and in the failures
+    // (nothing here will produce their bytes) alike - which leaves the
+    // ratio exactly where it would be without them.
+    let asked = (ids.len() as u32).saturating_add(omitted);
     fetch_volume_articles(
         servers,
         ids,
@@ -123,7 +216,10 @@ pub(crate) async fn fetch_volumes(
         cancel,
     )
     .await
-    .map(|(failures, _paths)| failures.total().saturating_add(omitted) as usize)
+    .map(|(failures, _paths)| VolumeYield {
+        asked,
+        failed: failures.total().saturating_add(omitted),
+    })
 }
 
 /// One volume's `ArticleReq`s and id → file-index entries, appended to
@@ -546,6 +642,91 @@ pub(crate) async fn consume_volume_articles(
         }
     }
     (failures, writers.into_values().map(|(p, _)| p).collect())
+}
+
+/// §282 item 4's gate, on its own. Arithmetic only - the wire shapes
+/// that produce these numbers are `recovery_volume_tests` below and the
+/// `a_recovery_set_the_source_will_not_serve_*` e2e legs.
+#[cfg(test)]
+mod volume_yield_tests {
+    use super::*;
+
+    /// The incident, in this type's terms: a 1024 MB ask that returned
+    /// 6.7% of its articles. Everything after that measurement was the
+    /// daemon asking the same provider for MORE.
+    #[test]
+    fn the_incident_fetch_says_the_source_will_not_serve() {
+        let y = VolumeYield {
+            asked: 1293,
+            failed: 1206,
+        };
+        assert!(y.source_will_not_serve());
+        assert!(y.fraction() < 0.07, "{}", y.fraction());
+        assert!(y.describe().contains("87 of 1293"), "{}", y.describe());
+    }
+
+    /// The shape the e2e suite pins as a LEGITIMATE partial, and the
+    /// reason the threshold is one half rather than something tighter:
+    /// one lost article of a large volume must still escalate, because
+    /// the escalation is what refetches it.
+    #[test]
+    fn one_lost_article_of_a_large_volume_still_escalates() {
+        let y = VolumeYield {
+            asked: 180,
+            failed: 1,
+        };
+        assert!(!y.source_will_not_serve());
+    }
+
+    /// A ratio needs a denominator. One lost article of a two-article
+    /// volume is 50% and says nothing at all about the provider, so the
+    /// sample floor refuses it - which is the difference between a gate
+    /// and a coin toss on every small recovery set.
+    #[test]
+    fn a_tiny_fetch_is_never_a_verdict_about_the_source() {
+        for asked in 1..MIN_RECOVERY_YIELD_SAMPLE {
+            let y = VolumeYield {
+                asked,
+                failed: asked,
+            };
+            assert!(
+                !y.source_will_not_serve(),
+                "{asked} article(s) is not a sample"
+            );
+        }
+        // One more article and the same total refusal IS a verdict.
+        let y = VolumeYield {
+            asked: MIN_RECOVERY_YIELD_SAMPLE,
+            failed: MIN_RECOVERY_YIELD_SAMPLE,
+        };
+        assert!(y.source_will_not_serve());
+    }
+
+    /// An empty ask has demonstrated nothing, and the safe reading of
+    /// "nothing demonstrated" is "carry on" - a default-constructed
+    /// yield is what `fetch_and_repair` starts every run holding.
+    #[test]
+    fn an_empty_ask_is_not_a_refusal() {
+        let y = VolumeYield::default();
+        assert_eq!(y.fraction(), 1.0);
+        assert!(!y.source_will_not_serve());
+    }
+
+    /// Exactly at the threshold is not under it: the gate refuses the
+    /// escalation only once the source has served LESS than half.
+    #[test]
+    fn the_threshold_is_strict() {
+        let half = VolumeYield {
+            asked: 100,
+            failed: 50,
+        };
+        assert!(!half.source_will_not_serve());
+        let under = VolumeYield {
+            asked: 100,
+            failed: 51,
+        };
+        assert!(under.source_will_not_serve());
+    }
 }
 
 #[cfg(test)]

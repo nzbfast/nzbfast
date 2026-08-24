@@ -364,8 +364,40 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
     let vol = fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..n, false, false)], None);
     let mut articles = HashMap::new();
     let segs = make_file_articles("Enospc.Retry.2026.rar", &vol, 40_000, "er", &mut articles);
-    let srv = MockServer::start(articles, Chaos::default()).await;
-    let served = srv.served.clone();
+    // The offset-0 article gets a clear run at the slot; every other
+    // article is held on the wire until it has had one. That is not
+    // decoration, it is what makes this test's subject exist at all.
+    // A slot is Unknown until its offset-0 article sniffs it, and an
+    // article that arrives while it is still Unknown is parked whole
+    // (`Persist::Held`) and re-fed later through `drain_holds`, where a
+    // crypto placement is deliberately reported NOWHERE - so it never
+    // journals. Six 40 kB articles over a loopback mock with 25
+    // connections all land inside the same handful of microseconds, so
+    // how many of them beat the sniff was pure scheduling: measured 24
+    // Aug 2026 over 10 runs on a loaded box, the journal held 4 `D`
+    // records six times, 3 once, 1 once and NOTHING twice - and the
+    // twice it held nothing this test failed, while the run that
+    // journaled one article passed having asserted almost nothing.
+    // 400 ms of dead air orders it: the sniff is local and sub-
+    // millisecond, and the delay is well under both the 1 s TTFB
+    // suspicion floor and the 4 s pre-byte budget, so no connection
+    // reacts to it. That the population is now FIXED is asserted on
+    // the journal below, so a future change that puts articles back in
+    // front of the sniff reddens instead of quietly weakening.
+    let presniff_hold_ms = 400;
+    let slow_ttfb: HashMap<String, u64> = segs
+        .iter()
+        .skip(1)
+        .map(|(id, _, _)| (format!("<{id}>"), presniff_hold_ms))
+        .collect();
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            slow_ttfb,
+            ..Chaos::default()
+        },
+    )
+    .await;
     let body_log = srv.body_log.clone();
 
     let mut xml = format!(
@@ -472,7 +504,14 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
 
         // Retry: everything needed is on disk (published plaintext + the
         // republished D records), so the provider sees ~nothing.
-        let served_before = served.load(std::sync::atomic::Ordering::Relaxed);
+        // `body_log.len()`, NOT `served`: the mock logs an id when the
+        // request ARRIVES and increments `served` only once the body is
+        // fully written, so the two counters part company for every
+        // in-flight request and for every one that answers 430. Slicing
+        // `body_log` at a `served` mark therefore starts the "refetched"
+        // window somewhere INSIDE the first run and blames it for
+        // articles the retry never asked for.
+        let asked_before = body_log.lock().unwrap().len();
         let r = http(
             port,
             &format!("/api?mode=retry&value={nzo}&apikey=sekrit&output=json"),
@@ -503,9 +542,23 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
             .filter(|l| l.starts_with("D "))
             .filter_map(|l| l.rsplit(' ').next().map(str::to_string))
             .collect();
-        assert!(
-            !d_ids.is_empty(),
-            "the decrypt publish recorded no D placements\n--- journal ---\n{journal_txt}"
+        // Every article but two, and the two are named rather than
+        // tolerated: the offset-0 article is the sniff itself (its
+        // bytes route before any mode exists to journal them against),
+        // and the tail article carries the archive's end-of-set headers,
+        // which live in no output file and so are journaled by nothing.
+        // Measured stable at `segs.len() - 2` once the ordering above
+        // holds it there. A bare `!is_empty()` stood here until 24 Aug
+        // 2026 and was the flake: it passed on a run that journaled one
+        // article of six and failed on the runs that journaled none.
+        assert_eq!(
+            d_ids.len(),
+            segs.len() - 2,
+            "the decrypt publish journaled {} of {} articles - every one \
+             but the offset-0 sniff and the header tail should have a `D`\n\
+             --- journal ---\n{journal_txt}",
+            d_ids.len(),
+            segs.len()
         );
         // Journal COMPLETENESS is not asserted here, and the reason is
         // an open gap rather than nondeterminism. On the legacy
@@ -523,13 +576,17 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
         // journals almost nothing - which is TODO 100's own defect on
         // the route that replaced it. Filed as TODO 27 item 2; it is
         // pre-existing, live for every check-verified RAR5 set since
-        // phase 1 landed on 26 Jul, and NOT introduced here.
+        // phase 1 landed on 26 Jul, and NOT introduced here. The wire
+        // ordering at the top of this test is a WORKAROUND for exactly
+        // that gap and belongs to it: it does not make a held crypto
+        // span journal, it only stops articles being held. Delete it
+        // with the gap, and raise the count above to the full payload
+        // population at the same time.
         //
         // What is asserted below is what the route does guarantee, and
         // it is the half the retry actually rides on: whatever DID
         // journal restores locally and is never asked for again.
-        let refetched: Vec<String> =
-            body_log.lock().unwrap()[served_before as usize..].to_vec();
+        let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         assert!(
             refetched.len() < segs.len(),
             "retry refetched the whole set: {refetched:?}\n--- journal ---\n{journal_txt}"

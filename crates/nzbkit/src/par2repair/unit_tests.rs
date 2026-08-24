@@ -1277,3 +1277,56 @@ fn a_torn_recovery_volume_reports_how_many_slices_are_usable() {
         other => panic!("expected RecoveryShort {{ have: 1, need: 2 }}, got {other:?}"),
     }
 }
+
+/// TODO §283 item 14: the disk route is the one the mapped planner FALLS
+/// THROUGH TO when it declines at `MAX_REPAIR_DIM`, and item 14's reading
+/// of the code was that nothing capped the dimension once you were on it -
+/// only `MAX_INPUT_SLICES` and the recovery-shortfall arithmetic. This is
+/// that claim driven rather than read: a set declaring one block more than
+/// the cap, with enough recovery slices on disk to clear the shortfall
+/// check, is refused by name.
+///
+/// The volume's slice bodies are ZERO rather than real recovery data, and
+/// that is the point of the fixture: the refusal has to land before any of
+/// it is read, so generating 8193 real slices over 8193 inputs (~67M field
+/// multiplies) would only prove the test was slow. The packets are
+/// otherwise well formed - real header, real body MD5 - so the catalog
+/// counts them and the shortfall check passes on them.
+///
+/// 16-byte blocks, not the smallest legal 2: extra-file adoption verifies
+/// a candidate window against the block's own MD5, and at a 4-byte block a
+/// chance match anywhere in the directory would adopt a slice, drop
+/// `missing` to exactly the cap and turn this into a test of nothing.
+///
+/// Verified to BITE rather than observed green: with `check_repair_dim`
+/// short-circuited to `Ok`, the disk route runs the whole 8193-dimension
+/// solve and comes back `VerifyFailed("over.bin")` after 8.4 s in a debug
+/// build - which is also the shape of the answer item 14 was worried
+/// about, at the one dimension small enough to watch.
+#[test]
+fn the_disk_route_refuses_a_set_one_block_over_the_repair_matrix_cap() {
+    const DIM_BS: usize = 16;
+    let over = MAX_REPAIR_DIM + 1;
+    let dir = tmpdir("dimcap");
+    // Never written to disk, so every one of its slices is missing.
+    let big = payload(over * DIM_BS, 11);
+    let files: &[(&str, &[u8])] = &[("over.bin", &big)];
+    std::fs::write(dir.join("set.par2"), par2_index(SET, DIM_BS, files)).unwrap();
+    let mut vol = Vec::new();
+    for e in 0..over as u32 {
+        let mut body = e.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0u8; DIM_BS]);
+        vol.extend(pkt(SET, par2::TYPE_RECVSLIC, &body));
+    }
+    std::fs::write(dir.join("set.vol0+8193.par2"), &vol).unwrap();
+    match repair_dir(&dir) {
+        Err(RepairError::Malformed(m)) => {
+            assert!(
+                m.contains(&format!("{over} missing blocks")) && m.contains("repair-matrix cap"),
+                "the dimension cap must be the stated reason: {m}"
+            );
+        }
+        other => panic!("expected the repair-matrix cap refusal, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -457,6 +457,29 @@ jobs:
       # publish-release step 4d, whose `--live` mode is the other half.
       - name: flatpak pin gate
         run: python3 tools/flatpak-pin-gate.py --selftest && python3 tools/flatpak-pin-gate.py
+  rate-format-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-rate-format-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # MB/s printed whole below 1000, GB/s at two decimals at or above
+      # it, times eight to Mb/s and Gb/s when `unit_bits` says bits. That
+      # rule is written three times - `rateParts` in web/dashboard.html
+      # (canonical), `fmt_rate` in crates/nzbtray/src/main.rs,
+      # `rateText` in macapp/Sources/NzbFast/StatusItem.swift - because
+      # neither native surface can call into the page. c6a2f8ecd added
+      # the second at 17:13:14Z on 24 Aug 2026 saying "this is the one
+      # place the rule is written twice"; 27cc66897 added the THIRD at
+      # 17:20:30Z saying the same thing, from a lane that could not see
+      # it. 9e2433cd5 fixed the map; this fixes the mechanism. Also
+      # refuses a FOURTH copy - §281 (Android, then iOS) is the next
+      # surface due and a notification wants exactly this string.
+      - name: rate format gate
+        run: tools/rate-format-gate.py --selftest && tools/rate-format-gate.py
   i18n-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

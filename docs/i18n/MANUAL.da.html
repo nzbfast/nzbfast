@@ -1065,7 +1065,9 @@ fortsætter tilføjelsen urørt, og loggen siger hvorfor.</p>
 <p>Hver jobmilepæl er en versioneret hændelse: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(et automatisk nyt forsøg har sat et mislykket download i kø igen) og
+(et automatisk nyt forsøg har sat et mislykket download i kø igen),
+<code>job.switched</code> (et job der ikke kunne fuldføres blev erstattet af en
+alternativ kopi der blev holdt klar til det) og
 <code>job.delete_kept</code> (en sletning fjernede posten, men kunne ikke fjerne
 dens filer), plus <code>watch.picked</code> (en .nzb blev taget ud af
 overvågningsmappen), <code>nzb.refeed</code> (en færdig downloads egen NZB-fil blev lagt i køen på pause), <code>watchlist.upgraded</code> (en opgradering fra

@@ -15,14 +15,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var stackReady = false
     private var quitting = false
     private let quitWatchdog = QuitWatchdog()
+    private let statusItem = StatusItemController()
 
     // MARK: lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First, because applyPreferences() below is the first thing
+        // to read either key and an unregistered bool(forKey:) is
+        // false - which would ship the menu bar item off.
+        StatusItemController.registerDefaults()
         buildMenus()
         windowController = DashboardWindowController()
         windowController.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // The menu bar item performs no action of its own: it calls the
+        // ones this delegate already owns, so its "Open in Browser" is
+        // the same guarded call as the View menu's, key handling and all.
+        statusItem.onOpenWindow = { [weak self] in self?.showMainWindow() }
+        statusItem.onOpenBrowser = { [weak self] in self?.openInBrowser() }
+        statusItem.onOpenDownloads = { [weak self] in self?.openDownloads() }
+        statusItem.applyPreferences()
 
         daemon.onUnexpectedExit = { [weak self] tail in
             Task { @MainActor in self?.childDied(tail) }
@@ -56,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         switch await daemon.start() {
         case .attached, .spawned:
             stackReady = true
+            statusItem.setStackReady(true)
             // dashboardURL, not baseURL: only now is the port confirmed to
             // be an nzbfast, and the page needs the key handed to it or a
             // fresh install lands on a prompt for a credential it has never
@@ -68,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             pendingLinks = []
             for l in links { await postNzblnk(l) }
         case .failed(let why):
+            statusItem.setStackReady(false)
             windowController.setOverlay(visible: true, text: "nzbfast couldn't start")
             let alert = NSAlert()
             alert.messageText = "nzbfast couldn't start"
@@ -88,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func childDied(_ tail: String) {
         guard !quitting else { return }
         stackReady = false
+        statusItem.setStackReady(false)
         windowController.setOverlay(visible: true, text: "nzbfast stopped")
         let alert = NSAlert()
         alert.messageText = "nzbfast stopped unexpectedly"
@@ -105,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     self.windowController.setOverlay(visible: true, text: why)
                 } else {
                     self.stackReady = true
+                    self.statusItem.setStackReady(true)
                     self.windowController.showDashboard(self.daemon.dashboardURL)
                 }
             }
@@ -128,6 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         quitting = true
         QuitWatchdog.log.notice("quit requested")
+        // Before the stop below, not after: a poll in flight against an
+        // engine that is shutting down is a request nobody will read the
+        // answer to, and its timer would keep firing through the wait.
+        statusItem.suspend()
         // An error alert nobody is around to dismiss (the engine-crash
         // dialog on an unattended machine) holds its modal loop through a
         // whole shutdown otherwise. Aborting makes runModal return
@@ -216,6 +236,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let login = appMenu.addItem(
             withTitle: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
+        // Beside Start at Login because they answer the same question -
+        // what does this app do when its window is not in front - and
+        // because the app has no Preferences window to put them in.
+        let menuBar = appMenu.addItem(
+            withTitle: "Show in Menu Bar", action: #selector(toggleMenuBar), keyEquivalent: "")
+        menuBar.target = self
+        menuBar.toolTip =
+            "Keep an nzbfast icon in the menu bar, with the queue and a pause control behind it."
+        let menuBarSpeed = appMenu.addItem(
+            withTitle: "Show Speed in Menu Bar", action: #selector(toggleMenuBarSpeed),
+            keyEquivalent: "")
+        menuBarSpeed.target = self
+        menuBarSpeed.toolTip =
+            "Put the current download speed beside the menu bar icon while a download is running."
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide nzbfast", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit nzbfast", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -271,6 +305,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if item.action == #selector(toggleLogin) {
             item.state = SMAppService.mainApp.status == .enabled ? .on : .off
         }
+        if item.action == #selector(toggleMenuBar) {
+            item.state = UserDefaults.standard.bool(forKey: StatusItemController.showKey)
+                ? .on : .off
+        }
+        // The speed rides beside the icon, so with no icon there is
+        // nowhere for it to go. Greyed rather than hidden: a checkbox
+        // that vanishes reads as a setting that was lost.
+        if item.action == #selector(toggleMenuBarSpeed) {
+            item.state = UserDefaults.standard.bool(forKey: StatusItemController.speedKey)
+                ? .on : .off
+            return UserDefaults.standard.bool(forKey: StatusItemController.showKey)
+        }
         // Nothing to open in a browser - and no confirmed port to hand the
         // API key to - until the daemon has answered.
         if item.action == #selector(openInBrowser) { return stackReady }
@@ -306,6 +352,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }
+    }
+
+    @objc private func toggleMenuBar() {
+        let d = UserDefaults.standard
+        d.set(!d.bool(forKey: StatusItemController.showKey), forKey: StatusItemController.showKey)
+        statusItem.applyPreferences()
+    }
+
+    @objc private func toggleMenuBarSpeed() {
+        let d = UserDefaults.standard
+        d.set(!d.bool(forKey: StatusItemController.speedKey), forKey: StatusItemController.speedKey)
+        statusItem.applyPreferences()
+    }
+
+    /// Show and focus the one window. Same as the Dock-icon reopen path
+    /// above, and reached the same way from the menu bar item - closing
+    /// the window leaves the app (and the engine) running, so "open" has
+    /// to mean bring it back rather than make another.
+    @objc private func showMainWindow() {
+        windowController.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func openNzbPanel() {

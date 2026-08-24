@@ -20,6 +20,12 @@ pub(super) struct PreLock {
     pub(super) live_shape: Option<(String, String)>,
     pub(super) pw_wanted: Option<String>,
     pub(super) health_defer: bool,
+    /// §282 item 12: every row currently parked as a held alternate.
+    /// Taken ONCE here, like everything else in this struct, so the
+    /// per-row offer is a filter over a small Vec instead of a second
+    /// walk of the queue under the queue lock. Empty on the
+    /// overwhelmingly common install, where nothing is held at all.
+    pub(super) alt_held: Vec<crate::serve::altcand::HeldSpare>,
     pub(super) disk_now: Option<(u64, u64)>,
     pub(super) free_now: Option<u64>,
     pub(super) now_unix: u64,
@@ -55,6 +61,8 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     // §77: is the health sink switched on at all? Read once for the
     // whole payload rather than per slot.
     let health_defer = d.post_health_defer.load(Ordering::Relaxed);
+    // §282 item 12, same rule: read once for the whole payload.
+    let alt_held = d.alt_held_spares();
     // Free space on the output disk, read once per payload: feeds the
     // per-slot unpack-space check below. This is per-job arithmetic,
     // deliberately separate from the min_free floor (which holds the
@@ -144,6 +152,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         live_shape,
         pw_wanted,
         health_defer,
+        alt_held,
         disk_now,
         free_now,
         now_unix,

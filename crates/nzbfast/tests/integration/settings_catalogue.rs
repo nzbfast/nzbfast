@@ -413,6 +413,76 @@ fn settings_survive_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The §282 alternate-candidate NUMBERS survive a restart too.
+///
+/// `settings_survive_a_restart` above cannot see these. It discovers its
+/// targets with `v.as_bool()`, which is what makes it maintenance-free
+/// for flags - and which silently excludes every numeric key on the
+/// settings surface. `alt_auto_switch` and `alt_auto_search` are covered
+/// there; `alt_hold_count`, `alt_max_copies` and `alt_max_extra_bytes`
+/// had no automated restore coverage at all.
+///
+/// TODO §282 item 19 is why that gap is worth a test of its own rather
+/// than a note. While `alt_hold_count` defaulted to 0, a dropped restore
+/// block reset a user's 3 to 0 and the feature visibly stopped holding
+/// spares - loud, and someone would report it. Defaulting it to 2 makes
+/// the same bug reset their 0 or their 5 to 2, which reads as a working
+/// default rather than as a lost setting. And 2 is the number the whole
+/// cost argument rides on: a user who set 0 because they are on a
+/// metered account would be silently put back to holding spares.
+///
+/// Deliberately a NAMED LIST and not a reflective sweep of every number
+/// `get_config` reports. A number is not a flag: `port`, `speedlimit`
+/// and the tuner bounds carry ranges, clamps and meanings, so "set it to
+/// something else" is not a safe universal move the way "flip it" is.
+/// The values below are chosen to be inside each key's clamp and
+/// different from every default, so a revert cannot pass by coincidence.
+#[test]
+fn the_alternate_candidate_numbers_survive_a_restart() {
+    let dir = scratch("restart-altnums");
+    // Each is away from its shipped default (2 / 2 / 0) and inside the
+    // clamp its `apply_setting` arm applies (hold 0-10, copies 1-10).
+    let want: [(&str, u64); 3] = [
+        ("alt_hold_count", 5),
+        ("alt_max_copies", 4),
+        ("alt_max_extra_bytes", 21_474_836_480),
+    ];
+    {
+        let d = serve(&dir);
+        for (name, v) in &want {
+            let r = api(d.port, &format!("mode=config&name={name}&value={v}"));
+            assert_eq!(
+                r["status"].as_bool(),
+                Some(true),
+                "setting {name} was rejected: {r}"
+            );
+        }
+        // Live first, so a key that never reached the daemon does not
+        // read as a restart failure below.
+        let after = settings_block(d.port);
+        for (name, v) in &want {
+            assert_eq!(
+                after.get(*name).and_then(serde_json::Value::as_u64),
+                Some(*v),
+                "saved, but get_config still reports the old value for {name} -                  the apply_setting arm validated it without applying it"
+            );
+        }
+    } // daemon killed here
+
+    // Same directory, new process: settings.json is the only carrier.
+    let d = serve(&dir);
+    let restored = settings_block(d.port);
+    for (name, v) in &want {
+        assert_eq!(
+            restored.get(*name).and_then(serde_json::Value::as_u64),
+            Some(*v),
+            "{name} reverted across a restart. Saved to settings.json but \
+             never read back at launch - add it to restore_ui_and_index_settings"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Turning fast verify off means full verify, and it stays off.
 ///
 /// `fast_verify` and `verify_mode` are two controls over the same pair of

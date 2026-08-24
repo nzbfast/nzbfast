@@ -124,7 +124,7 @@ async fn set_password_mid_download_unlocks_in_same_run() {
         let mut started = false;
         for _ in 0..150 {
             let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
-            if q.contains(&id) && q.contains("Downloading") {
+            if queue_slot(&q, &id)["status"] == "Downloading" {
                 started = true;
                 break;
             }

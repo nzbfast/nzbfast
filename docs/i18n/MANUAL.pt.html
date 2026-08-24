@@ -1079,7 +1079,9 @@ a adição segue intocada e o log diz por quê.</p>
 <p>Cada marco de um trabalho é um evento versionado: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(uma repetição automática recolocou na fila um download que falhou) e
+(uma repetição automática recolocou na fila um download que falhou),
+<code>job.switched</code> (uma tarefa que não conseguiu terminar foi substituída
+por uma cópia alternativa guardada para ela) e
 <code>job.delete_kept</code> (uma exclusão removeu o registro mas não conseguiu
 remover os arquivos dele), mais <code>watch.picked</code> (um .nzb foi retirado
 da pasta vigiada), <code>nzb.refeed</code> (o próprio arquivo NZB de um download concluído foi acrescentado à fila, em pausa), <code>watchlist.upgraded</code> (uma melhoria da lista de

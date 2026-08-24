@@ -220,7 +220,6 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
         },
     )
     .await;
-    let served = srv.served.clone();
     let body_log = srv.body_log.clone();
 
     let xml1 = nzb_xml("Lane.Enospc.2026.rar", &segs1, Some("decpw"));
@@ -362,7 +361,12 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
 
         // §100 property, unchanged by the lane: retry refetches no
         // D-recorded article.
-        let served_before = served.load(std::sync::atomic::Ordering::Relaxed);
+        // `body_log.len()`, NOT `served`: the mock logs an id when the
+        // request ARRIVES and increments `served` only once the body is
+        // fully written, so a `served` mark indexes `body_log`
+        // somewhere INSIDE the first run and blames the retry for
+        // articles it never asked for.
+        let asked_before = body_log.lock().unwrap().len();
         let r = http(
             port,
             &format!("/api?mode=retry&value={nzo}&apikey=sekrit&output=json"),
@@ -383,11 +387,24 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
             .filter(|l| l.starts_with("D "))
             .filter_map(|l| l.rsplit(' ').next().map(str::to_string))
             .collect();
+        // Deliberately "not empty" and NOT a count, unlike the §100
+        // test this leg was copied from. That one holds every article
+        // but the offset-0 one behind `Chaos::slow_ttfb` so the sniff
+        // always classifies the slot first and the `D` population is
+        // fixed (see TODO 27.2 for why an article that beats the sniff
+        // never journals at all). The same scaffold was tried here on
+        // 24 Aug 2026 and it BREAKS THIS SUITE'S PREMISE: 400 ms of
+        // dead air pushes job 1's finish out past job 2's whole
+        // download, so the Finishing/Downloading overlap this file
+        // exists to observe stops happening - 5 runs, 5 failures on
+        // "never observed a finishing row beside a Downloading one".
+        // The lane overlap is this test's subject and the journal is
+        // its rider, so the rider is the one that stays tolerant.
         assert!(
             !d_ids.is_empty(),
             "the decrypt publish recorded no D placements\n--- journal ---\n{journal_txt}"
         );
-        let refetched: Vec<String> = body_log.lock().unwrap()[served_before as usize..].to_vec();
+        let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         let leaked: Vec<&String> = refetched.iter().filter(|id| d_ids.contains(*id)).collect();
         assert!(
             leaked.is_empty(),

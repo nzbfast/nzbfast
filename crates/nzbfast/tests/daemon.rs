@@ -25,6 +25,8 @@ mod daemon_delete;
 mod daemon_handles;
 // §129 4a pre-queue hook legs (sibling dir, size gate).
 mod daemon_hooks;
+// M14f promote, its §282 18/19 event and defaults (sibling dir, gate).
+mod daemon_altswitch;
 // TODO 166: a user's index write is bounded and says "busy" rather
 // than parking a worker (sibling dir, size gate).
 mod daemon_indexbusy;
@@ -69,7 +71,7 @@ use std::process::{Command, Stdio};
 
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 
-use harness::{Daemon, free_port};
+use harness::{Daemon, free_port, history_has, history_slot, queue_has, queue_slot};
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
@@ -995,20 +997,20 @@ async fn sab_facade_priorities_and_retry() {
         );
         assert!(r.contains("\"status\":true"), "{r}");
         let h = poll_history(&|h: &str| h.contains("Completed"), "force job while paused");
-        assert!(h.contains(&good_id), "{h}");
+        assert!(history_has(&h, &good_id), "{h}");
         // The bad job must still be queued: the queue is paused.
         let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
-        assert!(q.contains(&bad_id), "{q}");
+        assert!(queue_has(&q, &bad_id), "{q}");
         assert!(q.contains("\"priority\":\"Normal\""), "{q}");
 
         // Resume: the bad job runs, fails, parks in history.
         http(port, "/api?mode=resume&apikey=sekrit&output=json", None);
         let h = poll_history(&|h: &str| h.contains("Failed"), "bad job to fail");
-        assert!(h.contains(&bad_id), "{h}");
+        assert!(history_has(&h, &bad_id), "{h}");
 
         // failed_only filters the completed one out.
         let h = http(port, "/api?mode=history&failed_only=1&apikey=sekrit&output=json", None);
-        assert!(h.contains(&bad_id) && !h.contains(&good_id), "{h}");
+        assert!(history_has(&h, &bad_id) && !history_has(&h, &good_id), "{h}");
         // Pagination: limit=1 returns one slot but reports both.
         let h = http(port, "/api?mode=history&start=0&limit=1&apikey=sekrit&output=json", None);
         assert!(h.contains("\"noofslots\":2"), "{h}");
@@ -1028,7 +1030,7 @@ async fn sab_facade_priorities_and_retry() {
             &|h: &str| h.contains("\"retries\":1") && h.contains("Failed"),
             "retried job to fail again",
         );
-        assert!(h.contains(&bad_id), "{h}");
+        assert!(history_has(&h, &bad_id), "{h}");
 
         // add-paused (priority -2) holds the job until per-job resume.
         let paused_id = upload(&good_xml, "&apikey=sekrit&priority=-2");
@@ -1385,144 +1387,6 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
             mixed.get("result").is_some(),
             "NZBGet matches methods case-insensitively (strcasecmp): {mixed}"
         );
-    })
-    .await
-    .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M14f: a queued duplicate is held as ALTERNATIVE and auto-promoted
-/// when the original fails.
-///
-/// "Fails" means FINALLY fails. A first missing-article failure is parked
-/// with an M32 automatic retry armed, and promoting the alternative there
-/// would download the same title twice in parallel - the retry is about
-/// to fetch the very gaps that failed. So this runs with a 5 s cooldown
-/// and checks both halves: held while the retry is pending, promoted once
-/// it has been spent.
-#[tokio::test(flavor = "multi_thread")]
-async fn duplicate_held_then_promoted() {
-    let dir = std::env::temp_dir().join(format!("nzbfast-dupe-{}", std::process::id()));
-    let _scratch = scratch::ScratchDir::attach(&dir);
-
-    let data = payload(120_000, 11);
-    let mut articles = HashMap::new();
-    let segs = make_file_articles("ep.bin", &data, 40_000, "dp", &mut articles);
-    let srv = MockServer::start(articles, Chaos::default()).await;
-
-    let seg_xml = |segs: &[(String, u64, u32)]| {
-        let mut x = String::new();
-        for (id, bytes, num) in segs {
-            x.push_str(&format!(
-                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
-            ));
-        }
-        x
-    };
-    let wrap = |inner: &str| {
-        format!(
-            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;ep.bin&quot; yEnc (1/9)\">\n    <groups><group>g</group></groups>\n    <segments>\n{inner}    </segments>\n  </file>\n</nzb>\n"
-        )
-    };
-    let ghost: Vec<(String, u64, u32)> = (1..=3)
-        .map(|n| (format!("dghost{n}@x"), 40_000, n))
-        .collect();
-    let bad_xml = wrap(&seg_xml(&ghost)); // 720p "original" - will fail
-    let good_xml = wrap(&seg_xml(&segs)); // 1080p duplicate - must take over
-
-    let cfg = dir.join("config.json");
-    std::fs::write(
-        &cfg,
-        format!(
-            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
-            srv.addr.ip(),
-            srv.addr.port()
-        ),
-    )
-    .unwrap();
-    let d = serve(&dir, |port| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
-        c.env("NZBFAST_OPEN", "1")
-            .env("NZBFAST_NO_ENRICH", "1")
-            // Short M32 cooldown instead of the 20 min default: the promotion
-            // waits for the automatic retry to be spent, and the test needs to
-            // see both sides of that within its own lifetime.
-            .env("NZBFAST_AUTO_RETRY_SECS", "5")
-            .arg("--config")
-            .arg(&cfg)
-            .arg("serve")
-            .arg("--bind")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--out")
-            .arg(dir.join("complete"))
-            .arg("--connections")
-            .arg("2");
-        c
-    })
-    .await;
-    let port = d.port;
-
-    tokio::task::spawn_blocking(move || {
-        let upload = |xml: &str, fname: &str| {
-            let boundary = "----dupeb";
-            let mut body = Vec::new();
-            body.extend_from_slice(
-                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{fname}\"\r\n\r\n").as_bytes(),
-            );
-            body.extend_from_slice(xml.as_bytes());
-            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-            let r = http(
-                port,
-                "/api?mode=addfile&output=json",
-                Some((&format!("multipart/form-data; boundary={boundary}"), &body)),
-            );
-            assert!(r.contains("\"status\":true"), "{r}");
-        };
-        // Pause so both jobs sit in the queue when the dupe check runs.
-        http(port, "/api?mode=pause&output=json", None);
-        upload(&bad_xml, "Show.Name.S01E02.720p.WEB.nzb");
-        upload(&good_xml, "Show.Name.S01E02.1080p.WEB.nzb");
-        let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "{q}");
-        assert!(q.contains("show name/s1e2"), "{q}");
-
-        // Resume: 720p fails → 1080p ALTERNATIVE must promote and finish.
-        http(port, "/api?mode=resume&output=json", None);
-
-        // FIRST failure: an automatic retry is armed, so the alternative
-        // is still held. park decides this synchronously with the history
-        // push, so the queue may be read as soon as Failed appears.
-        let mut held = false;
-        for _ in 0..150 {
-            let h = http(port, "/api?mode=history&output=json", None);
-            if h.contains("\"Failed\"") {
-                let q = http(port, "/api?mode=queue&output=json", None);
-                assert!(
-                    q.contains("\"Duplicate\""),
-                    "promoted while an automatic retry was pending: {q}"
-                );
-                held = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        assert!(held, "the original never failed");
-
-        // The retry runs, fails again (retries == 1, no longer eligible),
-        // and THAT failure promotes the alternative.
-        let mut ok = false;
-        for _ in 0..150 {
-            let h = http(port, "/api?mode=history&output=json", None);
-            if h.contains("\"Completed\"") && h.contains("\"Failed\"") {
-                assert!(h.contains("1080p"), "{h}");
-                ok = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        assert!(ok, "alternative was never promoted/completed");
     })
     .await
     .unwrap();
@@ -2168,7 +2032,7 @@ async fn queue_survives_restart() {
         // queue when the daemon dies.
         let later_id = upload(port_a, &later_xml, "&priority=-2");
         let q = http(port_a, "/api?mode=queue&apikey=sekrit&output=json", None);
-        assert!(q.contains(&later_id) && q.contains("\"Paused\""), "{q}");
+        assert!(queue_slot(&q, &later_id)["status"] == "Paused", "{q}");
         (keeper_id, later_id)
     })
     .await
@@ -2183,14 +2047,17 @@ async fn queue_survives_restart() {
     let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
         let q = http(port_b, "/api?mode=queue&apikey=sekrit&output=json", None);
-        assert!(q.contains(&later_id), "queued job lost across restart: {q}");
+        // Row and pause in ONE field read: two payload substrings could
+        // be satisfied by two different jobs.
         assert!(
-            q.contains("\"Paused\""),
-            "per-job pause lost across restart: {q}"
+            queue_slot(&q, &later_id)["status"] == "Paused",
+            "queued job or its per-job pause lost across restart: {q}"
         );
         let h = http(port_b, "/api?mode=history&apikey=sekrit&output=json", None);
-        assert!(h.contains(&keeper_id), "history lost across restart: {h}");
-        assert!(h.contains("\"Completed\""), "{h}");
+        assert!(
+            history_slot(&h, &keeper_id)["status"] == "Completed",
+            "history lost across restart: {h}"
+        );
         // The restored category survives too (out_dir under complete/tv).
         // Compared with the separator normalised: the daemon reports NATIVE
         // paths, so on Windows this reads "complete\\tv\\j" (JSON-escaped)
@@ -2205,7 +2072,7 @@ async fn queue_survives_restart() {
         );
         poll_history(
             port_b,
-            &|h: &str| h.contains(&later_id) && h.matches("Completed").count() >= 2,
+            &|h: &str| history_slot(h, &later_id)["status"] == "Completed",
             "restored job after resume",
         );
         assert_eq!(
@@ -3559,11 +3426,11 @@ async fn slow_single_server_job_deferred() {
 
         // Warmup on the fast server establishes the session-best rate.
         let warm_id = upload(&warm_xml, "warm.nzb");
-        poll(&|_q, h| h.contains(&warm_id) && h.contains("Completed"), "warmup completion");
+        poll(&|_q, h| history_slot(h, &warm_id)["status"] == "Completed", "warmup completion");
 
         // Slow job starts (only candidate); fast job queues behind it.
         let slow_id = upload(&slow_xml, "slowjob.nzb");
-        poll(&|q, _h| q.contains(&slow_id) && q.contains("Downloading"), "slow job start");
+        poll(&|q, _h| queue_slot(q, &slow_id)["status"] == "Downloading", "slow job start");
         let fast_id = upload(&fast_xml, "fastjob.nzb");
 
         // The watchdog defers the slow job (warmup 2 s + window 3 s).
@@ -3571,24 +3438,24 @@ async fn slow_single_server_job_deferred() {
             &|q, _h| q.contains("\"deferred\":true"),
             "watchdog deferral of the slow job",
         );
-        assert!(q.contains(&slow_id), "{q}");
+        assert!(queue_has(&q, &slow_id), "{q}");
         assert!(q.contains("defer_reason"), "{q}");
 
         // The fast job overtakes and completes while the slow one is
         // still pending.
         let (_, h) = poll(
-            &|_q, h| h.contains(&fast_id) && h.contains("Completed"),
+            &|_q, h| history_slot(h, &fast_id)["status"] == "Completed",
             "fast job completion",
         );
         assert!(
-            !h.contains(&slow_id),
+            !history_has(&h, &slow_id),
             "slow job should still be queued when the fast one lands: {h}"
         );
 
         // The deferred job then runs (only candidate left), resumes from
         // its journal, and completes.
         poll(
-            &|_q, h| h.contains(&slow_id) && h.matches("Completed").count() >= 3,
+            &|_q, h| history_slot(h, &slow_id)["status"] == "Completed",
             "deferred job eventual completion",
         );
     })
@@ -3743,14 +3610,14 @@ async fn gone_post_defers_so_the_queue_moves_on() {
         // The gone job starts first (only candidate); the good one
         // queues behind it and would wait forever without the defer.
         let gone_id = upload(&gone_xml, "gonejob.nzb");
-        poll(&|q, _h| q.contains(&gone_id) && q.contains("Downloading"), "gone job start");
+        poll(&|q, _h| queue_slot(q, &gone_id)["status"] == "Downloading", "gone job start");
         let good_id = upload(&good_xml, "goodjob.nzb");
 
         let (q, _) = poll(
             &|q, _h| q.contains("\"deferred\":true"),
             "watchdog deferral of the gone job",
         );
-        assert!(q.contains(&gone_id), "the GONE job is the one to defer: {q}");
+        assert!(queue_has(&q, &gone_id), "the GONE job is the one to defer: {q}");
         assert!(
             q.contains("came back missing"),
             "defer must be attributed to refusals, not to a slow/dead server: {q}"
@@ -3759,7 +3626,7 @@ async fn gone_post_defers_so_the_queue_moves_on() {
         // The point of the whole arm: the healthy job behind it runs and
         // finishes while the gone one is still parked.
         let (_, h) = poll(
-            &|_h, h| h.contains(&good_id) && h.contains("Completed"),
+            &|_h, h| history_slot(h, &good_id)["status"] == "Completed",
             "good job completion while the gone job is deferred",
         );
         assert!(
@@ -3918,28 +3785,28 @@ async fn idle_servers_prefetch_next_job() {
 
         // A starts (only job); B queues behind it.
         let a_id = upload(&a_xml, "slowa.nzb");
-        poll(&|q, _| q.contains(&a_id) && q.contains("Downloading"), "job A start");
+        poll(&|q, _| queue_slot(q, &a_id)["status"] == "Downloading", "job A start");
         let b_id = upload(&b_xml, "fastb.nzb");
 
         // The fast server is idle for A → sidecar starts B; the queue
         // reports it as prefetching.
         let (q, _) = poll(&|q, _| q.contains("\"prefetching\":true"), "sidecar start");
-        assert!(q.contains(&b_id), "{q}");
+        assert!(queue_has(&q, &b_id), "{q}");
 
         // B completes entirely on the idle server WHILE A still runs.
         let (q, h) = poll(
-            &|_, h| h.contains(&b_id) && h.contains("Completed"),
+            &|_, h| history_slot(h, &b_id)["status"] == "Completed",
             "B completion via sidecar",
         );
         assert!(
-            q.contains(&a_id) && q.contains("Downloading"),
+            queue_slot(&q, &a_id)["status"] == "Downloading",
             "A should still be downloading when B lands: {q}"
         );
-        assert!(!h.contains(&a_id), "{h}");
+        assert!(!history_has(&h, &a_id), "{h}");
 
         // A still finishes normally on its slow server.
         poll(
-            &|_, h| h.contains(&a_id) && h.matches("Completed").count() >= 2,
+            &|_, h| history_slot(h, &a_id)["status"] == "Completed",
             "A eventual completion",
         );
     })
@@ -4105,7 +3972,7 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
 
         // A starts (only job); B queues behind it.
         let a_id = upload(&a_xml, "slowa.nzb");
-        poll(&|q, _| q.contains(&a_id) && q.contains("Downloading"), "job A start");
+        poll(&|q, _| queue_slot(q, &a_id)["status"] == "Downloading", "job A start");
         let b_id = upload(&b_xml, "afterb.nzb");
 
         // The monitor notes the dead idle server and borrows from the
@@ -4131,11 +3998,11 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
 
         // B completes on the borrowed slice WHILE A still downloads.
         let (q, _) = poll(
-            &|_, h| h.contains(&b_id) && h.contains("Completed"),
+            &|_, h| history_slot(h, &b_id)["status"] == "Completed",
             "B completion via borrowed sidecar",
         );
         assert!(
-            q.contains(&a_id) && q.contains("Downloading"),
+            queue_slot(&q, &a_id)["status"] == "Downloading",
             "A should still be downloading when B lands: {q}"
         );
 
@@ -4145,17 +4012,14 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
         // half the fleet would push A toward 25 s. Generous margin for
         // connect overhead and a loaded CI box, but well under starved.
         let (_, h) = poll(
-            &|_, h| h.contains(&a_id) && h.matches("Completed").count() >= 2,
+            &|_, h| history_slot(h, &a_id)["status"] == "Completed",
             "A completion",
         );
-        // Keys serialize alphabetically, so a slot's elapsed_secs sits
-        // BEFORE its nzo_id: the last one preceding A's id is A's.
-        let a_elapsed: f64 = h
-            .split(&a_id)
-            .next()
-            .and_then(|s| s.rsplit("\"elapsed_secs\":").next())
-            .and_then(|s| s.trim().split(',').next())
-            .and_then(|s| s.trim().parse().ok())
+        // A's OWN row. This used to slice the payload on A's id and read
+        // the last `elapsed_secs` before it, which lands in the wrong row
+        // as soon as another id shares A's prefix (`1` inside `10`).
+        let a_elapsed: f64 = history_slot(&h, &a_id)["elapsed_secs"]
+            .as_f64()
             .unwrap_or_else(|| panic!("no elapsed_secs for A in history: {h}"));
         assert!(
             a_elapsed < 19.0,
@@ -6909,7 +6773,7 @@ async fn going_offline_winds_down_the_running_download() {
         for _ in 0..240 {
             let h = http(port, "/api?mode=history&output=json", None);
             assert!(
-                !h.contains(&id),
+                !history_has(&h, &id),
                 "went offline mid-transfer and the job ran to COMPLETION anyway - \
                  the provider fleet was never wound down\n{h}"
             );
@@ -6948,7 +6812,7 @@ async fn going_offline_winds_down_the_running_download() {
         for _ in 0..600 {
             let h = http(port, "/api?mode=history&output=json", None);
             assert!(!h.contains("\"Failed\""), "the wound-down job failed instead of resuming\n{h}");
-            if h.contains(&id) && h.contains("\"Completed\"") {
+            if history_slot(&h, &id)["status"] == "Completed" {
                 done = true;
                 break;
             }
@@ -7078,7 +6942,7 @@ async fn offline_outranks_force_and_a_client_resume() {
             for _ in 0..(secs * 4) {
                 let h = http(port, "/api?mode=history&output=json", None);
                 assert!(
-                    !h.contains(&id),
+                    !history_has(&h, &id),
                     "{tag}: the job reached history while the daemon reported itself OFFLINE - \
                      the provider fleet reopened behind the operator's back\n{h}"
                 );
@@ -7135,7 +6999,7 @@ async fn offline_outranks_force_and_a_client_resume() {
         for _ in 0..600 {
             let h = http(port, "/api?mode=history&output=json", None);
             assert!(!h.contains("\"Failed\""), "the job failed after coming back online\n{h}");
-            if h.contains(&id) && h.contains("\"Completed\"") {
+            if history_slot(&h, &id)["status"] == "Completed" {
                 done = true;
                 break;
             }
@@ -7655,7 +7519,7 @@ async fn preflight_health_badges_the_row_and_downloads_the_job_anyway() {
         // verdict, and both download normally once the queue runs.
         let q = http(port, "/api?mode=queue&output=json", None);
         assert!(
-            q.contains(&old_id) && q.contains(&new_id),
+            queue_has(&q, &old_id) && queue_has(&q, &new_id),
             "a job left the queue: {q}"
         );
         assert!(!q.contains("\"Failed\""), "a verdict failed a job: {q}");
@@ -7667,8 +7531,8 @@ async fn preflight_health_badges_the_row_and_downloads_the_job_anyway() {
                 !h.contains("\"Failed\""),
                 "a job failed despite serving bodies\n{h}"
             );
-            if h.contains(&old_id) && h.contains(&new_id) && h.matches("\"Completed\"").count() >= 2
-            {
+            let done = |id: &str| history_slot(&h, id)["status"] == "Completed";
+            if done(&old_id) && done(&new_id) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -7987,7 +7851,7 @@ async fn health_auto_defer_reorders_and_never_removes() {
             // finished job reports its post-processing tail as "Moving"
             // and only reaches history once that tail is done, and the
             // runner has started the NEXT job by then.
-            if s.is_null() || s["status"] != "Queued" || h.contains(&good_id) {
+            if s.is_null() || s["status"] != "Queued" || history_has(&h, &good_id) {
                 good_first = true;
                 break;
             }
@@ -8001,7 +7865,7 @@ async fn health_auto_defer_reorders_and_never_removes() {
         assert!(good_first, "the healthy job never overtook the red one");
         assert!(
             !slot(&dead_id).is_null()
-                || http(port, "/api?mode=history&output=json", None).contains(&dead_id),
+                || history_has(&http(port, "/api?mode=history&output=json", None), &dead_id),
             "the red job was removed from the queue"
         );
 
@@ -8009,7 +7873,7 @@ async fn health_auto_defer_reorders_and_never_removes() {
         // summary cites what pre-flight already knew.
         for _ in 0..600 {
             let h = http(port, "/api?mode=history&output=json", None);
-            if h.contains(&dead_id) {
+            if history_has(&h, &dead_id) {
                 assert!(
                     h.contains("a pre-flight sample when this job was added"),
                     "the failure summary dropped the pre-flight evidence\n{h}"

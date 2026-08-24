@@ -1062,7 +1062,9 @@ Linux اصلاً از سطل زبالهٔ میزکاری استفاده نمی�
 <p>هر نقطهٔ عطف یک کار، رویدادی نسخه‌دار است: <code>job.added</code>،
 <code>job.started</code>، <code>job.finishing</code>، <code>job.repaired</code>،
 <code>job.completed</code>، <code>job.failed</code>، <code>job.retried</code>
-(یک تلاش خودکار مجدد، دانلود ناموفق را دوباره به صف افزود) و
+(یک تلاش خودکار مجدد، دانلود ناموفق را دوباره به صف افزود)،
+<code>job.switched</code> (کاری که نمی‌توانست کامل شود با نسخه‌ای جایگزین که
+برایش نگه داشته شده بود عوض شد) و
 <code>job.delete_kept</code> (یک حذف، رکورد را برداشت اما نتوانست فایل‌هایش را
 بردارد)، به‌علاوهٔ <code>watch.picked</code> (یک .nzb از پوشهٔ دیده‌بانی برداشته
 شد)، <code>nzb.refeed</code> (فایل NZB خودِ یک دانلود تمام‌شده به صورت متوقف به صف افزوده شد)، <code>watchlist.upgraded</code> (ارتقایی از فهرست پیگیری انجام شد و نسخهٔ

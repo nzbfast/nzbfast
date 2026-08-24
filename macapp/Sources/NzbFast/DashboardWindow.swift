@@ -12,17 +12,71 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
     private let overlayLabel = NSTextField(labelValue: "starting nzbfast…")
     private let spinner = NSProgressIndicator()
 
+    /// The dashboard's own dark background (`--bg` in web/ui-tokens.html,
+    /// #0e1014). The window wears it as well as the "starting…" overlay:
+    /// with a full-size content view there is no title bar left to paint
+    /// over it, and a live resize or a rubber-band overscroll shows the
+    /// window's backgroundColor for a frame or two. The AppKit default is
+    /// white, which is exactly the flash this window is built to avoid.
+    /// It stays dark under the light theme too, on purpose - it matches
+    /// the overlay that has always come up first at launch.
+    static let pageBackground = NSColor(
+        red: 0.055, green: 0.063, blue: 0.078, alpha: 1)
+
     init() {
         let config = WKWebViewConfiguration()
         // Dashboard state (API key, chart prefs) lives in localStorage -
         // use the default (persistent) data store.
+        //
+        // Tell the page it is inside this wrapper rather than in a browser
+        // tab. Nothing on the daemon side reads it - `api_client` in
+        // serve/origin.rs takes the FIRST token of a User-Agent and
+        // ignores anything leading with `mozilla`, which this still does -
+        // but the dashboard needs to know, because a handful of things are
+        // only true here: it can offer "this is also a web page you can
+        // bookmark", and it can name the View > Open in Browser item that
+        // exists in this menu bar and nowhere else.
+        //
+        // `applicationNameForUserAgent` and NOT `customUserAgent`: it is
+        // the API for "the default UA plus a suffix", and it is
+        // SYNCHRONOUS. There is no public way to read WebKit's own default
+        // string ahead of a load - `evaluateJavaScript("navigator.userAgent")`
+        // needs a live web view and answers on a later turn of the run
+        // loop - so a customUserAgent would either race the first load
+        // (the marker missing exactly on the launch that shows the banner)
+        // or be hand-built, which means this wrapper inventing its own
+        // WebKit version number. This appends, so navigator.userAgent is
+        // WebKit's own string with " NzbFastApp/<version>" on the end.
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        // The waiver is for leak-check's credential heuristic, which reads
+        // `...UserAgent = "<8+ chars>"` as a secret assignment - the `user`
+        // arm of its key list matches any identifier containing "User".
+        // This is a product token that ships in the headers of every
+        // request the wrapper makes; there is nothing here to keep.
+        config.applicationNameForUserAgent = "NzbFastApp/\(appVersion)"  // leakcheck-allow-synthetic
         webView = WKWebView(frame: .zero, configuration: config)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            // .fullSizeContentView puts the content view under the title
+            // bar instead of below it, which is what lets the dashboard's
+            // own header meet the traffic lights with no grey strip
+            // between them. It changes the CONTENT rect only - the frame
+            // rect, which is what the autosave below stores and restores,
+            // is unaffected, so a window saved by an older build still
+            // comes back where the user left it.
+            styleMask: [.titled, .closable, .miniaturizable, .resizable,
+                        .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "nzbfast"
+        // Transparent rather than hidden: the title bar is still there
+        // and still drags the window, it just paints nothing of its own.
+        // The title itself would sit on top of the dashboard's header, so
+        // it goes - `window.title` is kept for the Window menu, Mission
+        // Control and the app switcher, which all read it.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = DashboardWindowController.pageBackground
         window.minSize = NSSize(width: 720, height: 480)
         // Naming the frame only makes AppKit WRITE it: every resize was
         // saved to "NSWindow Frame nzbfast.main" and nothing ever read it
@@ -59,7 +113,7 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
 
         // "starting…" overlay, dashboard-dark to avoid a white flash.
         overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor(red: 0.055, green: 0.063, blue: 0.078, alpha: 1).cgColor
+        overlay.layer?.backgroundColor = DashboardWindowController.pageBackground.cgColor
         overlay.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overlay)
         NSLayoutConstraint.activate([

@@ -350,3 +350,69 @@ fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
     let tail = std::fs::read_to_string(log).unwrap_or_default();
     panic!("daemon never came up on :{port}\n--- log ---\n{tail}");
 }
+
+/// One slot out of a SAB `mode=queue` or `mode=history` payload, found
+/// by `nzo_id`; `Value::Null` when the job is not in that section.
+///
+/// This exists because `payload.contains(&nzo_id)` - the idiom this
+/// replaced at 40-odd sites on 24 Aug 2026 - answers a different
+/// question from the one every one of those sites was asking, and it
+/// answers it wrong in two separate ways.
+///
+/// FIRST, the payload is more than its slots. `mode=queue` carries the
+/// `whyslow` diagnostic block, and that block names the LAST job's own
+/// `nzo_id` (`crates/nzbfast/src/serve/whyslow.rs`, the `"nzo_id":
+/// owner` field), so `q.contains(&id)` reads TRUE against a queue whose
+/// `slots` is `[]` and whose `noofslots` is 0. That is what bit
+/// `daemon_bomb`'s `assert_refused_keeping` on 24 Aug 2026: its "the
+/// min-free hold never requeued the job" assertion was really asking
+/// "did this download run long enough to arm whyslow", and it failed 2
+/// runs in 12 on the biggest fixture in that file. A history payload
+/// has its own version of the same hazard - a Failed row carries
+/// `fail_detail`, snapshotted out of the daemon's GLOBAL log ring, so
+/// another job's `[queue] added <nzo_id> ...` line rides inside it.
+///
+/// SECOND, and this one breaks POSITIVE assertions and poll predicates
+/// as well, nzo ids are minted `SABnzbd_nzo_nzbfast{n}` off a plain
+/// incrementing counter (`crates/nzbfast/src/serve/daemon_enqueue.rs`,
+/// and `daemon_persist.rs` on restore). `SABnzbd_nzo_nzbfast1` is a
+/// strict PREFIX of `...nzbfast10` through `19`, and of `...100` up. A
+/// suite that reaches ten jobs therefore has a `contains` that can be
+/// satisfied by a job it never asked about.
+///
+/// Read the field it means: `queue_slot(&q, &id)["status"]` rather than
+/// `q.contains(&id) && q.contains("Downloading")`, which two different
+/// jobs can satisfy between them.
+pub fn queue_slot(payload: &str, nzo: &str) -> serde_json::Value {
+    section_slot(payload, "queue", nzo)
+}
+
+/// One slot out of a SAB `mode=history` payload. See [`queue_slot`].
+pub fn history_slot(payload: &str, nzo: &str) -> serde_json::Value {
+    section_slot(payload, "history", nzo)
+}
+
+/// Is this job in the queue's `slots` array? See [`queue_slot`] for why
+/// this is not `payload.contains(&nzo)`.
+pub fn queue_has(payload: &str, nzo: &str) -> bool {
+    !queue_slot(payload, nzo).is_null()
+}
+
+/// Is this job in history's `slots` array? See [`queue_slot`].
+pub fn history_has(payload: &str, nzo: &str) -> bool {
+    !history_slot(payload, nzo).is_null()
+}
+
+/// The shared body of the four above. Panics with the whole payload on
+/// unparseable JSON, which is the same bargain the callers' own
+/// assertion messages make: printing the payload is what made the
+/// original defect diagnosable, so a malformed one must not read as a
+/// quiet `false`.
+fn section_slot(payload: &str, section: &str, nzo: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(payload)
+        .unwrap_or_else(|e| panic!("bad {section} JSON: {e}\n{payload}"));
+    v[section]["slots"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["nzo_id"] == nzo).cloned())
+        .unwrap_or(serde_json::Value::Null)
+}

@@ -99,6 +99,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         auto_defer: std::sync::atomic::AtomicBool::new(true),
         post_health: std::sync::atomic::AtomicBool::new(true),
         post_health_defer: std::sync::atomic::AtomicBool::new(true),
+        alt: Default::default(),
         post_health_fail: std::sync::atomic::AtomicBool::new(false),
         auto_prefetch: std::sync::atomic::AtomicBool::new(true),
         race_stragglers: std::sync::atomic::AtomicBool::new(true),

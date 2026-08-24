@@ -67,6 +67,7 @@ async fn mapped_verdict_with_reports(
         missing,
         &mut Vec::new(),
         &mut Vec::new(),
+        &mut None,
         false,
         None,
         // `needed` is 0 here, so nothing fetches and the seam is

@@ -91,6 +91,7 @@ mod oracle;
 mod postproc_lane;
 mod pull_search;
 mod queue_handoff;
+mod refeed_wiring;
 mod remote_compat;
 mod settings_catalogue;
 mod stream_repair;

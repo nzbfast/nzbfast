@@ -899,7 +899,7 @@ pub(super) fn finish_job(
     total: u64,
     backbones: &[String],
     post_age_days: u32,
-    repair_shortfall: Option<(usize, usize)>,
+    repair_shortfall: Option<crate::repair::RepairShortfall>,
     extracted: &[String],
     unhealed_slots: Option<&[usize]>,
     extractor: &Arc<nzbkit::extract::Extractor>,
@@ -996,10 +996,14 @@ pub(super) fn finish_job(
             post_age_days,
         };
         anyhow::bail!(with_build(incomplete_reason(incomplete, derrs, &causes)))
-    } else if let Some((needed, have)) = repair_shortfall {
+    } else if let Some(short) = repair_shortfall {
+        // Which of the post's two halves let the user down. §282 item 4
+        // added the second clause: a recovery set the provider will not
+        // serve reads identically to a shredded payload from here, and
+        // the remedies are opposite - see [`RepairShortfall`].
         anyhow::bail!(with_build(format!(
-            "verification failed and PAR2 repair could not complete: {needed} recovery \
-             block(s) needed but the NZB only carries {have}"
+            "verification failed and PAR2 repair could not complete: {}",
+            short.clause()
         )))
     } else {
         anyhow::bail!(with_build(
@@ -1646,13 +1650,21 @@ pub(super) async fn finish_run(
         derrs,
         recovery_errs,
         recovery_segments,
-        // Nothing produces this yet: the download-time counters above are
-        // all the evidence this run has, and on the 24 Aug incident they
-        // were all zero because the recovery volumes were DEFERRED and
-        // the fetch that failed ran in the repair ladder. TODO 282 item
-        // 4 owns that fetch and the yield gate that ends it; this is
-        // where its verdict arrives.
-        false,
+        // TODO 282 item 4's verdict, arriving at the seam item 17 left
+        // for it. The download-time counters above are all the evidence
+        // this run has otherwise, and on the 24 Aug incident they were
+        // all zero because the recovery volumes were DEFERRED and the
+        // fetch that failed ran in the repair ladder - which is where
+        // the yield gate measured it.
+        //
+        // Only the UNSERVABLE variant. `Blocks` means the NZB does not
+        // carry enough parity for the damage, which is a fact about the
+        // POST and not about the source, and the census clause beside
+        // it already says the post is short.
+        matches!(
+            repair_shortfall,
+            Some(crate::repair::RepairShortfall::Unservable(_))
+        ),
         missing_430,
         takedown_430,
         retention_skipped,
@@ -1755,7 +1767,7 @@ mod tests {
         reextract_failed: Option<String>,
         incomplete: usize,
         derrs: u64,
-        repair_shortfall: Option<(usize, usize)>,
+        repair_shortfall: Option<crate::repair::RepairShortfall>,
     ) -> Result<()> {
         run_finish_ex(
             dir,
@@ -1776,7 +1788,7 @@ mod tests {
         reextract_failed: Option<String>,
         incomplete: usize,
         derrs: u64,
-        repair_shortfall: Option<(usize, usize)>,
+        repair_shortfall: Option<crate::repair::RepairShortfall>,
         extracted: &[String],
     ) -> Result<()> {
         run_finish_full(
@@ -1845,7 +1857,7 @@ mod tests {
         reextract_failed: Option<String>,
         incomplete: usize,
         derrs: u64,
-        repair_shortfall: Option<(usize, usize)>,
+        repair_shortfall: Option<crate::repair::RepairShortfall>,
         extracted: &[String],
         slots: &[Arc<FileSlot>],
         extractor: &Arc<nzbkit::extract::Extractor>,
@@ -1961,21 +1973,71 @@ mod tests {
             Some("boom".into()),
             3,
             2,
-            Some((9, 1)),
+            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
         ));
         assert!(m.contains("boom"), "{m}");
         assert!(m.contains("still in the output directory"), "{m}");
         // incomplete files beat the repair-shortfall arm.
-        let m = msg(run_finish(&d, false, None, 1, 0, Some((9, 1))));
+        let m = msg(run_finish(
+            &d,
+            false,
+            None,
+            1,
+            0,
+            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+        ));
         assert!(m.contains("download incomplete"), "{m}");
         assert!(!m.contains("recovery block"), "{m}");
         // derrs alone also beat the shortfall arm.
-        let m = msg(run_finish(&d, false, None, 0, 2, Some((9, 1))));
+        let m = msg(run_finish(
+            &d,
+            false,
+            None,
+            0,
+            2,
+            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+        ));
         assert!(m.contains("could not write the download"), "{m}");
         // The shortfall arm names its arithmetic.
-        let m = msg(run_finish(&d, false, None, 0, 0, Some((9, 1))));
+        let m = msg(run_finish(
+            &d,
+            false,
+            None,
+            0,
+            0,
+            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+        ));
         assert!(m.contains("9 recovery"), "{m}");
         assert!(m.contains("carries 1"), "{m}");
+        // §282 item 4: the SAME arm, the other half of the post. A job
+        // whose payload arrived whole and whose parity the provider
+        // would not serve reaches here, and must not be handed the
+        // block-arithmetic sentence - it would send the user counting
+        // recovery blocks in an NZB that carries plenty of them.
+        let m = msg(run_finish(
+            &d,
+            false,
+            None,
+            0,
+            0,
+            Some(crate::repair::RepairShortfall::Unservable(
+                crate::repair::VolumeYield {
+                    asked: 1293,
+                    failed: 1206,
+                },
+            )),
+        ));
+        assert!(m.contains("could not be fetched from your provider"), "{m}");
+        assert!(m.contains("87 of 1293"), "{m}");
+        assert!(!m.contains("only carries"), "{m}");
+        // Still an Unrepairable classification, which is what arms the
+        // one automatic retry and hints `search` rather than `retry` -
+        // where §282 section C picks the job up.
+        assert!(m.contains("repair could not complete"), "{m}");
+        assert_eq!(
+            crate::failkind::fail_kind(&m),
+            crate::failkind::FailKind::Unrepairable
+        );
         // Nothing else to say: the bare verdict.
         let m = msg(run_finish(&d, false, None, 0, 0, None));
         assert!(
@@ -2000,7 +2062,12 @@ mod tests {
         for (label, incomplete, derrs, shortfall) in [
             ("missing-articles", 1usize, 0u64, None),
             ("decode-errors", 0, 2, None),
-            ("repair-shortfall", 0, 0, Some((9usize, 1usize))),
+            (
+                "repair-shortfall",
+                0,
+                0,
+                Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+            ),
             ("bare-verify", 0, 0, None),
         ] {
             let d = tdir(&format!("quarantine-{label}"));

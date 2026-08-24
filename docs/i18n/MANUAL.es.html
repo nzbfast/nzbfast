@@ -1087,7 +1087,9 @@ el añadido sigue adelante intacto y el registro dice por qué.</p>
 <p>Cada hito de un trabajo es un evento con versión: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(un reintento automático ha vuelto a encolar una descarga fallida) y
+(un reintento automático ha vuelto a encolar una descarga fallida),
+<code>job.switched</code> (un trabajo que no pudo terminar fue reemplazado por
+una copia alternativa que se guardaba para él) y
 <code>job.delete_kept</code> (un borrado quitó el registro pero no pudo quitar
 sus archivos), más <code>watch.picked</code> (se recogió un .nzb de la carpeta
 vigilada), <code>nzb.refeed</code> (el propio archivo NZB de una descarga terminada se añadió a la cola en pausa), <code>watchlist.upgraded</code> (una mejora de la lista de

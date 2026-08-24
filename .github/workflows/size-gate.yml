@@ -160,11 +160,36 @@
 # in either script, so a bug there still surfaces here. See the note
 # further down, where the PRIVATE gates are named, for why a `.claude/`
 # path is safe to write into a file that ships.
+# Nineteen is `tools/index-lock-gate.py`, wired here at landing on 23 Aug
+# 2026 and left unnumbered in this list until now.
+# Twenty is `tools/rate-format-gate.py`, and it is this family's first
+# subject that spans THREE LANGUAGES. One rule turns a rate into a
+# displayed string - MB/s whole below 1000, GB/s at two decimals at or
+# above it, times eight to Mb/s and Gb/s when `unit_bits` says bits - and
+# it is written three times, because neither native wrapper can call into
+# the page: `rateParts` in web/dashboard.html (canonical), `fmt_rate` in
+# crates/nzbtray/src/main.rs, `rateText` in
+# macapp/Sources/NzbFast/StatusItem.swift. The second landed on 24 Aug
+# 2026 at 17:13:14Z with a doc comment saying "this is the one place the
+# rule is written twice - keep them in step"; the THIRD landed at
+# 17:20:30Z, seven minutes later, saying the same thing, from a lane that
+# could not see it. 9e2433cd5 corrected both comments to name all three.
+# That fixed the map, not the mechanism, and the mechanism was "remember"
+# - with a silent failure: a menu bar reading GB/s beside a dashboard
+# reading MB/s is the bits/bytes mess the unit convention exists to stop,
+# and it would ship looking like a rounding difference. Here rather than
+# on main alone for the same reason as the pin gate and the manual gate:
+# the lane that moves ONE of the three should see the red, not the lane
+# after it. macapp.yml started compiling the mac wrapper on 24 Aug 2026,
+# hours after this landed, and it does not overlap: a compiler cannot see
+# this defect, because `"%.2f Gb/s"` builds exactly as well as
+# `"%.2f GB/s"`. This is still the whole of what stands between a
+# Swift-side unit mistake and a shipped menu bar.
 # Each gate is its own job with its own concurrency group, so one cannot
 # starve or cancel another, and each verdict shows up under its own name
 # on the commit.
 #
-# The `paths:` filter is the union of what the twenty scripts actually
+# The `paths:` filter is the union of what the twenty-two scripts actually
 # read, worked out from the scripts rather than guessed, because a push
 # the filter skips is a push the gates silently miss:
 #
@@ -242,7 +267,7 @@
 #     above provably reaches its subject the file still names it
 #     separately (see the harness/i18n case just below), so a dot-prefixed
 #     path gets no less.
-#   - the twenty gate scripts and this file. `crates/**` and `**/*.rs`
+#   - the twenty-two gate scripts and this file. `crates/**` and `**/*.rs`
 #     already carry the harness gate's whole subject, so it adds only its
 #     own script to the list, and `**/*.py` already reaches
 #     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
@@ -319,6 +344,8 @@ on:
       - 'tools/flatpak-pin-gate.py'
       - 'tools/harness-gate.py'
       - 'tools/index-lock-gate.py'
+      - 'tools/rate-format-gate.py'
+      - 'macapp/**'
       - 'web/i18n/manual-check.py'
       - 'web/i18n/site-check.py'
       - 'web/i18n/site-crosslink.py'
@@ -329,15 +356,15 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out twenty
+# Every job below is the same shape, deliberately spelled out twenty-two
 # times rather than as a matrix, so each step's `run:` line is the bare
 # script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of eighteen of the twenty; the memory and
+# about what passes - true of twenty of the twenty-two; the memory and
 # hooks gates have no ci-private line to match, see "Eighteen" above.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With twenty jobs that
+# in the run, so one slow leg kills the fast one. With twenty-two jobs that
 # is no longer hypothetical - a per-job group means the overflow gate's
 # selftest can never take the lock gate's verdict down with it.
 #
@@ -553,6 +580,36 @@ jobs:
       # months.
       - name: index lock gate
         run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
+  rate-format-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: rate-format-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The one rule that turns a rate into a string is written three
+      # times - the dashboard's `rateParts`, the Windows tray's
+      # `fmt_rate`, the mac menu bar's `rateText` - because neither
+      # native surface can call into the page. The second and third
+      # landed SEVEN MINUTES apart on 24 Aug 2026, each with a doc
+      # comment saying it was the second copy. Here as well as in
+      # ci-private because a threshold moves in ONE of the three on the
+      # author's own push, and the failure is silent: a menu bar reading
+      # GB/s beside a dashboard reading MB/s ships looking like a
+      # rounding difference. `--selftest` first, and it is the gate: the
+      # extractor pins three functions BY NAME across three languages,
+      # and one that quietly stops matching reports a clean tree forever
+      # - nav-regen's dead picker arm, above, for months.
+      #
+      # `macapp/**` is in this workflow's paths filter for this job and
+      # no other reason. macapp.yml compiles the wrapper as of 24 Aug
+      # 2026, but a COMPILER cannot see this defect: `"%.2f Gb/s"` builds
+      # exactly as well as `"%.2f GB/s"`. So this stays the only thing in
+      # CI that can catch a Swift-side unit mistake.
+      - name: rate format gate
+        run: tools/rate-format-gate.py --selftest && tools/rate-format-gate.py
   manual-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

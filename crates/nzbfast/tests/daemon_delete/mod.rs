@@ -205,7 +205,7 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
 
         // C is prefetched and completes: the delete stops one job, not
         // the feature.
-        let (q, h) = poll(&|_, h| h.contains(&c_id), "C to complete on the idle server");
+        let (q, h) = poll(&|_, h| history_has(h, &c_id), "C to complete on the idle server");
         assert!(h.contains("\"Completed\""), "{h}");
         assert!(
             qslot(&q, &a_id)["status"] == "Downloading",
@@ -493,7 +493,10 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
         );
         assert!(r.contains("\"status\":true"), "retrying a deleted row: {r}");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains(&ids[0]), "the retried row must be back in the queue: {q}");
+        assert!(
+            queue_has(&q, &ids[0]),
+            "the retried row must be back in the queue: {q}"
+        );
         let h = http(port, "/api?mode=history&output=json", None);
         assert!(
             hslot(&h, &ids[0]).is_null(),

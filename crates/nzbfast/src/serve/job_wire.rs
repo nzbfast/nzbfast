@@ -17,6 +17,13 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "state": format!("{:?}", j.state),
         "total_bytes": j.total_bytes,
         "out_dir": j.out_dir.to_string_lossy(),
+        // §282 item 14: which release replaced which, and why. Persisted
+        // because the clause is a history clause - it has to survive the
+        // restart between the switch and the user reading the row.
+        "alt_from": j.alt_from,
+        "alt_from_name": j.alt_from_name,
+        "alt_why": j.alt_why,
+        "alt_to_name": j.alt_to_name,
         "fail_message": j.fail_message,
         "fail_detail": j.fail_detail,
         "delete_status": j.delete_status,
@@ -161,6 +168,10 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         },
         total_bytes: v.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
         out_dir,
+        alt_from: s("alt_from").unwrap_or_default(),
+        alt_from_name: s("alt_from_name").unwrap_or_default(),
+        alt_why: s("alt_why").unwrap_or_default(),
+        alt_to_name: s("alt_to_name").unwrap_or_default(),
         fail_message: s("fail_message").unwrap_or_default(),
         fail_detail: s("fail_detail").unwrap_or_default(),
         // Monotonic clock cannot survive a process, so this stays None;
