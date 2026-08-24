@@ -17,6 +17,8 @@ pub(super) fn no_causes() -> crate::LossCauses<'static> {
         takedown_430_recovery: 0,
         retention_excluded_recovery: 0,
         transport_failed_recovery: 0,
+        recovery_segments: 0,
+        recovery_unobtainable: false,
         transport_sample: None,
         decode_sample: None,
         recovery_errs: 0,

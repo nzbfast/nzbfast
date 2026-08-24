@@ -179,6 +179,43 @@ pub(crate) struct LossCauses<'a> {
     pub(crate) takedown_430_recovery: u64,
     pub(crate) retention_excluded_recovery: u64,
     pub(crate) transport_failed_recovery: u64,
+    /// Recovery (PAR2) segments the post carries, as the DENOMINATOR the
+    /// four counters above have never had. Without it a recovery loss is
+    /// a bare number: 135 lost segments is a scratch on a 17,000-segment
+    /// set and the whole of a 200-segment one, and only the second of
+    /// those is a reason the job died. 0 = the caller has no per-slot
+    /// recovery accounting, which stands the verdict below down entirely
+    /// (the conservative direction: no denominator, no claim).
+    pub(crate) recovery_segments: u64,
+    /// The repair ladder's terminal verdict about the recovery set
+    /// itself: this source will not serve it, whatever the download-time
+    /// counters above say.
+    ///
+    /// SEAM for TODO 282 item 4, which owns `repair.rs` and the measured
+    /// yield gate behind that verdict; today nothing sets it and the
+    /// counters above are the only evidence this module has. It is here
+    /// rather than in item 4's own change because the ORDERING is this
+    /// module's business - see [`recovery_is_the_casualty`] - and a
+    /// verdict landing later must not have to re-argue where it goes.
+    ///
+    /// The incident this whole rung exists for is exactly the case only
+    /// this field can carry, and the reason is structural rather than
+    /// incidental. `get::plan` NEVER puts a named `Par2Volume` in the
+    /// main plan - the whole one-pass design is that parity is fetched
+    /// only if damage turns up - so on a conventionally named recovery
+    /// set every counter above is unreachable BY CONSTRUCTION, whatever
+    /// the provider does. The 1206 article failures that killed the
+    /// 24 Aug job all happened in the repair-side fetch, which writes
+    /// volume files directly and has no `FileSlot` to charge.
+    ///
+    /// Reproduced here on 24 Aug 2026 at test scale (a 2 MB payload, a
+    /// 10% named par2 set, every volume article answered 430): the run
+    /// logged `fetched 0.0 MB of recovery data (12 article failures)`
+    /// twice and reached this module with all four recovery counters at
+    /// zero. So the counters cover the OBFUSCATED shape, where the
+    /// volumes are downloaded before anything knows what they are, and
+    /// this field covers the common one.
+    pub(crate) recovery_unobtainable: bool,
     /// First transport error, verbatim.
     pub(crate) transport_sample: Option<String>,
     /// First decode/write error, verbatim.
@@ -245,6 +282,26 @@ pub(crate) struct LossCauses<'a> {
     pub(crate) post_age_days: u32,
 }
 
+impl LossCauses<'_> {
+    /// Recovery (PAR2) segments this run cannot repair from: absent for
+    /// any reason, or arrived and failed their own checks.
+    ///
+    /// Deliberately WIDER than the `rec_lost` the trailing recovery
+    /// clause quotes, which counts absence only. Parity that decoded
+    /// wrong is parity we do not have, and the question this figure
+    /// answers - is the recovery set the casualty - does not care which
+    /// way it was lost. The two are not merged because the trailing
+    /// clause's sentence ("were lost as well") is about absence and its
+    /// count is pinned by
+    /// `a_recovery_articles_failure_never_decides_the_payloads_verdict`.
+    fn recovery_unusable(&self) -> u64 {
+        self.missing_430_recovery
+            + self.transport_failed_recovery
+            + self.retention_excluded_recovery
+            + self.recovery_errs
+    }
+}
+
 /// How old a post must be before "every article 430" may be called DEAD
 /// rather than "not here yet".
 ///
@@ -255,6 +312,72 @@ pub(crate) struct LossCauses<'a> {
 /// classified away. Below it (and for a dateless NZB, which reads as age
 /// 0) the classic transient opening stands and the automatic retry runs.
 pub(crate) const GONE_MIN_AGE_DAYS: u32 = 3;
+
+/// The share of a post's recovery set that has to be gone before the
+/// parity is called the casualty rather than the payload.
+///
+/// More than half, and deliberately blunt: this decides one CLAUSE of
+/// one sentence, and the alternative to a blunt threshold here is the
+/// message that sent a user looking at articles, then at par2cmdline,
+/// for a job whose payload was 99.2% intact.
+const RECOVERY_DEAD_NUM: u64 = 1;
+const RECOVERY_DEAD_DEN: u64 = 2;
+
+/// How short the payload may be and still be described as the survivor.
+///
+/// A post that carries parity at all carries it in the region of 10% of
+/// the payload (the 24 Aug incident's was 255 blocks against 2550-odd,
+/// and 10% is the scene norm), so a payload short by under a twentieth
+/// of its segments is inside what an OBTAINABLE recovery set would have
+/// covered. That is what licenses the clause to say "not the payload".
+/// It is not a promise that the repair would have succeeded - nothing
+/// here knows the block geometry - and the sentence does not make one.
+const PAYLOAD_INTACT_DEN: u64 = 20;
+
+/// Which of the two halves of a post actually died: the payload, or the
+/// recovery set that was supposed to fix it.
+///
+/// A RUNG of the opening precedence in [`incomplete_reason`], not a
+/// special case bolted on the side, and its position in that ordering is
+/// the whole of the design:
+///
+/// * `stalled` outranks it, for the reason the propagation-trap note
+///   established - a stalled pool never asked for most of what it is
+///   now short of, so no count it collected is evidence about anything,
+///   the recovery counts included.
+/// * `size_header_lies` and `post_gone` outrank it because both are
+///   POSITIVE evidence about the payload: nothing was lost at all, or
+///   every article of every file was. Neither leaves a gap for parity
+///   to close, so naming the parity would be beside the point.
+/// * `all_transport` outranks it because it is a statement about THIS
+///   machine's link, and `fail_kind` maps its opening to `Transport` -
+///   the one classification that never reports a release to an indexer
+///   as dead. A flaky provider that failed the parity fetch too must
+///   not talk its way out of that.
+///
+/// Everything below it is the plain missing-articles opening, which is
+/// the one this rung exists to displace.
+fn recovery_is_the_casualty(
+    causes: &LossCauses,
+    post_gone: bool,
+    size_header_lies: bool,
+    all_transport: bool,
+) -> bool {
+    if post_gone || size_header_lies || all_transport {
+        return false;
+    }
+    let mostly_gone = causes.recovery_segments > 0
+        && causes.recovery_unusable() * RECOVERY_DEAD_DEN
+            > causes.recovery_segments * RECOVERY_DEAD_NUM;
+    if !(mostly_gone || causes.recovery_unobtainable) {
+        return false;
+    }
+    // The comparative claim needs its other half PROVEN, not assumed.
+    // Both sides can be short at once, and a run that lost a third of
+    // its payload has no business being told the payload was fine.
+    causes.total_segments > 0
+        && causes.missing_segments * PAYLOAD_INTACT_DEN <= causes.total_segments
+}
 
 pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCauses) -> String {
     if incomplete > 0 {
@@ -376,6 +499,11 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
             && causes.missing_segments == 0
             && derrs == 0
             && causes.missing_430 + causes.transport_failed + causes.retention_excluded == 0;
+        // Which of the two failed - the payload, or the recovery set that
+        // was supposed to fix it. See [`recovery_is_the_casualty`] for
+        // why it sits exactly here in the precedence.
+        let recovery_casualty =
+            recovery_is_the_casualty(causes, post_gone, size_header_lies, all_transport);
         let mut msg = if size_header_lies {
             format!(
                 "post size header disagrees with its parts: every payload article \
@@ -396,6 +524,38 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                  to transport failures ({} in all - no server said any article was \
                  missing), {derrs} decode/write errors",
                 causes.transport_failed
+            )
+        } else if recovery_casualty {
+            // Same OPENING WORDS as the plain arm below, and that is
+            // deliberate rather than lazy. `fail_kind` classifies on
+            // "download incomplete", so any other opening moves this
+            // shape out of `MissingArticles` - and `MissingArticles` is
+            // the only kind the age gate applies to, so the 644-day post
+            // that raised this would get its automatic retry back and
+            // spend a second 13 GB download proving the same recovery
+            // set unobtainable. That is a policy change, and item 17 is
+            // not one: what was wrong here was never the class, it was
+            // that the first thing the user read was a count of holes in
+            // a payload that was 99.2% whole. The cause goes in front of
+            // the counts; the counts follow, unchanged, in the census
+            // clause below.
+            let lost = if causes.recovery_segments > 0 {
+                format!(
+                    "{} of the post's {} PAR2 recovery segment(s) are missing or damaged",
+                    causes.recovery_unusable(),
+                    causes.recovery_segments
+                )
+            } else {
+                // The seam's wording: a verdict about the SOURCE, with
+                // no segment census behind it to quote.
+                "the PAR2 recovery volumes could not be fetched from any server that \
+                 has the post"
+                    .to_string()
+            };
+            format!(
+                "download incomplete: the recovery data is what failed, not the payload - \
+                 {lost}, so the {incomplete} file(s) that came up short have no parity \
+                 left to rebuild them from, {derrs} decode/write errors"
             )
         } else {
             format!(
@@ -443,7 +603,10 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         let rec_lost = causes.missing_430_recovery
             + causes.transport_failed_recovery
             + causes.retention_excluded_recovery;
-        if rec_lost > 0 {
+        // Suppressed when the opening already led with it: the rung
+        // above spends the same figures on the headline, and saying them
+        // twice in one sentence reads as two separate losses.
+        if rec_lost > 0 && !recovery_casualty {
             msg.push_str(&format!(
                 "; {rec_lost} recovery (PAR2) segment(s) were lost as well, so there \
                  was less parity available to repair with than the post carries"
@@ -457,6 +620,17 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                     causes.takedown_430_recovery
                 ));
             }
+        } else if causes.takedown_430_recovery > 0 {
+            // The takedown flavour survives the suppression above on its
+            // own, as its own clause. It is the one fact about a dead
+            // recovery set that changes what the user should do next -
+            // waiting cannot bring a removed volume back - and the
+            // headline says the set is gone, never why.
+            msg.push_str(&format!(
+                "; {} of those recovery segment(s) were reported as removed for a \
+                 takedown request, so waiting will not bring the parity back",
+                causes.takedown_430_recovery
+            ));
         }
         // The segment census, right behind the classifying clause. "94
         // file(s) with missing segments" was the whole story a user got,
@@ -1564,6 +1738,265 @@ mod main_tests {
         );
     }
 
+    /// TODO 282 item 17, and the sentence the incident turned on.
+    ///
+    /// The job reported `download incomplete: 83 file(s) with missing
+    /// segments, 0 decode/write errors; 135 of 17130 segment(s) never
+    /// arrived (13414 MB did)` - every number true, and an accusation
+    /// against a payload that was 99.2% intact. What actually died was
+    /// the recovery set: the repair ladder asked for 1024 MB of parity,
+    /// was served 68.9 MB of it over 1206 article failures, and spent
+    /// forty-plus minutes re-asking. The message never mentioned
+    /// recovery at all, so it sent the user looking at articles, then at
+    /// par2cmdline, and finally at us.
+    ///
+    /// Both halves are pinned here, because the value of the clause is
+    /// entirely in TELLING THEM APART: the recovery-dead shape has to
+    /// name the recovery set, and the payload-dead shape has to read
+    /// exactly as it does today.
+    #[test]
+    fn the_message_names_which_of_the_two_actually_died() {
+        // Recovery dead, payload nearly whole: 900 of the post's 1000
+        // parity segments gone, payload short 135 of 17130 (0.79%).
+        let backbones = ["giganews".to_string()];
+        let rec = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                missing_430: 135,
+                missing_430_recovery: 900,
+                recovery_segments: 1000,
+                missing_segments: 135,
+                total_segments: 17130,
+                bytes_arrived: 13_414_000_000,
+                par2_slots: 127,
+                backbones: &backbones,
+                post_age_days: 644,
+                ..no_causes()
+            },
+        );
+        assert!(
+            rec.contains("the recovery data is what failed, not the payload"),
+            "the cause has to be the headline: {rec}"
+        );
+        assert!(
+            rec.contains("900 of the post's 1000 PAR2 recovery segment(s) are missing or damaged"),
+            "and it has to carry its own evidence: {rec}"
+        );
+        // The counts are good; they are just not the headline. They still
+        // appear, in the census clause, exactly as before.
+        assert!(
+            rec.contains("135 of 17130 segment(s) never arrived"),
+            "the census clause must survive the new opening: {rec}"
+        );
+        // Said ONCE. The old trailing clause spends the same figures and
+        // would read as a second, separate loss.
+        assert!(
+            !rec.contains("were lost as well"),
+            "the recovery loss is stated twice: {rec}"
+        );
+        // The CLASS is unchanged, and that is deliberate: everything
+        // downstream of the opening token - the one automatic retry, the
+        // age gate that suppresses it here, the indexer report - was
+        // decided for this shape elsewhere. This item changed what the
+        // user reads, not what the daemon does.
+        assert_eq!(
+            crate::failkind::fail_kind(&rec),
+            crate::failkind::FailKind::MissingArticles,
+            "{rec}"
+        );
+
+        // Payload dead, recovery untouched: the same job with the loss on
+        // the other side. Reads as it always has.
+        let payload = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                missing_430: 9000,
+                missing_segments: 9000,
+                total_segments: 17130,
+                bytes_arrived: 6_000_000_000,
+                recovery_segments: 1000,
+                par2_slots: 127,
+                post_age_days: 644,
+                ..no_causes()
+            },
+        );
+        assert!(
+            payload.starts_with("download incomplete: 83 file(s) with missing segments"),
+            "the payload-dead shape must not have moved: {payload}"
+        );
+        assert!(
+            !payload.contains("recovery data is what failed"),
+            "nothing about this run says the parity is the casualty: {payload}"
+        );
+    }
+
+    /// The rung's own boundaries, which are where a cause clause goes
+    /// wrong: it must not vouch for a payload that is also short, and it
+    /// must not displace an opening that outranks it.
+    #[test]
+    fn the_recovery_clause_stands_down_where_it_would_be_a_lie() {
+        let both_short = LossCauses {
+            missing_430_recovery: 900,
+            recovery_segments: 1000,
+            // A THIRD of the payload gone as well: whatever killed this
+            // job, "not the payload" is not a claim anyone may make.
+            missing_430: 5710,
+            missing_segments: 5710,
+            total_segments: 17130,
+            par2_slots: 127,
+            ..no_causes()
+        };
+        let msg = super::incomplete_reason(83, 0, &both_short);
+        assert!(
+            !msg.contains("not the payload"),
+            "both halves were short: {msg}"
+        );
+        assert!(
+            msg.contains("900 recovery (PAR2) segment(s) were lost as well"),
+            "and the ordinary recovery clause has to come back: {msg}"
+        );
+
+        // A stall outranks it, for the propagation-trap note's reason:
+        // the run STOPPED, so none of its counts - the recovery counts
+        // included - is evidence about anything.
+        let stalled = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                stalled: true,
+                missing_430_recovery: 900,
+                recovery_segments: 1000,
+                missing_segments: 135,
+                total_segments: 17130,
+                ..no_causes()
+            },
+        );
+        assert!(stalled.contains("connection pool stalled"), "{stalled}");
+        assert!(!stalled.contains("not the payload"), "{stalled}");
+        assert_eq!(
+            crate::failkind::fail_kind(&stalled),
+            crate::failkind::FailKind::Transport,
+            "{stalled}"
+        );
+
+        // And so does an all-transport run: its opening is the one
+        // classification that never reports a release to an indexer as
+        // dead, and a provider that failed the parity fetch too must not
+        // talk its way out of it.
+        let transport = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                transport_failed: 135,
+                transport_failed_recovery: 900,
+                recovery_segments: 1000,
+                missing_segments: 135,
+                total_segments: 17130,
+                ..no_causes()
+            },
+        );
+        assert!(
+            transport.starts_with("download failed on connection errors"),
+            "{transport}"
+        );
+        assert_eq!(
+            crate::failkind::fail_kind(&transport),
+            crate::failkind::FailKind::Transport,
+            "{transport}"
+        );
+
+        // A post that is wholly gone keeps its own opening too: there is
+        // no gap for parity to have closed.
+        let backbones = ["giganews".to_string()];
+        let gone = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                missing_430: 17130,
+                missing_segments: 17130,
+                total_segments: 17130,
+                missing_430_recovery: 900,
+                recovery_segments: 1000,
+                par2_slots: 127,
+                backbones: &backbones,
+                post_age_days: 644,
+                ..no_causes()
+            },
+        );
+        assert!(gone.starts_with("post is gone"), "{gone}");
+    }
+
+    /// TODO 282 item 4's seam, driven from this side.
+    ///
+    /// The incident's own shape reaches this module with EVERY
+    /// download-time recovery counter at zero - the volumes were
+    /// deferred, and the fetch that failed ran in the repair ladder,
+    /// which has no slot to charge. So the rung has a second input that
+    /// carries a verdict rather than a census, and it words itself
+    /// without figures it does not have.
+    #[test]
+    fn a_repair_side_verdict_reaches_the_message_without_a_census() {
+        let msg = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                recovery_unobtainable: true,
+                missing_segments: 135,
+                total_segments: 17130,
+                bytes_arrived: 13_414_000_000,
+                par2_slots: 127,
+                ..no_causes()
+            },
+        );
+        assert!(
+            msg.contains("the recovery data is what failed, not the payload"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("could not be fetched from any server that has the post"),
+            "with no census behind it, the clause must not invent one: {msg}"
+        );
+        assert!(
+            !msg.contains("0 of the post's"),
+            "and must never quote an empty census: {msg}"
+        );
+    }
+
+    /// A takedown on the parity survives the new opening.
+    ///
+    /// It rides inside the old trailing clause, which the rung above
+    /// suppresses to avoid saying the same figures twice - and it is the
+    /// one fact about a dead recovery set that changes what the user
+    /// should do next, because waiting cannot bring a removed volume
+    /// back. So it comes back as its own clause.
+    #[test]
+    fn a_parity_takedown_is_still_named_under_the_new_opening() {
+        let msg = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                missing_430_recovery: 900,
+                takedown_430_recovery: 900,
+                recovery_segments: 1000,
+                missing_segments: 135,
+                total_segments: 17130,
+                par2_slots: 127,
+                ..no_causes()
+            },
+        );
+        assert!(msg.contains("not the payload"), "{msg}");
+        assert!(
+            msg.contains("900 of those recovery segment(s) were reported as removed"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("waiting will not bring the parity back"),
+            "{msg}"
+        );
+    }
+
     /// A LossCauses with nothing known - each test overrides one field.
     fn no_causes() -> LossCauses<'static> {
         LossCauses {
@@ -1575,6 +2008,8 @@ mod main_tests {
             takedown_430_recovery: 0,
             retention_excluded_recovery: 0,
             transport_failed_recovery: 0,
+            recovery_segments: 0,
+            recovery_unobtainable: false,
             transport_sample: None,
             decode_sample: None,
             recovery_errs: 0,

@@ -1134,3 +1134,146 @@ fn refresh_tracks_new_changed_and_removed_packet_files() {
     assert_eq!(cat.covered_names().unwrap(), ["a.bin"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// TODO §282 item 15, the half that is NOT a defect: a partially
+/// fetched recovery volume DOES contribute the slices it holds.
+///
+/// The live shape (a real daemon against one provider, 24 Aug 2026
+/// 00:36Z) is a volume whose
+/// articles mostly never arrived, so the file on disk is full-length
+/// with holes in it. Two damage shapes come out of that, and the packet
+/// scan has to survive both without losing what is still good:
+///
+/// - a hole that swallows a whole packet, HEADER INCLUDED, so nothing
+///   at that offset looks like a packet at all;
+/// - a hole that starts inside the payload, leaving a structurally
+///   valid header over bytes that no longer hash to it.
+///
+/// Both were measured on the incident's leftover volumes: five partial
+/// volumes carrying 0.9% to 5.5% of their bytes held 6 torn RecvSlic
+/// packets between them and not one valid slice, while the surviving
+/// critical packets scattered through the same files scanned fine. The
+/// intact slices here are the ones AFTER both holes, which is the part
+/// worth pinning - the serial scan's `start + 1` resume is what finds
+/// them, and a scanner that gave up on the first bad MD5 would throw
+/// away recovery data that was already paid for.
+#[test]
+fn a_holey_recovery_volume_still_yields_its_intact_slices() {
+    let dir = tmpdir("holey-volume");
+    let a = payload(BS * 8, 61);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a)];
+    let mut damaged = a.clone();
+    damaged[BS * 2] ^= 0x5a;
+    damaged[BS * 5] ^= 0x5a;
+    std::fs::write(dir.join("a.bin"), &damaged).unwrap();
+    std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+
+    let mut vol = par2_volume(SET, BS, files, &[0, 1, 2, 3]);
+    let stride = 64 + 4 + BS;
+    assert_eq!(vol.len(), stride * 4, "four slices, one packet each");
+    // Exponent 1: the whole packet is a hole.
+    vol[stride..stride * 2].fill(0);
+    // Exponent 2: header survives, payload does not.
+    vol[stride * 2 + 64 + 4..stride * 3].fill(0);
+    std::fs::write(dir.join("set.vol0+4.par2"), &vol).unwrap();
+
+    match repair_dir(&dir).expect("the surviving exponents carry the repair") {
+        RepairStatus::Repaired(rep) => assert_eq!(
+            rep.blocks_rebuilt, 2,
+            "exponents 0 and 3 survived the holes and rebuilt both blocks"
+        ),
+        other => panic!("expected Repaired from the intact slices, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other half of TODO §282 item 15: when the surviving slices do
+/// not cover the damage, say WHICH condition that is.
+///
+/// The live line read `recovery set malformed: 0 recovery slice(s) for
+/// 163 missing block(s)` over a set that was not malformed at all - a
+/// 1024 MB recovery fetch had come back 68.9 MB with 1206 article
+/// failures, and at a 5.25 MB block size no slice landed whole. Reading
+/// that as a malformed set is what sends the next reader after the PAR2
+/// parser instead of after the provider. `have` is the count of slices
+/// that are both present AND MD5-valid, so this asserts the number the
+/// incident made worth asserting: a volume that is PARTLY there reports
+/// what it holds, never zero.
+#[test]
+fn a_torn_recovery_volume_reports_how_many_slices_are_usable() {
+    struct BufIo(std::sync::Mutex<Vec<u8>>);
+    impl VolumeIo for BufIo {
+        fn read(&self, _f: usize, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let d = self.0.lock().unwrap();
+            let off = off as usize;
+            buf.copy_from_slice(&d[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write(&self, _f: usize, off: u64, data: &[u8]) -> std::io::Result<()> {
+            let mut d = self.0.lock().unwrap();
+            let off = off as usize;
+            d[off..off + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    let a = payload(BS * 8, 62);
+    let files: &[(&str, &[u8])] = &[("a.bin", &a)];
+    let meta = meta_for("a.bin", &a, BS);
+    let stride = 64 + 4 + BS;
+
+    // (how many of the two slices are torn) -> the count reported.
+    for (torn, want_have) in [(1usize, 1usize), (2, 0)] {
+        let dir = tmpdir(&format!("torn-volume-{torn}"));
+        let mut damaged = a.clone();
+        let mut present = vec![true; 8];
+        for blk in [2usize, 5] {
+            present[blk] = false;
+            damaged[blk * BS] ^= 0x5a;
+        }
+        std::fs::write(dir.join("set.par2"), par2_index(SET, BS, files)).unwrap();
+        let mut vol = par2_volume(SET, BS, files, &[0, 1]);
+        // Tear from the BACK, so the `torn == 1` case leaves exponent 0
+        // usable and the selection is short rather than absent.
+        for s in (2 - torn)..2 {
+            vol[s * stride + 64 + 4..(s + 1) * stride].fill(0);
+        }
+        std::fs::write(dir.join("set.vol0+2.par2"), &vol).unwrap();
+
+        let mut cat = PacketCatalog::build(&dir).expect("catalog builds");
+        let io = BufIo(std::sync::Mutex::new(damaged));
+        let err = repair_mapped_catalog(&[(meta.clone(), present)], BS, &mut cat, &SET, &io, false)
+            .expect_err("two missing blocks cannot be covered");
+        assert!(
+            matches!(err, RepairError::RecoveryShort { have, need: 2 } if have == want_have),
+            "expected RecoveryShort {{ have: {want_have}, need: 2 }}, got {err:?}"
+        );
+        let said = err.to_string();
+        assert!(
+            said.contains("recovery data short") && said.contains("usable"),
+            "the verdict must name the shortfall: {said}"
+        );
+        assert!(
+            !said.contains("malformed"),
+            "a short recovery set is not a malformed one: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The in-memory sibling of the same arithmetic (`repair_mapped`,
+    // the corpus form the catalog path replaced) reports it identically.
+    let slices = global_slices(files, BS);
+    let recovery = vec![(0u32, generate_recovery(&slices, BS, 0))];
+    let mut present = vec![true; 8];
+    let mut damaged = a.clone();
+    for blk in [2usize, 5] {
+        present[blk] = false;
+        damaged[blk * BS] ^= 0x5a;
+    }
+    let io = BufIo(std::sync::Mutex::new(damaged));
+    match repair_mapped(&[(meta, present)], BS, &recovery, &io, false) {
+        Err(RepairError::RecoveryShort { have: 1, need: 2 }) => {}
+        other => panic!("expected RecoveryShort {{ have: 1, need: 2 }}, got {other:?}"),
+    }
+}

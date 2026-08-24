@@ -919,6 +919,18 @@ a pena ligar para uma pasta onde o seu navegador guarda, onde uma página de in�
 sessão ou de erro pode chegar com um nome <code>.nzb</code>. Desligado, o ficheiro fica
 onde o pôs e o motivo é mostrado por cima da fila. Um ficheiro que apenas parece
 incompleto fica no lugar em qualquer dos casos, porque pode ainda estar a chegar.</p>
+<p><b>Colocar na fila os arquivos NZB que um download produz</b> (desligado por
+padrão) cobre a postagem contêiner: um NZB pequeno cujo conteúdo é outro
+<code>.nzb</code>. Com isto ligado, um download que termina com um NZB entre seus
+arquivos acrescenta esse NZB à fila <i>em pausa</i>, para que você leia o tamanho e
+o inicie você mesmo. Esse início manual é também o que trava uma cadeia: nada avança
+sem você. Segue apenas um nível, um NZB dentro de um download que chegou ele próprio
+por esta via fica onde está; os candidatos acima de 32 MB são ignorados, são tomados
+no máximo 20 por download, e tudo o que não for um NZB legível fica no disco em vez
+de ser adivinhado. Uma coisa ele não consegue distinguir: um lançamento que
+simplesmente traz o seu próprio <code>.nzb</code> ao lado do conteúdo também é
+oferecido, portanto você pode ver uma linha em pausa para o download que acabou de
+terminar. Apague essa linha e nada mais acontece.</p>
 <p><b>Voltar a ver a pasta a cada</b> (uma definição avançada) é uma rede de segurança e
 nada mais, por isso não é o botão que torna as recolhas rápidas. Um ficheiro largado
 nesta máquina é notado no momento em que aterra, porque o sistema o diz; este intervalo
@@ -1070,7 +1082,7 @@ a adição segue intocada e o log diz por quê.</p>
 (uma repetição automática recolocou na fila um download que falhou) e
 <code>job.delete_kept</code> (uma exclusão removeu o registro mas não conseguiu
 remover os arquivos dele), mais <code>watch.picked</code> (um .nzb foi retirado
-da pasta vigiada), <code>watchlist.upgraded</code> (uma melhoria da lista de
+da pasta vigiada), <code>nzb.refeed</code> (o próprio arquivo NZB de um download concluído foi acrescentado à fila, em pausa), <code>watchlist.upgraded</code> (uma melhoria da lista de
 acompanhamento chegou e a cópia substituída foi removida),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> e <code>quota.reached</code>. Cada um carrega

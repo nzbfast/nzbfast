@@ -903,6 +903,17 @@ webbläsare sparar i, dit en inloggningssida eller en felsida kan komma under et
 <code>.nzb</code>-namn. Av ligger filen kvar där du lade den och skälet visas ovanför
 kön i stället. En fil som bara ser ofullständig ut lämnas kvar i båda fallen, eftersom
 den kan vara på väg in ännu.</p>
+<p><b>Köa NZB-filer som en nedladdning ger</b> (av som standard) täcker
+behållarinlägget: en liten NZB vars innehåll är en annan <code>.nzb</code>. Med
+detta på lägger en nedladdning som slutar med en NZB bland sina filer den NZB:n i
+kön <i>pausad</i>, så att du kan läsa storleken och starta den själv. Den manuella
+starten är också det som stoppar en kedja: inget går vidare utan dig. Den följer
+bara en nivå, en NZB inuti en nedladdning som själv kom den vägen lämnas i fred;
+kandidater över 32 MB hoppas över, högst 20 per nedladdning tas, och allt som inte
+är en läsbar NZB blir kvar på disken i stället för att gissas. En sak kan den inte
+skilja på: en release som helt enkelt lägger sin egen <code>.nzb</code> bredvid
+innehållet erbjuds också, så du kan se en pausad rad för nedladdningen du just blev
+klar med. Ta bort den raden så händer inget mer.</p>
 <p><b>Titta i mappen igen var</b> (en avancerad inställning) är ett skyddsnät och inget
 mer, så det är inte ratten som gör upphämtningarna snabba. En fil som läggs på den här
 maskinen märks i samma stund som den landar, för systemet säger till; det här
@@ -1053,7 +1064,7 @@ utlåtande fortsätter tillägget orört och loggen säger varför.</p>
 (ett automatiskt nytt försök har köat om en misslyckad nedladdning) och
 <code>job.delete_kept</code> (en radering tog bort posten men kunde inte ta bort
 dess filer), plus <code>watch.picked</code> (en .nzb hämtades ur bevakningsmappen),
-<code>watchlist.upgraded</code> (en uppgradering från bevakningslistan landade och
+<code>nzb.refeed</code> (en färdig nedladdnings egen NZB-fil lades i kön, pausad), <code>watchlist.upgraded</code> (en uppgradering från bevakningslistan landade och
 den ersatta kopian togs bort),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> och <code>quota.reached</code>. Var och en bär

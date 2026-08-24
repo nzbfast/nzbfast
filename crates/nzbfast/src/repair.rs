@@ -715,6 +715,13 @@ pub(crate) async fn try_mapped_repair(
     }
 
     // Exact-fit recovery fetch - same knapsack + margin as the disk path.
+    // Article failures from that fetch, kept for the decline message
+    // below: a shortfall verdict on its own cannot say whether the
+    // recovery data is absent from the POST or merely absent from what
+    // the provider served us, and on the §282 incident that was the
+    // whole question (1206 of ~1290 articles lost, so not one 5.25 MB
+    // slice landed whole).
+    let mut fetch_failures = 0usize;
     let fetched_files: Vec<usize>;
     if needed > 0 {
         let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
@@ -755,6 +762,7 @@ pub(crate) async fn try_mapped_repair(
                 cancel,
             ))
             .await?;
+        fetch_failures = partial_failures;
         if partial_failures == 0 {
             fetched_out.extend_from_slice(&fetched_files);
         }
@@ -883,7 +891,15 @@ pub(crate) async fn try_mapped_repair(
             Ok(true)
         }
         Err(e) => {
-            warn!(target: "repair", "mapped repair declined ({e}) - falling back to volume materialization");
+            let lost = if fetch_failures > 0 {
+                format!("; the recovery fetch lost {fetch_failures} article(s)")
+            } else {
+                String::new()
+            };
+            warn!(
+                target: "repair",
+                "mapped repair declined ({e}{lost}) - falling back to volume materialization"
+            );
             Ok(false)
         }
     }

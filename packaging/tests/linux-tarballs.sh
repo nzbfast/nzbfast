@@ -124,9 +124,21 @@ export PATH
 # The upload script refuses anything without a current scan stamp, and
 # that check runs first, so stamp both fixtures or the owner gate is
 # never reached and the test passes without having tested anything.
+# SHOW THE SCANNER'S OWN WORDS ON FAILURE. This was `>/dev/null 2>&1`,
+# and that is why the gate has been unreadable: scan-release-assets.sh
+# has more than a dozen distinct `✗ CANNOT INSPECT` exits (missing
+# tool, unreadable gzip, nothing unpacked, no binary found) and every
+# one of them arrived here as the same eleven words. On the public
+# runner both fixtures are refused while both pass on a developer Mac
+# AND in a plain linux container, so the reason is something about that
+# environment - and the reason was being thrown away at exactly the
+# moment it was needed. A test that hides the diagnosis of its own
+# failure costs more than the failure does.
 for a in "$WORK/leak-linux-x64.tar.gz" "$WORK/ok-linux-x64.tar.gz"; do
-    bash packaging/scan-release-assets.sh "$a" >/dev/null 2>&1 \
-        || bad "the pattern scanner refused $(basename "$a") before the owner gate"
+    if ! out=$(bash packaging/scan-release-assets.sh "$a" 2>&1); then
+        bad "the pattern scanner refused $(basename "$a") before the owner gate"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+    fi
 done
 
 out=$(bash packaging/upload-release-assets.sh v0.0.0-test "$WORK/leak-linux-x64.tar.gz" 2>&1)

@@ -2634,6 +2634,8 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
     <input type="checkbox" id="s_watch_recursive" onchange="setCfg('watch_recursive',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.rejected">Move unusable files aside<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.rejected.hint">a file that is not a usable NZB is moved into a "rejected" folder inside the watch folder, with a small text file beside it saying what was wrong. Off: the file stays where you put it and the reason is shown above the queue. A file that merely looks incomplete is always left in place, because it may still be arriving</span></label>
     <input type="checkbox" id="s_watch_move_rejected" onchange="setCfg('watch_move_rejected',this.checked?1:0)"></div>
+  <div class="row"><label data-i18n="set.watchdir.refeed">Queue NZB files a download produces<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.refeed.hint">some posts are a "container": a small NZB whose payload is another .nzb file. With this on, a download that finishes with an NZB among its files adds that NZB to the queue paused, so you can check its size and start it yourself. It goes one level only, an NZB inside a download that itself arrived this way is left alone; candidate files over 32 MB are skipped, at most 20 per download are taken, and anything that is not a readable NZB is left on disk</span></label>
+    <input type="checkbox" id="s_refeed_nzb" onchange="setCfg('refeed_nzb',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.watchdir.script">Post-processing scripts<span class="hint" data-i18n="set.watchdir.script.hint">runs after every job. Both contracts are spoken, so a script written for either downloader works unchanged: SABnzbd's 8 arguments and SAB_* variables, and NZBGet's NZBPP_ / NZBOP_ / NZBPR_ variables with the 93/94/95 exit codes. Name several, separated by commas, to run them in that order - each one sees what the one before it did, and a failure part-way through does not cancel the rest. Empty = off</span></label>
     <div class="pathrow"><input class="txt" id="s_script" onchange="setCfg('script',this.value)"><button class="mini" onclick="browseDir('script','file')" data-i18n-title="btn.browsefile.title" title="Browse for a script file" data-i18n="btn.browse">Browse…</button><button class="mini" onclick="openDir('script')" data-i18n-title="set.watchdir.openscript.title" title="Open the folder containing this script" aria-label="Open the folder containing this script">📂</button></div></div>
   <div class="row" data-adv="1"><label data-i18n="set.watchdir.scripttimeout">Give the script at most<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.watchdir.scripttimeout.hint">a script still running after this is killed, and a line saying so goes in the log; the download itself is unaffected either way. Seconds; 0 = wait as long as it takes, which is what a long transcode wants. Default 3600. With no limit, one script that hangs holds a thread for as long as nzbfast runs, and every job that finishes after it holds another</span></label>
@@ -6311,6 +6313,30 @@ function healthTip(h){
   return t('queue.health.title','Checked before downloading - sampled articles {sampled}, present on at least one server {present}, servers that answered {answered}, post age in days {age}. A sample this small cannot prove a post is bad, so this is a hint and the download runs either way.',
     {sampled:h.sampled, present:h.present, answered:h.answered, age:h.age_days});
 }
+// TODO §282: the repair data gets its own verdict, never folded into the
+// one above. On 24 Aug 2026 two jobs failed with the payload 99.2% and
+// 99.8% intact because the PAR2 set was the half the provider would not
+// serve, and both badged green here - the sampler skipped the recovery
+// volumes outright, so it checked the healthy half and said so.
+//
+// The row shows the WORSE of the two, so a clean payload can no longer
+// carry a green dot over unusable repair data; the numbers stay
+// separate, because "the payload is short" and "the repair data is
+// short" call for completely different things.
+const HRANK={green:0,amber:1,red:2};
+function healthWorse(h){
+  const r=h&&h.recovery;
+  return (r&&r.bucket&&(HRANK[r.bucket]||0)>(HRANK[h.bucket]||0)) ? r : null;
+}
+function recLabel(b){
+  return b==='amber' ? t('queue.health.rec.amber','repair data may be missing')
+       : b==='red'   ? t('queue.health.rec.red','repair data is missing')
+       : '';
+}
+function recTip(r){
+  return t('queue.health.rec.title','The post\'s repair data was checked too - sampled articles {sampled}, present on at least one server {present}, servers that answered {answered}. A post can be almost complete and still not be repairable when this is the half that is missing. Advisory like the rest: the download runs either way.',
+    {sampled:r.sampled, present:r.present, answered:r.answered});
+}
 // The same verdict opened out in the queue drawer: the sentence, the
 // per-server split (which is the part that separates "nobody has this"
 // from "the cheap block account does not"), and the standing reminder
@@ -6320,25 +6346,28 @@ function healthDetail(h){
   const cls = h.bucket==='green' ? 'ok' : h.bucket==='red' ? 'bad' : 'warn';
   const per=(h.per_server||[]).map(x=>
     `<span>${esc(String(x.host).replace(/^(news|reader)\./,''))} <b>${x.have}</b>/${h.sampled}</span>`).join('');
+  const w=healthWorse(h);
   return `<div class="${cls}" style="font-size:12px;margin-top:7px">${t('drawer.health','Pre-flight check:')} ${esc(healthLabel(h.bucket))}<br>
     <span class="dim">${esc(healthTip(h))}</span>`+
     (per?`<div class="dsrv">${per}</div>`:'')+
+    (w?`<div class="${w.bucket==='red'?'bad':'warn'}" style="margin-top:6px">${esc(recLabel(w.bucket))}<br><span class="dim">${esc(recTip(w))}</span></div>`:'')+
     (h.sunk?`<div class="dim" style="margin-top:4px">${t('drawer.health.sunk','Waiting behind items of the same priority that checked out better. Raise its priority or drag it up to run it now.')}</div>`:'')+
     `<div class="dim" style="margin-top:4px">${t('drawer.health.hint','Advisory only. A post that was uploaded moments ago looks exactly like one that is gone, so nzbfast never blocks, pauses or fails a job because of this check. A clean result means the articles answered, not that their contents are intact: a small number of providers answer for removed articles with dummy data, which only the real download catches.')}</div>`+
     `</div>`;
 }
 function healthBadge(h){
   if(!h||!h.bucket) return '';
-  const cls = h.bucket==='green' ? 'ok' : h.bucket==='red' ? 'bad' : 'warn';
+  const w=healthWorse(h), b=w?w.bucket:h.bucket;
+  const cls = b==='green' ? 'ok' : b==='red' ? 'bad' : 'warn';
   // Green is a bare dot: the reassuring case is the overwhelmingly
   // common one, and a queue of twenty rows each saying "looks complete"
   // is noise the exceptional rows then have to shout over.
   // The bare green dot stays visually quiet, but carries its meaning
   // for screen readers - colour was the only signal.
-  const body = h.bucket==='green'
+  const body = b==='green'
     ? `●<span class="sr-only"> ${esc(healthLabel('green'))}</span>`
-    : '● '+healthLabel(h.bucket);
-  return ` <span class="${cls}" title="${escA(healthTip(h))}">· ${body}</span>`;
+    : '● '+(w?recLabel(b):healthLabel(b));
+  return ` <span class="${cls}" title="${escA(w?recTip(w):healthTip(h))}">· ${body}</span>`;
 }
 
 // §76 quality chip: what the file's own header says it is, read while it
@@ -9273,6 +9302,10 @@ function originLabel(o){
     watchlist:t('origin.watchlist','your watchlist'),
     spot:t('origin.spot','a Spotnet post'),
     indexer:t('origin.indexer','an indexer search'),
+    // TODO 280: the container post's child. No entry in ORIGIN_ICON, so
+    // it gets the drawer line and no row glyph - the fact is worth a
+    // sentence and does not need a mark of its own.
+    refeed:t('origin.refeed','a download that contained it'),
     'failure-link':t('origin.failurelink','automatic replacement for a failed download')}[o]||'';
 }
 // The row's glance-size version of the same fact: one glyph, with the
@@ -12482,6 +12515,13 @@ function handleLifeEvents(r){
       // second must both toast. A sequence number is that key, and the
       // daemon owns it.
       toast(t('toast.watchpicked','Picked up {name} from {dir} - added to the queue.',{name:e.name,dir:e.folder}));
+    } else if(e.kind==='nzb.refeed'){
+      // TODO 280: a queue row nobody added. The download that just
+      // finished turned out to be a container post, and its inner .nzb
+      // is now sitting in the queue PAUSED - so the sentence has to say
+      // both where it came from and that it is waiting on the user,
+      // or a paused row appearing out of nowhere reads as a bug.
+      toast(t('toast.refeed','{name} came out of {parent} - it is in the queue, paused, waiting for you to start it.',{name:e.name,parent:e.parent}));
     } else if(e.kind==='giveup.tripped'){
       // §96.3 / §129 1b(b): the breaker deciding to stop chasing
       // something is the one moment it takes an action of its own (it
@@ -14149,6 +14189,8 @@ async function loadSettings(){
   if(document.activeElement!==pcl) pcl.checked = c.par_cleanup!==false;
   const wkn=document.getElementById('s_watch_keep');
   if(wkn && document.activeElement!==wkn) wkn.checked = c.watch_keep_nzb===true;
+  const rfd=document.getElementById('s_refeed_nzb');
+  if(rfd && document.activeElement!==rfd) rfd.checked = c.refeed_nzb===true;
   const wrc=document.getElementById('s_watch_recursive');
   if(wrc && document.activeElement!==wrc) wrc.checked = c.watch_recursive===true;
   const wmr=document.getElementById('s_watch_move_rejected');

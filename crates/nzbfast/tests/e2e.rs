@@ -14,6 +14,7 @@ mod e2e_chaserepair;
 mod e2e_chaseresume;
 mod e2e_chip6;
 mod e2e_drop;
+mod e2e_faults;
 mod e2e_holdstrace;
 mod e2e_repair;
 mod e2e_resume;

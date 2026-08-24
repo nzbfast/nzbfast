@@ -1022,12 +1022,18 @@ fn mapped_driver_catches_a_lying_write_path() {
 fn mapped_driver_rejects_short_recovery_and_bad_present_len() {
     let (files, bs, recovery, pristine) = mapped_fixture(&[(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)]);
     let io = MemIo::new(pristine.clone(), None);
-    // 5 missing, only 4 recovery slices.
+    // 5 missing, only 4 recovery slices. NOT `Malformed` (§282 item
+    // 15): a set that simply does not carry enough recovery is the
+    // everyday shortfall, and calling it malformed sent readers after
+    // a corrupt PAR2 set when the set was fine.
     assert!(matches!(
         repair_mapped(&files, bs, &recovery, &io, false),
-        Err(RepairError::Malformed(_))
+        Err(RepairError::RecoveryShort { have: 4, need: 5 })
     ));
-    // Present-vector length mismatch.
+    // Present-vector length mismatch, which IS malformed input - the
+    // caller's ledger contradicts the FileDesc, and no amount of
+    // recovery data would make it coherent. The pair is the point:
+    // these two are different failures and now say so.
     let mut bad = files.clone();
     bad[0].1.push(true);
     assert!(matches!(

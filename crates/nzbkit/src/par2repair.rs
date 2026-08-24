@@ -86,6 +86,23 @@ pub enum RepairError {
     NoMainPacket,
     #[error("recovery set malformed: {0}")]
     Malformed(String),
+    /// Not enough recovery slices could be VALIDATED to cover the
+    /// missing blocks. Deliberately distinct from [`Self::Malformed`]:
+    /// this is the everyday shortfall, and reporting it as a malformed
+    /// set sends the reader after a corrupt PAR2 set when the set is
+    /// usually fine and the RECOVERY DATA is simply not all there.
+    ///
+    /// Live on a real daemon 24 Aug 2026 00:36Z (TODO §282 item 15): a
+    /// 1024 MB recovery fetch returned 68.9 MB with 1206 article
+    /// failures, and the decline read "recovery set malformed: 0
+    /// recovery slice(s) for 163 missing block(s)" over a set whose
+    /// only problem was that the provider would not serve it. `have`
+    /// counts slices that are BOTH present and MD5-valid, so a
+    /// partially fetched volume's intact slices are already in it - a
+    /// torn one contributes nothing because a recovery slice is
+    /// atomic, not because it was skipped.
+    #[error("recovery data short: {have} usable recovery slice(s) for {need} missing block(s)")]
+    RecoveryShort { have: usize, need: usize },
     #[error("recovery matrix is singular for this slice combination")]
     SingularMatrix,
     #[error("repaired file failed MD5 verification: {0}")]
@@ -1590,11 +1607,10 @@ fn repair_mapped_inner(
         }
     }
     if by_exp.len() < missing.len() {
-        return Err(RepairError::Malformed(format!(
-            "{} recovery slice(s) for {} missing block(s)",
-            by_exp.len(),
-            missing.len()
-        )));
+        return Err(RepairError::RecoveryShort {
+            have: by_exp.len(),
+            need: missing.len(),
+        });
     }
     let mut exps: Vec<u32> = by_exp.keys().copied().collect();
     exps.sort_unstable();

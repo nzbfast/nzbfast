@@ -244,7 +244,7 @@ jobs:
         working-directory: crates/nzbkit/fuzz
         run: |
           set -e
-          # All sixteen targets (sevenz_name_probe runs separately below
+          # All seventeen targets (sevenz_name_probe runs separately below
           # with its own rss limit). Targets that land after this list was
           # last touched belong here too - absence is an accident, not an
           # exclusion: zip_stream is the chase's call order over an
@@ -255,11 +255,13 @@ jobs:
           # than a parser (TODO 133.3 - H7's input parsed fine), and
           # rar_name_probe is the layer above rar_map: the blocker
           # mapping whose EncryptedHeader answer writes a TERMINAL
-          # classification (TODO 131 rung 5).
+          # classification (TODO 131 rung 5), and audio_tags reads a
+          # NAME out of a poster's own metadata and puts it on a file
+          # (issue #55).
           for t in yenc_decode nzb_parse nzblnk_parse par2_parse rar_extract \
                    rar_map rar_recovery_scan mkv_parse zip_parse zip_stream \
                    mediaprobe pesto_msgid par2_verify_diff url_authority_diff \
-                   rar_name_probe; do
+                   rar_name_probe audio_tags; do
             echo "::group::fuzz $t"
             cargo +nightly fuzz run "$t" -- \
               -max_total_time=60 -rss_limit_mb=4096 -timeout=10

@@ -879,6 +879,10 @@ pub(super) const AUTOMATION: &[Setting] = &[
     rw("watch_keep_nzb", |c| {
         json!(c.d.watch_keep_nzb.load(Ordering::Relaxed))
     }),
+    // TODO 280: the container post.
+    rw("refeed_nzb", |c| {
+        json!(c.d.refeed_nzb.load(Ordering::Relaxed))
+    }),
     // §129 3e. Only the switch: the judge's thresholds live in
     // settings.json under `slow_storage`.
     rw("slow_storage_pause", |c| json!(c.d.slow_storage.enabled())),

@@ -75,6 +75,11 @@ mod stats_cache_tests;
 #[path = "daemon_tests/owned_cache_tests.rs"]
 mod owned_cache_tests;
 
+// TODO 282 section B: the ranked spares a grab holds against its own
+// failure, out for the ceiling and carrying the same #[path] requirement.
+#[path = "daemon_tests/spare_tests.rs"]
+mod spare_tests;
+
 fn with_daemon(name: &str, f: impl FnOnce(&Arc<Daemon>)) {
     let dir = std::env::temp_dir().join(format!("nzbfast-dmn-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

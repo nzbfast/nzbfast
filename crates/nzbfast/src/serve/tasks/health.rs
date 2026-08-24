@@ -145,8 +145,8 @@ pub(in crate::serve) fn spawn_health_prober(daemon: &Arc<Daemon>, config: &std::
             // Parsing an NZB is a file read plus an XML pass, and a big
             // one is tens of MB - off the runtime's workers.
             let k = crate::health::sample_size(total_bytes);
-            let Ok(Some((ids, age_days))) =
-                tokio::task::spawn_blocking(move || sample_ids(&nzb_path, k)).await
+            let Ok(Some(sample)) =
+                tokio::task::spawn_blocking(move || sample_job(&nzb_path, k)).await
             else {
                 // An unreadable or article-less NZB is not an error
                 // worth logging on every tick: the job simply gets no
@@ -154,7 +154,20 @@ pub(in crate::serve) fn spawn_health_prober(daemon: &Arc<Daemon>, config: &std::
                 unsampleable.insert(nzo_id.clone());
                 continue;
             };
+            // §282 item 2: one pipelined burst per server carrying BOTH
+            // samples, split back apart afterwards. A second burst would
+            // be a second connection to every host per probe, for
+            // evidence that costs the same handful of STATs riding along
+            // behind the first.
+            let split = sample.ids.len();
+            let rec_ids = sample
+                .recovery
+                .as_ref()
+                .map(|r| r.ids.clone())
+                .unwrap_or_default();
+            let all: Vec<String> = sample.ids.iter().chain(rec_ids.iter()).cloned().collect();
             let mut answers: Vec<crate::health::ServerAnswer> = Vec::new();
+            let mut rec_answers: Vec<crate::health::ServerAnswer> = Vec::new();
             for s in &servers {
                 // Re-checked per server, not just once at the top: a job
                 // can start between two hosts, and when it does the rest
@@ -162,9 +175,48 @@ pub(in crate::serve) fn spawn_health_prober(daemon: &Arc<Daemon>, config: &std::
                 if !download_idle(&d) {
                     break;
                 }
-                answers.push(probe_server(s, &ids, &d).await);
+                let mut a = probe_server(s, &all, &d).await;
+                let tail = a.cells.split_off(split.min(a.cells.len()));
+                rec_answers.push(crate::health::ServerAnswer {
+                    host: a.host.clone(),
+                    cells: tail,
+                });
+                answers.push(a);
             }
-            let verdict = crate::health::score(&answers, age_days, now, probes + 1);
+            let verdict = crate::health::score(&answers, sample.age_days, now, probes + 1);
+            // §282 item 1: and the recovery set's own verdict, scored
+            // apart from the payload's and never folded into it.
+            //
+            // The BODY probe runs only on servers that ANSWERED and that
+            // may fund a measurement, and both halves matter. Answered,
+            // because a host we never reached is not evidence about the
+            // set - the rule `score` already applies to the STAT sweep,
+            // and the reason `health.rs` unions for itself rather than
+            // reusing `preflight::SweepResult::union_missing`. Fundable,
+            // because this is nzbfast's own curiosity running against
+            // every queued job, which is exactly what
+            // `may_spend_on_measurement` is the install-wide answer to;
+            // `check` falls back to a metered account because a person
+            // asked it to, and a background prober has nobody asking.
+            // With none qualifying the fetch is skipped, the verdict
+            // rests on the STAT sample, and the reason says so.
+            let recovery = match sample.recovery.as_ref() {
+                Some(rec) if !rec.seed.is_empty() => {
+                    let payers: Vec<nzbkit::config::ServerConfig> = servers
+                        .iter()
+                        .zip(rec_answers.iter())
+                        .filter(|(s, a)| a.answered() && s.may_spend_on_measurement())
+                        .map(|(s, _)| s.clone())
+                        .collect();
+                    let fetched = if payers.is_empty() || !download_idle(&d) {
+                        None
+                    } else {
+                        probe_recovery(&payers, &rec.seed, &d).await
+                    };
+                    crate::health::score_recovery(&rec_answers, rec.age_days, rec.volumes, fetched)
+                }
+                _ => None,
+            };
             {
                 let mut g = job.lock_ok();
                 // Never overwrite a real verdict with nothing: a probe
@@ -181,6 +233,14 @@ pub(in crate::serve) fn spawn_health_prober(daemon: &Arc<Daemon>, config: &std::
                     // flag exists to prevent.
                     v.waived = g.health.as_ref().is_some_and(|h| h.waived);
                     info!(target: "health", "{nzo_id} {}: {}", v.bucket.as_str(), v.reason);
+                    // Logged on its own line, and only when it has
+                    // something to say: a green recovery set is the
+                    // overwhelmingly common case and a second line per
+                    // job is how a log stops being read.
+                    if let Some(r) = recovery.as_ref().filter(|r| r.doubtful()) {
+                        info!(target: "health", "{nzo_id} recovery {}: {}", r.bucket.as_str(), r.reason);
+                    }
+                    v.recovery = recovery;
                     g.health = Some(v);
                     blind_until.remove(&nzo_id);
                 } else {
@@ -225,26 +285,66 @@ pub(super) fn busy_tail(d: &Arc<Daemon>) -> bool {
     })
 }
 
-/// The sampled message-ids for one job, and the age in days of the
-/// youngest article in the post.
+/// What one job's NZB offers the prober: the payload sample, the post's
+/// age, and - since TODO §282 - the recovery set's own sample beside
+/// them rather than folded into them.
+pub(super) struct JobSample {
+    /// Payload message-ids, bracketed.
+    pub ids: Vec<String>,
+    /// Age in days of the youngest PAYLOAD article.
+    pub age_days: u32,
+    /// `None` on a post that declares no PAR2 at all.
+    pub recovery: Option<RecoverySample>,
+}
+
+/// TODO §282 items 1 and 2: the recovery half of one job's NZB.
+pub(super) struct RecoverySample {
+    /// Recovery-volume message-ids, bracketed - the ids the payload
+    /// sample deliberately skips.
+    pub ids: Vec<String>,
+    /// Age in days of the youngest article in the recovery set. Its
+    /// own, not the post's: a fill can re-post par2 long after the
+    /// payload, and it is this figure the propagation guard has to run
+    /// on for this verdict.
+    pub age_days: u32,
+    /// PAR2 files the NZB declares, index and volumes together.
+    pub volumes: u32,
+    /// Head and tail of the cheapest PAR2 file, for the BODY probe -
+    /// the same two draws `check`'s `block_size_probe` makes, off the
+    /// same [`nzbkit::nzb::Nzb::par2_seed_file`] pick.
+    pub seed: Vec<String>,
+}
+
+/// The sampled message-ids for one job.
 ///
 /// Stratified over the whole post - first, last and evenly spread -
 /// using the same [`nzbkit::preflight::stratified_sample`] the `check`
-/// command's sweep uses, over the same file set: PAR2 recovery volumes
-/// are excluded because nothing fetches them unless a repair needs them,
-/// so their absence says nothing about whether the job can complete.
+/// command's sweep uses. PAR2 recovery volumes are excluded from the
+/// PAYLOAD sample and always were, because a recovery volume's absence
+/// is not payload absence; §282 item 2 keeps that skip exactly as it is
+/// and samples the recovery set SEPARATELY, into
+/// [`JobSample::recovery`], so the two verdicts never share a bucket.
 ///
 /// The age is the MINIMUM over the files, matching what the failure
 /// diagnosis computes (`post_age_days`, in `get/census.rs`) - a fill or
 /// a repost tops an old NZB up with fresh articles, and it is the newest
 /// posting that decides whether propagation is still a live explanation.
-pub(super) fn sample_ids(nzb_path: &std::path::Path, k: usize) -> Option<(Vec<String>, u32)> {
+pub(super) fn sample_job(nzb_path: &std::path::Path, k: usize) -> Option<JobSample> {
     let bytes = std::fs::read(nzb_path).ok()?;
     let nzb = nzbkit::nzb::Nzb::parse(&bytes).ok()?;
     let mut ids: Vec<String> = Vec::new();
     let mut age = u32::MAX;
+    let mut rec_ids: Vec<String> = Vec::new();
+    let mut rec_age = u32::MAX;
+    let mut volumes = 0u32;
     for f in &nzb.files {
-        if f.kind() == nzbkit::nzb::FileKind::Par2Volume {
+        let kind = f.kind();
+        if kind != nzbkit::nzb::FileKind::Data {
+            volumes += 1;
+        }
+        if kind == nzbkit::nzb::FileKind::Par2Volume {
+            rec_age = rec_age.min(crate::nzb_age_days(f.date));
+            rec_ids.extend(f.segments.iter().map(|s| format!("<{}>", s.message_id)));
             continue;
         }
         age = age.min(crate::nzb_age_days(f.date));
@@ -253,11 +353,73 @@ pub(super) fn sample_ids(nzb_path: &std::path::Path, k: usize) -> Option<(Vec<St
     if ids.is_empty() {
         return None;
     }
-    let picked = nzbkit::preflight::stratified_sample(ids.len(), k)
-        .into_iter()
-        .map(|i| ids[i].clone())
-        .collect();
-    Some((picked, if age == u32::MAX { 0 } else { age }))
+    let pick = |from: &[String], n: usize| -> Vec<String> {
+        nzbkit::preflight::stratified_sample(from.len(), n)
+            .into_iter()
+            .map(|i| from[i].clone())
+            .collect()
+    };
+    // The seed is the `.par2` index where there is one and the smallest
+    // volume where there is not - the download path's own pick for
+    // bootstrapping a set, so the probe draws the cheapest article that
+    // can carry a Main packet rather than whatever the NZB listed
+    // first. Head then tail: an index carries its Main packet in the
+    // first bytes, a volume interleaves criticals between slices and
+    // puts a copy near the end. Two articles, ~1.5 MB at worst.
+    let seed = nzb
+        .par2_seed_file()
+        .map(|fi| {
+            let segs = &nzb.files[fi].segments;
+            let mut out = vec![format!("<{}>", segs[0].message_id)];
+            if segs.len() > 1 {
+                out.push(format!("<{}>", segs[segs.len() - 1].message_id));
+            }
+            out
+        })
+        .unwrap_or_default();
+    let recovery = (!rec_ids.is_empty()).then(|| RecoverySample {
+        ids: pick(&rec_ids, k),
+        age_days: if rec_age == u32::MAX { 0 } else { rec_age },
+        volumes,
+        seed,
+    });
+    Some(JobSample {
+        ids: pick(&ids, k),
+        age_days: if age == u32::MAX { 0 } else { age },
+        recovery,
+    })
+}
+
+/// TODO §282 item 1: pull a couple of articles of the recovery set and
+/// see whether they arrive and parse as a PAR2 set.
+///
+/// The half a STAT sweep cannot reach. In the 24 Aug incident the
+/// provider ANSWERED for the recovery volumes and then delivered 68.9 MB
+/// of a 1024 MB ask; only asking for the bytes finds that out. The
+/// function itself is `nzbkit::preflight::probe_recovery_set`, written
+/// and tested for `check` long before this and called from nowhere in
+/// the daemon until now.
+///
+/// `None` means the probe was abandoned, not that it failed: a download
+/// starting under us takes the account's connection slots back, exactly
+/// as `probe_server` yields them, and an abandoned probe must not be
+/// recorded as an answer.
+///
+/// Callers pass only servers that ANSWERED the STAT sweep and that
+/// `may_spend_on_measurement()` - see the call site for why both.
+async fn probe_recovery(
+    servers: &[nzbkit::config::ServerConfig],
+    ids: &[String],
+    d: &Arc<Daemon>,
+) -> Option<bool> {
+    tokio::select! {
+        got = nzbkit::preflight::probe_recovery_set(servers, ids) => Some(got.is_some()),
+        () = async {
+            while download_idle(d) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        } => None,
+    }
 }
 
 /// STAT every sampled id on one server over a single pipelined burst.

@@ -977,6 +977,19 @@ Ordner, in den dein Browser speichert, wo eine Login- oder Fehlerseite unter ein
 hingelegt hast, und der Grund steht stattdessen über der Warteschlange. Eine Datei, die
 nur unvollständig aussieht, bleibt in beiden Fällen liegen, denn sie kommt vielleicht
 noch an.</p>
+<p><b>NZB-Dateien einreihen, die ein Download hervorbringt</b> (standardmäßig aus)
+deckt das Container-Posting ab: eine kleine NZB, deren Inhalt eine weitere
+<code>.nzb</code> ist. Ist es eingeschaltet, reiht ein Download, der mit einer NZB
+unter seinen Dateien endet, diese NZB <i>pausiert</i> in die Warteschlange ein,
+damit Sie ihre Größe lesen und sie selbst starten. Dieser Start von Hand ist
+zugleich das, was eine Kette aufhält: ohne Sie geht nichts weiter. Es folgt nur eine
+Ebene, eine NZB in einem Download, der selbst so gekommen ist, bleibt liegen;
+Kandidaten über 32 MB werden übersprungen, höchstens 20 je Download werden genommen,
+und alles, was keine lesbare NZB ist, bleibt auf der Festplatte, statt geraten zu
+werden. Eines kann sie nicht unterscheiden: eine Veröffentlichung, die ihre eigene
+<code>.nzb</code> einfach neben den Inhalt legt, wird ebenfalls angeboten, sodass
+Sie eine pausierte Zeile für den gerade fertigen Download sehen können. Löschen Sie
+diese Zeile, und mehr passiert nicht.</p>
 <p><b>Ordner erneut prüfen alle</b> (eine erweiterte Einstellung) ist nur eine
 Rückfallebene und damit nicht der Regler, der Übernahmen schnell macht. Eine auf diesem
 Rechner abgelegte Datei wird in dem Moment bemerkt, in dem sie landet, weil das System
@@ -1137,7 +1150,7 @@ unangetastet weiter, und das Log sagt warum.</p>
 eingereiht) und <code>job.delete_kept</code> (ein Löschen hat den Eintrag
 entfernt, konnte aber dessen Dateien nicht entfernen), dazu
 <code>watch.picked</code> (eine .nzb wurde aus dem Überwachungsordner geholt),
-<code>watchlist.upgraded</code> (ein Watchlist-Upgrade ist angekommen und die
+<code>nzb.refeed</code> (die eigene NZB-Datei eines fertigen Downloads wurde pausiert in die Warteschlange gelegt), <code>watchlist.upgraded</code> (ein Watchlist-Upgrade ist angekommen und die
 ersetzte Kopie wurde entfernt),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> und <code>quota.reached</code>. Jedes trägt

@@ -940,6 +940,19 @@ browser opslaat, waar een inlogpagina of een foutpagina onder een <code>.nzb</co
 kan binnenkomen. Uit blijft het bestand liggen waar je het neerzette en verschijnt de
 reden boven de wachtrij. Een bestand dat er alleen onvolledig uitziet blijft in beide
 gevallen liggen, want het is misschien nog onderweg.</p>
+<p><b>NZB-bestanden die een download oplevert in de wachtrij zetten</b> (standaard
+uit) dekt de containerpost: een kleine NZB waarvan de inhoud een ander
+<code>.nzb</code>-bestand is. Staat dit aan, dan zet een download die eindigt met
+een NZB tussen zijn bestanden die NZB <i>gepauzeerd</i> in de wachtrij, zodat u de
+grootte leest en hem zelf start. Dat handmatig starten is ook wat een keten stopt:
+zonder u gaat er niets verder. Het volgt maar één niveau, een NZB in een download
+die zelf zo binnenkwam blijft liggen; kandidaten boven 32 MB worden overgeslagen, er
+worden er hooguit 20 per download genomen, en alles wat geen leesbare NZB is blijft
+op schijf staan in plaats van dat ernaar wordt geraden. Eén ding kan het niet
+onderscheiden: een release die simpelweg zijn eigen <code>.nzb</code> naast de
+inhoud meelevert, wordt ook aangeboden, dus u kunt een gepauzeerde regel zien voor
+de download die u net hebt afgerond. Verwijder die regel en er gebeurt verder
+niets.</p>
 <p><b>Map opnieuw nakijken elke</b> (een geavanceerde instelling) is een vangnet en
 niets meer, dus het is niet de knop die het oppikken snel maakt. Een bestand dat je op
 deze machine neerzet wordt opgemerkt op het moment dat het landt, want het systeem meldt
@@ -1095,7 +1108,7 @@ door en zegt het log waarom.</p>
 (een automatische nieuwe poging heeft een mislukte download opnieuw in de wachtrij
 gezet) en <code>job.delete_kept</code> (een verwijdering haalde het record weg maar
 kon de bestanden niet weghalen), plus <code>watch.picked</code> (een .nzb is uit de
-volgmap gehaald), <code>watchlist.upgraded</code> (een volglijst-upgrade is geland
+volgmap gehaald), <code>nzb.refeed</code> (het eigen NZB-bestand van een voltooide download is gepauzeerd in de wachtrij gezet), <code>watchlist.upgraded</code> (een volglijst-upgrade is geland
 en de vervangen kopie is verwijderd),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> en <code>quota.reached</code>. Elk draagt

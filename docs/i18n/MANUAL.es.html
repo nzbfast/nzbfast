@@ -926,6 +926,18 @@ inicio de sesión o de error puede llegar con un nombre <code>.nzb</code>. Desac
 el archivo se queda donde lo pusiste y el motivo se muestra encima de la cola. Un
 archivo que solo parece incompleto se deja en su sitio en cualquiera de los dos casos,
 porque puede que aún esté llegando.</p>
+<p><b>Poner en cola los archivos NZB que produce una descarga</b> (desactivado por
+defecto) cubre la publicación contenedor: un NZB pequeño cuyo contenido es otro
+<code>.nzb</code>. Con esto activado, una descarga que termina con un NZB entre sus
+archivos añade ese NZB a la cola <i>en pausa</i>, para que lea su tamaño y la inicie
+usted mismo. Ese inicio a mano es también lo que detiene una cadena: nada va más
+lejos sin usted. Baja un solo nivel, un NZB dentro de una descarga que llegó ella
+misma por esta vía se deja en paz; los candidatos de más de 32 MB se omiten, se
+toman como mucho 20 por descarga, y todo lo que no sea un NZB legible se queda en el
+disco en vez de adivinarse. Hay algo que no puede distinguir: una publicación que
+simplemente incluye su propio <code>.nzb</code> junto al contenido también se
+ofrece, así que puede ver una fila en pausa para la descarga que acaba de terminar.
+Borre esa fila y no ocurre nada más.</p>
 <p><b>Volver a mirar la carpeta cada</b> (un ajuste avanzado) es una red de seguridad y
 nada más, así que no es el mando que hace rápidas las recogidas. Un archivo dejado en
 esta máquina se detecta en cuanto aterriza, porque lo dice el sistema; este intervalo
@@ -1078,7 +1090,7 @@ el añadido sigue adelante intacto y el registro dice por qué.</p>
 (un reintento automático ha vuelto a encolar una descarga fallida) y
 <code>job.delete_kept</code> (un borrado quitó el registro pero no pudo quitar
 sus archivos), más <code>watch.picked</code> (se recogió un .nzb de la carpeta
-vigilada), <code>watchlist.upgraded</code> (una mejora de la lista de
+vigilada), <code>nzb.refeed</code> (el propio archivo NZB de una descarga terminada se añadió a la cola en pausa), <code>watchlist.upgraded</code> (una mejora de la lista de
 seguimiento se completó y se eliminó la copia sustituida),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> y <code>quota.reached</code>. Cada uno lleva

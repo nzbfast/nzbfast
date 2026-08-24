@@ -283,6 +283,12 @@ pub(super) fn apply_setting_tail(
             d.par_cleanup.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
+        "refeed_nzb" => {
+            // Live: read once per completed job, so nothing to re-arm.
+            let on = flag();
+            d.refeed_nzb.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
         "watch_keep_nzb" => {
             // Live: the watch loop reads it per pickup.
             let on = flag();

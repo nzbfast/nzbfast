@@ -27,6 +27,13 @@ url = "2"
 debug = 1
 
 [[bin]]
+name = "audio_tags"
+path = "fuzz_targets/audio_tags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "yenc_decode"
 path = "fuzz_targets/yenc_decode.rs"
 test = false

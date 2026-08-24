@@ -15,6 +15,7 @@
 //! Cipher internals (`rarcrypt`, `zipcrypt`), container probing (`mp4`) and
 //! the PAR2 NTT engine (`par2ntt`) are crate-private implementation detail.
 
+pub mod audiotag;
 pub mod benchserve;
 pub mod categories;
 pub mod config;
@@ -24,6 +25,12 @@ pub mod config;
 mod corr_calibration;
 pub mod disk;
 pub mod extract;
+/// Role-aware fault selection for the chaos mock (TODO 283): resolve a
+/// FILE ROLE - payload, recovery index, volume N - to the ids the
+/// `Chaos` knobs apply to. Same status as `mock`: public for the rigs
+/// and the test suites, not a real API.
+#[doc(hidden)]
+pub mod faultplan;
 /// GF(2^16) primitives for the PAR2 engines. Not part of the real API:
 /// public only so nzbkit's own examples (par2_fold_bench, par2_ntt_bench)
 /// can build against it.

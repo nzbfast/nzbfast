@@ -927,6 +927,17 @@ saves into, where a login page or an error page can arrive under an <code>.nzb</
 name. With it off, the file stays where you put it and the reason is shown above the
 queue instead. A file that merely looks incomplete is left in place either way,
 because it may still be arriving.</p>
+<p><b>Queue NZB files a download produces</b> (off by default) covers the container
+post: a small NZB whose payload is another <code>.nzb</code>. With it on, a download
+that finishes with an NZB among its files adds that NZB to the queue <i>paused</i>,
+so you can read its size and start it yourself. That manual start is also what stops
+a chain: nothing goes further without you. It follows one level only, an NZB inside
+a download that itself arrived this way is left alone; candidates over 32 MB are
+skipped, at most 20 per download are taken, and anything that is not a readable NZB
+is left on disk rather than guessed at. One thing it cannot tell apart: a release
+that simply ships its own <code>.nzb</code> beside the payload is offered too, so
+you may see a paused row for the download you just finished. Delete that row and
+nothing else happens.</p>
 <p><b>Re-check the folder every</b> (an advanced setting) is a backstop and nothing
 more, so it is not the knob that makes pickups fast. A file dropped on this machine is
 noticed the moment it lands, because the system says so; this interval covers only the
@@ -1083,7 +1094,7 @@ the add proceeds untouched and the log says why.</p>
 (an automatic retry has re-queued a failed download) and
 <code>job.delete_kept</code> (a delete removed the record but could not remove
 its files), plus <code>watch.picked</code> (a .nzb was taken out of the watch
-folder), <code>watchlist.upgraded</code> (a watchlist upgrade landed and the
+folder), <code>nzb.refeed</code> (a finished download's own NZB file was added to the queue, paused), <code>watchlist.upgraded</code> (a watchlist upgrade landed and the
 superseded copy was removed), <code>queue.idle</code>,
 <code>giveup.tripped</code>, <code>disk.low</code>, <code>storage.slow</code>
 and <code>quota.reached</code>. Each carries

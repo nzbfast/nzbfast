@@ -905,6 +905,18 @@ mappe, din browser gemmer i, hvor en loginside eller en fejlside kan lande under
 <code>.nzb</code>-navn. Slået fra bliver filen liggende, hvor du lagde den, og årsagen
 vises i stedet over køen. En fil, der blot ser ufuldstændig ud, bliver liggende i begge
 tilfælde, for den er måske stadig på vej.</p>
+<p><b>Sæt NZB-filer, som en download producerer, i kø</b> (slået fra som standard)
+dækker container-indlægget: en lille NZB, hvis indhold er en anden
+<code>.nzb</code>. Med det slået til tilføjer en download, der slutter med en NZB
+blandt sine filer, den NZB til køen <i>på pause</i>, så du kan se dens størrelse og
+selv starte den. Den manuelle start er også det, der stopper en kæde: intet går
+videre uden dig. Den følger kun ét niveau, en NZB inde i en download, der selv kom
+denne vej, får lov at ligge; kandidater over 32 MB springes over, højst 20 pr.
+download tages, og alt, der ikke er en læsbar NZB, bliver liggende på disken i
+stedet for at blive gættet på. Én ting kan den ikke skelne: en udgivelse, der ganske
+enkelt lægger sin egen <code>.nzb</code> ved siden af indholdet, bliver også
+tilbudt, så du kan se en pauset række for den download, du lige har afsluttet. Slet
+den række, og der sker ikke mere.</p>
 <p><b>Se mappen efter igen hver</b> (en avanceret indstilling) er et sikkerhedsnet og
 ikke andet, så det er ikke den knap, der gør afhentningerne hurtige. En fil, der lægges
 på denne maskine, bliver bemærket i det øjeblik den lander, fordi systemet siger til;
@@ -1056,7 +1068,7 @@ fortsætter tilføjelsen urørt, og loggen siger hvorfor.</p>
 (et automatisk nyt forsøg har sat et mislykket download i kø igen) og
 <code>job.delete_kept</code> (en sletning fjernede posten, men kunne ikke fjerne
 dens filer), plus <code>watch.picked</code> (en .nzb blev taget ud af
-overvågningsmappen), <code>watchlist.upgraded</code> (en opgradering fra
+overvågningsmappen), <code>nzb.refeed</code> (en færdig downloads egen NZB-fil blev lagt i køen på pause), <code>watchlist.upgraded</code> (en opgradering fra
 overvågningslisten landede, og den erstattede kopi blev fjernet),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> og <code>quota.reached</code>. Hver bærer

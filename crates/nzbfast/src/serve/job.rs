@@ -510,6 +510,13 @@ pub struct Job {
     /// a long list of dead posts would otherwise walk the whole list
     /// unattended. See `FAILURE_REGRAB_MAX`.
     pub failure_depth: u8,
+    /// TODO 280: how many refeed generations deep this job is. 0 for
+    /// every job a person or an app added; 1 for one queued out of a
+    /// finished download's own payload. Persisted, because a restart
+    /// that forgot it would make a child's output eligible all over
+    /// again and turn a one-level rule into no rule at all. See
+    /// `refeed::REFEED_MAX_DEPTH`.
+    pub refeed_depth: u8,
     /// What post-download synthesised naming concluded about an
     /// obfuscated payload: the container facts on the first line, then
     /// one candidate film per line. Empty for every job the ladder did
@@ -1199,6 +1206,22 @@ pub(super) async fn finalize_completed_gen(
                 d4.record_unlock_password(&site3, &poster, &pw);
             })
             .await;
+        }
+        // TODO 280: the payload is settled where the record says it is
+        // - unpacked, swept and renamed, and the destination move has
+        // not started - so this is the moment a container post's inner
+        // .nzb is on disk and findable. Off by default, and never on the
+        // failure path: a job that did not complete has no payload to
+        // read. Blocking (a folder walk, whole-file reads and an
+        // enqueue), so it goes to the pool rather than onto this tail's
+        // worker; a panic in it must not cost the job its history row.
+        if d.refeed_nzb.load(Ordering::Relaxed) {
+            let (d5, j5) = (d.clone(), job.clone());
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || d5.refeed_completed(&j5, gen0)).await
+            {
+                warn!(target: "refeed", "looking for NZB files in the output did not finish: {e}");
+            }
         }
         // Outside the job lock - save_queue locks every job in turn.
         // The identity/cleanup stamps land on a record that may already

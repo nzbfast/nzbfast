@@ -62,6 +62,23 @@ pub(super) struct IndexerHit {
     /// the two, and the address is gone by then either way.
     pub(super) origin: SourceOrigin,
     pub(super) at: Instant,
+    /// Which SEARCH minted this token. TODO 282 item 5 holds the next
+    /// ranked candidates of the search that produced a grab, and this is
+    /// how the grab finds its own siblings in a cache that is otherwise
+    /// one flat LRU of every search the daemon has answered.
+    pub(super) cohort: String,
+    /// Which merged ROW of that search, and whether this is the row's
+    /// headline copy.
+    ///
+    /// A row is one release; its copies are the same release listed by
+    /// several indexers, which are very often literally the same post
+    /// (§282 item 6 refuses those anyway, but only after paying for the
+    /// fetch). So the spare walk takes ONE candidate per other row, and
+    /// takes the headline - deterministically, because the cache is a
+    /// HashMap and "whichever copy we happened to see first" is a
+    /// different answer on every run of the same search.
+    pub(super) row: u32,
+    pub(super) headline: bool,
 }
 
 /// How far back the `addnzblnk` rate gate looks.

@@ -212,6 +212,9 @@ fn restore_job_settings(
     if let Some(on) = saved.get("watch_keep_nzb").and_then(Value::as_bool) {
         daemon.watch_keep_nzb.store(on, Ordering::Relaxed);
     }
+    if let Some(on) = saved.get("refeed_nzb").and_then(Value::as_bool) {
+        daemon.refeed_nzb.store(on, Ordering::Relaxed);
+    }
     if let Some(on) = saved.get("watch_recursive").and_then(Value::as_bool) {
         daemon.watch_recursive.store(on, Ordering::Relaxed);
     }
@@ -2374,6 +2377,7 @@ fn build_daemon(
         }),
         watch_dir: Mutex::new(watch),
         watch_keep_nzb: AtomicBool::new(false),
+        refeed_nzb: AtomicBool::new(false),
         watch_recursive: AtomicBool::new(false),
         watch_move_rejected: AtomicBool::new(false),
         watch_failed: Mutex::new(std::collections::HashMap::new()),

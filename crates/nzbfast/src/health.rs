@@ -170,6 +170,76 @@ pub(crate) struct PostHealth {
     /// reorder clears: once the user has asserted an order, a guess made
     /// from eight STATs does not get to argue with it.
     pub waived: bool,
+    /// TODO §282 item 1: the RECOVERY set's own verdict, scored
+    /// separately and never folded into the buckets above.
+    ///
+    /// Two numbers on the job, never one widened bucket. Every field
+    /// from `bucket` down to `absent` is a claim about the PAYLOAD, and
+    /// three separate consumers - the amber propagation guard, the
+    /// optional auto-defer, and [`PostHealth::no_server_can_supply`] -
+    /// read them as exactly that. A recovery volume's absence is not
+    /// payload absence, so widening them to cover both would quietly
+    /// change what all three mean. `None` until the prober has an
+    /// answer, and forever on a post that carries no PAR2 at all.
+    pub recovery: Option<RecoveryHealth>,
+}
+
+/// TODO §282 item 1: what pre-flight learned about a job's PAR2
+/// recovery set, as its own verdict beside [`PostHealth`].
+///
+/// The gap this closes, from the 24 Aug 2026 incident §282 is written
+/// against: two jobs failed with the payload 99.2% and 99.8% intact
+/// because the RECOVERY set was the half the provider would not serve
+/// (`fetched 68.9 MB of recovery data in 229.09s (1206 article
+/// failures)` against a 1024 MB ask). The pre-flight sampler could not
+/// have seen it, by construction - the payload sampler skips
+/// `nzbkit::nzb::FileKind::Par2Volume` outright, so it sampled the one
+/// half of the post that was healthy. Both jobs badged GREEN.
+///
+/// Same honesty rules as the payload verdict, and for the same reasons.
+/// The counts are `absent` of `sampled`, never a percentage. A host
+/// that never answered is dropped rather than counted - see [`tally`],
+/// which both verdicts are built from precisely so that rule cannot
+/// drift between them. A clean answer here is not a promise: STAT
+/// reports that an article ANSWERED, not that its bytes are intact, and
+/// the false-green mode on a takedown that replaces the body rather
+/// than deleting it is written up in `nzbkit::preflight`'s module
+/// header. And nothing here may fail a job - see [`score_recovery`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecoveryHealth {
+    pub bucket: Bucket,
+    pub reason: String,
+    /// Recovery articles STATed per server.
+    pub sampled: u32,
+    /// Sampled recovery articles on at least one server that answered.
+    pub present: u32,
+    /// Sampled recovery articles on NONE of the servers that answered.
+    pub absent: u32,
+    /// Servers that gave a definite answer about at least one of them.
+    pub answered: u32,
+    /// Servers the probe tried.
+    pub servers: u32,
+    /// Per server that answered: (host, present, missing).
+    pub per_server: Vec<(String, u32, u32)>,
+    /// PAR2 files the NZB declares - index and volumes together. The
+    /// reach of the sample, not a claim about the set's block count.
+    pub volumes: u32,
+    /// Did a real BODY of a recovery article arrive and parse as a PAR2
+    /// set? `Some(true)` is the strongest evidence this module can
+    /// obtain - those bytes were served, not merely acknowledged.
+    /// `Some(false)` is deliberately WEAKER than it looks and is scored
+    /// as such; [`score_recovery`] has the argument. `None` = the fetch
+    /// was not attempted.
+    pub fetched: Option<bool>,
+}
+
+impl RecoveryHealth {
+    /// Is there anything here worth saying? Green is the quiet case and
+    /// the queue row has nothing to add to what the payload badge
+    /// already says.
+    pub(crate) fn doubtful(&self) -> bool {
+        self.bucket != Bucket::Green
+    }
 }
 
 impl PostHealth {
@@ -229,21 +299,24 @@ impl PostHealth {
     }
 }
 
-/// Score a completed sample. `None` when nothing was learned - no server
-/// answered, or there was nothing to sample - because a badge with no
-/// evidence behind it is worse than no badge.
+/// The union both verdicts in this module are built from: who answered,
+/// what they said about the sample, and what that makes of it. `None`
+/// when nothing was learned.
 ///
-/// `age_days` is the age of the YOUNGEST article in the post, the same
-/// figure [`crate::diag::LossCauses::post_age_days`] carries and for the
-/// same reason: a fill or a repost tops an old NZB up with new articles,
-/// and it is the newest posting that decides whether propagation is
-/// still a live explanation.
-pub(crate) fn score(
-    answers: &[ServerAnswer],
-    age_days: u32,
-    at: i64,
-    probes: u32,
-) -> Option<PostHealth> {
+/// Shared rather than copied, because the two rules that are easy to get
+/// wrong are the same rule for the payload and for the recovery set, and
+/// a copy is where they drift apart. Both are spelled out inside.
+struct Tally {
+    sampled: u32,
+    present: u32,
+    absent: u32,
+    answered: u32,
+    servers: u32,
+    /// Per server that answered: (host, present, missing).
+    per_server: Vec<(String, u32, u32)>,
+}
+
+fn tally(answers: &[ServerAnswer]) -> Option<Tally> {
     let servers = answers.len() as u32;
     // A host that never answered is not a vote. Counting its silence as
     // "has the article" (which is what a plain all-servers union does,
@@ -297,6 +370,45 @@ pub(crate) fn score(
     if absent == 0 && unanswered > 0 {
         return None;
     }
+    Some(Tally {
+        sampled,
+        present,
+        absent,
+        answered,
+        servers,
+        per_server: voting
+            .iter()
+            .map(|a| {
+                let (have, missing) = a.counts();
+                (a.host.clone(), have, missing)
+            })
+            .collect(),
+    })
+}
+
+/// Score a completed sample. `None` when nothing was learned - no server
+/// answered, or there was nothing to sample - because a badge with no
+/// evidence behind it is worse than no badge.
+///
+/// `age_days` is the age of the YOUNGEST article in the post, the same
+/// figure [`crate::diag::LossCauses::post_age_days`] carries and for the
+/// same reason: a fill or a repost tops an old NZB up with new articles,
+/// and it is the newest posting that decides whether propagation is
+/// still a live explanation.
+pub(crate) fn score(
+    answers: &[ServerAnswer],
+    age_days: u32,
+    at: i64,
+    probes: u32,
+) -> Option<PostHealth> {
+    let Tally {
+        sampled,
+        present,
+        absent,
+        answered,
+        servers,
+        per_server,
+    } = tally(answers)?;
     // The whole guard, in one line: missing everywhere is only evidence
     // about the POST once the post is older than propagation. Below the
     // threshold - and for a dateless NZB, which reads as age 0 - the
@@ -331,14 +443,10 @@ pub(crate) fn score(
     // this is the same reasoning that puts the per-server table in the
     // failure diagnostics, run before the download instead of after it.
     if bucket != Bucket::Green {
-        let per: Vec<String> = voting
-            .iter()
-            .map(|a| {
-                let (have, _) = a.counts();
-                format!("{} ({have}/{sampled} present)", a.host)
-            })
-            .collect();
-        reason.push_str(&format!("; per server: {}", per.join(", ")));
+        reason.push_str(&format!(
+            "; per server: {}",
+            per_server_clause(&per_server, sampled)
+        ));
     }
     // Both halves of the honesty clause. The sample size, because
     // "2 of 8" is not "25% of the release is missing" and the row must
@@ -354,13 +462,7 @@ pub(crate) fn score(
     Some(PostHealth {
         bucket,
         reason,
-        per_server: voting
-            .iter()
-            .map(|a| {
-                let (have, missing) = a.counts();
-                (a.host.clone(), have, missing)
-            })
-            .collect(),
+        per_server,
         sampled,
         present,
         absent,
@@ -370,6 +472,138 @@ pub(crate) fn score(
         checked_at: at,
         probes,
         waived: false,
+        // Hung on afterwards by the prober, which is the only caller
+        // that has a recovery sample to score. Keeping it out of this
+        // signature keeps the payload verdict a function of the payload
+        // evidence and nothing else.
+        recovery: None,
+    })
+}
+
+/// The per-server census as one clause: who has how many of the sample.
+///
+/// "Missing everywhere" and "missing on the one server that happens to
+/// be cheapest" are very different situations and the counts alone
+/// cannot tell them apart - the same reasoning that puts the per-server
+/// table in the failure diagnostics, run before the download instead of
+/// after it.
+fn per_server_clause(per_server: &[(String, u32, u32)], sampled: u32) -> String {
+    per_server
+        .iter()
+        .map(|(host, have, _)| format!("{host} ({have}/{sampled} present)"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// TODO §282 item 1: score the RECOVERY set's sample, entirely apart
+/// from the payload's.
+///
+/// `fetched` is what a real BODY of a recovery article did:
+/// `Some(true)` it arrived and parsed as a PAR2 set, `Some(false)` the
+/// attempt came back with nothing, `None` no attempt was made.
+///
+/// **`Some(false)` is scored more softly than it reads, on purpose.**
+/// `nzbkit::preflight::probe_recovery_set` answers `None` for every
+/// failure it can have - the article refused, the body undecodable, no
+/// valid Main packet in the couple of articles it drew - and it cannot
+/// say which. On a post with no `.par2` index the probe has to guess at
+/// the head and tail of a recovery VOLUME, where the Main packet may
+/// simply be somewhere else, so a failed fetch over a perfectly healthy
+/// set is a real shape and not a rare one. Treating it as proof would
+/// paint every such post red. So on its own it can only reach Amber -
+/// enough that the row stops badging green, which is the whole ask -
+/// and Red needs the STAT sample to have found recovery articles
+/// missing on every server that answered, exactly as the payload
+/// verdict does.
+///
+/// The age guard is the same guard and is here for the same reason
+/// ([`crate::diag::GONE_MIN_AGE_DAYS`], memory
+/// `nzbfast-retry-propagation-trap`): a recovery set posted yesterday
+/// that 430s everywhere is very likely still propagating. `age_days` is
+/// the age of the youngest article in the RECOVERY set, not in the
+/// post - a fill can re-post par2 long after the payload.
+///
+/// **Nothing this returns may fail a job.** The one predicate a job can
+/// be failed on is [`PostHealth::no_server_can_supply`], it reads the
+/// payload fields only, and it stays that way: `post_health_fail` is
+/// OFF by default as a public commitment on issue #29 (§138), and a new
+/// verdict must not become a new way to end a release automatically.
+/// This one badges, and it puts a clause in the failure summary of a
+/// job that failed on its own.
+pub(crate) fn score_recovery(
+    answers: &[ServerAnswer],
+    age_days: u32,
+    volumes: u32,
+    fetched: Option<bool>,
+) -> Option<RecoveryHealth> {
+    let Tally {
+        sampled,
+        present,
+        absent,
+        answered,
+        servers,
+        per_server,
+    } = tally(answers)?;
+    let unfetchable = fetched == Some(false);
+    let bucket = if absent == 0 {
+        if unfetchable {
+            Bucket::Amber
+        } else {
+            Bucket::Green
+        }
+    } else if age_days < GONE_MIN_AGE_DAYS {
+        Bucket::Amber
+    } else {
+        Bucket::Red
+    };
+    let mut reason = if absent == 0 && !unfetchable {
+        format!(
+            "pre-flight: the recovery set answered - all {sampled} sampled article(s) of              its {volumes} PAR2 file(s) are on at least one of {answered} server(s)"
+        )
+    } else if absent == 0 {
+        format!(
+            "pre-flight: all {sampled} sampled article(s) of the recovery set answered,              but a recovery article we asked for did not come back readable - the set              may still be fine, so this is a warning and nothing more"
+        )
+    } else if bucket == Bucket::Amber {
+        format!(
+            "pre-flight: {absent} of {sampled} sampled recovery article(s) are on none of              the {answered} server(s) that answered, but the recovery set is only              {age_days} day(s) old - it may still be propagating"
+        )
+    } else {
+        format!(
+            "pre-flight: {absent} of {sampled} sampled recovery article(s) are on none of              the {answered} server(s) that answered, and at {age_days} day(s) old the              recovery set is past the point where propagation explains it - a post whose              payload is nearly complete cannot be repaired when this is the half that is              missing"
+        )
+    };
+    if bucket != Bucket::Green {
+        reason.push_str(&format!(
+            "; per server: {}",
+            per_server_clause(&per_server, sampled)
+        ));
+    }
+    if servers > answered {
+        reason.push_str(&format!(
+            "; {} of {servers} server(s) did not answer and were not counted",
+            servers - answered
+        ));
+    }
+    // Said out loud rather than left as a silent `None`: without it a
+    // green recovery badge on a fleet of block accounts looks like the
+    // stronger, body-confirmed green, and it is not.
+    if fetched.is_none() {
+        reason.push_str(
+            "; no recovery article was fetched (no server on this install may be billed              for a measurement), so this rests on the sample alone",
+        );
+    }
+    Some(RecoveryHealth {
+        bucket,
+        reason,
+        sampled,
+        present,
+        absent,
+        answered,
+        servers,
+        per_server,
+        volumes,
+        fetched,
     })
 }
 
@@ -392,20 +626,41 @@ pub(crate) fn sample_size(total_bytes: u64) -> usize {
 /// under me mid-download" call for different things. `None` when the
 /// sample says nothing useful about it.
 pub(crate) fn failure_clause(h: &PostHealth) -> Option<String> {
-    if h.absent > 0 {
-        Some(format!(
+    let mut out = if h.absent > 0 {
+        format!(
             "; a pre-flight sample when this job was added already found {} of {} sampled \
              article(s) on none of the {} server(s) that answered, so the post was \
              short before the download started",
             h.absent, h.sampled, h.answered
-        ))
+        )
     } else {
-        Some(format!(
+        format!(
             "; a pre-flight sample when this job was added found all {} sampled \
              article(s) present, so whatever went missing did so after that",
             h.sampled
-        ))
+        )
+    };
+    // TODO §282: and the half the sentence above is silent about. On
+    // the 24 Aug incident every clause up to here would have read
+    // "all present" over a payload that was 99.8% intact and a recovery
+    // set that could not be fetched at all - which is the one fact that
+    // explains the failure, and the one nothing said.
+    if let Some(r) = h.recovery.as_ref().filter(|r| r.doubtful()) {
+        out.push_str(&format!(
+            "; the PAR2 recovery set checked out badly too - {} of {} sampled recovery \
+             article(s) were on none of the {} server(s) that answered{}, so there was \
+             little repair data to be had whatever the payload was short of",
+            r.absent,
+            r.sampled,
+            r.answered,
+            if r.fetched == Some(false) {
+                ", and a recovery article we asked for never came back readable"
+            } else {
+                ""
+            }
+        ));
     }
+    Some(out)
 }
 
 /// TODO §138: the failure sentence for a job the opt-in give-up ends
@@ -458,6 +713,67 @@ pub(crate) fn health_json(h: &PostHealth) -> serde_json::Value {
         "checked_at": h.checked_at,
         "probes": h.probes,
         "waived": h.waived,
+        // §282: nested rather than flattened, so no consumer of the
+        // payload keys can pick a recovery number up by accident.
+        "recovery": h.recovery.as_ref().map(|r| serde_json::json!({
+            "bucket": r.bucket.as_str(),
+            "reason": r.reason,
+            "per_server": r.per_server
+                .iter()
+                .map(|(host, have, missing)| serde_json::json!({
+                    "host": host, "have": have, "missing": missing,
+                }))
+                .collect::<Vec<_>>(),
+            "sampled": r.sampled,
+            "present": r.present,
+            "absent": r.absent,
+            "answered": r.answered,
+            "servers": r.servers,
+            "volumes": r.volumes,
+            "fetched": r.fetched,
+        })),
+    })
+}
+
+/// The per-server census, back off the wire. Shared by both halves of
+/// [`health_from_json`] because the shape is the same on both.
+fn per_server_from_json(v: &serde_json::Value) -> Vec<(String, u32, u32)> {
+    v.get("per_server")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    Some((
+                        e.get("host")?.as_str()?.to_string(),
+                        e.get("have")?.as_u64()? as u32,
+                        e.get("missing")?.as_u64()? as u32,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One recovery verdict, back off the wire. `None` for an absent or
+/// unreadable record - a job persisted before §282 has no such key and
+/// must load exactly as it did.
+fn recovery_from_json(v: &serde_json::Value) -> Option<RecoveryHealth> {
+    let u = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+    Some(RecoveryHealth {
+        bucket: Bucket::from_str(v.get("bucket").and_then(serde_json::Value::as_str)?)?,
+        reason: v
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        per_server: per_server_from_json(v),
+        sampled: u("sampled"),
+        present: u("present"),
+        absent: u("absent"),
+        answered: u("answered"),
+        servers: u("servers"),
+        volumes: u("volumes"),
+        fetched: v.get("fetched").and_then(serde_json::Value::as_bool),
     })
 }
 
@@ -470,21 +786,7 @@ pub(crate) fn health_from_json(v: &serde_json::Value) -> Option<PostHealth> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        per_server: v
-            .get("per_server")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| {
-                        Some((
-                            e.get("host")?.as_str()?.to_string(),
-                            e.get("have")?.as_u64()? as u32,
-                            e.get("missing")?.as_u64()? as u32,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        per_server: per_server_from_json(v),
         sampled: u("sampled"),
         present: u("present"),
         absent: u("absent"),
@@ -500,6 +802,7 @@ pub(crate) fn health_from_json(v: &serde_json::Value) -> Option<PostHealth> {
             .get("waived")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        recovery: v.get("recovery").and_then(recovery_from_json),
     })
 }
 
@@ -800,5 +1103,133 @@ mod tests {
                 .unwrap()
                 .contains("went missing did so after that")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // TODO §282 items 1 and 2: the recovery set's own verdict.
+    // -----------------------------------------------------------------
+
+    /// The incident, in one assertion. The payload samples clean and
+    /// the recovery set does not, and the two verdicts must be able to
+    /// disagree: a job whose payload is 99.8% intact and whose PAR2 is
+    /// unobtainable is exactly the 24 Aug shape, and it badged green.
+    #[test]
+    fn the_recovery_verdict_is_scored_apart_from_the_payload() {
+        let payload = score(&[answer("a", &[H, H, H])], 400, 0, 1).unwrap();
+        assert_eq!(payload.bucket, Bucket::Green);
+        let rec = score_recovery(&[answer("a", &[M, M, M])], 400, 9, Some(false)).unwrap();
+        assert_eq!(rec.bucket, Bucket::Red);
+        assert_eq!((rec.absent, rec.sampled), (3, 3));
+        assert_eq!(rec.volumes, 9);
+        assert!(rec.doubtful());
+        // And the payload buckets are untouched by it: nothing here may
+        // widen what `absent`/`present` mean, because the amber
+        // propagation guard and the §138 give-up read them.
+        assert_eq!((payload.absent, payload.present), (0, 3));
+    }
+
+    /// The propagation guard is the same guard here, and it runs on the
+    /// RECOVERY set's own age. Below [`GONE_MIN_AGE_DAYS`] a recovery
+    /// set missing everywhere is still amber - it may be landing.
+    #[test]
+    fn a_young_recovery_set_missing_everywhere_is_only_amber() {
+        let r = score_recovery(&[answer("a", &[M, M])], 1, 3, None).unwrap();
+        assert_eq!(r.bucket, Bucket::Amber);
+        let old = score_recovery(&[answer("a", &[M, M])], 30, 3, None).unwrap();
+        assert_eq!(old.bucket, Bucket::Red);
+    }
+
+    /// A failed BODY fetch on its own can only reach AMBER, however old
+    /// the post. `probe_recovery_set` answers `None` for a refused
+    /// article and for a set whose Main packet simply was not in the two
+    /// articles it drew, and it cannot say which - so on a clean STAT
+    /// sample it is a warning, never proof. It must still stop the row
+    /// badging green, which is the whole point of the item.
+    #[test]
+    fn an_unfetchable_set_that_stats_clean_is_amber_and_never_red() {
+        let r = score_recovery(&[answer("a", &[H, H])], 4000, 2, Some(false)).unwrap();
+        assert_eq!(r.bucket, Bucket::Amber);
+        assert!(r.doubtful(), "the row must stop badging green");
+        assert_eq!(r.absent, 0);
+        // Confirmed by the bytes is the strong green; a skipped fetch is
+        // still green but says so.
+        let strong = score_recovery(&[answer("a", &[H, H])], 4000, 2, Some(true)).unwrap();
+        assert_eq!(strong.bucket, Bucket::Green);
+        assert!(!strong.reason.contains("no recovery article was fetched"));
+        let unpaid = score_recovery(&[answer("a", &[H, H])], 4000, 2, None).unwrap();
+        assert_eq!(unpaid.bucket, Bucket::Green);
+        assert!(unpaid.reason.contains("no recovery article was fetched"));
+    }
+
+    /// A host that never answered is dropped from THIS verdict too. One
+    /// server with a wrong password must not paint every recovery set in
+    /// the queue green - the trap `score` unions for itself to avoid,
+    /// and the reason both share [`tally`].
+    #[test]
+    fn a_silent_server_is_dropped_from_the_recovery_verdict() {
+        let r = score_recovery(
+            &[answer("a", &[M, M]), answer("mute", &[U, U])],
+            30,
+            4,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.bucket, Bucket::Red, "the silent host is not a vote");
+        assert_eq!((r.answered, r.servers), (1, 2));
+        assert!(r.reason.contains("did not answer and were not counted"));
+        // Nothing answered at all: no verdict, not a green one.
+        assert!(score_recovery(&[answer("mute", &[U, U])], 30, 4, None).is_none());
+        assert!(score_recovery(&[], 30, 4, Some(false)).is_none());
+    }
+
+    /// It survives the wire and a restart, and a record written before
+    /// §282 loads exactly as it did.
+    #[test]
+    fn the_recovery_verdict_round_trips_and_older_records_still_load() {
+        let mut h = score(&[answer("a", &[H, M])], 30, 99, 1).unwrap();
+        h.recovery = score_recovery(&[answer("a", &[M, H])], 30, 7, Some(false));
+        let back = health_from_json(&health_json(&h)).unwrap();
+        assert_eq!(back, h);
+        let r = back.recovery.unwrap();
+        assert_eq!(r.fetched, Some(false));
+        assert_eq!(r.volumes, 7);
+        assert_eq!(r.per_server, vec![("a".to_string(), 1, 1)]);
+
+        let mut old = health_json(&score(&[answer("a", &[H, H])], 30, 99, 1).unwrap());
+        old.as_object_mut().unwrap().remove("recovery");
+        assert!(health_from_json(&old).unwrap().recovery.is_none());
+    }
+
+    /// The failure summary carries it. On the incident every clause the
+    /// old code could write said "all present" - true of the payload,
+    /// and silent about the half that killed the job.
+    #[test]
+    fn the_failure_clause_names_the_recovery_set() {
+        let mut clean = score(&[answer("a", &[H, H])], 30, 0, 1).unwrap();
+        clean.recovery = score_recovery(&[answer("a", &[M, M])], 30, 5, Some(false));
+        let c = failure_clause(&clean).unwrap();
+        assert!(c.contains("went missing did so after that"), "{c}");
+        assert!(c.contains("PAR2 recovery set checked out badly"), "{c}");
+        assert!(c.contains("never came back readable"), "{c}");
+        // A green recovery set adds nothing: the quiet case stays quiet.
+        let mut fine = score(&[answer("a", &[H, H])], 30, 0, 1).unwrap();
+        fine.recovery = score_recovery(&[answer("a", &[H, H])], 30, 5, Some(true));
+        assert!(!failure_clause(&fine).unwrap().contains("recovery set"));
+    }
+
+    /// The one predicate a job can be FAILED on stays payload-only.
+    /// `post_health_fail` is off by default as a public commitment on
+    /// issue #29 (§138), and a new verdict must not become a new way to
+    /// end a release automatically.
+    #[test]
+    fn a_dead_recovery_set_never_licenses_the_optin_giveup() {
+        let mut h = score(&[answer("a", &[H, H])], 400, 0, 1).unwrap();
+        h.recovery = score_recovery(&[answer("a", &[M, M])], 400, 5, Some(false));
+        assert_eq!(h.recovery.as_ref().unwrap().bucket, Bucket::Red);
+        assert!(
+            !h.no_server_can_supply(),
+            "the recovery verdict must not reach the give-up bar"
+        );
+        assert!(!h.sinks(), "nor the auto-defer");
     }
 }

@@ -73,6 +73,11 @@ pub(super) struct Census {
     /// the payload is there.
     pub(super) retention_skipped_payload: u64,
     pub(super) recovery_missing: u64,
+    /// Segments the post's RECOVERY slots carry in all - the
+    /// denominator `recovery_missing` and the recovery-side cause
+    /// counters have never had. See `diag::LossCauses::recovery_segments`
+    /// for what reads it and why a bare loss count could not serve.
+    pub(super) recovery_segments: u64,
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -435,6 +440,17 @@ pub(super) fn take_census(
             (s.missing.load(Ordering::Relaxed) + s.remaining.load(Ordering::Relaxed)) as u64
         })
         .sum();
+    // The denominator for every recovery loss above. Counted over the
+    // same slot set and from `total_segments`, so a DEFERRED recovery
+    // article (one the one-pass identification chose not to fetch) is in
+    // it: the question the ratio answers is "how much of this post's
+    // parity is gone", and a volume we declined to ask for is not gone.
+    let recovery_segments: u64 = slots
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| slot_recovery(*i))
+        .map(|(_, s)| s.total_segments as u64)
+        .sum();
     let retention_skipped = retention_excluded.total();
     let retention_skipped_payload = retention_excluded.payload();
     if retention_skipped > 0 {
@@ -472,6 +488,7 @@ pub(super) fn take_census(
         retention_skipped,
         retention_skipped_payload,
         recovery_missing,
+        recovery_segments,
     }
 }
 
@@ -726,6 +743,12 @@ mod tests {
         assert_eq!(c.recovery_errs, 4);
         assert_eq!(c.derrs, 2);
         assert_eq!(c.recovery_missing, 5);
+        // ...and its WHOLE segment count, which is the denominator every
+        // recovery loss above has been quoted without (TODO 282 item 17).
+        // Counted off `total_segments`, so a volume the plan never asked
+        // for is in it: the ratio answers "how much of this post's parity
+        // is gone", and parity nobody requested is not gone.
+        assert_eq!(c.recovery_segments, 10);
         assert_eq!(c.retention_skipped, 1);
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -767,6 +790,10 @@ mod tests {
         assert_eq!(c.total_segments, 2);
         assert_eq!(c.derrs, 0);
         assert_eq!(c.recovery_missing, 0);
+        // No par2 slot at all: no denominator, which stands the cause
+        // clause in `diag::incomplete_reason` down rather than dividing
+        // by a figure nobody measured.
+        assert_eq!(c.recovery_segments, 0);
         // Sweep 8, L9: a server addressed by IP names no backbone, in
         // either family. An address keys as ITSELF now (it used to key
         // as one octet), so the no-letters test alone would start

@@ -1000,6 +1000,19 @@ ou une page d'erreur peut arriver sous un nom en <code>.nzb</code>. Désactivé,
 fichier reste où vous l'avez mis et la raison s'affiche au-dessus de la file d'attente.
 Un fichier qui semble seulement incomplet est laissé en place dans les deux cas, car il
 est peut-être encore en train d'arriver.</p>
+<p><b>Mettre en file les fichiers NZB produits par un téléchargement</b> (désactivé
+par défaut) couvre la publication conteneur : un petit NZB dont le contenu est un
+autre <code>.nzb</code>. Avec cette option, un téléchargement qui se termine avec un
+NZB parmi ses fichiers ajoute ce NZB à la file <i>en pause</i>, pour que vous lisiez
+sa taille et le lanciez vous-même. Ce lancement à la main est aussi ce qui arrête
+une chaîne : rien ne va plus loin sans vous. Cela ne suit qu’un niveau, un NZB à
+l’intérieur d’un téléchargement arrivé lui-même par cette voie est laissé tel quel ;
+les candidats de plus de 32 Mo sont ignorés, 20 au maximum sont pris par
+téléchargement, et tout ce qui n’est pas un NZB lisible reste sur le disque au lieu
+d’être deviné. Une chose qu’elle ne sait pas distinguer : une publication qui livre
+simplement son propre <code>.nzb</code> à côté du contenu est proposée elle aussi,
+vous pouvez donc voir une ligne en pause pour le téléchargement que vous venez de
+terminer. Supprimez cette ligne et rien d’autre ne se produit.</p>
 <p><b>Revérifier le dossier toutes les</b> (un réglage avancé) n'est qu'un filet de
 sécurité, ce n'est donc pas le bouton qui rend les prises en charge rapides. Un fichier
 déposé sur cette machine est repéré au moment où il arrive, parce que le système le
@@ -1159,7 +1172,7 @@ intact et le journal dit pourquoi.</p>
 (une reprise automatique a remis en file une tâche échouée) et
 <code>job.delete_kept</code> (une suppression a retiré l'entrée mais n'a pas pu
 supprimer ses fichiers), plus <code>watch.picked</code> (un .nzb a été retiré du
-dossier surveillé), <code>watchlist.upgraded</code> (une amélioration de liste de
+dossier surveillé), <code>nzb.refeed</code> (le fichier NZB d’un téléchargement terminé a été ajouté à la file, en pause), <code>watchlist.upgraded</code> (une amélioration de liste de
 suivi a abouti et la copie remplacée a été supprimée),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> et <code>quota.reached</code>. Chacun porte

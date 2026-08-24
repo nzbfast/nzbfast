@@ -908,6 +908,17 @@ Tarayıcının kaydettiği bir klasör için açık tutmaya değer: oraya bir ot
 ya da bir hata sayfası <code>.nzb</code> adıyla düşebilir. Kapalıyken dosya koyduğun
 yerde kalır ve gerekçe bunun yerine kuyruğun üstünde gösterilir. Yalnızca eksik görünen
 bir dosya her iki durumda da yerinde bırakılır, çünkü hâlâ geliyor olabilir.</p>
+<p><b>Bir indirmenin ürettiği NZB dosyalarını kuyruğa al</b> (varsayılan olarak
+kapalı) kap gönderisini kapsar: içeriği başka bir <code>.nzb</code> olan küçük bir
+NZB. Bu açıkken, dosyaları arasında bir NZB ile biten indirme, o NZB'yi
+<i>duraklatılmış</i> olarak kuyruğa ekler; böylece boyutunu okuyup kendiniz
+başlatırsınız. Bu elle başlatma aynı zamanda zinciri durduran şeydir: siz olmadan
+hiçbir şey ileri gitmez. Yalnızca bir seviye izler, bu yolla gelmiş bir indirmenin
+içindeki NZB'ye dokunulmaz; 32 MB üzerindeki adaylar atlanır, indirme başına en çok
+20 tanesi alınır ve okunabilir bir NZB olmayan her şey tahmin edilmek yerine diskte
+kalır. Ayırt edemediği tek şey var: kendi <code>.nzb</code> dosyasını içeriğin
+yanında getiren bir sürüm de önerilir, bu yüzden az önce bitirdiğiniz indirme için
+duraklatılmış bir satır görebilirsiniz. O satırı silin, başka bir şey olmaz.</p>
 <p><b>Klasörü şu sıklıkta yeniden denetle</b> (gelişmiş bir ayar) bir güvenlik ağıdır,
 başka bir şey değil; yani alışları hızlandıran düğme bu değildir. Bu makineye bırakılan
 bir dosya indiği anda fark edilir, çünkü sistem haber verir; bu aralık yalnızca sistemin
@@ -1058,7 +1069,7 @@ söyler.</p>
 (otomatik bir yeniden deneme başarısız bir indirmeyi yeniden kuyruğa aldı) ve
 <code>job.delete_kept</code> (bir silme kaydı kaldırdı ama dosyalarını
 kaldıramadı), artı <code>watch.picked</code> (izlenen klasörden bir .nzb alındı),
-<code>watchlist.upgraded</code> (izleme listesi yükseltmesi tamamlandı ve yerini
+<code>nzb.refeed</code> (biten bir indirmenin kendi NZB dosyası duraklatılmış olarak kuyruğa eklendi), <code>watchlist.upgraded</code> (izleme listesi yükseltmesi tamamlandı ve yerini
 bıraktığı kopya kaldırıldı),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> ve <code>quota.reached</code>. Her biri bir

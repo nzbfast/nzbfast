@@ -1587,6 +1587,9 @@ pub struct Daemon {
     /// restart would re-download the whole folder. Live - read per
     /// pickup, so it needs no boot-apply beyond the saved-settings replay.
     pub watch_keep_nzb: AtomicBool,
+    /// TODO 280: queue an NZB found in a finished download's own output,
+    /// paused. Off; caps and reasoning in `serve/refeed.rs`. Live.
+    pub refeed_nzb: AtomicBool,
     /// Scan subfolders of the watch folder too, with the first
     /// subfolder's name becoming the job's category (watch/tv/x.nzb
     /// lands in "tv") - the layout Sonarr-era muscle memory expects.

@@ -517,6 +517,7 @@ impl Daemon {
                 None,
                 "recovered",
                 false,
+                None,
             ) {
                 Ok(e) if e.durable => {
                     adopted += 1;

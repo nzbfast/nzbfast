@@ -104,6 +104,9 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "failure_host": j.failure_host,
         "failure_https": j.failure_https,
         "failure_depth": j.failure_depth,
+        // TODO 280. Persisted for the reason the field's own comment
+        // gives: forgetting it re-opens a child's payload to a refeed.
+        "refeed_depth": j.refeed_depth,
         "identify": j.identify,
         // §77 pre-flight verdict. Persisted rather than recomputed: the
         // probe cost a round of STATs against every server, and after a
@@ -321,6 +324,9 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         failure_depth: v.get("failure_depth").and_then(Value::as_u64).unwrap_or(0) as u8,
+        // Absent on every record written before TODO 280, where 0 - "a
+        // job nobody refed" - is the truth for all of them.
+        refeed_depth: v.get("refeed_depth").and_then(Value::as_u64).unwrap_or(0) as u8,
         identify: s("identify").unwrap_or_default(),
         // Absent on every record written before §77, and on any record
         // whose verdict no longer parses: both mean "not sampled", which

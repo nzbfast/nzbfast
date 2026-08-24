@@ -557,10 +557,10 @@ pub(super) fn load_mapped_recovery(
     }
     match load_selected_recovery(cat, &mut by_exp, n_missing, bs, true)? {
         Some(loaded) => Ok(loaded),
-        None => Err(RepairError::Malformed(format!(
-            "{} recovery slice(s) for {n_missing} missing block(s)",
-            by_exp.len()
-        ))),
+        None => Err(RepairError::RecoveryShort {
+            have: by_exp.len(),
+            need: n_missing,
+        }),
     }
 }
 

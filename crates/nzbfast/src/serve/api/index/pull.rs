@@ -231,6 +231,12 @@ pub(super) fn m_indexer_search(
             });
             rows.truncate(500);
             let now_ts = unix_now();
+            // TODO 282 item 5: one id for this whole search, stamped on
+            // every token it mints, so a grab from it can find the other
+            // candidates it was listed beside. A secret rather than a
+            // counter for the same reason the tokens are: it is handed to
+            // the browser inside them and must not be guessable.
+            let cohort = fresh_secret();
             let mut out = Vec::with_capacity(rows.len());
             {
                 let mut rt = d.indexer_rt.lock_ok();
@@ -249,7 +255,7 @@ pub(super) fn m_indexer_search(
                         break;
                     }
                 }
-                for row in rows {
+                for (row_ix, row) in rows.into_iter().enumerate() {
                     // Every copy gets its own grab token: taking a
                     // different indexer's copy is the whole point of the
                     // group, so a source the UI shows but cannot grab
@@ -265,7 +271,8 @@ pub(super) fn m_indexer_search(
                     let sources: Vec<Value> = row
                         .iter()
                         .take(MAX_SOURCES)
-                        .map(|m| {
+                        .enumerate()
+                        .map(|(copy_ix, m)| {
                             let token = fresh_secret();
                             rt.results.insert(
                                 token.clone(),
@@ -275,6 +282,9 @@ pub(super) fn m_indexer_search(
                                     indexer: m.indexer.clone(),
                                     origin: m.origin.clone(),
                                     at: now,
+                                    cohort: cohort.clone(),
+                                    row: row_ix as u32,
+                                    headline: copy_ix == 0,
                                 },
                             );
                             rt.order.push_back(token.clone());
@@ -720,6 +730,7 @@ pub(super) fn m_indexer_grab(
                             Ok(Enqueued { nzo_id: id, .. }) => {
                                 d.indexer_rt.lock_ok().usage.count_grab(&h.indexer);
                                 save_indexer_usage(d);
+                                hold_search_spares(d, &id, &h);
                                 json!({"status": true, "nzo_ids": [id]})
                             }
                             Err(e) => {
@@ -739,4 +750,99 @@ pub(super) fn m_indexer_grab(
             }
         }
     })
+}
+
+/// TODO 282 item 5: hold the next ranked candidates of the search this
+/// grab came out of, as paused alternatives of the job just added.
+///
+/// **Off the request thread.** The click is answered the moment the
+/// grabbed job is queued; the spares arrive a beat later. Each candidate
+/// costs one HTTP fetch bounded by the shared agent's 15 s, so doing this
+/// inline could put half a minute in front of a button press, for rows
+/// the user is not waiting on.
+///
+/// The candidate list is captured HERE, under the cache lock, rather than
+/// re-read on that thread: `INDEXER_HIT_TTL` and the LRU cap can both
+/// drop a token while the thread runs, and a spare walk that quietly
+/// shrinks is worse than one that fetches what it decided to fetch.
+///
+/// One candidate per OTHER row - see [`IndexerHit::row`] - so the walk
+/// never spends the user's grab budget fetching a second indexer's copy
+/// of the release it just grabbed.
+#[cfg(feature = "indexer")]
+fn hold_search_spares(d: &Arc<Daemon>, primary: &str, grabbed: &IndexerHit) {
+    let cands: Vec<spare::SpareCandidate> = {
+        let rt = d.indexer_rt.lock_ok();
+        let mut rows: Vec<(u32, &String, &IndexerHit)> = rt
+            .results
+            .iter()
+            .filter(|(_, h)| {
+                h.cohort == grabbed.cohort
+                    && h.row != grabbed.row
+                    && h.headline
+                    && h.at.elapsed() <= INDEXER_HIT_TTL
+            })
+            .map(|(t, h)| (h.row, t, h))
+            .collect();
+        // The cache is a HashMap; row order is what the search sorted
+        // them into (newest first), and it has to be restored here or
+        // the same grab holds different spares on every run.
+        rows.sort_by_key(|(r, _, _)| *r);
+        rows.into_iter()
+            .map(|(_, token, h)| spare::SpareCandidate {
+                title: h.title.clone(),
+                source: h.indexer.clone(),
+                token: token.clone(),
+            })
+            .collect()
+    };
+    if cands.is_empty() {
+        return;
+    }
+    // Weak, like every other aux lane: a shutdown must not wait out six
+    // 15 s indexer fetches for rows nobody is looking at.
+    let dw = Arc::downgrade(d);
+    let primary = primary.to_string();
+    crate::serve::spawn_aux("spare-hold", move || {
+        let Some(d) = dw.upgrade() else { return };
+        let held = d.hold_spares_with(&primary, &cands, spare::SPARE_HOLD_COUNT, |c| {
+            let hit = {
+                let rt = d.indexer_rt.lock_ok();
+                rt.results
+                    .get(&c.token)
+                    .filter(|h| h.at.elapsed() <= INDEXER_HIT_TTL)
+                    .cloned()
+            };
+            let hit = hit.ok_or_else(|| "that result has expired".to_string())?;
+            // The user's metered budget decides, exactly as it does for
+            // the grab itself: a spare IS an indexer grab, and one that
+            // spent quota the account did not have would be a feature
+            // charging for itself behind the user's back.
+            let cfg = d
+                .indexers
+                .lock_ok()
+                .iter()
+                .find(|i| i.name == hit.indexer)
+                .cloned();
+            {
+                let mut rt = d.indexer_rt.lock_ok();
+                rt.usage.roll(unix_now());
+                if !cfg.as_ref().is_none_or(|c| rt.usage.grab_allowed(c)) {
+                    return Err(format!("{}: daily grab budget reached", hit.indexer));
+                }
+            }
+            // fetch_url_from, never a bare fetch: the enclosure link is
+            // bound to the origin the SEARCH answered from (M12/M9), and
+            // a spare is fetched long after that search, on another
+            // thread, which is exactly the window that binding closes.
+            let f = fetch_url_from(&hit.url, &hit.origin)
+                .map_err(|e| redact_url_creds(&e.to_string()))?;
+            d.indexer_rt.lock_ok().usage.count_grab(&hit.indexer);
+            save_indexer_usage(&d);
+            Ok(f.bytes)
+        });
+        if held > 0 {
+            info!(target: "queue", "{primary}: {held} spare(s) held against its failure");
+        }
+    });
 }

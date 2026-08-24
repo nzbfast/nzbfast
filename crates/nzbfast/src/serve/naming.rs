@@ -474,6 +474,7 @@ impl Daemon {
                 Base::Movie => match crate::wall::movie_name(&p, &style) {
                     Some(base) => crate::smart::rename_movie(&parent, out_dir, &base),
                     None => {
+                        crate::smart::rename_obfuscated_audio(out_dir);
                         crate::smart::rename_obfuscated_video(out_dir, name);
                         None
                     }
@@ -483,7 +484,24 @@ impl Daemon {
                 // release name. This is also where a FULLY obfuscated
                 // post lands - it parses to no kind at all - so it is
                 // the arm synthesised naming actually fires in.
+                // An obfuscated MUSIC post lands here too, and the
+                // release name cannot name eleven tracks - only the
+                // tracks themselves can (issue #55). Beside the video
+                // pass rather than instead of it: the two ask different
+                // questions of different files.
+                //
+                // BEFORE it, and that order is deliberate. The two
+                // sniffs overlap on exactly one shape - an audio-only
+                // ISO-BMFF file, which is a container `video_ext`'s
+                // probe has to walk the tracks of before it can decline
+                // - and a probe that cannot finish leaves the sniff
+                // standing, so a file with tags naming it could still
+                // be offered to `nameless_video` as the feature. Tags
+                // are the stronger evidence, so they are asked first:
+                // once the audio pass has named a file it no longer
+                // looks obfuscated, and the video pass leaves it alone.
                 Base::None => {
+                    crate::smart::rename_obfuscated_audio(out_dir);
                     crate::smart::rename_obfuscated_video(out_dir, name);
                     None
                 }

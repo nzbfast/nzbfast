@@ -56,6 +56,28 @@ pub(super) fn is_watchlist_origin(origin: &str) -> bool {
     origin == "watchlist" || origin.starts_with("watchlist:")
 }
 
+/// What a job added by [`Daemon::hold_spares_with`] records as its
+/// origin.
+///
+/// A §282 spare is a queue row the USER never asked for, so everything
+/// that cleans one up has to be able to tell it from a duplicate the
+/// user added by hand - which looks identical otherwise, being paused at
+/// the same priority with the same `held_for`. `Job::origin` is the
+/// established seam for exactly this question (see [`is_arr_origin`]),
+/// it is already persisted in `queue.json`, and it needs no new field
+/// and no migration.
+pub(super) const SPARE_ORIGIN: &str = "spare";
+
+/// Was this row added as a §282 spare?
+///
+/// Two spellings for the same reason [`is_arr_origin`] takes two: the
+/// `prefix:detail` shape is what this codebase reaches for when a
+/// coarse origin later wants detail, and records already on disk are
+/// never rewritten.
+pub(super) fn is_spare_origin(origin: &str) -> bool {
+    origin == SPARE_ORIGIN || origin.starts_with("spare:")
+}
+
 /// Longest a single field of a watchlist origin's detail may be.
 ///
 /// The title is the user's own watchlist entry, or one synced from Plex

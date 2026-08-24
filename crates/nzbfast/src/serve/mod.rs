@@ -50,6 +50,11 @@ use wire::*;
 // serve/dupe.rs: inherent methods on `Daemon`, so no glob is needed.
 mod dupe;
 
+// serve/spare.rs: TODO 282 section B - the ranked spares a grab holds
+// against its own failure, and the same-post admission test the promote
+// path now runs too.
+mod spare;
+
 mod giveup;
 mod histmigrate;
 mod histstore;
@@ -741,6 +746,11 @@ use job_finalize::FinalizeOutcome;
 mod report;
 
 mod hooks;
+
+// TODO 280: the container post - a finished download whose own payload
+// is another .nzb - and the opt-in switch that queues it, paused.
+mod refeed;
+
 mod prequeue;
 
 mod apiutil;

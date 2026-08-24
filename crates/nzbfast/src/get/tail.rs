@@ -878,6 +878,11 @@ pub(super) fn finish_job(
     incomplete: usize,
     derrs: u64,
     recovery_errs: u64,
+    recovery_segments: u64,
+    // TODO 282 item 4's seam - see `diag::LossCauses::recovery_unobtainable`.
+    // The verdict is the repair ladder's to reach; the ORDERING it lands
+    // in is `incomplete_reason`'s, and that half is already built.
+    recovery_unobtainable: bool,
     missing_430: &Arc<CauseSplit>,
     takedown_430: &Arc<CauseSplit>,
     retention_skipped: u64,
@@ -972,6 +977,8 @@ pub(super) fn finish_job(
             takedown_430_recovery: takedown_430.recovery(),
             retention_excluded_recovery: retention_skipped - retention_skipped_payload,
             transport_failed_recovery: transport_failed.recovery(),
+            recovery_segments,
+            recovery_unobtainable,
             transport_sample: transport_sample.lock_ok().clone(),
             decode_sample: decode_error_sample.lock_ok().clone(),
             recovery_errs,
@@ -1475,6 +1482,7 @@ pub(super) async fn finish_run(
         retention_skipped,
         retention_skipped_payload,
         recovery_missing,
+        recovery_segments,
     } = take_census(
         servers,
         stats,
@@ -1637,6 +1645,14 @@ pub(super) async fn finish_run(
         incomplete,
         derrs,
         recovery_errs,
+        recovery_segments,
+        // Nothing produces this yet: the download-time counters above are
+        // all the evidence this run has, and on the 24 Aug incident they
+        // were all zero because the recovery volumes were DEFERRED and
+        // the fetch that failed ran in the repair ladder. TODO 282 item
+        // 4 owns that fetch and the yield gate that ends it; this is
+        // where its verdict arrives.
+        false,
         missing_430,
         takedown_430,
         retention_skipped,
@@ -1795,6 +1811,8 @@ mod tests {
             incomplete,
             derrs,
             recovery_errs,
+            0,
+            false,
             &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             0,
@@ -1844,6 +1862,8 @@ mod tests {
             incomplete,
             derrs,
             0,
+            0,
+            false,
             &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             0,

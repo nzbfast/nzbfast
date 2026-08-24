@@ -916,6 +916,17 @@ päällä kansiolle, johon selain tallentaa: sinne voi saapua kirjautumis- tai v
 <code>.nzb</code>-nimisenä. Pois päältä tiedosto jää siihen mihin sen panit ja syy
 näytetään jonon yläpuolella. Tiedosto joka vain näyttää keskeneräiseltä jätetään
 paikalleen kummassakin tapauksessa, koska se voi olla vielä saapumassa.</p>
+<p><b>Lisää jonoon NZB-tiedostot, jotka lataus tuottaa</b> (oletuksena pois) kattaa
+säiliöjulkaisun: pieni NZB, jonka sisältö on toinen <code>.nzb</code>. Kun tämä on
+päällä, lataus, joka päättyy NZB-tiedosto mukanaan, lisää sen NZB:n jonoon
+<i>keskeytettynä</i>, jotta luet sen koon ja käynnistät sen itse. Tuo käsin
+käynnistys on myös se, mikä pysäyttää ketjun: mikään ei etene ilman sinua. Se seuraa
+vain yhtä tasoa, tätä tietä itse saapuneen latauksen sisällä oleva NZB jätetään
+rauhaan; yli 32 Mt:n ehdokkaat ohitetaan, enintään 20 latausta kohden otetaan, ja
+kaikki, mikä ei ole luettava NZB, jää levylle sen sijaan että sitä arvattaisiin.
+Yhtä asiaa se ei erota: julkaisu, joka vain tuo oman <code>.nzb</code>-tiedostonsa
+sisällön viereen, tarjotaan sekin, joten voit nähdä keskeytetyn rivin juuri
+valmistuneelle lataukselle. Poista se rivi, eikä muuta tapahdu.</p>
 <p><b>Tarkista kansio uudelleen joka</b> (lisäasetus) on turvaverkko eikä muuta, joten
 se ei ole se nuppi joka tekee poiminnoista nopeita. Tälle koneelle pudotettu tiedosto
 huomataan samalla hetkellä kun se laskeutuu, koska järjestelmä kertoo siitä; tämä väli
@@ -1066,7 +1077,7 @@ lisäys etenee koskemattomana ja loki kertoo miksi.</p>
 (automaattinen uudelleenyritys palautti epäonnistuneen latauksen jonoon) ja
 <code>job.delete_kept</code> (poisto poisti tietueen mutta ei saanut poistettua
 sen tiedostoja), sekä <code>watch.picked</code> (.nzb noudettiin
-valvontakansiosta), <code>watchlist.upgraded</code> (seurantalistan päivitys
+valvontakansiosta), <code>nzb.refeed</code> (valmiin latauksen oma NZB-tiedosto lisättiin jonoon keskeytettynä), <code>watchlist.upgraded</code> (seurantalistan päivitys
 onnistui ja korvattu kopio poistettiin),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> ja <code>quota.reached</code>. Jokainen kantaa

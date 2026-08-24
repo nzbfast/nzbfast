@@ -67,11 +67,27 @@ impl Daemon {
         allow_dupe: bool,
     ) -> Result<Enqueued> {
         self.enqueue_as(
-            None, nzb_bytes, name, category, priority, pp, password, origin, allow_dupe,
+            None, nzb_bytes, name, category, priority, pp, password, origin, allow_dupe, None,
         )
     }
 
-    /// `enqueue` with the id chosen by the caller. Only
+    /// `enqueue` with the id chosen by the caller, and with the option of
+    /// parking it as a HELD SPARE of another job.
+    ///
+    /// `hold_for` is TODO 282 item 5, and it is an explicit instruction
+    /// rather than the duplicate ladder happening to fire: the caller has
+    /// already decided this NZB is a backup for that job, so the whole
+    /// `dupe_collision` question is skipped and the row lands paused at
+    /// [`DUPE_PRIORITY`] with `held_for` naming the target. It has to be
+    /// explicit, because none of the three settings that decide a
+    /// duplicate's fate is a statement about a spare: `dupe_scope =
+    /// "exact"` would let a different release of the same episode QUEUE
+    /// and download payload, `dupe_action = "discard"`/`"fail"` would
+    /// refuse or fail it, and a recent delete mark would release the
+    /// hold. A spare that downloads payload is the one outcome §282
+    /// forbids outright.
+    ///
+    /// `id` is the id chosen by the caller. Only
     /// `recover_orphaned_spool` passes `Some`: an orphaned spool file is
     /// named by the id its job was accepted under, and re-adopting it
     /// under that id keeps an *arr's handle and the job's stream token
@@ -91,6 +107,7 @@ impl Daemon {
         password: Option<&str>,
         origin: &str,
         allow_dupe: bool,
+        hold_for: Option<&str>,
     ) -> Result<Enqueued> {
         let nzo_id = match id {
             Some(id) => id.to_string(),
@@ -188,7 +205,7 @@ impl Daemon {
         // job still carries its identity, so everything downstream that
         // reasons about duplicates keeps working.
         let key = dupe_key(&stem);
-        let collision = if allow_dupe {
+        let collision = if allow_dupe || hold_for.is_some() {
             None
         } else {
             self.dupe_collision(&stem)
@@ -199,8 +216,13 @@ impl Daemon {
         // SECOND copy added behind this one is an ordinary duplicate of
         // the row we are about to publish, and must be held like one.
         // Unconditional: a delete followed by an add that was never
-        // going to be held has still been answered.
-        self.clear_delete_mark(&stem);
+        // going to be held has still been answered. Except for a spare,
+        // which this daemon added and the user did not - spending their
+        // mark on it would leave the identity unprotected for the rest of
+        // the window against an add they DID make.
+        if hold_for.is_none() {
+            self.clear_delete_mark(&stem);
+        }
         #[cfg(test)]
         if collision.is_some() {
             let seam = DUPE_ADMIT_BARRIER.lock_ok().clone();
@@ -212,8 +234,10 @@ impl Daemon {
             }
         }
         // Not final: the original can be deleted between here and the
-        // publish, and the queue critical section below re-asks.
-        let mut duplicate = collision.is_some();
+        // publish, and the queue critical section below re-asks. An
+        // explicit `hold_for` is a duplicate by instruction, and the same
+        // critical section re-asks whether its target is still there.
+        let mut duplicate = collision.is_some() || hold_for.is_some();
         // §129 2d: what a duplicate add becomes is the user's call now.
         // "pause" is the M14f hold; "discard" refuses the add outright;
         // "fail" files it straight to history as Failed (the *arr
@@ -263,6 +287,11 @@ impl Daemon {
         // pairing for the identity substrate - recorded after the job
         // publishes, below.
         let pairing_name = stem.clone();
+        // The two arms that refuse a SPARE have to unlink its spool copy,
+        // and by then `spool_path` has moved onto the job. Cloned only
+        // when there is a spare in the first place, so an ordinary add
+        // pays nothing for it.
+        let spare_spool = hold_for.map(|_| spool_path.clone());
         let job = Arc::new(Mutex::new(Job {
             origin: origin.to_string(),
             nzo_id: nzo_id.clone(),
@@ -290,6 +319,10 @@ impl Daemon {
             failure_host: String::new(),
             failure_https: false,
             failure_depth: 0,
+            // TODO 280: every add starts at 0. The refeed path stamps
+            // the child's depth after this returns, exactly as
+            // `enqueue_fetched` stamps a failure-link replacement's.
+            refeed_depth: 0,
             identify: String::new(),
             media: None,
             postproc_secs: 0.0,
@@ -303,6 +336,7 @@ impl Daemon {
             held_for: collision
                 .as_ref()
                 .map(|c| c.nzo_id.clone())
+                .or_else(|| hold_for.map(str::to_string))
                 .unwrap_or_default(),
             library: self.library_cats.lock_ok().contains(&category),
             fetched: false,
@@ -362,43 +396,24 @@ impl Daemon {
         // *arr contract (a failed grab means "search for another
         // release") and retry-from-history both hold. The spool .nzb
         // stays; a retry does not re-run the hook (SAB semantics).
+        //
+        // A SPARE files nothing at all - see the `hold_for` arm below,
+        // and `spare::Daemon::hold_spares_with` for why §4b's junk-queue
+        // class is the thing §282 must not resurrect by a new road.
         if let Some(why) = hook_reject {
-            {
-                let mut g = job.lock_ok();
-                g.state = JobState::Failed;
-                g.paused = false;
-                g.priority = 0;
-                g.fail_message = why;
-                g.finished_at = Some(Instant::now());
-                g.finished_unix = Some(unix_now());
+            if hold_for.is_some() {
+                drop(publish);
+                if let Some(p) = &spare_spool {
+                    let _ = std::fs::remove_file(p);
+                }
+                anyhow::bail!("the pre-queue script refused this spare: {why}");
             }
-            self.history.lock_ok().push(job.clone());
-            drop(publish);
             info!(
                 target: "prequeue",
                 "{nzo_id} filed to history as FAILED - rejected by the pre-queue \
                  script"
             );
-            // §158.7: the DESTINATION store first, then the queue
-            // snapshot. This job was never queued, so `save_queue` writes
-            // a queue.json that does not carry it either way - which is
-            // exactly what made the old order lossy rather than merely
-            // odd. A kill (or an ENOSPC) between the two writes left the
-            // record in NEITHER file: queue.json never had it and
-            // history.jsonl did not have it yet, so the spooled .nzb sat
-            // on disk named by no record anywhere and the *arr that
-            // submitted it was never told the grab failed. Ordered this
-            // way the torn state is "in history only", which is the whole
-            // truth for a job that never reached the queue. Nothing here
-            // depends on the queue write running first; all it carries of
-            // this job is the id-allocator bump, and the restore's
-            // wall-clock floor already covers an allocator bump that
-            // never landed.
-            let durable = self.history_upsert(std::slice::from_ref(&job));
-            self.save_queue();
-            self.life_emit_parked(&job);
-            self.history_enforce_retention();
-            return Ok(self.enqueued(nzo_id, durable));
+            return Ok(self.file_never_queued(&job, nzo_id, why, publish));
         }
         // §129 2d, dupe_action = "fail": the job never queues - it files
         // straight to history as Failed, through the same seam every
@@ -414,35 +429,17 @@ impl Daemon {
             // nothing is downloading.
             && self.dupe_collision_stands(c)
         {
-            {
-                let mut g = job.lock_ok();
-                g.state = JobState::Failed;
-                g.paused = false;
-                g.priority = 0;
-                g.fail_message = format!(
-                    "duplicate of {:?} ({}) - failed; the duplicates setting decides this",
-                    c.name, c.where_
-                );
-                g.finished_at = Some(Instant::now());
-                g.finished_unix = Some(unix_now());
-            }
-            self.history.lock_ok().push(job.clone());
-            drop(publish);
+            let why = format!(
+                "duplicate of {:?} ({}) - failed; the duplicates setting decides this",
+                c.name, c.where_
+            );
             info!(
                 target: "queue",
                 "{nzo_id} filed to history as FAILED - duplicate of {} ({}), and \
                  duplicates are set to fail",
                 c.name, c.nzo_id
             );
-            // §158.7: the destination store first, for the reason
-            // spelled out on the pre-queue REJECT arm above - this job
-            // never queued either, so a kill between the two writes used
-            // to lose it from both files.
-            let durable = self.history_upsert(std::slice::from_ref(&job));
-            self.save_queue();
-            self.life_emit_parked(&job);
-            self.history_enforce_retention();
-            return Ok(self.enqueued(nzo_id, durable));
+            return Ok(self.file_never_queued(&job, nzo_id, why, publish));
         }
         // §129 4a: the add joins the event ring and the queue in one
         // step, announced BEFORE the job is visible to anything that
@@ -476,8 +473,20 @@ impl Daemon {
         // crash in that window loses a job a consumer was told about -
         // the same window every other reader of the add already had,
         // since the queue was live to the API at exactly this point.
+        let mut orphan_spare = false;
         {
             let mut q = self.queue.lock_ok();
+            // TODO 282 item 5: a spare's target must still be here, and
+            // the answer when it is not is to REFUSE the add - not to
+            // queue it normally, which is what the collision arm below
+            // does. The two differ because the outcomes differ: an add
+            // that stopped being a duplicate is a download the user
+            // asked for, while a spare whose job is gone is a download
+            // NOBODY asked for, and letting it queue is the one thing a
+            // spare may never do (see `spare::Daemon::hold_spares_with`).
+            if let Some(target) = hold_for {
+                orphan_spare = !q.iter().any(|j| j.lock_ok().nzo_id == target);
+            }
             // Last look at the collision, under the very lock this add
             // publishes with. `add_lock` serializes adds against each
             // other, but a delete takes only the queue (or history)
@@ -533,25 +542,39 @@ impl Daemon {
                     );
                 }
             }
-            self.queue_idle_latch.store(false, Ordering::Relaxed);
-            self.life_emit(
-                "job.added",
-                json!({
-                    "nzo_id": nzo_id,
-                    "name": pairing_name,
-                    "category": category,
-                    "priority": enqueue_priority(priority, duplicate),
-                    "origin": origin,
-                    "total_bytes": total_bytes,
-                    "duplicate": duplicate,
-                    "paused": duplicate || priority == -2,
-                }),
-            );
-            q.push_back(job);
+            if !orphan_spare {
+                self.queue_idle_latch.store(false, Ordering::Relaxed);
+                self.life_emit(
+                    "job.added",
+                    json!({
+                        "nzo_id": nzo_id,
+                        "name": pairing_name,
+                        "category": category,
+                        "priority": enqueue_priority(priority, duplicate),
+                        "origin": origin,
+                        "total_bytes": total_bytes,
+                        "duplicate": duplicate,
+                        "paused": duplicate || priority == -2,
+                    }),
+                );
+                q.push_back(job);
+            }
         }
         // Published: the directory and the identity are now visible to
         // every other adder.
         drop(publish);
+        if orphan_spare {
+            // Never queued, so nothing names the spool copy - and
+            // `recover_orphaned_spool` adopts exactly that shape at the
+            // next start.
+            if let Some(p) = &spare_spool {
+                let _ = std::fs::remove_file(p);
+            }
+            anyhow::bail!(
+                "the job this spare was held for is gone - it was deleted while the \
+                 spare was being admitted"
+            );
+        }
         if duplicate {
             info!(target: "queue", "added {nzo_id} as ALTERNATIVE (duplicate held)");
         } else {
@@ -562,6 +585,56 @@ impl Daemon {
         // path: a contended index costs this pairing, not the add.
         self.record_nzb_pairing(&pairing_name, origin, &nzb);
         Ok(self.enqueued(nzo_id, durable))
+    }
+
+    /// File an add that never reached the queue into history as Failed,
+    /// and answer its caller.
+    ///
+    /// Shared by the two arms that do this - a pre-queue REJECT (§129 4a)
+    /// and `dupe_action = "fail"` (§129 2d) - because the ORDER of the
+    /// two writes is the whole subject, and an invariant written out
+    /// twice is one that drifts on the copy nobody edited.
+    ///
+    /// §158.7: the DESTINATION store first, then the queue snapshot.
+    /// This job was never queued, so `save_queue` writes a queue.json
+    /// that does not carry it either way - which is exactly what made the
+    /// old order lossy rather than merely odd. A kill (or an ENOSPC)
+    /// between the two writes left the record in NEITHER file: queue.json
+    /// never had it and history.jsonl did not have it yet, so the spooled
+    /// .nzb sat on disk named by no record anywhere and the *arr that
+    /// submitted it was never told the grab failed. Ordered this way the
+    /// torn state is "in history only", which is the whole truth for a
+    /// job that never reached the queue. Nothing here depends on the
+    /// queue write running first; all it carries of this job is the
+    /// id-allocator bump, and the restore's wall-clock floor already
+    /// covers an allocator bump that never landed.
+    ///
+    /// Takes the `add_lock` guard by value: the history push belongs
+    /// inside the add transaction and the two store writes deliberately
+    /// do not, so the drop point is part of what this method is for.
+    fn file_never_queued(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        nzo_id: String,
+        why: String,
+        publish: std::sync::MutexGuard<'_, ()>,
+    ) -> Enqueued {
+        {
+            let mut g = job.lock_ok();
+            g.state = JobState::Failed;
+            g.paused = false;
+            g.priority = 0;
+            g.fail_message = why;
+            g.finished_at = Some(Instant::now());
+            g.finished_unix = Some(unix_now());
+        }
+        self.history.lock_ok().push(job.clone());
+        drop(publish);
+        let durable = self.history_upsert(std::slice::from_ref(job));
+        self.save_queue();
+        self.life_emit_parked(job);
+        self.history_enforce_retention();
+        self.enqueued(nzo_id, durable)
     }
 
     /// The one place an undurable accept is said out loud, so a caller

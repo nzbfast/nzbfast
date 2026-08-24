@@ -954,6 +954,18 @@ salva il browser, dove una pagina di login o di errore può arrivare con un nome
 <code>.nzb</code>. Disattivato, il file resta dove l'hai messo e il motivo compare
 invece sopra la coda. Un file che sembra soltanto incompleto viene lasciato al suo
 posto in entrambi i casi, perché potrebbe essere ancora in arrivo.</p>
+<p><b>Metti in coda i file NZB prodotti da un download</b> (disattivato per
+impostazione predefinita) copre il post contenitore: un piccolo NZB il cui contenuto
+è un altro <code>.nzb</code>. Con questa opzione attiva, un download che termina con
+un NZB tra i suoi file aggiunge quel NZB alla coda <i>in pausa</i>, così ne leggi la
+dimensione e lo avvii tu. Quell'avvio a mano è anche ciò che ferma una catena:
+niente prosegue senza di te. Scende di un solo livello, un NZB dentro un download
+arrivato a sua volta per questa via viene lasciato stare; i candidati oltre 32 MB
+vengono saltati, ne vengono presi al massimo 20 per download, e tutto ciò che non è
+un NZB leggibile resta su disco invece di essere indovinato. Una cosa non riesce a
+distinguerla: una release che porta semplicemente il proprio <code>.nzb</code>
+accanto al contenuto viene proposta anch’essa, quindi puoi vedere una riga in pausa
+per il download appena concluso. Elimina quella riga e non succede altro.</p>
 <p><b>Ricontrolla la cartella ogni</b> (un'impostazione avanzata) è una rete di
 sicurezza e nulla di più, quindi non è la manopola che rende rapidi i prelievi. Un file
 lasciato su questa macchina viene notato nel momento in cui arriva, perché lo dice il
@@ -1108,7 +1120,7 @@ l'aggiunta procede intatta e il log dice perché.</p>
 (un nuovo tentativo automatico ha rimesso in coda un download fallito) e
 <code>job.delete_kept</code> (un'eliminazione ha rimosso il record ma non è
 riuscita a rimuoverne i file), più <code>watch.picked</code> (un .nzb è stato
-prelevato dalla cartella sorvegliata), <code>watchlist.upgraded</code> (un
+prelevato dalla cartella sorvegliata), <code>nzb.refeed</code> (il file NZB di un download concluso è stato aggiunto alla coda, in pausa), <code>watchlist.upgraded</code> (un
 aggiornamento della watchlist è andato a buon fine e la copia superata è stata
 rimossa),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,

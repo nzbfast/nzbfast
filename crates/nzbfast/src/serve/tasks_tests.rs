@@ -298,7 +298,7 @@ fn prune_person_art_evicts_oldest_first_and_stops_at_the_cap() {
 }
 
 // ---------------------------------------------------------------------
-// 9. sample_ids
+// 9. sample_job
 // ---------------------------------------------------------------------
 
 fn epoch_now() -> i64 {
@@ -309,7 +309,7 @@ fn epoch_now() -> i64 {
 }
 
 #[test]
-fn sample_ids_excludes_recovery_volumes_and_wraps_ids() {
+fn sample_job_excludes_recovery_volumes_and_wraps_ids() {
     let dir = tdir("sample-ids");
     let now = epoch_now();
     let xml = format!(
@@ -337,19 +337,56 @@ fn sample_ids_excludes_recovery_volumes_and_wraps_ids() {
     );
     let path = dir.join("post.nzb");
     std::fs::write(&path, xml).unwrap();
-    let (ids, age) = super::sample_ids(&path, 64).expect("sampled");
-    assert!(ids.contains(&"<seg1@test>".to_string()));
-    assert!(ids.contains(&"<seg2@test>".to_string()));
+    let s = super::sample_job(&path, 64).expect("sampled");
+    assert!(s.ids.contains(&"<seg1@test>".to_string()));
+    assert!(s.ids.contains(&"<seg2@test>".to_string()));
     // The base .par2 index IS sampled; recovery volumes are not.
-    assert!(ids.contains(&"<par2main@test>".to_string()));
-    assert!(!ids.iter().any(|i| i.contains("vol@test")));
+    assert!(s.ids.contains(&"<par2main@test>".to_string()));
+    assert!(!s.ids.iter().any(|i| i.contains("vol@test")));
     // Age is the minimum over the sampled files: 2 days, not 5, not 0.
-    assert_eq!(age, 2);
+    assert_eq!(s.age_days, 2);
+
+    // TODO §282 item 2: the volume the payload sample skipped is
+    // sampled SEPARATELY, and the two lists never overlap.
+    let r = s
+        .recovery
+        .expect("a post with a volume has a recovery sample");
+    assert_eq!(r.ids, vec!["<vol@test>".to_string()]);
+    assert!(!r.ids.iter().any(|i| s.ids.contains(i)));
+    // Both PAR2 files, index and volume, are the set's reach.
+    assert_eq!(r.volumes, 2);
+    // Its own age, off the VOLUME's date (today), not the post's 2.
+    assert_eq!(r.age_days, 0);
+    // The BODY probe draws the index, which is the cheaper seed and the
+    // one that carries the Main packet in its first bytes.
+    assert_eq!(r.seed, vec!["<par2main@test>".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A post with no PAR2 at all has nothing to say about a recovery set,
+/// and must not manufacture an empty verdict for one.
+#[test]
+fn sample_job_has_no_recovery_half_without_par2() {
+    let dir = tdir("sample-nopar2");
+    let xml = format!(
+        r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject="data.bin yEnc (1/1)" date="{}">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="1000" number="1">seg1@test</segment></segments>
+ </file>
+</nzb>"#,
+        epoch_now() - 86_400
+    );
+    let path = dir.join("post.nzb");
+    std::fs::write(&path, xml).unwrap();
+    let s = super::sample_job(&path, 8).expect("sampled");
+    assert!(s.recovery.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn sample_ids_answers_none_for_volume_only_or_unreadable_posts() {
+fn sample_job_answers_none_for_volume_only_or_unreadable_posts() {
     let dir = tdir("sample-none");
     let xml = format!(
         r#"<?xml version="1.0"?>
@@ -363,8 +400,8 @@ fn sample_ids_answers_none_for_volume_only_or_unreadable_posts() {
     );
     let path = dir.join("vols.nzb");
     std::fs::write(&path, xml).unwrap();
-    assert!(super::sample_ids(&path, 8).is_none());
-    assert!(super::sample_ids(&dir.join("missing.nzb"), 8).is_none());
+    assert!(super::sample_job(&path, 8).is_none());
+    assert!(super::sample_job(&dir.join("missing.nzb"), 8).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

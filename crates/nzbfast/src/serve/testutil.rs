@@ -277,6 +277,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         cat_meta: Mutex::new(std::collections::HashMap::new()),
         watch_dir: Mutex::new(None),
         watch_keep_nzb: AtomicBool::new(false),
+        refeed_nzb: AtomicBool::new(false),
         watch_recursive: AtomicBool::new(false),
         watch_move_rejected: AtomicBool::new(false),
         watch_failed: Mutex::new(std::collections::HashMap::new()),

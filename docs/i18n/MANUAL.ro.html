@@ -918,6 +918,18 @@ pentru un dosar în care salvează browserul tău, unde o pagină de autentifica
 de eroare poate ajunge cu un nume <code>.nzb</code>. Dezactivat, fișierul rămâne unde
 l-ai pus, iar motivul e arătat deasupra cozii. Un fișier care doar pare incomplet e
 lăsat pe loc în ambele cazuri, fiindcă s-ar putea să fie încă în curs de sosire.</p>
+<p><b>Pune în coadă fișierele NZB pe care le produce o descărcare</b> (dezactivat
+implicit) acoperă postarea container: un NZB mic al cărui conținut este un alt
+<code>.nzb</code>. Cu această opțiune activă, o descărcare care se încheie cu un NZB
+printre fișierele sale adaugă acel NZB în coadă <i>în pauză</i>, ca să îi citiți
+dimensiunea și să îl porniți dumneavoastră. Pornirea aceasta manuală este și ceea ce
+oprește un lanț: nimic nu merge mai departe fără dumneavoastră. Coboară un singur
+nivel, un NZB dintr-o descărcare venită ea însăși pe această cale este lăsat în
+pace; candidații peste 32 MB sunt săriți, se iau cel mult 20 per descărcare, iar tot
+ce nu este un NZB lizibil rămâne pe disc în loc să fie ghicit. Un lucru nu îl poate
+deosebi: o lansare care pur și simplu își aduce propriul <code>.nzb</code> lângă
+conținut este oferită și ea, așa că puteți vedea un rând în pauză pentru descărcarea
+tocmai încheiată. Ștergeți acel rând și nu se mai întâmplă nimic.</p>
 <p><b>Reverifică dosarul la fiecare</b> (o setare avansată) e o plasă de siguranță și
 nimic mai mult, deci nu e butonul care face preluările rapide. Un fișier lăsat pe
 această mașină e observat în clipa în care aterizează, fiindcă sistemul o spune; acest
@@ -1072,7 +1084,7 @@ spune de ce.</p>
 (o reîncercare automată a repus în coadă o descărcare eșuată) și
 <code>job.delete_kept</code> (o ștergere a înlăturat înregistrarea, dar nu i-a
 putut înlătura fișierele), plus <code>watch.picked</code> (un .nzb a fost luat din
-folderul urmărit), <code>watchlist.upgraded</code> (o îmbunătățire din lista de
+folderul urmărit), <code>nzb.refeed</code> (fișierul NZB al unei descărcări încheiate a fost adăugat în coadă, în pauză), <code>watchlist.upgraded</code> (o îmbunătățire din lista de
 urmărire a reușit, iar copia înlocuită a fost ștearsă),
 <code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
 <code>storage.slow</code> și <code>quota.reached</code>. Fiecare poartă

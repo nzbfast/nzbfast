@@ -450,3 +450,104 @@ async fn damage_in_a_plain_set_member_leaves_the_volumes_one_pass() {
         );
     }
 }
+
+/// TODO §282 item 15, at the surface the operator actually reads.
+///
+/// On a real daemon, 24 Aug 2026 00:36Z, a 1024 MB recovery fetch came
+/// back with 68.9 MB and 1206 article failures and the decline read
+/// `mapped repair declined (recovery set malformed: 0 recovery slice(s)
+/// for 163 missing block(s))`. The set was not malformed. Every one of
+/// its volumes was fine on the poster's side; the provider simply would
+/// not serve them, and at a 5.25 MB block size across ~800 KB articles
+/// not one slice landed whole. (Measured afterwards on the leftover
+/// volumes: 0.9% to 5.5% of their bytes present, six torn RecvSlic
+/// packets between them, zero valid ones - so the ZERO was arithmetic,
+/// and only the word for it was wrong.)
+///
+/// This drives that exact shape: enough recovery declared in the NZB to
+/// clear the mapped path's `have < needed` bail, and every recovery
+/// VOLUME article dead, so the fetch returns nothing usable. The teeth
+/// are the two clauses together - the verdict names a shortfall rather
+/// than a malformed set, and it says the fetch is where the data went
+/// missing, which is what tells the reader to look at the provider
+/// instead of at the PAR2 parser.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unservable_recovery_set_declines_as_short_not_malformed() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("recovery-unservable");
+    let notes = payload(600_000, 23);
+    fx.add_file("notes.bin", &notes, 60_000);
+    assert!(
+        fx.add_par2(50, &["notes.bin"], 60_000),
+        "par2 create failed"
+    );
+
+    // Damage first: several payload articles gone, so the repair needs
+    // more blocks than the bootstrap index alone can ever hold.
+    let mut missing: std::collections::HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("notes_bin"))
+        .filter(|k| {
+            ["-2@mock>", "-4@mock>", "-6@mock>"]
+                .iter()
+                .any(|s| k.ends_with(s))
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !missing.is_empty(),
+        "the fixture must post multi-article files"
+    );
+    // Then the recovery set itself: every VOLUME article 430s while the
+    // index `.par2` still serves, which is the incident's shape - the
+    // set is discovered and believed, and none of its slices can be had.
+    let dead_volumes: Vec<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("vol") && k.contains("par2"))
+        .cloned()
+        .collect();
+    assert!(
+        !dead_volumes.is_empty(),
+        "the fixture must post recovery volumes for this rig to mean anything"
+    );
+    missing.extend(dead_volumes);
+
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            missing,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let (log, _ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+
+    assert!(
+        log.contains("mapped repair declined"),
+        "the mapped lane never reached its shortfall verdict:\n{log}"
+    );
+    assert!(
+        log.contains("recovery data short") && log.contains("usable recovery slice(s)"),
+        "the verdict must name the shortfall:\n{log}"
+    );
+    assert!(
+        !log.contains("recovery set malformed"),
+        "an unservable recovery set is not a malformed one:\n{log}"
+    );
+    assert!(
+        log.contains("the recovery fetch lost"),
+        "the verdict must say the FETCH is where the recovery data went, \
+         which is the whole difference between a bad post and a bad \
+         provider:\n{log}"
+    );
+}

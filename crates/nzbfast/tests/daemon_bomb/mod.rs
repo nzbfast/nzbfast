@@ -18,11 +18,16 @@
 //! neither CI container nor the Windows runners. Injecting the ANSWER is
 //! portable everywhere and moves the very number the whole ladder reads.
 //!
-//! Five of the six legs here inject a single fixed number. The sixth -
-//! the recovery-record rung, TODO §249 item 2 - injects a SCHEDULE,
-//! because the rung it drives is entered only when the rungs above it
+//! Six of the eight legs here inject a single fixed number. The other
+//! two - the recovery-record rung, TODO §249 item 2, and the hinted
+//! form's second-pass exit, §249's residue - inject a SCHEDULE, because
+//! the extraction each drives is entered only when an attempt above it
 //! failed for a reason that was NOT the disk, so no single number can
-//! reach it.
+//! reach it. The rung's THIRD caller (`settle_without_set`, the arm a
+//! post with no activated PAR2 set takes) is back on a fixed number and
+//! that is not an inconsistency: nothing sits above the recovery records
+//! in that arm, so its extraction is the first free-space reading its
+//! thread ever takes.
 //!
 //! A submodule of the daemon target rather than its own `tests/*.rs`,
 //! for the reason every sibling here is one: a top-level file would
@@ -190,8 +195,22 @@ fn assert_refused_keeping(port: u16, kept: &str, slot: &serde_json::Value, log: 
     // back into the queue.
     let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
     let nzo = slot["nzo_id"].as_str().unwrap_or_default();
+    // The SLOTS array, not the payload TEXT. A `q.contains(nzo)` reads
+    // true off the `whyslow` diagnostic block, which carries the last
+    // job's own `nzo_id` and rides the queue payload even when the queue
+    // is empty (`"slots":[]`, `noofslots: 0`). That made this assertion
+    // fire on a job whose download was slow enough to arm whyslow and
+    // pass on one that finished too fast for it - measured 24 Aug 2026
+    // at 2 runs in 12 on the hinted leg, which is the biggest fixture
+    // here and so the slowest download.
+    let requeued = serde_json::from_str::<serde_json::Value>(&q)
+        .ok()
+        .and_then(|v| v["queue"]["slots"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|s| s["nzo_id"].as_str() == Some(nzo));
     assert!(
-        !q.contains(nzo),
+        !requeued,
         "the job was requeued instead of failed: {q}\n--- log ---\n{log}"
     );
     assert!(
@@ -742,14 +761,15 @@ async fn a_bomb_after_a_par2_repair_reaches_the_job_message() {
 const ROOMY_FREE: &str = "9000000000";
 
 /// A compressed multivolume RAR5 set with a 20% recovery record in every
-/// volume, one volume byte-damaged in the middle of its payload.
+/// volume, and no damage at all.
 ///
-/// The same fixture shape `rarfix/rrhint_tests.rs` builds, for the same
-/// reason: the damage is real (the split member carries a CRC, so a
-/// blind extraction of it refuses) and the records are big enough to
-/// undo it, which is exactly the set that fails the first rung for a
-/// reason that is not the disk and then EXTRACTS on the third.
-fn damaged_rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
+/// The same fixture shape `rarfix/rrhint_tests.rs` builds. Split out of
+/// [`damaged_rr_set`] for the no-set leg, which wants its damage to
+/// arrive as a CORRUPT ARTICLE rather than as a byte-patched file: that
+/// leg is reached only when the download itself is short or damaged
+/// (`settle_without_set` opens on `incomplete == 0 && derrs == 0`), so a
+/// set that arrives whole never gets there however damaged its bytes.
+fn rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
     use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
     // COMPRESSIBLE, and that is load-bearing rather than incidental: the
     // top-level chase gate this leg's daemon closes only diverts a
@@ -793,11 +813,21 @@ fn damaged_rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
         "expected a multivolume set, got {}",
         volumes.len()
     );
-    let mut out: Vec<(String, Vec<u8>)> = volumes
+    volumes
         .iter()
         .enumerate()
         .map(|(i, bytes)| (format!("{name}.part{:02}.rar", i + 1), bytes.clone()))
-        .collect();
+        .collect()
+}
+
+/// [`rr_set`] with one volume byte-damaged in the middle of its payload.
+///
+/// The damage is real (the split member carries a CRC, so a blind
+/// extraction of it refuses) and the records are big enough to undo it,
+/// which is exactly the set that fails the first rung for a reason that
+/// is not the disk and then EXTRACTS on the third.
+fn damaged_rr_set(name: &str) -> Vec<(String, Vec<u8>)> {
+    let mut out = rr_set(name);
     // One volume, one run of flipped bytes a third of the way in, 1% of
     // the volume - inside the 20% record even on the short last volume.
     let bad = &mut out[2].1;
@@ -1065,6 +1095,467 @@ fn assert_third_rung_refused(log: &str) {
             .iter()
             .any(|l| l.contains("not retrying with unrar, volumes kept")),
         "the extraction under the repair did not refuse for the disk:\n{log}"
+    );
+}
+
+/// The SECOND caller of the same rung, and a route the leg above cannot
+/// reach: `get::settle::settle_without_set`, the arm a post with no
+/// activated PAR2 set takes.
+///
+/// TODO §249's closing note left this one named and unproved. It calls
+/// the BLIND form (`rarfix::try_rar_rr_repair_why`) and was dropping
+/// every verdict for the same cause the leg above found and fixed - the
+/// `stats.skipped.is_empty()` exit threw the first attempt's reason
+/// away - so "unblocked by that fix" was an inference about a line
+/// nothing had ever driven. This drives it.
+///
+/// Three things about the fixture, each of which is the shortest way in
+/// rather than a preference.
+///
+/// **No PAR2 anywhere.** The arm is selected by `verifier.set()` being
+/// `None`, so the post carries the RAR volumes and nothing else. That
+/// makes this the one leg in the family that needs no `par2` binary and
+/// so no `have_par2` guard: there is no PAR2 report to build a hint
+/// from, which is exactly what the BLIND form means.
+///
+/// **The damage arrives as a corrupt ARTICLE.** The arm opens on
+/// `incomplete == 0 && derrs == 0`, so a set that arrives whole never
+/// reaches the rung however damaged its bytes are on disk - which is why
+/// this posts [`rr_set`] (clean) and lets the mock server flip a byte in
+/// one middle article instead of posting [`damaged_rr_set`]. One article
+/// is ~2% of a volume, comfortably inside the 20% record that then
+/// repairs it.
+///
+/// **The set is posted BARE**, with no stored outer wrapper. The wrapper
+/// the leg above needs is a property of `unpack::unpack_named_rar`,
+/// which is the NESTED pass and runs after this one; the settle rung
+/// works on whatever volume files are in the output directory, and
+/// `NZBFAST_NO_TOP_RAR_CHASE=1` puts them there.
+///
+/// And a FIXED free-space number, where the leg above needs a schedule.
+/// That is not a shortcut, it is the shape of the arm: the rung the leg
+/// above drives is the THIRD of `unpack_named_rar`'s three, so a number
+/// low enough to bomb it bombs the first one too and the job never
+/// arrives - which is the whole reason the schedule spelling exists.
+/// This arm has no rung above the recovery records at all, so the
+/// extraction under the repair is the first free-space reading its
+/// thread ever takes (measured 24 Aug 2026: "reading 1 on thread N",
+/// immediately under "unpacking archive natively"). A fixed number is
+/// therefore both sufficient and steadier - it cannot be knocked off by
+/// a read count that shifts under an unrelated change.
+///
+/// The route is unusually cheap to pin here, and worth saying why: every
+/// arm of the unpack tail below this one - the demoted-volume ladder,
+/// the SFX pass, the nested pass - is gated on `all_good`, which this
+/// refusal has just cleared. So nothing downstream can compose the same
+/// sentence, and the message the job carries is this rung's or nothing.
+///
+/// Verified red against dropping the `reextract_failed = Some(why)` at
+/// `get/settle.rs`'s no-set arm, and the failure is the exact wrong
+/// blame TODO §249 is about: the console names the disk while the job
+/// reads "the articles did not decode".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bomb_on_the_no_set_arms_recovery_records_reaches_the_job_message() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-bombnoset-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let name = "Bomb.Noset.2026";
+    let volumes = rr_set("Inner.Set");
+    let lead = volumes[0].0.clone();
+    let mut articles = HashMap::new();
+    let mut files: Vec<(String, Vec<(String, u64, u32)>)> = Vec::new();
+    let mut corrupt: Option<String> = None;
+    for (i, (vol, bytes)) in volumes.iter().enumerate() {
+        let segs = make_file_articles(vol, bytes, 1_500, &format!("ns{i}"), &mut articles);
+        // One middle article of ONE volume: the head carries the volume
+        // headers, and holing those is a different failure from a holed
+        // payload block - the recovery records are for the second.
+        if i == 1 {
+            assert!(
+                segs.len() > 3,
+                "want a multi-article volume, got {}",
+                segs.len()
+            );
+            corrupt = Some(segs[segs.len() / 2].0.clone());
+        }
+        files.push((vol.clone(), segs));
+    }
+    let xml = nzb_xml(&files);
+    let chaos = Chaos {
+        corrupt: [format!("<{}>", corrupt.expect("a volume to damage"))]
+            .into_iter()
+            .collect(),
+        ..Chaos::default()
+    };
+    let srv = MockServer::start(articles, chaos).await;
+
+    let cfg = rr_config(&dir, &srv);
+    let d = serve(&dir, |port| {
+        rr_daemon_cmd(&cfg, &dir.join("complete"), port, FAKE_FREE)
+    })
+    .await;
+    let port = d.port;
+    let logpath = d.log_path();
+
+    let xml2 = xml.clone();
+    let lead2 = lead.clone();
+    tokio::task::spawn_blocking(move || {
+        let slot = add_and_settle(port, name, &xml2);
+        let log = std::fs::read_to_string(&logpath).unwrap_or_default();
+        assert_refused_keeping(port, &lead2, &slot, &log);
+        assert_no_set_rung_refused(&log);
+    })
+    .await
+    .unwrap();
+    drop(d);
+
+    // The control, on the same terms as the leg above's: same fixture,
+    // same corrupt article, same switches, an all-roomy schedule. It
+    // must finish Completed with the payload published, which is what
+    // proves the recovery records really did put the set right and the
+    // refusal above really is the disk.
+    let ctl_dir = dir.join("ctl");
+    let ctl_cfg = rr_config(&ctl_dir, &srv);
+    let ctl = serve(&ctl_dir, |port| {
+        rr_daemon_cmd(&ctl_cfg, &ctl_dir.join("complete"), port, ROOMY_FREE)
+    })
+    .await;
+    let cport = ctl.port;
+    let ctl_log = ctl.log_path();
+    let cdir = ctl_dir.join("complete");
+    tokio::task::spawn_blocking(move || {
+        let slot = add_and_settle(cport, name, &xml);
+        let log = std::fs::read_to_string(&ctl_log).unwrap_or_default();
+        assert_eq!(
+            slot["status"], "Completed",
+            "the repaired set must unpack on a roomy disk, or the refusal \
+             above proves nothing about this arm: {slot}\n--- log ---\n{log}"
+        );
+        assert!(
+            log.contains("PAR2 exhausted - trying embedded RAR recovery records"),
+            "the control never reached the recovery-record rung:\n{log}"
+        );
+        assert!(
+            !log.contains("decompression bomb"),
+            "the guard refused a set that fits:\n{log}"
+        );
+        assert!(
+            find_named(&cdir, "data.bin"),
+            "unpacked payload missing:\n{log}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The route, on the no-set leg: no PAR2 set ever activated, the
+/// recovery-record rung ran inside the SETTLE phase, and the verdict the
+/// job carries came out of the extraction below that repair - with the
+/// unpack tail's own ladder never reached at all.
+fn assert_no_set_rung_refused(log: &str) {
+    // The BARE-INTEGER spelling, and the assertion is here to say so:
+    // this arm is the one place in the family where a fixed number is
+    // the right seam, and a schedule appearing on this leg would mean
+    // somebody had to place an answer, which would mean a rung had
+    // grown above the one under test.
+    assert!(
+        !log.contains("NZBFAST_TEST_FREE_BYTES is set to a schedule"),
+        "this arm wants the fixed spelling - a schedule here means a rung \
+         grew above the one under test:\n{log}"
+    );
+    // The arm: this really is `settle_without_set`, not the set-side
+    // ladder with the same rung at the bottom of it.
+    assert!(
+        !log.contains("repair complete"),
+        "a PAR2 set repaired here, so this is not the no-set arm:\n{log}"
+    );
+    let rung = log
+        .lines()
+        .position(|l| l.contains("PAR2 exhausted - trying embedded RAR recovery records"))
+        .unwrap_or_else(|| panic!("the recovery-record rung never ran:\n{log}"));
+    assert!(
+        !log.contains("recovery-record repair could not save the set"),
+        "the repair failed, so the extraction under it never happened:\n{log}"
+    );
+    // And the verdict came from BELOW that line. Same reasoning as
+    // `assert_third_rung_refused`: a schedule that placed the tight
+    // answer one entry early would refuse somewhere else, keep the
+    // volumes, name the disk and pass every assertion in
+    // `assert_refused_keeping` while proving nothing.
+    let lines: Vec<&str> = log.lines().collect();
+    let (before, after) = lines.split_at(rung);
+    assert!(
+        !before.iter().any(|l| nzbkit::disk::bomb_verdict(l)),
+        "something ABOVE the recovery records raised the verdict:\n{log}"
+    );
+    assert!(
+        after.iter().any(|l| nzbkit::disk::bomb_verdict(l)),
+        "the recovery-record rung's extraction never raised a verdict:\n{log}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|l| l.contains("not retrying with unrar, volumes kept")),
+        "the extraction under the repair did not refuse for the disk:\n{log}"
+    );
+    // …and the unpack tail below never composed a sentence of its own.
+    // Every arm down there is gated on `all_good`, which this refusal
+    // cleared - so a message that named the archive would mean the
+    // settle site dropped the reason, which is the defect this leg is
+    // the proof against.
+    assert!(
+        !log.contains("the verified volumes could not be unpacked"),
+        "the unpack tail ran its own ladder over the refused set:\n{log}"
+    );
+}
+
+/// The THIRD caller of the rung, and the one exit of it nothing had ever
+/// driven: `get::settle::run_set_repair`'s PAR2-exhausted arm, calling
+/// the HINTED form with a real `DamageHint`, on a hint that SKIPPED
+/// volumes.
+///
+/// `try_rar_rr_repair_hinted_why` has two extraction attempts. When the
+/// hint skipped nothing it ends on the first, which is the exit the two
+/// legs above drive (and the exit that was silently dropping its
+/// reason). When the hint DID skip, the first attempt's reason is
+/// dropped on purpose - the comment at that line says why, and TODO §249
+/// registers the question of whether it should be as an open decision -
+/// and the rung carries out the SECOND pass's verdict instead. That exit
+/// is the last line of the function and had never been reached by
+/// anything.
+///
+/// The fixture is the one shape that reaches it, and each half is doing
+/// a job:
+///
+/// - the set carries TWO damages. One is baked into a volume's bytes
+///   BEFORE the PAR2 set is created over them, so PAR2 hashes the damage
+///   and swears the volume is intact - that is the wrong hint the second
+///   pass exists to correct. The other arrives as corrupt ARTICLES in a
+///   different volume, which is what PAR2 does see.
+/// - the recovery set is deliberately too small to repair the damage it
+///   sees (two recovery blocks against a handful of bad ones), so PAR2
+///   is genuinely exhausted and the rung is reached at all.
+/// - each volume still carries its own 20% recovery record, so the RR
+///   pass repairs the volume PAR2 named, extraction still fails on the
+///   volume PAR2 vouched for, and the second pass over the skipped
+///   volumes is what puts THAT right.
+///
+/// The schedule then places the tight answer on the extraction under the
+/// SECOND pass, leaving the first one roomy - so the verdict that
+/// reaches the job cannot be the first attempt's, and the assertions
+/// below pin it to the far side of the "running the recovery records
+/// over the skipped volume(s) too" line.
+///
+/// Verified red BOTH ways, because this exit has two carriers and either
+/// one dropping it puts the wrong blame on the job: against dropping the
+/// `reextract_failed = Some(why)` at `get/settle.rs`'s PAR2-exhausted
+/// arm, and against `.map_err(|_| None)` on the rung's own last line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bomb_on_the_hinted_rungs_second_pass_reaches_the_job_message() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nzbfast-bombhint-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let name = "Bomb.Hint.2026";
+    // Damaged BEFORE the PAR2 set is built over it: the set then hashes
+    // the damage, and every later verify swears that volume is fine.
+    let volumes = damaged_rr_set("Inner.Set");
+    let lead = volumes[0].0.clone();
+    let build = dir.join("fixture");
+    std::fs::create_dir_all(&build).unwrap();
+    for (vol, bytes) in &volumes {
+        std::fs::write(build.join(vol), bytes).unwrap();
+    }
+    // Two recovery blocks over 4 KB source blocks - enough for the set
+    // to activate and report per-block verdicts, nowhere near enough to
+    // repair the corrupt articles below. A recovery set that COULD
+    // repair them never reaches the rung at all.
+    let mut create = Command::new("par2");
+    create.args(["create", "-s4096", "-c2", "-q", "testset"]);
+    for (vol, _) in &volumes {
+        create.arg(vol);
+    }
+    let st = create.current_dir(&build).status().expect("par2 create");
+    assert!(st.success(), "par2 create failed: {st}");
+
+    let mut articles = HashMap::new();
+    let mut files: Vec<(String, Vec<(String, u64, u32)>)> = Vec::new();
+    let mut corrupt: Vec<String> = Vec::new();
+    for (i, (vol, bytes)) in volumes.iter().enumerate() {
+        let segs = make_file_articles(vol, bytes, 1_500, &format!("hv{i}"), &mut articles);
+        // The damage PAR2 CAN see, in a volume that is not the
+        // byte-damaged one: four articles spread across the volume, so
+        // they land in four separate 4 KB source blocks and outrun the
+        // two recovery blocks - while staying well inside the 20%
+        // record that repairs the volume on the hinted pass.
+        if i == 0 {
+            assert!(segs.len() > 20, "want a long volume, got {}", segs.len());
+            let step = segs.len() / 5;
+            corrupt.extend((1..=4).map(|k| format!("<{}>", segs[k * step].0)));
+        }
+        files.push((vol.clone(), segs));
+    }
+    let mut par2s: Vec<PathBuf> = std::fs::read_dir(&build)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "par2"))
+        .collect();
+    par2s.sort();
+    assert!(!par2s.is_empty(), "par2 create produced no recovery files");
+    for (i, p) in par2s.iter().enumerate() {
+        let pname = p.file_name().unwrap().to_string_lossy().to_string();
+        let data = std::fs::read(p).unwrap();
+        let segs = make_file_articles(&pname, &data, 4_000, &format!("hp{i}"), &mut articles);
+        files.push((pname, segs));
+    }
+    let xml = nzb_xml(&files);
+    let chaos = Chaos {
+        corrupt: corrupt.into_iter().collect(),
+        ..Chaos::default()
+    };
+    let srv = MockServer::start(articles, chaos).await;
+
+    let cfg = rr_config(&dir, &srv);
+    let d = serve(&dir, |port| {
+        // Two entries, and they are the rung's two extractions: the
+        // hinted pass's (roomy - it must fail on the damage PAR2
+        // vouched for, not on the disk) and the one under the second
+        // pass (tight). Measured 24 Aug 2026 - those are readings 1 and
+        // 2 on the tail's thread, and nothing else on it reads free
+        // space in between.
+        let mut c = rr_daemon_cmd(
+            &cfg,
+            &dir.join("complete"),
+            port,
+            &format!("{ROOMY_FREE},{FAKE_FREE}"),
+        );
+        // The file-based PAR2 path, so the arm under test is the one
+        // that ends at the recovery-record rung. A mapped repair that
+        // succeeded would finish the job before it.
+        c.env("NZBFAST_NO_NATIVE_REPAIR", "1");
+        c
+    })
+    .await;
+    let port = d.port;
+    let logpath = d.log_path();
+
+    let xml2 = xml.clone();
+    let lead2 = lead.clone();
+    tokio::task::spawn_blocking(move || {
+        let slot = add_and_settle(port, name, &xml2);
+        let log = std::fs::read_to_string(&logpath).unwrap_or_default();
+        assert_refused_keeping(port, &lead2, &slot, &log);
+        assert_second_pass_refused(&log);
+    })
+    .await
+    .unwrap();
+    drop(d);
+
+    // The control, and here it is carrying the heaviest load of the
+    // three in this family: the SAME fixture with an all-roomy schedule
+    // must finish Completed and publish `data.bin`, which is what proves
+    // the second pass really did put the volume PAR2 vouched for right.
+    // Without it, a job that failed at the first extraction for some
+    // unrelated reason would look identical from the outside.
+    let ctl_dir = dir.join("ctl");
+    let ctl_cfg = rr_config(&ctl_dir, &srv);
+    let ctl = serve(&ctl_dir, |port| {
+        let mut c = rr_daemon_cmd(
+            &ctl_cfg,
+            &ctl_dir.join("complete"),
+            port,
+            &format!("{ROOMY_FREE},{ROOMY_FREE}"),
+        );
+        c.env("NZBFAST_NO_NATIVE_REPAIR", "1");
+        c
+    })
+    .await;
+    let cport = ctl.port;
+    let ctl_log = ctl.log_path();
+    let cdir = ctl_dir.join("complete");
+    tokio::task::spawn_blocking(move || {
+        let slot = add_and_settle(cport, name, &xml);
+        let log = std::fs::read_to_string(&ctl_log).unwrap_or_default();
+        assert_eq!(
+            slot["status"], "Completed",
+            "the twice-repaired set must unpack on a roomy disk, or the \
+             refusal above proves nothing about the second pass: {slot}\n\
+             --- log ---\n{log}"
+        );
+        assert!(
+            log.contains("running the recovery records over the"),
+            "the control never reached the second pass:\n{log}"
+        );
+        assert!(
+            !log.contains("decompression bomb"),
+            "the guard refused a set that fits:\n{log}"
+        );
+        assert!(
+            find_named(&cdir, "data.bin"),
+            "unpacked payload missing:\n{log}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The route, on the hinted leg: PAR2 ran out, the hint really did skip
+/// volumes, the first extraction really did fail without naming the
+/// disk, and the verdict the job carries came out of the extraction
+/// under the SECOND pass.
+fn assert_second_pass_refused(log: &str) {
+    assert!(
+        log.contains("NZBFAST_TEST_FREE_BYTES is set to a schedule"),
+        "the free-space schedule never announced itself:\n{log}"
+    );
+    assert!(
+        log.contains("PAR2 exhausted - trying embedded RAR recovery records")
+            && log.contains("(PAR2 verdict in hand)"),
+        "the rung did not run with a hint, so this is the blind form:\n{log}"
+    );
+    // The premise the whole leg rests on: the hint SKIPPED something. A
+    // hint that skipped nothing takes the first-attempt exit, and this
+    // leg would then be a second proof of the one above it.
+    assert!(
+        log.lines()
+            .any(|l| l.contains("volume(s) PAR2 proved intact") && !l.contains("skipped 0 ")),
+        "the hint skipped nothing, so the second pass was never reachable:\n{log}"
+    );
+    let second = log
+        .lines()
+        .position(|l| l.contains("running the recovery records over the"))
+        .unwrap_or_else(|| panic!("the second pass never ran:\n{log}"));
+    assert!(
+        !log.contains("recovery-record repair could not save the set"),
+        "a pass failed, so the extraction under it never happened:\n{log}"
+    );
+    // And the verdict is the SECOND pass's. Split at that line rather
+    // than counted: both attempts print the same two sentences, and a
+    // schedule that put the tight answer on the FIRST one would refuse
+    // with an identical job message while proving nothing about the exit
+    // this leg exists for.
+    let lines: Vec<&str> = log.lines().collect();
+    let (before, after) = lines.split_at(second);
+    assert!(
+        !before.iter().any(|l| nzbkit::disk::bomb_verdict(l)),
+        "the FIRST extraction raised the verdict, so this is not the \
+         second pass's:\n{log}"
+    );
+    assert!(
+        after.iter().any(|l| nzbkit::disk::bomb_verdict(l)),
+        "the extraction under the second pass never raised a verdict:\n{log}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|l| l.contains("not retrying with unrar, volumes kept")),
+        "the extraction under the second pass did not refuse for the disk:\n{log}"
     );
 }
 

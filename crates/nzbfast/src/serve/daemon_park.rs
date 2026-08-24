@@ -810,12 +810,15 @@ impl Daemon {
             }
             g.held_for == failed_id
         }
-        let (id, failed, key, demote, stale) = {
+        let (id, failed, key, nzb_path, demote, stale) = {
             let g = job.lock_ok();
             (
                 g.nzo_id.clone(),
                 g.state == JobState::Failed,
                 g.dupe_key.clone(),
+                // TODO 282 item 6: the promote scan compares posts, and
+                // this is where the failed one's articles are read from.
+                g.nzb_path.clone(),
                 g.demote,
                 // Read under the SAME hold as the rest: a test separated
                 // from the first write it guards is not a guard.
@@ -1173,42 +1176,67 @@ impl Daemon {
             // parse_release is real parsing work, and running it under
             // the lock scaled with the number of held duplicates while
             // every API request waited (issue #38 follow-up).
-            let candidates: Vec<(Arc<Mutex<Job>>, String)> = self
+            //
+            // The spool path rides along for TODO 282 item 6: `spare`
+            // reads both NZBs to refuse a candidate that is the SAME
+            // POST as the job that just failed - a byte-different NZB
+            // of identical articles, which fails identically and shows
+            // the user the same failure twice. It also breaks a rank tie
+            // toward a candidate on a different group and poster (item
+            // 7). Both degrade to the pre-282 pure-rank pick when a
+            // spool file cannot be read; see `spare::best_alternative`.
+            let candidates: Vec<(Arc<Mutex<Job>>, String, PathBuf)> = self
                 .queue
                 .lock_ok()
                 .iter()
                 .filter_map(|j| {
                     let g = j.lock_ok();
                     (g.priority == -3 && g.paused && held_against(&g, &id, &key))
-                        .then(|| (j.clone(), g.name.clone()))
+                        .then(|| (j.clone(), g.name.clone(), g.nzb_path.clone()))
                 })
                 .collect();
-            let mut best: Option<(u32, &Arc<Mutex<Job>>)> = None;
-            for (j, name) in &candidates {
-                let rank = crate::watchlist::quality_rank(&crate::wall::parse_release(name));
-                // Ties keep the earlier-added one, which is the
-                // old behaviour and is as good a tiebreak as any.
-                if best.is_none_or(|(r, _)| rank > r) {
-                    best = Some((rank, j));
-                }
-            }
-            if let Some((rank, j)) = best {
+            let named: Vec<(String, PathBuf)> = candidates
+                .iter()
+                .map(|(_, n, p)| (n.clone(), p.clone()))
+                .collect();
+            let promoted = spare::best_alternative(&nzb_path, &named).and_then(|(i, rank)| {
+                let j = &candidates[i].0;
                 let mut g = j.lock_ok();
                 // Re-check now that the queue lock has been dropped and
                 // retaken a world away: a delete landing in the gap sets
                 // tombstone, and promoting a just-deleted alternative
                 // would start downloading the very title the user
                 // cancelled.
-                if g.priority == -3 && g.paused && !g.tombstone && held_against(&g, &id, &key) {
-                    g.paused = false;
-                    g.priority = 0;
-                    info!(
-                        target: "queue",
-                        "{} promoted (best held duplicate of failed {id}, rank {rank})",
-                        g.nzo_id
-                    );
-                }
+                (g.priority == -3 && g.paused && !g.tombstone && held_against(&g, &id, &key)).then(
+                    || {
+                        g.paused = false;
+                        g.priority = 0;
+                        info!(
+                            target: "queue",
+                            "{} promoted (best held duplicate of failed {id}, rank {rank})",
+                            g.nzo_id
+                        );
+                        g.nzo_id.clone()
+                    },
+                )
+            });
+            // The spares that did NOT win are still held against a job
+            // that has just left the queue, so nothing will ever park it
+            // again and `held_against` can never match them. Point them
+            // at the row that took its place, or a grab that held two
+            // spares only ever tries one.
+            if let Some(next) = promoted {
+                self.repoint_spares(&id, &next);
             }
+        }
+        // TODO 282 item 5's other half: a job that COMPLETED (or that
+        // the user deleted) has nothing left for a spare to be a spare
+        // for, and a row this daemon added that outlives its reason is
+        // §4b's junk queue arriving by a new road. An armed auto-retry
+        // is neither - the job is coming back through the queue in
+        // minutes and its spares must be waiting when it does.
+        if (!failed || tombstone) && !armed_auto_retry {
+            self.drop_spares_for(&id);
         }
         // Coalesced: the record is already durable in history.jsonl (the
         // upsert above), and load_queue resolves a torn queue/history

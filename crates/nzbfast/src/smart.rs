@@ -3914,6 +3914,8 @@ pub use pwassoc::{dominant_poster, nzb_poster, order_passwords, record_password_
 mod sample;
 pub(crate) use sample::skippable_samples;
 use sample::{is_deletable_sample, is_sample_clip, is_sample_named};
+mod audioname;
+pub use audioname::rename_obfuscated_audio;
 mod videoext;
 use videoext::video_ext;
 
