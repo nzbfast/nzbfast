@@ -255,7 +255,12 @@ pub(super) struct CatMeta {
 
 pub struct Daemon {
     /// Streaming handle into the active download (M11).
-    pub hub: Arc<crate::StreamHub>,
+    // `pub(crate)`, not `pub`: `StreamHub` is a `pub(crate)` type, so a
+    // `pub` field naming it is `private_interfaces` - a DENY under the
+    // clippy gate, and it took main red on 24 Aug 2026. Narrowed rather
+    // than widening `StreamHub`, because every reader of this field is
+    // inside this crate and the type is not part of any public surface.
+    pub(crate) hub: Arc<crate::StreamHub>,
     /// Paused: no NEW job starts (the active transfer finishes).
     pub paused: std::sync::atomic::AtomicBool,
     /// OFFLINE: touch no provider at all, and hang up everything already
@@ -1462,7 +1467,9 @@ pub struct Daemon {
     /// §210: the interface carrying traffic to the news servers, as
     /// last probed (None = not yet, or unjudgeable: container, no
     /// probe on this platform). Read by `update_tune_hint`.
-    pub local_link: Mutex<Option<super::locallink::LocalLink>>,
+    // `pub(crate)` for the reason given at `hub` above: `LocalLink` is a
+    // `pub(crate)` type.
+    pub(crate) local_link: Mutex<Option<super::locallink::LocalLink>>,
     /// CPU% sampling state for stats: (sample time, cpu-secs, last pct).
     pub(super) cpu_sample: Mutex<Option<(Instant, f64, f64)>>,
     /// Rolling (time, decoded-bytes) samples for the live speed readout -
@@ -1812,6 +1819,9 @@ pub struct Daemon {
     /// .spool/giveup-state.json. Arc'd so the *arr-calling thread can
     /// release the action latch when the remote work fails.
     pub(super) giveup: Arc<Mutex<super::giveup::GiveupState>>,
+    /// §282 section C: the replacement hunt's work queue. Its ceilings
+    /// are item 13's and live on `alt` above (see `serve/hunt.rs`).
+    pub(super) hunt: super::hunt::HuntState,
     /// Where UI-changed settings persist (next to the server config).
     pub(super) settings_path: PathBuf,
     /// M31b "your wall": cached taste profile (built from completed
@@ -1900,101 +1910,6 @@ pub struct DaemonEvent {
 /// Cap for [`Daemon::events`], matching the pool ring's reasoning: a
 /// bounded window the UI can always afford to serve.
 const DAEMON_EVENT_RING: usize = 256;
-
-/// How long a server must have been granting NO sessions before the
-/// queue row says so, in seconds. Long enough that an ordinary redial,
-/// a capacity bounce or a router blip passes unremarked; short enough
-/// that a user watching a row at 0 B/s is told why well inside the
-/// pool's ~10 minute outage horizon.
-///
-/// Env-tunable for tests only - nothing in the UI offers it.
-pub fn server_down_secs() -> u64 {
-    std::env::var("NZBFAST_SERVER_DOWN_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60)
-}
-
-/// A configured server that is granting no sessions right now, as the
-/// API and the queue row report it. Sampled from the live pool, which
-/// is why it only exists while something is downloading.
-#[derive(Debug, Clone)]
-pub struct ServerOutage {
-    pub host: String,
-    /// Unix ms the episode began. Stable for its whole life (the gauge
-    /// is set once and cleared on recovery), so it is what identifies
-    /// an episode - `secs` drifts by a tick and cannot.
-    pub since_ms: u64,
-    /// Seconds since the first dial of this episode failed.
-    pub secs: u64,
-    /// `unreachable` | `refused` | `capacity` - see
-    /// [`nzbkit::pool::DownReason`].
-    pub kind: &'static str,
-    /// The server's own words, verbatim.
-    pub detail: String,
-}
-
-/// Which outage the QUEUE ROW reports, if any, and as which token.
-///
-/// Two rules, both deliberate. The row speaks only while the job is in
-/// an open stall episode: a dead backup on a job downloading at full
-/// speed belongs on the Providers card, not as an alarm on a working
-/// row. And the outage must have outlived [`server_down_secs`], so an
-/// ordinary redial or a capacity bounce that clears in seconds never
-/// reaches the user at all.
-///
-/// `outages` arrives longest-first, so the first match is the worst.
-pub fn row_outage(
-    stalled: bool,
-    outages: &[ServerOutage],
-) -> Option<(&'static str, &ServerOutage)> {
-    if !stalled {
-        return None;
-    }
-    let win = server_down_secs();
-    let o = outages.iter().find(|o| o.secs >= win)?;
-    let tok = match o.kind {
-        "refused" => "server_refused",
-        "capacity" => "server_capacity",
-        _ => "server_unreachable",
-    };
-    Some((tok, o))
-}
-
-/// Every server currently in an outage, worst (longest) first.
-///
-/// Reported whatever the rest of the pool is doing: a dead BACKUP on an
-/// otherwise healthy job is a real fact about a paid-for provider, and
-/// the Providers card is the right place for it. The queue row applies
-/// its own extra gate (see `row_outage` above, which speaks only inside
-/// an open stall episode and only past `server_down_secs`) so a job that
-/// is downloading fine never shouts about it.
-pub fn server_outages(d: &Daemon) -> Vec<ServerOutage> {
-    let mut v: Vec<ServerOutage> = d
-        .hub
-        .pool_live
-        .lock_ok()
-        .as_ref()
-        .map(|l| {
-            l.servers
-                .iter()
-                .filter_map(|s| {
-                    let secs = s.down_secs()?;
-                    let r = s.down_reason.lock_ok().clone()?;
-                    Some(ServerOutage {
-                        host: s.host.clone(),
-                        since_ms: s.down_since.load(Ordering::Relaxed),
-                        secs,
-                        kind: r.kind,
-                        detail: r.detail,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    v.sort_by_key(|o| std::cmp::Reverse(o.secs));
-    v
-}
 
 /// §G: one news server's last refusal to authenticate, remembered past
 /// the pool that saw it.

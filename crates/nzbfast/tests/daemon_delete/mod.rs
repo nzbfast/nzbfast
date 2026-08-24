@@ -157,14 +157,6 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
             r.split("SABnzbd_nzo_").nth(1).unwrap().split('"').next()
                 .map(|s| format!("SABnzbd_nzo_{s}")).unwrap()
         };
-        let qslot = |q: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value = serde_json::from_str(q)
-                .unwrap_or_else(|e| panic!("bad queue JSON: {e}\n{q}"));
-            v["queue"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
         let poll = |pred: &dyn Fn(&str, &str) -> bool, what: &str| -> (String, String) {
             for _ in 0..300 {
                 let q = http(port, "/api?mode=queue&output=json", None);
@@ -179,12 +171,12 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
 
         // A grinds on the slow server; B and C queue behind it.
         let a_id = upload(&a_xml, "grinder.nzb");
-        poll(&|q, _| qslot(q, &a_id)["status"] == "Downloading", "job A to start");
+        poll(&|q, _| queue_slot(q, &a_id)["status"] == "Downloading", "job A to start");
         let b_id = upload(&b_xml, "doomed.nzb");
         let c_id = upload(&c_xml, "keeps.nzb");
 
         // The idle fast server picks B up.
-        poll(&|q, _| qslot(q, &b_id)["prefetching"] == true, "B's prefetch to start");
+        poll(&|q, _| queue_slot(q, &b_id)["prefetching"] == true, "B's prefetch to start");
 
         // Sonarr's delete: NZBGet editqueue, addressing the numeric id.
         let nzbid: i64 = b_id
@@ -208,23 +200,15 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
         let (q, h) = poll(&|_, h| history_has(h, &c_id), "C to complete on the idle server");
         assert!(h.contains("\"Completed\""), "{h}");
         assert!(
-            qslot(&q, &a_id)["status"] == "Downloading",
+            queue_slot(&q, &a_id)["status"] == "Downloading",
             "A should still be running - the rig proves nothing otherwise: {q}"
         );
 
         // M5: GroupDelete is delete-and-file, not delete-and-forget. The
         // job leaves the queue, never publishes as a finished download,
         // and history gets a row that says the user removed it.
-        assert!(qslot(&q, &b_id).is_null(), "the deleted job is still queued: {q}");
-        let hslot = |h: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value = serde_json::from_str(h)
-                .unwrap_or_else(|e| panic!("bad history JSON: {e}\n{h}"));
-            v["history"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
-        let b_row = hslot(&h, &b_id);
+        assert!(queue_slot(&q, &b_id).is_null(), "the deleted job is still queued: {q}");
+        let b_row = history_slot(&h, &b_id);
         assert!(
             !b_row.is_null(),
             "GroupDelete must file a history row for the job it removed: {h}"
@@ -278,7 +262,7 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
             },
             "the active delete to park into history",
         );
-        let a_row = hslot(&h, &a_id);
+        let a_row = history_slot(&h, &a_id);
         assert_eq!(a_row["fail_message"], "deleted from the queue", "{a_row}");
         // The files half is deferred to park, so it is allowed to lag
         // the history row by the drain - poll rather than assert.
@@ -398,14 +382,6 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
             );
             http(port, "/jsonrpc", Some(("application/json", body.as_bytes())))
         };
-        let hslot = |h: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value = serde_json::from_str(h)
-                .unwrap_or_else(|e| panic!("bad history JSON: {e}\n{h}"));
-            v["history"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
 
         let r = http(port, "/api?mode=pause&output=json", None);
         assert!(r.contains("\"status\":true"), "{r}");
@@ -446,17 +422,17 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
 
         // History per verb, SAB view: three rows filed, FinalDelete none.
         let h = http(port, "/api?mode=history&output=json", None);
-        assert_eq!(hslot(&h, &ids[0])["fail_message"], "deleted from the queue", "{h}");
+        assert_eq!(history_slot(&h, &ids[0])["fail_message"], "deleted from the queue", "{h}");
         assert_eq!(
-            hslot(&h, &ids[1])["fail_message"],
+            history_slot(&h, &ids[1])["fail_message"],
             "deleted from the queue as a duplicate",
             "{h}"
         );
         assert!(
-            hslot(&h, &ids[2]).is_null(),
+            history_slot(&h, &ids[2]).is_null(),
             "GroupFinalDelete must not file a history row: {h}"
         );
-        assert_eq!(hslot(&h, &ids[3])["fail_message"], "deleted from the queue", "{h}");
+        assert_eq!(history_slot(&h, &ids[3])["fail_message"], "deleted from the queue", "{h}");
 
         // The same rows in NZBGet's own vocabulary.
         let jr = http(
@@ -499,7 +475,7 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
         );
         let h = http(port, "/api?mode=history&output=json", None);
         assert!(
-            hslot(&h, &ids[0]).is_null(),
+            history_slot(&h, &ids[0]).is_null(),
             "the retried row must have left history: {h}"
         );
     })

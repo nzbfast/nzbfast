@@ -1139,11 +1139,18 @@ impl Daemon {
         // now downloads the same title twice. And not for a tombstone: the
         // "failure" there is the abort the user's own delete fired, so
         // promoting would start downloading the very title they cancelled.
+        //
+        // §282 item 8 needs to know whether anything WAS held, and it
+        // has to ask BEFORE the promotion: the winner leaves priority
+        // -3 and the runners-up are repointed at it, so the same
+        // question answered afterwards answers about a different queue.
+        let mut spare_held = false;
         if failed
             && !tombstone
             && !armed_auto_retry
             && let Some(key) = key
         {
+            spare_held = self.spare_held_for(&id, &key);
             self.promote_held_alternative(&job, &id, &key, &nzb_path);
         }
         // TODO 282 item 5's other half: a job that COMPLETED (or that
@@ -1155,12 +1162,51 @@ impl Daemon {
         if (!failed || tombstone) && !armed_auto_retry {
             self.drop_spares_for(&id);
         }
+        // §282 item 8: the job is dead and NOTHING was held for it, so
+        // ask the hunt worker whether a replacement can be found. It
+        // refuses an *arr-origin job outright (item 9), and it costs one
+        // relaxed load on an install that has not opted in.
+        //
+        // HELD, not PROMOTED, and the difference is item 19's doing. A
+        // spare that exists but was not promoted because
+        // `alt_auto_switch` is off is still the answer to this job: item
+        // 12's notice offers it on a click, and hunting alongside it
+        // would put a THIRD copy of one release in front of the user.
+        //
+        // `!armed_auto_retry` is the same guard the promotion takes, and
+        // for the same reason: the original is coming back through the
+        // queue in minutes, so this is not yet a terminal verdict. A
+        // tombstone is the user's own delete, not a failure.
+        if failed && !tombstone && !armed_auto_retry && !spare_held {
+            self.hunt_request(&job);
+        }
         // Coalesced: the record is already durable in history.jsonl (the
         // upsert above), and load_queue resolves a torn queue/history
         // pair in history's favour - the debounced rewrite only drops
         // the queue row.
         self.save_queue_soon();
         self.note_queue_idle();
+    }
+
+    /// Is ANY spare still held against this job? §282 item 8's whole
+    /// trigger: the hunt is what happens when nothing is.
+    ///
+    /// Separate from [`Self::promote_held_alternative`] rather than a
+    /// value it returns, because the two questions differ the moment
+    /// `alt_auto_switch` is off (item 19): nothing is promoted, and a
+    /// spare is still held for item 12's notice to offer on a click.
+    /// Hunting then would put a THIRD copy of one release in front of
+    /// the user. It also has to be asked BEFORE the promotion runs -
+    /// the winner leaves priority -3 and the runners-up are repointed
+    /// at it, so afterwards this answers about a different queue.
+    ///
+    /// A tombstoned row does not count: it is a spare the user has
+    /// deleted, and the promotion's own re-check refuses it too.
+    fn spare_held_for(&self, id: &str, key: &str) -> bool {
+        self.queue.lock_ok().iter().any(|j| {
+            let g = j.lock_ok();
+            g.priority == -3 && g.paused && !g.tombstone && held_against(&g, id, key)
+        })
     }
 
     /// §282 item 18 / M14f: the original finally failed, so promote the
@@ -1201,9 +1247,34 @@ impl Daemon {
     /// §282 item 18 asked for: what was abandoned (`replaces`,
     /// `replaces_name`), what replaced it (`nzo_id`, `name`), and why
     /// (`reason`, the failed job's own `fail_message`). The hunt half of
-    /// that item - a `job.hunt_*` pair - is deliberately NOT emitted
-    /// here: §282 section C is not built, and an event that can never
-    /// fire is a vocabulary entry nobody can test.
+    /// that item is not emitted HERE because it is not this path's to
+    /// emit: §282 section C landed the same day and `serve/hunt.rs`
+    /// emits its own `job.replaced` when a search finds a replacement
+    /// nobody held. Whether that pair should be renamed to the
+    /// `job.hunt_*` shape item 18 sketched is item 18's call, not a
+    /// silent rename of a kind webhook subscribers may already match.
+    ///
+    /// **THIS IS NOT THE ONLY DOOR, and `by` is how a subscriber tells
+    /// them apart.** `altcand::alt_switch` - item 12's "Switch to this
+    /// copy" button - reaches the same outcome by hand and emits the
+    /// same kind, so both carry `"by"`: `"auto"` here, `"user"` there.
+    /// Until 24 Aug 2026 only this one emitted at all, and a target
+    /// subscribed to `job.*` heard a bare `job.failed` when a person
+    /// clicked - the same user-visible switch in a quieter vocabulary,
+    /// and the one case where a switch is known for certain rather than
+    /// inferred.
+    ///
+    /// `rank` IS THIS DOOR'S ONLY, and is omitted rather than nulled on
+    /// the other. It reports which held spare `watchlist::quality_rank`
+    /// picked; a clicked switch is the user overriding that choice, so
+    /// there is no winning rank to report - and `by` already answers
+    /// why the key is absent, which an explicit null would not (a
+    /// subscriber that coerces cannot tell `null` from rank 0). Read
+    /// `rank` only under `by == "auto"`.
+    ///
+    /// `by` is scoped to THIS kind's two doors and does not reach
+    /// `job.replaced`: a hunt is not a switch between two copies the
+    /// user already had, so it carries its own vocabulary.
     fn promote_held_alternative(
         &self,
         failed: &Arc<Mutex<Job>>,
@@ -1329,6 +1400,7 @@ impl Daemon {
                 "replaces": id,
                 "replaces_name": failed_name,
                 "reason": fail_message,
+                "by": "auto",
             }),
         );
     }

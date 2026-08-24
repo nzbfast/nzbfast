@@ -57,6 +57,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let pauseItem = NSMenuItem(title: "Pause", action: nil, keyEquivalent: "")
     private let downloadsItem = NSMenuItem(
         title: "Open Downloads Folder", action: nil, keyEquivalent: "")
+    private let limitItem = NSMenuItem(title: "Speed Limit", action: nil, keyEquivalent: "")
+    private let limitMenu = NSMenu()
+    /// What each row of `limitMenu` asks for, indexed by the row's tag.
+    /// The rows are rebuilt from every poll, so a pick cannot be named by
+    /// a constant id the way the fixed items above are.
+    private var limitPicks: [LimitPick] = []
 
     // MARK: lifecycle
 
@@ -145,6 +151,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         pauseItem.target = self
         menu.addItem(pauseItem)
 
+        // Under Pause because it is the same kind of thing - the two
+        // controls the dashboard header puts side by side, and the two a
+        // menu bar is worth opening for.
+        limitItem.submenu = limitMenu
+        // Same reason the parent menu turns it off, and NOT inherited
+        // from it: a submenu is its own NSMenu and defaults to ON, which
+        // had AppKit's validation re-enable the disabled custom row -
+        // every row of a live rehearsal read as clickable (24 Aug 2026).
+        limitMenu.autoenablesItems = false
+        menu.addItem(limitItem)
+
         menu.addItem(.separator())
 
         downloadsItem.action = #selector(openDownloadsFolder)
@@ -168,6 +185,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// than the menu blocking on a request.
     func menuNeedsUpdate(_ menu: NSMenu) {
         refresh()
+        rebuildLimitMenu()
         poll()
     }
 
@@ -233,7 +251,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 lastGoodMbps = mbps
                 last = Daemon.QueueStatus(
                     paused: s.paused, offline: s.offline, mbps: mbps,
-                    slots: s.slots, status: s.status)
+                    slots: s.slots, status: s.status, limitBps: s.limitBps,
+                    autoSpeed: s.autoSpeed, lineSpeed: s.lineSpeed)
             } else {
                 last = nil
             }
@@ -268,6 +287,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // the handshake has confirmed.
         browserItem.isEnabled = stackReady
         pauseItem.isEnabled = live
+        // The submenu itself is rebuilt only as the menu opens (see
+        // rebuildLimitMenu); this is the same "the engine is not
+        // answering" gate the Pause item takes.
+        limitItem.isEnabled = live
         pauseItem.title = (last?.paused ?? false) ? "Resume" : "Pause"
 
         // Empty when idle, per the Dock's own convention - a badge
@@ -294,7 +317,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// about telling "stopped" from "slow".
     ///
     /// The Windows tray holds to the same floor (RATE_FLOOR_MBPS in
-    /// crates/nzbtray/src/main.rs); see the wording note below.
+    /// crates/nzbtray/src/probe_body.rs); see the wording note below.
     static let rateFloor = 0.05
 
     /// The one live line in the menu: what the engine is doing, how much
@@ -309,7 +332,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// ```
     ///
     /// THE SAME LINE IS DRAWN BY THE WINDOWS TRAY, as its hover tooltip:
-    /// tip_from_queue in crates/nzbtray/src/main.rs builds these same
+    /// tip_from_queue in crates/nzbtray/src/probe_body.rs builds these same
     /// three fields in this same order with this same separator, and
     /// differs only in putting `nzbfast - ` in front - it labels a
     /// nameless icon in a tray of nameless icons, where this line hangs
@@ -350,6 +373,180 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return parts.joined(separator: " · ")
     }
 
+    // MARK: speed limit
+
+    /// The absolute presets the speed-limit submenu offers, bytes/sec,
+    /// and the percentage ones. Both lists are the dashboard header's own
+    /// (`#limitSel`'s options and `LIMIT_PCTS` in web/dashboard.html) -
+    /// see the wording note on `limitRows`.
+    static let limitPresets = [50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000]
+    static let limitPcts = [25, 50, 75]
+
+    /// What clicking one row of the speed-limit submenu asks the daemon
+    /// for. `live` is not a pick - see `limitRows`.
+    enum LimitPick: Equatable {
+        case none
+        case auto
+        case abs(Int)
+        case pct(Int)
+        case live
+    }
+
+    struct LimitRow {
+        let label: String
+        let pick: LimitPick
+        let checked: Bool
+    }
+
+    /// The speed-limit submenu, from the same poll the state line is
+    /// built from.
+    ///
+    /// ```text
+    /// No limit
+    /// Auto · yield to LAN        (or "Auto · 42 MB/s now" while it drives)
+    /// 50 MB/s · 100 MB/s · 250 MB/s · 500 MB/s · 1.00 GB/s
+    /// 25% of your line speed · 25 MB/s      (only once a line speed is set)
+    /// 37 MB/s (custom)                      (only when nothing above matches)
+    /// ```
+    ///
+    /// THE SAME MENU IS DRAWN BY THE WINDOWS TRAY: `limit_menu` in
+    /// crates/nzbtray/src/probe_body.rs builds these same rows from these same
+    /// two lists with these same labels and the same checkmark rule, and
+    /// carries the unit tests for the shared rules. Change the wording in
+    /// one and change it in the other, in the same commit - the reason is
+    /// written out at length on `stateLine`, and it is the same reason.
+    ///
+    /// All three surfaces are one voice by construction, because the
+    /// rules are the dashboard header's rules and not new ones:
+    ///
+    /// - The PRESETS, the percentages, and the "only once a line speed is
+    ///   configured" gate on the percentages are `syncLimitPresets`'s.
+    ///   The daemon would in fact anchor a bare percentage against the
+    ///   learned link peak when no line speed is set (§18), but the header
+    ///   does not offer it there and neither does this: a menu entry whose
+    ///   outcome the user cannot predict is worse than no entry.
+    /// - A percentage preset is stored as an ABSOLUTE limit, so it is
+    ///   matched BACK to the percentage that produced it - the daemon's
+    ///   own `line * p / 100` - and beats an absolute preset of the same
+    ///   size. Without that a 25% pick comes back labelled "(custom)" on
+    ///   the very next poll.
+    /// - The RATE in every label goes through `rateText`, so a bits
+    ///   install reads "400 Mb/s" where a bytes install reads "50 MB/s",
+    ///   exactly as `relabelLimitOptions` does it on the page.
+    ///
+    /// Two things the header has that this deliberately does not. There
+    /// is no "custom…" row: typing a rate is not something a menu bar
+    /// does well, and "Open nzbfast" is two items above - the live value
+    /// stays VISIBLE here either way, which is the half that mattered.
+    /// And a limit a schedule entry set is not attributed the way the
+    /// header's "your schedule" label attributes it; there is no room
+    /// beside a menu row for it, and the row still shows the rate in
+    /// force.
+    static func limitRows(_ s: Daemon.QueueStatus, bits: Bool) -> [LimitRow] {
+        let rate = { (bps: Int) in rateText(Double(bps) / 1e6, bits: bits) }
+        // What the daemon is doing now, in the vocabulary of the rows
+        // below - decided ONCE so no two rows can both claim the check.
+        let live: LimitPick
+        if s.autoSpeed {
+            live = .auto
+        } else if s.limitBps == 0 {
+            live = .none
+        } else if s.lineSpeed > 0,
+                  let p = limitPcts.first(where: { s.lineSpeed * $0 / 100 == s.limitBps }) {
+            live = .pct(p)
+        } else if limitPresets.contains(s.limitBps) {
+            live = .abs(s.limitBps)
+        } else {
+            live = .live
+        }
+
+        var rows = [
+            LimitRow(label: "No limit", pick: .none, checked: live == .none),
+            // The governor picks a real number every second, and a row
+            // saying only "Auto" reads as "no limit" - the one thing it
+            // is not. `limitBps` IS that live number while auto is on, so
+            // the row can say what auto currently means.
+            LimitRow(
+                label: s.autoSpeed && s.limitBps > 0
+                    ? "Auto · \(rate(s.limitBps)) now"
+                    : "Auto · yield to LAN",
+                pick: .auto, checked: live == .auto),
+        ]
+        for bps in limitPresets {
+            rows.append(LimitRow(label: rate(bps), pick: .abs(bps), checked: live == .abs(bps)))
+        }
+        if s.lineSpeed > 0 {
+            for p in limitPcts {
+                rows.append(LimitRow(
+                    label: "\(p)% of your line speed · \(rate(s.lineSpeed * p / 100))",
+                    pick: .pct(p), checked: live == .pct(p)))
+            }
+        }
+        if live == .live {
+            rows.append(LimitRow(
+                label: "\(rate(s.limitBps)) (custom)", pick: .live, checked: true))
+        }
+        return rows
+    }
+
+    /// The `mode=config` calls one pick asks for, in the order they must
+    /// be made. Empty for `.live`, which is not a pick. Mirrors
+    /// `limit_calls` in crates/nzbtray/src/probe_body.rs, which carries the
+    /// tests for the ordering rule.
+    static func limitCalls(_ pick: LimitPick) -> [(String, String)] {
+        switch pick {
+        case .live: return []
+        case .auto: return [("auto_speed", "1")]
+        case .none: return [("auto_speed", "0"), ("speedlimit", "0")]
+        case .abs(let bps): return [("auto_speed", "0"), ("speedlimit", String(bps))]
+        // A percentage goes over the wire AS a percentage: the daemon
+        // anchors it against the line speed it holds, so the menu cannot
+        // pick a stale one. Bare and <= 100 is that convention
+        // (set_speedlimit in serve/settings_setters.rs).
+        case .pct(let p): return [("auto_speed", "0"), ("speedlimit", String(p))]
+        }
+    }
+
+    /// Redraw the submenu against the last poll. Called only from
+    /// `menuNeedsUpdate`, which fires just BEFORE the menu is shown:
+    /// rebuilding items under an open menu is how a pick gets eaten, and
+    /// a submenu nobody has opened does not need rebuilding three times a
+    /// minute.
+    private func rebuildLimitMenu() {
+        limitMenu.removeAllItems()
+        guard let s = last, stackReady else {
+            limitItem.isEnabled = false
+            return
+        }
+        limitItem.isEnabled = true
+        limitPicks = []
+        for row in Self.limitRows(s, bits: daemon.unitBits) {
+            let item = NSMenuItem(
+                title: row.label, action: #selector(pickLimit(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = row.checked ? .on : .off
+            item.tag = limitPicks.count
+            // The custom row is a readout of a limit set somewhere else,
+            // not a button - and it keeps its checkmark while disabled.
+            item.isEnabled = row.pick != .live
+            limitMenu.addItem(item)
+            limitPicks.append(row.pick)
+        }
+    }
+
+    @objc private func pickLimit(_ sender: NSMenuItem) {
+        guard let pick = limitPicks.indices.contains(sender.tag)
+            ? limitPicks[sender.tag] : nil
+        else { return }
+        Task {
+            await daemon.setSpeedLimit(Self.limitCalls(pick))
+            // Confirm from the daemon rather than assuming: a limit can
+            // be refused, and the checkmark has to end up describing what
+            // the queue actually did.
+            poll()
+        }
+    }
+
     /// Offline, or the daemon's own word for the queue - see the field
     /// note on `stateLine`.
     static func stateWord(_ s: Daemon.QueueStatus) -> String {
@@ -365,7 +562,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     ///
     /// Written out again rather than shared, because the wrapper has no
     /// way to call into the page. It is the THIRD copy, not the second:
-    /// `fmt_rate` in crates/nzbtray/src/main.rs is the Windows tray's,
+    /// `fmt_rate` in crates/nzbtray/src/probe_body.rs is the Windows tray's,
     /// landed the same afternoon by a lane that could not see this one.
     /// The dashboard's is canonical and the other two follow it. The rule the unit
     /// convention exists to keep is that one number never appears in two
@@ -374,6 +571,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// across: these strings sit beside native menus that are English
     /// throughout, and the app ships no catalogue to translate them
     /// from.
+    ///
+    /// `tools/rate-format-gate.py` refuses a tree where the three
+    /// disagree, and refuses a fourth copy. It pins this function BY
+    /// NAME, so a rename moves the gate's `SOURCES` in the same commit.
     static func rateText(_ mbps: Double, bits: Bool) -> String {
         if bits {
             let mb = mbps * 8

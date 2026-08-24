@@ -485,6 +485,26 @@ verplaatsen, of de achterrand van de kop om haar te verbreden of te versmallen;
 dubbelklikken op die rand zet de breedtes terug. Met een kop in de aandacht verplaatsen de
 pijltjes links en rechts hem, en Shift met een pijltje wijzigt de breedte.</p>
 
+<h3 id="dash-install">Installeren als app</h3>
+<p>Chrome, Edge en de andere Chromium-browsers kunnen het dashboard als app op deze computer
+installeren: een eigen venster, een eigen pictogram in het Dock of de taakbalk, geen
+tabbladbalk en geen adresbalk. Er wordt niets geüpload en niets extra's gedownload; het is
+hetzelfde dashboard van dezelfde service, in een eigen venster. Instellingen → Interface
+toont een knop <b>Installeren als app</b> zodra je browser dat kan, en de adresbalk biedt
+meestal op datzelfde moment hetzelfde aan. Safari heeft geen knop te bieden: op een Mac is het
+menuonderdeel <b>Archief → Voeg toe aan Dock</b>, en op een iPhone of iPad <b>Deel → Zet op
+beginscherm</b>. Firefox op de desktop kan webapps helemaal niet installeren, dus daar blijft
+de rij verborgen in plaats van iets te beschrijven dat er niet is. De macOS-app is al zo'n
+venster en vraagt er daarom nooit om.</p>
+<p>Uit de manier waarop een browser de ene geïnstalleerde app van de andere onderscheidt,
+volgen twee dingen, en je weet ze allebei liever vooraf. De identiteit is het adres inclusief
+de poort: verhuist de service weg van <code>6789</code>, dan is een daarvandaan
+geïnstalleerde app wees. Er gaat niets stuk, maar je installeert hem opnieuw vanaf het nieuwe
+adres en haalt de oude weg. En installeren vereist een veilig adres, wat
+<code>127.0.0.1</code> per definitie is; deze service via gewone HTTP vanaf een andere
+computer in je netwerk bereiken is dat niet, dus daar biedt geen enkele browser installatie
+aan. Zet hem achter HTTPS (zie <a href="#remote-proxy">nzbfast van buitenaf bereiken</a>) en het aanbod komt terug.</p>
+
 <h2 id="adding">5 · Downloads toevoegen</h2>
 <div class="tblwrap"><table>
 <tr><th>Methode</th><th>Hoe</th></tr>

@@ -511,6 +511,27 @@ colonne latéralement pour déplacer la colonne, ou son bord arrière pour la re
 un double-clic sur ce bord rétablit les largeurs. Quand un en-tête a le focus, les flèches
 gauche et droite le déplacent, et Maj avec une flèche le redimensionne.</p>
 
+<h3 id="dash-install">L'installer comme application</h3>
+<p>Chrome, Edge et les autres navigateurs Chromium savent installer le tableau de bord comme
+une application sur cette machine : sa propre fenêtre, sa propre icône dans le Dock ou la
+barre des tâches, sans barre d'onglets ni barre d'adresse. Rien n'est envoyé et rien de plus
+n'est téléchargé ; c'est le même tableau de bord, servi par le même service, dans une fenêtre
+à lui. Réglages → Interface fait apparaître un bouton <b>Installer comme application</b> dès
+que votre navigateur sait le faire, et la barre d'adresse propose en général la même chose au
+même moment. Safari n'a pas de bouton à proposer : sur un Mac, l'élément de menu est
+<b>Fichier → Ajouter au Dock</b>, et sur un iPhone ou un iPad c'est <b>Partager → Sur l'écran
+d'accueil</b>. Firefox sur ordinateur ne sait pas installer d'application web du tout, donc
+la ligne y reste masquée plutôt que de décrire ce qui n'est pas proposé. L'application macOS
+est déjà une fenêtre de ce genre, et ne demande donc jamais rien.</p>
+<p>Deux conséquences découlent de la façon dont un navigateur distingue une application
+installée d'une autre, et il vaut mieux les connaître tout de suite. L'identité, c'est
+l'adresse, port compris : déplacer le service ailleurs que sur <code>6789</code> laisse
+orpheline l'application installée depuis cette adresse. Rien ne casse, mais vous la
+réinstallez depuis la nouvelle adresse et retirez l'ancienne. Et l'installation exige une
+adresse sûre, ce que <code>127.0.0.1</code> est par définition ; joindre ce service en HTTP
+simple depuis une autre machine du réseau ne l'est pas, donc aucun navigateur n'y propose
+l'installation. Mettez-le derrière HTTPS (voir <a href="#remote-proxy">Accéder à nzbfast depuis l'extérieur de chez vous</a>) et la proposition revient.</p>
+
 <h2 id="adding">5 · Ajouter des téléchargements</h2>
 <div class="tblwrap"><table>
 <tr><th>Méthode</th><th>Comment</th></tr>

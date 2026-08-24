@@ -1,4 +1,5 @@
-# Compile the Mac app wrapper. Nothing else in CI ever has.
+# Compile the Mac app wrapper, and assemble the bundle. Nothing else in
+# CI ever has.
 #
 # `macapp/` is the AppKit + WKWebView wrapper that owns the bundled
 # engine - seven files and a couple of thousand lines of AppKit Swift,
@@ -61,13 +62,15 @@
 # provenance-release.yml both use macos-latest), but until now they ran
 # on tags alone, never per push.
 #
-# The path filter is COMPLETE for what this job does, and that is worth
-# saying because a path-filtered gate is only as good as its list.
+# The path filter is COMPLETE for what macapp-build does, and that is
+# worth saying because a path-filtered gate is only as good as its list.
 # macapp/Package.swift declares no dependencies and the sources carry no
 # `#if` and no arch conditionals, so nothing outside macapp/ can change
 # whether `swift build` succeeds. make-app.sh's OTHER half - the
 # universal release engine it lipos in from cargo - is a crates/ concern
-# and is covered by the Rust jobs.
+# and is covered by the Rust jobs. macapp-bundle, added below, reads
+# three files outside macapp/ and the filter carries two of them; the
+# third is argued out where that job is.
 #
 # ---------------------------------------------------------------------
 # WHAT IT RUNS, AND WHAT IT DELIBERATELY DOES NOT
@@ -110,6 +113,86 @@
 # `-warnings-as-errors`. Do not add it as a rider on some later edit.
 #
 # ---------------------------------------------------------------------
+# THE SECOND JOB: THE BUNDLE, NOT THE WRAPPER
+#
+# `swift build` covers the wrapper. `macapp/make-app.sh` does four more
+# things, and the sentence at the top of this file is true of every one
+# of them: the first thing that would catch a break is somebody cutting
+# a release. It parses the version out of crates/nzbfast/Cargo.toml and
+# the beta serial out of packaging/beta-serial.txt, renders a ten-entry
+# iconset through sips and iconutil, writes Info.plist from a heredoc,
+# and ad-hoc codesigns inside-out. Four of the five defects measured
+# against it on 24 Aug 2026 left make-app.sh EXITING ZERO: a version
+# grep pointed at another key stamped `edition.workspace = true` into
+# CFBundleShortVersionString, a dropped iconset entry shipped a
+# nine-member icns, a dropped `--arch x86_64` shipped an app no Intel
+# Mac can open, and a dropped `codesign` on the nested engine still
+# passed `codesign --verify --deep --strict` on the app, because the
+# outer seal covers that binary as a RESOURCE and an unsigned resource
+# seals perfectly well. Nothing anywhere in this repo could see any of
+# the four.
+#
+# So macapp-bundle runs the script and then holds the bundle it wrote to
+# macapp/check-app.sh, whose header states the failure mode behind each
+# of its seven arms. Its `--selftest` is this job's canary and is
+# stronger than a planted compile error: it drives EVERY arm at a copy
+# of the bundle mutated to break that arm exactly, and refuses to pass
+# unless each one names itself. Copies only, under mktemp, so `git
+# status` is clean afterwards.
+#
+# THE ENGINE IS THE COST, AND THE SCRIPT ALREADY HAS THE ESCAPE HATCH.
+# Run bare, make-app.sh builds a universal RELEASE engine first (two
+# cargo targets and a lipo), which is minutes and is pure duplication of
+# what the Rust jobs already cover. `ENGINE=` reuses a prebuilt binary
+# instead, so this job hands it a stub. Not any stub: the script runs
+# `lipo -info` on it and later `codesign --force -s -`, so it has to be
+# a genuine Mach-O, which rules out a text file and makes `cp $(which
+# true)` a bet on a system binary's slices. Two lines of C compiled
+# `-arch arm64 -arch x86_64` is definitively both and cost 0.33 s
+# measured. The price of the stub is that the ENGINE's own universality
+# is not checked here; that is the release lipo's business, and
+# check-app.sh says so where it lists what it does not check.
+#
+# Measured on a dev Mac with `.build` populated: 34 s for make-app.sh
+# (the universal RELEASE wrapper build dominates), 0.2 s for the checks,
+# 1.6 s for the selftest.
+#
+# ---------------------------------------------------------------------
+# THE PATH FILTER IS WIDER THAN macapp/**, AND STILL HAS ONE HOLE
+#
+# make-app.sh reads three things outside macapp/: the icon master, the
+# version, and the beta serial. A path-filtered gate is only as good as
+# its list, so, with churn measured over the month to 24 Aug 2026 and
+# `--no-merges`:
+#
+#   packaging/icon/**            3 commits   IN. Free, and the sips
+#                                            loop reads icon-1024.png.
+#   crates/nzbfast/Cargo.toml   47 commits   IN. This is where the
+#                                            version-parse risk lives:
+#                                            move that key to workspace
+#                                            inheritance and the grep
+#                                            silently yields the wrong
+#                                            string. ~1.5 pushes a day,
+#                                            against ~260 to the repo.
+#   packaging/beta-serial.txt  126 commits   OUT, and not on cost alone.
+#                                            Its content is a number
+#                                            that a deploy bumps ~4x a
+#                                            day; no value it can hold
+#                                            breaks either parse, since
+#                                            both sides map junk to 0.
+#                                            The risk is in the SCRIPT,
+#                                            which is inside macapp/**.
+#                                            So this file changing can
+#                                            never redden the job, and
+#                                            triggering on it would buy
+#                                            nothing for 4 runs a day.
+#
+# `on: push: paths:` is per WORKFLOW, not per job, so the widening also
+# spins macapp-build on an icon or a Cargo.toml push. That is 50 s, it
+# is the alternative to a second workflow file duplicating the placement
+# argument above, and it is the trade taken deliberately.
+#
+# ---------------------------------------------------------------------
 # VERIFIED RED, ON A REAL RUNNER, BEFORE IT LANDED
 #
 # A gate that cannot fail is a rubber stamp, so this one was measured
@@ -134,10 +217,14 @@ on:
     branches: ['**']
     paths:
       - 'macapp/**'
+      - 'packaging/icon/**'
+      - 'crates/nzbfast/Cargo.toml'
       - '.github/workflows/macapp.yml'
   pull_request:
     paths:
       - 'macapp/**'
+      - 'packaging/icon/**'
+      - 'crates/nzbfast/Cargo.toml'
       - '.github/workflows/macapp.yml'
   workflow_dispatch:
 
@@ -201,3 +288,61 @@ jobs:
           rm -f Sources/NzbFast/build_canary.swift
           grep -m1 'error:' /tmp/macapp-canary.log || true
           echo "canary refused as expected"
+
+  # THE BUNDLE. macapp-build proves the wrapper COMPILES; this proves
+  # make-app.sh still ASSEMBLES a correct .app out of it. See the header
+  # section "THE SECOND JOB" for the four measured defects that leave
+  # that script exiting zero.
+  macapp-bundle:
+    # Same reasoning as macapp-build for the missing `github.repository`
+    # guard: no private tooling, and every file this touches ships
+    # (macapp, packaging/icon and crates are all in PUBLIC_MANIFEST).
+    runs-on: macos-latest
+    timeout-minutes: 20
+    concurrency:
+      # NOT macapp-build's group. Job-level concurrency is contended
+      # between jobs of the SAME run, so sharing a group here would have
+      # the two jobs of one push queue behind each other - and with
+      # cancel-in-progress, cancel each other.
+      group: macapp-bundle-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The engine make-app.sh would otherwise spend minutes building
+      # from cargo. It has to be a real Mach-O and it has to be fat: the
+      # script runs `lipo -info` on it, and `codesign --force -s -`
+      # later. Two lines of C, both slices, 0.33 s. It exits NON-ZERO on
+      # purpose: nothing in this job runs it, and a stub that succeeded
+      # is one a later step could mistake for an engine.
+      - name: stub engine
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/stub.c" <<'C'
+          #include <stdio.h>
+          int main(int argc, char **argv) {
+              (void)argc; (void)argv;
+              fprintf(stderr, "nzbfast CI stub engine\n");
+              return 1;
+          }
+          C
+          cc -arch arm64 -arch x86_64 -o "$RUNNER_TEMP/nzbfast-stub" "$RUNNER_TEMP/stub.c"
+          lipo -info "$RUNNER_TEMP/nzbfast-stub"
+
+      # The real thing: iconset, Info.plist, inside-out ad-hoc signing,
+      # and the universal RELEASE wrapper build that macapp-build
+      # deliberately does not do.
+      - name: make-app.sh
+        run: ENGINE="$RUNNER_TEMP/nzbfast-stub" ./macapp/make-app.sh
+
+      - name: check the bundle
+        run: ./macapp/check-app.sh macapp/build/NzbFast.app
+
+      # THE CANARY, and it is the checker's own --selftest rather than a
+      # planted defect, because one planted defect proves one arm. This
+      # drives all seven at bundles mutated to break each one exactly,
+      # plus an unmutated control that must pass and a missing bundle
+      # that must refuse. Works on copies under mktemp, so it cannot
+      # disturb the bundle the step above just passed.
+      - name: prove every check can actually fail
+        run: ./macapp/check-app.sh --selftest macapp/build/NzbFast.app

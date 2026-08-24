@@ -503,6 +503,27 @@ ein Doppelklick darauf stellt die Breiten wieder her. Hat eine Überschrift den 
 verschieben die Pfeile nach links und rechts sie, und Umschalt mit einem Pfeil ändert die
 Breite.</p>
 
+<h3 id="dash-install">Als App installieren</h3>
+<p>Chrome, Edge und die anderen Chromium-Browser können das Dashboard als App auf diesem
+Rechner installieren: ein eigenes Fenster, ein eigenes Symbol im Dock oder in der Taskleiste,
+keine Tableiste und keine Adresszeile. Es wird nichts hochgeladen und nichts zusätzlich
+heruntergeladen; es ist dasselbe Dashboard vom selben Dienst, nur in einem eigenen Fenster.
+Einstellungen → Oberfläche zeigt eine Schaltfläche <b>Als App installieren</b>, sobald Ihr
+Browser das kann, und die Adresszeile bietet meist im selben Moment dasselbe an. Safari hat
+keine Schaltfläche dafür: auf dem Mac heißt der Menüpunkt <b>Ablage → Zum Dock hinzufügen</b>,
+auf iPhone und iPad <b>Teilen → Zum Home-Bildschirm</b>. Firefox am Schreibtisch kann Web-Apps
+überhaupt nicht installieren, deshalb bleibt die Zeile dort verborgen, statt etwas zu
+beschreiben, das es nicht gibt. Die macOS-App ist bereits ein solches Fenster und fragt
+deshalb nie.</p>
+<p>Zwei Dinge folgen daraus, wie ein Browser installierte Apps auseinanderhält, und beide
+weiß man besser vorher als hinterher. Die Identität ist die Adresse einschließlich des Ports:
+Zieht der Dienst von <code>6789</code> weg, ist eine von dort installierte App verwaist. Es
+geht nichts kaputt, aber Sie installieren sie von der neuen Adresse erneut und entfernen die
+alte. Und Installieren verlangt eine sichere Adresse, was <code>127.0.0.1</code> per
+Definition ist; dieser Dienst über einfaches HTTP von einem anderen Rechner im Netz ist es
+nicht, also bietet dort kein Browser die Installation an. Setzen Sie ihn hinter HTTPS (siehe
+<a href="#remote-proxy">nzbfast von außerhalb erreichen</a>) und das Angebot kommt zurück.</p>
+
 <h2 id="adding">5 · Downloads hinzufügen</h2>
 <div class="tblwrap"><table>
 <tr><th>Methode</th><th>So geht’s</th></tr>

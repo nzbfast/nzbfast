@@ -177,6 +177,28 @@ pub(super) fn spawn_search_log_writer(daemon: &Arc<Daemon>) {
     });
 }
 
+/// §282 section C: the worker behind `Daemon::hunt_request`.
+///
+/// Notify-driven rather than periodic, because a terminal verdict is a
+/// rare event and a poll that finds an empty queue every tick for weeks
+/// is pure cost. `notify_one` stores a permit, so a request that lands
+/// while the tick is already running is not lost: the loop comes
+/// straight back around and drains it.
+///
+/// `spawn_blocking`: the search, the NZB fetch and the enqueue are all
+/// synchronous, and each indexer call carries a 15 s ceiling, so this is
+/// not tokio-worker work.
+pub(super) fn spawn_hunt_worker(daemon: &Arc<Daemon>) {
+    let d = daemon.clone();
+    tokio::spawn(async move {
+        loop {
+            d.hunt.wake.notified().await;
+            let d2 = d.clone();
+            let _ = tokio::task::spawn_blocking(move || d2.hunt_tick()).await;
+        }
+    });
+}
+
 /// §96.5: bill the running download's per-server bytes into the usage
 /// ledger every 30 s, instead of only at net-drain. The whole point is
 /// crash safety for PAID bytes: block accounts span years, and the old

@@ -493,6 +493,26 @@ colonna per spostare la colonna, o il suo bordo finale per ridimensionarla; un d
 su quel bordo ripristina le larghezze. Con un'intestazione a fuoco, i tasti freccia
 sinistra e destra la spostano, e Maiusc con una freccia la ridimensiona.</p>
 
+<h3 id="dash-install">Installarlo come app</h3>
+<p>Chrome, Edge e gli altri browser Chromium possono installare il pannello come app su questo
+computer: una finestra tutta sua, una sua icona nel Dock o nella barra delle applicazioni,
+senza barra delle schede e senza barra degli indirizzi. Non viene inviato nulla e non viene
+scaricato nulla in più; è lo stesso pannello dello stesso servizio, in una finestra propria.
+Impostazioni → Interfaccia mostra un pulsante <b>Installa come app</b> ogni volta che il
+browser è in grado di farlo, e di solito la barra degli indirizzi propone la stessa cosa nello
+stesso momento. Safari non ha un pulsante da offrire: su Mac la voce di menu è <b>File →
+Aggiungi al Dock</b>, su iPhone o iPad è <b>Condividi → Aggiungi a Home</b>. Firefox su
+computer non sa installare app web, quindi lì la riga resta nascosta invece di descrivere
+qualcosa che non c'è. L'app per macOS è già una finestra di questo tipo, e infatti non chiede
+mai nulla.</p>
+<p>Due cose discendono da come un browser distingue un'app installata da un'altra, ed è meglio
+saperle subito. L'identità è l'indirizzo, porta compresa: se sposti il servizio da
+<code>6789</code>, l'app installata da lì resta orfana. Non si rompe nulla, ma la reinstalli
+dal nuovo indirizzo e togli quella vecchia. E per installare serve un indirizzo sicuro, cosa
+che <code>127.0.0.1</code> è per definizione; raggiungere questo servizio in HTTP semplice da
+un altro computer della rete non lo è, quindi lì nessun browser propone l'installazione.
+Mettilo dietro HTTPS (vedi <a href="#remote-proxy">Raggiungere nzbfast da fuori casa</a>) e la proposta torna.</p>
+
 <h2 id="adding">5 · Aggiungere download</h2>
 <div class="tblwrap"><table>
 <tr><th>Metodo</th><th>Come</th></tr>

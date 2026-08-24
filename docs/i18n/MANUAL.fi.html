@@ -468,6 +468,25 @@ sivusuunnassa, ja muutat leveyttä vetämällä otsikon takareunasta; kaksoisnap
 reunaan palauttaa leveydet. Kun otsikko on kohdistettuna, vasen ja oikea nuoli siirtävät
 sitä, ja Vaihto nuolen kanssa muuttaa leveyttä.</p>
 
+<h3 id="dash-install">Asenna sovelluksena</h3>
+<p>Chrome, Edge ja muut Chromium-selaimet osaavat asentaa koontinäytön sovelluksena tälle
+koneelle: oma ikkuna, oma kuvake Dockissa tai tehtäväpalkissa, ei välilehtipalkkia eikä
+osoitekenttää. Mitään ei lähetetä ulos eikä mitään ylimääräistä ladata; se on sama koontinäyttö
+samasta palvelusta, vain omassa ikkunassaan. Asetukset → Käyttöliittymä näyttää painikkeen
+<b>Asenna sovelluksena</b> heti kun selaimesi osaa sen, ja osoitekenttä tarjoaa yleensä samaa
+samalla hetkellä. Safarilla ei ole painiketta tarjottavana: Macissä valikkokohta on
+<b>Arkisto → Lisää Dockiin</b>, iPhonessa ja iPadissa <b>Jaa → Lisää Koti-valikkoon</b>.
+Työpöydän Firefox ei osaa asentaa verkkosovelluksia lainkaan, joten siellä rivi pysyy
+piilossa sen sijaan että kuvailisi jotain mitä ei ole tarjolla. macOS-sovellus on jo tällainen
+ikkuna, eikä siksi kysy koskaan.</p>
+<p>Siitä, miten selain erottaa asennetut sovellukset toisistaan, seuraa kaksi asiaa, ja
+molemmat on parempi tietää nyt kuin huomata myöhemmin. Tunniste on osoite portteineen: jos
+siirrät palvelun pois portista <code>6789</code>, sieltä asennettu sovellus jää orvoksi. Mikään
+ei hajoa, mutta asennat sen uudelleen uudesta osoitteesta ja poistat vanhan. Asentaminen
+vaatii lisäksi turvallisen osoitteen, mitä <code>127.0.0.1</code> on määritelmän mukaan; tämän
+palvelun tavoittaminen tavallisella HTTP:llä verkon toiselta koneelta ei ole, joten siellä
+mikään selain ei tarjoa asennusta. Laita se HTTPS:n taakse (katso <a href="#remote-proxy">nzbfastin tavoittaminen kodin ulkopuolelta</a>), niin tarjous palaa.</p>
+
 <h2 id="adding">5 · Latausten lisääminen</h2>
 <div class="tblwrap"><table>
 <tr><th>Tapa</th><th>Miten</th></tr>

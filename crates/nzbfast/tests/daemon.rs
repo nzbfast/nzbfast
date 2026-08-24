@@ -1494,14 +1494,6 @@ async fn raising_a_held_duplicates_priority_releases_it() {
                 .map(|s| format!("SABnzbd_nzo_{s}"))
                 .expect("addfile returned no nzo_id")
         };
-        let qslot = |q: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value =
-                serde_json::from_str(q).unwrap_or_else(|e| panic!("bad queue JSON: {e}\n{q}"));
-            v["queue"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
 
         // Paused so both land in the queue before the duplicate check runs.
         http(port, "/api?mode=pause&output=json", None);
@@ -1511,7 +1503,7 @@ async fn raising_a_held_duplicates_priority_releases_it() {
 
         let q = http(port, "/api?mode=queue&output=json", None);
         for id in [&held_id, &held2_id] {
-            let held = qslot(&q, id);
+            let held = queue_slot(&q, id);
             assert_eq!(held["priority"], "Duplicate", "not held: {q}");
             assert_eq!(held["status"], "Paused", "a hold is a pause: {q}");
         }
@@ -1544,10 +1536,10 @@ async fn raising_a_held_duplicates_priority_releases_it() {
         assert!(r.contains("true"), "GroupSetPriority refused: {r}");
 
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert_eq!(qslot(&q, &held_id)["priority"], "High", "{q}");
+        assert_eq!(queue_slot(&q, &held_id)["priority"], "High", "{q}");
         for id in [&held_id, &held2_id] {
             assert_ne!(
-                qslot(&q, id)["status"],
+                queue_slot(&q, id)["status"],
                 "Paused",
                 "the priority write left the hold in place for {id}: {q}"
             );
@@ -5913,56 +5905,18 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
             }
             panic!("timed out waiting for {what}");
         };
-        // ONE queue slot. The payload carries a queue-wide "status" of its
-        // own, so a substring search for "Downloading" says nothing about
-        // the job being asked about.
-        let qslot = |q: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value = serde_json::from_str(q)
-                .unwrap_or_else(|e| panic!("bad queue JSON: {e}\n{q}"));
-            v["queue"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
-        // ONE history slot - the same rule as `qslot`, for a sharper
-        // reason. A FAILED record carries `fail_detail`: that job's
-        // console block, snapshotted out of the daemon's log ring. The
-        // ring is a GLOBAL tee of stdout, so every line any other lane
-        // printed while the failing job held the floor is in there too -
-        // including `[queue] added <nzo_id> as ALTERNATIVE (duplicate
-        // held)` for a job added mid-download. `h.contains(&id)`
-        // therefore answers "is this id mentioned ANYWHERE in history",
-        // which is not the question any assertion below asks.
-        //
-        // Not hypothetical: it is what made this test flaky under
-        // `cargo test --workspace` (2 Aug 2026 - 7 failures in 10 loaded
-        // runs, every one captured with history holding a single slot).
-        // The runner picks a queued job on a 500 ms tick, so the dead job
-        // could open its log bracket BEFORE the test's next upload
-        // landed, and a loaded box is exactly what makes that upload slow
-        // enough to lose that race. The poll then matched the
-        // ALTERNATIVE's id inside the dead job's `fail_detail` and
-        // returned before the alternative had downloaded at all.
-        let hslot = |h: &str, id: &str| -> serde_json::Value {
-            let v: serde_json::Value = serde_json::from_str(h)
-                .unwrap_or_else(|e| panic!("bad history JSON: {e}\n{h}"));
-            v["history"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
 
         // Paused so both land in the queue before the duplicate check runs.
         http(port, "/api?mode=pause&output=json", None);
         let orig_id = upload(&orig_xml, "Show.Name.S01E02.720p.WEB.nzb");
         let held_id = upload(&held_xml, "Show.Name.S01E02.1080p.WEB.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert_eq!(qslot(&q, &held_id)["priority"], "Duplicate", "not held: {q}");
+        assert_eq!(queue_slot(&q, &held_id)["priority"], "Duplicate", "not held: {q}");
         http(port, "/api?mode=resume&output=json", None);
 
         // Cancel the original while it is actually transferring.
         poll(
-            &|q, _| qslot(q, &orig_id)["status"] == "Downloading",
+            &|q, _| queue_slot(q, &orig_id)["status"] == "Downloading",
             "the original to start",
         );
         let r = http(
@@ -5978,28 +5932,28 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
         let dead_id = upload(&dead_xml, "Other.Show.S05E01.720p.WEB.nzb");
         let alt_id = upload(&alt_xml, "Other.Show.S05E01.1080p.WEB.nzb");
         let (q, h) = poll(
-            &|_, h| !hslot(h, &dead_id).is_null() && !hslot(h, &alt_id).is_null(),
+            &|_, h| !history_slot(h, &dead_id).is_null() && !history_slot(h, &alt_id).is_null(),
             "the failed original and its promoted alternative",
         );
         // Which job took which outcome, not merely that both words are
         // somewhere in the payload: the old pair of substring searches
         // passed just as happily with the two swapped.
-        assert_eq!(hslot(&h, &dead_id)["status"], "Failed", "{h}");
-        assert_eq!(hslot(&h, &alt_id)["status"], "Completed", "{h}");
+        assert_eq!(history_slot(&h, &dead_id)["status"], "Failed", "{h}");
+        assert_eq!(history_slot(&h, &alt_id)["status"], "Completed", "{h}");
 
         // The cancelled title's alternative is still held, and nothing
         // about the cancelled job reached history.
         assert_eq!(
-            qslot(&q, &held_id)["priority"],
+            queue_slot(&q, &held_id)["priority"],
             "Duplicate",
             "the cancelled download promoted its held duplicate: {q}"
         );
         assert!(
-            hslot(&h, &held_id).is_null(),
+            history_slot(&h, &held_id).is_null(),
             "the held duplicate downloaded anyway: {h}"
         );
         assert!(
-            hslot(&h, &orig_id).is_null(),
+            history_slot(&h, &orig_id).is_null(),
             "a cancelled job must not reach history: {h}"
         );
     })
@@ -6740,17 +6694,8 @@ async fn going_offline_winds_down_the_running_download() {
             .map(|s| format!("SABnzbd_nzo_{s}"))
             .unwrap();
 
-        // ONE queue slot: the payload carries a queue-wide "status" of its
-        // own, so a substring search says nothing about THIS job.
-        let qslot = |id: &str| -> serde_json::Value {
-            let q = http(port, "/api?mode=queue&output=json", None);
-            let v: serde_json::Value =
-                serde_json::from_str(&q).unwrap_or_else(|e| panic!("bad queue JSON: {e}\n{q}"));
-            v["queue"]["slots"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
-                .unwrap_or(serde_json::Value::Null)
-        };
+        // ONE queue slot for this job, read fresh off the API.
+        let qslot = |id: &str| queue_slot(&http(port, "/api?mode=queue&output=json", None), id);
 
         // Wait for it to be genuinely on the wire, not merely picked.
         let mut on_the_wire = false;

@@ -416,6 +416,26 @@ pub enum Persist {
     Held(Vec<Frag>),
 }
 
+/// One placement a held-span re-feed performed: the slot, the fragment
+/// in that slot's volume address space, and whether the bytes reached
+/// an in-stream-decrypted (plaintext-once) file rather than landing as
+/// a verbatim copy of the posted bytes.
+///
+/// The crypto fact is captured AT THE WRITE, where the route is known
+/// for certain, and not re-derived at record time from the file name:
+/// it is what keeps such a placement out of an `R` record - the
+/// invariant a `D` record exists to protect - independently of what the
+/// chain's crypto map happens to hold when the article completes.
+#[derive(Debug, Clone)]
+pub struct LatePlacement {
+    pub slot: usize,
+    pub frag: Frag,
+    /// The bytes are PLAINTEXT on disk: restorable only by
+    /// re-encryption through the file's journaled `E`/`K`/`T` facts, so
+    /// the article completes into a `D` record and never an `R`.
+    pub crypto: bool,
+}
+
 /// One deferred pwrite: performed after the routing lock drops.
 struct WriteJob {
     writer: Arc<FileWriter>,
@@ -916,14 +936,18 @@ struct Inner {
     /// leave `span_held` alone (a re-held subrange belongs to an
     /// article that was already reported `Held` when it arrived).
     refeed_active: bool,
-    /// Plain (non-crypto) writes performed by held-span re-feeds, in
-    /// volume address space, drained by
-    /// [`Extractor::drain_late_placements`]. The journal writer joins
-    /// these against the articles it parked on a `Held` return - a
-    /// held-then-drained article's bytes are durably on disk the moment
-    /// the entry lands here (the re-feed writes run under the routing
-    /// lock, before the drain call returns).
-    late_placements: Vec<(usize, Frag)>,
+    /// Writes performed by held-span re-feeds, in volume address
+    /// space, drained by [`Extractor::drain_late_placements`]. The
+    /// journal writer joins these against the articles it parked on a
+    /// `Held` return - a held-then-drained article's PLAIN bytes are
+    /// durably on disk the moment the entry lands here (the re-feed
+    /// writes run under the routing lock, before the drain call
+    /// returns). A crypto entry ([`LatePlacement::crypto`]) makes the
+    /// weaker claim its route can: the span was fed to the file's
+    /// [`CryptoState`], which may still hold a seam sliver in RAM, so
+    /// the journal writer gates it on `crypto_span_on_disk` exactly as
+    /// it gates a directly-placed `D` (TODO 27.2).
+    late_placements: Vec<LatePlacement>,
     /// Set when the CURRENT top-level write parked bytes of its own
     /// span in `holds` (reset at write entry; re-feed pushes are
     /// excluded via `refeed_active`). Read by the write tail to return
@@ -1210,16 +1234,18 @@ impl Extractor {
     }
 
     /// Drain the placements held-span re-feeds performed since the last
-    /// call: `(slot, frag)` pairs for plain (non-crypto) writes that
-    /// landed while `drain_holds` replayed parked spans, in THIS
-    /// level's slot/volume address space. A nested child's drained
-    /// holds are folded in, translated back through the forward windows
-    /// recorded when the child parked them ([`FwdWindow`]); a child
-    /// placement with no window (structurally unexpected) is dropped,
-    /// which errs toward a refetch on resume. The journal writer joins
-    /// these against articles parked on a [`Persist::Held`] return; the
-    /// bytes are already durably written when an entry appears here.
-    pub fn drain_late_placements(&self) -> Vec<(usize, Frag)> {
+    /// call: one [`LatePlacement`] per write that landed while
+    /// `drain_holds` replayed parked spans, in THIS level's slot/volume
+    /// address space. A nested child's drained holds are folded in,
+    /// translated back through the forward windows recorded when the
+    /// child parked them ([`FwdWindow`]); a child placement with no
+    /// window (structurally unexpected) is dropped, which errs toward a
+    /// refetch on resume. The journal writer joins these against
+    /// articles parked on a [`Persist::Held`] return; a PLAIN entry's
+    /// bytes are already durably written when it appears here, while a
+    /// crypto one carries the weaker claim its route can make and is
+    /// gated on [`Extractor::crypto_span_on_disk`] at record time.
+    pub fn drain_late_placements(&self) -> Vec<LatePlacement> {
         let (mut out, child) = {
             let mut inner = self.inner.lock_ok();
             let placed = std::mem::take(&mut inner.late_placements);
@@ -1236,23 +1262,25 @@ impl Extractor {
             let child_placed = c.drain_late_placements();
             if !child_placed.is_empty() {
                 let inner = self.inner.lock_ok();
-                for (cslot, cf) in child_placed {
+                for lp in child_placed {
+                    let cf = lp.frag;
                     // A child hold is a subrange of exactly one
                     // forwarded write, so one containing window is the
                     // translation (duplicated windows carry identical
                     // mappings - routing is deterministic).
                     if let Some(w) = inner.fwd_windows.iter().find(|w| {
-                        w.child_slot == cslot
+                        w.child_slot == lp.slot
                             && cf.vol_off >= w.child_off
                             && cf.vol_off + cf.len <= w.child_off + w.len
                     }) {
-                        out.push((
-                            w.parent_slot,
-                            Frag {
+                        out.push(LatePlacement {
+                            slot: w.parent_slot,
+                            frag: Frag {
                                 vol_off: w.parent_vol_off + (cf.vol_off - w.child_off),
                                 ..cf
                             },
-                        ));
+                            crypto: lp.crypto,
+                        });
                     }
                 }
             }
@@ -1843,10 +1871,14 @@ impl Extractor {
             })
             .collect();
         // The partial view a `Held` return carries: plain fragments
-        // only. Crypto fragments are deliberately left out - the caller
-        // completes a held article into a plain `R` record, and an `R`
-        // must never describe plaintext-once bytes; a held span with a
-        // crypto part simply never completes and refetches on resume.
+        // only. Crypto fragments are deliberately left out, and stay
+        // out after TODO 27.2 (24 Aug 2026) taught the DRAIN to report
+        // its crypto placements: this is the view of what was already
+        // on disk when the article arrived, and the caller's join adds
+        // the crypto fact per fragment from the drain, where the route
+        // is known. A span whose crypto part landed on the DIRECT path
+        // and whose remainder was held therefore still never completes,
+        // and refetches on resume - the safe direction.
         let mut plain_frags: Vec<Frag> = if span_held {
             jobs.iter()
                 .filter(|j| j.crypto.is_none())

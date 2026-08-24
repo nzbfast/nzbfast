@@ -43,14 +43,23 @@ pub(super) struct ParkedR {
 #[derive(Default)]
 pub(super) struct PendingR {
     pub(super) parked: Vec<ParkedR>,
-    pub(super) late: std::collections::HashMap<usize, Vec<nzbkit::extract::Frag>>,
+    /// Per slot, the drained fragments and whether each landed as
+    /// PLAINTEXT in an in-stream-decrypted file - see
+    /// [`nzbkit::extract::LatePlacement::crypto`]. The flag decides
+    /// which record the completed article gets, and a `true` anywhere
+    /// in a span's join makes an `R` record impossible for it.
+    pub(super) late: std::collections::HashMap<usize, Vec<(nzbkit::extract::Frag, bool)>>,
 }
 
 /// Join freshly drained late placements against the parked held
-/// articles and journal every article whose span the plain fragments
-/// now fully cover. A hold is always a subrange of exactly one
-/// article's span, so containment in `[off, off+len)` is the join key.
-/// Cheap when nothing is parked (one uncontended lock).
+/// articles and journal every article whose span the fragments now
+/// fully cover. A hold is always a subrange of exactly one article's
+/// span, so containment in `[off, off+len)` is the join key. Cheap when
+/// nothing is parked (one uncontended lock).
+///
+/// A span whose fragments include a PLAINTEXT-ONCE one completes into a
+/// `D` record rather than an `R` (TODO 27.2, 24 Aug 2026) - see
+/// [`complete_crypto`] for what that costs it.
 pub(super) fn flush_pending_r(
     pending_r: &std::sync::Mutex<PendingR>,
     extractor: &nzbkit::extract::Extractor,
@@ -60,26 +69,39 @@ pub(super) fn flush_pending_r(
     if st.parked.is_empty() {
         return;
     }
-    for (slot, frag) in extractor.drain_late_placements() {
-        st.late.entry(slot).or_default().push(frag);
+    for lp in extractor.drain_late_placements() {
+        st.late
+            .entry(lp.slot)
+            .or_default()
+            .push((lp.frag, lp.crypto));
     }
     let PendingR { parked, late } = &mut *st;
     let mut done: Vec<(usize, u64, u64)> = Vec::new();
+    // The `E`/`K`/`T` facts every `D` record leans on, drained and
+    // written ONCE per pass and before the first `D` of it, so a record
+    // is never orphaned ahead of the facts that restore it. Lazy: a
+    // pass that completes no crypto article touches the sink at all.
+    let mut events_written = false;
     parked.retain(|p| {
         let end = p.off + p.len;
-        let mut frags = p.frags.clone();
+        // A `Persist::Held` return carries PLAIN fragments only
+        // (`compose_persist` filters the crypto ones out), so the
+        // article's own partial view is all `false`.
+        let mut frags: Vec<(nzbkit::extract::Frag, bool)> =
+            p.frags.iter().cloned().map(|f| (f, false)).collect();
         if let Some(slot_late) = late.get(&p.sidx) {
             frags.extend(
                 slot_late
                     .iter()
-                    .filter(|f| f.vol_off >= p.off && f.vol_off + f.len <= end)
+                    .filter(|(f, _)| f.vol_off >= p.off && f.vol_off + f.len <= end)
                     .cloned(),
             );
         }
-        frags.sort_by_key(|f| f.vol_off);
+        frags.sort_by_key(|(f, _)| f.vol_off);
+        let crypto = frags.iter().any(|(_, c)| *c);
         let mut covered_to = p.off;
         let mut gap = false;
-        for f in &frags {
+        for (f, _) in &frags {
             if f.vol_off > covered_to {
                 gap = true; // a hole the placements do not fill
                 break;
@@ -104,11 +126,28 @@ pub(super) fn flush_pending_r(
         // direction.
         let mut on_disk = None;
         if gap || frags.is_empty() || covered_to < end {
+            // A crypto span does NOT inherit the widening above it, and
+            // that is a decision rather than an omission (TODO 27.2, 24
+            // Aug 2026). `materialized_span_on_disk` vouches for the
+            // slot's VOLUME file holding these bytes verbatim at their
+            // final offsets, and its answer composes ONE identity
+            // fragment naming that volume - which is an `R` claim in
+            // everything but the letter. Inheriting it would let a span
+            // whose bytes reached a plaintext-once file complete off a
+            // volume it may only partly have reached, mixing a copy
+            // restore with a re-encryption restore over the same range.
+            // A crypto span therefore completes ONLY off its own
+            // placement trail, and where the trail comes up short the
+            // article stays parked and refetches - the safe direction,
+            // and no worse than what it did before it journaled at all.
+            if crypto {
+                return true; // stays parked
+            }
             let Some((name, size)) = extractor.materialized_span_on_disk(p.sidx, p.off, p.len)
             else {
                 return true; // stays parked
             };
-            frags = vec![nzbkit::extract::Frag::identity(&name, p.off, p.len)];
+            frags = vec![(nzbkit::extract::Frag::identity(&name, p.off, p.len), false)];
             on_disk = Some((name, size));
         }
         // Every byte of the span is durably on disk (the re-feed writes
@@ -117,10 +156,14 @@ pub(super) fn flush_pending_r(
         // article.
         if p.par2_main {
             journal.record(&p.id);
+        } else if crypto {
+            if !complete_crypto(p, &frags, extractor, journal, &mut events_written) {
+                return true; // plaintext not settled yet - stays parked
+            }
         } else {
+            let mut frags: Vec<nzbkit::extract::Frag> = frags.into_iter().map(|(f, _)| f).collect();
             let widened = on_disk.is_some();
             let slot_file = on_disk.or_else(|| extractor.slot_file_info(p.sidx));
-            let mut frags = frags;
             // A parked article completing AFTER its slot demoted may mix
             // identity fragments (the reconstruction's own writes) with
             // fragments naming inner files the fallback just deleted -
@@ -149,13 +192,70 @@ pub(super) fn flush_pending_r(
     // not grow for the life of the job.
     if !done.is_empty() {
         for (slot, v) in late.iter_mut() {
-            v.retain(|f| {
+            v.retain(|(f, _)| {
                 !done
                     .iter()
                     .any(|(s, o, e)| s == slot && f.vol_off >= *o && f.vol_off + f.len <= *e)
             });
         }
     }
+}
+
+/// Complete a parked article whose fragments include plaintext-once
+/// bytes: a `D` record, never an `R` (TODO 27.2, 24 Aug 2026). Returns
+/// false when the plaintext has not physically landed yet, which leaves
+/// the article parked for a later pass exactly as a directly-placed `D`
+/// waits in `pending_d`.
+///
+/// Two things this does that the plain arm does not, both of them the
+/// reason the crypto route was left unreported until now:
+///
+///  * It gates on [`nzbkit::extract::Extractor::crypto_span_on_disk`].
+///    A plain re-feed write has landed by the time its placement is
+///    surfaced; a crypto one was handed to `CryptoState`, which can
+///    still be holding a seam sliver in RAM, and a `D` for RAM-held
+///    bytes would survive a kill the bytes did not.
+///  * It writes the `E`/`K`/`T` facts first (once per flush pass), so
+///    the record can never precede the parameters that restore it.
+///
+/// The mask is the OR of what the write REPORTED and what the chain
+/// says NOW. The reported flag is the ground truth - it was taken at
+/// the write, where the route was certain - while the chain's view is
+/// what the two direct-path sites use, so taking either as enough is
+/// the conservative reading: a fragment marked crypto restores by
+/// re-encryption, and one whose facts are missing must FAIL on resume
+/// rather than fall through to a copy.
+fn complete_crypto(
+    p: &ParkedR,
+    frags: &[(nzbkit::extract::Frag, bool)],
+    extractor: &nzbkit::extract::Extractor,
+    journal: &nzbkit::journal::Journal,
+    events_written: &mut bool,
+) -> bool {
+    let bare: Vec<nzbkit::extract::Frag> = frags.iter().map(|(f, _)| f.clone()).collect();
+    if !extractor.crypto_span_on_disk(&bare) {
+        return false;
+    }
+    if !*events_written {
+        journal.record_crypto_events(&extractor.drain_crypto_events());
+        *events_written = true;
+    }
+    let chain = extractor.crypto_frag_mask(&bare);
+    let mask: Vec<bool> = frags
+        .iter()
+        .enumerate()
+        .map(|(i, (_, reported))| *reported || chain.get(i).copied().unwrap_or(false))
+        .collect();
+    journal.record_placed_crypto(
+        p.sidx,
+        &p.id,
+        extractor.slot_file_info(p.sidx),
+        &p.name,
+        p.size,
+        &bare,
+        &mask,
+    );
+    true
 }
 
 /// One decode consumer's dependency set - exactly the clone list its
@@ -886,6 +986,8 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
 /// overlapping tail's job as well as the newest one; the registry entry
 /// goes when this guard drops.
 pub(super) fn spawn_mem_sampler(stream_owner: &str, nzb_path: &std::path::Path) -> MemSampler {
+    #[cfg(test)]
+    assert_mem_sampler_serialized("spawn_mem_sampler");
     let run = MEM_SAMPLER_RUN.fetch_add(1, Ordering::Relaxed) + 1;
     let record = Arc::new(nzbkit::memgauge::PeakRecord::new());
     nzbkit::memgauge::install_latest_peak_record(record.clone());
@@ -995,7 +1097,81 @@ pub(super) static MEM_SAMPLER_RUN: AtomicU64 = AtomicU64::new(0);
 /// printed). A no-op when a newer sampler has already taken the token:
 /// that one belongs to the next job and must keep running.
 pub(super) fn stop_mem_sampler(run: u64) {
+    #[cfg(test)]
+    assert_mem_sampler_serialized("stop_mem_sampler");
     let _ = MEM_SAMPLER_RUN.compare_exchange(run, run + 1, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// Serializes the unit tests that drive [`MEM_SAMPLER_RUN`].
+///
+/// The token is process-global and the tests assert on its ABSOLUTE
+/// value, so two of them on different threads of one process read each
+/// other's bumps. nextest cannot see that - it gives every test its own
+/// process - but `cargo test -p nzbfast --bin nzbfast` and CI's
+/// `unit-one-process` job put ~1850 tests in ONE, and there
+/// `stopping_an_old_sampler_leaves_the_new_one_running` failed 73 runs
+/// in 200 (24 Aug 2026, mac dev box: `left: 5, right: 4` - a neighbour's
+/// spawn landing between this test's own two). Latent since the three
+/// tests were written (bug sweep 22 Aug 2026, F-19); the same shape as
+/// the `crate::wall` / `crate::ratelimit` cooldown-table collision fixed
+/// in a29a8e4cc.
+///
+/// Take it with [`serialize_mem_sampler_tests`] as the FIRST statement of
+/// any test that spawns or stops a sampler. That is not a convention to
+/// remember: [`spawn_mem_sampler`] and [`stop_mem_sampler`] assert the
+/// guard is held on this thread, so a fourth test that forgets it panics
+/// by name on its first call rather than flaking on somebody else's run.
+#[cfg(test)]
+static MEM_SAMPLER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    /// Whether THIS thread is the one holding [`MEM_SAMPLER_TEST_LOCK`].
+    ///
+    /// The mutex alone cannot answer that - `try_lock` failing means
+    /// someone holds it, not that you do - and "you" is the whole
+    /// question the assertion asks.
+    static MEM_SAMPLER_TEST_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The guard: releases the mutex and clears the thread's flag together,
+/// so an assertion inside a test that panics cannot leave the next test
+/// looking serialized when it is not.
+#[cfg(test)]
+pub(crate) struct MemSamplerTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for MemSamplerTestGuard {
+    fn drop(&mut self) {
+        MEM_SAMPLER_TEST_HELD.with(|h| h.set(false));
+    }
+}
+
+/// Claim [`MEM_SAMPLER_TEST_LOCK`] for this test. Declare it FIRST, so
+/// it drops LAST - after every `MemSampler` the test owns, whose own
+/// drop unregisters a row the next test is about to census.
+///
+/// Poison-recovering (`lock_ok`, not `unwrap`): one test failing an
+/// assertion must report itself, not turn its two neighbours red too.
+#[cfg(test)]
+pub(crate) fn serialize_mem_sampler_tests() -> MemSamplerTestGuard {
+    use nzbkit::sync::MutexExt;
+    let lock = MEM_SAMPLER_TEST_LOCK.lock_ok();
+    MEM_SAMPLER_TEST_HELD.with(|h| h.set(true));
+    MemSamplerTestGuard { _lock: lock }
+}
+
+/// The pin. See [`MEM_SAMPLER_TEST_LOCK`].
+#[cfg(test)]
+fn assert_mem_sampler_serialized(what: &str) {
+    assert!(
+        MEM_SAMPLER_TEST_HELD.with(|h| h.get()),
+        "{what} touches the process-global MEM_SAMPLER_RUN token, so a unit test \
+         that reaches it must serialize against every other one that does: take \
+         `let _serial = serialize_mem_sampler_tests();` as the test's first statement"
+    );
 }
 
 #[cfg(test)]

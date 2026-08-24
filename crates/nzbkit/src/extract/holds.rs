@@ -1934,7 +1934,7 @@ mod tests {
             .unwrap();
         let late = ex.drain_late_placements();
         assert!(
-            late.iter().all(|(slot, f)| *slot == 0 && f.file == inner),
+            late.iter().all(|p| p.slot == 0 && p.frag.file == inner),
             "store payload places into the inner file: {late:?}"
         );
         // Every held article lying fully inside the data area (the last
@@ -1943,7 +1943,7 @@ mod tests {
         let covered = |off: u64, len: u64| {
             let mut iv: Vec<(u64, u64)> = late
                 .iter()
-                .map(|(_, f)| (f.vol_off, f.vol_off + f.len))
+                .map(|p| (p.frag.vol_off, p.frag.vol_off + p.frag.len))
                 .filter(|&(s, e)| s >= off && e <= off + len)
                 .collect();
             iv.sort_unstable();

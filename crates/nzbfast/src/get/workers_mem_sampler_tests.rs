@@ -6,6 +6,8 @@ use super::*;
 /// the new job's sampler.
 #[test]
 fn stopping_an_old_sampler_leaves_the_new_one_running() {
+    // FIRST, so it drops LAST: see MEM_SAMPLER_TEST_LOCK in workers.rs.
+    let _serial = serialize_mem_sampler_tests();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -32,6 +34,8 @@ fn stopping_an_old_sampler_leaves_the_new_one_running() {
 /// names the newest job.
 #[test]
 fn each_sampler_owns_its_peak_record() {
+    // FIRST, so it drops LAST: see MEM_SAMPLER_TEST_LOCK in workers.rs.
+    let _serial = serialize_mem_sampler_tests();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -58,6 +62,8 @@ fn each_sampler_owns_its_peak_record() {
 /// sampler guard's drop retires its row.
 #[test]
 fn live_samplers_are_registered_under_their_labels() {
+    // FIRST, so it drops LAST: see MEM_SAMPLER_TEST_LOCK in workers.rs.
+    let _serial = serialize_mem_sampler_tests();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()

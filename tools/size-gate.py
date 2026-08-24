@@ -200,7 +200,17 @@ BASELINE_FILES = {
     # functions rather than a second `impl Daemon`, so that one is
     # re-exported from daemon.rs and every call site still names it
     # unqualified. 3,783 with both, still over the ceiling: entry stays.
-    "crates/nzbfast/src/serve/daemon.rs": 3783,
+    # ...and 3,859 by 24 Aug 2026, one line over its own limit, which is
+    # what a file sitting at 3,857 does the moment anyone adds a field to
+    # the Daemon struct - the §282 hunt's was the two lines that tripped
+    # it, and any other lane's next two would have. What the UI says
+    # about a server granting no sessions (server_down_secs, the
+    # ServerOutage row, row_outage's token and the server_outages census)
+    # is one subject, owes nothing to the Daemon struct it was sitting
+    # beside, and moved whole to outage.rs - a ninth child on the
+    # daemon_index shape, re-exported so every call site still names it
+    # unqualified. 3,764, so the entry ratchets DOWN.
+    "crates/nzbfast/src/serve/daemon.rs": 3764,
     # 5,150, then 5,397 after the 8 Aug burst. The inline `mod tests`
     # (the repair math and the mapped driver) moved to
     # par2repair/inline_tests.rs, beside unit_tests.rs: 4,206. Regrown

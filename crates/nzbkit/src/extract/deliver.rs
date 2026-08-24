@@ -169,9 +169,9 @@ impl Extractor {
         // whose identity offsets this path knows - and the disk oracle
         // is the wider claim, made where the destination can be asked.
         if inner.refeed_active {
-            inner.late_placements.push((
+            inner.late_placements.push(LatePlacement {
                 slot,
-                Frag {
+                frag: Frag {
                     file: w
                         .path
                         .file_name()
@@ -182,7 +182,8 @@ impl Extractor {
                     vol_off: offset,
                     len: data.len() as u64,
                 },
-            ));
+                crypto: false,
+            });
         }
         Ok(())
     }
@@ -204,25 +205,35 @@ impl Extractor {
                 None,
             )?;
             // A re-fed (drained-hold) forward has no caller composing
-            // its Persist into an article record - surface a Placed
-            // result so the article that parked these bytes can still
-            // journal. PlacedCrypto stays unreported: a held article
+            // its Persist into an article record - surface the result
+            // so the article that parked these bytes can still journal.
+            // A PlacedCrypto one rides the SAME trail carrying its
+            // crypto flag (TODO 27.2): it is what tells the journal
+            // writer to complete the article into a `D` record. The
+            // invariant that refusal protected is unchanged and now
+            // holds by the flag rather than by silence - a held article
             // must never complete into an `R` record over
             // plaintext-once bytes.
+            let placed = match p {
+                Persist::Placed(cfrags) => Some((cfrags, false)),
+                Persist::PlacedCrypto(cfrags) => Some((cfrags, true)),
+                Persist::No | Persist::Held(_) => None,
+            };
             if j.refeed
-                && let Persist::Placed(cfrags) = p
+                && let Some((cfrags, crypto)) = placed
             {
                 let mut inner = self.inner.lock_ok();
                 for cf in cfrags {
-                    inner.late_placements.push((
-                        j.parent_slot,
-                        Frag {
+                    inner.late_placements.push(LatePlacement {
+                        slot: j.parent_slot,
+                        frag: Frag {
                             file: cf.file,
                             file_off: cf.file_off,
                             vol_off: j.vol_off + (cf.vol_off - j.file_off),
                             len: cf.len,
                         },
-                    ));
+                        crypto,
+                    });
                 }
             }
         }
@@ -373,15 +384,20 @@ impl Extractor {
                                         len: bytes.len() as u64,
                                     });
                                     for cf in cfrags {
-                                        inner.late_placements.push((
-                                            parent_slot,
-                                            Frag {
+                                        // A `Held` return carries PLAIN
+                                        // fragments only (see
+                                        // `compose_persist`), so these
+                                        // are never crypto.
+                                        inner.late_placements.push(LatePlacement {
+                                            slot: parent_slot,
+                                            frag: Frag {
                                                 file: cf.file.clone(),
                                                 file_off: cf.file_off,
                                                 vol_off: vol_off + (cf.vol_off - file_off),
                                                 len: cf.len,
                                             },
-                                        ));
+                                            crypto: false,
+                                        });
                                     }
                                 }
                                 return Ok(p);

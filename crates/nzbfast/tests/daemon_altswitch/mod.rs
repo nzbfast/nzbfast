@@ -253,6 +253,15 @@ async fn promoting_a_held_alternate_announces_the_switch_on_the_ring() {
             !e["reason"].as_str().unwrap_or_default().is_empty(),
             "the switch gave no reason: {e}"
         );
+        // WHICH DOOR. The clicked switch emits the same kind (item 12's
+        // button, `altcand::alt_switch`), so `by` is what tells a
+        // subscriber which one it is reading - and it is the key that
+        // says `rank` below is meaningful.
+        assert_eq!(e["by"], "auto", "the automatic promote did not say so: {e}");
+        assert!(
+            e["rank"].is_number(),
+            "the automatic door reports the rank it picked on: {e}"
+        );
         // The ring stamps every event, and a consumer keys on these.
         assert_eq!(e["schema_version"], 1, "{e}");
         assert!(e["seq"].as_u64().unwrap_or(0) > 0, "{e}");
@@ -399,6 +408,223 @@ async fn duplicate_held_then_promoted() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         assert!(ok, "alternative was never promoted/completed");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §282 item 18, the OTHER door: the user-clicked switch announces
+/// itself on the ring too, and says it was a person who did it.
+///
+/// Until 24 Aug 2026 it did not. `Daemon::alt_switch` - item 12's
+/// "Switch to this copy" button - does everything the automatic promote
+/// does (fails the original, unpauses the spare, stamps `alt_from` /
+/// `alt_from_name` / `alt_why` on one row and `alt_to_name` on the
+/// other) and then emitted only `life_emit_parked`, which on a Failed
+/// row resolves to a bare `job.failed`. So a webhook target subscribed
+/// to `job.*` heard the same user-visible switch in two different
+/// vocabularies, and the quieter one was the case where a switch is
+/// known for CERTAIN rather than inferred from a rank.
+///
+/// Driven through the real API - `mode=alt_switch` on a live daemon -
+/// rather than by calling the method, because the method is already
+/// covered in-process (`daemon_tests/altcand_tests.rs`) and what is new
+/// here is the event reaching the ring a webhook reads. That costs the
+/// test a real terminal verdict: the button is refused outright unless
+/// `altcand::terminal_reason` says the job cannot finish, so the
+/// original is a post of GHOST ids on a 30-day-old NZB against a single
+/// server, which is the one shape that scores red AND satisfies
+/// `no_server_can_supply` (every configured server answered, every
+/// sampled article absent, past the propagation age gate). That is
+/// `daemon_health`'s fixture, borrowed for its verdict.
+///
+/// The queue stays PAUSED throughout, and that is load-bearing twice
+/// over: nothing downloads, so the health prober's `download_idle`
+/// stand-down never trips and the probe actually runs; and the original
+/// never reaches `park`, so the AUTOMATIC promote cannot fire. `by` is
+/// asserted `"user"` for that reason as much as for its own - a
+/// `job.switched` carrying `"auto"` here would mean the test proved the
+/// wrong door.
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_by_hand_announces_the_switch_on_the_ring_and_says_who_did_it() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-altclick-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let data = payload(120_000, 41);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("ep.bin", &data, 40_000, "ac", &mut articles);
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    // 30 days: past GONE_MIN_AGE_DAYS, so propagation no longer explains
+    // an absent article and the verdict may reach red at all.
+    let date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 30 * 86_400;
+    let wrap = |inner: &str| {
+        format!(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  \
+             <file poster=\"x\" date=\"{date}\" subject=\"&quot;ep.bin&quot; yEnc (1/9)\">\n    \
+             <groups><group>g</group></groups>\n    <segments>\n{inner}    </segments>\n  \
+             </file>\n</nzb>\n"
+        )
+    };
+    let seg_xml = |segs: &[(String, u64, u32)]| {
+        let mut x = String::new();
+        for (id, bytes, num) in segs {
+            x.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        x
+    };
+    // Ids the mock has never heard of: 430 to STAT, which is an ANSWER
+    // saying absent rather than a server that failed to speak.
+    let ghost: Vec<(String, u64, u32)> = (1..=3)
+        .map(|n| (format!("acghost{n}@x"), 40_000, n))
+        .collect();
+    let bad_xml = wrap(&seg_xml(&ghost));
+    let good_xml = wrap(&seg_xml(&segs));
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            // The verdict is the precondition for the button, so the
+            // probe has to land inside the test's own lifetime.
+            .env("NZBFAST_HEALTH_TICK_SECS", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // Paused before either add, so both rows are in the queue when
+        // the dupe check runs and the second is HELD rather than started
+        // beside the first.
+        http(port, "/api?mode=pause&output=json", None);
+        let doomed = upload_nzb(port, &bad_xml, "Show.Name.S07E03.720p.WEB.nzb");
+        let spare = upload_nzb(port, &good_xml, "Show.Name.S07E03.1080p.WEB.nzb");
+        assert_ne!(doomed, spare, "addfile handed back one id twice");
+        let q = http(port, "/api?mode=queue&output=json", None);
+        assert_eq!(
+            queue_slot(&q, &spare)["status"],
+            "Paused",
+            "the spare was not held: {q}"
+        );
+
+        // The button does not exist until something has concluded the
+        // job cannot finish, and `alt_switch` refuses without it - so
+        // wait for the §77 prober's verdict rather than assuming it.
+        let mut red = false;
+        for _ in 0..200 {
+            let q = http(port, "/api?mode=queue&output=json", None);
+            if queue_slot(&q, &doomed)["health"]["bucket"] == "red" {
+                red = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(
+            red,
+            "the doomed post never scored red, so nothing to switch"
+        );
+
+        // THE CLICK, through the endpoint the dashboard calls.
+        let r = http(
+            port,
+            &format!("/api?mode=alt_switch&value={doomed}&alt={spare}&output=json"),
+            None,
+        );
+        assert!(r.contains("\"status\":true"), "the switch was refused: {r}");
+
+        // Poll the ring: the emit follows the durable write, so it is
+        // not necessarily on the ring by the time the API answers.
+        let mut found = None;
+        for _ in 0..100 {
+            let raw = http(port, "/api?mode=dashboard&events=0&output=json", None);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+                && let Some(e) = v["events"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|e| e["kind"] == "job.switched"))
+            {
+                found = Some(e.clone());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let e = found.expect("a hand switch reached the ring as job.failed only");
+
+        // WHICH DOOR. "auto" here would mean the M14f promote fired and
+        // this test proved the path it was written to distinguish from.
+        assert_eq!(e["by"], "user", "the clicked switch did not say so: {e}");
+        // What replaced what - by id AND by name, since the id is opaque
+        // to a webhook consumer and the name is what a person reads.
+        assert_eq!(e["nzo_id"], serde_json::json!(spare), "{e}");
+        assert_eq!(e["replaces"], serde_json::json!(doomed), "{e}");
+        assert!(
+            e["name"].as_str().unwrap_or_default().contains("1080p"),
+            "the switch named the wrong replacement: {e}"
+        );
+        assert!(
+            e["replaces_name"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("720p"),
+            "the switch did not name what it abandoned: {e}"
+        );
+        // ...and WHY: the failed row's own fail_message, build stamp and
+        // all, which is what an operator pastes into a bug report.
+        assert!(
+            e["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[nzbfast "),
+            "the reason is not the failed job's own fail_message: {e}"
+        );
+        assert!(e["category"].is_string(), "{e}");
+        // `rank` is the AUTOMATIC door's only: a clicked switch is the
+        // user overriding the ranking, so there is no winning rank to
+        // report and the key is omitted rather than nulled.
+        assert!(
+            e.get("rank").is_none(),
+            "a hand switch has no rank to report: {e}"
+        );
+        // The ring stamps every event, and a consumer keys on these.
+        assert_eq!(e["schema_version"], 1, "{e}");
+        assert!(e["seq"].as_u64().unwrap_or(0) > 0, "{e}");
+
+        // And the bare `job.failed` is STILL there: existing subscribers
+        // key on it, and adding a kind must not take one away.
+        let raw = http(port, "/api?mode=dashboard&events=0&output=json", None);
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            v["events"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|e| e["kind"] == "job.failed")),
+            "job.switched replaced job.failed instead of joining it: {raw}"
+        );
     })
     .await
     .unwrap();

@@ -295,13 +295,34 @@ impl Daemon {
     /// owns that record and files it itself. The verdict this reads is
     /// taken while the queue is idle, so the row it appears on is a
     /// queued one; refusing the race is cheaper than winning it.
+    ///
+    /// **IT ANNOUNCES THE SWITCH, and until 24 Aug 2026 it did not.**
+    /// Item 18 gave the switch its own lifecycle kind so that a user who
+    /// is not looking at the dashboard is told, and wired it to the
+    /// AUTOMATIC promote only (`Daemon::promote_held_alternative`). This
+    /// door does the same job on a click - fails the original, unpauses
+    /// the spare, stamps both halves of item 14's clause - and emitted
+    /// nothing but `life_emit_parked`, which on a Failed row resolves to
+    /// a bare `job.failed`. So the same outcome reached a `job.*`
+    /// subscriber in two vocabularies, and the QUIETER one was the case
+    /// where a switch is known for certain rather than inferred from a
+    /// rank. Both now emit `job.switched` with the same keys, plus `by`
+    /// (`"user"` here, `"auto"` there) to tell the doors apart; `rank` is
+    /// the automatic door's only and is OMITTED here rather than nulled,
+    /// because a clicked switch IS the user overriding the ranking. The
+    /// whole argument, and the one place to change it, is the doc block
+    /// on `promote_held_alternative`.
+    ///
+    /// The five refusal arms return BEFORE any of this and emit nothing,
+    /// which is the point: none of them changed a job, so there is no
+    /// switch to announce.
     pub(super) fn alt_switch(&self, failed_id: &str, spare_id: &str) -> Option<String> {
         // Both rows, the two mutations and the queue removal under ONE
         // hold, so nothing can promote, delete or pick either half in
         // between. The history push and the durable write happen after
         // it, which is the order every other park on this tree takes.
         let held_writes = Daemon::hold_queue_writes();
-        let orig = {
+        let (orig, switched) = {
             let mut q = self.queue.lock_ok();
             let find = |id: &str| -> Option<Arc<Mutex<Job>>> {
                 q.iter().find(|j| j.lock_ok().nzo_id == id).cloned()
@@ -329,7 +350,7 @@ impl Daemon {
             let Some((_, why, lead)) = verdict else {
                 return Some("nothing has concluded that this download cannot finish".into());
             };
-            let spare_name = {
+            let (spare_name, spare_category) = {
                 let mut sg = spare.lock_ok();
                 let is_spare = sg.priority == -3
                     && sg.paused
@@ -347,11 +368,16 @@ impl Daemon {
                 sg.priority = 0;
                 sg.held_for.clear();
                 sg.alt_from = failed_id.to_string();
-                sg.alt_from_name = name;
+                sg.alt_from_name = name.clone();
                 sg.alt_why = why.clone();
-                sg.name.clone()
+                (sg.name.clone(), sg.category.clone())
             };
-            {
+            // The failed row's own sentence, read back out AFTER it is
+            // stamped: `job.switched` carries the raw `fail_message`
+            // (build stamp and all) because that is what an operator
+            // pastes into a bug report, and the automatic door carries
+            // exactly the same string for exactly that reason.
+            let reason = {
                 let mut g = orig.lock_ok();
                 g.state = JobState::Failed;
                 g.paused = false;
@@ -364,19 +390,43 @@ impl Daemon {
                 g.alt_to_name = spare_name.clone();
                 g.finished_at = Some(Instant::now());
                 g.finished_unix = Some(unix_now());
-            }
+                g.fail_message.clone()
+            };
             q.retain(|j| !Arc::ptr_eq(j, &orig));
             info!(
                 target: "queue",
                 "{spare_id} promoted by hand as an alternate for {failed_id} ({spare_name:?})"
             );
-            orig
+            // Assembled here, from strings that are already owned
+            // clones, so the emit below is a move of a finished value
+            // and provably acquires nothing on its way to the ring.
+            let switched = json!({
+                "nzo_id": spare_id,
+                "name": spare_name,
+                "category": spare_category,
+                "replaces": failed_id,
+                "replaces_name": name,
+                "reason": reason,
+                "by": "user",
+            });
+            (orig, switched)
         };
         self.history.lock_ok().push(orig.clone());
         drop(held_writes);
         let _ = self.history_upsert(std::slice::from_ref(&orig));
         self.save_queue();
+        // Both events, and in this order. `job.failed` is what the
+        // original row IS now, and every existing subscriber keys on it;
+        // `job.switched` is what HAPPENED, and is the only one of the two
+        // that names the replacement. A target subscribed to `job.*` gets
+        // both and can tell one switch from two unrelated jobs by
+        // `replaces`. Neither may run under a job mutex - `life_emit`
+        // takes the ring lock and then offers the event to the webhook
+        // dispatcher - and neither does: `held_writes` is dropped above,
+        // `life_emit_parked` takes and releases its own lock, and
+        // `switched` was assembled inside the hold.
         self.life_emit_parked(&orig);
+        self.life_emit("job.switched", switched);
         self.history_enforce_retention();
         None
     }

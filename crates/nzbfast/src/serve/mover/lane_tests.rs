@@ -361,10 +361,23 @@ fn concurrent_pacers_share_one_bucket() {
     *d.move_pace.lock_ok() = "1".to_string();
     assert_eq!(d.mover_budget_bps(0), Some(1_000_000));
 
+    // The bucket's WINDOW is reset immediately before each call, and
+    // that is load-bearing rather than tidiness. `mover_pacer` rolls
+    // the window and zeroes `sent` once 2 s have passed since it was
+    // last rolled (mover.rs) - correct production behaviour, so a
+    // caller does not pay one debt twice. The window here is born at
+    // `PaceState::default()`, i.e. inside `test_daemon`, so on a loaded
+    // box a slow construction - or a descheduled gap between these two
+    // calls - silently zeroed the counter the assertions below read
+    // (`left: 0, right: 65536`, 3 of 3 stress runs, 24 Aug 2026).
+    // Resetting the window touches nothing the test is about: `sent` is
+    // left alone, so the accumulation being asserted is unchanged.
     let chunk = 64 * 1024;
+    d.mover_bucket.lock_ok().window = Instant::now();
     mover_pacer(&d)(chunk);
     assert_eq!(d.mover_bucket.lock_ok().sent, chunk);
     // A SECOND pacer, handed out separately, adds to the same bucket.
+    d.mover_bucket.lock_ok().window = Instant::now();
     mover_pacer(&d)(chunk);
     assert_eq!(
         d.mover_bucket.lock_ok().sent,

@@ -63,7 +63,30 @@ mod spare;
 mod giveup;
 mod histmigrate;
 mod histstore;
+/// §282 section C: hunt for a replacement when a job cannot complete.
+mod hunt;
 mod moveseq;
+/// Server-outage reporting, lifted out of daemon.rs (TODO 106).
+mod outage;
+// `pub(crate)` and not `pub`: these four items take and return `Daemon`,
+// so a crate-public re-export makes `Daemon` reachable at `pub`, and
+// `private_interfaces` then refuses any `pub` field of it that names a
+// `pub(crate)` type - which `hub` and `local_link` both did, until
+// bb8c6d633 narrowed those two to `pub(crate)` as well. Nothing outside
+// this crate uses these four. The belt is on both ends now: this line
+// stops `Daemon` being reachable at `pub`, and those fields would be
+// legal even if it were.
+//
+// CORRECTION to what this comment claimed when it landed: the class is
+// NOT Windows-specific, and windows-clippy is not the only job passing
+// `-p nzbfast-ffi`. BOTH clippy steps in ci-private.yml pass it, and the
+// Linux `check` one failed on the identical two errors minutes earlier
+// on 24 Aug 2026. It read as a Windows red only because
+// `tools/windows-verdict.py` digs a real verdict out from under main's
+// cancellations for the Windows jobs and nothing does that for `check`.
+// The flag is what pulls nzbfast's LIB target into the lint at all; the
+// host clippy line in CLAUDE.md lacked it and gained it in 470efe74d.
+pub(crate) use outage::*;
 #[cfg(feature = "indexer")]
 pub(crate) mod predb_seed;
 mod tasks;

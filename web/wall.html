@@ -9,10 +9,13 @@
      #0e1014 dark. They cannot BE var(--bg) - a meta tag is read before any
      stylesheet and takes no custom property - so if that token ever moves,
      move these with it.
-     This follows the OS preference only. An explicit theme choice (the
-     data-theme attribute the pre-paint script sets) is not reflected here;
-     that belongs with the rest of the installed-window work rather than in
-     a meta tag. -->
+     The PAIR follows the OS preference, which is what "Auto" means. An
+     explicit theme choice outranks the OS, so it has to outrank these
+     too: nzbfastSyncThemeColor (ui-tokens.html, pre-paint) overwrites
+     BOTH tags with the colour the page is about to paint, and restores
+     this pair when the choice goes back to Auto. Leave them here anyway -
+     they are the correct markup with JS off, and the tokens script needs
+     something to find. -->
 <meta name="theme-color" content="#eef0f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
 <!-- Same real PNG icons as the dashboard - see the note there. The wall is
@@ -78,9 +81,25 @@ body{margin:0;background:var(--bg);color:var(--fg);
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 /* ---- top bar ---- */
+/* --tbh is the top of the viewport that belongs to the WINDOW rather than
+   to us. The mac wrapper (macapp/Sources/NzbFast/DashboardWindow.swift)
+   runs its web view under a transparent, full-size-content title bar and
+   sets this on <html> from the measured title-bar height; it does that for
+   EVERY document it loads, and the wall is one of them, because the nav
+   pill that reaches it is an ordinary same-origin link. Without an inset
+   the traffic lights land on this bar's own logo, which is also the link
+   home. Unset in a browser tab, where the fallback is 0px and the layout
+   is exactly what it was.
+
+   Taken as PADDING on the bar rather than as a strip drawn over it: this
+   bar is already sticky, translucent and blurred, which is what a mac
+   title bar is, so the lights end up floating on its own material with
+   the logo below them, and it keeps working when the page is scrolled and
+   the bar is stuck. */
 .bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;
   flex-wrap:wrap;row-gap:8px;
-  padding:12px 22px;background:color-mix(in srgb,var(--bg) 82%,transparent);
+  padding:calc(12px + var(--tbh,0px)) 22px 12px;
+  background:color-mix(in srgb,var(--bg) 82%,transparent);
   backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
 /* The nav travels as one block and is pushed to the end, so the four
    pills wrap together onto a second row rather than the last one
@@ -542,7 +561,7 @@ button:active:not(:disabled){transform:scale(.94);filter:brightness(1.35)}
      of bar + 34px of chips on an 812px screen, sticky, i.e. 40% gone
      before a single poster. */
   /* One row: the mark, the search box, and the way into everything else. */
-  .bar{flex-wrap:nowrap;gap:9px;padding:9px 12px}
+  .bar{flex-wrap:nowrap;gap:9px;padding:calc(9px + var(--tbh,0px)) 12px 9px}
   #densctl{display:none}
   .bar h1{font-size:15px}
   .bar h1 a span,.bar h1 a::after{display:none}

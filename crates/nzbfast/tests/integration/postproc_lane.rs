@@ -387,22 +387,33 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
             .filter(|l| l.starts_with("D "))
             .filter_map(|l| l.rsplit(' ').next().map(str::to_string))
             .collect();
-        // Deliberately "not empty" and NOT a count, unlike the §100
-        // test this leg was copied from. That one holds every article
-        // but the offset-0 one behind `Chaos::slow_ttfb` so the sniff
-        // always classifies the slot first and the `D` population is
-        // fixed (see TODO 27.2 for why an article that beats the sniff
-        // never journals at all). The same scaffold was tried here on
-        // 24 Aug 2026 and it BREAKS THIS SUITE'S PREMISE: 400 ms of
-        // dead air pushes job 1's finish out past job 2's whole
-        // download, so the Finishing/Downloading overlap this file
-        // exists to observe stops happening - 5 runs, 5 failures on
-        // "never observed a finishing row beside a Downloading one".
-        // The lane overlap is this test's subject and the journal is
-        // its rider, so the rider is the one that stays tolerant.
-        assert!(
-            !d_ids.is_empty(),
-            "the decrypt publish recorded no D placements\n--- journal ---\n{journal_txt}"
+        // A count, by identity, with NO wire-ordering scaffold - and
+        // this rider needed both halves of TODO 27.2 to become one.
+        // It stood at a tolerant `!d_ids.is_empty()` until 24 Aug 2026
+        // because an article that beat the offset-0 sniff parked and
+        // then never journaled at all, which made the population a
+        // function of the interleave. The §100 test this leg was copied
+        // from bought determinism for a day with a `Chaos::slow_ttfb`
+        // map; the same scaffold was tried HERE and breaks this suite's
+        // premise - 400 ms of dead air pushes job 1's finish out past
+        // job 2's whole download, so the Finishing/Downloading overlap
+        // this file exists to observe stops happening (5 runs, 5
+        // failures on "never observed a finishing row beside a
+        // Downloading one"). With held crypto spans journaling, no
+        // scaffold is needed on either site: every article but the
+        // offset-0 sniff and the header tail carries a `D` whatever
+        // order they land in.
+        let want: std::collections::HashSet<String> = segs1[1..segs1.len() - 1]
+            .iter()
+            .map(|(id, _, _)| format!("<{id}>"))
+            .collect();
+        assert_eq!(
+            d_ids, want,
+            "the decrypt publish journaled {} of {} articles - every one \
+             but the offset-0 sniff and the header tail should have a `D`\n\
+             --- journal ---\n{journal_txt}",
+            d_ids.len(),
+            segs1.len()
         );
         let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         let leaked: Vec<&String> = refetched.iter().filter(|id| d_ids.contains(*id)).collect();

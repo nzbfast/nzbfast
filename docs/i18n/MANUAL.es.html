@@ -473,6 +473,26 @@ lados para mover la columna, o su borde trasero para redimensionarla; un doble c
 borde restablece las anchuras. Con un encabezado enfocado, las teclas de flecha izquierda y
 derecha lo mueven, y Mayús con una flecha lo redimensiona.</p>
 
+<h3 id="dash-install">Instalarlo como aplicación</h3>
+<p>Chrome, Edge y los demás navegadores Chromium pueden instalar el panel como una aplicación
+en este equipo: su propia ventana, su propio icono en el Dock o en la barra de tareas, sin
+barra de pestañas y sin barra de direcciones. No se envía nada y no se descarga nada
+adicional; es el mismo panel del mismo servicio, en una ventana propia. Ajustes → Interfaz
+muestra un botón <b>Instalar como aplicación</b> siempre que tu navegador sepa hacerlo, y la
+barra de direcciones suele ofrecer lo mismo en ese momento. Safari no tiene un botón que
+ofrecer: en un Mac la opción de menú es <b>Archivo → Añadir al Dock</b>, y en un iPhone o iPad
+es <b>Compartir → Añadir a pantalla de inicio</b>. Firefox en el escritorio no puede instalar
+aplicaciones web, así que allí la fila queda oculta en lugar de describir algo que no se
+ofrece. La aplicación de macOS ya es una ventana de este tipo, y por eso nunca lo pregunta.</p>
+<p>De cómo un navegador distingue una aplicación instalada de otra se siguen dos cosas, y las
+dos es mejor saberlas ahora. La identidad es la dirección, incluido el puerto: si mueves el
+servicio fuera de <code>6789</code>, la aplicación instalada desde allí queda huérfana. No se
+rompe nada, pero la instalas de nuevo desde la dirección nueva y quitas la antigua. Y para
+instalar hace falta una dirección segura, que <code>127.0.0.1</code> es por definición;
+llegar a este servicio por HTTP simple desde otro equipo de tu red no lo es, así que allí
+ningún navegador ofrece instalarlo. Ponlo detrás de HTTPS (consulta <a href="#remote-proxy">Llegar a nzbfast desde fuera de casa</a>) y la oferta
+vuelve.</p>
+
 <h2 id="adding">5 · Añadir descargas</h2>
 <div class="tblwrap"><table>
 <tr><th>Método</th><th>Cómo</th></tr>

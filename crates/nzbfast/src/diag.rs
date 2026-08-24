@@ -539,18 +539,48 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
             // a payload that was 99.2% whole. The cause goes in front of
             // the counts; the counts follow, unchanged, in the census
             // clause below.
-            let lost = if causes.recovery_segments > 0 {
+            // TWO sources of evidence, and they are not alternatives.
+            // The census counts what the DOWNLOAD saw, on the eager
+            // path, where a recovery file that got a slot dies like any
+            // other article. The seam is §282 item 4's verdict out of
+            // the repair ladder, which is where a DEFERRED volume's
+            // fetch happens - and where the incident's recovery set
+            // actually died.
+            //
+            // Selecting between them on `recovery_segments > 0` was
+            // wrong on the shape the seam exists for, and wrong in the
+            // way that reads worst. A conventionally named set gives
+            // `get::plan` no `Par2Volume` to slot, so that counter is 1
+            // - the main index, which ARRIVED - while
+            // `recovery_unusable()` is 0, and the sentence came out
+            // "0 of the post's 1 PAR2 recovery segment(s) are missing
+            // or damaged, so the 1 file(s) that came up short have no
+            // parity left to rebuild them from", which contradicts
+            // itself in the same breath. Found by §283 item 13's
+            // end-to-end assertion the day the seam was wired.
+            //
+            // So the census speaks when it has something to say, the
+            // verdict speaks when there is one, and both speak when
+            // both are true - the eager half and the deferred half of
+            // one recovery set can fail in the same job and each is a
+            // different remedy. `recovery_casualty` guarantees at least
+            // one arm: it needs `mostly_gone` (which cannot hold with
+            // `recovery_unusable()` at zero) or the seam.
+            let census = (causes.recovery_unusable() > 0).then(|| {
                 format!(
                     "{} of the post's {} PAR2 recovery segment(s) are missing or damaged",
                     causes.recovery_unusable(),
                     causes.recovery_segments
                 )
-            } else {
-                // The seam's wording: a verdict about the SOURCE, with
-                // no segment census behind it to quote.
-                "the PAR2 recovery volumes could not be fetched from any server that \
-                 has the post"
-                    .to_string()
+            });
+            // The seam's wording: a verdict about the SOURCE, with no
+            // segment census behind it to quote.
+            const UNOBTAINABLE: &str = "the PAR2 recovery volumes could not be fetched from any server that \
+                 has the post";
+            let lost = match (census, causes.recovery_unobtainable) {
+                (Some(c), true) => format!("{c}, and {UNOBTAINABLE}"),
+                (Some(c), false) => c,
+                (None, _) => UNOBTAINABLE.to_string(),
             };
             format!(
                 "download incomplete: the recovery data is what failed, not the payload - \
@@ -1961,6 +1991,84 @@ mod main_tests {
         assert!(
             !msg.contains("0 of the post's"),
             "and must never quote an empty census: {msg}"
+        );
+    }
+
+    /// The same seam, on the shape the PRODUCT actually produces.
+    ///
+    /// The test above sets `recovery_segments` to zero, and no real run
+    /// of the incident's shape does. A conventionally named set puts
+    /// its main `.par2` index in the eager plan - that is how the set
+    /// goes live at all - so the counter is ONE, and it arrived, so
+    /// `recovery_unusable()` is zero. Selecting the census wording on
+    /// `recovery_segments > 0` therefore reached for a census with
+    /// nothing in it and told the user "0 of the post's 1 PAR2 recovery
+    /// segment(s) are missing or damaged, so the 1 file(s) that came up
+    /// short have no parity left to rebuild them from".
+    ///
+    /// Measured end to end at test scale in
+    /// `e2e_faults::dead_recovery_set_over_a_healthy_payload_fails_
+    /// honestly`, which is why the count here is 1 and not a round
+    /// number: it is what that shape reports.
+    #[test]
+    fn a_live_index_over_a_dead_volume_set_does_not_quote_an_empty_census() {
+        let msg = super::incomplete_reason(
+            1,
+            0,
+            &LossCauses {
+                recovery_unobtainable: true,
+                // The main index, downloaded and intact. Nothing else
+                // of the recovery set ever got a slot.
+                recovery_segments: 1,
+                missing_segments: 1,
+                total_segments: 40,
+                par2_slots: 1,
+                ..no_causes()
+            },
+        );
+        assert!(
+            msg.contains("the recovery data is what failed, not the payload"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("0 of the post's 1 PAR2 recovery segment(s)"),
+            "an intact index is not evidence that the parity is intact, and \
+             quoting it as a census contradicts the clause it is supporting: {msg}"
+        );
+        assert!(
+            msg.contains("could not be fetched from any server that has the post"),
+            "the verdict is the only evidence this shape has: {msg}"
+        );
+    }
+
+    /// Both halves of one recovery set fail, and both are said.
+    ///
+    /// The eager half and the deferred half are different remedies -
+    /// one is articles this post has lost, the other is a source that
+    /// will not serve what it still has - so a message that picks one
+    /// and drops the other sends half the users to the wrong place.
+    #[test]
+    fn an_eager_census_and_a_repair_side_verdict_are_both_stated() {
+        let msg = super::incomplete_reason(
+            83,
+            0,
+            &LossCauses {
+                recovery_unobtainable: true,
+                missing_430_recovery: 40,
+                recovery_segments: 1000,
+                missing_segments: 135,
+                total_segments: 17130,
+                par2_slots: 127,
+                ..no_causes()
+            },
+        );
+        assert!(
+            msg.contains("40 of the post's 1000 PAR2 recovery segment(s) are missing or damaged"),
+            "the census it does have must survive: {msg}"
+        );
+        assert!(
+            msg.contains("could not be fetched from any server that has the post"),
+            "and so must the verdict: {msg}"
         );
     }
 

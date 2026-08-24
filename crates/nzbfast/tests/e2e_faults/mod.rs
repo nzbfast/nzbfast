@@ -63,14 +63,55 @@ fn matrix_post_vols(
     recovery: usize,
     vols: Option<usize>,
 ) -> Vec<u8> {
+    matrix_post_art(fx, blocks, bs, recovery, vols, bs)
+}
+
+/// [`matrix_post_vols`] with the RECOVERY set's article size stated
+/// separately from the payload's.
+///
+/// The two are the same everywhere else in this module and the reason
+/// is written up on [`matrix_post`]: article size equal to PAR2 block
+/// size is what makes "damage k articles" mean "damage exactly k
+/// blocks", and every shape that states arithmetic depends on it. That
+/// argument is about the PAYLOAD. Nothing about a recovery volume needs
+/// its articles to be block-sized, and one shape needs them not to be -
+/// see [`RECOVERY_YIELD_ART`].
+fn matrix_post_art(
+    fx: &mut Fixture,
+    blocks: usize,
+    bs: usize,
+    recovery: usize,
+    vols: Option<usize>,
+    par2_art: usize,
+) -> Vec<u8> {
     let data = unique_payload(blocks * bs, 0x5eed_0283);
     fx.add_file("payload.bin", &data, bs);
     assert!(
-        par2_create_exact(fx, recovery, bs as u64, vols, &["payload.bin"], bs),
+        par2_create_exact(fx, recovery, bs as u64, vols, &["payload.bin"], par2_art),
         "par2 create failed - callers must gate on have_par2()"
     );
     data
 }
+
+/// The article size a recovery set is posted at when a shape needs the
+/// product to be able to MEASURE whether a source will serve it.
+///
+/// §282 item 4's yield gate is a ratio, and a ratio over a tiny sample
+/// is noise: `sidefetch::MIN_RECOVERY_YIELD_SAMPLE` is 16 articles, on
+/// the stated reasoning that one lost article of a two-article volume
+/// is 50% and says nothing at all about the source. At one article per
+/// 64 KiB block, an 8-block recovery set is about five articles per
+/// fetch - under the floor, so the gate correctly declines to judge,
+/// and a shape that means "this provider will not serve the parity"
+/// cannot be written at that geometry no matter how much of it is
+/// killed. 8 KiB puts the same set at tens of articles, which is the
+/// side of the floor the live incident was on: it asked for 1024 MB of
+/// volumes and counted 1206 article failures.
+///
+/// This is the fixture bending to the product's rule, not around it.
+/// The floor is a real threshold in shipped code and a shape whose
+/// sample is under it is testing the floor, not the gate.
+const RECOVERY_YIELD_ART: usize = 8_192;
 
 /// `Fixture::add_par2_opts` with the recovery BLOCK COUNT pinned rather
 /// than a redundancy percentage.
@@ -263,17 +304,38 @@ fn importable(fx: &Fixture, name: &str) -> bool {
 /// comfortably; what was dead was the recovery.
 ///
 /// Asserted here: the job reaches an honest terminal verdict, it does
-/// not claim success, and it does not hang. NOT asserted: that the
-/// verdict NAMES the recovery set as the casualty. §282 item 17's rung
-/// (`diag::recovery_is_the_casualty`) and its seam
-/// (`LossCauses::recovery_unobtainable`) both exist; nothing sets the
-/// seam on a conventionally named set, because `get::plan` never puts a
-/// named `Par2Volume` in the main plan and every download-time recovery
-/// counter is therefore unreachable by construction. **This test is
-/// where to assert that clause the day the seam is wired.** NOT
-/// asserted either: the escalation count, which §282 item 4 is actively
-/// changing - see `escalation_on_a_dead_recovery_set_is_
-/// bounded` below, which measures rather than pins.
+/// not claim success, it does not hang, and **the verdict names the
+/// recovery set as the casualty rather than the payload** - which is
+/// §283 item 13, closed here.
+///
+/// That last assertion needed two things that did not exist when this
+/// shape was written. §282 item 17 built the rung
+/// (`diag::recovery_is_the_casualty`) and left its seam
+/// (`LossCauses::recovery_unobtainable`) with no producer, because
+/// `get::plan` never puts a named `Par2Volume` in the main plan and
+/// every DOWNLOAD-time recovery counter is therefore unreachable by
+/// construction on a conventionally named set. §282 item 4 built the
+/// producer: the volumes are fetched later, in the repair ladder, and
+/// its yield gate is what measures that the source will not serve them.
+///
+/// And it needed one thing of this fixture's, which is the part worth
+/// reading before changing the geometry: the recovery set is posted at
+/// [`RECOVERY_YIELD_ART`] rather than at one article per block, because
+/// item 4's gate refuses to judge a sample under sixteen articles and a
+/// 64 KiB-per-block set is about five. At the old geometry this shape
+/// killed 93% of the recovery set and the product correctly declined to
+/// call the source dead, so the clause could not fire however the seam
+/// was wired. Kill the payload harder instead and it still cannot fire,
+/// for the opposite reason - the rung refuses to blame the parity on a
+/// job that lost more than a twentieth of its payload, which is
+/// `diag::PAYLOAD_INTACT_DEN` and is exactly the precision this clause
+/// is worth having for.
+///
+/// NOT asserted: the escalation count. That is §282 item 4's own
+/// property and `e2e_repair::an_unservable_recovery_set_declines_as_
+/// short_not_malformed` pins it; here it is measured and printed, so a
+/// regression in it shows up in the output of a shape that is about
+/// something else.
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_recovery_set_over_a_healthy_payload_fails_honestly() {
     if !have_par2() {
@@ -281,7 +343,7 @@ async fn dead_recovery_set_over_a_healthy_payload_fails_honestly() {
         return;
     }
     let mut fx = Fixture::new("fault-deadrec");
-    matrix_post(&mut fx, 40, 65_536, 8);
+    matrix_post_art(&mut fx, 40, 65_536, 8, None, RECOVERY_YIELD_ART);
     let p = plan(&fx);
     let mut chaos = Chaos::default();
     // The live rates: 0.8% of the payload gone, 93% of the recovery.
@@ -308,6 +370,20 @@ async fn dead_recovery_set_over_a_healthy_payload_fails_honestly() {
     assert!(
         !log.contains("clean download"),
         "a dead recovery set must not read as a clean download:\n{log}"
+    );
+    // §283 item 13. The headline, not the counts - the counts are fine
+    // and were never the complaint. Asserted on the OPENING rather than
+    // on the sentence that follows it, deliberately: the opening is
+    // load-bearing beyond the prose, because `diag::fail_kind` keys on
+    // it and any other opening leaves `MissingArticles`, which is the
+    // one kind the age gate applies to. The evidence clause after it is
+    // wording and this module does not pin wording.
+    assert!(
+        log.contains("the recovery data is what failed, not the payload"),
+        "the payload arrived 97.5% intact and the parity is what would \
+         not serve - a message that reports this as missing segments \
+         sends the user to look at articles, which is where §282's 46 \
+         minutes went:\n{log}"
     );
     // Terminal, not wedged. Generous because the box is shared; the
     // point is that it ENDS.
@@ -383,11 +459,29 @@ async fn a_partially_fetched_recovery_volume_still_repairs() {
 /// Run as a PAIR on purpose. Both jobs fail, and §282 item 17's cause
 /// clause has to tell them apart: shape 1 is "your provider will not
 /// serve this post's recovery data", shape 3 is "this post is short and
-/// there is not enough parity to rebuild it". Today the only thing that
-/// distinguishes them in the product's own output is that shape 3
-/// reaches the shortfall arithmetic and shape 1 does not - so that is
-/// what this asserts, and it is the assertion a cause clause should
-/// REPLACE rather than delete.
+/// there is not enough parity to rebuild it".
+///
+/// **The discriminator is the cause clause** (§283 item 13). Until the
+/// seam behind it had a producer, the only thing that told these two
+/// apart in the product's own output was that shape 3 reaches the
+/// shortfall arithmetic and shape 1 does not - a true difference, but
+/// an incidental one, and one the user has to know how to read. The
+/// arithmetic assertions are kept BELOW the clause rather than deleted
+/// with it, because each is still a correctness property in its own
+/// right: a post short of parity must reach the arithmetic, and a post
+/// that has parity it cannot obtain must never be told it is
+/// unrepairable, which is the wrong remedy.
+///
+/// This is also the pair that catches the tempting bad fix. The clause
+/// only earns its keep if it is PRECISE, and the way to make it fire on
+/// shape 1 by accident is to loosen `diag::recovery_is_the_casualty`
+/// until it fires on shape 3 as well - blaming the parity on a job
+/// whose payload died, which is worse than the silence it replaces.
+/// Half of that guard is `diag::PAYLOAD_INTACT_DEN` (shape 3 loses half
+/// its payload, twenty times the admitted share) and half is the
+/// producer being the yield gate rather than any failure: shape 3's
+/// recovery set is fetched, arrives whole, and is simply not enough,
+/// which is `RepairShortfall::Blocks` and not `Unservable`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_payload_and_a_dead_recovery_set_are_distinguishable() {
     if !have_par2() {
@@ -412,6 +506,12 @@ async fn a_dead_payload_and_a_dead_recovery_set_are_distinguishable() {
         "a holey file must never be left importable:\n{dead_payload}"
     );
     assert!(
+        !dead_payload.contains("the recovery data is what failed, not the payload"),
+        "half this payload is gone and no amount of parity would have \
+         saved it - blaming the recovery set here is the bad fix this \
+         pair exists to catch:\n{dead_payload}"
+    );
+    assert!(
         dead_payload.contains("unrepairable"),
         "a post short of parity must reach the shortfall arithmetic:\n{dead_payload}"
     );
@@ -419,7 +519,10 @@ async fn a_dead_payload_and_a_dead_recovery_set_are_distinguishable() {
     // Shape 1 again, for the contrast: parity enough for the damage,
     // and a provider that will not serve it.
     let mut fx2 = Fixture::new("fault-deadrec2");
-    matrix_post(&mut fx2, 40, 65_536, 8);
+    // Same geometry as shape 1, and for the reason written up there:
+    // the yield gate that produces this arm's verdict will not judge a
+    // sample under sixteen articles.
+    matrix_post_art(&mut fx2, 40, 65_536, 8, None, RECOVERY_YIELD_ART);
     let p2 = plan(&fx2);
     let mut chaos2 = Chaos::default();
     p2.role(Role::Payload)
@@ -434,6 +537,12 @@ async fn a_dead_payload_and_a_dead_recovery_set_are_distinguishable() {
     assert!(
         !ok2,
         "no recovery obtainable, so no repair:\n{dead_recovery}"
+    );
+    assert!(
+        dead_recovery.contains("the recovery data is what failed, not the payload"),
+        "the two failures have to be distinguishable in the sentence \
+         the user actually reads, and this is the half that was silent \
+         until §283 item 13:\n{dead_recovery}"
     );
     assert!(
         !dead_recovery.contains("unrepairable"),

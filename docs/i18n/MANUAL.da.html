@@ -468,6 +468,26 @@ kolonnen, eller dens bageste kant for at ændre bredden; et dobbeltklik på kant
 bredderne tilbage. Med en overskrift i fokus flytter venstre- og højrepilen den, og Skift
 med en pil ændrer bredden.</p>
 
+<h3 id="dash-install">Installer som app</h3>
+<p>Chrome, Edge og de andre Chromium-browsere kan installere betjeningspanelet som en app på
+denne maskine: sit eget vindue, sit eget symbol i Dock eller på proceslinjen, ingen fanelinje
+og ingen adresselinje. Der sendes intet op, og der hentes ikke noget ekstra; det er det samme
+panel fra den samme tjeneste, bare i sit eget vindue. Indstillinger → Grænseflade viser en
+knap <b>Installer som app</b>, så snart din browser kan finde ud af det, og adresselinjen
+tilbyder som regel det samme i samme øjeblik. Safari har ingen knap at tilbyde: på en Mac
+hedder menupunktet <b>Arkiv → Føj til Dock</b>, og på en iPhone eller iPad <b>Del → Føj til
+hjemmeskærm</b>. Firefox på skrivebordet kan slet ikke installere webapps, så dér holdes
+rækken skjult i stedet for at beskrive noget, der ikke tilbydes. macOS-appen er allerede et
+vindue af den slags og spørger derfor aldrig.</p>
+<p>To ting følger af, hvordan en browser skelner én installeret app fra en anden, og begge er
+lettere at vide nu end at opdage senere. Identiteten er adressen inklusive porten: flytter du
+tjenesten væk fra <code>6789</code>, står en app installeret derfra forældreløs. Der går
+ingenting i stykker, men du installerer den igen fra den nye adresse og fjerner den gamle. Og
+installation kræver en sikker adresse, hvilket <code>127.0.0.1</code> er per definition; at nå
+denne tjeneste over almindelig HTTP fra en anden maskine på netværket er det ikke, så dér
+tilbyder ingen browser at installere den. Sæt den bag HTTPS (se <a href="#remote-proxy">Nå nzbfast udefra</a>), så kommer tilbuddet
+tilbage.</p>
+
 <h2 id="adding">5 · Tilføj downloads</h2>
 <div class="tblwrap"><table>
 <tr><th>Metode</th><th>Hvordan</th></tr>

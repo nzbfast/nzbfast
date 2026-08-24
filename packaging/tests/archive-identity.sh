@@ -220,6 +220,26 @@ echo "6. the upload gate carries it"
 #     fact stopped at `gh login ... is not nzbfast` - which it did on
 #     every run of this test from the day it landed until 23 Aug 2026.
 #   - the scan-stamp check, hence the scan below.
+# PRIVATE-ONLY FROM HERE, same reason as the sibling guard in
+# packaging/tests/linux-tarballs.sh: scan-release-assets.sh is
+# DELIBERATELY stripped from the public export (publish-public.sh - "the
+# scanner literally contains the private vocabulary it greps for"), and
+# so is private-patterns.txt. Sections 1 to 5 above need neither and are
+# meaningful publicly, which is why this skips rather than the whole
+# file being pulled from the export.
+#
+# Found the same way and on the same day: the linux-tarballs cascade was
+# masking it, and when that was fixed THIS became the next failure in
+# the same job - 15 passed, 2 failed, both of them here.
+if [ ! -f packaging/scan-release-assets.sh ]; then
+    echo "  skip - packaging/scan-release-assets.sh is not in this checkout."
+    echo "         It is publish tooling and is private-only, so the upload"
+    echo "         gate cannot be exercised here. Sections 1-5 above still ran."
+    echo
+    echo "passed: $PASS  failed: $FAIL"
+    [ "$FAIL" -eq 0 ]
+    exit
+fi
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/gh" <<'ENDOFGH'
 #!/bin/sh

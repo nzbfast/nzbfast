@@ -472,6 +472,25 @@ para mover a coluna, ou a sua margem traseira para a redimensionar; um duplo cli
 margem repõe as larguras. Com um cabeçalho em foco, as teclas de seta esquerda e direita
 movem-no, e Shift com uma seta redimensiona-o.</p>
 
+<h3 id="dash-install">Instalar como aplicação</h3>
+<p>O Chrome, o Edge e os outros navegadores Chromium conseguem instalar o painel como uma
+aplicação nesta máquina: uma janela própria, um ícone próprio na Dock ou na barra de tarefas,
+sem barra de separadores e sem barra de endereço. Nada é enviado e nada de extra é
+transferido; é o mesmo painel do mesmo serviço, numa janela só dele. Definições → Interface
+mostra um botão <b>Instalar como aplicação</b> sempre que o seu navegador o souber fazer, e a
+barra de endereço costuma oferecer o mesmo no mesmo momento. O Safari não tem um botão a
+oferecer: num Mac a opção de menu é <b>Ficheiro → Adicionar à Dock</b>, e num iPhone ou iPad é
+<b>Partilhar → Adicionar ao ecrã principal</b>. O Firefox no computador não instala aplicações
+web de todo, por isso a linha fica escondida em vez de descrever algo que não existe. A
+aplicação para macOS já é uma janela deste género, por isso nunca pergunta.</p>
+<p>Duas coisas decorrem da forma como um navegador distingue uma aplicação instalada de outra,
+e ambas se sabem melhor agora do que depois. A identidade é o endereço, porta incluída: mover
+o serviço para fora de <code>6789</code> deixa órfã a aplicação instalada a partir de lá. Nada
+se parte, mas volta a instalá-la a partir do novo endereço e remove a antiga. E instalar exige
+um endereço seguro, coisa que <code>127.0.0.1</code> é por definição; chegar a este serviço
+por HTTP simples a partir de outra máquina da sua rede não é, por isso aí nenhum navegador
+oferece a instalação. Ponha-o atrás de HTTPS (ver <a href="#remote-proxy">Chegar ao nzbfast a partir de fora de casa</a>) e a oferta regressa.</p>
+
 <h2 id="adding">5 · Adicionar downloads</h2>
 <div class="tblwrap"><table>
 <tr><th>Método</th><th>Como</th></tr>

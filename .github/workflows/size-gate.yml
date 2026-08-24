@@ -185,11 +185,33 @@
 # this defect, because `"%.2f Gb/s"` builds exactly as well as
 # `"%.2f GB/s"`. This is still the whole of what stands between a
 # Swift-side unit mistake and a shipped menu bar.
+# Twenty-one is `tools/bg-token-gate.py`, added 24 Aug 2026, and the
+# numbering runs one behind the job count from here on: the payload-id
+# gate landed the same day and was wired without a number, so there are
+# twenty-four steps below and twenty-one numbers above. Its subject is
+# `--bg`, the page ground, DEFINED once in web/ui-tokens.html and
+# hand-copied into five sites that cannot read a custom property - the
+# dashboard's and the wall's media-scoped <meta name="theme-color">
+# PAIRS, `THEME_BG` in the pre-paint script, the manifest's
+# background_color and theme_color, and `pageBackground` on the mac
+# window. Every one carries a comment asking the next person to keep them
+# in step and nothing checked that anybody did, which is the lint-waiver
+# gate's argument exactly: a convention that lives only in a comment
+# decays. What makes it worth a job rather than a habit is WHERE it shows
+# - those values paint the browser's own chrome, an installed window's
+# title bar, the strip a window-controls-overlay install leaves beside
+# the buttons, Android's address bar, iOS's status bar - so the failure
+# is a bar in one colour welded to the top of a page in another, silent,
+# on the most visible surface the product has. Here rather than on main
+# alone because the lane that moves the palette is the one that should
+# see the red. The fifth site is the argument for its roster arm: the
+# survey that commissioned this gate named four, and the mac window's
+# ground - a real copy, in float channels - was not among them.
 # Each gate is its own job with its own concurrency group, so one cannot
 # starve or cancel another, and each verdict shows up under its own name
 # on the commit.
 #
-# The `paths:` filter is the union of what the twenty-two scripts actually
+# The `paths:` filter is the union of what the twenty-four scripts actually
 # read, worked out from the scripts rather than guessed, because a push
 # the filter skips is a push the gates silently miss:
 #
@@ -267,7 +289,7 @@
 #     above provably reaches its subject the file still names it
 #     separately (see the harness/i18n case just below), so a dot-prefixed
 #     path gets no less.
-#   - the twenty-two gate scripts and this file. `crates/**` and `**/*.rs`
+#   - the twenty-four gate scripts and this file. `crates/**` and `**/*.rs`
 #     already carry the harness gate's whole subject, so it adds only its
 #     own script to the list, and `**/*.py` already reaches
 #     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
@@ -346,6 +368,10 @@ on:
       - 'tools/index-lock-gate.py'
       - 'tools/rate-format-gate.py'
       - 'macapp/**'
+      - 'tools/payload-id-gate.py'
+      - 'tools/bg-token-gate.py'
+      - 'web/ui-tokens.html'
+      - 'web/site.webmanifest'
       - 'web/i18n/manual-check.py'
       - 'web/i18n/site-check.py'
       - 'web/i18n/site-crosslink.py'
@@ -356,15 +382,15 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out twenty-two
+# Every job below is the same shape, deliberately spelled out twenty-four
 # times rather than as a matrix, so each step's `run:` line is the bare
 # script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of twenty of the twenty-two; the memory and
-# hooks gates have no ci-private line to match, see "Eighteen" above.
+# about what passes - true of twenty-two of the twenty-four; the memory
+# and hooks gates have no ci-private line to match, see "Eighteen" above.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With twenty-two jobs that
+# in the run, so one slow leg kills the fast one. With twenty-four jobs that
 # is no longer hypothetical - a per-job group means the overflow gate's
 # selftest can never take the lock gate's verdict down with it.
 #
@@ -610,6 +636,54 @@ jobs:
       # CI that can catch a Swift-side unit mistake.
       - name: rate format gate
         run: tools/rate-format-gate.py --selftest && tools/rate-format-gate.py
+  payload-id-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: payload-id-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `payload.contains(&nzo_id)` over a SAB response is not "is this job
+      # in the queue": mode=queue's whyslow block names the LAST job's own
+      # nzo_id, so it reads TRUE against an empty queue, and the ids are
+      # minted off a counter so ...nzbfast1 is a strict prefix of
+      # ...nzbfast10. 03e328222 swept all 54 sites BY HAND after a flake and
+      # nothing checked the 55th. Here rather than only in ci-private
+      # because these suites are hand-copied descendants of each other, so
+      # the next one is a copy of whatever is next door - a new site should
+      # be red on the AUTHOR's push. `--selftest` first: what this gate
+      # protects against is a regex that has quietly stopped matching, and
+      # that reads as a clean tree forever.
+      - name: payload id gate
+        run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
+  bg-token-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: bg-token-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--bg` is defined in web/ui-tokens.html and its VALUES are copied
+      # into five sites that cannot read a custom property: the two pages'
+      # media-scoped <meta name="theme-color"> pairs, THEME_BG in the
+      # pre-paint script, the manifest's two colours, and the mac window's
+      # pageBackground. Every one carries a comment asking the next person
+      # to keep them in step and nothing checked that anybody did. Here as
+      # well as in ci-private because these values paint the BROWSER'S OWN
+      # chrome - an installed window's title bar, Android's address bar,
+      # iOS's status bar - so a drift is a bar in one colour welded to the
+      # top of a page in another, on the most visible surface there is, and
+      # the lane that moves the palette should see the red rather than the
+      # lane after it. `--selftest` first, and it is the gate: the arms pin
+      # two symbols BY NAME across four languages and normalise `#000`
+      # against `#000000`, and one that quietly stops matching reports a
+      # clean tree forever - nav-regen's dead picker arm, above, for months.
+      - name: bg token gate
+        run: tools/bg-token-gate.py --selftest && tools/bg-token-gate.py
   manual-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

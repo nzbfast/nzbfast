@@ -467,6 +467,26 @@ eller dess bakre kant för att ändra bredden; ett dubbelklick på kanten åters
 bredderna. Med en rubrik i fokus flyttar vänster- och högerpilen den, och Skift med en pil
 ändrar bredden.</p>
 
+<h3 id="dash-install">Installera som app</h3>
+<p>Chrome, Edge och de andra Chromium-webbläsarna kan installera panelen som en app på den här
+datorn: ett eget fönster, en egen symbol i Dock eller i aktivitetsfältet, ingen flikrad och
+inget adressfält. Ingenting skickas iväg och ingenting extra hämtas; det är samma panel från
+samma tjänst, i ett eget fönster. Inställningar → Gränssnitt visar en knapp <b>Installera som
+app</b> så snart din webbläsare klarar det, och adressfältet brukar erbjuda samma sak i samma
+stund. Safari har ingen knapp att erbjuda: på en Mac heter menyalternativet <b>Arkiv → Lägg
+till i Dock</b>, och på en iPhone eller iPad <b>Dela → Lägg till på hemskärmen</b>. Firefox på
+skrivbordet kan inte installera webbappar alls, så där hålls raden dold i stället för att
+beskriva något som inte erbjuds. macOS-appen är redan ett sådant fönster och frågar därför
+aldrig.</p>
+<p>Två saker följer av hur en webbläsare skiljer en installerad app från en annan, och båda är
+lättare att veta nu än att upptäcka sedan. Identiteten är adressen inklusive porten: flyttar du
+tjänsten bort från <code>6789</code> blir en app installerad därifrån föräldralös. Inget går
+sönder, men du installerar den igen från den nya adressen och tar bort den gamla. Och
+installation kräver en säker adress, vilket <code>127.0.0.1</code> är per definition; att nå
+den här tjänsten över vanlig HTTP från en annan dator i nätverket är det inte, så där erbjuder
+ingen webbläsare installation. Sätt den bakom HTTPS (se <a href="#remote-proxy">Nå nzbfast utifrån</a>) så kommer erbjudandet
+tillbaka.</p>
+
 <h2 id="adding">5 · Lägga till nedladdningar</h2>
 <div class="tblwrap"><table>
 <tr><th>Metod</th><th>Så här</th></tr>

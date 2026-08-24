@@ -11,6 +11,13 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
     private let overlay = NSView()
     private let overlayLabel = NSTextField(labelValue: "starting nzbfast…")
     private let spinner = NSProgressIndicator()
+    private let dragStrip = TitlebarDragView()
+    /// Last inset handed to the page, in points. `windowDidResize` fires
+    /// on every frame of a live resize and the inset does not change
+    /// during one, so comparing first keeps a drag from running a JS
+    /// evaluation per frame.
+    private var lastInset = -1
+    private var pageLoaded = false
 
     /// The dashboard's own dark background (`--bg` in web/ui-tokens.html,
     /// #0e1014). The window wears it as well as the "starting…" overlay:
@@ -69,11 +76,16 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
                         .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "nzbfast"
-        // Transparent rather than hidden: the title bar is still there
-        // and still drags the window, it just paints nothing of its own.
-        // The title itself would sit on top of the dashboard's header, so
-        // it goes - `window.title` is kept for the Window menu, Mission
-        // Control and the app switcher, which all read it.
+        // Transparent rather than hidden: the title bar is still there,
+        // it just paints nothing of its own. The title itself would sit
+        // on top of the dashboard's header, so it goes - `window.title`
+        // is kept for the Window menu, Mission Control and the app
+        // switcher, which all read it.
+        //
+        // What it does NOT still do is drag the window: the web view
+        // under it takes the mouse-down. `TitlebarDragView` at the foot
+        // of this file is what puts the drag and the double-click back,
+        // and its comment carries the measurement.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = DashboardWindowController.pageBackground
@@ -137,7 +149,71 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
             stack.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
         ])
+
+        // The title-bar band, TOPMOST so nothing else can take the click.
+        // Bounded by `contentLayoutGuide`, which is AppKit's own answer to
+        // "where does the content area actually start" - so the strip is
+        // exactly as tall as the title bar is, follows a title bar that
+        // retracts in full screen down to nothing, and needs no constant.
+        dragStrip.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(dragStrip)
+        var strip: [NSLayoutConstraint] = [
+            dragStrip.topAnchor.constraint(equalTo: content.topAnchor),
+            dragStrip.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            dragStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+        ]
+        if let guide = window.contentLayoutGuide as? NSLayoutGuide {
+            strip.append(dragStrip.bottomAnchor.constraint(equalTo: guide.topAnchor))
+        } else {
+            strip.append(dragStrip.heightAnchor.constraint(equalToConstant: 0))
+        }
+        NSLayoutConstraint.activate(strip)
+        pushTitlebarInset()
     }
+
+    /// Tell the page how many points at the top of the window belong to
+    /// the title bar, as the CSS variable `--tbh`. `html.macapp` in
+    /// web/dashboard.html reads it for the padding above the header and
+    /// for where the settings rail sticks, and web/wall.html reads it for
+    /// the padding above its own bar; both fall back when it is unset,
+    /// which is every ordinary browser tab.
+    ///
+    /// MEASURED rather than assumed, which buys two small things over the
+    /// 34px the page used to hardcode. This window's title bar is 32 pt
+    /// and not the 28 the received wisdom gives (macOS 26, 24 Aug 2026),
+    /// and it moves with the window's style; and in FULL SCREEN it
+    /// retracts to nothing, where a fixed number leaves the page holding
+    /// 34px of padding it no longer owes anyone. `contentLayoutRect` is
+    /// AppKit reporting what it actually laid out, so both follow for
+    /// free.
+    ///
+    /// Pushed TWO ways, and that is load order rather than belt and
+    /// braces. The user script runs at document start, so the first paint
+    /// of a fresh navigation already has the inset - without it the header
+    /// draws under the traffic lights and jumps down a frame later, on
+    /// every load and on every trip to /wall and back.
+    /// `evaluateJavaScript` is the other direction: the page is already up
+    /// and the number just changed, which is a full-screen transition.
+    private func pushTitlebarInset() {
+        guard let w = window, let content = w.contentView else { return }
+        let px = Int(max(0, content.bounds.height - w.contentLayoutRect.height).rounded())
+        guard px != lastInset else { return }
+        lastInset = px
+        let js = "document.documentElement.style.setProperty('--tbh','\(px)px')"
+        // This wrapper adds no other user scripts; if it ever does, drop
+        // the blanket remove and track this one's handle instead.
+        let scripts = webView.configuration.userContentController
+        scripts.removeAllUserScripts()
+        scripts.addUserScript(
+            WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        if pageLoaded {
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    func windowDidResize(_ notification: Notification) { pushTitlebarInset() }
+    func windowDidEnterFullScreen(_ notification: Notification) { pushTitlebarInset() }
+    func windowDidExitFullScreen(_ notification: Notification) { pushTitlebarInset() }
 
     required init?(coder: NSCoder) { fatalError("unused") }
 
@@ -153,6 +229,7 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         setOverlay(visible: false)
+        pageLoaded = true
     }
 
     /// Load the dashboard even when the engine serves it over TLS with a
@@ -286,5 +363,52 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
 private extension NSTextField {
     convenience init(labelValue: String) {
         self.init(labelWithString: labelValue)
+    }
+}
+
+/// The title-bar band of the window, sitting over the web view. It is
+/// what makes that band behave like a title bar at all.
+///
+/// MEASURED 24 Aug 2026 with synthetic CGEvent drags against three
+/// throwaway windows and against the shipped app: a plain titled window
+/// drags from its title bar, and the shipped configuration WITHOUT this
+/// view does not move AT ALL - four separate grab points, window active.
+/// A `.fullSizeContentView` window's transparent title bar is not a live
+/// drag target; the web view under it takes the mouse-down. So the window
+/// this app ships had no title bar you could drag, and could be moved
+/// only by its frame edges.
+///
+/// `mouseDownCanMoveWindow` is the one-liner version and it is NOT
+/// enough: AppKit intercepts the mouse-down before the view sees it,
+/// which gives you the drag and loses the double-click. Double-clicking a
+/// title bar is a real macOS gesture with a system preference behind it
+/// (System Settings > Desktop & Dock), and a window whose title bar is
+/// the web page must still honour it, so the down is handled here and
+/// `performDrag` asks AppKit for the ordinary drag afterwards.
+///
+/// One thing a real title bar does that this does not: drag an INACTIVE
+/// window. The first click on a background window activates it and is
+/// then spent, so it takes a second click to start the drag. Overriding
+/// `acceptsFirstMouse` was tried on the same rig and changed nothing - it
+/// did not fire at all - so the line is deliberately absent rather than
+/// present and inert. Custom drag regions behave this way generally; it
+/// costs one extra click and nothing else.
+private final class TitlebarDragView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let w = window else { return }
+        guard event.clickCount == 2 else {
+            w.performDrag(with: event)
+            return
+        }
+        // The preference is absent until it is changed, and its absent
+        // meaning is Zoom - so default, do not read unset as "do
+        // nothing". The values are AppKit's own spellings.
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": w.performMiniaturize(nil)
+        case "None": break
+        default: w.performZoom(nil)
+        }
     }
 }

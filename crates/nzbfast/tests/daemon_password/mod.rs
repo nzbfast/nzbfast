@@ -364,40 +364,23 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
     let vol = fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..n, false, false)], None);
     let mut articles = HashMap::new();
     let segs = make_file_articles("Enospc.Retry.2026.rar", &vol, 40_000, "er", &mut articles);
-    // The offset-0 article gets a clear run at the slot; every other
-    // article is held on the wire until it has had one. That is not
-    // decoration, it is what makes this test's subject exist at all.
-    // A slot is Unknown until its offset-0 article sniffs it, and an
-    // article that arrives while it is still Unknown is parked whole
-    // (`Persist::Held`) and re-fed later through `drain_holds`, where a
-    // crypto placement is deliberately reported NOWHERE - so it never
-    // journals. Six 40 kB articles over a loopback mock with 25
-    // connections all land inside the same handful of microseconds, so
-    // how many of them beat the sniff was pure scheduling: measured 24
-    // Aug 2026 over 10 runs on a loaded box, the journal held 4 `D`
-    // records six times, 3 once, 1 once and NOTHING twice - and the
-    // twice it held nothing this test failed, while the run that
-    // journaled one article passed having asserted almost nothing.
-    // 400 ms of dead air orders it: the sniff is local and sub-
-    // millisecond, and the delay is well under both the 1 s TTFB
-    // suspicion floor and the 4 s pre-byte budget, so no connection
-    // reacts to it. That the population is now FIXED is asserted on
-    // the journal below, so a future change that puts articles back in
-    // front of the sniff reddens instead of quietly weakening.
-    let presniff_hold_ms = 400;
-    let slow_ttfb: HashMap<String, u64> = segs
-        .iter()
-        .skip(1)
-        .map(|(id, _, _)| (format!("<{id}>"), presniff_hold_ms))
-        .collect();
-    let srv = MockServer::start(
-        articles,
-        Chaos {
-            slow_ttfb,
-            ..Chaos::default()
-        },
-    )
-    .await;
+    // NO wire ordering, deliberately. A `Chaos::slow_ttfb` map held
+    // every article but the offset-0 one back by 400 ms here until 24
+    // Aug 2026, because how many articles beat the sniff decided how
+    // many `D` records the run produced: an article arriving while its
+    // slot is still `Unknown` parks whole (`Persist::Held`), is re-fed
+    // through `drain_holds`, and a crypto placement on that route was
+    // reported NOWHERE, so it never journaled at all. Measured over 10
+    // runs on a loaded box that day, the journal held 4 `D` records six
+    // times, 3 once, 1 once and NOTHING twice. TODO 27.2 closed that:
+    // the re-feed reports the placement WITH its crypto fact and
+    // `flush_pending_r` completes the article into a `D`, so the
+    // population no longer depends on the interleave and the scaffold
+    // that hid the dependence is gone with it. Verified by running the
+    // set entirely INVERTED - the offset-0 sniff held behind every
+    // other article, so all five payload articles park - which now
+    // journals the same four.
+    let srv = MockServer::start(articles, Chaos::default()).await;
     let body_log = srv.body_log.clone();
 
     let mut xml = format!(
@@ -547,45 +530,30 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
         // bytes route before any mode exists to journal them against),
         // and the tail article carries the archive's end-of-set headers,
         // which live in no output file and so are journaled by nothing.
-        // Measured stable at `segs.len() - 2` once the ordering above
-        // holds it there. A bare `!is_empty()` stood here until 24 Aug
-        // 2026 and was the flake: it passed on a run that journaled one
-        // article of six and failed on the runs that journaled none.
+        // That is the FULL payload population of this fixture, and since
+        // TODO 27.2 closed on 24 Aug 2026 it is reached whatever order
+        // the articles land in - a held crypto span now reports its
+        // placement and completes into a `D` like a directly-placed one.
+        // Asserted by IDENTITY and not by count, so a run that journals
+        // four of the wrong four is not a pass. A bare `!is_empty()`
+        // stood here until that day and was the flake; the wire ordering
+        // that briefly replaced it was a workaround for the gap and went
+        // out with it.
+        let want: std::collections::HashSet<String> = segs[1..segs.len() - 1]
+            .iter()
+            .map(|(id, _, _)| format!("<{id}>"))
+            .collect();
         assert_eq!(
-            d_ids.len(),
-            segs.len() - 2,
+            d_ids, want,
             "the decrypt publish journaled {} of {} articles - every one \
              but the offset-0 sniff and the header tail should have a `D`\n\
              --- journal ---\n{journal_txt}",
             d_ids.len(),
             segs.len()
         );
-        // Journal COMPLETENESS is not asserted here, and the reason is
-        // an open gap rather than nondeterminism. On the legacy
-        // finish-decrypt route this journal held `R` records for every
-        // payload article and the publish republished all of them, so
-        // "every pure-payload article, deterministically" was the right
-        // assertion; TODO 27 phase 3 deleted that route, and on
-        // plaintext-once a span that arrives BEFORE the offset-0 sniff
-        // classifies the slot is held and re-fed through `drain_holds`,
-        // where `route_dest` reports plain writes into
-        // `late_placements` and deliberately reports crypto ones
-        // NOWHERE ("a crypto placement must never complete into an `R`
-        // record"). Those articles therefore never journal at all, and
-        // an encrypted set whose articles mostly land before the sniff
-        // journals almost nothing - which is TODO 100's own defect on
-        // the route that replaced it. Filed as TODO 27 item 2; it is
-        // pre-existing, live for every check-verified RAR5 set since
-        // phase 1 landed on 26 Jul, and NOT introduced here. The wire
-        // ordering at the top of this test is a WORKAROUND for exactly
-        // that gap and belongs to it: it does not make a held crypto
-        // span journal, it only stops articles being held. Delete it
-        // with the gap, and raise the count above to the full payload
-        // population at the same time.
-        //
-        // What is asserted below is what the route does guarantee, and
-        // it is the half the retry actually rides on: whatever DID
-        // journal restores locally and is never asked for again.
+        // What is asserted below is the half the retry actually rides
+        // on: whatever journaled restores locally and is never asked for
+        // again.
         let refetched: Vec<String> = body_log.lock().unwrap()[asked_before..].to_vec();
         assert!(
             refetched.len() < segs.len(),

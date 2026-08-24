@@ -272,32 +272,40 @@ impl Extractor {
                             match &crypto {
                                 Some(cs) if repair => cs.patch(&w, base + piece_off, part)?,
                                 Some(cs) => cs.ingest(&w, base + piece_off, part)?,
-                                None => {
-                                    w.write_at(base + piece_off, part)?;
-                                    // A drained held span landing in an
-                                    // inner file: report it, so the
-                                    // article that parked these bytes
-                                    // (Persist::Held) still journals.
-                                    // Plain writes only - a crypto
-                                    // placement must never complete
-                                    // into an `R` record.
-                                    if inner.refeed_active {
-                                        inner.late_placements.push((
-                                            slot,
-                                            Frag {
-                                                file: w
-                                                    .path
-                                                    .file_name()
-                                                    .unwrap_or_default()
-                                                    .to_string_lossy()
-                                                    .into_owned(),
-                                                file_off: base + piece_off,
-                                                vol_off: offset + span_off,
-                                                len,
-                                            },
-                                        ));
-                                    }
-                                }
+                                None => w.write_at(base + piece_off, part)?,
+                            }
+                            // A drained held span landing in an inner
+                            // file: report it, so the article that
+                            // parked these bytes (Persist::Held) still
+                            // journals. A CRYPTO write is reported the
+                            // same way and carries the fact (TODO
+                            // 27.2): the journal writer completes it
+                            // into a `D` record, never an `R`, and
+                            // holds it until `crypto_span_on_disk`
+                            // says the plaintext really landed - this
+                            // route hands `CryptoState` the bytes and
+                            // a seam sliver can still be in RAM. Until
+                            // that flag existed these writes were
+                            // reported NOWHERE, so a whole encrypted
+                            // set that arrived before its offset-0
+                            // sniff journaled nothing and refetched
+                            // entirely on resume.
+                            if inner.refeed_active {
+                                inner.late_placements.push(LatePlacement {
+                                    slot,
+                                    frag: Frag {
+                                        file: w
+                                            .path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                        file_off: base + piece_off,
+                                        vol_off: offset + span_off,
+                                        len,
+                                    },
+                                    crypto: crypto.is_some(),
+                                });
                             }
                         }
                     }

@@ -339,6 +339,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         arr_giveup_threshold: AtomicU64::new(0),
         arr_instances: Mutex::new(Vec::new()),
         giveup: Arc::new(Mutex::new(Default::default())),
+        hunt: Default::default(),
         settings_path,
         #[cfg(feature = "indexer")]
         taste_cache: Mutex::new(None),

@@ -1642,9 +1642,9 @@ impl Extractor {
             // What `plain_span` reported for a re-fed span landing
             // plain: file offset == volume offset by definition.
             if j.refeed {
-                inner.late_placements.push((
-                    j.slot,
-                    Frag {
+                inner.late_placements.push(LatePlacement {
+                    slot: j.slot,
+                    frag: Frag {
                         file: j
                             .writer
                             .path
@@ -1656,7 +1656,12 @@ impl Extractor {
                         vol_off: j.at,
                         len: n as u64,
                     },
-                ));
+                    // A drop-behind trim spills the frontier buffer's
+                    // own raw bytes with a plain pwrite; an
+                    // in-stream-decrypted file is fed through
+                    // `CryptoState` and never reaches this route.
+                    crypto: false,
+                });
             }
         }
         failed.map_or(Ok(()), Err)

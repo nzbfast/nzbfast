@@ -480,6 +480,38 @@ jobs:
       # surface due and a notification wants exactly this string.
       - name: rate format gate
         run: tools/rate-format-gate.py --selftest && tools/rate-format-gate.py
+  bg-token-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-bg-token-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--bg` is the page ground, DEFINED in web/ui-tokens.html and
+      # nowhere else - five declarations, one per theme state. Its VALUES
+      # are hand-copied into five sites that cannot read a custom
+      # property: the dashboard's and the wall's media-scoped
+      # <meta name="theme-color"> PAIRS, `THEME_BG` in the pre-paint
+      # script, the manifest's background_color and theme_color, and
+      # `pageBackground` on the mac window. A <meta> tag is read before
+      # any stylesheet and takes no custom property, a manifest carries
+      # no media variants, the pre-paint script runs before the <style>
+      # below it is parsed and AppKit paints before any of it exists - so
+      # the duplication is legitimate and every copy carries a comment
+      # asking the next person to keep it in step. Nothing checked that
+      # anybody did, which is the lint waiver gate's argument one
+      # directory over. The failure is silent and lands on the browser's
+      # own chrome: an installed window's title bar, Android's address
+      # bar, iOS's status bar. Its own arms answer the three things that
+      # are easy to get wrong - `#000` and `#000000` are the same colour,
+      # the manifest is a CHOICE of one ground rather than a copy of a
+      # pair, and the meta tags are checked by PAIRING because a swapped
+      # pair IS the defect. Also a job in size-gate.yml, which runs on
+      # every branch push. Private repo only, like the gates above.
+      - name: bg token gate
+        run: tools/bg-token-gate.py --selftest && tools/bg-token-gate.py
   i18n-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1441,6 +1473,22 @@ jobs:
       - name: index lock gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/index-lock-gate.py --selftest && tools/index-lock-gate.py
+      # `payload.contains(&nzo_id)` over a SAB payload answers a different
+      # question from "is this job in the queue/history", and answers it
+      # wrong twice: mode=queue carries the whyslow block, which names the
+      # LAST job's own nzo_id, so it reads TRUE against `"slots":[]`; and
+      # the ids come off a plain counter, so ...nzbfast1 is a strict prefix
+      # of ...nzbfast10 and of ...100 up, which breaks positive assertions
+      # and poll predicates too. 03e328222 converted all 54 sites by hand
+      # after a daemon_bomb flake; nothing checked the 55th. Precision comes
+      # from resolving the receiver to a local assigned from `http(...)` -
+      # a Vec<String>::contains, a settings.json read and a daemon log read
+      # are all live on that tree and none is in the class. Also a job in
+      # size-gate.yml, which runs on every branch push. Private repo only,
+      # like the gates above.
+      - name: payload id gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
       - name: clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # No escapes: every warning blocks. The categories still allowed

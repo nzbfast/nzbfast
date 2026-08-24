@@ -596,18 +596,27 @@ impl Extractor {
     /// within one part, so a straddle never happens; handled anyway).
     pub(super) fn split_translate_placements(
         inner: &Inner,
-        placed: Vec<(usize, Frag)>,
-    ) -> Vec<(usize, Frag)> {
+        placed: Vec<LatePlacement>,
+    ) -> Vec<LatePlacement> {
         let mut out = Vec::with_capacity(placed.len());
-        for (slot, f) in placed {
+        for lp in placed {
+            let (slot, f, crypto) = (lp.slot, lp.frag, lp.crypto);
             let Some(base) = inner.slots.get(slot).and_then(|s| s.split_head.as_ref()) else {
-                out.push((slot, f));
+                out.push(LatePlacement {
+                    slot,
+                    frag: f,
+                    crypto,
+                });
                 continue;
             };
             let set = &inner.rar_splits[base];
             let p = set.part_size;
             if p == 0 {
-                out.push((slot, f));
+                out.push(LatePlacement {
+                    slot,
+                    frag: f,
+                    crypto,
+                });
                 continue;
             }
             let mut pos = 0u64;
@@ -622,15 +631,16 @@ impl Extractor {
                     set.parts.get(&idx).copied()
                 };
                 if let Some(t) = target {
-                    out.push((
-                        t,
-                        Frag {
+                    out.push(LatePlacement {
+                        slot: t,
+                        frag: Frag {
                             file: f.file.clone(),
                             file_off: f.file_off + pos,
                             vol_off: rel,
                             len: n,
                         },
-                    ));
+                        crypto,
+                    });
                 }
                 pos += n;
             }

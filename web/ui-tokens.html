@@ -75,6 +75,51 @@
     if(d==='compact'||d==='spacious') r.setAttribute('data-density',d);
   }catch(e){/* private mode, or a corrupt value: keep the defaults */}
 })();
+
+// The browser paints its OWN chrome from <meta name="theme-color">: the
+// title bar of an installed window, the strip a window-controls-overlay
+// install leaves beside the buttons, the address bar on Android, the
+// status bar on iOS. Each page carries a media-scoped PAIR of those tags,
+// which follows the OS preference and nothing else - right for "Auto",
+// wrong for everybody who chose. A light-theme user on a dark OS got a
+// near-black bar welded to the top of a near-white page, which is the
+// exact seam those tags exist to remove.
+//
+// A meta tag takes no custom property and no media variant beyond the one
+// query it already uses, so the fix is to OVERWRITE both tags with the
+// colour the page is actually about to paint, stashing what was there so
+// going back to Auto restores the pair exactly. Nothing is removed: with
+// JS off, or on a page that never calls this, the media pair is still the
+// markup, still correct for Auto, and still better than white.
+//
+// Lives here rather than in either page because the wall carries the same
+// pair for the same reason. The 16 manuals share this snippet too and
+// declare no such tag; there the query matches nothing and this is a
+// no-op.
+//
+// The colours are literals for the same reason the tags are: this runs
+// before the <style> below has been parsed, so there is no computed --bg
+// to read yet. They ARE the palette's --bg - move them when it moves.
+window.nzbfastSyncThemeColor = function(){
+  var THEME_BG = {light:'#eef0f5', dark:'#0e1014', contrast:'#000000'};
+  var tags = document.querySelectorAll('meta[name="theme-color"]');
+  if(!tags.length) return;
+  var c = null;
+  try{
+    // A user's own background outranks the theme's, exactly as the
+    // [data-userbg] rule below outranks the theme's --bg. Same literal
+    // #rrggbb test as everywhere else: this value reaches a colour.
+    var ub = localStorage.getItem('nzbfastuserbg');
+    if(ub && /^#[0-9a-f]{6}$/i.test(ub)) c = ub;
+  }catch(e){/* private mode: fall through to the theme */}
+  if(!c) c = THEME_BG[document.documentElement.getAttribute('data-theme')] || null;
+  for(var i=0;i<tags.length;i++){
+    var t = tags[i];
+    if(c){ if(t.dataset.auto===undefined) t.dataset.auto = t.content; t.content = c; }
+    else if(t.dataset.auto!==undefined){ t.content = t.dataset.auto; delete t.dataset.auto; }
+  }
+};
+window.nzbfastSyncThemeColor();
 </script>
 <style>
 :root{

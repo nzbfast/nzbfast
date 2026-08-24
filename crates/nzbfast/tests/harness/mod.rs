@@ -370,7 +370,17 @@ fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
 /// runs in 12 on the biggest fixture in that file. A history payload
 /// has its own version of the same hazard - a Failed row carries
 /// `fail_detail`, snapshotted out of the daemon's GLOBAL log ring, so
-/// another job's `[queue] added <nzo_id> ...` line rides inside it.
+/// another job's `[queue] added <nzo_id> ...` line rides inside it. That
+/// half is the older measurement of the two: it made
+/// `cancelling_a_download_leaves_its_duplicate_held` flaky under `cargo
+/// test --workspace` on 2 Aug 2026, at 7 failures in 10 loaded runs,
+/// every one captured with history holding a single slot. The runner
+/// picks a queued job on a 500 ms tick, so the dead job could open its
+/// log bracket BEFORE the test's next upload landed - and a loaded box
+/// is exactly what makes that upload slow enough to lose that race. The
+/// poll then matched the ALTERNATIVE's id inside the dead job's
+/// `fail_detail` and returned before the alternative had downloaded at
+/// all.
 ///
 /// SECOND, and this one breaks POSITIVE assertions and poll predicates
 /// as well, nzo ids are minted `SABnzbd_nzo_nzbfast{n}` off a plain

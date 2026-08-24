@@ -9,10 +9,13 @@
      #0e1014 dark. They cannot BE var(--bg) - a meta tag is read before any
      stylesheet and takes no custom property - so if that token ever moves,
      move these with it.
-     This follows the OS preference only. An explicit theme choice (the
-     data-theme attribute the pre-paint script sets) is not reflected here;
-     that belongs with the rest of the installed-window work rather than in
-     a meta tag. -->
+     The PAIR follows the OS preference, which is what "Auto" means. An
+     explicit theme choice outranks the OS, so it has to outrank these
+     too: nzbfastSyncThemeColor (ui-tokens.html, pre-paint) overwrites
+     BOTH tags with the colour the page is about to paint, and restores
+     this pair when the choice goes back to Auto. Leave them here anyway -
+     they are the correct markup with JS off, and the tokens script needs
+     something to find. -->
 <meta name="theme-color" content="#eef0f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
 <!-- Real PNG icons, not a `data:` emoji. An emoji favicon draws in the tab
@@ -23,6 +26,25 @@
 <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
+<!-- Installing the dashboard as an app. Chromium fires beforeinstallprompt
+     ONCE, and the event object it hands over is the only thing that can open
+     the install dialog afterwards - so it is caught here in <head> rather
+     than in the page script, which does not run until the whole body has
+     parsed. preventDefault() suppresses the browser's own mini-infobar; the
+     row in Settings > Interface is our version of it. -->
+<script>
+window.__nzbInstallEvent=null;
+addEventListener('beforeinstallprompt',function(e){
+  e.preventDefault(); window.__nzbInstallEvent=e;
+  // installSync is defined far below; on a first fire it may not exist yet,
+  // and boot calls it anyway.
+  if(window.installSync) try{ installSync(); }catch(_){}
+});
+addEventListener('appinstalled',function(){
+  window.__nzbInstallEvent=null;
+  if(window.installSync) try{ installSync(); }catch(_){}
+});
+</script>
 <!-- Shared design tokens + the pre-paint theme script, substituted by
      serve.rs from web/ui-tokens.html. Inlined ahead of this page's own
      <style> so page rules can still override a token if they must. -->
@@ -1976,12 +1998,40 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
 }
 /* The mac wrapper (macapp/) hosts this page in a WKWebView whose window
    has a transparent, full-size-content title bar, so the page paints to
-   the very top of the window and the traffic lights sit over it. AppKit
-   still owns the clicks in that strip - a control drawn under it cannot
-   be pressed - so the page owes it a top inset. 34px is the 28pt title
-   bar plus a hair of breathing room; the class is set from the user-agent
-   marker during parse, so it lands before the first paint. */
-html.macapp .wrap{padding-top:34px}
+   the very top of the window and the traffic lights sit over it. The page
+   owes it a top inset, and --tbh is that inset: DashboardWindow.swift
+   sets it on <html> at document start, from `contentLayoutRect` - AppKit
+   reporting the title bar it actually laid out. The `macapp` class is
+   still what turns the rule on, set from the user-agent marker during
+   parse so it lands before the first paint.
+
+   MEASURED rather than assumed, and both halves of that are small. The
+   title bar is 32 pt on this window, not the 28 the received wisdom
+   gives (macOS 26, 24 Aug 2026), and it moves with the window's style -
+   so a constant is a number that is already a little wrong and will go
+   wronger. And in FULL SCREEN it retracts to nothing, where the page
+   should simply look like a page again.
+
+   Which is what the expression says, and it keeps the 34px that shipped
+   exactly where it was. "The title bar plus a hair" is the intent; 32+2
+   IS 34 on this OS, the 32px fallback is for a wrapper too old to set
+   the variable, and the 22px floor is this page's own top padding
+   everywhere else, which is what a hair of breathing room should
+   collapse to once there is no title bar left to breathe under. */
+html.macapp .wrap{padding-top:max(22px,calc(var(--tbh,32px) + 2px))}
+/* The settings rail is sticky against the VIEWPORT, so it parks under the
+   traffic lights on a scrolled page unless it clears them too. */
+html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
+/* The material that makes the inset read as a title bar rather than as a
+   gap: content scrolling up the page passes BEHIND a blur instead of
+   sliding under the close button. Keyed on --tbh alone and NOT on the
+   class, because zero height has to be the browser-tab answer - and it
+   must stay zero under window-controls-overlay too, where the header
+   itself rises into the strip (above) and a bar drawn over it would
+   swallow every control in it. */
+#tbstrip{position:fixed;top:0;left:0;right:0;height:var(--tbh,0px);z-index:60;
+  pointer-events:none;background:color-mix(in srgb,var(--bg) 72%,transparent);
+  backdrop-filter:blur(18px) saturate(150%);-webkit-backdrop-filter:blur(18px) saturate(150%)}
 </style>
 <!-- Your own CSS, from `custom.css` in the config folder (issue #31). LAST
      in the head on purpose: it loads after every built-in rule, so an
@@ -1991,7 +2041,12 @@ html.macapp .wrap{padding-top:34px}
      which is the normal case. Upgrades replace this page but never that
      file. -->
 <link rel="stylesheet" href="/custom.css">
-</head><body><div class="wrap">
+</head><body>
+<!-- The window's own title-bar row when this page IS the title bar (the
+     mac wrapper); a zero-height nothing that paints nothing anywhere
+     else. See #tbstrip above. -->
+<div id="tbstrip" aria-hidden="true"></div>
+<div class="wrap">
 
 <header>
   <h1><span class="logo" role="button" tabindex="0" data-i18n-title="hdr.logo.title" title="Next screen" aria-label="Next screen"
@@ -3356,6 +3411,19 @@ html.macapp .wrap{padding-top:34px}
 
 <div class="card set" data-sg="look" data-sk="interface">
   <h3 data-i18n="set.ui.title">Interface</h3>
+  <!-- Install as an app. Hidden until there is something to offer, which is
+       why it starts closed rather than disabled: Chromium reveals it when
+       beforeinstallprompt fires, Safari gets the sentence naming its menu
+       item (it has no install API), Firefox desktop has no install at all
+       and sees nothing. It also stays hidden where the offer is already
+       taken - a window already running installed, or the mac app, which IS
+       the native window this row is describing. installSync() owns all of
+       that; nothing here is stamped from the daemon. -->
+  <div class="row" id="rowInstall" style="display:none"><label data-i18n="set.ui.install">Install as an app<span class="hint" data-i18n="set.ui.install.hint">gives nzbfast its own window and its own icon in your dock or taskbar, with no tab strip or address bar around it. It is still this daemon on this machine: nothing is uploaded, and nothing extra is downloaded. The window is tied to the address you are on, so if you ever change the daemon's port, install it again from the new one.</span></label>
+    <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="ghost" id="btnInstall" onclick="doInstall(this)" data-i18n="set.ui.install.btn">Install as an app</button>
+      <span class="dim" id="installHint" style="font-size:12.5px"></span>
+    </span></div>
   <div class="row"><label data-i18n="set.ui.lang">Language<span class="hint" data-i18n="set.ui.lang.hint">how this browser shows nzbfast: "System" follows your device language; stored in this browser</span></label>
     <!-- Language options are appended at boot from LOCALE_NAMES (one table,
          both selects) - only the translated "auto" row lives in the HTML. -->
@@ -4374,6 +4442,7 @@ function appOpenHref(a){
   if(a) appOpenHref(a);
   el.classList.add('on');
 })();
+
 // ...and the same first run when the daemon opened the browser ITSELF.
 // There the URL is a child process's argv, which on Linux is a
 // world-readable /proc/<pid>/cmdline, so what arrives is not the key but
@@ -5038,7 +5107,7 @@ function gb(n){ return num(n/1e9,2); }
 // hand-written twin of rateParts' four thresholds:
 //
 //   macapp/Sources/NzbFast/StatusItem.swift   rateText()   (27cc66897)
-//   crates/nzbtray/src/main.rs                fmt_rate()   (c6a2f8ecd)
+//   crates/nzbtray/src/probe_body.rs                fmt_rate()   (c6a2f8ecd)
 //
 // Both landed on 24 Aug 2026, seven minutes apart, from lanes that could
 // not see each other - so assume the next wrapper (Android, then iOS)
@@ -5076,6 +5145,20 @@ function unit(k){ return t('unit.'+k, UNIT_EN[k]); }
 // page as a whole stays on the user's setting - and doing that here,
 // rather than with a second formatter beside this one, is the whole
 // point of this function being the only place a speed grows a unit.
+// THIS RULE IS WRITTEN THREE TIMES, and this is the canonical one.
+// Neither desktop wrapper can call into this page, so each carries a
+// hand-written twin of the four thresholds below: `fmt_rate` in
+// crates/nzbtray/src/main.rs (Windows tray) and `rateText` in
+// macapp/Sources/NzbFast/StatusItem.swift (mac menu bar). The two of
+// them landed SEVEN MINUTES apart on 24 Aug 2026, from lanes that could
+// not see each other, each with a comment saying it was the second copy.
+// Move a threshold here and move both of them IN THE SAME COMMIT, and do
+// not grow a FOURTH: a menu bar reading GB/s beside this page reading
+// MB/s is the bits/bytes mess the unit convention exists to stop, and it
+// ships looking like a rounding difference. tools/rate-format-gate.py
+// refuses a tree where the three disagree and refuses a fourth copy, so
+// that is checked rather than remembered - but it pins these functions
+// BY NAME, so a rename here moves the gate's SOURCES in the same commit.
 function rateParts(mbps, bits){
   mbps = mbps || 0;
   if(bits===undefined) bits = UNIT_BITS;
@@ -9356,9 +9439,20 @@ function setTheme(v){
   const r=document.documentElement;
   if(v==='auto'){ r.removeAttribute('data-theme'); localStorage.removeItem('nzbfastTheme'); }
   else { r.setAttribute('data-theme',v); localStorage.setItem('nzbfastTheme',v); }
+  // ...and the browser's own chrome around the page. The pre-paint script
+  // set it from what was stored; this is the same call for the choice
+  // made just now, so the title bar of an installed window changes with
+  // the page rather than at the next load.
+  syncThemeColor();
   // The theme changes what the accent is measured against, and repaints
   // the charts' palette.
   updateContrastReport();
+}
+// The tokens snippet owns the meta tags (it is shared with the wall and
+// the manuals); this is the one call site on this page's side, wrapped so
+// an older cached tokens block cannot throw here.
+function syncThemeColor(){
+  try{ if(window.nzbfastSyncThemeColor) window.nzbfastSyncThemeColor(); }catch(_){}
 }
 function setAccent(v){
   const r=document.documentElement;
@@ -9437,6 +9531,9 @@ function setLookColor(which, value){
   localStorage.setItem('nzbfast'+which, value);
   r.style.setProperty(LOOK_COLORS[which], value);
   r.setAttribute('data-'+which,'1');
+  // A custom background is what the page now paints, so it is what the
+  // chrome around it must paint too.
+  if(which==='userbg') syncThemeColor();
   updateContrastReport(); drawAllCharts(0);
 }
 function clearLookColors(){
@@ -9446,6 +9543,7 @@ function clearLookColors(){
     r.style.removeProperty(LOOK_COLORS[k]);
     r.removeAttribute('data-'+k);
   }
+  syncThemeColor();
   loadLookControls(); updateContrastReport(); drawAllCharts(0);
 }
 function paletteSwatch(){
@@ -14145,8 +14243,13 @@ function setSearch(q){
     let hit=0;
     c.querySelectorAll('.row').forEach(r=>{
       // textContent covers the label, the hint and any option labels, so
-      // "megabit" finds Speed units and "8080" finds the port.
-      const m=(r.textContent||'').toLowerCase().includes(q);
+      // "megabit" finds Speed units and "8080" finds the port. A row that
+      // JS has closed outright is skipped: #rowInstall carries its copy in
+      // the DOM on every browser but is only displayed where an install is
+      // actually on offer, and counting it would open the Interface card
+      // on a search whose only match is invisible.
+      const m=r.style.display!=='none'
+        && (r.textContent||'').toLowerCase().includes(q);
       r.classList.toggle('sqhide', !m && !titleHit);
       r.classList.toggle('hit', m);
       if(m) hit++;
@@ -17821,6 +17924,78 @@ function layoutModeSync(){
     s.setAttribute('aria-pressed', LAYOUT_MODE?'true':'false');
   }
 }
+// §Stage2: install the dashboard as an app. Three surfaces answer this
+// three different ways, and the row has to say only what is true here.
+//  - Chromium (Chrome, Edge, Brave) fires beforeinstallprompt on a secure
+//    context and hands over the only object that can open the dialog. It
+//    is stashed by the <head> script, because it fires before this one runs.
+//  - Safari has no such event and no API at all: the user does it from the
+//    File menu, so the honest offer is the sentence naming that menu item.
+//  - Firefox desktop cannot install a web app, so the row stays hidden
+//    rather than describing a button that is not there.
+// 127.0.0.1 is a secure context by definition, so a local dashboard is
+// installable; reaching this daemon over plain http from another machine on
+// the network is NOT, and there Chromium fires nothing and the row is
+// correctly silent.
+
+// Is this page already running as an installed app? Every mode except
+// "browser" counts: an installed window can be launched minimal-ui or with
+// the window-controls overlay, and offering to install it again from inside
+// itself is the confusing case worth spending four extra strings on.
+function inStandalone(){
+  return ['standalone', 'minimal-ui', 'window-controls-overlay', 'fullscreen']
+      .some(m => matchMedia('(display-mode: ' + m + ')').matches)
+    // iOS Safari never reported display-mode until 16.4 and still sets this.
+    || navigator.standalone === true;
+}
+function installSync(){
+  const row = document.getElementById('rowInstall');
+  if(!row) return;
+  const btn = document.getElementById('btnInstall');
+  const hint = document.getElementById('installHint');
+  // IN_APP_WRAPPER, not a second sniff of our own: the mac wrapper's window
+  // already IS the thing this row offers, and its engine is Safari's, so
+  // without that test the Safari arm below would tell somebody looking at
+  // the native window to open a File menu it does not have.
+  if(inStandalone() || IN_APP_WRAPPER){ row.style.display = 'none'; return; }
+  if(window.__nzbInstallEvent){
+    row.style.display = ''; btn.style.display = ''; btn.disabled = false;
+    hint.textContent = '';
+    return;
+  }
+  const ua = navigator.userAgent;
+  // Every Chromium browser also says "Safari" in its UA, so the exclusions
+  // are what make this test mean Safari. It runs only after the Chromium
+  // arm above missed, which is the real guard.
+  if(/Safari/.test(ua) && !/Chrome|Chromium|Edg\/|OPR\/|Android/.test(ua)){
+    row.style.display = ''; btn.style.display = 'none';
+    // iPadOS reports itself as a Mac, so the touch count is what tells the
+    // two menus apart.
+    const touch = /iPhone|iPod|iPad/.test(ua)
+      || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    hint.textContent = touch
+      ? t('set.ui.install.ios', 'Tap the Share button, then "Add to Home Screen".')
+      : t('set.ui.install.safari', 'In Safari, choose File, then "Add to Dock".');
+    return;
+  }
+  row.style.display = 'none';
+}
+async function doInstall(btn){
+  const ev = window.__nzbInstallEvent;
+  if(!ev){ installSync(); return; }
+  btn.disabled = true;
+  // Single use, accepted or dismissed: a second prompt() on the same event
+  // throws. Chromium fires a fresh one on a later visit if it was dismissed.
+  window.__nzbInstallEvent = null;
+  try{
+    ev.prompt();
+    const r = await ev.userChoice;
+    toast(r && r.outcome === 'accepted'
+      ? t('toast.installed', 'Installed. Look for nzbfast in your dock or taskbar.')
+      : t('toast.installNo', 'Not installed. Your browser will offer again later.'));
+  }catch(_){ /* the dialog was already open, or the event went stale */ }
+  installSync();
+}
 function setLayoutEdit(on, fromSettings){
   if(!LAYOUT_EDIT) return;
   LAYOUT_MODE=!!on;
@@ -19118,6 +19293,11 @@ initLayout();
 // Settings row still has to be hidden rather than left offering a mode
 // with no controls behind it.
 layoutModeSync();
+// Same reasoning as the line above, one row down: the install row has to be
+// hidden on a browser that cannot install, and beforeinstallprompt may
+// already have fired and been stashed by the <head> script before this
+// script existed.
+installSync();
 renderCardMgr();
 // After initLayout, which is what builds the ▤ buttons applyDensity lights.
 // NOT behind LAYOUT_EDIT: the per-card override is a desktop affordance,
@@ -19231,6 +19411,7 @@ if(LOCALE!=='en'){
     // every aria-label at once, which is what the per-selector restamps
     // above have to do by hand for the card tools.
     layoutModeSync();   // §6d: the Settings toggle's label + tooltip are JS-stamped
+    installSync();      // its Safari hint is JS-stamped for the same reason
     renderHiddenBar();
     renderCardMgr();
     renderSndEvents(); fillVoices(); checkWelcome(); idxNavPill();

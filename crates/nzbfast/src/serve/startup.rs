@@ -1576,6 +1576,7 @@ pub(super) fn spawn_core_tasks(
     tasks::spawn_memory_trim(daemon);
     tasks::spawn_usage_flush(daemon);
     tasks::spawn_queue_saver(daemon);
+    tasks::spawn_hunt_worker(daemon);
 
     tasks::spawn_auto_speed(daemon, config);
 
@@ -2472,6 +2473,7 @@ fn build_daemon(
         arr_giveup_threshold: AtomicU64::new(0),
         arr_instances: Mutex::new(Vec::new()),
         giveup: Arc::new(Mutex::new(Default::default())),
+        hunt: Default::default(),
         settings_path: settings_path.clone(),
         #[cfg(feature = "indexer")]
         taste_cache: Mutex::new(None),

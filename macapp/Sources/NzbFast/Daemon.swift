@@ -955,6 +955,16 @@ final class Daemon {
         let slots: Int
         /// SAB's own word for the queue: Paused, Idle or Downloading.
         let status: String
+        /// The speed ceiling in force, bytes/sec, 0 for none. While
+        /// `autoSpeed` is on this is the number the governor picked for
+        /// this instant rather than a ceiling anyone set.
+        let limitBps: Int
+        /// Is the auto governor holding the wheel?
+        let autoSpeed: Bool
+        /// The configured line speed, bytes/sec, 0 when unset. The
+        /// percentage rows of the limit menu appear only once it is
+        /// known - see StatusItemController.limitRows.
+        let lineSpeed: Int
     }
 
     /// Poll mode=queue for the handful of numbers the status item shows.
@@ -975,12 +985,44 @@ final class Daemon {
         // A STRING on the wire - SAB's own type for this field - so it
         // is parsed rather than cast.
         let kb = (q["kbpersec"] as? String).flatMap(Double.init) ?? 0
+        // Also a string on the wire, and for the same reason - but
+        // mode=status once sent this one as a number, so both are read.
+        let limit = (q["speedlimit_abs"] as? String)
+            .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            ?? (q["speedlimit_abs"] as? Int) ?? 0
         return QueueStatus(
             paused: (q["paused"] as? Bool) ?? false,
             offline: (q["offline"] as? Bool) ?? false,
             mbps: kb / 1000,
             slots: (q["noofslots"] as? Int) ?? 0,
-            status: (q["status"] as? String) ?? "")
+            status: (q["status"] as? String) ?? "",
+            limitBps: limit,
+            autoSpeed: (q["auto_speed"] as? Bool) ?? false,
+            lineSpeed: (q["line_speed"] as? Int) ?? 0)
+    }
+
+    /// Apply one speed-limit pick from the menu bar.
+    ///
+    /// The calls are made in the order `StatusItemController.limitCalls`
+    /// returns them and the run STOPS on the first refusal: the two-call
+    /// picks clear the governor before setting a ceiling, and setting one
+    /// after failing to clear it would leave the governor free to
+    /// overwrite it a second later - a limit that visibly refuses to
+    /// stick. Returns true when every call was accepted.
+    ///
+    /// Values are digits and names are literals, so nothing here is
+    /// escaped; `apiURL` escapes the key.
+    @discardableResult
+    func setSpeedLimit(_ calls: [(String, String)]) async -> Bool {
+        for (name, value) in calls {
+            var req = URLRequest(url: apiURL("config", "name=\(name)&value=\(value)"))
+            req.timeoutInterval = 5
+            guard let (data, _) = try? await Daemon.loopback.data(for: req),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["status"] as? Bool) != false
+            else { return false }
+        }
+        return true
     }
 
     /// mode=pause / mode=resume: the same two calls the dashboard's own

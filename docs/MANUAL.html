@@ -486,6 +486,25 @@ drag the heading's trailing edge to resize it; double-clicking that edge puts th
 back. With a heading focused, the left and right arrow keys move it, and Shift with an
 arrow resizes it.</p>
 
+<h3 id="dash-install">Install it as an app</h3>
+<p>Chrome, Edge and the other Chromium browsers can install the dashboard as an app on this
+machine: its own window, its own icon in the dock or taskbar, no tab strip and no address
+bar. Nothing is uploaded and nothing extra is downloaded; it is the same dashboard from the
+same daemon, in a window of its own. Settings → Interface grows an <b>Install as an app</b>
+button whenever your browser will do it, and the address bar usually offers the same thing
+at the same moment. Safari has no button to offer: on a Mac the menu item is <b>File → Add
+to Dock</b>, and on an iPhone or iPad it is <b>Share → Add to Home Screen</b>. Firefox on the
+desktop cannot install web apps at all, so the row stays out of sight there rather than
+describing something that is not on offer. The macOS app is already a window of this kind,
+and never asks.</p>
+<p>Two things follow from how a browser tells one installed app from another, and both are
+easier to know now than to discover later. The identity is the address including the port,
+so moving the daemon off <code>6789</code> orphans an app installed from it: nothing breaks,
+but you install it again from the new address and drop the old one. And installing needs a
+secure address, which <code>127.0.0.1</code> is by definition; reaching this daemon over
+plain HTTP from another machine on your network is not, so no browser offers to install it
+there. Put it behind HTTPS (see <a href="#remote-proxy">Reaching nzbfast from outside your home</a>) and the offer comes back.</p>
+
 <h2 id="adding">5 · Adding downloads</h2>
 <div class="tblwrap"><table>
 <tr><th>Method</th><th>How</th></tr>
