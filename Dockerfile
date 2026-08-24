@@ -8,7 +8,7 @@
 # arm64 and amd64 builds both still resolve. Dependabot's `docker`
 # ecosystem moves these forward weekly - if you unpin one, drop its
 # ecosystem entry too, or the pin silently rots.
-FROM rust:1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS build
+FROM rust:1-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS build
 WORKDIR /src
 # Issue #38: a wedged daemon in the official image could not be given a
 # usable backtrace - the release profile strips symbols and the strip
