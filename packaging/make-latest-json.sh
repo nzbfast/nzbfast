@@ -344,8 +344,36 @@ if [ ! -x "$SIGNER" ]; then
     ( cd "$ROOT" && cargo build --release -p nzbfast --example update_sign >&2 )
     SIGNER="$ROOT/target/release/examples/update_sign"
 fi
+# The signer's own self-check verifies with the key it just used, which
+# proves the crypto library works and nothing about WHICH key was used:
+# any well-formed ed25519 private key passes it. A stale, rotated or test
+# key therefore produced a green "signed" line, a manifest every shipped
+# client rejects, and a burned serial (Codex sweep 24 Aug, F-15). Hold
+# the supplied key to the ONE key clients actually trust, read out of
+# serve/update.rs so the two cannot drift, BEFORE anything is signed or
+# recorded.
+EXPECTED_PUB=$(grep -A1 'UPDATE_PUBKEY_HEX: &str =' "$ROOT/crates/nzbfast/src/serve/update.rs" \
+    | grep -o '"[0-9a-f]\{64\}"' | tr -d '"')
+if [ -z "$EXPECTED_PUB" ]; then
+    echo "ERROR: could not read UPDATE_PUBKEY_HEX out of crates/nzbfast/src/serve/update.rs" >&2
+    echo "       (did the constant move or change shape? fix this extraction with it)" >&2
+    exit 1
+fi
+GOT_PUB=$("$SIGNER" pubkey "$NZBFAST_UPDATE_SIGNING_KEY") || {
+    echo "ERROR: could not derive a public key from NZBFAST_UPDATE_SIGNING_KEY" >&2
+    exit 1
+}
+if [ "$GOT_PUB" != "$EXPECTED_PUB" ]; then
+    echo "" >&2
+    echo "ERROR: NZBFAST_UPDATE_SIGNING_KEY is NOT the production update key." >&2
+    echo "       it derives  $GOT_PUB" >&2
+    echo "       clients trust $EXPECTED_PUB (serve/update.rs UPDATE_PUBKEY_HEX)" >&2
+    echo "       Signing with it would produce a manifest every client rejects" >&2
+    echo "       and burn a release serial. Nothing was signed or recorded." >&2
+    exit 1
+fi
 "$SIGNER" sign "$NZBFAST_UPDATE_SIGNING_KEY" "$OUT" || { echo "signing failed" >&2; exit 1; }
-echo "signed $OUT -> $OUT.sig"
+echo "signed $OUT -> $OUT.sig (key verified against the embedded UPDATE_PUBKEY_HEX)"
 
 # Only now, once a signed manifest actually exists, record the serial as
 # shipped. Doing it earlier would raise the floor on a run that died before

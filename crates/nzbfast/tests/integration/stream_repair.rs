@@ -481,6 +481,14 @@ fn daemon_cmd(cfg: &Path, out: &Path, port: u16) -> Command {
         .env("NZBFAST_NO_ENRICH", "1")
         .env("NZBFAST_NO_NATIVE_REPAIR", "1")
         .env("NZBFAST_STREAM_ZEROFILL", "0")
+        // The external-repair tests wait on nzbfast's own lowercase INFO
+        // "repair complete" wrapper event - deliberately, it is the
+        // repaired-coverage barrier - and the child falls back to
+        // ambient RUST_LOG when NZBFAST_LOG is unset, so a parent shell
+        // exporting RUST_LOG=warn timed three of them out with the
+        // repair done (Codex sweep 24 Aug, F-22). Pin INFO at the child.
+        .env("NZBFAST_LOG", "info")
+        .env_remove("RUST_LOG")
         .arg("--config")
         .arg(cfg)
         .arg("serve")

@@ -61,6 +61,10 @@ impl ConnTarget {
     /// pending, which is the `connections: 0` hang this file already
     /// refuses at spawn. Slots above the spawned fleet size are simply
     /// not there to wake, so the fleet size is the natural ceiling.
+    /// That ceiling is why a fleet meant to GROW must be spawned wide
+    /// and parked (TODO 277): a `set` above the spawn count returns
+    /// exactly as one below it does and nothing dials, so `get::fleet`
+    /// spawns the line-cap curve's CEILING and parks the surplus.
     pub fn set(&self, target: usize) {
         self.tx.send_if_modified(|t| {
             let n = target.max(1);
@@ -175,10 +179,17 @@ pub struct PoolConfig {
     pub live_target: Option<Arc<ConnTarget>>,
     /// TODO 208 item 1: the whole fleet's connection budget the in-run
     /// shed walks `live_target` down to its share of (see
-    /// `pool::linecap`); 0 = off. A CONSTANT since 23 Aug 2026 - it
-    /// used to be connections per Mbit of the measured line. MAX-folded
-    /// across the fleet, like the gauge's `pct`.
+    /// `pool::linecap`); 0 = off. MAX-folded across the fleet, like the
+    /// gauge's `pct`. A flat constant between 23 and 24 Aug 2026; since
+    /// TODO 277 it is the SEED of a curve on the line rate, which the
+    /// governor may grow during the run when `line_cap_auto`.
     pub line_cap_fleet: usize,
+    /// TODO 277: is `line_cap_fleet` the curve's own number (true) or
+    /// one somebody typed (false)? Only the first may be grown in-run -
+    /// a leg that typed `NZBFAST_LINE_CAP=40` is asking for 40 sockets,
+    /// not for a floor of 40. ALL-folded across the fleet, unlike
+    /// everything else here, because one typed number pins the arm.
+    pub line_cap_auto: bool,
     /// TODO 208 item 1: the line rate in bytes/s the daemon has seen
     /// this link sustain (its persisted link anchor), 0 = none. The cap
     /// no longer divides it, but the in-run shed still stands down
@@ -519,6 +530,7 @@ impl Default for PoolConfig {
             lease: None,
             handoff: None,
             line_cap_fleet: 0,
+            line_cap_auto: false,
             line_anchor_bps: 0,
             rate: None,
             oracle: None,
@@ -1631,6 +1643,13 @@ struct Shared {
     /// the question the terminal-state invariant turns on. The last
     /// worker out owns [`seal_run`]; see it for why that matters.
     workers_live: AtomicUsize,
+    /// Of those, how many are parked in `admit::wait_for_slot` right
+    /// now - alive, holding no admission and so no connection (TODO
+    /// 277). Per server, then summed: `stall_bound_at` samples the
+    /// total before every socket wait and must not fold a Vec there.
+    /// [`Shared::workers_dialling`] is why both exist.
+    parked: Vec<AtomicUsize>,
+    parked_total: AtomicUsize,
     /// How many workers this run has EVER had. `workers_live == 0` is
     /// ambiguous on its own - it is equally "the fleet is exhausted" and
     /// "the fleet has not been born yet" - and a guard that cannot tell
@@ -2262,6 +2281,8 @@ impl Shared {
             left_mid_run: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             auth: (0..n_servers).map(|_| AuthState::default()).collect(),
             workers_live: AtomicUsize::new(0),
+            parked: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
+            parked_total: AtomicUsize::new(0),
             workers_born: AtomicUsize::new(0),
             stream_until: AtomicU64::new(0),
             promote_gen: tokio::sync::watch::Sender::new(0),
@@ -2391,20 +2412,6 @@ impl Shared {
         }
     }
 
-    /// Average delivery rate of a server since the run started, B/s.
-    ///
-    /// This is a server's SHARE of the job, not its speed: a server given
-    /// four times the connections delivers roughly four times the bytes at
-    /// identical per-connection speed. Comparisons that mean "is this one
-    /// slower" want [`Self::rate_per_worker`].
-    fn rate(&self, server: usize) -> f64 {
-        let el = self.start.elapsed().as_secs_f64().max(0.5);
-        self.bytes[server].load(Ordering::Relaxed) as f64 / el
-    }
-
-    /// [`Self::rate`] divided by the server's live workers: what one of
-    /// its connections is actually managing, which is the comparable
-    /// quantity across servers with different connection counts.
     /// Record WHY a session ended. `slot` indexes [`SessionEnds`] in
     /// field order (0 peer, 1 protocol, 2 prebyte, 3 stall, 4 ours).
     /// Snapshot this server's session-end tally for [`PoolStats`].
@@ -2445,11 +2452,6 @@ impl Shared {
             };
             c.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    fn rate_per_worker(&self, server: usize) -> f64 {
-        let alive = self.alive[server].load(Ordering::Relaxed).max(1) as f64;
-        self.rate(server) / alive
     }
 
     /// M11 stream mode: should this server LEAVE a promoted (seek) item

@@ -7,6 +7,7 @@
 //! exactly what the inline module reached because `super` is still
 //! `workers`.
 
+use super::recovery::*;
 use super::*;
 
 fn ladder_nzb() -> Arc<Nzb> {

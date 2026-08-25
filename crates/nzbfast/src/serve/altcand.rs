@@ -240,22 +240,171 @@ pub(super) fn terminal_reason(j: &Job) -> Option<(&'static str, String, &'static
     ))
 }
 
-/// The queue row's offer: the reason, and the spares that could be
-/// switched to. `None` when nothing has concluded the job is doomed.
+/// The queue row's offer: the reason, the spares that could be switched
+/// to, and whether the row may ask for a search. `None` when nothing has
+/// concluded the job is doomed.
 ///
 /// An offer with an EMPTY spare list is still an offer, and that is the
 /// point: the notice is the half that was missing from the incident this
 /// was designed against ("it never told me up front that it could not
 /// finish"), and it is worth saying whether or not there is a button
 /// beside it.
-pub(super) fn offer_json(j: &Job, held: &[HeldSpare]) -> Option<Value> {
+///
+/// **`search` and `auto` are §282 item 20**, which closed the seam
+/// between this file and `serve/hunt.rs`. Item 12 said that with nothing
+/// held the button "searches and shows what it found, ranked, for the
+/// user to pick" and deliberately did not build it; section C then built
+/// the automatic road only, so a user with nothing held was handed a
+/// sentence naming a setting and no way to ask. Two booleans, because
+/// both answers are the daemon's and neither can be derived in the page:
+///
+/// * `search` - may this row ask? False on an *arr-origin job, where
+///   `hunt_gates` refuses on item 9's rule. Sent so the drawer can say
+///   why instead of drawing a button that answers with a refusal.
+/// * `auto` - is `alt_auto_search` on? It changes what the empty case
+///   MEANS. Off, nothing further will happen unless the user acts; on, a
+///   search will be tried when the job finally fails. The old copy named
+///   only the hold setting, which read as "nothing else can happen" from
+///   the day section C landed.
+pub(super) fn offer_json(j: &Job, held: &[HeldSpare], auto_search: bool) -> Option<Value> {
     let (token, why, _) = terminal_reason(j)?;
     let spares: Vec<Value> = held
         .iter()
         .filter(|s| s.held_against(&j.nzo_id, j.dupe_key.as_deref()))
         .map(|s| json!({"nzo_id": s.nzo_id, "name": s.name}))
         .collect();
-    Some(json!({"reason": token, "detail": why, "spares": spares}))
+    Some(json!({
+        "reason": token,
+        "detail": why,
+        "spares": spares,
+        "search": !is_arr_origin(&j.origin),
+        "auto": auto_search,
+    }))
+}
+
+/// §284: may a row that has ALREADY FAILED still be offered another
+/// copy?
+///
+/// [`offer_json`] above answers for a queue row, off `terminal_reason`,
+/// because there nothing has failed yet and the pre-flight verdict is
+/// the only evidence there is. The moment `daemon_park::park_gen` runs,
+/// that row leaves the queue and the whole of §282 section D went with
+/// it - the notice, both buttons and the switch itself all resolved
+/// against `d.queue` alone. This is the same question asked of the
+/// history record, and it is asked of the FAILURE rather than of the
+/// health probe: the job really did fail, so its `fail_message` is the
+/// verdict, exactly as it is for `hunt::Daemon::hunt_request`'s
+/// automatic road. A pre-flight verdict that survived the park is not
+/// needed and is not read - which is what makes this reach the shape
+/// §284 item 2 is actually about, a job that died DURING the run with
+/// no health probe on it at all.
+///
+/// **HOW FAR BACK, which §284 asks to be decided deliberately rather
+/// than by a number somebody picked.** Every clause below is a
+/// mechanism and none of them is an age:
+///
+/// 1. `fail_action` must be `"search"`. That is the retry surface's own
+///    "is this still worth acting on" test, already shipped and already
+///    drawn: those are exactly the rows whose Retry is dimmed with
+///    "asking again cannot fix this one - the post is the problem, not
+///    the download", and which already carry a `find another` button
+///    into a manual search. Everything else is either local (another
+///    copy fails the same way, which is `NoHunt::LocalFault` one step
+///    later) or genuinely retryable. A ranked one-click replacement
+///    must not be offered on a NARROWER set than the hand search
+///    beside it, and it must not be offered on a WIDER one.
+/// 2. The spooled `.nzb` must still be on disk. Not decoration: the
+///    hunt's age gate reads it when the failure sentence carries no age
+///    clause, and `hunt_pick`'s item 6 admission test reads it to
+///    refuse a copy that is the SAME POST. Without it the pick can only
+///    ever refuse, and a button that answers with a refusal is the one
+///    thing `hunt_gates`' *arr arm refuses to ship. In practice this is
+///    also the real age bound, because the spool is what a reaped
+///    record loses.
+/// 3. No auto-retry may be armed and still in the future. `park_gen`
+///    guards BOTH the promotion and the hunt on `!armed_auto_retry` for
+///    one reason: the original is coming back through the queue in
+///    minutes and has not finished failing. A button offered inside
+///    that window spends a copy on a job that is about to try again.
+///    Tested against the clock rather than on presence, matching the
+///    dashboard's own armed test - a stamp in the past means the retry
+///    never ran, and that is not a reason to withhold the offer for
+///    good.
+/// 4. Nothing has replaced it already (`alt_to_name`). Item 14's stamp
+///    IS the record that this switch happened; offering again would
+///    spend a third copy of one release and write a second account of
+///    one event over the first.
+///
+/// A tombstone is the user's own delete rather than a failure, the same
+/// exclusion `park_gen` makes at every one of these decisions.
+pub(super) fn parked_replaceable(j: &Job) -> bool {
+    j.state == JobState::Failed
+        && !j.tombstone
+        && j.alt_to_name.is_empty()
+        // `unsigned_abs` because the stamp is unix SECONDS in a u64 and
+        // `unix_now` hands back an i64; the two are the same number on
+        // every clock this runs on.
+        && !j.auto_retry_at.is_some_and(|t| t > unix_now().unsigned_abs())
+        && fail_action(
+            fail_kind(&j.fail_message),
+            fail_hint(&j.fail_message),
+            &j.fail_message,
+            j.password_required,
+        ) == "search"
+        && j.nzb_path.is_file()
+}
+
+/// §284: the same offer, on the history row of a job that has already
+/// failed. `None` when [`parked_replaceable`] says another copy is not
+/// the move for this record.
+///
+/// TWO KEYS AND NOT FOUR, and each absence is a decision rather than an
+/// omission:
+///
+/// * no `reason`/`detail`. The queue row has nowhere else to say why it
+///   cannot finish, so [`offer_json`] carries the verdict; the history
+///   drawer prints the record's own Reason line, its fail_kind guidance
+///   and its full attempt log above this block already. A third
+///   paraphrase of one failure is what the drawer does not need.
+/// * no `auto`. On a queue row that boolean says what will happen when
+///   the job finally fails. This job HAS failed: with `alt_auto_search`
+///   on, `park_gen` already asked - so "one will be searched for" is
+///   not a promise that can still be kept, it is a description of
+///   something that has already happened and come back empty.
+pub(super) fn parked_offer_json(j: &Job, held: &[HeldSpare]) -> Option<Value> {
+    if !parked_replaceable(j) {
+        return None;
+    }
+    let spares: Vec<Value> = held
+        .iter()
+        .filter(|s| s.held_against(&j.nzo_id, j.dupe_key.as_deref()))
+        .map(|s| json!({"nzo_id": s.nzo_id, "name": s.name}))
+        .collect();
+    Some(json!({
+        "spares": spares,
+        "search": !is_arr_origin(&j.origin),
+    }))
+}
+
+/// The original half of a switch, read once from whichever store holds
+/// it.
+///
+/// §284's whole shape in one struct: the two roads differ in what they
+/// have to DO to the abandoned row, not in what they say about it.
+struct SwitchFrom {
+    job: Arc<Mutex<Job>>,
+    /// The release being abandoned, for item 14's clause.
+    name: String,
+    /// Its dupe key, for the pre-`held_for` spare shape.
+    key: Option<String>,
+    /// Item 14's `alt_why`: why this attempt was abandoned, stripped of
+    /// the build stamp.
+    why: String,
+    /// The failure LEAD to stamp, or `None` when the row has already
+    /// failed and carries its own sentence. `Some` is the whole of the
+    /// difference between the two roads: it means "this row is still on
+    /// the queue, so failing it is this switch's job".
+    lead: Option<&'static str>,
 }
 
 impl Daemon {
@@ -278,6 +427,37 @@ impl Daemon {
             .collect()
     }
 
+    /// §284: is `target` a HISTORY record a spare may still be held
+    /// against?
+    ///
+    /// `daemon_enqueue::enqueue_as` refuses an add whose `hold_for`
+    /// names no queue row, and it is right to: a spare whose job is
+    /// gone is a download NOBODY asked for, which is the one thing a
+    /// spare may never become. Every spare had a QUEUE row for an owner
+    /// until `hunt::Daemon::hunt_pick` learned to run on a job that has
+    /// already failed - it parks the picked copy as a spare of the
+    /// doomed row for the instant it takes [`Daemon::alt_switch`] to
+    /// promote it, and on that road the doomed row is in history. The
+    /// pick therefore failed at the add, with a sentence about a delete
+    /// that had not happened.
+    ///
+    /// [`parked_replaceable`] and not a bare "is it in history": it is
+    /// the same predicate the drawer's offer and both clicked doors are
+    /// drawn from, so this refusal has not loosened by a single record.
+    /// A job that was deleted, completed, retried or already replaced is
+    /// refused exactly as it was before.
+    ///
+    /// Called with the queue lock HELD, which is the queue -> history
+    /// order `enqueue_as` already takes on its duplicate arm - the
+    /// argument that it cannot ABBA is written out there, and nothing in
+    /// `serve/` holds history and then reaches for the queue.
+    pub(super) fn parked_spare_owner(&self, target: &str) -> bool {
+        self.history.lock_ok().iter().any(|j| {
+            let g = j.lock_ok();
+            g.nzo_id == target && parked_replaceable(&g)
+        })
+    }
+
     /// §282 item 12: switch `failed_id` for the held spare `spare_id`.
     ///
     /// Returns the error to show the user, or None on success. Every
@@ -296,6 +476,25 @@ impl Daemon {
     /// taken while the queue is idle, so the row it appears on is a
     /// queued one; refusing the race is cheaper than winning it.
     ///
+    /// **TWO ROADS SINCE §284, and the second one is a HISTORY ROW.**
+    /// Until 24 Aug 2026 this resolved both ids against `d.queue` and
+    /// answered "that download is no longer in the queue" otherwise, so
+    /// the whole of §282 section D vanished the instant
+    /// `daemon_park::park_gen` retained the failed job out of the queue
+    /// - including, on an install with `alt_auto_switch` off, a spare
+    /// still parked at priority -3 that nothing would ever promote,
+    /// offer or drop. The parked road is what makes
+    /// `daemon_park::spare_held_for`'s and `promote_held_alternative`'s
+    /// doc blocks true: the notice really does offer it on a click, on
+    /// the abandoned job's history row.
+    ///
+    /// The two differ in exactly three things, all of them because the
+    /// parked row has ALREADY FAILED: the verdict comes from its own
+    /// `fail_message` rather than from `terminal_reason`, nothing about
+    /// the row is restamped beyond item 14's `alt_to_name`, and
+    /// `job.failed` is not re-emitted. See [`parked_replaceable`] for
+    /// which parked rows qualify and why the bound is drawn where it is.
+    ///
     /// **IT ANNOUNCES THE SWITCH, and until 24 Aug 2026 it did not.**
     /// Item 18 gave the switch its own lifecycle kind so that a user who
     /// is not looking at the dashboard is told, and wired it to the
@@ -313,42 +512,113 @@ impl Daemon {
     /// whole argument, and the one place to change it, is the doc block
     /// on `promote_held_alternative`.
     ///
+    /// A THIRD DOOR carries these same keys under a DIFFERENT kind:
+    /// `hunt::hunt_enqueue`'s `job.replaced`, `by: "hunt"`. Item 18
+    /// settled that on 24 Aug 2026 - one payload shape, two kinds,
+    /// because a hunt spends new bytes and a target's `events` field can
+    /// only filter on the kind. So an edit to the keys assembled below
+    /// is an edit to three sites, not two.
+    ///
     /// The five refusal arms return BEFORE any of this and emit nothing,
     /// which is the point: none of them changed a job, so there is no
     /// switch to announce.
     pub(super) fn alt_switch(&self, failed_id: &str, spare_id: &str) -> Option<String> {
+        // §284: the original may be a HISTORY row, and it is resolved
+        // BEFORE the queue lock is taken rather than inside the hold
+        // below. `history_job` takes the history mutex, and nothing on
+        // this tree takes those two nested - `park_gen` retains the
+        // queue and pushes to history as two separate holds for the same
+        // reason. The two races that opens are both benign and both end
+        // in a refusal the user answers by clicking again: a row that
+        // parks in the gap loses its queue entry and is not yet in
+        // `parked`, and one that is RETRIED in the gap is found in the
+        // queue below, which wins.
+        let parked = self.history_job(failed_id);
         // Both rows, the two mutations and the queue removal under ONE
         // hold, so nothing can promote, delete or pick either half in
         // between. The history push and the durable write happen after
         // it, which is the order every other park on this tree takes.
         let held_writes = Daemon::hold_queue_writes();
-        let (orig, switched) = {
+        let (orig, switched, was_queued) = {
             let mut q = self.queue.lock_ok();
             let find = |id: &str| -> Option<Arc<Mutex<Job>>> {
                 q.iter().find(|j| j.lock_ok().nzo_id == id).cloned()
             };
-            let Some(orig) = find(failed_id) else {
-                return Some("that download is no longer in the queue".into());
+            let from = match find(failed_id) {
+                // THE QUEUE ROAD (§282 item 12). Nothing has failed yet,
+                // so the pre-flight verdict is the only evidence there
+                // is - and failing the row is this switch's job.
+                Some(orig) => {
+                    let (verdict, key, name, running) = {
+                        let g = orig.lock_ok();
+                        (
+                            terminal_reason(&g),
+                            g.dupe_key.clone(),
+                            g.name.clone(),
+                            matches!(g.state, JobState::Downloading | JobState::Finishing),
+                        )
+                    };
+                    if running {
+                        return Some(
+                            "this download has already started - pause it first, or let it finish"
+                                .into(),
+                        );
+                    }
+                    let Some((_, why, lead)) = verdict else {
+                        return Some(
+                            "nothing has concluded that this download cannot finish".into(),
+                        );
+                    };
+                    SwitchFrom {
+                        job: orig,
+                        name,
+                        key,
+                        why,
+                        lead: Some(lead),
+                    }
+                }
+                // THE PARKED ROAD (§284). The job HAS failed, so its own
+                // `fail_message` is the verdict - the same evidence
+                // `promote_held_alternative` reads on the automatic
+                // road, and for the same reason. There is no queue row
+                // to fail, no `finished_*` to stamp and no history push
+                // to make: everything except item 14's `alt_to_name` has
+                // already happened, which is why §284 says this switch
+                // has LESS to do rather than more.
+                None => {
+                    let Some(orig) = parked else {
+                        return Some("that download is no longer in the queue".into());
+                    };
+                    let (ok, key, name, why) = {
+                        let g = orig.lock_ok();
+                        (
+                            parked_replaceable(&g),
+                            g.dupe_key.clone(),
+                            g.name.clone(),
+                            why_from_fail(&g.fail_message),
+                        )
+                    };
+                    if !ok {
+                        return Some("another copy is no longer offered for that download".into());
+                    }
+                    SwitchFrom {
+                        job: orig,
+                        name,
+                        key,
+                        why,
+                        lead: None,
+                    }
+                }
             };
+            let SwitchFrom {
+                job: orig,
+                name,
+                key,
+                why,
+                lead,
+            } = from;
             let Some(spare) = find(spare_id) else {
                 return Some("that alternate is no longer in the queue".into());
-            };
-            let (verdict, key, name, running) = {
-                let g = orig.lock_ok();
-                (
-                    terminal_reason(&g),
-                    g.dupe_key.clone(),
-                    g.name.clone(),
-                    matches!(g.state, JobState::Downloading | JobState::Finishing),
-                )
-            };
-            if running {
-                return Some(
-                    "this download has already started - pause it first, or let it finish".into(),
-                );
-            }
-            let Some((_, why, lead)) = verdict else {
-                return Some("nothing has concluded that this download cannot finish".into());
             };
             let (spare_name, spare_category) = {
                 let mut sg = spare.lock_ok();
@@ -377,26 +647,66 @@ impl Daemon {
             // (build stamp and all) because that is what an operator
             // pastes into a bug report, and the automatic door carries
             // exactly the same string for exactly that reason.
+            //
+            // On the PARKED road there is nothing to stamp: the row
+            // failed hours ago and its sentence is the one the drawer,
+            // the report and every *arr have already read. Rewriting it
+            // now would move a record's verdict under readers who have
+            // already acted on it, and re-stamping `finished_unix` would
+            // move the row to the top of a history sorted by when things
+            // finished. Only `alt_to_name` is owed, which is item 14's
+            // half that cannot be known any earlier.
             let reason = {
                 let mut g = orig.lock_ok();
-                g.state = JobState::Failed;
-                g.paused = false;
-                g.priority = 0;
-                // The LEAD, not the bare sentence: `fail_kind` reads
-                // this by prefix, and it is what tells an *arr to
-                // blocklist the release and search for another one
-                // rather than hand us the same dead post back.
-                g.fail_message = crate::with_build(format!("{lead}: {why}"));
+                if let Some(lead) = lead {
+                    g.state = JobState::Failed;
+                    g.paused = false;
+                    g.priority = 0;
+                    // The LEAD, not the bare sentence: `fail_kind` reads
+                    // this by prefix, and it is what tells an *arr to
+                    // blocklist the release and search for another one
+                    // rather than hand us the same dead post back.
+                    g.fail_message = crate::with_build(format!("{lead}: {why}"));
+                    g.finished_at = Some(Instant::now());
+                    g.finished_unix = Some(unix_now());
+                }
                 g.alt_to_name = spare_name.clone();
-                g.finished_at = Some(Instant::now());
-                g.finished_unix = Some(unix_now());
                 g.fail_message.clone()
             };
-            q.retain(|j| !Arc::ptr_eq(j, &orig));
+            let was_queued = lead.is_some();
+            if was_queued {
+                q.retain(|j| !Arc::ptr_eq(j, &orig));
+            }
+            // The spares that were NOT picked are still held against a
+            // job that is now finished with, on BOTH roads: the queue
+            // road just retained it out of the queue, and the parked one
+            // stamps `alt_to_name` above, which is what
+            // `parked_replaceable` reads to stop offering that record a
+            // second copy. Either way `held_against` can never match them
+            // again - nothing promotes them, nothing offers them and
+            // nothing drops them. So point them at the row that took its
+            // place, exactly as `promote_held_alternative` does on the
+            // automatic road: a grab that held two spares must not try
+            // only one because the user clicked rather than waited.
+            //
+            // INSIDE the hold, and via the free function rather than
+            // `Daemon::repoint_spares`, which takes this same lock. That
+            // closes the window as well as the deadlock: at the instant
+            // this guard drops, every loser already names the winner, so
+            // `drop_stranded_spares` can never see one of them pointing
+            // at a row that has left the queue and is not yet in history.
+            //
+            // The winner is not among them - `held_for` was cleared and
+            // its priority raised above - and neither is a duplicate the
+            // USER queued, which keeps naming what it was added against.
+            let repointed = spare::repoint_spares_in(q.iter(), failed_id, spare_id);
             info!(
                 target: "queue",
                 "{spare_id} promoted by hand as an alternate for {failed_id} ({spare_name:?})"
             );
+            if repointed > 0 {
+                info!(target: "queue", "{repointed} spare(s) now held against {spare_id}");
+            }
             // Assembled here, from strings that are already owned
             // clones, so the emit below is a move of a finished value
             // and provably acquires nothing on its way to the ring.
@@ -409,11 +719,21 @@ impl Daemon {
                 "reason": reason,
                 "by": "user",
             });
-            (orig, switched)
+            (orig, switched, was_queued)
         };
-        self.history.lock_ok().push(orig.clone());
+        if was_queued {
+            self.history.lock_ok().push(orig.clone());
+        }
         drop(held_writes);
-        let _ = self.history_upsert(std::slice::from_ref(&orig));
+        if was_queued {
+            let _ = self.history_upsert(std::slice::from_ref(&orig));
+        } else {
+            // `_if_present` and not `history_upsert`, the same call
+            // `promote_held_alternative` makes for the same reason: a
+            // delete landing between the read above and this write must
+            // not resurrect the record.
+            let _ = self.history_upsert_if_present(&orig);
+        }
         self.save_queue();
         // Both events, and in this order. `job.failed` is what the
         // original row IS now, and every existing subscriber keys on it;
@@ -425,7 +745,18 @@ impl Daemon {
         // dispatcher - and neither does: `held_writes` is dropped above,
         // `life_emit_parked` takes and releases its own lock, and
         // `switched` was assembled inside the hold.
-        self.life_emit_parked(&orig);
+        //
+        // ONLY ON THE QUEUE ROAD, and this is §284's one deliberate
+        // asymmetry in the event stream. `job.failed` is the announcement
+        // that a job has just failed, and on the parked road it failed
+        // hours ago - `park_gen` emitted it then, and every subscriber
+        // acted on it then. Emitting it again would tell an *arr, a
+        // webhook and the dashboard's own failure alarm that a record
+        // they have already handled has failed a second time. What DID
+        // just happen is the switch, so that is the one that is said.
+        if was_queued {
+            self.life_emit_parked(&orig);
+        }
         self.life_emit("job.switched", switched);
         self.history_enforce_retention();
         None

@@ -600,6 +600,7 @@ final class Daemon {
                             "stopped the old engine but couldn't launch the new one: \(error.localizedDescription)")
                     }
                     if await waitUntilUp(timeout: 15) { return .spawned }
+                    await reapFailedSpawn()
                     return .failed("the upgraded engine didn't answer on port \(port) within 15 s")
                 }
                 // The old engine would not stop. Attaching to it beats
@@ -607,7 +608,18 @@ final class Daemon {
                 // the dashboard still shows the old version.
                 NSLog("nzbfast: old engine on :%d would not stop - attaching to it", port)
             }
-            spawnedByUs = false
+            // ...unless the "external" engine is a child WE spawned that
+            // is still running - attaching must not launder our own
+            // child into an attachment, because quit's two sweeps each
+            // excuse it: bundleOrphanPIDs excludes child.pid, and the
+            // owned-child kill is gated on spawnedByUs. That laundering
+            // is how a slow spawn plus Try Again left a daemon that
+            // survived app quit (Codex sweep 24 Aug, F-14). The reap on
+            // the timeout paths below makes this arm rare; it is the
+            // belt for whatever still reaches here owning a live child.
+            if !(spawnedByUs && child?.isRunning == true) {
+                spawnedByUs = false
+            }
             return .attached
         }
         // Nothing of ours is answering, so we spawn. A saved port wins
@@ -638,7 +650,34 @@ final class Daemon {
         if await waitUntilUp(timeout: 15) {
             return .spawned
         }
+        await reapFailedSpawn()
         return .failed("the engine didn't answer on port \(port) within 15 s")
+    }
+
+    /// A spawn whose child never answered inside the window must not
+    /// report failure while still holding that child published. It did:
+    /// Try Again re-entered start(), the probe attached to the same pid
+    /// once it finally answered, the attach arm cleared spawnedByUs with
+    /// `child` still naming the pid, and quit then skipped BOTH sweeps -
+    /// bundleOrphanPIDs excludes child.pid and the owned-child kill is
+    /// gated on spawnedByUs - so the daemon outlived the app (Codex
+    /// sweep 24 Aug, F-14). The Windows tray has killed and waited on
+    /// its child after the same 15 s timeout since it shipped; this is
+    /// that rule. `deliberateStop` first, so the termination handler
+    /// does not raise the crash alert about an exit we chose; SIGKILL
+    /// after a bounded grace, the same journal-backed bargain stop()
+    /// strikes for a child that ignores mode=shutdown.
+    private func reapFailedSpawn() async {
+        guard spawnedByUs, let c = child else { return }
+        deliberateStop = true
+        if c.isRunning { c.terminate() }
+        for _ in 0..<20 {
+            if !c.isRunning { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if c.isRunning { kill(c.processIdentifier, SIGKILL) }
+        child = nil
+        spawnedByUs = false
     }
 
     /// Orders spawn's publish against stop's `stopping = true`. The two

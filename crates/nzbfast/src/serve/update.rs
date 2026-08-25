@@ -117,12 +117,27 @@ pub(super) fn fetch_update_resource(url: &str) -> std::result::Result<Vec<u8>, S
 /// or wrongly signed is a LOUD refusal - that is the attack we care about.
 pub(super) fn fetch_manifest(url: &str) -> std::result::Result<Value, String> {
     let body = fetch_update_resource(url).map_err(|e| format!("update check: {e}"))?;
-    // Signature lives beside the manifest: latest.json -> latest.json.sig.
-    let sig_url = format!("{url}.sig");
+    let sig_url = sig_url_for(url);
     let sig = fetch_update_resource(&sig_url)
         .map_err(|e| format!("update manifest is unsigned (no {sig_url}: {e}) - refusing"))?;
     verify_manifest_sig(&body, &sig)?;
     serde_json::from_slice(&body).map_err(|e| format!("update manifest: {e}"))
+}
+
+/// The detached signature's URL: `.sig` appended to the manifest's PATH,
+/// not to the string. A bare `format!("{url}.sig")` turned
+/// `latest.json?token=abc` into `latest.json?token=abc.sig` - same path,
+/// mutated query - so a custom mirror behind a token or presigned URL
+/// fetched its manifest fine and then failed closed as "unsigned",
+/// forever and quietly (Codex sweep 24 Aug, F-21). The default GitHub
+/// URL has no query and never hit it. String surgery rather than a URL
+/// parser: the setter already pins the scheme, and the first `?` or `#`
+/// is where a path ends in any http(s) URL.
+fn sig_url_for(url: &str) -> String {
+    match url.find(['?', '#']) {
+        Some(i) => format!("{}.sig{}", &url[..i], &url[i..]),
+        None => format!("{url}.sig"),
+    }
 }
 
 /// Record the `serial` of a signature-verified manifest, advancing the
@@ -368,5 +383,34 @@ mod tests {
             latch_update_manifest(d, None);
             assert_eq!(d.queue_rev.load(Ordering::Relaxed), rev);
         });
+    }
+
+    /// `.sig` lands on the PATH, with the query and fragment kept where
+    /// they were - a token-bearing mirror URL must not have its token
+    /// mutated into `abc.sig` (Codex sweep 24 Aug, F-21).
+    #[test]
+    fn the_sig_url_keeps_the_query_intact() {
+        assert_eq!(
+            sig_url_for("https://mirror/latest.json?token=abc"),
+            "https://mirror/latest.json.sig?token=abc"
+        );
+        assert_eq!(
+            sig_url_for("https://mirror/latest.json#frag"),
+            "https://mirror/latest.json.sig#frag"
+        );
+        assert_eq!(
+            sig_url_for("https://mirror/latest.json?a=1#frag"),
+            "https://mirror/latest.json.sig?a=1#frag"
+        );
+        // The default URL's shape is unchanged.
+        assert_eq!(
+            sig_url_for(DEFAULT_UPDATE_URL),
+            format!("{DEFAULT_UPDATE_URL}.sig")
+        );
+        // Percent-encoded paths pass through untouched.
+        assert_eq!(
+            sig_url_for("https://m/p%20a/latest.json?t=x%3Fy"),
+            "https://m/p%20a/latest.json.sig?t=x%3Fy"
+        );
     }
 }

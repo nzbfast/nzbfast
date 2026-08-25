@@ -860,6 +860,12 @@ struct Inner {
     /// callback so a cancelled extractor can actually drop: its Drop
     /// aborts the buffers and the worker's next upgrade fails.
     self_weak: Weak<Extractor>,
+    /// A [`ChaseReadPause`] is in force: every chase buffer registered
+    /// while this is set is born paused, so the hold covers volumes that
+    /// arrive DURING the pause and not only the ones already registered
+    /// when it was taken. Cleared by the guard's `Drop`, which then
+    /// re-reads the registry rather than the snapshot it took.
+    chase_reads_paused: bool,
     extracted_bytes: u64,
     /// Reusable buffer for `map_span_into` - one heap allocation per
     /// ARTICLE under the routing lock otherwise. Taken (empty) during
@@ -1209,6 +1215,7 @@ impl Extractor {
                 verify_output_crc,
                 promote: None,
                 self_weak: Weak::new(),
+                chase_reads_paused: false,
                 extracted_bytes: 0,
                 map_scratch: Vec::new(),
                 slot_fallbacks: Vec::new(),

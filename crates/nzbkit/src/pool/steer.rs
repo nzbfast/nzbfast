@@ -297,6 +297,36 @@ impl Shared {
         }
     }
 
+    /// Average delivery rate of a server since the run started, B/s.
+    ///
+    /// This is a server's SHARE of the job, not its speed: a server given
+    /// four times the connections delivers roughly four times the bytes at
+    /// identical per-connection speed. Comparisons that mean "is this one
+    /// slower" want [`Self::rate_per_worker`].
+    ///
+    /// Hoisted here from `pool.rs` under the size gate, to sit with the
+    /// windowed twins below that every consumer actually reads.
+    pub(super) fn rate(&self, server: usize) -> f64 {
+        let el = self.start.elapsed().as_secs_f64().max(0.5);
+        self.bytes[server].load(Ordering::Relaxed) as f64 / el
+    }
+
+    /// [`Self::rate`] divided by the server's dialling workers: what
+    /// one of its connections is actually managing, which is the
+    /// comparable quantity across servers with different connection
+    /// counts.
+    ///
+    /// DIALLING and not alive since TODO 277: a parked worker delivers
+    /// nothing, so counting it reads the server as slower per
+    /// connection than it is.
+    ///
+    /// (This block's first paragraph is its ORIGINAL doc, recovered
+    /// from `pool.rs`, where a hoist had stranded it above
+    /// `session_ends` - one of the abutments in doc-gate's baseline.)
+    pub(super) fn rate_per_worker(&self, server: usize) -> f64 {
+        self.rate(server) / self.workers_dialling_on(server).unwrap_or(0).max(1) as f64
+    }
+
     /// Windowed delivered rate for a server, B/s, decayed to now.
     /// `None` until the server has delivered its first body this run -
     /// callers fall back to the whole-run average (or skip the gate),
@@ -316,8 +346,11 @@ impl Shared {
     /// windowed twin of [`Self::rate_per_worker`], and the comparable
     /// quantity across servers with different connection counts.
     pub(super) fn srv_rate_per_worker(&self, si: usize) -> Option<f64> {
-        let alive = self.alive.get(si)?.load(Ordering::Relaxed).max(1) as f64;
-        Some(self.srv_rate(si)? / alive)
+        // DIALLING, not alive, for the reason `rate_per_worker` gives:
+        // a parked worker delivers nothing, so it must not divide a
+        // delivered rate.
+        let live = self.workers_dialling_on(si)?.max(1) as f64;
+        Some(self.srv_rate(si)? / live)
     }
 
     /// The per-worker speed a steering or racing gate should judge by:
@@ -783,7 +816,11 @@ impl Shared {
         if !self.tail_taper {
             return base;
         }
-        let live = self.workers_live.load(Ordering::Relaxed).max(1);
+        // DIALLING, not live: the taper's whole arithmetic is about
+        // the depth each WORKING connection is holding, and a parked
+        // worker holds no pipeline at all. See
+        // `Shared::workers_dialling`.
+        let live = self.workers_dialling().max(1);
         let left = self.pending.load(Ordering::Acquire);
         let win = base.min(left / (2 * live)).max(tail_window_min().min(base));
         // Evidence for the leg, not a control input. Guarded on
@@ -890,6 +927,37 @@ mod tests {
                 "queued {queued} at depth {depth} should top up to {want}"
             );
         }
+    }
+
+    /// TODO 277: a fleet that spawns above its live target and parks
+    /// the surplus tapers on the workers actually holding a pipeline,
+    /// not on the slot count. Parked workers hold NO pipeline, so
+    /// counting them would halve the depth at which the taper starts
+    /// biting - a run dialling 360 with 360 more parked behind it would
+    /// begin tapering at 2,880 queued rather than 1,440, for no reason
+    /// any measurement knows about.
+    #[test]
+    fn the_tail_taper_counts_the_workers_that_hold_a_pipeline() {
+        let live = 360usize;
+        let base = 4usize;
+        let sh = tapered_shared(8_000);
+        // Twice the fleet spawned, half of it parked: the dialling
+        // count is the 360 the taper was measured on.
+        sh.workers_live.store(2 * live, Ordering::Relaxed);
+        sh.parked_total.store(live, Ordering::Relaxed);
+        assert_eq!(sh.workers_dialling(), live);
+        // The trigger sits where it does with a fleet of 360 spawned
+        // flat, and NOT where 720 sharers would put it.
+        sh.pending.store(2 * base * live, Ordering::Release);
+        assert_eq!(sh.tail_window(base), base, "tapered one article early");
+        sh.pending.store(2 * base * live - 1, Ordering::Release);
+        assert_eq!(sh.tail_window(base), base - 1);
+        // What the spawned count would have said at the same depth: a
+        // 720-way share is already down at the floor, three rungs
+        // below. So this test would not pass with the two confused for
+        // one another.
+        sh.parked_total.store(0, Ordering::Relaxed);
+        assert_eq!(sh.tail_window(base), 1);
     }
 
     /// Disarmed, the rule is the identity at every queue depth - a

@@ -608,3 +608,190 @@ fn count_after(log: &str, marker: &str, prefix: &str) -> Option<usize> {
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
+
+/// TODO 287's fixture: a GHOSTED volume beside a live chase. A
+/// compressed multi-volume RAR5 set in which volume 3 never arrives at
+/// all (every article refused forever) and one article of volume 5 is
+/// refused too, with enough parity to rebuild both.
+///
+/// The two damages together are the point. The ghost gives
+/// `try_mapped_repair` a `recreated` file, whose reconstructed spans
+/// feed through the NORMAL arrival path and can therefore attach a
+/// rebuilt volume to the very group being patched; the single lost
+/// article gives it a `chased` slot to patch in place. That pair
+/// declined outright until 24 Aug 2026.
+///
+/// The order is deliberate: the ghost sits AHEAD of the damaged volume,
+/// so the engine decodes volumes 1 and 2, parks waiting for a volume
+/// that will only ever arrive from parity, and cannot have consumed a
+/// byte of volume 5. That is exactly the shape §287's snapshot pause
+/// could not hold - the rebuilt volume registers behind a parked engine,
+/// which is free to walk the whole rest of the set the moment it lands.
+///
+/// Smaller than `damaged_compressed_chase` on both axes, because the
+/// parity has to carry a WHOLE volume rather than one article: at 800 kB
+/// per volume the ghost is about an eighth of the packed set, and 40%
+/// redundancy covers it with room for the lost article beside it. The
+/// member still clears the 4 MiB `should_stream_decode` bar, which is
+/// what makes the set chase at all.
+fn ghosted_volume_beside_a_chase(tag: &str) -> (Fixture, Vec<u8>, Vec<String>) {
+    let doc = half_entropy(12_000_000, 0x9e3779b97f4a7c15);
+    let vols = rars::rar50::Rar50VolumeWriter::new(
+        rars::rar50::WriterOptions::default().with_compression_level(1),
+    )
+    .compressed_entries(&[rars::rar50::CompressedEntry {
+        name: b"movie.bin",
+        data: &doc,
+        mtime: None,
+        attributes: 0,
+        host_os: 0,
+    }])
+    .max_payload_per_volume(800_000)
+    .finish()
+    .unwrap();
+    assert!(vols.len() >= 6, "want many volumes, got {}", vols.len());
+    let mut fx = Fixture::new(tag);
+    let names: Vec<String> = (1..=vols.len()).map(|i| format!("c.part{i}.rar")).collect();
+    for (name, vol) in names.iter().zip(&vols) {
+        fx.add_file(name, vol, 200_000);
+    }
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    assert!(fx.add_par2(40, &name_refs, 200_000), "par2 create failed");
+    (fx, doc, names)
+}
+
+/// TODO 287's open checkbox (24 Aug 2026): a volume rebuilt WHOLE from
+/// parity, fed into a live chase while that same chase is having another
+/// volume patched in place, one-passes.
+///
+/// `try_mapped_repair` used to decline `recreated > 0 &&
+/// !chased.is_empty()` outright, and its comment gave one reason: a
+/// rebuilt volume registers through the ordinary arrival path, so it
+/// joins the chase group INSIDE the repair's `pause_chase_reads` guard,
+/// and that guard held a SNAPSHOT of the volumes registered when it was
+/// taken. The new volume was born unpaused behind a parked engine.
+/// §287 latched the pause on the extractor instead, so a volume that
+/// registers during one is born paused and the guard's `Drop` resumes
+/// the registry as it stands then. The decline went with it.
+///
+/// The PAIR is what is new here. `e2e.rs`'s
+/// `compressed_set_wholly_missing_volume_joins_chase_one_pass` has fed a
+/// ghosted volume into a live chase since the parity-as-a-source path
+/// landed, and it passes because nothing in that set is ALSO being
+/// patched in place - so `chased` is empty and the decline never
+/// applied. Add one damaged article to a second volume and the same job
+/// took the disk ladder end to end.
+///
+/// The teeth are the same three the legs above use, for the same
+/// reasons: the chase must really have run, the repair must really have
+/// gone through the mapped route AND recreated a file, and the set must
+/// not have materialized or been extracted a second time. Two of those
+/// pass vacuously on their own, which is why all of them are here - a
+/// job that never chased prints no materialize line either.
+///
+/// BOTH CONTROLS WERE RUN, 24 Aug 2026, and the second is the one to
+/// read before trusting this leg for more than it says.
+///
+/// Put the four-line decline back and this leg FAILS at the one-pass
+/// assertion, on the full three-write route: `materializing volumes for
+/// repair`, a disk repair of 211 blocks across 2 files, and
+/// `re-extracting 12 repaired volume(s)`. That is the cost the
+/// relaxation removes, and it is what makes this leg about the decline.
+///
+/// Disable §287's `chase_reads_paused` latch in `try_attach_chase` and
+/// this leg still PASSES, 3 runs of 3. That is not a hole in the leg, it
+/// is the shape: a mid-pause registration is the only unpaused buffer in
+/// the set, because every volume ahead of it arrived during the download
+/// and the snapshot pause holds all of them. So a forward-only engine
+/// can walk the rebuilt volume and then blocks on the next one it wants,
+/// and the rebuilt volume's bytes are written once, in offset order, and
+/// never rewritten. The latch is still what makes the route defensible -
+/// it replaces that interleaving argument with a property - but this leg
+/// does not pin it, and the case that does is §287's own
+/// `holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up`
+/// over in `nzbkit`, whose watermark assertion says in bytes how much
+/// the engine got if the hold ever stops reaching.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ghosted_volume_rebuilds_into_a_live_chase_one_pass() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let (fx, doc, names) = ghosted_volume_beside_a_chase("chase-repair-ghost");
+    // Volume 3 whole, plus one article of volume 5 past its head. The
+    // head has to arrive or the volume never classifies and never joins
+    // the chase, which would leave `chased` empty and this leg testing
+    // the shape it already covered.
+    let mut missing: std::collections::HashSet<String> = fx
+        .articles
+        .keys()
+        .filter(|k| k.contains("c_part3_rar"))
+        .cloned()
+        .collect();
+    assert!(!missing.is_empty(), "fixture must have volume 3 articles");
+    let damaged = fx
+        .articles
+        .keys()
+        .find(|k| k.contains("c_part5_rar") && k.ends_with("-3@mock>"))
+        .expect("volume 5 has a third article")
+        .clone();
+    missing.insert(damaged);
+    let chaos = Chaos {
+        missing,
+        ..Default::default()
+    };
+    let srv = MockServer::start(fx.articles.clone(), chaos).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+    let (log, ok) = tokio::task::spawn_blocking(move || {
+        run_get_args(&cfg, &nzb, &out, &[], &["--mem-limit", "2G"])
+    })
+    .await
+    .unwrap();
+    assert!(ok, "job failed:\n{log}");
+    assert_eq!(
+        std::fs::read(fx.dir.join("out/movie.bin")).expect("extracted file"),
+        doc,
+        "extracted bytes differ"
+    );
+    // Teeth: both halves of the pair really happened, in the one call.
+    assert!(
+        log.contains("extracting in-stream"),
+        "the set never chased - the leg proves nothing:\n{log}"
+    );
+    assert!(
+        log.contains("file missing entirely"),
+        "volume 3 was not seen as a whole-file loss, so nothing was \
+         recreated and this is the ordinary damaged-chase leg:\n{log}"
+    );
+    assert!(
+        log.contains("repair complete")
+            && log.contains("(native, mapped")
+            && log.contains("recreated from parity"),
+        "the ghost was not rebuilt through the mapped route:\n{log}"
+    );
+    // The finding: none of the three-write route's footprints. A
+    // decline here is what the old `recreated > 0 && !chased.is_empty()`
+    // gate produced on every run of this fixture.
+    assert!(
+        !log.contains("materializing volumes for repair"),
+        "the set fell off one-pass:\n{log}"
+    );
+    assert!(
+        !log.contains("re-extracting") && !log.contains("native unpack complete"),
+        "the archive was extracted a second time from disk:\n{log}"
+    );
+    assert!(
+        !log.contains("repair rewrote chased bytes") && !log.contains("mapped repair declined"),
+        "the engine read bytes the patch was still landing - the pause \
+         did not reach the volume that registered under it:\n{log}"
+    );
+    for n in &names {
+        assert!(
+            !fx.dir.join("out").join(n).exists(),
+            "volume {n} became a file:\n{log}"
+        );
+    }
+    dump_route(&log);
+}

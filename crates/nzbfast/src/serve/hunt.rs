@@ -55,6 +55,18 @@
 //! invitation to go and build the settings keys, and §282 section C is
 //! already the part of this backlog that got BUILT TWICE by two lanes
 //! in one afternoon.
+//!
+//! ## Two entry points, and only one of them is the daemon's initiative
+//!
+//! §282 item 20 added the second one. [`Daemon::hunt_request`] is the
+//! AUTOMATIC road: a job has failed for good, nothing was held, and the
+//! daemon decides on its own to go looking. [`Daemon::hunt_offer`] and
+//! [`Daemon::hunt_pick`] are the CLICKED road: a person is looking at a
+//! queue row that `altcand::terminal_reason` says cannot finish, and has
+//! asked for a search. The pick list is [`Daemon::hunt_candidates`] with
+//! the enqueue withheld, so both roads rank, filter and admit by exactly
+//! the same rules; [`Trigger`] carries the difference, which is two
+//! refusals wide and no wider.
 
 use super::giveup::target_keys;
 use super::*;
@@ -106,6 +118,41 @@ impl Default for HuntPolicy {
     }
 }
 
+/// What asked for a hunt: the daemon's own conclusion, or a person.
+///
+/// §282 item 20 gave this module a second entry point, and it is NOT the
+/// same act as the first. `Auto` is the daemon spending the user's bytes
+/// on its own initiative after a job has died. `Clicked` is a person
+/// looking at a doomed queue row and asking for a search.
+///
+/// **It changes exactly two of the refusals below, and it is written as
+/// a parameter rather than a second walk so that everything it does NOT
+/// change stays impossible to diverge.** The *arr rule, the age gate,
+/// the identity test, the copy cap, the ranking, item 6's admission test
+/// and the same-release filter are the same on both roads.
+///
+/// The two it changes, and why:
+///
+/// 1. **`alt_auto_search`** ([`NoHunt::Disabled`]) is the consent for
+///    the DAEMON to search. A click is its own consent, given at the
+///    moment and about this one release, so requiring the setting as
+///    well would make the button dead on every default install - which
+///    is the gap item 20 exists to close. §282 item 12 calls the click
+///    "the default posture ... safe on any account type", and it is safe
+///    for the same reason: nothing happens without it.
+/// 2. **The metered guard** ([`NoHunt::MeteredNoBudget`]) refuses an
+///    "unlimited" ceiling on an install with a block account, because
+///    nobody agreed to spend paid bytes. On a click somebody just did.
+///    A ceiling the user actually SET still applies on both roads - that
+///    is a number they chose, not a stand-in for consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Trigger {
+    /// `park` concluded the job was dead and nothing was held.
+    Auto,
+    /// A person pressed the button on the queue row (§282 item 20).
+    Clicked,
+}
+
 /// The work queue `park` writes into and `hunt_tick` drains.
 ///
 /// The three ceilings are NOT here: they are §282 item 13's settings and
@@ -119,7 +166,42 @@ pub(super) struct HuntState {
     /// so nothing here happens on park's thread.
     pub q: Mutex<std::collections::VecDeque<HuntRequest>>,
     pub wake: tokio::sync::Notify,
+    /// §282 item 20: the last pick list shown per doomed row, so the
+    /// PICK does not have to search again.
+    ///
+    /// A cache and not a ledger. Re-running the search on the pick would
+    /// spend a second hit of the user's daily indexer allowance to
+    /// re-derive a list they are looking at, and would let the row they
+    /// clicked be a different row by the time it is fetched. Losing it -
+    /// a restart, an eviction, the age below - costs one honest "search
+    /// again", which is why nothing durable is written for it.
+    pub offers: Mutex<std::collections::HashMap<String, HuntOffers>>,
 }
+
+/// One row's cached pick list.
+#[derive(Debug)]
+pub(super) struct HuntOffers {
+    /// When it was taken, for [`OFFER_TTL_SECS`].
+    at: i64,
+    cands: Vec<Cand>,
+}
+
+/// How long a cached pick list may be picked from. Past it the search
+/// is re-run, because an indexer's answer is a statement about right
+/// now: a copy on the list may have been taken down since, and the
+/// user's own budgets and settings may have moved.
+const OFFER_TTL_SECS: i64 = 30 * 60;
+
+/// How many doomed rows may hold a cached pick list at once. Small on
+/// purpose: this exists for the row a person is looking at, and the
+/// oldest entry is dropped to make room.
+const OFFER_ROWS_CACHED: usize = 8;
+
+/// How many candidates the pick list shows. More than
+/// [`MAX_CANDIDATE_FETCHES`] because a row on this list costs nothing
+/// until it is picked, where the automatic road fetches every candidate
+/// it reaches.
+const MAX_OFFER_ROWS: usize = 12;
 
 /// Why a hunt did not happen. Every arm is a sentence in the log, and
 /// most of them are a test - these are the refusals the feature is made
@@ -321,6 +403,7 @@ pub(super) fn hunt_gates(
     req: &HuntRequest,
     policy: HuntPolicy,
     now: i64,
+    trigger: Trigger,
 ) -> Result<(Parsed, Vec<String>), NoHunt> {
     // ITEM 9, FIRST AND UNCONDITIONALLY. Nothing below may run for a job
     // an *arr sent us, whatever the settings say, so this test is ahead
@@ -328,10 +411,43 @@ pub(super) fn hunt_gates(
     // later refactor that reorders the rest cannot reach past it, and
     // `an_arr_origin_job_is_never_hunted_for` pins that it is still
     // first.
+    //
+    // AND IT HOLDS ON THE CLICKED ROAD TOO (§282 item 20a, which the
+    // section leaves open and which is decided HERE). The argument for
+    // letting a person through is real: they can see what their *arr is
+    // doing and we cannot, and `altcand::alt_switch` already lets them
+    // promote a held spare on an *arr row today with no gate at all. It
+    // loses to two facts about what the button would actually do.
+    //
+    // First, a spare is a row the *arr ITSELF pushed - the only *arr
+    // rows §282 can promote, because item 5's spares are grabbed from
+    // OUR search and an *arr job never has one. A hunt is different in
+    // kind: it starts a whole download of a release the *arr never
+    // chose and has never heard of, under our own `hunt:<target>`
+    // origin and a fresh nzo_id. The *arr blocklists the release it did
+    // grab and searches again on its own poll cycle, so the user ends
+    // up paying for the episode twice, and the copy we picked is not
+    // the one their library is waiting on. That is item 9's harm
+    // exactly, and a click does not make it stop being the harm - it
+    // only makes it the user's.
+    //
+    // Second, and this is what settles it rather than merely arguing
+    // it: refusing costs NOTHING THAT SHIPS. The button does not exist
+    // yet, so the gate takes no capability away from anybody, and
+    // loosening it later is this one `if` plus its copy. Turning it on
+    // and finding out it double-grabs is a behaviour people have
+    // already built habits around. The conservative direction is the
+    // reversible one.
+    //
+    // The row says so rather than going quiet: the drawer draws no
+    // search button on an *arr-origin row and names the reason, so the
+    // user is told the *arr owns the retry instead of pressing a button
+    // that answers with a refusal.
     if is_arr_origin(&req.origin) {
         return Err(NoHunt::ArrOwned);
     }
-    if !policy.enabled {
+    // The setting is consent for the DAEMON to search. See [`Trigger`].
+    if trigger == Trigger::Auto && !policy.enabled {
         return Err(NoHunt::Disabled);
     }
     if !fail_kind(&req.fail_message).post_unavailable() {
@@ -367,7 +483,24 @@ fn same_release(candidate: &str, want_dupe: &str, want_keys: &[String]) -> bool 
     !ck.is_empty() && ck.iter().any(|k| want_keys.contains(k))
 }
 
+/// Best first, the way the M14f promote path ranks its held spares, so
+/// "best" means one thing in both places. Newest post breaks a tie: of
+/// two equal encodes the more recent one has had less of its retention
+/// window spent.
+///
+/// One function because §282 item 20's pick list must be ordered exactly
+/// as the automatic road's attempt order is - a user reading a list whose
+/// top row is not the one the daemon would have taken is being shown a
+/// different feature.
+fn sort_best_first(cands: &mut [Cand]) {
+    cands.sort_by(|a, b| b.rank.cmp(&a.rank).then_with(|| b.posted.cmp(&a.posted)));
+}
+
 /// One candidate replacement, from whichever source offered it.
+///
+/// `Clone` and `Debug` because §282 item 20 caches the pick list between
+/// the search and the click - see [`HuntState::offers`].
+#[derive(Debug, Clone)]
 struct Cand {
     stem: String,
     rank: u32,
@@ -376,6 +509,7 @@ struct Cand {
     src: CandSrc,
 }
 
+#[derive(Debug, Clone)]
 enum CandSrc {
     /// Our own index can synthesise the NZB, so this costs no indexer
     /// budget at all and is tried first.
@@ -386,6 +520,49 @@ enum CandSrc {
         indexer: String,
         origin: SourceOrigin,
     },
+}
+
+impl Cand {
+    /// Which indexer offered this, for the pick list. Empty for our own
+    /// index, which is not an account name and needs no label.
+    fn source(&self) -> &str {
+        match &self.src {
+            #[cfg(feature = "indexer")]
+            CandSrc::Local(_) => "",
+            CandSrc::External { indexer, .. } => indexer,
+        }
+    }
+
+    /// The handle the dashboard hands back to pick this candidate.
+    ///
+    /// A DIGEST of what identifies the candidate rather than its index
+    /// in the list, which is §274's rule for the same reason: a list
+    /// re-taken between the render and the click renumbers, and an index
+    /// then picks a different release than the one under the cursor. A
+    /// name alone will not do either - two indexers offer the same stem
+    /// and they are different fetches - so the source is hashed with it.
+    ///
+    /// Not a security boundary and not persisted: both ends of it are
+    /// one process, and a handle that does not resolve is answered with
+    /// "search again" rather than with a guess.
+    fn key(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.stem.hash(&mut h);
+        match &self.src {
+            #[cfg(feature = "indexer")]
+            CandSrc::Local(id) => {
+                0u8.hash(&mut h);
+                id.hash(&mut h);
+            }
+            CandSrc::External { url, indexer, .. } => {
+                1u8.hash(&mut h);
+                indexer.hash(&mut h);
+                url.hash(&mut h);
+            }
+        }
+        format!("{:016x}", h.finish())
+    }
 }
 
 impl Daemon {
@@ -485,7 +662,7 @@ impl Daemon {
     fn hunt_one(&self, req: &HuntRequest) -> Result<(), NoHunt> {
         let policy = self.hunt_policy();
         let now = unix_now();
-        let (p, keys) = hunt_gates(req, policy, now)?;
+        let (p, keys) = hunt_gates(req, policy, now, Trigger::Auto)?;
         let threshold = self.arr_giveup_threshold.load(Ordering::Relaxed).min(1000) as u32;
 
         // ITEM 11, first half: the §96.3 breaker. A target it has already
@@ -524,14 +701,10 @@ impl Daemon {
         // own curiosity", and a copy the user did not click is exactly
         // that. On an install where any enabled server answers no, an
         // "unlimited" ceiling is refused outright rather than honoured.
-        let budget = self.hunt_budget(&keys, policy)?;
+        let budget = self.hunt_budget(&keys, policy, Trigger::Auto)?;
 
         let mut cands = self.hunt_candidates(req, &p, &keys);
-        // Best first, the way the M14f promote path ranks its held
-        // spares, so "best" means one thing in both places. Newest post
-        // breaks a tie: of two equal encodes the more recent one has had
-        // less of its retention window spent.
-        cands.sort_by(|a, b| b.rank.cmp(&a.rank).then_with(|| b.posted.cmp(&a.posted)));
+        sort_best_first(&mut cands);
 
         // Refused BEFORE the fetch ceiling below, not inside the loop:
         // an over-budget candidate that ate one of the four attempts
@@ -594,9 +767,21 @@ impl Daemon {
 
     /// How many further bytes this target may cost, or `None` for no
     /// ceiling. `Err` when a ceiling is REQUIRED and none is set.
-    fn hunt_budget(&self, keys: &[String], policy: HuntPolicy) -> Result<Option<u64>, NoHunt> {
+    fn hunt_budget(
+        &self,
+        keys: &[String],
+        policy: HuntPolicy,
+        trigger: Trigger,
+    ) -> Result<Option<u64>, NoHunt> {
         if policy.max_extra_bytes == 0 {
-            return if self.hunt_metered() {
+            // "Unlimited" is refused on a metered install because nobody
+            // agreed to spend paid bytes on a copy they did not pick. On
+            // a click somebody just did, about this one release, with
+            // the row in front of them - so the guard is what it is
+            // standing in for, and it stands down. A ceiling the user
+            // actually SET is a number they chose and still applies on
+            // both roads: it is the arm below, which this never reaches.
+            return if trigger == Trigger::Auto && self.hunt_metered() {
                 Err(NoHunt::MeteredNoBudget)
             } else {
                 Ok(None)
@@ -616,6 +801,15 @@ impl Daemon {
     /// metered account: it honours both the explicit `block_account`
     /// flag and the older inference from a configured prepaid block,
     /// which plenty of installs still rely on.
+    /// A config that will not LOAD answers "metered", not "free". This
+    /// is the one place the daemon asks whether provider bytes cost
+    /// money before spending them on nobody's click, and it used to
+    /// `unwrap_or(false)`: a malformed or momentarily unreadable file
+    /// read as "no server is metered", which is unlimited automatic
+    /// spend on exactly the install the ceiling exists for (Codex sweep
+    /// 24 Aug, F-10). Failing the other way costs one skipped automatic
+    /// hunt on an install with no ceiling set, and the refusal names
+    /// itself in the giveup clause.
     fn hunt_metered(&self) -> bool {
         nzbkit::config::Config::load(&self.cfg_path)
             .map(|c| {
@@ -623,7 +817,7 @@ impl Daemon {
                     .iter()
                     .any(|s| s.enabled && !s.may_spend_on_measurement())
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// Bytes already spent hunting these targets, across the queue and
@@ -931,28 +1125,112 @@ impl Daemon {
         };
         match out {
             Ok(e) => {
-                info!(
-                    target: "queue",
-                    "{}: {} could not complete, so {} was queued in its place ({})",
-                    e.nzo_id, req.name, cand.stem, origin
-                );
                 // §282 item 14, BOTH halves: the new row records what
                 // it replaced and why, the abandoned row records what
                 // replaced it, and `altcand::switch_lines` renders them
                 // on every surface. Before the emit, so a subscriber
                 // that reads the queue on the event finds the clause
-                // already there.
-                self.stamp_hunt_switch(req, &e.nzo_id, &cand.stem);
-                // The event ring is what an open dashboard toasts off,
-                // so the switch is visible the moment it happens rather
-                // than only in the log.
+                // already there - and FIRST, because its answer is the
+                // placement truth everything else here hangs on.
+                // `enqueue` answers Ok for an add a pre-queue verdict
+                // filed straight to history as Failed, and this arm
+                // used to announce that as a replacement anyway: log,
+                // `job.replaced`, and a `true` that stopped the
+                // candidate loop with nothing running (Codex sweep
+                // 24 Aug, F-08). A rejection is not a replacement:
+                // say so, skip the event, and let the loop try the
+                // next candidate.
+                if !self.stamp_hunt_switch(req, &e.nzo_id, &cand.stem) {
+                    info!(
+                        target: "queue",
+                        "{}: {} was fetched to replace {} but a pre-queue verdict \
+                         filed it straight to history - trying the next candidate",
+                        e.nzo_id, cand.stem, req.name
+                    );
+                    return false;
+                }
+                info!(
+                    target: "queue",
+                    "{}: {} could not complete, so {} was queued in its place ({})",
+                    e.nzo_id, req.name, cand.stem, origin
+                );
+                // The event ring, which is what a WEBHOOK subscriber
+                // hears - item 18's whole point being the user who is
+                // not looking at the dashboard.
+                //
+                // IT IS ALSO TOASTED, since 24 Aug 2026, and this
+                // comment has now been wrong in BOTH directions: it
+                // claimed a toast that did not exist from the day the
+                // file landed, was corrected to "not toasted" when item
+                // 18 read the page hours later, and is corrected again
+                // here by the change that built the arm. Check the page
+                // before trusting a third version of this sentence.
+                // `handleLifeEvents` in web/dashboard.html dispatches on
+                // `e.kind` through a chain with NO fallthrough arm, and
+                // carried neither kind - so an open tab silently dropped
+                // both while every webhook subscriber was told. It now
+                // has one arm for the pair, and that arm reads `by` to
+                // stay quiet on the door the user clicked themselves.
+                // What a looking user has always seen is item 14's
+                // clause, rendered off the job row by
+                // `altcand::switch_lines` - a state rather than a
+                // moment, so it is there whenever they look and absent
+                // at the instant it happens. The toast is that instant;
+                // the two are complements and neither replaces the
+                // other.
+                //
+                // ONE PAYLOAD SHAPE, TWO KINDS - §282 item 18's closing
+                // decision, taken 24 Aug 2026. The keys here are the
+                // keys `job.switched` carries (`promote_held_alternative`
+                // and `altcand::alt_switch`): what replaced the job
+                // (`nzo_id`, `name`, `category`), what was abandoned
+                // (`replaces`, `replaces_name`), why (`reason`), and
+                // which door (`by`). They were `failed_nzo_id` /
+                // `failed_name` for the not quite four hours between
+                // this file landing (12:42) and item 18 closing, and
+                // carried neither
+                // `category` nor `reason` - a third vocabulary for the
+                // one thing a user experiences as "the release I queued
+                // is gone and something else is downloading", which a
+                // subscriber then had to special-case field by field.
+                //
+                // The KIND stays separate, and that is the substance of
+                // the decision rather than an omission. A hunt is not a
+                // switch: it spends NEW bytes and an indexer grab on a
+                // release the user never queued, where both
+                // `job.switched` doors promote a copy already held and
+                // already paid for. `hooks::wants_lifecycle` matches an
+                // exact kind or a `prefix.*` and NOTHING in the body, so
+                // the kind is the only axis a webhook target's `events`
+                // field can express - fold this into `job.switched` and
+                // "tell me when you spend money hunting" stops being
+                // sayable at all. A subscriber that does not care takes
+                // `job.*` and reads one shape across both.
+                //
+                // `target` is this door's only, the way `rank` is the
+                // promote door's only, and is omitted rather than nulled
+                // on the other two for the reason written up there.
+                //
+                // THE FREE RENAME WINDOW WAS OPEN AND WAS NOT USED, on
+                // purpose. `job.replaced` had never been in a released
+                // binary when this landed (v1.2.2 is 23 Aug; the hunt is
+                // e61b3d232, 24 Aug 12:42), so the kind could have been
+                // renamed to item 18's sketched `job.hunt_*` at no
+                // compatibility cost, and that will never be true again.
+                // Rejected because a rename buys a subscriber nothing
+                // that aligning the keys did not already buy, and the
+                // one thing it would cost is real: the manual sentence
+                // and 15 translations name kinds in prose.
                 self.life_emit(
                     "job.replaced",
                     json!({
                         "nzo_id": e.nzo_id,
-                        "failed_nzo_id": req.nzo_id,
-                        "failed_name": req.name,
                         "name": cand.stem,
+                        "category": req.category,
+                        "replaces": req.nzo_id,
+                        "replaces_name": req.name,
+                        "reason": req.fail_message,
+                        "by": "hunt",
                         "target": keys[0],
                     }),
                 );
@@ -1003,13 +1281,24 @@ impl Daemon {
     /// A record no longer in history is simply not stamped, which is the
     /// honest answer: it was deleted or retried, and neither wants a
     /// "replaced by" clause.
-    fn stamp_hunt_switch(&self, req: &HuntRequest, new_id: &str, new_name: &str) {
+    ///
+    /// Returns whether the replacement was FOUND ON THE QUEUE and
+    /// stamped. That answer is `hunt_enqueue`'s placement oracle: false
+    /// means the add never became a live row (the pre-queue REJECT
+    /// shape above), so no replacement happened and the caller must not
+    /// announce one (Codex sweep 24 Aug, F-08).
+    fn stamp_hunt_switch(&self, req: &HuntRequest, new_id: &str, new_name: &str) -> bool {
         // The CLAUSE carries `why_from_fail`'s stripped form, the same
         // call `promote_held_alternative` makes: the raw `fail_message`
         // is what an operator pastes into a bug report, and its build
         // stamp in the middle of "replaced X because Y" is noise about
         // the wrong build. The `job.replaced` event keeps the raw form,
-        // as the promote path's `reason` does.
+        // as the promote path's `reason` does - which this comment
+        // asserted from the day the file landed and which was not true
+        // until item 18 closed on 24 Aug 2026, the event having carried
+        // no `reason` key at all. The two forms of one sentence are the
+        // point of the split, so a `reason` that arrives pre-stripped is
+        // the regression to watch for here.
         let why = crate::serve::altcand::why_from_fail(&req.fail_message);
         let stamped = {
             let q = self.queue.lock_ok();
@@ -1025,7 +1314,7 @@ impl Daemon {
             }
         };
         if !stamped {
-            return;
+            return false;
         }
         self.save_queue();
         // ...and the abandoned row learns what replaced it. The lookup
@@ -1045,6 +1334,424 @@ impl Daemon {
         // `history_upsert_if_present` takes both itself.
         if let Some(failed) = failed {
             let _ = self.history_upsert_if_present(&failed);
+        }
+        true
+    }
+}
+
+// §282 item 20: the CLICKED road. A person is looking at a queue row
+// that `altcand::terminal_reason` says cannot finish, and has asked for
+// a replacement. Item 12 built the notice, the row badge, the switch
+// endpoint and the drawer and deliberately left the search half out,
+// saying so in its own note; section C then built the AUTOMATIC road
+// only. Both halves are correct on their own and nobody owned the seam,
+// so a user with nothing held got a sentence naming a setting and no way
+// to ask.
+//
+// NOTHING BELOW SEARCHES A SECOND WAY. The pick list is
+// `hunt_candidates` with the enqueue withheld: the same identity filter,
+// the same ranking, the same dead-stem exclusion and the same cost
+// ceilings, so a candidate a person can pick is exactly one the
+// automatic road would have tried. The two refusals that differ are on
+// [`Trigger`] and nowhere else.
+impl Daemon {
+    /// The doomed row, snapshotted for the gates - from the queue, or
+    /// (§284) from history once it has actually failed.
+    ///
+    /// Three refusals live here rather than in [`hunt_gates`] because
+    /// they are statements about the ROW rather than about hunting, and
+    /// each of them is a state the dashboard cannot reach by drawing
+    /// what it was told - reaching one means the record moved under the
+    /// tab. Their sentences are `alt_switch`'s own, word for word, so
+    /// the two buttons on one drawer never explain the same refusal two
+    /// ways.
+    ///
+    /// **THE `fail_message` IS THE HINGE, and the two roads reach it
+    /// differently for one reason: on the queue road nothing has failed
+    /// yet, and on the parked road everything has.**
+    ///
+    /// Queued, the snapshot's `fail_message` is the sentence the
+    /// abandoned row WILL carry if the user picks something: the
+    /// verdict's failure lead, then its evidence, which is exactly what
+    /// `alt_switch` writes. That is not decoration - `fail_kind` reads
+    /// it by prefix, and it is what lets the age gate and the
+    /// local-fault test below judge the clicked road on the same
+    /// evidence as the automatic one instead of on the empty string a
+    /// still-queued job carries.
+    ///
+    /// Parked, no synthesis is needed or wanted: the job failed, so it
+    /// carries the real sentence, and that is the same string
+    /// [`Daemon::hunt_request`] hands the automatic road off a job that
+    /// has just died. So §284's road is the AUTOMATIC road's evidence
+    /// reached by a click, which is why every gate below judges it
+    /// correctly with no argument threaded through - and why it reaches
+    /// the shape §284 item 2 is about, a job that died DURING the run
+    /// with no health probe on it for `terminal_reason` to read.
+    fn hunt_click_request(&self, nzo_id: &str) -> std::result::Result<HuntRequest, String> {
+        let job = self
+            .queue
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == nzo_id)
+            .cloned();
+        let Some(job) = job else {
+            // §284. Resolved only once the queue has answered, so a row
+            // that is in both stores for an instant is judged as the
+            // queue row it is about to stop being - the same precedence
+            // `altcand::alt_switch` takes, and it has to be the same or
+            // the search and the switch would run different gates.
+            return self.hunt_parked_request(nzo_id);
+        };
+        let g = job.lock_ok();
+        if matches!(g.state, JobState::Downloading | JobState::Finishing) {
+            return Err(
+                "this download has already started - pause it first, or let it finish".into(),
+            );
+        }
+        let Some((_, why, lead)) = crate::serve::altcand::terminal_reason(&g) else {
+            return Err("nothing has concluded that this download cannot finish".into());
+        };
+        Ok(HuntRequest {
+            nzo_id: g.nzo_id.clone(),
+            name: g.name.clone(),
+            origin: g.origin.clone(),
+            fail_message: format!("{lead}: {why}"),
+            nzb_path: g.nzb_path.clone(),
+            category: g.category.clone(),
+        })
+    }
+
+    /// §284: the same snapshot, off the history row of a job that has
+    /// already failed.
+    ///
+    /// One gate, `altcand::parked_replaceable`, which is the SAME
+    /// predicate the history row's own offer is drawn from - so a button
+    /// that is on the page is a button this door will answer, and the
+    /// bound on how far back an offer reaches is decided in exactly one
+    /// place. Its refusal sentence is `alt_switch`'s parked one, word
+    /// for word, for the reason the queue road's three are.
+    fn hunt_parked_request(&self, nzo_id: &str) -> std::result::Result<HuntRequest, String> {
+        let Some(job) = self.history_job(nzo_id) else {
+            return Err("that download is no longer in the queue".into());
+        };
+        let g = job.lock_ok();
+        if !crate::serve::altcand::parked_replaceable(&g) {
+            return Err("another copy is no longer offered for that download".into());
+        }
+        Ok(HuntRequest {
+            nzo_id: g.nzo_id.clone(),
+            name: g.name.clone(),
+            origin: g.origin.clone(),
+            // The row's OWN verdict, not a synthesis: see the note on
+            // the queue road above.
+            fail_message: g.fail_message.clone(),
+            nzb_path: g.nzb_path.clone(),
+            category: g.category.clone(),
+        })
+    }
+
+    /// Distinct releases of these targets that have already failed.
+    ///
+    /// The read-only half of what `hunt_one` gets back from
+    /// `record_failure`, and it stays read-only on BOTH clicked roads -
+    /// for two different reasons, which is worth setting out because
+    /// §284 made the original one only half true.
+    ///
+    /// **QUEUED (§282 item 20): nothing has failed.** The row is still
+    /// on the queue, its verdict is a pre-flight one, and recording a
+    /// failure for a release that has not had one would feed the §96.3
+    /// breaker evidence it did not earn - and that breaker is what
+    /// decides whether an *arr is told to give a target up.
+    ///
+    /// **PARKED (§284): it has failed, and recording it here would be
+    /// the SECOND time for the rows that count.** `park_gen` already
+    /// ran `giveup_note_outcome` on that job, so a watchlist-origin
+    /// release is in the store; a second record of one dead release
+    /// would spend two of the user's `alt_max_copies` on it. (*arr rows
+    /// never reach here at all - `hunt_gates` refuses them first, item
+    /// 9.)
+    ///
+    /// **AND THE COUNT IS ZERO FOR MOST PARKED ROWS, which is not an
+    /// oversight.** `giveup_note_outcome` returns early for anything
+    /// that is neither *arr nor watchlist, so a job the user added by
+    /// hand records nothing when it dies - `hunt_one` says so at its own
+    /// `record_failure` and records there for exactly that reason. So on
+    /// the parked road `alt_max_copies` bounds only what the breaker
+    /// already knows about, and a hand-added release the user keeps
+    /// clicking through is bounded by the clicking rather than by the
+    /// number. That is the right way round: this ceiling exists to stop
+    /// the DAEMON spending copies on its own initiative, and §282 item
+    /// 12 calls the click "the default posture ... safe on any account
+    /// type" precisely because a person is deciding each time. Making
+    /// the cap bite here would mean recording, which is the double count
+    /// above. The byte ceiling is unaffected and still applies on both
+    /// roads: `hunt_spent` counts the `hunt:<target>` origins themselves
+    /// rather than the breaker.
+    fn hunt_copies_spent(&self, keys: &[String]) -> u32 {
+        let st = self.giveup.lock_ok();
+        keys.iter()
+            .filter_map(|k| st.targets.get(k))
+            .map(|t| t.stems.len() as u32)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The gates and the ceilings both clicked doors run, in one place so
+    /// the SEARCH and the PICK cannot answer differently. Returns the
+    /// target keys and the byte budget.
+    fn hunt_click_gates(
+        &self,
+        req: &HuntRequest,
+    ) -> std::result::Result<(Parsed, Vec<String>, Option<u64>), String> {
+        let policy = self.hunt_policy();
+        let (p, keys) =
+            hunt_gates(req, policy, unix_now(), Trigger::Clicked).map_err(|e| e.why())?;
+        // Item 11's copy cap. The setting is "how many copies of one
+        // release this may spend in total, the first attempt included",
+        // so a user who set 2 and has watched 2 die is told that rather
+        // than handed a third - and the sentence names the ceiling, so
+        // the remedy is one setting away.
+        let copies = self.hunt_copies_spent(&keys);
+        if copies >= policy.max_copies {
+            return Err(NoHunt::CopyCap(copies).why());
+        }
+        let budget = self
+            .hunt_budget(&keys, policy, Trigger::Clicked)
+            .map_err(|e| e.why())?;
+        Ok((p, keys, budget))
+    }
+
+    /// §282 item 20: what a person may pick, ranked.
+    ///
+    /// Costs one search across the enabled indexers and NO grab: an
+    /// indexer's daily grab budget is spent by [`Self::hunt_pick`], on
+    /// the one copy the user actually chose. Nothing is enqueued here
+    /// and nothing is downloaded.
+    pub(in crate::serve) fn hunt_offer(&self, nzo_id: &str) -> std::result::Result<Value, String> {
+        let req = self.hunt_click_request(nzo_id)?;
+        let (p, keys, budget) = self.hunt_click_gates(&req)?;
+        let mut cands = self.hunt_candidates(&req, &p, &keys);
+        sort_best_first(&mut cands);
+        // Refused before the list is cut, exactly as the automatic road
+        // refuses before its fetch ceiling: an over-budget candidate
+        // holding a slot would starve the affordable ones behind it. A
+        // size of 0 is UNKNOWN and not free - see [`affordable`].
+        let before = cands.len();
+        cands.retain(|c| affordable(c.size, budget));
+        // Said as the ceiling rather than as "nothing found", because
+        // they are different facts with different remedies: one is a
+        // setting, the other is the world.
+        if cands.is_empty() && before > 0 {
+            return Err(NoHunt::ByteCap.why());
+        }
+        cands.truncate(MAX_OFFER_ROWS);
+        let rows: Vec<Value> = cands
+            .iter()
+            .map(|c| {
+                json!({
+                    "key": c.key(),
+                    "name": c.stem,
+                    "size": c.size,
+                    "posted": c.posted,
+                    "source": c.source(),
+                })
+            })
+            .collect();
+        self.hunt_remember(nzo_id, cands);
+        Ok(json!({"candidates": rows}))
+    }
+
+    /// Keep this row's pick list for the click that follows it.
+    fn hunt_remember(&self, nzo_id: &str, cands: Vec<Cand>) {
+        let now = unix_now();
+        let mut m = self.hunt.offers.lock_ok();
+        m.retain(|_, o| now - o.at < OFFER_TTL_SECS);
+        while m.len() >= OFFER_ROWS_CACHED {
+            // Oldest out. `min_by_key` over at most a handful of
+            // entries; a real LRU would be state to keep correct for
+            // nothing.
+            let Some(oldest) = m.iter().min_by_key(|(_, o)| o.at).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            m.remove(&oldest);
+        }
+        m.insert(nzo_id.to_string(), HuntOffers { at: now, cands });
+    }
+
+    /// The candidate `key` names on this row's cached list, if it is
+    /// still there and still fresh.
+    fn hunt_remembered(&self, nzo_id: &str, key: &str) -> Option<Cand> {
+        let now = unix_now();
+        let m = self.hunt.offers.lock_ok();
+        let o = m.get(nzo_id).filter(|o| now - o.at < OFFER_TTL_SECS)?;
+        o.cands.iter().find(|c| c.key() == key).cloned()
+    }
+
+    /// §282 item 20: the user picked one.
+    ///
+    /// **Through the EXISTING switch path, and that is the whole design.**
+    /// The candidate is fetched, held to item 6's admission test, then
+    /// parked as a HELD SPARE of the doomed row - and
+    /// [`Daemon::alt_switch`] promotes it. So the abandoned job is failed
+    /// with the verdict's own sentence and the failure LEAD that tells an
+    /// *arr what happened, item 14's "what replaced what" clause is
+    /// written on both rows by the code that already writes it, and
+    /// `job.switched` is emitted with `by: "user"` - none of which is
+    /// re-spelled here. A second copy of that sequence is how the two
+    /// halves of §282 would drift into two accounts of one event.
+    ///
+    /// The gates are re-run rather than trusted from the search: the
+    /// list may be half an hour old, and the row, the settings and the
+    /// budget can all have moved since it was drawn.
+    pub(in crate::serve) fn hunt_pick(
+        &self,
+        nzo_id: &str,
+        key: &str,
+    ) -> std::result::Result<String, String> {
+        let req = self.hunt_click_request(nzo_id)?;
+        let (_, keys, budget) = self.hunt_click_gates(&req)?;
+        let cand = self
+            .hunt_remembered(nzo_id, key)
+            .ok_or("that list of copies is out of date - search again")?;
+        if !affordable(cand.size, budget) {
+            return Err(NoHunt::ByteCap.why());
+        }
+        let Some((bytes, headers)) = self.hunt_fetch(&cand) else {
+            return Err(
+                "that copy's .nzb could not be fetched from the indexer that \
+                        offered it - the log says why"
+                    .into(),
+            );
+        };
+        // ITEM 6's admission test, `spare`'s rather than a second copy of
+        // it, and on the ADMISSION side of its argument (`unknown =
+        // false`): a copy that is the same post fails identically, and a
+        // pair that cannot be compared is a whole download started on a
+        // guess. Same call, same answer, as the automatic road.
+        let want = std::fs::read(&req.nzb_path)
+            .ok()
+            .and_then(|b| nzbkit::nzb::Nzb::parse(&b).ok())
+            .map(|n| spare::post_ids(&n));
+        let got = nzbkit::nzb::Nzb::parse(&bytes).ok();
+        let admitted = match (want.as_ref(), got.as_ref()) {
+            (Some(w), Some(g)) => spare::admits(w, &spare::post_ids(g), false),
+            _ => false,
+        };
+        if !admitted {
+            return Err(
+                "that copy is the same post as the download that cannot finish (or \
+                        one of the two .nzb files could not be read), so it would fail the \
+                        same way"
+                    .into(),
+            );
+        }
+        // `hunt:<target key>` and not the spare origin: the byte
+        // accounting item 11 reads is per TARGET and reads the origin,
+        // so a copy picked by hand has to count against the same ceiling
+        // a hunted one does. Both roads spend one copy of one release.
+        let origin = hunt_origin(&keys[0]);
+        let e = self
+            .hunt_hold(&req, &cand, &bytes, headers.as_ref(), &origin)
+            .map_err(|e| format!("that copy could not be queued: {e}"))?;
+        if let Some(err) = self.alt_switch(&req.nzo_id, &e) {
+            // The switch refused, so the row we just parked is a
+            // download nobody asked for, held against a job that is
+            // still on the queue. Take it back off rather than leave it:
+            // a spare the user cannot see the reason for is §4b's junk
+            // queue arriving by a new road.
+            self.hunt_unhold(&e);
+            return Err(err);
+        }
+        self.hunt.offers.lock_ok().remove(nzo_id);
+        info!(
+            target: "queue",
+            "{e}: {} cannot finish, so {} was picked by hand in its place ({origin})",
+            req.name, cand.stem
+        );
+        Ok(e)
+    }
+
+    /// Park the picked copy as a held spare of the doomed row, so
+    /// `alt_switch` can promote it.
+    ///
+    /// `enqueue_as` with `hold_for` rather than `enqueue_fetched`,
+    /// because that one has no `hold_for` argument and lives in
+    /// `serve/daemon.rs`, which is on its size-gate ceiling. The one
+    /// thing it does that `enqueue_as` does not is the failure-link
+    /// stamp, which is eleven lines and is here - and it needs its own
+    /// save for the reason that one states: `enqueue` saved the queue
+    /// before the stamp existed, so a restart in the window would lose
+    /// the link off a row that is about to run.
+    fn hunt_hold(
+        &self,
+        req: &HuntRequest,
+        cand: &Cand,
+        bytes: &[u8],
+        fetched: Option<&Fetched>,
+        origin: &str,
+    ) -> Result<String> {
+        let e = self.enqueue_as(
+            None,
+            bytes,
+            &cand.stem,
+            &req.category,
+            SAB_DEFAULT_PRIORITY,
+            None,
+            None,
+            origin,
+            false,
+            Some(&req.nzo_id),
+        )?;
+        if let Some(f) = fetched.filter(|f| !f.failure_link.is_empty()) {
+            let stamped = {
+                let q = self.queue.lock_ok();
+                match q.iter().find(|j| j.lock_ok().nzo_id == e.nzo_id) {
+                    Some(job) => {
+                        let mut g = job.lock_ok();
+                        g.failure_link = f.failure_link.clone();
+                        g.failure_host = f.host.clone();
+                        g.failure_https = f.https;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if stamped {
+                self.save_queue();
+            }
+        }
+        Ok(e.nzo_id)
+    }
+
+    /// Take a parked pick back off the queue after a refused switch.
+    ///
+    /// The spool copy goes with the row. `hunt_hold` wrote one through
+    /// `enqueue_as`, and this removal is the last record that names it -
+    /// a survivor under the adoptable `SABnzbd_nzo_nzbfast*.nzb` name is
+    /// re-enqueued by `recover_orphaned_spool` at the next start, as a
+    /// fresh download of the copy the user was just told could not be
+    /// switched to. Unlike the other `drop_spool` callers this one is
+    /// not fault-conditioned: every refused switch left the orphan
+    /// (Codex sweep 24 Aug, F-04).
+    fn hunt_unhold(&self, nzo_id: &str) {
+        let nzb = {
+            let mut q = self.queue.lock_ok();
+            let before = q.len();
+            let mut nzb = None;
+            q.retain(|j| {
+                let g = j.lock_ok();
+                if g.nzo_id == nzo_id {
+                    nzb = Some(g.nzb_path.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if q.len() == before { None } else { nzb }
+        };
+        if let Some(nzb) = nzb {
+            drop_spool(&nzb);
+            self.save_queue();
         }
     }
 }

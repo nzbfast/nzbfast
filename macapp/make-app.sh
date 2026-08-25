@@ -46,6 +46,15 @@ cp "$ENGINE" "$APP/Contents/Resources/bin/nzbfast"
 chmod +x "$APP/Contents/Resources/bin/nzbfast"
 
 # Icon: iconset from the committed 1024px master (packaging/icon/).
+#
+# icon-downstream-gate: this iconset is built into a temp directory on
+# every run and folded straight into the .app - nothing here is committed,
+# so there is no raster that can fall behind the master. That is what makes
+# this different from the other two second-generation downscales,
+# packaging/flatpak/make-icon.sh and packaging/qnap/make-icons.sh, whose
+# outputs ARE committed and are held by tools/icon-downstream-gate.py. If
+# an .icns or an iconset is ever committed here, delete this waiver and
+# give this script a DERIVATIONS table instead.
 ICONSET=$(mktemp -d)/NzbFast.iconset
 mkdir -p "$ICONSET"
 for entry in 16:icon_16x16 32:icon_16x16@2x 32:icon_32x32 64:icon_32x32@2x \

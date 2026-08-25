@@ -604,10 +604,17 @@ pub(crate) fn parse_main(body: &[u8]) -> Option<(u64, Vec<[u8; 16]>)> {
     // malformed and verification is skipped - the download still completes
     // (PAR2 is repair-only).
     const MAX_BLOCK_SIZE: u64 = 256 << 20;
+    // `nfiles` is wire bytes too, and the bound is division rather than
+    // `ids_bytes.len() < nfiles * 16` because that multiply is a usize:
+    // on a 32-bit target `nfiles = 0x1000_0000` wraps it to 0, so a tiny
+    // crafted Main packet passed the length test (and under
+    // overflow-checks - dev, test, fuzz - it panics instead). 64-bit
+    // targets could never wrap it; the division is the same test on
+    // every width (Codex sweep 24 Aug, F-02).
     if block_size == 0
         || block_size % 4 != 0
         || block_size > MAX_BLOCK_SIZE
-        || ids_bytes.len() < nfiles * 16
+        || nfiles > ids_bytes.len() / 16
     {
         return None;
     }
@@ -1005,6 +1012,29 @@ mod tests {
         // Existing guards still hold: zero, and non-multiple-of-4.
         assert!(parse_main(&main_body(0, 1)).is_none());
         assert!(parse_main(&main_body(1002, 1)).is_none());
+    }
+
+    #[test]
+    fn a_wrapping_file_count_is_refused_not_accepted() {
+        // Hand-built rather than through `main_body`, which sizes its id
+        // list to the count - the point here is a count the body cannot
+        // back. nfiles * 16 == 2^32 WRAPS to 0 in a 32-bit usize
+        // multiply, so the old `ids_bytes.len() < nfiles * 16` guard
+        // passed a tiny crafted Main packet on ARMv7 (and panicked under
+        // overflow-checks, which is what a fuzzer on a 32-bit host would
+        // have hit). The division form cannot wrap on any width (Codex
+        // sweep 24 Aug, F-02).
+        let body = |nfiles: u32| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&768_000u64.to_le_bytes());
+            b.extend_from_slice(&nfiles.to_le_bytes());
+            b.extend_from_slice(&[0u8; 16]); // one id, however many claimed
+            b
+        };
+        assert!(parse_main(&body(0x1000_0000)).is_none());
+        assert!(parse_main(&body(u32::MAX)).is_none());
+        // ...and an honest count over the same 16-byte list still parses.
+        assert_eq!(parse_main(&body(1)).unwrap().1.len(), 1);
     }
 
     /// The three block figures, and which way each of them leans.

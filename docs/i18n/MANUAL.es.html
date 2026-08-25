@@ -1109,7 +1109,8 @@ el añadido sigue adelante intacto y el registro dice por qué.</p>
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (un reintento automático ha vuelto a encolar una descarga fallida),
 <code>job.switched</code> (un trabajo que no pudo terminar fue reemplazado por
-una copia alternativa que se guardaba para él) y
+una copia alternativa que se guardaba para él), <code>job.replaced</code> (el mismo resultado, salvo que no se guardaba
+ninguna copia, así que se buscó y se descargó un reemplazo) y
 <code>job.delete_kept</code> (un borrado quitó el registro pero no pudo quitar
 sus archivos), más <code>watch.picked</code> (se recogió un .nzb de la carpeta
 vigilada), <code>nzb.refeed</code> (el propio archivo NZB de una descarga terminada se añadió a la cola en pausa), <code>watchlist.upgraded</code> (una mejora de la lista de

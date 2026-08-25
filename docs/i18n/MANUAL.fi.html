@@ -1095,7 +1095,8 @@ lisäys etenee koskemattomana ja loki kertoo miksi.</p>
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (automaattinen uudelleenyritys palautti epäonnistuneen latauksen jonoon),
 <code>job.switched</code> (työ jota ei voitu saada valmiiksi korvattiin sitä
-varten varatulla vaihtoehtoisella kopiolla) ja
+varten varatulla vaihtoehtoisella kopiolla), <code>job.replaced</code> (sama lopputulos, mutta mitään kopiota ei
+ollut varattuna, joten korvaava haettiin ja ladattiin) ja
 <code>job.delete_kept</code> (poisto poisti tietueen mutta ei saanut poistettua
 sen tiedostoja), sekä <code>watch.picked</code> (.nzb noudettiin
 valvontakansiosta), <code>nzb.refeed</code> (valmiin latauksen oma NZB-tiedosto lisättiin jonoon keskeytettynä), <code>watchlist.upgraded</code> (seurantalistan päivitys

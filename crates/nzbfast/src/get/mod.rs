@@ -115,10 +115,27 @@ async fn run_fetch(
     tx: tokio::sync::mpsc::Sender<nzbkit::pool::FetchOutcome>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
 ) -> Vec<nzbkit::pool::PoolStats> {
-    let total_conns: usize = servers.iter().map(|(_, c)| c.connections).sum();
-    let shards = shard_count(total_conns);
+    // Two different numbers for two different jobs, and TODO 277 is
+    // what parted them. `spawned` is how many worker slots exist, which
+    // is what the shard layout has to cover: it is decided once here
+    // and cannot follow the in-run fleet governor, so it is sized for
+    // the fleet that MAY come up rather than the one dialling now.
+    // `dialled` is how many connections this run is actually asking the
+    // providers for - the parked surplus holds nothing - and that is
+    // the number to report. The bench rigs read it positionally out of
+    // the head of this line (`rig_conn_scan`'s `sharding [0-9]+
+    // connections`) as the denominator of `conns_held=`, and a
+    // denominator that counted parked slots would read every ordinary
+    // leg as a fleet that came up short.
+    let spawned: usize = servers.iter().map(|(_, c)| c.connections).sum();
+    let dialled: usize = servers.iter().map(|(_, c)| c.dialled()).sum();
+    let shards = shard_count(spawned);
     if shards > 1 {
-        info!(target: "get", "sharding {total_conns} connections across {shards} I/O runtimes");
+        let parked = match spawned.saturating_sub(dialled) {
+            0 => String::new(),
+            n => format!(" ({n} more spawned and parked, headroom for the line-rate governor)"),
+        };
+        info!(target: "get", "sharding {dialled} connections across {shards} I/O runtimes{parked}");
         let servers_owned = servers.to_vec();
         let qc = queue_ctl.clone();
         tokio::task::spawn_blocking(move || {

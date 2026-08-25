@@ -1139,7 +1139,8 @@ l'aggiunta procede intatta e il log dice perché.</p>
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (un nuovo tentativo automatico ha rimesso in coda un download fallito),
 <code>job.switched</code> (un lavoro che non poteva completarsi è stato
-sostituito da una copia alternativa tenuta da parte per esso) e
+sostituito da una copia alternativa tenuta da parte per esso), <code>job.replaced</code> (lo stesso esito, salvo che non era tenuta da
+parte alcuna copia, quindi un sostituto è stato cercato e scaricato) e
 <code>job.delete_kept</code> (un'eliminazione ha rimosso il record ma non è
 riuscita a rimuoverne i file), più <code>watch.picked</code> (un .nzb è stato
 prelevato dalla cartella sorvegliata), <code>nzb.refeed</code> (il file NZB di un download concluso è stato aggiunto alla coda, in pausa), <code>watchlist.upgraded</code> (un

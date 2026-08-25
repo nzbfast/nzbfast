@@ -661,20 +661,90 @@ pub fn effective_limit(global: usize, server_connections: u32) -> usize {
 
 /// TODO 208 item 1: the whole fleet's connection budget for the fleet
 /// cap (`nzbkit::pool::linecap`), read from `NZBFAST_LINE_CAP`. Unset =
-/// the measured constant; `0` (or anything that is not a whole number)
+/// TODO 277's curve on `anchor_bps`, the best line reading this process
+/// has at job build (0 = none, which is the curve's floor and the flat
+/// constant that shipped); `0` (or anything that is not a whole number)
 /// = off, which is the bench drivers' A/B arm. Read once per job build,
 /// not per epoch, so an arm is one whole leg.
+///
+/// An explicit number is a FIXED fleet at every rate and at every
+/// moment of the run - see [`line_cap_is_auto`], which is what tells
+/// the in-run governor to leave a typed arm alone.
 ///
 /// The UNIT changed with the rule on 23 Aug 2026: this was connections
 /// per Mbit of the measured line, so a box still exporting the old
 /// `0.5` no longer parses and reads as OFF - the control arm, which is
 /// the safe direction, and it shows as an empty `line cap` in the
-/// `[pool]` line rather than as a fleet of one.
-pub fn line_cap_fleet() -> usize {
+/// `[pool]` line rather than as a fleet of one. TODO 277 did NOT put
+/// that unit back: what moves with the line now is a fleet SIZE off a
+/// measured curve with a floor and a ceiling, never a multiplier.
+pub fn line_cap_fleet(anchor_bps: u64) -> usize {
     match std::env::var("NZBFAST_LINE_CAP") {
-        Err(_) => nzbkit::pool::linecap::LINE_CAP_DEFAULT_FLEET,
+        Err(_) => nzbkit::pool::linecap::fleet_for_line(anchor_bps),
         Ok(v) => v.trim().parse::<usize>().unwrap_or(0),
     }
+}
+
+/// TODO 277: is the fleet above the curve's own number, so the in-run
+/// governor may grow it? False the moment `NZBFAST_LINE_CAP` is set to
+/// anything at all, including the `0` that turns the rule off - a leg
+/// that typed a fleet size wants that fleet for the whole leg.
+pub fn line_cap_is_auto() -> bool {
+    std::env::var("NZBFAST_LINE_CAP").is_err()
+}
+
+/// TODO 277: the fleet the seed SPAWNS slots for, which is not the
+/// fleet it runs at. `line_cap` is the cap in force and `auto` is
+/// [`line_cap_is_auto`].
+///
+/// The in-run governor may raise the cap during the run, and a
+/// `ConnTarget` above the SPAWNED fleet has nothing to wake
+/// (`nzbkit::pool::ConnTarget::set`) - so a curve that starts at its
+/// floor could never reach its ceiling, which is what left an
+/// anchorless run (a CLI `get`, a sidecar, a daemon's first job) pinned
+/// at the floor whatever its line. The seed therefore spawns this many
+/// slots and parks the surplus, TODO 112's shape.
+///
+/// The CEILING and never the raw `--connections` dial: that is 500
+/// sockets on a five-provider box, and §208 measured what a fleet that
+/// size does to a line. `LINE_CAP_MAX_FLEET` is the most this rule will
+/// EVER ask for at any rate, so it is the most headroom that can ever
+/// be used.
+///
+/// A leg that TYPED a fleet size gets none: it pinned the governor too,
+/// so there is no raise to make room for, and spawning past its rung
+/// would move the shard layout of every A/B arm on every §208 ladder.
+pub fn line_cap_headroom_fleet(line_cap: usize, auto: bool) -> usize {
+    match auto {
+        true => nzbkit::pool::linecap::LINE_CAP_MAX_FLEET,
+        false => line_cap,
+    }
+}
+
+/// How many worker slots to SPAWN for a server that will RUN at
+/// `applied` connections, given its share of
+/// [`line_cap_headroom_fleet`] and `uncapped` - what this server's own
+/// ceilings (the `--connections` dial, the account's number, a host
+/// cap) allow before the fleet cap takes its share out.
+///
+/// Held to those ceilings AND to the measured knee, since the knee is
+/// what the account was seen to refuse above and a slot spawned past it
+/// is one the governor could only ever wake into a refusal. Never below
+/// what the run already dials.
+///
+/// Pure, and split out for the reason `disk::storage_override` and
+/// `nntp::set_extra_ca` are: the inputs come from `NZBFAST_LINE_CAP`,
+/// and a test that wrote the environment to reach this would race every
+/// other test in the process.
+pub fn line_cap_spawn_slots(
+    applied: usize,
+    headroom_share: usize,
+    uncapped: usize,
+    pinned: bool,
+    tuned: Option<&Tuned>,
+    now: u64,
+) -> usize {
+    applied_connections(headroom_share.min(uncapped), pinned, tuned, now).max(applied)
 }
 
 /// The per-server share of the fleet cap for a fleet of `n_servers`.
@@ -682,11 +752,13 @@ pub fn line_cap_fleet() -> usize {
 /// this into the server's own ceiling; a pinned server is theirs to
 /// skip.
 ///
-/// It takes no line rate: since the cap became a constant the seed
-/// binds on every install, including a CLI run and a daemon's first
-/// job, which used to escape it for want of a link anchor.
-pub fn line_cap_share(n_servers: usize) -> Option<usize> {
-    nzbkit::pool::linecap::fleet_cap(line_cap_fleet())
+/// `anchor_bps` is the line reading the curve sizes from, in bytes/s;
+/// 0 = none, which is the floor. The seed binds on every install
+/// either way, including a CLI run and a daemon's first job, which used
+/// to escape it for want of a link anchor - those two just get the
+/// floor, since the floor is what a reading of nothing yields.
+pub fn line_cap_share(n_servers: usize, anchor_bps: u64) -> Option<usize> {
+    nzbkit::pool::linecap::fleet_cap(line_cap_fleet(anchor_bps))
         .map(|f| nzbkit::pool::linecap::server_share(f, n_servers))
 }
 
@@ -2525,5 +2597,65 @@ mod tests {
         assert_eq!(moved.raised, vec![("low.example.com".into(), 6, 26)]);
         assert!(moved.retired.is_empty(), "v2 entries never retire");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// TODO 277: a leg that TYPED a fleet size gets no spawn headroom -
+    /// it pinned the in-run governor too, so there is no raise to make
+    /// room for, and spawning past its rung would move the shard layout
+    /// of every A/B arm on every §208 ladder. The auto case is the
+    /// curve's ceiling whatever the cap in force is, which is what the
+    /// governor may grow to.
+    #[test]
+    fn only_an_auto_cap_gets_room_to_grow_into() {
+        let max = nzbkit::pool::linecap::LINE_CAP_MAX_FLEET;
+        for cap in [
+            nzbkit::pool::linecap::LINE_CAP_DEFAULT_FLEET,
+            30,
+            max,
+            0,
+            15,
+        ] {
+            assert_eq!(line_cap_headroom_fleet(cap, true), max, "auto cap {cap}");
+            assert_eq!(line_cap_headroom_fleet(cap, false), cap, "typed cap {cap}");
+        }
+    }
+
+    /// The spawn count is the headroom share held to this server's own
+    /// ceilings and to its measured knee, and never below what the run
+    /// already dials.
+    #[test]
+    fn the_spawn_headroom_is_bounded_by_the_account_and_by_the_knee() {
+        let knee = |c: usize| Tuned {
+            connections: c,
+            granted: c,
+            asked: c,
+            gbps: 1.0,
+            checked: 100,
+            source: "auto".into(),
+            suspect: false,
+            limit: 100,
+            v: SCHEMA,
+            pending: None,
+            buckets: Vec::new(),
+            shaped: None,
+            capped: None,
+        };
+        // The ordinary five-provider case: dialling its share of the
+        // curve's floor, ten slots born for it.
+        assert_eq!(line_cap_spawn_slots(5, 10, 100, false, None, 100), 10);
+        // An account that grants fewer than the headroom share never
+        // has more slots born than it grants.
+        assert_eq!(line_cap_spawn_slots(5, 10, 7, false, None, 100), 7);
+        // A measured knee bounds it too: a slot past the knee is one
+        // the governor could only ever wake into a refusal. It bounds
+        // `applied` as well, so the two stay in step.
+        assert_eq!(
+            line_cap_spawn_slots(4, 10, 100, false, Some(&knee(4)), 100),
+            4
+        );
+        // Never below the dial: a pin (which skips the knee) and a
+        // server already at the ceiling both spawn what they run.
+        assert_eq!(line_cap_spawn_slots(60, 10, 100, true, None, 100), 60);
+        assert_eq!(line_cap_spawn_slots(10, 10, 100, false, None, 100), 10);
     }
 }

@@ -353,12 +353,11 @@ impl LiveStats {
                     host: s.host.clone(),
                     // With a live target in force the number in use is
                     // the target, not the spawn count - slots above it
-                    // park immediately.
-                    budget: AtomicUsize::new(
-                        cfg.live_target
-                            .as_ref()
-                            .map_or(cfg.connections, |t| t.get().min(cfg.connections)),
-                    ),
+                    // park immediately. `PoolConfig::dialled` is that
+                    // rule; it was inlined here first and is now shared
+                    // with the launch banner, which needs the same
+                    // number for the same reason.
+                    budget: AtomicUsize::new(cfg.dialled()),
                     connected: AtomicUsize::new(0),
                     refusal: std::sync::Mutex::new(None),
                     bytes: AtomicU64::new(0),

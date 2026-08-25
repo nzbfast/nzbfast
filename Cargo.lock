@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "nzbtray"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "rustls",
  "serde_json",

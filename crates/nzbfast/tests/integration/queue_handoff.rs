@@ -135,6 +135,32 @@ fn nzb_xml(subject: &str, segs: &[(String, u64, u32)]) -> String {
     xml
 }
 
+/// The live queue, as one line per slot: name, status, activity and how
+/// far along it is. Failure evidence, and deliberately NOT the whole
+/// `mode=queue` payload - that is ~4 KB of settings and whyslow gauges
+/// per assertion, and a panic message nobody can read is a panic
+/// message nobody reads. These four fields are what say whether the
+/// runner had moved on to the successor yet.
+fn queue_summary(port: u16) -> String {
+    let q = http(port, "/api?mode=queue&apikey=sekrit&output=json", None);
+    let Some(slots) = serde_json::from_str::<serde_json::Value>(&q)
+        .ok()
+        .and_then(|v| v["queue"]["slots"].as_array().cloned())
+    else {
+        return format!("<unparseable queue: {q}>");
+    };
+    slots
+        .iter()
+        .map(|s| {
+            format!(
+                "{} status={} activity={} pct={}",
+                s["filename"], s["status"], s["activity"], s["percentage"]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn history_slots(port: u16) -> Vec<serde_json::Value> {
     let h = http(port, "/api?mode=history&apikey=sekrit&output=json", None);
     serde_json::from_str::<serde_json::Value>(&h)
@@ -248,34 +274,48 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
         add_nzb(port, "Handoff.B.2026", &xml_b);
 
         // Watch the request log: when was A's slow article first asked
-        // for, and when was the first B article asked for?
-        let mut slow_asked: Option<Instant> = None;
-        let mut b_asked: Option<Instant> = None;
+        // for, and when was the first B article asked for? BOTH stamps
+        // come off the mock's own arrival record and never off this
+        // thread's clock - see [`nzbkit::mock::BodyLog`], and the note
+        // in `with_the_handoff_off_the_queue_is_serial` for the CI
+        // failure that came of stamping when a POLLER noticed an entry.
+        // The loop below still polls, but only for the event to EXIST.
         let t0 = Instant::now();
-        while b_asked.is_none() && t0.elapsed() < Duration::from_secs(60) {
+        let (b_id, b_at, slow_at) = loop {
             {
                 let log = body_log.lock().unwrap();
-                if slow_asked.is_none() && log.contains(&slow_id) {
-                    slow_asked = Some(Instant::now());
-                }
-                if log.iter().any(|id| id.starts_with("<hb-")) {
-                    b_asked = Some(Instant::now());
+                if let Some((b_id, b_at)) = log.first_matching(|id| id.starts_with("<hb-")) {
+                    let slow_at = log.first_asked(&slow_id).unwrap_or_else(|| {
+                        panic!(
+                            "B ({b_id}) was asked for and A's slow article {slow_id} never \
+                             was.\nwire: {:?}",
+                            log.timeline(t0)
+                        )
+                    });
+                    break (b_id, b_at, slow_at);
                 }
             }
+            assert!(
+                t0.elapsed() < Duration::from_secs(60),
+                "no B article was requested within 60 s.\nwire: {:?}\nqueue: {}",
+                body_log.lock().unwrap().timeline(t0),
+                queue_summary(port)
+            );
             std::thread::sleep(Duration::from_millis(5));
-        }
-        let slow_asked = slow_asked.expect("A's slow article was never requested");
-        let b_asked = b_asked.expect("no B article was requested within 60 s");
+        };
         // The proof. A's slow article cannot be served before its dead
         // air ends, so a daemon that waits for A's drain cannot ask for
-        // B before `slow_asked + DEAD_AIR_MS`. Asking well inside that
+        // B before `slow_at + DEAD_AIR_MS`. Asking well inside that
         // window means B started on A's idle connections.
-        let gap = b_asked.saturating_duration_since(slow_asked);
+        let gap = b_at.saturating_duration_since(slow_at);
         assert!(
             gap < Duration::from_millis(DEAD_AIR_MS / 2),
-            "B's first article was asked {gap:?} after A's slow one - the \
+            "B's first article {b_id} was asked {gap:?} after A's slow one ({slow_id}) - the \
              hand-over did not happen (a serial queue waits the full \
-             {DEAD_AIR_MS} ms of dead air)"
+             {DEAD_AIR_MS} ms of dead air).\n\
+             wire, as (id, offset from A's slow request): {:?}\nqueue: {}",
+            body_log.lock().unwrap().timeline(slow_at),
+            queue_summary(port)
         );
 
         // Both complete and byte-identical. WHICH ONE FILES FIRST IS
@@ -460,31 +500,83 @@ async fn with_the_handoff_off_the_queue_is_serial() {
     })
     .await;
     let port = d.port;
+    let a_count = segs_a.len();
     tokio::task::spawn_blocking(move || {
         add_nzb(port, "Serial.A.2026", &xml_a);
         add_nzb(port, "Serial.B.2026", &xml_b);
-        let mut slow_asked: Option<Instant> = None;
-        let mut b_asked: Option<Instant> = None;
+        // BOTH stamps come off the mock's own arrival record, never off
+        // this thread's clock. The loop below still POLLS - it has to,
+        // there is nothing to block on - but it polls for the EVENT to
+        // EXIST and then reads the event's own `Instant`. Stamping
+        // `Instant::now()` when a poller NOTICES an entry is what this
+        // test used to do, and it measures notice time: the gap it
+        // reports is the true gap minus however late the poller was to
+        // see A's slow request, and that lateness is unbounded on a box
+        // running a full parallel sweep. It cost a 1-in-7 CI failure on
+        // the mac dev box, 24 Aug 2026, with the daemon behaving
+        // perfectly. Widening the 2 s bound would have been the wrong
+        // fix twice over - see the fault_contract note in
+        // .config/nextest.toml - because the quantity being compared
+        // was not the daemon's.
         let t0 = Instant::now();
-        while b_asked.is_none() && t0.elapsed() < Duration::from_secs(60) {
+        let (b_id, b_at, slow_at) = loop {
             {
                 let log = body_log.lock().unwrap();
-                if slow_asked.is_none() && log.contains(&slow_id) {
-                    slow_asked = Some(Instant::now());
-                }
-                if log.iter().any(|id| id.starts_with("<sb-")) {
-                    b_asked = Some(Instant::now());
+                if let Some((b_id, b_at)) = log.first_matching(|id| id.starts_with("<sb-")) {
+                    let slow_at = log.first_asked(&slow_id).unwrap_or_else(|| {
+                        panic!(
+                            "B ({b_id}) was asked for and A's slow article {slow_id} never was, \
+                             so the serial queue ran the jobs in the wrong order entirely.\n\
+                             wire: {:?}",
+                            log.timeline(t0)
+                        )
+                    });
+                    break (b_id, b_at, slow_at);
                 }
             }
+            assert!(
+                t0.elapsed() < Duration::from_secs(60),
+                "B was never asked for at all in 60 s - the queue stalled rather than \
+                 serialised.\nwire: {:?}\nqueue: {}",
+                body_log.lock().unwrap().timeline(t0),
+                queue_summary(port)
+            );
             std::thread::sleep(Duration::from_millis(5));
-        }
-        let gap = b_asked
-            .expect("B never asked")
-            .saturating_duration_since(slow_asked.expect("slow never asked"));
+        };
+        let gap = b_at.saturating_duration_since(slow_at);
         assert!(
             gap >= Duration::from_millis(2_000),
-            "with the hand-over off, B must wait for A's drain; it was asked after {gap:?}"
+            "with the hand-over off, B must wait for A's drain; its first article {b_id} \
+             landed {gap:?} after A's slow one ({slow_id}), which answers only after \
+             2000 ms of dead air.\n\
+             wire, as (id, offset from A's slow request): {:?}\nqueue: {}",
+            body_log.lock().unwrap().timeline(slow_at),
+            queue_summary(port)
         );
+        // Belt for the same claim from the other end, and it needs no
+        // clock at all: the arrival record is ORDERED, so every one of
+        // A's articles must already have been asked for by the time B's
+        // first shows up. Stated over the DISTINCT ids before that
+        // point rather than as "no A id after B's first" - a refetch of
+        // an A article is legitimate and could land at any time, and an
+        // assertion a retry can break is a new flake, which is the one
+        // thing this change must not add.
+        {
+            let log = body_log.lock().unwrap();
+            let first_b = log.iter().position(|id| id.starts_with("<sb-")).unwrap();
+            let a_before: HashSet<&String> = log[..first_b]
+                .iter()
+                .filter(|id| id.starts_with("<sa-"))
+                .collect();
+            assert_eq!(
+                a_before.len(),
+                a_count,
+                "B's first article was asked with only {} of A's {a_count} articles ever \
+                 requested, so the queue interleaved rather than serialised: {:?}",
+                a_before.len(),
+                log.timeline(slow_at)
+            );
+        }
         for _ in 0..600 {
             if history_slots(port)
                 .iter()
@@ -712,7 +804,7 @@ struct DrainRig {
     /// The request log of the server that HOLDS A's articles: A's wire,
     /// read through `asked_for`, which filters it (the successor asks
     /// this server for its own articles too and is refused).
-    a_wire: Arc<Mutex<Vec<String>>>,
+    a_wire: Arc<Mutex<nzbkit::mock::BodyLog>>,
     _slow: MockServer,
     _fast: MockServer,
     _d: crate::harness::Daemon,
@@ -780,6 +872,14 @@ async fn drain_rig(tag: &str) -> DrainRig {
         let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
+            // `arm_handoff` waits on the runner's INFO hand-over line in
+            // this daemon's log, and the child falls back to ambient
+            // RUST_LOG when NZBFAST_LOG is unset - a parent shell
+            // exporting RUST_LOG=warn turned both draining-predecessor
+            // tests into 60 s timeouts with the product behaving
+            // (Codex sweep 24 Aug, F-22). Pin INFO at the child.
+            .env("NZBFAST_LOG", "info")
+            .env_remove("RUST_LOG")
             .arg("--config")
             .arg(&cfg)
             .arg("serve")
@@ -856,7 +956,7 @@ fn decoded_mb(port: u16, id: &str) -> f64 {
 /// its articles too: they are not here, so they are refused instantly,
 /// and counting them made A's wire look like it was serving hundreds of
 /// bodies a second and never falling silent.
-fn asked_for(wire: &Arc<Mutex<Vec<String>>>) -> usize {
+fn asked_for(wire: &Arc<Mutex<nzbkit::mock::BodyLog>>) -> usize {
     wire.lock()
         .unwrap()
         .iter()
@@ -895,7 +995,7 @@ fn arm_handoff(port: u16, log_path: &Path, a_xml: &str, b_xml: &str) -> (String,
 /// after the signal lands. A predecessor nobody stopped never goes quiet
 /// at all - it has ~40 s of slow server left - so the bound below is
 /// what that failure trips.
-fn wait_for_quiet_wire(wire: &Arc<Mutex<Vec<String>>>) -> usize {
+fn wait_for_quiet_wire(wire: &Arc<Mutex<nzbkit::mock::BodyLog>>) -> usize {
     let quiet = Duration::from_secs(2);
     let mut last = asked_for(wire);
     let mut since = Instant::now();

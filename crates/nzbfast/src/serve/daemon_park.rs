@@ -1196,7 +1196,20 @@ impl Daemon {
     /// `alt_auto_switch` is off (item 19): nothing is promoted, and a
     /// spare is still held for item 12's notice to offer on a click.
     /// Hunting then would put a THIRD copy of one release in front of
-    /// the user. It also has to be asked BEFORE the promotion runs -
+    /// the user.
+    ///
+    /// **THAT CLAIM WAS UNTRUE FROM THE DAY IT WAS WRITTEN, AND §284
+    /// MADE IT TRUE.** The notice it names was drawn on the QUEUE row,
+    /// and this function runs inside the park that takes the queue row
+    /// away - so from the moment `alt_auto_switch` existed to be
+    /// switched off, the spare this preserved sat paused at priority -3
+    /// pointing at a history record that offered nothing, with
+    /// `drop_spares_for` not running on a failure either. §284 put the
+    /// offer on the history row (`altcand::parked_offer_json`, and
+    /// `alt_switch`'s parked road), so the sentence above now describes
+    /// something that happens.
+    ///
+    /// It also has to be asked BEFORE the promotion runs -
     /// the winner leaves priority -3 and the runners-up are repointed
     /// at it, so afterwards this answers about a different queue.
     ///
@@ -1222,7 +1235,13 @@ impl Daemon {
     /// beyond the payload the user already asked for, so the away case
     /// gets a working download rather than a failed one. Switched OFF,
     /// the spare is not lost - it stays held at priority -3 for §282
-    /// item 12's dashboard notice to offer on a click.
+    /// item 12's dashboard notice to offer on a click, **on the
+    /// abandoned job's HISTORY row** (§284). The queue row that notice
+    /// was originally drawn on is gone by the time anyone could read it:
+    /// this function runs from `park_gen`, after the retain that takes
+    /// it out of the queue. Until §284 that made this sentence a
+    /// description of nothing - the spare was held, and no surface could
+    /// offer it, promote it or drop it.
     ///
     /// **THE GATE REACHES FURTHER THAN §282, AND THAT IS THE ONE THING
     /// TO KNOW ABOUT IT.** M14f is older than every part of this
@@ -1250,9 +1269,20 @@ impl Daemon {
     /// that item is not emitted HERE because it is not this path's to
     /// emit: §282 section C landed the same day and `serve/hunt.rs`
     /// emits its own `job.replaced` when a search finds a replacement
-    /// nobody held. Whether that pair should be renamed to the
-    /// `job.hunt_*` shape item 18 sketched is item 18's call, not a
-    /// silent rename of a kind webhook subscribers may already match.
+    /// nobody held.
+    ///
+    /// **THAT CALL IS NOW MADE, and the answer is one payload shape
+    /// across two kinds** (item 18, 24 Aug 2026). `job.replaced` keeps
+    /// its own kind - a hunt spends NEW bytes and an indexer grab on a
+    /// release the user never queued, where both doors here promote a
+    /// copy already held, and `hooks::wants_lifecycle` matches a kind or
+    /// a `prefix.*` and nothing in the body, so the kind is the only
+    /// axis a target's `events` field can express that difference on.
+    /// Its KEYS are now these keys exactly: `nzo_id`, `name`,
+    /// `category`, `replaces`, `replaces_name`, `reason`, `by`. Change
+    /// one of them here and change it there in the same commit; the
+    /// argument, and the door-specific keys, are written up at the emit
+    /// in `serve/hunt.rs`.
     ///
     /// **THIS IS NOT THE ONLY DOOR, and `by` is how a subscriber tells
     /// them apart.** `altcand::alt_switch` - item 12's "Switch to this
@@ -1272,9 +1302,33 @@ impl Daemon {
     /// subscriber that coerces cannot tell `null` from rank 0). Read
     /// `rank` only under `by == "auto"`.
     ///
-    /// `by` is scoped to THIS kind's two doors and does not reach
-    /// `job.replaced`: a hunt is not a switch between two copies the
-    /// user already had, so it carries its own vocabulary.
+    /// **THE DASHBOARD IS A THIRD CONSUMER, and has been since 24 Aug
+    /// 2026.** `handleLifeEvents` in web/dashboard.html has one arm for
+    /// `job.switched` and `job.replaced` together: it reads `by` (to
+    /// stay silent on the clicked door, which `altSwitch()` already
+    /// confirms), `replaces_name` and `name` for the sentence, and
+    /// `replaces` for the click-through into the abandoned row's
+    /// history drawer. It also uses the presence of a switch in the
+    /// same event batch to suppress the `job.failed` alarm for the row
+    /// this one replaces, which is why the two emits being back to back
+    /// - `life_emit_parked` in `park_gen` and then this one - is a
+    /// property the page relies on rather than an accident. That arm
+    /// REPLACED a queue-snapshot diff (a page-side "this row stopped
+    /// being a Duplicate" cue) which could name neither the abandoned
+    /// release nor the reason and could not see a hunt at all; the
+    /// retirement note is in `sndQueueEvents`. So the keys below have
+    /// three readers, not two, and the third one ships user-visible
+    /// copy in 27 catalogues.
+    ///
+    /// `by` is TOTAL across both kinds since item 18 closed, and it was
+    /// scoped to this kind's two doors before that. Three values, one
+    /// per door: `"auto"` here, `"user"` on the click, `"hunt"` on
+    /// `job.replaced`. A subscriber that unions the two kinds therefore
+    /// always has a "which door" answer, which was the whole complaint -
+    /// under the old scoping, reading `by` over a `job.*` feed returned
+    /// nothing for the one door the user did least to ask for. `"hunt"`
+    /// is redundant with the kind, deliberately: a total key a consumer
+    /// can read unconditionally is worth more than the byte it costs.
     fn promote_held_alternative(
         &self,
         failed: &Arc<Mutex<Job>>,

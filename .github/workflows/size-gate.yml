@@ -1,7 +1,9 @@
 # The build-free gates (size, lock, waiver, doc, ref, overflow, bench2j,
 # leg-warn, par2, provenance, iface, windows-portability, flatpak pin,
-# harness, manual parity, site parity, cross-link staleness, nav
-# staleness), on EVERY branch instead of only on main.
+# harness, index lock, rate format, payload id, bg token, test global,
+# manual parity, site parity, cross-link staleness, nav staleness, icon
+# derivation), on
+# EVERY branch instead of only on main.
 #
 # They all already run in ci-private's `check` job, and that is where
 # they will stay - this workflow does not replace it. What it fixes is
@@ -188,7 +190,7 @@
 # Twenty-one is `tools/bg-token-gate.py`, added 24 Aug 2026, and the
 # numbering runs one behind the job count from here on: the payload-id
 # gate landed the same day and was wired without a number, so there are
-# twenty-six steps below and twenty-three numbers above. Its subject is
+# thirty-two steps below and twenty-nine numbers above. Its subject is
 # `--bg`, the page ground, DEFINED once in web/ui-tokens.html and
 # hand-copied into five sites that cannot read a custom property - the
 # dashboard's and the wall's media-scoped <meta name="theme-color">
@@ -210,34 +212,40 @@
 # Twenty-two is `tools/claude-clippy-gate.py`, added 24 Aug 2026, and it
 # is the first gate in this family whose subject is the INSTRUCTIONS
 # rather than the code. CLAUDE.md tells a session "this exact line is
-# what gates a push" and it says it TWICE - a host clippy line in its
-# numbered gate list, and a Windows one quoted inside the entry about
-# unix-only symbols. ci-private.yml runs clippy twice too, in `check` and
-# in `windows-clippy`. Nothing held the four in step. Both CI steps
-# gained `-p nzbfast-ffi` on 23 Aug 2026 and neither documented copy did,
-# and on 24 Aug a size-gate lift (9abdb5817) re-exported a `&Daemon`
-# signature out of `serve`, which raises `Daemon`'s effective visibility
-# to public and put its `pub` fields in scope for `private_interfaces`.
-# The lib stopped compiling. That commit's message records re-running
-# clippy on the host AND against x86_64-pc-windows-gnu, both green,
-# because without nzbfast-ffi - the only crate that turns nzbfast's `ffi`
-# feature on - the lib target is never compiled and the lint has no
-# public surface to judge. main was red for hours with every documented
-# gate green, and THREE lanes converged on the fix independently. This is
-# the failure mode this file exists for, one level up: not a lane that
-# skipped a gate, a lane that ran the documented gate and was told the
-# wrong thing. It compares a TOKEN SET and not a string, because the four
-# spellings are legitimately formatted differently and a gate that is red
-# on a rewrap gets loosened until it means nothing; and a block, job or
-# step it cannot LOCATE is a refusal naming the anchor, because "it found
+# what gates a push" over and over - a host clippy line in its numbered
+# gate list, a Windows one quoted inside the entry about unix-only
+# symbols, a slim-build line written into a prose paragraph, a formatting
+# line - and ci-private.yml runs its own copy of each, in `check`,
+# `windows-clippy`, `slim-check` and `fmt`. Nothing held any of the
+# copies in step. Both clippy steps gained `-p nzbfast-ffi` on 23 Aug
+# 2026 and neither documented copy did, and on 24 Aug a size-gate lift
+# (9abdb5817) re-exported a `&Daemon` signature out of `serve`, which
+# raises `Daemon`'s effective visibility to public and put its `pub`
+# fields in scope for `private_interfaces`. The lib stopped compiling.
+# That commit's message records re-running clippy on the host AND
+# against x86_64-pc-windows-gnu, both green, because without nzbfast-ffi
+# - the only crate that turns nzbfast's `ffi` feature on - the lib
+# target is never compiled and the lint has no public surface to judge.
+# main was red for hours with every documented gate green, and THREE
+# lanes converged on the fix independently. This is the failure mode
+# this file exists for, one level up: not a lane that skipped a gate, a
+# lane that ran the documented gate and was told the wrong thing. It
+# compares a TOKEN SET and not a string, because the spellings are
+# legitimately formatted differently and a gate that is red on a rewrap
+# gets loosened until it means nothing; and a block, job or step it
+# cannot LOCATE is a refusal naming the anchor, because "it found
 # nothing, so the tree is clean" is the rubber stamp the two generator
 # gates above already demonstrated. Measured against 82cb74636^ - the
 # tree as it stood while main was red - it reports four differences,
 # including a `--locked` gap on both documented copies that no incident
-# report ever named. Here rather than in ci-private for the same reason
-# as everything above it, and with more force: the lane that edits a
-# clippy step is the lane that should be told the documented line no
-# longer matches it.
+# report ever named. The slim and fmt pairs were added the same day, and
+# the slim one carried the identical defect found by widening rather than
+# by an incident: `slim-check` has passed `--locked` since the hour it
+# was written and the documented line never did, so the widening commit
+# had to fix the line as well as add the pair. Here rather than in
+# ci-private for the same reason as everything above it, and with more
+# force: the lane that edits one of those steps is the lane that should
+# be told the documented line no longer matches it.
 # Twenty-three is `tools/ci-verdict.py --selftest`, added 24 Aug 2026, and
 # it is the only step in this file that runs a script's SELFTEST and not
 # the script. That is deliberate and load-bearing. `ci-verdict.py` with no
@@ -263,11 +271,223 @@
 # workflow. It needs no new `paths:` entry - `**/*.py` and
 # `.github/workflows/ci-private.yml` are both already triggers below, and
 # they are exactly the pair of files that can break it.
+# Twenty-four is `tools/wco-drag-gate.py`, added 24 Aug 2026, and its
+# subject is the one bug on this fleet that NOBODY CAN SEE. Two pages
+# declare their top bar to be the installed window's title bar - the
+# dashboard's `header` (72031b498) and the wall's `.bar` (a3bb81ae8) -
+# because a Chromium PWA in window-controls-overlay mode has no other
+# drag handle: a WCO window that marks nothing draggable can be moved
+# only by its frame edges. A drag region SWALLOWS THE PRESS, so every
+# control inside one has to opt back out with `app-region:no-drag`, and
+# both pages carry a hand-maintained opt-out list plus a comment asking
+# the next person to extend it. Nothing checked that anybody did. The day
+# somebody adds a control and does not extend the list, that control
+# silently stops responding to clicks in an installed app window - and
+# there is no signal anywhere: invisible in a browser tab (the media
+# query never matches), invisible in the mac wrapper (WebKit has neither
+# the display mode nor the env() variables), invisible to every Rust
+# test, and invisible to every other job in this file. Nobody here runs a
+# WCO window except when deliberately building the rig for it, which
+# takes about an hour. It is not a file list: it finds every
+# `app-region:drag` declaration, takes the SELECTOR each applies to,
+# resolves it against that file's markup and walks the subtree - because
+# a gate that hardcoded the two pages could not see the third, and a
+# third page is what commissioned this one (the wall was left out of
+# 72031b498 for a day precisely because the change was thought of as
+# belonging to one file). Here rather than on main alone for the reason
+# every entry above gives: the lane that adds a button to a bar is the
+# one lane that can be told what it just broke. `--selftest` first and it
+# is the gate: what this protects against is a scanner that has quietly
+# stopped matching, which reads as a clean tree forever, so it pins how
+# many interactive elements each fixture REACHED and floors the real
+# tree. Nine of ten mutations driven against the real pages redden it;
+# the tenth is a pinned blind case, a container that is empty in the
+# markup and filled by script.
+# Twenty-five is `tools/test-global-gate.py`, added 24 Aug 2026, and its
+# subject is the one defect class no test job in this repo can see. A
+# `static` counter or flag is one value for the whole process, so two
+# tests that write it and then assert on what it says are reading each
+# other's writes the moment they land on different threads of ONE
+# process - and every test job here and in ci-private runs nextest, which
+# gives each test its own process. It surfaces only under `cargo test
+# --bin`/`--lib` and the `unit-one-process` job. a676367fb measured it at
+# 73 failures in 200 runs on three mem-sampler tests that had been latent
+# since the day they were written, and a29a8e4cc had main red for a day
+# on the same shape across two modules. That commit also shipped the
+# better remedy where it could - a chokepoint assertion that fires in
+# every run - but the three other families on this tree (memgauge's
+# gauges, smart.rs's trash flags, par2repair's NTT breaker) have no door
+# to put one in and serialize by convention alone, and a raw
+# `X.store(v)` from a test has no function to assert inside at all. Here
+# rather than on main alone for the reason every entry above gives, and
+# more sharply: these modules' tests are copies of the one above them in
+# the file, so the lane that copies without the guard is the one lane
+# that can be told. It scores CROSS-UNIT contention too, since 24 Aug
+# 2026: a29a8e4cc's two contenders were tests of two OTHER modules,
+# joined to the static only by a `pub` door, so a per-unit scan could not
+# have seen the very incident that motivated the gate. All 43 doors on
+# this tree were read; the one live family is `serve/tests_jobs.rs`
+# reaching smart.rs's trash flags, correct today and never checked
+# before. Contention is scored per CRATE, because `cargo test -p X` is
+# one process per crate and pooling them manufactures a population that
+# cannot exist. `--selftest` first and it is the gate - an arm that
+# has quietly stopped matching reads as a clean tree forever, which this
+# script's own first draft demonstrated by blanking every `#[path]`
+# along with the string literals and losing the mem sampler unit.
+# Twenty-six is `tools/shot-version-gate.py`, added 24 Aug 2026, and it
+# is this family's first subject that is an IMAGE. Every dashboard
+# capture in `website/assets/` renders the running version in its header
+# pill, and nothing held those images to the crate version: all four
+# versioned shots went two releases stale AT ONCE, reading `v1.1.4 beta
+# 4` while crates/nzbfast/Cargo.toml was at 1.2.2, and it was caught only
+# because a person looked at an image and read the number. They were
+# re-shot in three separate passes on the same day (349e339e1, 1096d1adf
+# and 63c54b775). tools/check-site-version.sh is the precedent and the
+# reason the gap was glaring - it already holds the version STRINGS on
+# the sixteen download pages to Cargo.toml, and this is the same defect
+# one medium over, worse in one way: a stale download button 404s
+# loudly, while a stale capture quietly shows an old product to every
+# visitor and to everyone installing the PWA, since two of these images
+# are downscaled by packaging/icon/make-screenshots.sh into web/screens/
+# and declared in web/site.webmanifest. NO EXISTING GATE COULD EVER HAVE
+# CAUGHT IT, which is the argument: `website/` is not in PUBLIC_MANIFEST,
+# so `packaging/leak-check.sh --all` prints `0 public file(s) clean`
+# without having scanned it - a phrase that reads exactly like a pass -
+# and nothing in this repo can read a PNG. It cannot read one either, and
+# its header says so plainly rather than overclaiming: what it holds to
+# Cargo.toml is a human's assertion, in website/SCREENSHOTS.manifest,
+# that an image was shot at a version, so a record bumped without
+# re-shooting defeats it and no arm can tell. That still converts "nobody
+# ever looks" into "a release bump asks the question", which is the step
+# that was missing for two releases. Here rather than on main alone for
+# the reason every entry above gives, with a twist: the lane that bumps
+# the version is the one lane that can still choose to re-shoot before
+# the release goes out. MOST OF ITS ROSTER IS WAIVED, which makes the
+# waiver mechanism load-bearing rather than decorative - four indexer-fed
+# captures are deliberately stale under a standing rule dated 18 Aug
+# 2026, because populating the index the obvious way fills them with real
+# copyrighted release names, which a published capture may never carry - so a `frozen` record carries its reason and that reason
+# is printed on every run. A second arm refuses an asset nothing points
+# at, and its corpus deliberately excludes research/, .claude/ and the
+# gate's own source: all three name every asset there has ever been, and
+# counting them makes the arm inert rather than strict. That is not
+# hypothetical - the first cut counted its own docstring and reported the
+# one dead asset alive. `--selftest` first and it is the gate: every arm
+# is pinned by a case verified to bite, the run prints how many assets it
+# REACHED and how many corpus files it read, and both zeros are
+# refusals. One pin is there because the bug happened: the skip list is
+# applied to the path RELATIVE to the tree, since this repo's work
+# happens in worktrees under `.claude/`, and an absolute-parts test
+# matched the CHECKOUT LOCATION and read zero files everywhere.
+# Twenty-seven is `tools/screens-derived-gate.py`, added 24 Aug 2026, and
+# it is the sibling of Twenty-six one step downstream. Those same two
+# captures are ALSO the source of `web/screens/dash-wide.jpg` and
+# `web/screens/dash-narrow.jpg`, which packaging/icon/make-screenshots.sh
+# downscales with `sips`, which are committed, `include_bytes!`-embedded
+# in the binary, and declared as the `screenshots` array in
+# web/site.webmanifest - the array Chromium's richer install dialog
+# renders beside the app name. Nothing verified the committed copies were
+# still what the generator would produce. The script's own header asked
+# for it in prose - "the output is committed, rerun this whenever the
+# captures change" - which is the lint-waiver gate's argument once again:
+# a convention that lives only in a comment decays. What it costs is
+# sharper here than on the website half, because there are TWO failure
+# modes and only one of them is visible. A stale derivative is the picture
+# a new user sees at the moment they decide whether this is an app; and if
+# a file's dimensions stop matching its `sizes` string, Chromium ignores
+# that screenshot ENTIRELY and falls back to the bare one-line prompt,
+# with no error anywhere, so nobody sees a red line - they see a worse
+# dialog and assume it always looked like that. `sips` is macOS-only and
+# these runners are ubuntu, so the two shapes available were a recorded
+# source digest and a regenerate-and-compare, and the lane shipped BOTH
+# rather than choosing: this job holds the sha256 the generator recorded
+# for each source in website/SCREENS-DERIVED.manifest, plus every
+# dimension, ratio and declaration arm, none of which needs image tooling
+# at all, while `make-screenshots.sh --check` proves the actual bytes on a
+# mac as a pre-release step. Neither alone would do - CLAUDE.md's bench2j
+# entry is the precedent for what happens to a check that lives on one box
+# alone, and its subject rotted twice. Here rather than on main alone for
+# the reason every entry above gives, with the same twist as Twenty-six:
+# the lane that re-shoots a capture is the one lane still holding the mac
+# that can regenerate the derivative. Its roster comes from the
+# generator's own DERIVATIONS table rather than from a list of today's two
+# files, because a list is a gate that cannot see the third. `--selftest`
+# first and it is the gate: 33 cases, each pinned by a message it must
+# name, and the run prints how many files, records and declarations it
+# REACHED so an inert scanner shows a zero rather than a green.
+# Twenty-eight is `tools/icons-derived-gate.py`, added 24 Aug 2026, and it
+# is the third in this family in one day and the one whose subject is the
+# most-seen artwork the product has. Every raster mark it draws anywhere is
+# GENERATED off the three SVG masters in packaging/icon/: the seven PNGs
+# under web/icons/, plus icon-1024.png and nzbfast.ico beside those
+# masters, through make-favicons.sh, make-icon.sh and make-ico.py. They are
+# committed, seven of them are include_bytes!-embedded, four are the
+# `icons` array in web/site.webmanifest, three are `<link rel="icon">` on
+# the dashboard and the wall, and the .ico is what the Windows installer
+# welds onto the executable. Nothing verified the committed copies were
+# still what the generators would produce - a grep of .github/ and tools/
+# for "make-icons" or "web/icons" returned zero hits, and `web/icons/**`
+# was not even a trigger for this workflow. Same two failure modes as
+# Twenty-seven and both are worse here. A stale icon is the hardest thing
+# in the product to notice going wrong, because a mark you have looked at a
+# thousand times is what your eye stops reading: make-favicons.sh's own
+# header records that the previous icon defect shipped TWICE and was found
+# both times by a person looking at it. And the silent half has THREE
+# declaration sites for one file rather than one - the manifest and a
+# `sizes=` attribute on both pages - plus `purpose`, where a swap between
+# the plain and the maskable pair renders correctly everywhere except an
+# Android launcher, which insets the tile, which is the exact report that
+# pair was added to fix. qlmanage and sips are macOS-only and these runners
+# are ubuntu, so this is the recorded-digest half - the sha256 each master
+# had when its rasters were made, in packaging/icon/ICONS-DERIVED.manifest,
+# written by the generators through packaging/icon/derivations.py - plus
+# every dimension, declaration and roster arm, none of which needs image
+# tooling: the .ico's own ICONDIR is read back so a container that quietly
+# lost its 24 px entry is a red line rather than a downscale of the wrong
+# art in the taskbar. The regenerate-and-compare half is `--check` on each
+# of the three generators, on a mac, before a release; both halves were
+# measured biting on the real tree the day they landed. Its roster comes
+# from the generators' own DERIVATIONS tables, and a fourth `make-*` script
+# in that directory that this gate has never heard of is itself a refusal.
 # Each gate is its own job with its own concurrency group, so one cannot
 # starve or cancel another, and each verdict shows up under its own name
 # on the commit.
 #
-# The `paths:` filter is the union of what the twenty-six scripts actually
+# Twenty-nine is `tools/icon-downstream-gate.py`, added 24 Aug 2026, the
+# direct follow-on to Twenty-eight and the one that covers the step that
+# gate deliberately did not take. packaging/icon/icon-1024.png is not only
+# an output, it is a SOURCE: packaging/flatpak/make-icon.sh downscales it
+# into the icon Flathub shows, and packaging/qnap/make-icons.sh into the
+# three QTS App Center icons - and nothing of any kind checked those four
+# were still what their generators produce. A grep of .github/ and tools/
+# for "qnap/icons", "io.github.nzbfast.nzbfast.png" or "make-icons.sh"
+# returned zero hits outside packaging/icon/, and `packaging/qnap/**` was
+# not even a trigger for this workflow. That sibling names these four as
+# out of scope on the reasoning that they are protected one link up - their
+# master IS icon-1024.png, which it holds to icon.svg - and that reasoning
+# is sound and exactly half the problem: it catches an EDITED master, and
+# leaves the FORGOTTEN DOWNSCALE, where icon.svg moves, icon-1024.png is
+# regenerated and committed, that gate goes green having reported the
+# truth, and these four still carry the previous mark on a store page and
+# on every App Center tile. Same both-halves design for the same reason -
+# sips is macOS-only, so this is the recorded-digest half, in
+# packaging/icon/ICONS-DOWNSTREAM.manifest, and `--check` on each generator
+# is the mac half. Its own arms are the ones no digest can reach: a hicolor
+# install directory named for a size nothing held to the file, a qbuild
+# copy list that must name every row and no other, and the GREY icon's
+# PIXELS - because `sips -M` writes NO OUTPUT for an image with an alpha
+# channel and fails silently, so the documented failure of that transform
+# is a file of the right size, the right format and the wrong colour, which
+# a 64x64 measurement cannot see. Its roster is a SCAN of packaging/ and
+# macapp/ rather than a list, precisely because the sibling's is scoped to
+# packaging/icon/ and would not have seen either of the two scripts this
+# gate exists for; macapp/make-app.sh is the one waiver and says at its own
+# site that its iconset is built into a temp directory and committed
+# nowhere. All four files were measured reproducing byte-identically before
+# the design was settled, the hand-greyscaled one included, so no arm had
+# to be weakened and there was nothing stale to fix.
+#
+# The `paths:` filter is the union of what the thirty-two scripts actually
 # read, worked out from the scripts rather than guessed, because a push
 # the filter skips is a push the gates silently miss:
 #
@@ -290,11 +510,15 @@
 #     top of that, whose subject is 60 of those same pages, and the nav
 #     staleness gate's other two arms, whose subject is those 60 plus
 #     their four English bases. None of the four gates needed anything
-#     added here beyond its own script. Do not narrow any of these entries
+#     added here beyond its own script, and neither did the fifth: the
+#     screenshot version gate reads `website/assets/` and
+#     `website/SCREENSHOTS.manifest`, both under `website/**`, and
+#     `crates/nzbfast/Cargo.toml`, already covered by `crates/**` at the
+#     top of this list. Do not narrow any of these entries
 #     on the overflow gate's behalf without re-reading this line:
-#     `website/**` alone now carries FOUR, and narrowing it would leave
+#     `website/**` alone now carries FIVE, and narrowing it would leave
 #     the anonymity arm wired to a trigger a leaked city name cannot
-#     fire.
+#     fire, and the screenshot roster wired to one a new capture cannot.
 #   - `**/bench2*.sh`, `**/mkbench2*.py`: the bench2j gate's subject is a
 #     generated bench driver, its parent, and the generator between
 #     them. Nothing else in the filter reaches those - a bench driver is
@@ -352,7 +576,7 @@
 #     above provably reaches its subject the file still names it
 #     separately (see the harness/i18n case just below), so a dot-prefixed
 #     path gets no less.
-#   - the twenty-six gate scripts and this file. `crates/**` and `**/*.rs`
+#   - the thirty-two gate scripts and this file. `crates/**` and `**/*.rs`
 #     already carry the harness gate's whole subject, so it adds only its
 #     own script to the list, and `**/*.py` already reaches
 #     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
@@ -433,7 +657,17 @@ on:
       - 'macapp/**'
       - 'tools/payload-id-gate.py'
       - 'tools/bg-token-gate.py'
+      - 'tools/test-global-gate.py'
       - 'tools/claude-clippy-gate.py'
+      - 'tools/wco-drag-gate.py'
+      - 'tools/shot-version-gate.py'
+      - 'tools/screens-derived-gate.py'
+      - 'web/screens/**'
+      - 'tools/icons-derived-gate.py'
+      - 'web/icons/**'
+      - 'packaging/icon/**'
+      - 'tools/icon-downstream-gate.py'
+      - 'packaging/qnap/**'
       - '.github/workflows/ci-private.yml'
       - 'web/ui-tokens.html'
       - 'web/site.webmanifest'
@@ -447,22 +681,35 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out twenty-six
+# Every job below is the same shape, deliberately spelled out thirty-two
 # times rather than as a matrix, so each step's `run:` line is the bare
 # script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of twenty-two of the twenty-six. The memory
+# about what passes - true of twenty-four of the thirty-two. The memory
 # and hooks gates have no ci-private line to match, see "Eighteen" above,
 # and neither does the clippy-doc gate, which is wired here alone - this
 # file runs on main's pushes too, so nothing is lost by that. The
-# ci-verdict roster job is the fourth and the only one that DELIBERATELY
+# wco-drag gate is the fourth, wired here alone for the same reason and
+# left out of this sentence when it landed. The
+# ci-verdict roster job is the fifth and the only one that DELIBERATELY
 # differs: ci-private runs `--selftest && <the gate>`, this runs the
 # selftest ALONE, because the gate half is a statement about main's state
 # and would red the next lane. See "Twenty-three" above - that asymmetry
 # is the design, not drift, so do not "fix" it by appending the gate.
+# The wco-drag gate is the fifth, wired here alone at landing for the same
+# reason as the clippy-doc one; the arithmetic above counts it. The
+# screens-derived gate is the sixth, wired here alone for the same reason
+# again - this file runs on main's pushes too, so nothing is lost by it,
+# and its subject is a picture a lane can only fix while it still has the
+# mac in front of it. The icons-derived gate is the seventh and last, wired
+# here alone for that same reason one more time: its regenerate-and-compare
+# half needs qlmanage, so the lane holding the mac is the only lane that
+# can act on a hit at all. The downstream icon gate is the eighth, wired
+# here alone for exactly that reason again - its own mac half is `--check`
+# on two generators that need sips.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With twenty-six jobs that
+# in the run, so one slow leg kills the fast one. With thirty-two jobs that
 # is no longer hypothetical - a per-job group means the overflow gate's
 # selftest can never take the lock gate's verdict down with it.
 #
@@ -730,6 +977,28 @@ jobs:
       # that reads as a clean tree forever.
       - name: payload id gate
         run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
+  test-global-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: test-global-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A `#[test]` that writes a process-global and asserts on what it says
+      # is reading its neighbours' writes whenever they land on different
+      # threads of ONE process - and nextest cannot see that, because it
+      # gives every test its own process. a676367fb measured 73 failures in
+      # 200 runs on three tests that had been latent since they were
+      # written. Here rather than only in ci-private because the modules
+      # this covers serialize by CONVENTION: a new test copies the one above
+      # it, and one that copies without the guard must be red on the
+      # AUTHOR's push, not on whoever next runs `--bin nzbfast` by hand.
+      # `--selftest` first - what this protects against is an arm that has
+      # quietly stopped matching, which reads as a clean tree forever.
+      - name: test global gate
+        run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
   bg-token-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -756,6 +1025,152 @@ jobs:
       # clean tree forever - nav-regen's dead picker arm, above, for months.
       - name: bg token gate
         run: tools/bg-token-gate.py --selftest && tools/bg-token-gate.py
+  wco-drag-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: wco-drag-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Two pages declare their top bar to be the installed window's drag
+      # handle, because a Chromium PWA in window-controls-overlay mode has
+      # no other one. A drag region SWALLOWS THE PRESS, so every control
+      # inside it has to opt back out with `app-region:no-drag`, and both
+      # pages carry a hand-maintained list plus a comment asking the next
+      # person to extend it. A control added and not listed silently stops
+      # responding to clicks in an installed window, and NOTHING else on
+      # this fleet would ever say so - not a browser tab (the media query
+      # never matches), not the mac wrapper (WebKit has neither the display
+      # mode nor the env() variables), not a Rust test, not another job
+      # here. Here rather than in ci-private because the lane that adds the
+      # button is the one lane that can be told. `--selftest` first, and it
+      # is the gate: it pins how many interactive elements each fixture
+      # reached, so a scanner that has quietly stopped matching shows a
+      # zero instead of the clean tree it would otherwise report forever.
+      - name: wco drag gate
+        run: tools/wco-drag-gate.py --selftest && tools/wco-drag-gate.py
+  one-process-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: one-process-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # ci-private's `unit-one-process` carries no list - it reads the
+      # nextest archive's inventory and runs EVERY first-party lib/bin unit
+      # binary. nightly's `one-process-loaded`, the only job in the repo
+      # that runs that shape under LOAD, named its binary by hand and ran
+      # ONE of four. That is how
+      # `pool::fault_rigs::the_line_peak_reads_the_line_with_the_fleet_dialled_together`
+      # (nzbkit LIB) went red twice in 400 main runs on 23-24 Aug 2026 with
+      # the loaded job running the nzbfast BIN root, and was found by a
+      # human instead. This holds that matrix to the manifests: every
+      # derived target is a leg or a `one-process-uncovered:` line with a
+      # reason, and a renamed job, an empty matrix or a leg naming nothing
+      # is a REFUSAL rather than a pass. Here rather than in ci-private
+      # because the lane that adds the crate is the one lane that can be
+      # told - a nightly-only signal lands on whoever pushes next. Build
+      # free, about a tenth of a second.
+      - name: one process roster
+        run: |
+          tools/one-process-roster.py --selftest
+          tools/one-process-roster.py
+  shot-version-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: shot-version-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Every dashboard capture in website/assets/ renders the running
+      # version in its header pill, and nothing held those images to the
+      # crate version - all four went two releases stale at once, and a
+      # person reading a number off an image is what caught it. The
+      # sibling of ci-private's site-version-gate, one medium over, and
+      # worse in one way: a stale download button 404s loudly, a stale
+      # capture just shows an old product to everyone who visits. No other
+      # gate could see it - website/ is outside PUBLIC_MANIFEST, so
+      # leak-check reports `0 public file(s) clean` without scanning it,
+      # and nothing here can read a PNG. It cannot either: it holds a
+      # human's assertion in website/SCREENSHOTS.manifest to Cargo.toml,
+      # which its header states plainly rather than overclaiming.
+      # `--selftest` first, and it is the gate: the run prints how many
+      # assets it REACHED and how many corpus files the reference arm
+      # read, and both zeros are refusals.
+      - name: screenshot version gate
+        run: tools/shot-version-gate.py --selftest && tools/shot-version-gate.py
+  screens-derived-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: screens-derived-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The install dialog's two screenshots are GENERATED from the same
+      # captures the job above holds to the crate version, and nothing
+      # verified the committed copies were still what the generator would
+      # produce. `sips` is macOS-only, so this arm holds the source sha256
+      # the generator recorded, plus every dimension and ratio arm - which
+      # need no image tooling and catch the failure no digest can see: a
+      # file whose dimensions stop matching its `sizes` string is dropped
+      # from the dialog by Chromium SILENTLY. The regenerate-and-compare
+      # half is `make-screenshots.sh --check`, on a mac, before a release.
+      - name: install screenshot derivation gate
+        run: tools/screens-derived-gate.py --selftest && tools/screens-derived-gate.py
+  icons-derived-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: icons-derived-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Every raster mark the product shows is GENERATED off the three SVG
+      # masters in packaging/icon/, and nothing verified the committed
+      # copies were still what the generators produce - web/icons/** was
+      # not even a trigger for this workflow. qlmanage and sips are
+      # macOS-only, so this arm holds the master sha256 the generators
+      # recorded, plus every dimension, declaration and roster arm - which
+      # need no image tooling and catch what no digest can: a `sizes` that
+      # stops matching its file is ignored by Chromium SILENTLY, and it is
+      # declared in THREE places per file here (the manifest and a
+      # `sizes=` on both pages), while a `purpose` swap renders correctly
+      # everywhere except the Android launcher it puts an inset tile on.
+      # The regenerate-and-compare half is `--check` on each of the three
+      # generators, on a mac, before a release.
+      - name: icon derivation gate
+        run: tools/icons-derived-gate.py --selftest && tools/icons-derived-gate.py
+  icon-downstream-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: icon-downstream-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # packaging/icon/icon-1024.png is a SOURCE as well as an output: four
+      # committed rasters are downscaled from it, the Flathub icon and the
+      # three QTS App Center icons, and nothing checked they were still what
+      # their generators produce. The gate above covers the FIRST generation
+      # and names these as out of scope because an edited master cannot go
+      # unreported there - which leaves the forgotten DOWNSCALE, where that
+      # gate is green and correct and these four carry the previous mark.
+      # sips is macOS-only, so this arm holds the recorded master digest
+      # plus the arms no digest reaches: the hicolor install size, the
+      # qbuild copy list, and the grey icon's PIXELS, whose documented
+      # failure is a file of the right size and the wrong colour.
+      - name: downstream icon gate
+        run: tools/icon-downstream-gate.py --selftest && tools/icon-downstream-gate.py
   manual-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest

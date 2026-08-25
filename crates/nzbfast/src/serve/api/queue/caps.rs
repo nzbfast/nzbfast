@@ -87,8 +87,12 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
     let global = d.connections.load(Ordering::Relaxed).max(1);
     // TODO 208 item 1: the line-aware cap the next build will seed
     // under, so "using M of N" shows the number the job will open.
+    // TODO 277: from the SAME anchor the runner stamps on the hub at
+    // job start, or this card would promise a fleet the next job would
+    // not open on a line fast enough to grow it.
+    let (anchor_bps, _) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
     let line_share =
-        crate::conntune::line_cap_share(c.servers.iter().filter(|s| s.enabled).count());
+        crate::conntune::line_cap_share(c.servers.iter().filter(|s| s.enabled).count(), anchor_bps);
     c.servers
         .iter()
         .filter(|s| s.enabled)

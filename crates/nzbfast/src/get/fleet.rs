@@ -246,12 +246,25 @@ pub(super) async fn build_fleet(
     // - the in-run shed stands down without one
     // (`Shared::line_cap_tick`), and the stall bound sizes an article's
     // share from it.
-    let line_cap = crate::conntune::line_cap_fleet();
     let anchor_bps = hub
         .as_ref()
         .map(|h| h.line_anchor_bps.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(0);
-    let line_share = crate::conntune::line_cap_share(cfg_all.servers.len());
+    // TODO 277: the fleet is a curve on that anchor now, not a flat
+    // constant. An anchor of 0 - a CLI run, a sidecar, a daemon that
+    // has not finished a job yet - is the curve's floor, which is the
+    // number that shipped, so nothing about those runs changes.
+    let line_cap = crate::conntune::line_cap_fleet(anchor_bps);
+    let line_share = crate::conntune::line_cap_share(cfg_all.servers.len(), anchor_bps);
+    // TODO 277: the seed SPAWNS slots for a bigger fleet than it runs,
+    // and parks the surplus, so that the in-run governor's raise has
+    // somewhere to land - a `ConnTarget` above the spawned fleet wakes
+    // nothing. `conntune::line_cap_headroom_fleet` carries the whole
+    // argument and the three scoping rules.
+    let headroom_share = nzbkit::pool::linecap::server_share(
+        crate::conntune::line_cap_headroom_fleet(line_cap, crate::conntune::line_cap_is_auto()),
+        cfg_all.servers.len(),
+    );
     let seed_bucket = crate::conntune::bucket_of(crate::conntune::local_hour());
     let mut servers: Vec<_> = cfg_all
         .servers
@@ -261,6 +274,11 @@ pub(super) async fn build_fleet(
             if let Some(cap) = host_caps.get(&s.host) {
                 base = base.min((*cap).max(1));
             }
+            // What this server's own ceilings allow, before the fleet
+            // cap takes its share out: the bound TODO 277's spawn
+            // headroom is held to below, so that parking a surplus can
+            // never ask an account for more than it grants.
+            let uncapped = base;
             if let Some(share) = line_share
                 && !s.pin_connections
                 && share < base
@@ -276,10 +294,16 @@ pub(super) async fn build_fleet(
                 // cold giganews serves ~10-13 Mbps per connection, so
                 // the fleet cap held ~0.35 Gbps on a line that had
                 // recorded a 2.5 Gbps peak the same half hour.
+                // The head of this line - through `across N servers` -
+                // is parsed POSITIONALLY by the bench rig's fleet guard
+                // (it stamps `linecap=<fleet>:<allowed>of<asked>` on a
+                // leg line from it), so TODO 277's line reading is
+                // APPENDED after it and nothing before it moves.
                 info!(target: "tune", "line cap: {} {share} of {base} (fleet cap {line_cap} \
-                       across {} servers; pin this server's connections in Settings to \
-                       lift it for that server, or NZBFAST_LINE_CAP=0 turns it off)",
-                      s.host, cfg_all.servers.len());
+                       across {} servers, sized from a {:.0} Mbit line; pin this server's \
+                       connections in Settings to lift it for that server, or \
+                       NZBFAST_LINE_CAP=0 turns it off)",
+                      s.host, cfg_all.servers.len(), anchor_bps as f64 * 8.0 / 1e6);
                 base = share;
             }
             let applied = crate::conntune::applied_connections(
@@ -316,16 +340,38 @@ pub(super) async fn build_fleet(
                 // the hub: with no walker there is no belief to carry
                 // across jobs, and the seed above re-derives it.
                 // Handed out anchor or not: a mid-run one finds it.
-                _ => (
-                    applied,
-                    (line_cap > 0 && !s.pin_connections && applied > 1)
-                        .then(|| nzbkit::pool::ConnTarget::new(applied)),
-                ),
+                _ => {
+                    let target = (line_cap > 0 && !s.pin_connections && applied > 1)
+                        .then(|| nzbkit::pool::ConnTarget::new(applied));
+                    // TODO 277's spawn headroom, and only where there
+                    // IS a target to raise: a pinned server, a single
+                    // connection and a cap turned off all keep the old
+                    // shape exactly, spawning what they run.
+                    let spawn = match &target {
+                        None => applied,
+                        Some(_) => crate::conntune::line_cap_spawn_slots(
+                            applied,
+                            headroom_share,
+                            uncapped,
+                            s.pin_connections,
+                            tuned.get(&s.host),
+                            now,
+                        ),
+                    };
+                    (spawn, target)
+                }
             };
             // Cross-job hand-over: this host's slice of the daemon's
             // connection budget, sized to exactly the fleet spawned
             // here, and the run's idle signal. Both absent off the
             // daemon hub (CLI, sidecar), where no successor exists.
+            //
+            // SPAWNED and not dialled (TODO 277): the cap has to cover
+            // every slot the in-run governor may wake, or a raise would
+            // find its new workers blocked on `acquire` rather than on
+            // the line. It is still bounded by the account's own
+            // number, which is the limit this lease exists to hold two
+            // runs inside.
             let lease = hub
                 .as_ref()
                 .and_then(|h| h.conn_budget.get())
@@ -337,6 +383,7 @@ pub(super) async fn build_fleet(
                 lease,
                 handoff,
                 line_cap_fleet: line_cap,
+                line_cap_auto: crate::conntune::line_cap_is_auto(),
                 line_anchor_bps: anchor_bps,
                 window,
                 // The get pipeline's drain releases this charge
@@ -589,14 +636,16 @@ mod block_account_wiring {
 mod line_cap_seed {
     use super::*;
 
-    /// TODO 208 item 1: the link anchor reaches the seed. Five servers
-    /// at 100 each on a link seen to move 12.5 MB/s (100 Mbit) open
-    /// ten apiece - the measured fleet-50 rung - and each non-pinned
-    /// server gets a live target for the in-run shed, while a pinned
-    /// server keeps its number AND gets no target (a statement, not a
-    /// state). A hub with no anchor (a fresh install, and the CLI's
-    /// `None` hub) dials the configured fleet once.
-    async fn build(cfg: &Config, hub: &Option<Arc<StreamHub>>) -> Vec<(String, usize, bool)> {
+    /// Each server as `(host, SPAWNED slots, live target)`, which since
+    /// TODO 277 are three different facts rather than two. The spawn
+    /// count is the fleet curve's CEILING share, so the in-run governor
+    /// has slots to wake; the target is the curve's own number, which
+    /// is what the run dials; a pinned server keeps its configured
+    /// number AND gets no target at all (a statement, not a state).
+    async fn build(
+        cfg: &Config,
+        hub: &Option<Arc<StreamHub>>,
+    ) -> Vec<(String, usize, Option<usize>)> {
         let dir = std::env::temp_dir().join(format!(
             "nzbfast-linecap-{}-{}",
             std::process::id(),
@@ -618,7 +667,13 @@ mod line_cap_seed {
         fleet
             .servers
             .iter()
-            .map(|(s, p)| (s.host.clone(), p.connections, p.live_target.is_some()))
+            .map(|(s, p)| {
+                (
+                    s.host.clone(),
+                    p.connections,
+                    p.live_target.as_ref().map(|t| t.get()),
+                )
+            })
             .collect()
     }
 
@@ -635,47 +690,70 @@ mod line_cap_seed {
         .unwrap()
     }
 
-    /// The constant is fleet 25 over five servers = 5 each, whatever
-    /// the line, and the pinned server keeps the number it was given.
+    /// The curve's FLOOR is fleet 25 over five servers = 5 each at
+    /// 100 Mbit, and the pinned server keeps the number it was given.
+    /// The spawn is ten apiece - the ceiling's share, TODO 277 - so the
+    /// four capped servers run at 5 with 5 parked behind each.
     #[tokio::test]
-    async fn the_constant_seeds_five_per_server_and_a_pin_wins() {
+    async fn the_curves_floor_dials_five_per_server_and_a_pin_wins() {
         let hub = Arc::new(StreamHub {
             line_anchor_bps: std::sync::atomic::AtomicU64::new(12_500_000),
             ..Default::default()
         });
         let got = build(&five(), &Some(hub)).await;
-        let want: Vec<(String, usize, bool)> = ["a", "b", "c", "d"]
+        let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
             .iter()
-            .map(|h| (format!("{h}.example"), 5, true))
-            .chain(std::iter::once(("e.example".to_string(), 100, false)))
+            .map(|h| (format!("{h}.example"), 10, Some(5)))
+            .chain(std::iter::once(("e.example".to_string(), 100, None)))
             .collect();
         assert_eq!(got, want);
     }
 
-    /// TODO 208 item 1, the behaviour change the constant brings: a run
-    /// with no link anchor - every CLI run, and a daemon's first job -
-    /// is capped like any other, where the per-Mbit rule let it dial
-    /// the configured fleet for want of a line to divide. The in-run
-    /// shed still stands down without an anchor, so the targets are
-    /// still handed out.
+    /// TODO 277's whole point: a run whose seed sees NO line still
+    /// spawns the ceiling's worth of slots, so the in-run governor has
+    /// somewhere to put a raise. Before this the surplus did not exist
+    /// and a raised `ConnTarget` woke nothing (`ConnTarget::set`), which
+    /// is why a `nzbfast get` on a 10 GbE line dialled 25 for ever.
     #[tokio::test]
-    async fn no_anchor_is_capped_too_because_a_constant_needs_no_line() {
+    async fn an_anchorless_run_still_spawns_the_ceiling_to_grow_into() {
         for hub in [None, Some(Arc::new(StreamHub::default()))] {
             let got = build(&five(), &hub).await;
             assert!(
-                got.iter().all(|(h, c, t)| if h == "e.example" {
-                    *c == 100 && !*t
+                got.iter().all(|(h, spawned, target)| if h == "e.example" {
+                    *spawned == 100 && target.is_none()
                 } else {
-                    *c == 5 && *t
+                    *spawned == 10 && *target == Some(5)
                 }),
                 "{got:?}"
             );
         }
     }
 
+    /// A line already at the curve's ceiling has nothing to grow into,
+    /// so the spawn and the target are the same number - the shape that
+    /// shipped, reached from the other end.
+    #[tokio::test]
+    async fn a_ten_gig_anchor_spawns_exactly_what_it_dials() {
+        let hub = Arc::new(StreamHub {
+            // 10 Gbit/s in bytes/s: past `fleet_for_line`'s ceiling.
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(1_250_000_000),
+            ..Default::default()
+        });
+        let got = build(&five(), &Some(hub)).await;
+        assert!(
+            got.iter().all(|(h, spawned, target)| if h == "e.example" {
+                *spawned == 100 && target.is_none()
+            } else {
+                *spawned == 10 && *target == Some(10)
+            }),
+            "{got:?}"
+        );
+    }
+
     /// The retired 720 Mbit stand-down: a gigabit anchor used to hand
     /// the fleet back whole. §208 measured fleet 20 a second AHEAD of
-    /// fleet 360 on an unshaped 1 GbE line, so it no longer does.
+    /// fleet 360 on an unshaped 1 GbE line, so it no longer does - it
+    /// is still on the curve's floor, and still dials 5.
     #[tokio::test]
     async fn a_gigabit_anchor_is_capped_as_well() {
         let hub = Arc::new(StreamHub {
@@ -685,7 +763,7 @@ mod line_cap_seed {
         let got = build(&five(), &Some(hub)).await;
         assert!(
             got.iter()
-                .all(|(h, c, _)| *c == if h == "e.example" { 100 } else { 5 }),
+                .all(|(h, _, target)| *target == if h == "e.example" { None } else { Some(5) }),
             "{got:?}"
         );
     }

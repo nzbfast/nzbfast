@@ -486,9 +486,27 @@ fn chase_volume_set_cases() {
 /// under the cap as their allowance, the allowance shrinks to nothing
 /// while the engine is held, reopens once the engine's catch-up trim
 /// releases the consumed volumes, and the set never breaks the budget
-/// on the way. Deterministic by construction: the engine is held on
-/// volume 0 while the set is fed past the mark, then let go, so the
-/// transitions are forced rather than raced.
+/// on the way. Deterministic by construction: the engine is held for
+/// the whole feed, then let go, so the transitions are forced rather
+/// than raced.
+///
+/// WHAT "BY CONSTRUCTION" COST (§287, 24 Aug 2026). The hold used to be
+/// taken AFTER volume 0 was fed, and `pause_chase_reads` was a snapshot
+/// of the volumes registered at that instant - so it held the engine
+/// only while the engine was still inside volume 0. Lose the race
+/// between the last article of volume 0 and the pause (about 200 kB of
+/// decode, which a loaded box hands over freely) and the engine is past
+/// the one paused buffer; volumes 1..n register during the pause and
+/// nothing paused THEM, so the engine ran away through the whole set.
+/// It never breached, because `park_reeval` runs the drop-behind trim
+/// BEFORE it parks: the runaway engine kept releasing consumed volumes
+/// faster than the feed added them, the pressure never reached the
+/// engage mark, and the park log stayed empty - the `[]` this case
+/// failed with in 2 of 6 full CI sweeps. The pause now latches on the
+/// extractor and a volume registering under it is born paused, so it is
+/// taken here BEFORE the chase exists and the engine cannot read a byte
+/// of ANY volume until the guard drops. That is what the watermark
+/// assertion below pins; it is not decoration.
 fn holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up() {
     let dir = tmpdir("chase-holds-park");
     let (f, vols, names) = chase_volume_set();
@@ -515,9 +533,18 @@ fn holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up() 
     );
     eat_budget_to(&ex, vols.len(), CAP - junk, 151);
 
-    // Volume 0 registers the chase; hold the engine on it.
-    feed(&ex, 0, &names[0], &vols[0], 7000, 33);
+    // The hold goes on BEFORE the set registers, so every volume of it
+    // is born paused and the engine's progress is this test's to give.
     let pause = ex.pause_chase_reads();
+    // Volume 0 registers the chase, under the hold.
+    feed(&ex, 0, &names[0], &vols[0], 7000, 33);
+    assert_eq!(
+        ex.chase_watermark_bytes(),
+        0,
+        "the hold did not reach volume 0 - the engine read {} byte(s) of \
+         it, so everything below measures a race and not the backpressure",
+        ex.chase_watermark_bytes()
+    );
     assert!(log.lock().unwrap().is_empty(), "parked under the mark");
     for i in 1..vols.len() - 1 {
         feed(&ex, i, &names[i], &vols[i], 7000, 33 + i as u64);
@@ -528,7 +555,25 @@ fn holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up() 
     // body's worth, which is the liveness floor's job to carry.
     let (parks, parked_union) = {
         let l = log.lock().unwrap();
-        assert!(!l.is_empty() && l.iter().all(|(_, a)| a.is_some()), "{l:?}");
+        assert!(
+            !l.is_empty() && l.iter().all(|(_, a)| a.is_some()),
+            "{}: park log {l:?} (holds {} of cap {}, engage {engage}, \
+             trimmed {}, consumed {} of {}, watermark {})",
+            if l.is_empty() {
+                "nothing ever parked - the holds never reached the engage \
+                 mark, or the trim kept releasing them faster than the feed \
+                 filled them"
+            } else {
+                "a park entry carried no allowance - a RELEASE (None) was \
+                 raised while the engine was still held"
+            },
+            ex.holds_budget_for_tests().len(),
+            ex.holds_cap(),
+            ex.chase_trimmed_bytes(),
+            ex.chase_consumed_volumes(),
+            vols.len(),
+            ex.chase_watermark_bytes()
+        );
         let allows: Vec<u64> = l.iter().map(|(_, a)| a.unwrap()).collect();
         assert!(allows.windows(2).all(|w| w[1] <= w[0]), "{allows:?}");
         assert!(

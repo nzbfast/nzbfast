@@ -349,12 +349,19 @@ fn m_change_cat(
 }
 
 /// §282 item 12. `value` is the download that cannot finish, `alt` the
-/// held spare to run instead. Both must still be in the queue and the
-/// spare must be held against that job - see `Daemon::alt_switch`, which
-/// does the whole thing under one hold of the queue.
+/// held spare to run instead. The spare must still be in the queue and
+/// must be held against that job - see `Daemon::alt_switch`, which does
+/// the whole thing under one hold of the queue.
+///
+/// **`value` MAY BE A HISTORY ROW** since §284: a job that has already
+/// failed is offered the same switch on its history drawer, and the id
+/// is all that changes here. `alt_switch` resolves it against the queue
+/// first and history second, so this handler needs no arm of its own -
+/// which is the point, because a second door would be a second place for
+/// the two roads' rules to drift apart.
 ///
 /// The refusals come back as `error` for the toast rather than as a
-/// status code: every one of them means the queue moved under the tab,
+/// status code: every one of them means the record moved under the tab,
 /// and the sentence says what to do about it.
 fn m_alt_switch(
     d: &Arc<Daemon>,
@@ -368,6 +375,62 @@ fn m_alt_switch(
     Some(match d.alt_switch(&id, &alt) {
         Some(err) => json!({"status": false, "error": err}),
         None => json!({"status": true, "nzo_id": alt}),
+    })
+}
+
+/// §282 item 20. `value` is the download that cannot finish - a queue
+/// row, or (§284) the history row of one that already did; the answer is
+/// the ranked list of copies a person may pick from, already filtered to
+/// the same release and inside the cost ceilings.
+///
+/// A SEARCH and nothing else: no grab is spent, nothing is enqueued and
+/// nothing downloads. The pick is `mode=alt_hunt_pick` and it happens on
+/// a second click.
+///
+/// The refusals come back as `error` for the toast rather than as a
+/// status code, the way `alt_switch`'s do, because every one of them is a
+/// sentence the user can act on - a setting, an *arr that owns the retry,
+/// a post too young to be worth replacing.
+fn m_alt_hunt(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    let id = params.get("value").cloned().unwrap_or_default();
+    Some(match d.hunt_offer(&id) {
+        Ok(mut v) => {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("status".into(), json!(true));
+            }
+            v
+        }
+        Err(e) => json!({"status": false, "error": e}),
+    })
+}
+
+/// §282 item 20, the second click. `value` is the download that cannot
+/// finish - queue row or (§284) history row - and `alt` is the `key` of a
+/// row from `mode=alt_hunt`'s list.
+///
+/// This is the one that spends: it fetches that copy's .nzb against the
+/// indexer's daily grab budget, holds it to the same-post admission test,
+/// and hands it to the EXISTING switch path - so the doomed job is failed
+/// with the verdict's own sentence and both rows record what replaced
+/// what. Nothing here re-spells any of that.
+fn m_alt_hunt_pick(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    let id = params.get("value").cloned().unwrap_or_default();
+    let alt = params.get("alt").cloned().unwrap_or_default();
+    Some(match d.hunt_pick(&id, &alt) {
+        Ok(nzo_id) => json!({"status": true, "nzo_id": nzo_id}),
+        Err(e) => json!({"status": false, "error": e}),
     })
 }
 
@@ -1614,6 +1677,13 @@ pub(in crate::serve) fn dispatch(
         // the notice and the button from `alt_offer`, and the user
         // clicks.
         "alt_switch" => return m_alt_switch(d, req, params, ctx, api_body),
+        // §282 item 20: the other button item 12 described and did not
+        // build. With nothing held, search for a copy of the same
+        // release and show what was found, ranked, for the user to pick.
+        // The search spends no grab and enqueues nothing; the pick below
+        // spends one grab and goes through `alt_switch` itself.
+        "alt_hunt" => return m_alt_hunt(d, req, params, ctx, api_body),
+        "alt_hunt_pick" => return m_alt_hunt_pick(d, req, params, ctx, api_body),
         "eat_volumes" => return m_eat_volumes(d, req, params, ctx, api_body),
         // M24: attach an archive password to a job. Queued jobs
         // use it at completion; a history job flagged

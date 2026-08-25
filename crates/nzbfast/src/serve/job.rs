@@ -1317,12 +1317,14 @@ pub(crate) fn kept_notes_from_json(v: &Value) -> Option<VecDeque<KeptNote>> {
 ///
 /// Called when the notice goes - dismissed, retried, or pushed off the
 /// end of the ring - because the file is reachable through nothing else
-/// once that happens. Best-effort: an empty path means there was never
-/// one, and a failed removal costs a small file in the spool, not
-/// correctness.
+/// once that happens. An empty path means there was never one. The
+/// removal itself goes through [`drop_spool`]: the copy sits in the
+/// spool under the adoptable name, so a refused unlink here is not "a
+/// small file left behind", it is the dismissed release re-enqueued at
+/// the next start (Codex sweep 24 Aug, F-04).
 pub(crate) fn drop_kept_nzb(note: &KeptNote) {
     if !note.nzb.is_empty() {
-        let _ = std::fs::remove_file(&note.nzb);
+        drop_spool(std::path::Path::new(&note.nzb));
     }
 }
 

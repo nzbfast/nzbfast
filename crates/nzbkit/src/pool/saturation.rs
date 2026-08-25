@@ -595,7 +595,12 @@ impl Shared {
 
     /// [`Self::stall_bound`] at a given pool instant (ms since start).
     pub(super) fn stall_bound_at(&self, now: u64) -> Duration {
-        let live = self.workers_live.load(Ordering::Relaxed);
+        // DIALLING, not live: a fleet that spawns above its live target
+        // and parks the surplus (TODO 112's walker, TODO 277's fleet
+        // headroom) is not splitting the line that many ways, and
+        // counting the parked workers here would stretch this deadline
+        // in proportion. See `Shared::workers_dialling`.
+        let live = self.workers_dialling();
         // `pending` is every non-terminal article - queued AND in
         // flight (see `Shared::pending`) - so it is the sharer count on
         // its own. Adding `inflight.len()` counted the in-flight ones

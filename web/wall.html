@@ -98,7 +98,12 @@ body{margin:0;background:var(--bg);color:var(--fg);
    the bar is stuck. */
 .bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;
   flex-wrap:wrap;row-gap:8px;
-  padding:calc(12px + var(--tbh,0px)) 22px 12px;
+  /* The bar's own padding, held in variables so the phone arm below and
+     the window-controls-overlay arm at the foot of this sheet can each
+     restate one term without repeating the other two. --tbh is the mac
+     wrapper's title-bar inset (above); it is unset everywhere else. */
+  --barpx:22px;--barpy:12px;
+  padding:calc(var(--barpy) + var(--tbh,0px)) var(--barpx) var(--barpy);
   background:color-mix(in srgb,var(--bg) 82%,transparent);
   backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
 /* The nav travels as one block and is pushed to the end, so the four
@@ -561,7 +566,7 @@ button:active:not(:disabled){transform:scale(.94);filter:brightness(1.35)}
      of bar + 34px of chips on an 812px screen, sticky, i.e. 40% gone
      before a single poster. */
   /* One row: the mark, the search box, and the way into everything else. */
-  .bar{flex-wrap:nowrap;gap:9px;padding:calc(9px + var(--tbh,0px)) 12px 9px}
+  .bar{flex-wrap:nowrap;gap:9px;--barpx:12px;--barpy:9px}
   #densctl{display:none}
   .bar h1{font-size:15px}
   .bar h1 a span,.bar h1 a::after{display:none}
@@ -635,6 +640,59 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
   font-size:13.5px;color:var(--dim);text-align:center}
 #noidxnote b{color:var(--fg)}
 #noidxnote a{color:var(--acc)}
+/* Window Controls Overlay, the wall's half of what the dashboard got in
+   72031b498. An installed Chromium PWA whose manifest asks for it draws
+   the page all the way UP INTO the title bar and hands back the strip
+   the window buttons do NOT occupy as env(titlebar-area-x/y/width/
+   height). This page is reached from the dashboard by an ordinary
+   same-origin link, so the installed window navigates here in place and
+   inherits the display mode - without the rules below the bar's contents
+   sit under whichever row of buttons the platform draws (the nav is
+   margin-inline-start:auto, i.e. hard against the right edge, which is
+   exactly where Windows and Linux put theirs) and the window has no drag
+   handle at all.
+
+   Everything is inside the query, which matches nowhere else: a plain
+   tab, a standalone-mode install, the mac wrapper and every non-Chromium
+   browser keep exactly the layout they had, with no class to set and no
+   script to run. --tbh is untouched and stays in the padding-top term -
+   it is the mac wrapper's inset (WebKit has neither this display mode
+   nor these env() variables), so the two mechanisms never both apply,
+   but nothing here depends on that.
+
+   NO SCRIPT, and that is the one place this deliberately differs from
+   the dashboard. There, --wcoL/--wcoR are MEASURED by wcoSync() because
+   its header sits inside a centred, padded .wrap: env(titlebar-area-x)
+   is measured from the VIEWPORT's left edge, so the raw value
+   over-indents that header by the .wrap's own inset. This bar is a
+   full-bleed child of a margin-0 body, so its own left edge IS the
+   viewport's and the raw env is exact. The right inset is the room the
+   strip leaves at its far end, which is the bar's width minus the
+   strip's right edge - and 100% is exactly the bar's width here, since a
+   percentage padding resolves against the containing block (body, i.e.
+   the layout viewport MINUS any classic scrollbar). 100vw would be the
+   window width instead and would over-inset by the scrollbar. */
+@media (display-mode: window-controls-overlay){
+  .bar{padding-top:calc(var(--barpy) + var(--tbh,0px) + env(titlebar-area-y,0px));
+    padding-left:calc(var(--barpx) + env(titlebar-area-x,0px));
+    padding-right:calc(var(--barpx) + 100% - env(titlebar-area-x,0px)
+      - env(titlebar-area-width,100%));
+    /* So the drag handle covers the whole strip even before the bar's own
+       content has made it that tall. */
+    min-height:env(titlebar-area-height,33px);
+    /* The empty room in the bar IS the title bar's drag handle. There is
+       no other one: a WCO window that marks nothing draggable can be
+       moved only by its edges. */
+    -webkit-app-region:drag;app-region:drag}
+  /* ...and every control inside it has to opt back out, or it cannot be
+     clicked at all - a drag region swallows the press. Anything
+     interactive that joins the bar belongs on this list. The View
+     popover's own menu is not here because script moves #viewMenu onto
+     <body> at load (see the backdrop-filter trap in the script below), so
+     it never sits inside the drag region. */
+  .bar a,.bar button,.bar input,.bar select,.bar label{
+    -webkit-app-region:no-drag;app-region:no-drag}
+}
 </style>
 <!-- Your own CSS, from `custom.css` in the config folder - the same file
      the dashboard links, so one stylesheet themes both pages. Last in the

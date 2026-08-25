@@ -6713,9 +6713,19 @@ function altReason(o){
     ? t('queue.alt.why.gone','no server you have set up still carries this post')
     : (o.detail||'');
 }
-// Nothing here starts, stops or fails anything. The button is the whole
-// mechanism, and with no spare held there is no button - saying so, and
-// naming the setting that would have kept one, is the honest answer.
+// §282 item 20: the pick list this row has asked for, keyed by nzo_id.
+//
+// The drawer body is rebuilt from scratch on every tick, so a result list
+// injected into the DOM would be wiped a second after it arrived. Same
+// answer as JOBFILES above: the render reads a cache, and only the CLICK
+// writes to it. That also keeps the cost honest - a search spends a hit
+// of the user's daily indexer allowance, so nothing here may start one
+// off a render.
+const ALTHUNT={};
+// Nothing here starts, stops or fails anything by itself. With a spare
+// held the button switches to it; with none held the button SEARCHES,
+// and even then nothing is fetched or queued until a second click picks
+// one of the answers.
 function altOfferBlock(s){
   const o=s&&s.alt_offer;
   if(!o) return '';
@@ -6727,18 +6737,139 @@ function altOfferBlock(s){
   // and the age.
   const head=`<div class="bad" style="font-size:12px;margin-top:7px">${t('drawer.alt.title','This download cannot finish:')} ${esc(altReason(o))}`
     +(o.detail&&o.detail!==altReason(o)?`<div class="dim" style="margin-top:4px">${esc(o.detail)}</div>`:'');
-  if(!sp.length) return head+`<div class="dim" style="margin-top:4px">${
-    t('drawer.alt.none','No alternate copy is being held for this release, so there is nothing to switch to. Set "Alternate copies to hold" in Settings and future grabs keep a spare NZB or two ready for exactly this - they are a few kilobytes each and nothing downloads them.')}</div></div>`;
+  if(!sp.length) return head+altHuntBlock(s,o)+`</div>`;
   return head+sp.map(a=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altSwitch('${escA(s.nzo_id)}','${escA(a.nzo_id)}')">${
       t('drawer.alt.switch','Switch to this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(a.name)}</span></div>`).join('')
     +`<div class="dim" style="margin-top:4px">${
       t('drawer.alt.hint','Switching ends this download - it moves to history with the reason above - and starts the copy you picked instead. Nothing happens until you click.')}</div></div>`;
 }
+// The nothing-held half. Three states in one place because they are one
+// sentence to the reader: what is being held (nothing), what will happen
+// on its own (a search, or not), and what they can do now.
+//
+// `done` is §284: the same three states on the history row of a job that
+// has ALREADY failed. It changes the pick hint and nothing else, because
+// nothing else about these rules changes with the store the row is in -
+// the *arr refusal, the nothing-is-held sentence and the ranked list are
+// one account here and not two. (`o.auto` is absent on that road by
+// design: it says what will happen when the job finally fails, and this
+// one has, so the expression below falls to the honest half on its own.)
+function altHuntBlock(s,o,done){
+  // `auto` changes what "nothing is held" MEANS, and the old copy named
+  // only the hold setting - which read as "nothing else can happen" from
+  // the day the automatic search landed. It is not a second feature, it
+  // is the same sentence told truthfully in the other configuration.
+  //
+  // AND IT IS GATED ON `search`, not on `auto` alone. On an *arr-origin
+  // row the setting can be on and still nothing will be searched for -
+  // the *arr owns the retry - so claiming a search here would be the
+  // same staleness this line was rewritten to fix, arriving by the other
+  // road. When we will not search, do not say we will.
+  const none=(o.auto&&o.search)
+    ? t('drawer.alt.noneauto','No alternate copy is being held for this release. "Look for a replacement when none is held" is on, so one will be searched for if this download finally fails - or you can look now.')
+    : t('drawer.alt.none','No alternate copy is being held for this release. Set "Alternate copies to hold" in Settings and future grabs keep a spare NZB or two ready for exactly this - they are a few kilobytes each and nothing downloads them.');
+  let h=`<div class="dim" style="margin-top:4px">${none}</div>`;
+  // An *arr-origin row gets no button at all, and is told why rather than
+  // left to press one that answers with a refusal. Sonarr and Radarr own
+  // the retry for what they sent: they blocklist the release and search
+  // again themselves, and a copy found here is one they never asked for.
+  if(!o.search) return h+`<div class="dim" style="margin-top:4px">${
+    t('drawer.alt.arr','Sonarr or Radarr sent this download and looks for a replacement itself, so nzbfast does not search for one as well. Pick a different release from its own search if you want to choose by hand.')}</div>`;
+  const st=ALTHUNT[s.nzo_id]||{};
+  h+=`<div style="margin-top:6px"><button class="ghost mini" ${st.busy?'disabled':''} onclick="altHunt('${escA(s.nzo_id)}')">${
+    st.busy?t('drawer.alt.searching','Looking...'):t('drawer.alt.search','Look for another copy')}</button></div>`;
+  if(st.err) return h+`<div class="dim" style="margin-top:4px">${esc(st.err)}</div>`;
+  if(!st.rows) return h;
+  if(!st.rows.length) return h+`<div class="dim" style="margin-top:4px">${
+    t('drawer.alt.nores','Your indexers offered no other copy of this release.')}</div>`;
+  return h+st.rows.map(c=>`<div style="margin-top:6px"><button class="ghost mini" onclick="altPick('${escA(s.nzo_id)}','${escA(c.key)}')">${
+      t('drawer.alt.pick','Use this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(c.name)}</span> <span class="dim" style="font-size:11.5px">${
+      esc(fmtSize(c.size||0))}${c.source?' · '+esc(c.source):''}</span></div>`).join('')
+    +`<div class="dim" style="margin-top:4px">${done
+      ? t('drawer.alt.pickhint.done','Best first. Picking one starts that copy now. This download has already failed and its record stays in history exactly as it is, with a note saying what replaced it. Nothing is fetched until you pick.')
+      : t('drawer.alt.pickhint','Best first. Picking one ends this download - it moves to history with the reason above - and starts the copy you picked. Nothing is fetched until you pick.')}</div>`;
+}
+// §284: §282 section D's two affordances, on the history row of a job
+// that has already failed.
+//
+// Everything under the label is item 20's own renderer - the search, the
+// ranked pick list and every refusal sentence come from `altHuntBlock`,
+// and the spare's button calls the same `altSwitch()` the queue drawer
+// calls - so these rules have one account and not two. What differs is
+// the TENSE, and only the tense: the queue copy says switching "ends
+// this download", and this one ended hours ago.
+//
+// The daemon deliberately sends no `reason` or `detail` on this road.
+// The queue row has nowhere else to say why it cannot finish; this
+// drawer has already printed the record's own Reason line, its
+// per-kind guidance and its full attempt log above this block, and a
+// fourth paraphrase of one failure is not what the reader needs.
+function histAltBlock(s){
+  const o=s&&s.alt_offer;
+  if(!o) return '';
+  const sp=o.spares||[];
+  if(!sp.length) return altHuntBlock(s,o,true);
+  return sp.map(a=>`<div style="margin-top:2px"><button class="ghost mini" onclick="altSwitch('${escA(s.nzo_id)}','${escA(a.nzo_id)}')">${
+      t('drawer.alt.switch','Switch to this copy')}</button> <span class="mono" style="font-size:11.5px">${esc(a.name)}</span></div>`).join('')
+    +`<div class="dim" style="margin-top:4px">${
+      t('drawer.alt.hint.done','Starting the copy being held for this one costs no new search and no new bytes: its NZB is already here. This download has already failed and its record stays in history exactly as it is, with a note saying what replaced it. Nothing happens until you click.')}</div>`;
+}
+// Redraw whichever surface this row's buttons are on.
+//
+// The queue drawer is rebuilt from ALTHUNT on every render, so
+// `renderQueue` is the whole of it there. The HISTORY drawer is built
+// once when the row is opened and is not touched by a tick, so §284's
+// block is re-rendered in place by id - which also leaves the rest of
+// that drawer, and any <details> the reader has open in it, alone.
+//
+// When the offer has been WITHDRAWN - a pick just landed, so item 14
+// stamped `alt_to_name` and `parked_replaceable` now says no - the block
+// becomes that clause rather than going blank, which is the one thing
+// the reader wants to see there next and costs no new copy.
+function altRedraw(id){
+  renderQueue();
+  const el=document.getElementById('histalt-'+id);
+  if(el) setHtml(el, histAltBlock(histFull[id])||altSwitchBlock(histFull[id]));
+}
+// The search. Costs one query across your indexers and no grab: nothing
+// is fetched, queued or downloaded until altPick below.
+async function altHunt(id){
+  ALTHUNT[id]={busy:true};
+  altRedraw(id);
+  const j=await api('alt_hunt',`&value=${encodeURIComponent(id)}`);
+  ALTHUNT[id]=j.status?{rows:j.candidates||[]}:{err:tErr(j.error)||j.error||''};
+  altRedraw(id);
+}
+// The pick. This one spends: one .nzb fetch against the indexer's daily
+// grab budget, then the same switch the held-spare button takes.
+async function altPick(id,key){
+  ALTHUNT[id]={busy:true};
+  altRedraw(id);
+  const j=await api('alt_hunt_pick',`&value=${encodeURIComponent(id)}&alt=${encodeURIComponent(key)}`);
+  if(j.status){ delete ALTHUNT[id]; toast(t('toast.altswitched','Switched to the alternate copy.')); }
+  else { ALTHUNT[id]={err:tErr(j.error)||j.error||''}; toast(tErr(j.error)||t('toast.altfail','That switch is no longer possible.'), true); }
+  await altReread(id);
+  tick();
+}
 async function altSwitch(id,alt){
   const j=await api('alt_switch',`&value=${encodeURIComponent(id)}&alt=${encodeURIComponent(alt)}`);
   if(j.status) toast(t('toast.altswitched','Switched to the alternate copy.'));
   else toast(tErr(j.error)||t('toast.altfail','That switch is no longer possible.'), true);
+  await altReread(id);
   tick();
+}
+// A switch just landed (or was refused) on a row whose history drawer is
+// open. Both outcomes change what that block should say and neither is
+// derivable from the cached copy - the offer is withdrawn by a field the
+// daemon stamped after this page last read the record - so the row is
+// re-fetched rather than re-rendered. Only when the block is actually on
+// screen: on the queue road there is nothing here to refresh and a fetch
+// would be a round trip for nobody.
+async function altReread(id){
+  if(!document.getElementById('histalt-'+id)) return;
+  delete histFull[id];
+  await histFullRow(id);
+  altRedraw(id);
 }
 // §282 item 14: what this row replaced, why, and what replaced it. Shown
 // on BOTH rows of a switch, because either one can be the one the user
@@ -8165,6 +8296,23 @@ async function toggleHistRow(tr){
     if(txt||btn) rows.push([t('hist.fix','What to do'),
       (txt?esc(txt):'')+(txt&&btn?' ':'')+btn]);
   }
+  // §284, immediately under "What to do" because it is the same move
+  // made concrete: that row's `find another` hands the user off to a
+  // manual search of the wall, and this one offers the copy already
+  // being held for this release, or a ranked list of copies of it, on a
+  // click. The daemon draws the offer on exactly the rows whose Retry
+  // that row has already dimmed with "the post is the problem, not the
+  // download" - see `altcand::parked_replaceable` - so the two never
+  // disagree about which failures another copy answers.
+  //
+  // Its own container id: this drawer is built once when the row opens
+  // and no tick redraws it, so `altRedraw` re-renders this block in
+  // place after a search or a pick. nzo ids are daemon-minted
+  // (`SABnzbd_nzo_...`), so the attribute and the getElementById lookup
+  // are the same string.
+  const altHtml=histAltBlock(s);
+  if(altHtml) rows.push([t('hist.alt.head3','Another copy'),
+    `<div id="histalt-${escA(s.nzo_id)}">${altHtml}</div>`]);
   // A disk-full unpack failure is the one failure the user can finish
   // from this drawer: the volumes are kept, Retry re-runs just the
   // unpack, and the only question is "is there room yet?". So pair the
@@ -13105,12 +13253,55 @@ function maybeNotify(title, body){
 }
 function handleLifeEvents(r){
   const evs=r.events||[];
-  // A bulk delete can refuse several folders at once, and the toast
-  // element holds ONE message - so kept-files notices are collected
-  // across the batch and collapse to a count rather than clobbering
-  // each other down to the last one. That collapse is why this cannot
-  // just be another arm in the loop below.
+  // NOTHING IN THIS FUNCTION TOASTS DIRECTLY. The batch is "everything
+  // since this page's cursor", so it is routinely more than one event -
+  // two jobs failing into held spares in one poll is two `job.switched`,
+  // a completion racing a failover is a `job.completed` and a
+  // `job.switched` - and the toast element holds ONE message, so every
+  // arm below used to destroy the one above it without its ever having
+  // been painted. The arms collect instead, and `toastRun` at the end
+  // plays the batch (the policy, and why it is a bounded run rather
+  // than a collapse, is written out at that function).
+  const notices=[];
+  // IMPORTANCE, NOT ARRIVAL, decides which sentences survive a crowded
+  // batch. 2 = something is wrong, or is sitting there waiting for the
+  // user to do something about it. 1 = the engine took an action of its
+  // own that nobody asked for, which is the class where an unexplained
+  // change in the queue is the alternative. 0 = good news that three
+  // other surfaces already carry - the chime, the desktop notification,
+  // and the row arriving in History.
+  const P_ACT=2, P_ENGINE=1, P_GOOD=0;
+  const notice=(msg,prio,bad,go)=>notices.push({msg,prio,bad:!!bad,go:typeof go==='function'?go:null});
+  // A bulk delete can refuse several folders at once, and this one is
+  // collapsed to a COUNT rather than played as several notices: the
+  // sentence points at a strip that is still on the page and will stay
+  // there until dismissed, so N of them would spend the whole run
+  // saying the same thing about the same strip. That collapse needs the
+  // whole batch, which is why it cannot just be another arm in the loop
+  // below however the loop reports.
   const kept=[];
+  // §282 item 18's dashboard half. A switch announces itself with its
+  // own kind, and the row it replaces is failed by a SECOND event in
+  // the same batch: both doors that promote a copy already held emit
+  // the pair back to back (`Daemon::promote_held_alternative` runs
+  // after `life_emit_parked` in the same park; `altcand::alt_switch`
+  // emits the two on consecutive lines). So the failure reaching this
+  // loop first is not a verdict - a replacement is already running -
+  // and the arm below has to know that before it decides to alarm.
+  // Collected up front for exactly that reason.
+  //
+  // The HUNT (`job.replaced`) is deliberately not in the same batch: it
+  // runs on a worker some minutes after the failure, so that job's
+  // `job.failed` already fired as the verdict it genuinely was at the
+  // time, and this map never bites on it. That asymmetry is a property
+  // of the daemon, not an assumption made here - if a poll happens to
+  // land between a promote's two emits, the failure toast simply
+  // narrates alone and the switch arrives next tick, which is the
+  // behaviour that shipped before this existed.
+  const switchedFor=new Map();
+  for(const e of evs){
+    if(e.kind==='job.switched'||e.kind==='job.replaced') switchedFor.set(e.replaces, e);
+  }
   for(const e of evs){
     if(e.kind==='job.completed'){
       // A locked archive is not a success to celebrate: the chime and
@@ -13124,7 +13315,7 @@ function handleLifeEvents(r){
             snd('password');
             say('password', t('say.password','Password needed for {name}.',{name:sayShort(e.name)}));
           }
-          toast(t('toast.needpw','Downloaded, but locked: {name} needs a password to unpack.',{name:e.name}), true);
+          notice(t('toast.needpw','Downloaded, but locked: {name} needs a password to unpack.',{name:e.name}), P_ACT, true);
           maybeNotify(t('notify.needpw','Needs a password to unpack'), e.name);
         }
       } else {
@@ -13134,9 +13325,9 @@ function handleLifeEvents(r){
         // a word about where the files had gone. `moved_to` is empty for
         // everything still under the download root, so the suffix
         // appears only when there is somewhere else to name.
-        toast(e.moved_to
+        notice(e.moved_to
           ? t('toast.completedMoved','Completed: {name} - moved to {dest}',{name:e.name,dest:e.moved_to})
-          : t('toast.completed','Completed: {name}',{name:e.name}));
+          : t('toast.completed','Completed: {name}',{name:e.name}), P_GOOD);
         lastCompleteAt=performance.now();
         playChime();
         say('complete', t('say.complete','Download complete: {name}.',{name:sayShort(e.name)}));
@@ -13162,9 +13353,9 @@ function handleLifeEvents(r){
       // payload diffed against a seen-set - and a LATE one, since the
       // upgrade's deletes move no queue revision to carry it.
       const up={name:e.name,q:e.oldq||e.old};
-      toast(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy is still on disk, see History.',up)
+      notice(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy is still on disk, see History.',up)
         : e.fate==='trash' ? t('toast.upgraded.trash','Upgraded to {name} - the {q} copy went to the Trash.',up)
-        : t('toast.upgraded.gone','Upgraded to {name} - the {q} copy was deleted.',up));
+        : t('toast.upgraded.gone','Upgraded to {name} - the {q} copy was deleted.',up), P_ENGINE);
     } else if(e.kind==='job.retried'){
       // M32 / §129 1b(b): the automatic retry has just re-queued a
       // failed job. Without a sentence here the row the user was told
@@ -13172,7 +13363,67 @@ function handleLifeEvents(r){
       // for appears in the queue - which reads as the record being
       // lost. Was an `auto_retried` array on the queue payload diffed
       // against a seen-set.
-      toast(t('toast.autoretried','Trying {name} again now - only the missing pieces are fetched.',{name:e.name}));
+      notice(t('toast.autoretried','Trying {name} again now - only the missing pieces are fetched.',{name:e.name}), P_ENGINE);
+    } else if(e.kind==='job.switched'||e.kind==='job.replaced'){
+      // §282 item 18: the switch MOMENT. Item 14 already renders what
+      // replaced what on both rows (`altcand::switch_lines`), but that
+      // is a STATE - present whenever the user looks, and absent at the
+      // instant it happens, which is the instant a release name they
+      // never clicked starts downloading. Until this arm existed a
+      // webhook subscriber was told and an open tab was not.
+      //
+      // TWO SENTENCES, because the kinds are two different events for
+      // the user and not just for a webhook filter. `job.switched`
+      // promotes a copy nzbfast was ALREADY holding for this release -
+      // nothing new was spent, and the reassuring half is that the
+      // spare the setting kept is what it was kept for. `job.replaced`
+      // is the hunt: new bytes and an indexer grab on a release the
+      // user never queued and never asked for, so the sentence has to
+      // say a DIFFERENT release was found, or the name in the queue is
+      // unexplained. Folding them into one sentence would lose exactly
+      // the distinction the daemon split the kinds to keep (the
+      // argument is at the emit in serve/hunt.rs).
+      //
+      // NOT `bad`. This is a recovery, not a failure: the failure was
+      // the other event, and the arm below now stays silent when this
+      // one is in the batch. Explaining beats alarming - a red box on
+      // the moment the engine fixed something is what sent users off to
+      // grab a replacement that was already downloading.
+      //
+      // `by==='user'` SAYS NOTHING. That door is item 12's "Switch to
+      // this copy" button: the user just performed this deliberately,
+      // `altSwitch()` toasts the confirmation off the API response, and
+      // its own `tick()` pulls this event within the same breath - so a
+      // second box here does not inform, it CLOBBERS the one the click
+      // earned (the toast element holds exactly one message). What that
+      // door needed was the failure alarm suppressed, and it now is.
+      //
+      // The reason is deliberately not in the box. `reason` is the raw
+      // `fail_message`, build stamp and all, and two release names plus
+      // a diagnostic does not fit in three and a half seconds - so the
+      // verdict goes here and the click opens the abandoned row's
+      // drawer, which holds the whole of it. Same split as `job.failed`
+      // one arm down, and the same destination.
+      if(e.by!=='user'){
+        const a={old:e.replaces_name||'', name:e.name};
+        const line=e.kind==='job.replaced'
+          ? t('toast.hunted','{old} could not finish, so a different release was found and started instead: {name}',a)
+          : t('toast.switched','{old} could not finish, so a copy already being held is downloading instead: {name}',a);
+        notice(line, P_ENGINE, false, ()=>openHistDrawer(e.replaces));
+        // Sound on the PROMOTE door only. A hunted replacement is a row
+        // that was not in the queue last poll, so `sndQueueEvents`
+        // already plays "added" for it this same tick and a second one
+        // here would double it; a promoted spare WAS in the queue, so
+        // nothing else makes a sound for it and this is the only cue a
+        // sound-on user gets. Reusing `added` rather than growing the
+        // registry: something did start downloading, and a new key
+        // would be a new toggle row and 27 more catalogue entries for a
+        // note nobody asked for.
+        if(e.kind==='job.switched') snd('added');
+        maybeNotify(e.kind==='job.replaced'
+          ? t('notify.hunted','Started a different release')
+          : t('notify.switched','Switched to a copy already held'), line);
+      }
     } else if(e.kind==='watch.picked'){
       // The daemon consumed the user's file (a browser then lists its
       // download as "Removed"), so the moment needs its own sentence
@@ -13182,14 +13433,14 @@ function handleLifeEvents(r){
       // needed a key of at+name because two files ingested in the same
       // second must both toast. A sequence number is that key, and the
       // daemon owns it.
-      toast(t('toast.watchpicked','Picked up {name} from {dir} - added to the queue.',{name:e.name,dir:e.folder}));
+      notice(t('toast.watchpicked','Picked up {name} from {dir} - added to the queue.',{name:e.name,dir:e.folder}), P_GOOD);
     } else if(e.kind==='nzb.refeed'){
       // TODO 280: a queue row nobody added. The download that just
       // finished turned out to be a container post, and its inner .nzb
       // is now sitting in the queue PAUSED - so the sentence has to say
       // both where it came from and that it is waiting on the user,
       // or a paused row appearing out of nowhere reads as a bug.
-      toast(t('toast.refeed','{name} came out of {parent} - it is in the queue, paused, waiting for you to start it.',{name:e.name,parent:e.parent}));
+      notice(t('toast.refeed','{name} came out of {parent} - it is in the queue, paused, waiting for you to start it.',{name:e.name,parent:e.parent}), P_ACT);
     } else if(e.kind==='giveup.tripped'){
       // §96.3 / §129 1b(b): the breaker deciding to stop chasing
       // something is the one moment it takes an action of its own (it
@@ -13200,8 +13451,8 @@ function handleLifeEvents(r){
       // moves nothing, so on an idle daemon the toast waited for an
       // unrelated mutation. `threshold` is the count the daemon has
       // always sent under that name on this ring.
-      toast(t('toast.giveup','Stopped chasing {name}: {n} different releases failed. Try again from the Watchlist card.',
-        {name:e.name,n:e.threshold}));
+      notice(t('toast.giveup','Stopped chasing {name}: {n} different releases failed. Try again from the Watchlist card.',
+        {name:e.name,n:e.threshold}), P_ACT);
     } else if(e.kind==='job.failed'){
       // A Failed row can be asking for a password too (the in-stream
       // probe saw an encrypted set) - the audible ask keeps its old
@@ -13214,16 +13465,32 @@ function handleLifeEvents(r){
       // verdict - announcing "FAILED" with the failure sound for
       // something the engine plans to fix itself sent users to grab a
       // replacement that was never needed.
-      if(e.auto_retry_at&&e.auto_retry_at*1000>Date.now()){
-        toast(t('toast.willretry','{name} hit missing pieces - retrying automatically in {m} min.',{name:e.name,m:Math.max(1,Math.ceil((e.auto_retry_at*1000-Date.now())/60000))}));
+      if(switchedFor.has(e.nzo_id)){
+        // Nothing at all, on purpose. A replacement for this job is in
+        // this very batch, and the switch arm above narrates the pair
+        // in one sentence that names both halves - so an alarm here
+        // would be a red box the switch immediately overwrites, plus a
+        // sound and a desktop notification it cannot overwrite at all.
+        // The NOTIFICATION is the reason this branch exists rather than
+        // being left to the clobber: it is the one that reaches the
+        // user who is not looking, and it said "Download FAILED" about
+        // a download that had already been replaced.
+        //
+        // Same reading as the armed-retry branch below, and a stronger
+        // case for it: a retry is a promise about the next twenty
+        // minutes, a switch is something already downloading. The
+        // password ask above is untouched - an encrypted set is still
+        // encrypted whatever replaced the row.
+      } else if(e.auto_retry_at&&e.auto_retry_at*1000>Date.now()){
+        notice(t('toast.willretry','{name} hit missing pieces - retrying automatically in {m} min.',{name:e.name,m:Math.max(1,Math.ceil((e.auto_retry_at*1000-Date.now())/60000))}), P_ENGINE);
       } else {
         // The FIRST clause only. The engine's diagnostic is 250-400
         // characters with every cause appended after a semicolon, and a
         // 3.5 s box was the worst possible place to read it - so the
         // verdict goes here and the box opens the drawer that holds the
         // rest.
-        toast(t('toast.failed','Failed: {name} - {err}',{name:e.name, err:firstClause(e.fail_message)||t('err.unknown','unknown error')}),
-          true, ()=>openHistDrawer(e.nzo_id));
+        notice(t('toast.failed','Failed: {name} - {err}',{name:e.name, err:firstClause(e.fail_message)||t('err.unknown','unknown error')}),
+          P_ACT, true, ()=>openHistDrawer(e.nzo_id));
         snd('failed');
         say('failed', t('say.failed','Download failed: {name}.',{name:sayShort(e.name)}));
         maybeNotify(t('notify.failed','Download FAILED'), `${e.name}\n${e.fail_message||''}`);
@@ -13233,8 +13500,13 @@ function handleLifeEvents(r){
   // The kept-files nudge, one message however many landed. The STRIP
   // itself is rendered from the queue payload every tick and stays
   // until dismissed - this only points at it.
-  if(kept.length===1) toast(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0]}), true);
-  else if(kept.length) toast(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), true);
+  if(kept.length===1) notice(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0]}), P_ACT, true);
+  else if(kept.length) notice(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), P_ACT, true);
+  // Sort is STABLE (ES2019), so within a tier the daemon's own order -
+  // which is the order the things actually happened in - survives, and
+  // a batch that is all one tier plays exactly as it arrived.
+  notices.sort((a,b)=>b.prio-a.prio);
+  toastRun(notices);
   // Adopt the cursor last, whatever arrived - including the reseed
   // signal (events_reset) after this tab slept past the ring's tail.
   if(typeof r.events_seq==='number'){ dashESeq=r.events_seq; dashEHave=true; }
@@ -13444,12 +13716,44 @@ let updAttnFor='';
 // The version the chip is currently advertising, so the container recipe
 // can title itself with it without re-reading the queue.
 let updVersion='';
-// Truth-audit I: which rows were sitting at Duplicate priority last
-// poll. A held ALTERNATIVE is auto-promoted the moment the original
-// fails - the queue silently gains a running download the user never
-// asked to start, and the row that had explained itself as "held
-// (duplicate)" simply stopped saying so.
-let qHeld=null;
+// THE DUPLICATE-PROMOTION CUE USED TO LIVE HERE and does not any more
+// (§282 item 18, 24 Aug 2026). It was Truth-audit I's: remember which
+// rows sat at Duplicate priority last poll, and toast when one stopped
+// doing so, because a held alternative is auto-promoted the moment the
+// original fails and the queue silently gained a running download the
+// user never asked to start.
+//
+// It is now `job.switched` in `handleLifeEvents`, which is the same
+// migration §129 1b(b) made for `delete_kept`, `watch_picked`,
+// `auto_retried`, `giveup_tripped` and `watch_upgraded` - this was the
+// last cue in that family still recovered by diffing a queue snapshot,
+// and every reason those moved applies here harder:
+//
+//   * IT COULD NOT NAME WHAT WAS ABANDONED. The diff sees one row
+//     changing priority, so the sentence could only say "the copy it
+//     was held behind failed" - never WHICH release, and never why.
+//     The event carries `replaces_name` and `reason`, which is the
+//     whole of what item 18 was asked for.
+//   * IT NEEDED TO HAVE SEEN THE ROW HELD. A page that loaded after
+//     the promotion, or one whose spare sat below the queue window,
+//     has no previous set to diff and says nothing at all.
+//   * IT COULD NOT SEE THE HUNT. §282 section C's replacement is a row
+//     that was never in the queue, let alone held at Duplicate, so the
+//     one switch the user did least to ask for was structurally
+//     invisible to this cue.
+//   * IT COULD NOT TELL THE DOORS APART. A user who clicks "Switch to
+//     this copy" got this same sentence a second after their own
+//     confirmation, clobbering it; `by` answers that and a diff cannot.
+//   * IT FIRED ON THINGS THAT WERE NOT SWITCHES. Any hand-edit of a
+//     held row's priority in the queue UI leaves Duplicate, and was
+//     told "the copy it was held behind failed" about a copy that had
+//     not.
+//
+// And it ran AFTER `handleLifeEvents` in the tick (see the call order
+// where the poll lands), so leaving it in place would have overwritten
+// the event's own sentence on the two doors it could see. Do not
+// reintroduce a snapshot diff beside the event: the toast element holds
+// one message, and the later writer wins.
 function sndQueueEvents(q){
   // The arrival cue compares this poll's ids with the last poll's,
   // and a PAGED queue makes that comparison meaningless - "show more"
@@ -13457,20 +13761,9 @@ function sndQueueEvents(q){
   // the window is not a row that left the queue. So while the page is
   // short of the queue, the arrival and drained cues sit out, and
   // `qSeen` re-primes rather than banking a set it cannot trust. The
-  // pause and update cues are header facts and keep working; the
-  // duplicate-promotion cue only ever fires on rows this page held last
-  // poll, so it is safe either way.
+  // pause and update cues are header facts and keep working.
   const partial=qTruncated(q);
   const ids=new Set(q.slots.map(s=>s.nzo_id));
-  const held=new Set(q.slots.filter(s=>s.priority==='Duplicate').map(s=>s.nzo_id));
-  if(qHeld!==null){
-    for(const s of q.slots){
-      if(qHeld.has(s.nzo_id) && s.priority!=='Duplicate')
-        toast(t('toast.promoted','{name} is downloading now: the copy it was held behind failed, so this alternative took over.',
-          {name:s.filename||s.name}));
-    }
-  }
-  qHeld=held;
   if(qSeen!==null){
     const added=partial?[]:q.slots.filter(s=>!qSeen.has(s.nzo_id));
     if(added.length){
@@ -13507,13 +13800,54 @@ addEventListener('pointerdown', e=>{
 function playChime(){ snd('complete'); }
 
 // Drag-and-drop / file-picker NZB upload → mode=addfile (multipart).
-let toastH;
+// THE BOX HOLDS ONE MESSAGE, AND THE LAST WRITER USED TO WIN OUTRIGHT.
+// Every call cleared the element and reset one timer, so two toasts in
+// the same tick meant the first was destroyed without ever having been
+// painted - not shortened, never shown at all.
+//
+// That is the RIGHT answer for a caller answering a click: the newest
+// thing the user did is the news, and `toast()` below still behaves
+// exactly that way for the couple of hundred callers of that shape. It
+// is the wrong answer for `handleLifeEvents`, which walks a whole batch
+// of daemon events and can legitimately have several sentences to say -
+// two jobs failing into held spares in one poll interval is two
+// `job.switched` and one visible box, a completion racing a failover is
+// two more, and a tab that slept past a busy stretch drains its entire
+// backlog into whichever line happened to be last. Those are the
+// batches `toastRun()` exists for; its policy is at its own definition.
+let toastH, toastRunQ=[], toastMore=0;
+// A single message keeps the lifetime it has always had. A RUN trades
+// some of it for the second and third sentence: three boxes at
+// TOAST_RUN_MS plus two gaps is about eight and a half seconds, which
+// is the ceiling on how stale the last line of a run can be.
+const TOAST_MS=3500, TOAST_RUN_MS=2600, TOAST_GAP=260, TOAST_RUN_MAX=3;
 // `go` makes the box a way IN rather than just an announcement: a
 // failure toast that says one clause has to be able to hand the user the
 // drawer holding the rest, or the full diagnostic is only reachable by
 // hunting the row down afterwards. Optional - most toasts have nowhere
 // to go, and those stay exactly as inert as before.
 function toast(msg, bad, go){
+  // A direct toast is the user's own news and outranks a batch that is
+  // still playing: drop the remainder rather than making them sit
+  // through it to see the answer to what they just clicked.
+  toastRunQ=[]; toastMore=0;
+  toastShow(msg, bad, go, TOAST_MS);
+}
+// Strip the click-through affordance. Run before every render, and again
+// the moment the box goes dark - `role="button"` and a tab stop on an
+// INVISIBLE element is a stop that leads nowhere, and the attributes
+// used to outlive the box they belonged to: they came off only when the
+// NEXT toast rendered, which on a quiet page is never, so the last
+// failure of the session left a permanent invisible tab stop over the
+// dashboard.
+function toastInert(el){
+  el.onclick=null; el.onkeydown=null; el.classList.remove('clickable');
+  el.removeAttribute('role'); el.removeAttribute('tabindex');
+}
+// The renderer. Everything that puts words in the box goes through here
+// so that the two NODES below cannot be lost by a caller that only
+// wanted a different lifetime.
+function toastShow(msg, bad, go, ms){
   // Error-vs-info was border colour alone; the hidden prefix makes it
   // real for screen readers (the live region reads it) without changing
   // the visible text.
@@ -13527,7 +13861,7 @@ function toast(msg, bad, go){
   el.appendChild(document.createTextNode(msg));
   // textContent for the message, always: these carry release names and
   // server errors from outside. The affordance is a separate node.
-  el.onclick=null; el.classList.remove('clickable'); el.removeAttribute('role'); el.removeAttribute('tabindex');
+  toastInert(el);
   if(typeof go==='function'){
     const more=document.createElement('span');
     more.className='dim'; more.style.marginInlineStart='6px';
@@ -13537,10 +13871,97 @@ function toast(msg, bad, go){
     more.textContent=' '+t('toast.details','- details');
     el.appendChild(more);
     el.classList.add('clickable'); el.setAttribute('role','button'); el.setAttribute('tabindex','0');
-    el.onclick=()=>{ el.classList.remove('on'); go(); };
+    // Following the box ENDS the run. The user has just left for a
+    // history drawer, and the rest of the batch popping up over it
+    // seconds later is a box talking past whatever they went to read.
+    const follow=()=>{ el.classList.remove('on'); toastInert(el); clearTimeout(toastH); toastRunQ=[]; toastMore=0; go(); };
+    el.onclick=follow;
+    // ONE action, reached two ways. A box that claims `role="button"`
+    // and takes a tab stop has to answer Enter and Space, or the stop
+    // leads nowhere - which is worse than not being focusable at all.
+    // That argument is already written down at the layout drag handle
+    // in `renderCards`, and this was the last `role="button"` in either
+    // page still relying on a click alone: every other one is either
+    // handled on the element or by a delegated Enter/Space listener
+    // (the queue tbody's, and the wall's over `#wall`/`#strips`).
+    el.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); follow(); } };
   }
   el.classList.toggle('toastbad', !!bad);
-  el.classList.add('on'); clearTimeout(toastH); toastH=setTimeout(()=>el.classList.remove('on'),3500);
+  el.classList.add('on'); clearTimeout(toastH); toastH=setTimeout(toastNext, ms);
+}
+// End of one message. With nothing pending this is exactly the old
+// behaviour - the box fades and that is that.
+//
+// With a run pending it fades FIRST and brings the next message up after
+// a short dark gap, rather than swapping the words under the reader. The
+// gap is the fade the CSS already has and it earns its place twice: a
+// run reads as several notices instead of as one box that keeps changing
+// its mind, and a click that lands during the swap goes to the page
+// underneath (the box is click-through whenever it is off) instead of to
+// a destination that has just been replaced by a different one.
+function toastNext(){
+  const el=document.getElementById('toast');
+  el.classList.remove('on'); toastInert(el);
+  if(!toastRunQ.length && !toastMore) return;
+  toastH=setTimeout(()=>{
+    const n=toastRunQ.shift();
+    if(n){ toastShow(n.msg, n.bad, n.go, TOAST_RUN_MS); return; }
+    const k=toastMore; toastMore=0;
+    // No destination on this one, deliberately: it stands for several
+    // messages with several different rows behind them, and a box that
+    // picks one of them at random is worse than a box that picks none.
+    toastShow(tn('toast.more',k,'and {n} more notice','and {n} more notices'), false, null, TOAST_RUN_MS);
+  }, TOAST_GAP);
+}
+// Play a whole batch of notices. `handleLifeEvents` is the caller.
+//
+// THE POLICY, AND WHY IT IS THIS ONE. Three shapes were on the table: a
+// plain queue that shows everything in turn, a per-kind collapse ("3
+// downloads completed", the `kept[]` pattern generalised), and a cap
+// with an overflow count. This is the third with the first inside it,
+// and the reasons are properties of these particular messages:
+//
+//   * THE NAMES ARE MOST OF THE VALUE. Nearly every sentence here
+//     carries a release name, and "2 downloads switched to another
+//     copy" throws away the only part of it anyone can act on. For the
+//     case this is actually about - two or three events landing in one
+//     poll - there is no reason to lose them, so they are played whole.
+//   * A DESTINATION CANNOT BE MERGED. `job.failed` and the switch arm
+//     hand the box a `go` that opens one specific history row. A
+//     collapsed sentence stands for N rows and can only offer one of
+//     them or none, so collapsing would quietly disarm the
+//     click-through on exactly the two kinds that have one. Playing the
+//     messages separately keeps every destination on its own sentence,
+//     which is why click-bearing toasts need no exemption from any of
+//     this - nothing is ever merged.
+//   * A DRAINED BACKLOG MUST NOT BECOME A SLIDESHOW. The daemon's event
+//     ring holds 512, so a tab that slept can come back to dozens at
+//     once, and a queue that played all of them would still be
+//     narrating something that happened four minutes ago. Hence the
+//     cap, and hence the last slot going to a count of what was not
+//     shown rather than to more of the same.
+//
+// IMPORTANCE, NOT ARRIVAL, decides which sentences get the slots. The
+// caller sorts before calling: a red failure and "picked up a file from
+// the watch folder" are not equally worth the one box there is.
+function toastRun(list){
+  if(!list.length) return;
+  // A run still in flight is not thrown away when the next poll brings
+  // news: its unplayed remainder is COUNTED into the overflow. The newer
+  // batch takes the box, because it is newer news - but the page never
+  // goes on to claim that was all that happened.
+  let more=toastRunQ.length+toastMore;
+  toastRunQ=[]; toastMore=0;
+  // Leave a slot for the overflow line itself whenever there is going
+  // to be one, so a run is never longer than TOAST_RUN_MAX boxes.
+  const room=(more||list.length>TOAST_RUN_MAX)?TOAST_RUN_MAX-1:TOAST_RUN_MAX;
+  const show=list.slice(0,room);
+  more+=list.length-show.length;
+  toastRunQ=show.slice(1); toastMore=more;
+  // One notice and nothing carried over is the old single-toast case,
+  // down to the lifetime.
+  if(!toastRunQ.length && !more){ toast(show[0].msg, show[0].bad, show[0].go); return; }
+  toastShow(show[0].msg, show[0].bad, show[0].go, TOAST_RUN_MS);
 }
 // Open a history row's drawer from anywhere - the toast click-through,
 // and the watch-folder strip. Scrolls it into view: the row is usually

@@ -456,3 +456,104 @@ fn a_user_added_duplicate_is_never_dropped_as_a_spare() {
         assert_eq!(left, vec!["nzo-theirs".to_string()]);
     });
 }
+
+/// §282 item 5's residue: a spare whose owner has left BOTH stores is
+/// dropped, and one whose owner is still findable is not.
+///
+/// The state this pins is the one `drop_spares_for`'s single caller
+/// cannot reach. `daemon_park::park_gen` fires it when the owner
+/// completes or is deleted while the park can still see it; a history
+/// row retired by retention, deleted through the SAB or dashboard API,
+/// or a queued row deleted with no park behind it all leave the spare
+/// paused at Duplicate priority naming an id nothing can resolve -
+/// unpromotable, unofferable and, until this sweep, undroppable, with
+/// `recover_orphaned_spool` putting it back after every restart.
+///
+/// Four rows, and each of the three survivors is a different reason to
+/// leave one alone.
+#[test]
+fn a_spare_whose_owner_left_both_stores_is_dropped_and_the_others_are_not() {
+    with_daemon("spare-stranded", |d| {
+        let spool =
+            std::env::temp_dir().join(format!("nzbfast-282-stranded-{}.nzb", std::process::id()));
+        std::fs::write(&spool, b"<nzb></nzb>").expect("write spool fixture");
+        // The owner that is still QUEUED, and its spare.
+        d.queue
+            .lock_ok()
+            .push_back(jv("owner-live", "Show.S01E01-A", serde_json::json!({})));
+        let held = |id: &str, owner: &str, origin: &str, path: &std::path::Path| {
+            jv(
+                id,
+                "Show.S01E01-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": owner, "origin": origin,
+                    "nzb_path": path.to_string_lossy(),
+                }),
+            )
+        };
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(held("keep-queued", "owner-live", "spare", &spool));
+            q.push_back(held("keep-filed", "owner-filed", "spare", &spool));
+            q.push_back(held("keep-inflight", "owner-moving", "spare", &spool));
+            // The user's own duplicate of the same dead job: identical in
+            // every field the sweep can see except the origin, which is
+            // the only thing that tells them apart.
+            q.push_back(held("keep-theirs", "owner-gone", "dashboard", &spool));
+            q.push_back(held("drop-me", "owner-gone", "spare", &spool));
+        }
+        d.history.lock_ok().push(jv(
+            "owner-filed",
+            "Show.S02E01-A",
+            serde_json::json!({"state": "Failed"}),
+        ));
+        // In transit between the two stores: absent from both, and NOT
+        // stranded. Every mover registers here before it touches either.
+        d.hist_inflight.lock_ok().insert("owner-moving".to_string());
+
+        d.drop_stranded_spares();
+
+        let left: Vec<String> = queue_rows(d).into_iter().map(|r| r.0).collect();
+        assert_eq!(
+            left,
+            vec![
+                "owner-live".to_string(),
+                "keep-queued".to_string(),
+                "keep-filed".to_string(),
+                "keep-inflight".to_string(),
+                "keep-theirs".to_string(),
+            ],
+            "only the spare held for a job in neither store may go"
+        );
+        // The spool copy goes with the row, or `recover_orphaned_spool`
+        // re-adopts it at the next start with nothing to hold it against.
+        assert!(
+            !spool.is_file(),
+            "the dropped spare's spooled NZB is still on disk"
+        );
+        let _ = std::fs::remove_file(&spool);
+    });
+}
+
+/// A spare with no `held_for` at all is never touched by the sweep.
+///
+/// That is the pre-`held_for` shape `altcand::HeldSpare::held_against`
+/// matches by `dupe_key`: there is no owner id in it to ask about, so
+/// "is that job still around" has no answer here and the sweep does not
+/// guess one.
+#[test]
+fn a_spare_with_no_owner_id_is_left_alone_by_the_sweep() {
+    with_daemon("spare-stranded-legacy", |d| {
+        d.queue.lock_ok().push_back(jv(
+            "old-shape",
+            "Show.S01E01-B",
+            serde_json::json!({
+                "paused": true, "priority": DUPE_PRIORITY,
+                "origin": "spare", "dupe_key": "show/s1e1",
+            }),
+        ));
+        d.drop_stranded_spares();
+        assert_eq!(d.queue.lock_ok().len(), 1, "the legacy hold was dropped");
+    });
+}

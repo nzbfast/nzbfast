@@ -384,6 +384,35 @@ fn stall_bound_is_flat_until_the_line_peak_and_a_body_are_trained() {
     assert_eq!(sh.stall_bound(), ADAPTIVE_STALL, "no peak yet: still flat");
 }
 
+/// TODO 277: the share the deadline sizes is one PER DIALLING WORKER.
+/// A fleet that spawns the line-cap curve's ceiling and runs at its
+/// floor parks the surplus holding nothing, and counting those parked
+/// slots here would stretch the deadline in proportion - which is the
+/// §208.2 rescue a wedged last-article depends on being made twice as
+/// slow to fire, silently, on every install.
+#[test]
+fn stall_bound_shares_the_line_among_the_workers_actually_dialling() {
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &[(server("s"), PoolConfig::default())]);
+    sh.body_bytes_ewma.store(750_000, Ordering::Relaxed);
+    sh.sat.set_peak_bps(12_500_000); // 100 Mbit, the §208.2 rig's line
+    sh.pending.store(10_000, Ordering::Relaxed);
+    // The §112 shape at its widest: 720 slots spawned, half of them
+    // parked at the live target. The line is split 360 ways, which is
+    // the count the 21 Aug bound was measured on.
+    sh.workers_live.store(720, Ordering::Relaxed);
+    sh.parked_total.store(360, Ordering::Relaxed);
+    assert_eq!(sh.workers_dialling(), 360);
+    let dialling = Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 360));
+    assert_eq!(sh.stall_bound(), dialling);
+    // The spawned count is a genuinely different answer - the whole
+    // 720-way share runs into the 60 s ceiling - so this test would not
+    // pass with the two confused for one another.
+    sh.parked_total.store(0, Ordering::Relaxed);
+    let spawned = Duration::from_millis(share_aware_stall_ms(750_000, 12_500_000, 720));
+    assert_eq!(sh.stall_bound(), spawned);
+    assert_ne!(dialling, spawned);
+}
+
 #[test]
 fn stall_bound_shares_the_line_among_the_fewer_of_workers_and_articles_left() {
     // Seed a trained state by hand - the gauge's peak needs wall-clock

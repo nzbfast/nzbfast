@@ -437,6 +437,53 @@ jobs:
       # reason as the overflow gate, which is still in `check`.
       - name: download page version gate
         run: tools/check-site-version.sh --selftest && tools/check-site-version.sh --tree
+  shot-version-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-shot-version-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The sibling of the job above, one medium over. Every dashboard
+      # capture in website/assets/ renders the running version in its
+      # header pill, and nothing held those images to the crate version:
+      # all four versioned shots went two releases stale AT ONCE, reading
+      # `v1.1.4 beta 4` against a crate at 1.2.2, and it was caught only
+      # because a person looked at an image and read the number. Worse
+      # than the download page in one way - a stale button 404s loudly,
+      # while a stale capture quietly shows an old product to every
+      # visitor and to everyone installing the PWA, since two of these
+      # images are downscaled into web/screens/ and declared in
+      # web/site.webmanifest. No other gate could ever have seen it:
+      # website/ is not in PUBLIC_MANIFEST, so leak-check prints `0 public
+      # file(s) clean` without scanning it, and nothing here can read a
+      # PNG. `--selftest` first, same reason as every gate above it.
+      - name: screenshot version gate
+        run: tools/shot-version-gate.py --selftest && tools/shot-version-gate.py
+  one-process-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-one-process-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The `unit-one-process` job below carries no list of binaries - it
+      # inventories the archive and runs every first-party lib/bin unit
+      # target out of it. nightly's `one-process-loaded`, the only job in
+      # the repo that runs that shape under LOAD, named ONE of the four by
+      # hand, which is how a timer-paced flake in the nzbkit LIB root went
+      # red twice in 400 main runs while the loaded job campaigned over the
+      # nzbfast BIN root (2e4614940). This holds that matrix to the
+      # workspace manifests. Also a job in size-gate.yml, which runs on
+      # every branch push. Private repo only, like the gates above.
+      - name: one process roster
+        run: |
+          tools/one-process-roster.py --selftest
+          tools/one-process-roster.py
   flatpak-pin-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -851,9 +898,12 @@ jobs:
       # stop at the first row it sees and it reports a green one forever.
       # Neither looks like a broken script, and neither is a roster that
       # has quietly stopped covering a job - that one reports the job it
-      # forgot as green forever. The eighteen frozen-JSON cases drive
+      # forgot as green forever. The twenty-two frozen-JSON cases drive
       # every direction, plus both matrix folds, plus the roster held
-      # against this file.
+      # against this file, plus the failing-STEP extraction - including
+      # the trap that a GREEN job can carry a `failure` step, because
+      # windows-build, windows-clippy and windows-arm64 each open with a
+      # `continue-on-error` Defender-exclusion step.
       - name: ci verdict
         env:
           # The script resolves the repo from GITHUB_REPOSITORY, which
@@ -1513,6 +1563,24 @@ jobs:
       - name: payload id gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/payload-id-gate.py --selftest && tools/payload-id-gate.py
+      # A `#[test]` that moves a process-global and asserts on what it says
+      # reads its neighbours' writes whenever they land on different threads
+      # of ONE process. The whole CI matrix is blind to it - nextest gives
+      # every test its own process - so it surfaces only under
+      # `cargo test --bin`/`--lib` and the `unit-one-process` job, which is
+      # how a676367fb's three mem-sampler tests stayed latent from the day
+      # they were written to a measured 73 failures in 200 runs. That family
+      # got a chokepoint assertion; the three others on this tree (memgauge,
+      # smart's trash flags, par2repair's NTT breaker) have no door to put
+      # one in and serialize by convention alone. Contested means two tests
+      # move it AND one depends on its value - both halves measured, since
+      # without the first MEM_SAMPLER_RUN itself is missed and without the
+      # second 19 fixture-name counters are hits. Also a job in
+      # size-gate.yml, which runs on every branch push. Private repo only,
+      # like the gates above.
+      - name: test global gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
       - name: clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # No escapes: every warning blocks. The categories still allowed
@@ -2076,7 +2144,7 @@ jobs:
               # annotation's properties at the first `::` it finds, so
               # an id in the title truncates it and swallows the
               # message. In the message body a `::` is just text.
-              echo "::error title=A unit binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken: one test in it is leaving process-global state that another one reads. Reproduce with 'cargo test' - never nextest - on that target, and narrow it with '-- --test-threads=1'. libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' finds the polluter itself, in minutes."
+              echo "::error title=A unit binary failed with its tests sharing one process::$id failed when every one of its tests ran in a single process. If linux-tests is green on this same commit then no individual test is broken IN ISOLATION - but there are THREE shapes here and only ONE of them has a polluter, so do not reach for the bisect first. (a) POLLUTION: an earlier test left process-global state that this one read; visible even serially. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter - this job invokes the binary bare, so libtest is PARALLEL and can see it, and '-- --test-threads=1' structurally CANNOT reproduce it. (c) NO POLLUTER AT ALL: the test depends on a wall-clock duration it never sets - a window that rolls, a token that expires - and slow setup on a loaded box overran it. THE TELL, and it costs one run: re-run the failing test ALONE with the box busy. If it STILL fails there is no neighbour to find - that is (c), so read the test for a duration it depends on but never sets, and fix the TEST, never the production constant. If it passes alone and fails only in company it is (a) or (b). Reproduce with 'cargo test' - never nextest - on that target. libtest names the VICTIM and never the polluter: 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes, but do NOT hand it a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour and prints it with the confidence of a real answer. Never add '--test-threads=1' to make a red go away; that deletes the (b) coverage. nightly.yml's 'one-process-loaded' runs this same binary tens of times under load and reports a RATE, which is where (c) shows up on its own."
             fi
             echo "::endgroup::"
           done < unit-binaries.tsv

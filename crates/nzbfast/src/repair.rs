@@ -743,19 +743,6 @@ pub(crate) async fn try_mapped_repair(
             }
         }
     }
-    // A wholly-missing file's spans FEED through the normal arrival
-    // path, and routing can attach the rebuilt volume to the very chase
-    // group being patched - a buffer registered mid-pause, which
-    // `pause_chase_reads` does not hold. The engine is forward-only, so
-    // it can only reach that volume having finished every earlier one,
-    // which makes the interaction safe by argument rather than by
-    // construction. Not good enough for a route that exists to skip a
-    // second extraction: decline the pair outright. A ghosted volume
-    // beside a live chase is a rare shape, and it loses nothing it has
-    // today.
-    if recreated > 0 && !chased.is_empty() {
-        return Ok(false);
-    }
     // Anti-preallocation-bomb: refuse counts the repair math could
     // never satisfy anyway (a 64 GiB FileDesc over 4 KiB blocks is 16M
     // slices against a 32768-slice format) BEFORE allocating anything.
@@ -874,6 +861,51 @@ pub(crate) async fn try_mapped_repair(
     // release the engines; taken unconditionally because it is a no-op
     // when nothing is chased, and taking it inside the `!chased.is_empty()`
     // branch would put a second exit path on the guard's lifetime.
+    //
+    // THIS IS ALSO WHAT LETS A RECREATED FILE SIT BESIDE A LIVE CHASE
+    // (TODO 287.1, 24 Aug 2026). A wholly-missing file's spans feed
+    // through the normal arrival path, so routing can attach the rebuilt
+    // volume to the very chase group this call is patching, and that
+    // registration happens INSIDE this guard. The pair used to decline
+    // outright, just above the bomb check below, because the guard held a
+    // SNAPSHOT of the volumes registered when it was taken: a volume
+    // joining under it was not held, which made the interaction safe by
+    // ARGUMENT (the engine is forward-only, so it reaches that volume
+    // only having finished every earlier one) rather than by
+    // construction, and §287 called that not good enough for a route
+    // whose whole purpose is to skip a second extraction.
+    //
+    // §287 made it safe by construction, which is what retired the
+    // decline: `pause_chase_reads` latches `Inner::chase_reads_paused`
+    // under the routing lock, `try_attach_chase` reads it at buffer
+    // construction (before the seeding loop, so its failure return is
+    // covered too), and this guard's `Drop` clears the latch and resumes
+    // the registry as it stands THEN rather than the snapshot it took.
+    // The engine cannot read a byte of the rebuilt volume, or of
+    // anything after it, until every block of this repair has landed.
+    //
+    // MEASURED, and worth knowing before reading that latch as the only
+    // thing standing here: with it disabled, the ghost-beside-a-chase
+    // e2e leg still passes, 3 runs of 3. A mid-pause registration is the
+    // ONLY unpaused buffer in the set - every volume ahead of it arrived
+    // during the download, so the snapshot holds all of them - which
+    // means a forward-only engine can walk the rebuilt volume and then
+    // blocks on the next one it wants, and the rebuilt volume's own
+    // bytes are written once, in offset order, and never rewritten. This
+    // pair sat inside the old gap's stated shape without being able to
+    // reach its consequence. That is one more argument about
+    // interleavings, which is precisely what the latch replaces.
+    //
+    // What a decline AFTER the attach leaves behind is the ordinary
+    // ending, not a new one: the fed volume's buffer has holes, the
+    // resume lets the engine read up to the first of them, and
+    // `chase_finish` aborts it, demotes the group and materializes every
+    // volume - after which `repair_dir` recreates the missing file on
+    // disk authoritatively, exactly as it does for the fed slots a late
+    // decline leaves behind today. A demote that happens DURING the
+    // patch is caught by the `demoted_to_disk` sweep below, which reads
+    // every in-place slot and so covers the chased ones this feed shares
+    // a group with.
     let pause = extractor.pause_chase_reads();
     match repair_mapped_catalog(&files, bs, &mut cat, &set.recovery_set_id, &io, full_verify) {
         Ok(n) => {
@@ -1235,8 +1267,11 @@ pub(crate) async fn fetch_and_repair(
 ) -> Result<bool> {
     // §282 item 4: the most recent measurement of whether this source
     // will serve this recovery set at all. Seeded from the declined
-    // mapped attempt, overwritten by this function's own fetch, and read
-    // at every point below that would otherwise ask for MORE.
+    // mapped attempt, overwritten by each of this function's own
+    // fetches, and read at every point below that would otherwise ask
+    // for MORE - and once more at the very bottom, on the escalation's
+    // own yield, where there is nothing left to ask for and the VERDICT
+    // is the only thing left to get right.
     let mut wire = mapped_yield.unwrap_or_default();
     if wire.source_will_not_serve() {
         // The mapped attempt already asked this provider for these
@@ -1607,10 +1642,14 @@ pub(crate) async fn fetch_and_repair(
         "repair short - fetching all {} remaining volume(s)",
         remaining.len()
     );
-    cpu.without_permit(fetch_volumes(
-        servers, nzb, out_dir, &buf_pool, &remaining, cancel,
-    ))
-    .await?;
+    // Bound, not discarded: this is the LAST ask this job makes and, on
+    // a ladder that got here, usually the largest sample it takes. See
+    // the verdict at the bottom of this function.
+    wire = cpu
+        .without_permit(fetch_volumes(
+            servers, nzb, out_dir, &buf_pool, &remaining, cancel,
+        ))
+        .await?;
     if native_repair() == NativeVerdict::Done {
         return Ok(true);
     }
@@ -1623,6 +1662,47 @@ pub(crate) async fn fetch_and_repair(
         return Ok(true);
     }
     warn!(target: "repair", "repair failed even with every recovery volume");
+    // §282 item 4: the gate above is read at every point that would ask
+    // for MORE, and this is the point where there is nothing more to
+    // ask for - so until 24 Aug 2026 nothing ever read the escalation's
+    // OWN yield, and a job could demonstrate beyond doubt that its
+    // provider will not serve this recovery set and still reach the
+    // user with the plain missing-articles opening that item 17's rung
+    // exists to displace. Measured on a throwaway fixture: 280 recovery
+    // articles asked, 0 arrived, verdict `download incomplete: 1
+    // file(s) with missing segments`. The route in is the floor working
+    // correctly - a FIRST ask under `MIN_RECOVERY_YIELD_SAMPLE`
+    // declines to judge, which is right, and the escalation it then
+    // runs is far over the floor and was judged by nobody.
+    //
+    // REPORTING only. Every guard above is pre-ask and stays exactly as
+    // it was: this cannot make the ladder buy anything it does not buy
+    // today, which is where §282's 229 seconds went.
+    //
+    // Judged on the escalation's own yield, REPLACING the earlier
+    // sample rather than summing with it. Both are asks of one source
+    // against one set, so summing is arithmetically defensible - but it
+    // lets a smaller, older sample outvote a larger, fresher one, and
+    // that has a false positive this verdict must not have. When
+    // `pick_volumes`' cheapest subset happens to be volumes a partially
+    // retained set no longer holds, the first ask comes back empty
+    // while the escalation is served most of the way; summed, that job
+    // is told its provider will not serve the parity and sent hunting a
+    // different source, when the honest answer is that the parity on
+    // offer was not enough. The floor applies either way, so neither
+    // form judges a sample too small to mean anything - and the case
+    // summing would additionally catch is one where the WHOLE remaining
+    // set is under sixteen articles, which is exactly the size the
+    // floor exists to refuse.
+    if wire.source_will_not_serve() {
+        warn!(
+            target: "repair",
+            "recovery unusable: {} across every remaining volume - this provider \
+             will not serve this post's recovery set",
+            wire.describe()
+        );
+        *shortfall = Some(RepairShortfall::Unservable(wire));
+    }
     Ok(false)
 }
 

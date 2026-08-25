@@ -1510,6 +1510,108 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
         "suspect dup fired while switched off"
     );
 }
+/// TODO 277: a slot that has NEVER been admitted can still be woken.
+///
+/// This is the structural claim the whole fleet curve rests on. The
+/// seed spawns the curve's CEILING and runs at the curve's own number,
+/// so on an anchorless run half the fleet parks before it has ever
+/// dialled - and the in-run governor's raise is worth nothing unless
+/// those particular slots come up. The sibling rig above moves a target
+/// that started at the full spawn count, so every slot it wakes had
+/// dialled once already and the pool had a session's worth of state for
+/// it; nothing covered the never-admitted case, which is the one this
+/// change creates.
+///
+/// Assertions are on the `connected` gauge, never on rates - socket
+/// counts are deterministic on loopback, throughput is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raise_wakes_slots_that_were_parked_before_they_ever_dialled() {
+    let data: Vec<u8> = (0..900_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("t.bin", &data, 20_000, "hr", &mut articles);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 300_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    // Four slots SPAWNED, one dialling: the shape `get::fleet` now
+    // builds, with the surplus parked as headroom for a raise.
+    let target = ConnTarget::new(1);
+    let (sc, mut cfg) = payout_server(&srv, 4, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    assert_eq!(cfg.dialled(), 1, "spawned 4, dialling 1");
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    assert_eq!(
+        live.servers[0].budget.load(Ordering::Relaxed),
+        1,
+        "the dashboard must show the fleet in use, not the slot count"
+    );
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let wait_conns = |want: usize| {
+        let live = live.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let got = live.servers[0].connected.load(Ordering::Relaxed);
+                if got == want {
+                    return;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "connected stuck at {got}, wanted {want}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    // One dials; the other three park without ever having authenticated,
+    // and must STAY parked rather than flap up to the spawn count.
+    wait_conns(1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        live.servers[0].connected.load(Ordering::Relaxed),
+        1,
+        "a slot above the target dialled unasked"
+    );
+    // The governor's raise. Every one of these three is a slot the pool
+    // has never seen dial.
+    target.set(4);
+    wait_conns(4).await;
+    tokio::time::timeout(Duration::from_secs(60), fetch)
+        .await
+        .expect("run hung across the raise")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), segs.len());
+}
+
 /// TODO 112: the live connection target moves BOTH directions
 /// mid-run. Lowering it must drain the highest slots to their next
 /// response boundary and park them (connected falls to the target,
@@ -2260,6 +2362,103 @@ async fn the_line_cap_leaves_a_connection_bound_fleet_alone() {
     assert_eq!(collect.await.unwrap(), segs.len());
 }
 
+/// TODO 277: the in-run GOVERNOR, which is the half of the fleet curve
+/// that runs after the seed has already dialled.
+///
+/// The seed sizes the fleet from whatever line reading the process had
+/// at job build, and on a run that had none - a CLI `get`, a daemon's
+/// first job - that is the curve's floor. This rig is the case where
+/// the run then learns better: a fleet dialled small against a line the
+/// evidence says is multi-gig, with the cap left on `auto` because
+/// nobody typed `NZBFAST_LINE_CAP`. The governor must raise the cap and
+/// the walk must hand the new share to the target, waking the parked
+/// slots.
+///
+/// It drives the governor from the ANCHOR rather than from the trained
+/// peak on purpose: they are the same input to `fleet_step` (the tick
+/// takes the larger of the two, both being achieved rates and so lower
+/// bounds on the line), and the anchor is available at the first tick
+/// where a trained peak needs ~7 s of plateau first - so this rig
+/// measures the rule and not the gauge's warm-up, which
+/// `the_stall_bound_survives_the_gauges_warm_up` already owns.
+///
+/// The numbers are synthetic - a real 9 Gbps anchor would have seeded
+/// the fleet at the knee and left nothing to raise - because what is
+/// under test is the wiring: that `line_cap_auto` reaches the tick,
+/// that the raise is not behind the shed's anchor gate, and that a
+/// target sitting on the seed's own share is one the governor may move
+/// UP. The ceiling still binds: the fleet only ever reaches the eight
+/// slots that were spawned, which is the limit the module doc sets out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_line_cap_raises_a_fleet_when_the_line_reads_faster_than_it() {
+    let data: Vec<u8> = (0..12_000_000u32).map(|i| (i * 11) as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("lcr.bin", &data, 50_000, "lcr", &mut articles);
+    drop(data);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    // Eight slots spawned, four of them admitted: the shape the seed
+    // leaves behind whenever the cap cut the dial.
+    let target = ConnTarget::new(4);
+    let (sc, mut cfg) = payout_server(&srv, 8, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    cfg.line_cap_fleet = 4;
+    cfg.line_cap_auto = true;
+    // ~9 Gbps, the line the 24 Aug mummy round measured and the one the
+    // curve answers with its ceiling.
+    cfg.line_anchor_bps = 1_125_000_000;
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    // Three agreeing ticks at one a second, plus the dial and the first
+    // deliveries that drive the fold at all.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while target.get() < 8 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the governor never raised the fleet: target {}",
+            target.get()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(target.get(), 8, "raised past the slots that were spawned");
+    tokio::time::timeout(Duration::from_secs(300), fetch)
+        .await
+        .expect("run hung")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), segs.len());
+}
+
 /// TODO 208.2, the warm-up gap. A starved share looks like this on the
 /// wire: half a body, then nothing for longer than the flat 8 s
 /// deadline, then the rest - on a connection that is alive the whole
@@ -2411,6 +2610,55 @@ async fn the_stall_live_knob_restores_the_flat_floor_until_the_peak_trains() {
 /// reads the 400 KB/s line as what it is (within the mock's 64 KB
 /// chunk discretisation), the bound is the 16 s share from the first
 /// bodies on, and the 10 s silence is carried - no kill, no reconnect.
+///
+/// THE BAND IS ASYMMETRIC, AND ON PURPOSE. The two edges answer
+/// different questions and only one of them is this arm's subject.
+///
+/// The CEILING is the subject: an over-read is the defect, and the
+/// arm below measures the defect at ~1.8x the line. 460_000 is 1.15x
+/// nominal, so a gauge that has gone back to crediting clumps cannot
+/// pass here. Do not raise it.
+///
+/// The FLOOR is not a statement about the gauge at all - it is a
+/// statement about the BOX, and until 24 Aug 2026 it was an unstated
+/// one. The peak is a MEASUREMENT of what crossed the wire, so it
+/// tracks what the mock's pacing actually achieved, and the best
+/// reading available on this rig is not 400 KB/s to begin with: the
+/// fleet runs eight shares for the first half body, SEVEN for the
+/// 10 s gap, then eight again, and that trough is still inside the
+/// gauge's 10 s-half-life window when the plateau ends. Integrating
+/// the profile against the window (T = 8 s an article, plateau
+/// [T/2 + 10, 3T]) gives 384.6 KB/s at perfect pacing; the 64 KB
+/// chunk sawtooth adds a couple of percent back, and a quiet dev box
+/// measures 391-408 KB/s. So the reading scales as
+/// `384.6 KB/s x achieved/nominal`, and the floor is really a minimum
+/// pacing fraction the runner has to hit for 35 s.
+///
+/// At 340_000 that fraction was 88%, and nothing said so. It was
+/// overrun twice in the 400 main runs between 23 and 24 Aug 2026 -
+/// 336_086 B/s and 337_781 B/s, both on `unit-one-process`, where the
+/// whole nzbkit binary took 732 s against 72 s on the dev box. Neither
+/// was a polluter and no neighbour was involved: the victim
+/// reproduces SOLO once the box is loaded enough (measured 24 Aug,
+/// ten concurrent copies of this one test at background QoS against
+/// 128 spinners: 18 of 20 red, 276_525 to 333_549 B/s, every failure
+/// one-sided low). 260_000 is 68% of the 384.6 KB/s best, so a runner
+/// now has to lose a THIRD of its paced throughput before this arm can
+/// go red - and it still refuses the low-side failure the saturation
+/// module doc names, a gauge aged from too early an origin
+/// under-reading by the pipeline's fill ("half the line", 200 KB/s
+/// here), which stays out by 1.3x. Do not tighten it back toward the
+/// line; the gauge reads what the wire achieved, and on a CI runner
+/// the wire is the mock's timer.
+///
+/// One thing the floor cannot cover, so read it before widening
+/// further: the `(0, 0)` assertion above carries a wall-clock budget
+/// of its OWN - it fired 2 of those same 20 runs, when the gauge was
+/// still untrained as the silence opened and the bound sat on its 8 s
+/// floor. Widening past ~260_000 buys nothing, because that assertion
+/// becomes the limit, and it cannot be loosened without tuning the
+/// rig's geometry - which is the one thing the arm below refuses to
+/// do.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_line_peak_reads_the_line_with_the_fleet_dialled_together() {
     let (done, stalls, reconnects, peak) = warm_up_gap_leg(true, 0, true, 0).await;
@@ -2422,7 +2670,7 @@ async fn the_line_peak_reads_the_line_with_the_fleet_dialled_together() {
          bound it inflates killed the read ({stalls} stall kills, {reconnects} reconnects)"
     );
     assert!(
-        (340_000..=460_000).contains(&peak),
+        (260_000..=460_000).contains(&peak),
         "arrivals on: trained line peak {peak} B/s for a 400 KB/s line"
     );
 }
@@ -2437,12 +2685,30 @@ async fn the_line_peak_reads_the_line_with_the_fleet_dialled_together() {
 /// on the peak rather than on a kill: the rig's one silence (4-14 s)
 /// ends before the inflated peak exists, and a rig whose geometry is
 /// tuned until the consequence shows would be pinning the geometry.
+///
+/// Its floor is the same kind of quantity as the arm above's, and it
+/// moved on the same day for the same reason: this reading is a
+/// measurement too, so it comes off with the box. A quiet dev box
+/// measures 717.5-717.9 KB/s (four runs, 0.05% spread - the clump is
+/// a byte count, which is why it holds up better under load than the
+/// plateau does), and under the load that reddened the arm above 18
+/// times in 20 this one still fell to 556_944 once in ten and went
+/// red against its old 560_000. 500_000 is 70% of the quiet figure,
+/// matching the slip the arm above now tolerates.
+///
+/// WHAT MAKES THE PAIR AN A/B IS THAT THIS FLOOR SITS ABOVE THAT
+/// ARM'S CEILING, and nothing else. 500_000 > 460_000, so a knob that
+/// had become inert - both arms reading the same R, whatever R is -
+/// fails one of the two for every possible R. Keep that ordering: a
+/// ceiling raised to meet this floor, or this floor dropped to meet
+/// that ceiling, deletes the A/B and leaves two arms that can both
+/// pass on one reading.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_peak_arrivals_knob_restores_the_first_wave_clump() {
     let (done, _, _, peak) = warm_up_gap_leg(true, 0, false, 0).await;
     assert_eq!(done, 24, "the A/B arm still finishes the job");
     assert!(
-        peak >= 560_000,
+        peak >= 500_000,
         "peak_arrivals off, no ramp: the per-body clump should over-read the \
          400 KB/s line by ~1.7x, got a trained peak of {peak} B/s - the arm is not an arm"
     );

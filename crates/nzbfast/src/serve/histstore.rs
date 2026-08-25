@@ -122,7 +122,7 @@ impl Daemon {
         // the private path) may not run for weeks. `mode` applies only
         // to creation, so an existing file keeps whatever it has.
         let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).append(true);
+        opts.create(true).append(true).read(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -130,6 +130,28 @@ impl Daemon {
         }
         let r = opts.open(&path).and_then(|mut f| {
             let mut buf = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+            // A crash mid-append leaves the file without its final
+            // newline, and replay's per-line tolerance budgets that at
+            // ONE lost line. Appending straight after the torn bytes
+            // welded the first post-recovery record onto them into one
+            // unreadable line, so the NEXT replay dropped this record
+            // with the tear - a park or tombstone written after a crash
+            // was silently gone two restarts later (Codex sweep 24 Aug,
+            // F-03). One leading newline turns the weld back into "torn
+            // line, then this record", the shape replay already
+            // handles. Read through the same handle: `append` binds
+            // WRITES to the end, reads seek freely.
+            {
+                use std::io::{Read, Seek, SeekFrom};
+                if f.metadata()?.len() > 0 {
+                    f.seek(SeekFrom::End(-1))?;
+                    let mut last = [0u8; 1];
+                    f.read_exact(&mut last)?;
+                    if last[0] != b'\n' {
+                        buf.push('\n');
+                    }
+                }
+            }
             for l in lines {
                 buf.push_str(l);
                 buf.push('\n');
@@ -910,9 +932,12 @@ impl Daemon {
         }
         // The RECORD retires; the payload on disk is the user's. Only
         // the spooled .nzb (kept for retry, and retry needs a record)
-        // goes with it.
+        // goes with it - through `drop_spool`, because the tombstone is
+        // durable by now and a copy whose unlink is refused would be
+        // re-adopted at the next start as a fresh download of a release
+        // retention just aged out (Codex sweep 24 Aug, F-04).
         for p in spooled {
-            let _ = std::fs::remove_file(&p);
+            drop_spool(&p);
         }
         if !doomed.is_empty() {
             info!(
@@ -943,12 +968,29 @@ impl Daemon {
 /// `history_enforce_retention` returns before it takes a single lock -
 /// which is why this is unconditional rather than started and stopped
 /// with the setting.
+///
+/// **IT CARRIES A SECOND SWEEP** since §282 item 5's residue was closed
+/// (24 Aug 2026): `Daemon::drop_stranded_spares`, which drops a held
+/// spare whose owner has left both stores. The two ride one clock
+/// because the reap above is the commonest way that state is REACHED -
+/// a Failed row retired by the keep_count arm takes its spare's only
+/// remaining reason with it - and because a spare parked at
+/// `DUPE_PRIORITY` costs nothing while it waits, so a minute of latency
+/// is the whole price of not needing a hook on every delete path. It is
+/// NOT folded into `history_enforce_retention` itself, and must not be:
+/// that function returns on the first two atomic loads when retention is
+/// off, and a user deleting a history row by hand strands a spare
+/// whether retention is on or not. Its own cost with nothing held is one
+/// queue walk.
 pub(super) fn spawn_retention_sweep(daemon: &Arc<Daemon>) {
     let d = daemon.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             d.history_enforce_retention();
+            // After the reap, not before: a record this tick retires is
+            // one this tick can then collect the spares of.
+            d.drop_stranded_spares();
         }
     });
 }
@@ -1007,6 +1049,56 @@ mod store_tests {
             "a torn tail took the whole history with it"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The first append AFTER a torn tail survives the restart after
+    /// that.
+    ///
+    /// Replay tolerates the tear itself, but the store used to append
+    /// straight onto the torn bytes, welding the first post-recovery
+    /// record into the same unreadable line - so the SECOND replay
+    /// dropped both, and a park or tombstone written right after a
+    /// crash was silently gone (Codex sweep 24 Aug, F-03). The append
+    /// path now starts a fresh line when the tail lacks its newline.
+    /// Both tear shapes: invalid UTF-8, and syntactically torn JSON.
+    #[test]
+    fn an_append_after_a_torn_tail_survives_the_next_replay() {
+        let row = |id: &str| {
+            format!(
+                r#"{{"nzo_id":"{id}","name":"{id}.Release","out_dir":"/tmp/o","nzb_path":"/tmp/n.nzb","state":"Completed"}}"#
+            )
+        };
+        for (tag, tear) in [
+            ("tornutf8", &b"{\"nzo_id\":\"a2\",\"name\":\"Tor\xC3"[..]),
+            ("tornjson", &br#"{"nzo_id":"a2","name":"Torn"#[..]),
+        ] {
+            let dir = tmp(tag);
+            let d = test_daemon(&dir);
+            let path = d.history_store_path();
+
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(row("a1").as_bytes());
+            bytes.push(b'\n');
+            bytes.extend_from_slice(tear);
+            std::fs::write(&path, &bytes).unwrap();
+
+            // Restart 1: the tear costs its own line and nothing else.
+            let (jobs, _) = d.history_replay();
+            assert_eq!(jobs.len(), 1, "{tag}: replay after the tear");
+
+            // The first post-recovery mutation...
+            assert!(d.history_append(&[row("a3")]), "{tag}: append refused");
+
+            // ...is still there on restart 2.
+            let (jobs, _) = d.history_replay();
+            let ids: Vec<String> = jobs.iter().map(|j| j.nzo_id.clone()).collect();
+            assert_eq!(
+                ids,
+                ["a1", "a3"],
+                "{tag}: the torn tail swallowed the append after it"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /// Tombstones punch holes in the append order instead of compacting

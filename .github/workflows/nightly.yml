@@ -370,6 +370,13 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo test --locked -p nzbkit --tests --no-fail-fast -- --test-threads=1
+      # POLLUTION-ONLY on purpose, and it differs from the annotations on
+      # `unit-one-process` and `one-process-loaded` for a reason rather
+      # than by drift: every command in this job ends `--test-threads=1`,
+      # so a race between two THREADS on a process-global cannot occur
+      # here at all, and the runner is idle, so a test with a hidden
+      # wall-clock budget will not overrun it. Serial and quiet leaves
+      # exactly one shape, which is the one named below.
       # Gated on the BUILD having succeeded, or a compile error would
       # print an annotation about cross-test pollution, which is a
       # confident answer to a question nobody asked.
@@ -482,6 +489,13 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo test --locked -p nzbkit --features heavy-tests --test conn_tuner -- --test-threads=1
+      # POLLUTION-ONLY on purpose, and it differs from the annotations on
+      # `unit-one-process` and `one-process-loaded` for a reason rather
+      # than by drift: every command in this job ends `--test-threads=1`,
+      # so a race between two THREADS on a process-global cannot occur
+      # here at all, and the runner is idle, so a test with a hidden
+      # wall-clock budget will not overrun it. Serial and quiet leaves
+      # exactly one shape, which is the one named below.
       # Gated on the BUILD having succeeded, or a compile error would
       # print an annotation about cross-test pollution, which is a
       # confident answer to a question nobody asked.
@@ -489,6 +503,243 @@ jobs:
         if: ${{ failure() && steps.build.outcome == 'success' }}
         run: |
           echo "::error title=A heavy target failed with its tests sharing one process::If the nextest run of the same target is green on this commit then no individual test is broken: one test in it is leaving process-global state that a later one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p nzbfast --features heavy-tests --test <target> <the failing test>' names it in minutes."
+
+  # ===================================================================
+  # THE LOADED ONE-PROCESS RUN. The only job in this repo that can see a
+  # test carrying a hidden WALL-CLOCK budget, and the only one that
+  # reports a RATE instead of a verdict.
+  #
+  # A one-process failure is one of three shapes, and TODO 270's
+  # build-out reaches two of them:
+  #
+  #   (a) POLLUTION - test A leaves process-global state test B reads.
+  #       Needs one process, visible even serial. Every one-process job
+  #       here reaches it, and tools/pollution-bisect.py solves it.
+  #   (b) A CONCURRENT RACE on a process-global - two tests on different
+  #       THREADS of one process race a counter. Needs one process AND
+  #       parallel threads, so `--test-threads=1` structurally cannot
+  #       produce it. ci-private's `unit-one-process` reaches it (it
+  #       invokes each binary bare, so libtest is parallel), and
+  #       `windows-one-process` below reaches it once a night;
+  #       one-process-light and one-process-heavy above CANNOT, because
+  #       every command in them ends `-- --test-threads=1`.
+  #   (c) A HIDDEN WALL-CLOCK BUDGET in the test - production correctly
+  #       rolls a window or expires a token after N seconds and the
+  #       test's setup is inside it. Needs LOAD, not neighbours: it
+  #       fails SOLO once the box is slow enough, so there is no
+  #       polluter and a bisect over it converges on an innocent.
+  #
+  # Nothing ran the one-process shape under LOAD, so (c) was invisible
+  # to every job in this repo - and on 24 Aug 2026 BOTH of the flakes
+  # that were fixed had been found by a human running the one-process
+  # command by hand on a busy box, not by any of them.
+  # `serve::mover::lane_tests::concurrent_pacers_share_one_bucket` was
+  # (c): `mover_pacer` zeroes `sent` once 2 s pass and the window is
+  # born inside `test_daemon`, so slow construction zeroed the counter
+  # before the first assertion (4 failures in 4 loaded runs, 0 in 5
+  # quiet ones; fixed in the TEST, 0a5834795). The sibling
+  # `get::workers::mem_sampler_tests::stopping_an_old_sampler_leaves_the_new_one_running`
+  # was (b) racing `MEM_SAMPLER_RUN` at 73 failures in 200 runs
+  # (a676367fb). This job also takes (b) from "roughly one chance a
+  # night" to near-certain, because it runs the binary tens of times.
+  #
+  # IT REPORTS A RATE, and that is the whole design. A run that fails 3
+  # times in 40 is a real finding and NOT a red build; a job that goes
+  # red on any single failure gets muted inside a week, and a muted job
+  # is worse than no job. So the rate goes to the step summary and to a
+  # warning annotation per test, and the exit code is red only at or
+  # over 25% - a threshold calibrated on the two defects above, which
+  # sat at 100% and 36.5%. What IS a hard red is the driver deciding it
+  # could not do its job: a dilation that says the load never happened,
+  # too few iterations to read a zero, a binary that ran almost no tests,
+  # a pace probe that never reported, or a `--starve` whose lever did
+  # nothing. Those five are the anti-rubber-stamp arms and they are the
+  # ones never to soften - the whole risk of a job like this is that it
+  # reports a clean rate over nothing, forever.
+  #
+  # ONE LEG PER BINARY, and until 24 Aug 2026 there was one leg and four
+  # binaries. That was a deliberate choice about the DENOMINATOR - and it
+  # cost this job the exact defect it exists to find.
+  # `nzbfast --bin nzbfast` is ~1750 tests and 56.9 s parallel on a runner
+  # (measured in run 32660095310), so a loaded iteration is roughly 95 s
+  # and 3000 s buys about thirty of them; nzbkit's lib root is 731 s in
+  # that same measurement, so a campaign over it needs its own, much
+  # larger budget or it lands under `--min-runs` and two observations is
+  # not a rate. The original note said so and prescribed exactly this
+  # remedy - "a second job with its own budget" - and then ran one leg
+  # anyway, so `pool::fault_rigs::the_line_peak_reads_the_line_with_the_fleet_dialled_together`
+  # (nzbkit LIB) went red twice in the 400 main runs of 23-24 Aug 2026,
+  # was found by a human on a busy box, and was fixed in 2e4614940
+  # without this job ever having run the binary it lives in.
+  #
+  # THE ROSTER IS DERIVED, NOT WRITTEN. `tools/one-process-roster.py`
+  # reads the workspace manifests and holds the matrix below to every
+  # first-party unit target `ci-private.yml`'s `unit-one-process` runs on
+  # every push - each one either a leg or a `one-process-uncovered:` line
+  # with a reason. A list is a gate that cannot see the third binary, and
+  # the third binary was already there: `nzbtray`'s bin root carries 23
+  # tests on every host, because `probe_body` is declared
+  # `#[cfg(any(windows, test))]` and not `#[cfg(windows)]`.
+  #
+  # NOT ON THE PUSH PATH, deliberately. It is slow, and it is
+  # flaky-SEEKING by construction: reddening somebody's push with a
+  # probabilistic result is how this gets switched off.
+  # ===================================================================
+  one-process-loaded:
+    # Named, or the Actions list renders every matrix field in the job
+    # title and the two legs are told apart by reading a budget number.
+    name: one-process-loaded (${{ matrix.id }})
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    # Per-leg, because the two binaries are an order of magnitude apart:
+    # the campaign will not START an iteration it has no room to FINISH,
+    # so the worst case is the budget plus one iteration plus the build.
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # Never fail-fast: the whole output of this job is a RATE per
+      # binary, and cancelling nzbkit's campaign because nzbfast's found
+      # something throws away the measurement that costs the most to
+      # make.
+      fail-fast: false
+      matrix:
+        include:
+          # `id` is what tools/one-process-roster.py holds to the
+          # workspace; `select` is the cargo target spelling, and the two
+          # have to agree by hand because cargo has no `--bin` for a lib.
+          - id: nzbfast:bin/nzbfast
+            package: nzbfast
+            select: --bin nzbfast
+            budget: 3000
+            timeout: 90
+          # MEASURED 25 Aug 2026 and the budget is NOT thin, which this
+          # comment claimed on an estimate. On a hosted runner
+          # `unit-one-process` runs this binary idle in 369.77 s (1833
+          # tests, run 32795946947); the 731 s this line was written
+          # from is the other end of a wide spread and is a runner-day,
+          # not the number. And loading it costs about NOTHING in wall
+          # clock: the nzbfast leg measured 39-49 s loaded against 49.5 s
+          # idle, because the campaign runs `--test-threads=6` where the
+          # bare binary defaults to `nproc` = 2, and the extra threads
+          # pay for the spinners. So expect roughly 10-22 iterations
+          # here, not the six to ten guessed above. Cut the budget if the
+          # minutes are not wanted - but the reason is cost, not
+          # `--min-runs`, which has far more headroom than this said.
+          # This is the leg the 24 Aug defect lived in.
+          #
+          # IT IS ALSO THE EXPENSIVE ONE: worst case this is a ~2.5-4 h
+          # nightly runner where there was none, on a repo that bills.
+          # The budget is the knob, and it is the FIRST thing to cut if
+          # those minutes are not wanted - but cut it and watch
+          # `--min-runs`, because a leg that stops completing three
+          # iterations exits 2 every night, and a permanently red job is
+          # how this whole family gets switched off. Three or four
+          # iterations is the floor worth having; below that, drop the
+          # leg on purpose with a `one-process-uncovered:` line rather
+          # than leaving it red.
+          - id: nzbkit:lib
+            package: nzbkit
+            select: --lib
+            budget: 9000
+            timeout: 240
+    # nzbfast's LIB root is `#![cfg(feature = "ffi")]` at
+    # crates/nzbfast/src/lib.rs, and nothing in default-members turns that
+    # feature on, so without `-p nzbfast-ffi` it compiles to nothing and
+    # the binary carries no tests at all. A loaded campaign over an empty
+    # binary would trip `--min-tests` every night, which is a permanently
+    # red job over nothing.
+    # one-process-uncovered: nzbfast:lib - compiles to nothing without the ffi feature, so it carries no tests to load
+    # nzbtray's 23 tests are pure functions in `probe_body` - no timer, no
+    # process-global, no I/O - so there is nothing for load to perturb,
+    # and the binary runs in well under a second. `unit-one-process` runs
+    # it on every push, which is where a pollution or race shape in it
+    # would show.
+    # one-process-uncovered: nzbtray:bin/nzbtray - 23 pure-function tests, no timer and no process-global for load to perturb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # FIRST, and it needs neither the toolchain nor the cache below, so
+      # a disagreement costs seconds rather than a disk clean, a rustup
+      # install, an apt-get and a cache restore. A leg naming a target
+      # that no longer exists would otherwise fail deep in the build with
+      # a cargo error; a first-party binary nobody covers would not fail
+      # at all, which is the whole reason this gate exists.
+      - name: the matrix covers every first-party unit binary
+        run: |
+          tools/one-process-roster.py --selftest
+          tools/one-process-roster.py
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: test deps (par2 for repair fixtures)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq par2
+      - name: dependency cache key
+        id: depkey
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          echo "hash=$($py tools/dep-cache-key.py)" >> "$GITHUB_OUTPUT"
+      # RESTORE ONLY, no matching save, for the reason the sibling jobs
+      # above give: long-suites owns this key, and a save here would race
+      # it with a different artifact set behind it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
+      # Built with EXACTLY the command the campaign then runs, matrix
+      # field for matrix field. `-p nzbfast --bin nzbfast` resolves fewer
+      # features than `--workspace` does, so a build spelled any other
+      # way would leave the run steps quietly compiling a second artifact
+      # set - the trap measured at 33 s and a duplicate `target/` in the
+      # note above `unit-one-process` in ci-private.yml.
+      - name: build
+        id: build
+        run: cargo test --locked -p ${{ matrix.package }} ${{ matrix.select }} --no-run
+      # The spinners and the thread count are derived from `nproc` inside
+      # the driver rather than written here, because the ratio is what
+      # transfers between boxes and the numbers are not: the dev box that
+      # reproduced both defects ran 32 spinners with `--test-threads=96`
+      # on 32 cores. Its own docstring carries the derivation, the two
+      # dilation tiers and the measurements behind them.
+      #
+      # `--starve` is deliberately NOT passed, and since 25 Aug 2026 that
+      # is a measurement on THIS runner rather than an inference from a
+      # dev box. A hosted runner is TWO cores, so the derivation above
+      # puts 4 spinners and `--test-threads=6` on it, and the plain
+      # nzbfast leg reads pace 0.88 - UNDER the driver's 0.90 slip floor,
+      # so it already claims the timer-paced class without any lever.
+      # `nice -n 5` moves that to 0.84 and costs 2.0x of the campaign's
+      # own throughput (39-49 s an iteration -> 74-87 s), i.e. 0.04 of
+      # pace for half the denominator that makes this job a rate. Worse,
+      # it ARMS a refusal the plain leg does not have: `--starve` with a
+      # pace at or over 0.90 is exit 2 by design, where the same reading
+      # unstarved is deliberately not even a warning, and a permanently
+      # red job is how this family gets switched off.
+      # The dev-box numbers in the driver's header are a statement about
+      # SPINNERS, not about this job - probe-only on this runner, with no
+      # test binary beside them, pace reads 0.982. It is the TEST
+      # THREADS that dilate the pacing on a two-core box. TODO 289 carries
+      # both tables. Reach for `--starve` by hand on one suspect test,
+      # which is how both 24 Aug flakes were actually found.
+      - name: loaded, repeated one-process runs of the ${{ matrix.id }} unit binary
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: |
+          python3 tools/loaded-one-process.py --selftest
+          python3 tools/loaded-one-process.py --budget-seconds ${{ matrix.budget }} -- \
+            cargo test --locked -p ${{ matrix.package }} ${{ matrix.select }} -- --test-threads={threads}
+      # No `how to read a red run` step, and its absence is the point:
+      # the driver writes its own annotations, one per failing test with
+      # the three shapes and the tell that separates them, plus a step
+      # summary table carrying the rate. A second annotation here would
+      # be a confident answer over the top of a measured one.
 
   # Windows leg for the PRIVATE repo. The test suite had NEVER run on
   # Windows until a Windows-on-ARM build probe added the public-repo
@@ -713,7 +964,7 @@ jobs:
       - name: how to read a red run
         if: ${{ failure() && steps.build.outcome == 'success' }}
         run: |
-          echo "::error title=A Windows unit binary failed with its tests sharing one process::If windows-unit is green on this same commit then no individual test is broken: one test in that binary is leaving process-global state that another one reads. Do NOT make the victim order-independent - find the polluter. 'tools/pollution-bisect.py -p <crate> <the failing test>' names it in minutes, and needs a Windows box to do it on."
+          echo "::error title=A Windows unit binary failed with its tests sharing one process::If windows-unit is green on this same commit then no individual test is broken IN ISOLATION - but this step runs libtest PARALLEL (no --test-threads), so there are TWO shapes and only one has a polluter. (a) POLLUTION: an earlier test left process-global state that this one read. (b) A CONCURRENT RACE on a process-global: two tests on different THREADS raced a counter, which '-- --test-threads=1' structurally CANNOT reproduce - so do not narrow with it and do not add it to make the red go away. Do NOT make the victim order-independent either: find the cause. 'tools/pollution-bisect.py -p <crate> <the failing test>' names the polluter for (a) in minutes and needs a Windows box to do it on, and it is meaningless on a FLAKY victim - it refuses one that fails alone, and otherwise converges on an innocent neighbour with the confidence of a real answer. A third shape, a test that depends on a wall-clock duration it never sets, needs LOAD rather than neighbours and is 'one-process-loaded' above."
 
   # TODO 82: the long-run soak. One daemon, a mixed queue (store RAR5,
   # compressed RAR5, 7z, PAR2 repair, password) driven round and round

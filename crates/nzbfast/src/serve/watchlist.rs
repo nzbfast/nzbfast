@@ -185,13 +185,32 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 // deferral since the 3 Aug sweep; watch settlement
                 // walked straight past it. Settle on a later pass, the
                 // way a still-downloading predecessor already does.
-                let old_busy = d.queue.lock_ok().iter().any(|j| {
-                    let g = j.lock_ok();
-                    g.nzo_id == p.old_nzo
-                        && (matches!(g.state, JobState::Downloading | JobState::Finishing)
-                            || g.finalizing)
-                });
+                // A prefetching predecessor reads Queued and not
+                // finalizing, so the busy test below cannot see its live
+                // writers: the sidecar holds the job Arc directly, and
+                // its ownership check is (retries, move_seq, out_dir,
+                // !tombstone) - none of which this delete changes.
+                // Removing the row and its directory under it let the
+                // sidecar recreate files inside the deleted tree, mark
+                // the removed job Completed and park it back into
+                // history after the tombstone (Codex sweep 24 Aug,
+                // F-05). Poke it and settle on a later pass, the way
+                // every other live writer in this arm is deferred.
+                // Snapshotted BEFORE the queue lock: the sidecar mutex
+                // under queue+job would be a lock edge nothing else in
+                // the daemon has.
+                let sidecar_old = d.sidecar_owner().is_some_and(|(id, _)| id == p.old_nzo);
+                let old_busy = sidecar_old
+                    || d.queue.lock_ok().iter().any(|j| {
+                        let g = j.lock_ok();
+                        g.nzo_id == p.old_nzo
+                            && (matches!(g.state, JobState::Downloading | JobState::Finishing)
+                                || g.finalizing)
+                    });
                 if old_busy {
+                    if sidecar_old {
+                        d.poke_sidecar(|id| id == p.old_nzo);
+                    }
                     info!(
                         target: "watch",
                         "upgrade landed, but the superseded {} is still \
@@ -212,6 +231,14 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     pos.and_then(|i| q.remove(i))
                 };
                 if let Some(job) = queued_old {
+                    // Tombstoned even though it is leaving the queue
+                    // right here: the sidecar deferral above closes the
+                    // steady state, and this closes the race window
+                    // between its snapshot and the remove - an Ok that
+                    // lands after this refuses to run the completion
+                    // tail (`sidecar_result_is_ours` tests it), same as
+                    // the SAB delete arms.
+                    job.lock_ok().tombstone = true;
                     let (dir, nzb, name, filed, tail) = {
                         let g = job.lock_ok();
                         // The tail is the SUPERSEDED release's own, as
@@ -230,7 +257,12 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
                         d.note_delete_kept(&name, &dir, &why, None);
                     }
-                    let _ = std::fs::remove_file(&nzb);
+                    // Through `drop_spool` rather than a swallowed
+                    // `remove_file` (Codex sweep 24 Aug, F-04): the row
+                    // is gone for good, so a spool copy whose unlink is
+                    // refused would be re-adopted at the next start and
+                    // the superseded release downloads again.
+                    drop_spool(&nzb);
                     d.save_queue();
                     info!(
                         target: "watch",
@@ -247,11 +279,21 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 // A history row can be busy too: a password unlock marks
                 // the record `finalizing` while it extracts, renames and
                 // moves on disk. Same deferral as the queue side above.
-                if old.as_ref().is_some_and(|j| j.lock_ok().finalizing) {
+                // `d.moving` is the mover's own fence, and it is NOT
+                // covered by `finalizing`: a completed predecessor whose
+                // NAS move is mid-copy is in that set and nothing else,
+                // and deleting through it removed the source out from
+                // under `relocate_completed` - a half-published move
+                // with the record gone too (Codex sweep 24 Aug, F-05).
+                // The SAB and JSON-RPC history deletes have refused this
+                // shape since the 3 Aug sweep; parity here.
+                if old.as_ref().is_some_and(|j| j.lock_ok().finalizing)
+                    || d.moving.lock_ok().contains(&p.old_nzo)
+                {
                     info!(
                         target: "watch",
-                        "upgrade landed, but the superseded {} is being unlocked - \
-                         deleting it once it settles",
+                        "upgrade landed, but the superseded {} is being unlocked \
+                         or moved - deleting it once it settles",
                         p.prev_stem
                     );
                     state.pending.push(p);
@@ -276,7 +318,9 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     if let FilesGone::Kept(why) = &outcome {
                         d.note_delete_kept(&name, &dir, why, None);
                     }
-                    let _ = std::fs::remove_file(&nzb);
+                    // Same as the queue half above: a refused unlink
+                    // must not leave the record's spool copy adoptable.
+                    drop_spool(&nzb);
                     d.history
                         .lock_ok()
                         .retain(|j| j.lock_ok().nzo_id != p.old_nzo);

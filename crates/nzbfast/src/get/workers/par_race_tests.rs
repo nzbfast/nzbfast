@@ -9,6 +9,7 @@
 //! still reads it as test code; `super` is still `workers`, so
 //! `use super::*` reaches exactly what the inline module reached.
 
+use super::recovery::*;
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 

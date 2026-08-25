@@ -281,10 +281,11 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
             // ~7 epochs by design, and the cap is a fleet quantity.
             // Clamped on `desired` below rather than folded into the
             // controller's ceiling, so a cap that moves between jobs
-            // does not read as a settings change. The cap is a constant
-            // now, so the `anchor` beside it no longer sizes it - that
-            // reading is only the saturation test above.
-            let line_share = crate::conntune::line_cap_share(live.servers.len());
+            // does not read as a settings change. TODO 277: the same
+            // `anchor` the saturation test above reads is what sizes
+            // the cap, so the walker's clamp grows with the line
+            // exactly as the job's own seed does.
+            let line_share = crate::conntune::line_cap_share(live.servers.len(), anchor);
             if line_saturated != announced_saturated {
                 info!(
                     "live-tune: link {} (fleet {:.0} Mbps vs anchor {:.0} Mbps)",

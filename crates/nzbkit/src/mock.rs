@@ -600,6 +600,104 @@ fn wire_body(article: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The mock's BODY arrival record: every message-id it was asked for,
+/// in arrival order, each with the `Instant` the request LANDED.
+///
+/// The ids alone are what nearly every reader wants, so this `Deref`s to
+/// `Vec<String>` and `log.contains(..)` / `.len()` / `.iter()` / `log[n..]`
+/// all keep working unchanged. The stamps exist for the one question the
+/// ids cannot answer: WHEN, and specifically when as the SERVER saw it.
+///
+/// A test that wants "B was not asked until 2 s after A" must read these
+/// and never `Instant::now()` in its own polling loop - a poller stamps
+/// the moment it NOTICED an entry, which is the arrival time plus however
+/// long that thread was descheduled, and on a box running a full parallel
+/// sweep that is unbounded. Measured on the mac dev box, 24 Aug 2026: 0-6 ms
+/// of that lateness on an idle box or a single test binary, 74 ms and 121 ms
+/// under the full parallel sweep. See `with_the_handoff_off_the_queue_is_serial`
+/// in `crates/nzbfast/tests/integration/queue_handoff.rs`, which failed
+/// exactly that way once in seven CI sweeps that day - it had ~300 ms of
+/// margin, and the observer was spending it.
+///
+/// The stamp is taken BEFORE any `slow_ttfb` / stall chaos sleeps, so it
+/// is the request's arrival and never its answer's departure.
+///
+/// WHAT IT STILL ASSUMES, said out loud because a server-side clock is
+/// better than a poller's but is not an oracle: the stamp lands after
+/// this connection's task has been scheduled, read the BODY line and
+/// parsed it, so a starved mock stamps LATE, by however long that took.
+/// What makes that harmless for a `slow_ttfb` bound is that the sleep is
+/// DOWNSTREAM of the stamp in the same task - the answer departs at
+/// stamp + `slow_ttfb`, and a client cannot ask for the next article
+/// until it has that answer. So a late stamp pushes the whole rest of
+/// the sequence out with it and the floor holds by construction: no
+/// amount of scheduling can put a successor's arrival less than
+/// `slow_ttfb` after the stamp. It is only an UPPER bound on a gap that
+/// a starved mock (or a starved daemon) can inflate, and a test asserting
+/// one needs margin for that in a way a lower bound does not.
+#[derive(Default)]
+pub struct BodyLog {
+    ids: Vec<String>,
+    /// Arrival `Instant` of `ids[i]`, at the same index. Kept in the same
+    /// mutex as the ids so the two cannot be read out of step.
+    at: Vec<std::time::Instant>,
+}
+
+/// Deliberately the IDS ONLY, so that every `{:?}` of this log that
+/// predates the stamps still reads exactly as it did - a dozen assertion
+/// messages across the test tree format the whole log, and none of them
+/// wants a parallel array of `Instant` debug structs. Ask for
+/// [`BodyLog::timeline`] when the times are the point.
+impl std::fmt::Debug for BodyLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.ids.fmt(f)
+    }
+}
+
+impl std::ops::Deref for BodyLog {
+    type Target = Vec<String>;
+    fn deref(&self) -> &Vec<String> {
+        &self.ids
+    }
+}
+
+impl BodyLog {
+    /// Record one BODY request's arrival and return the new length -
+    /// the 1-based ordinal of this request across every connection.
+    fn record(&mut self, id: &str) -> u64 {
+        self.ids.push(id.to_string());
+        self.at.push(std::time::Instant::now());
+        self.ids.len() as u64
+    }
+
+    /// When `id` was FIRST asked for, or `None` if it never was.
+    pub fn first_asked(&self, id: &str) -> Option<std::time::Instant> {
+        self.ids.iter().position(|x| x == id).map(|i| self.at[i])
+    }
+
+    /// When the first id satisfying `pred` was asked for, with that id.
+    pub fn first_matching(
+        &self,
+        pred: impl Fn(&str) -> bool,
+    ) -> Option<(String, std::time::Instant)> {
+        self.ids
+            .iter()
+            .position(|x| pred(x))
+            .map(|i| (self.ids[i].clone(), self.at[i]))
+    }
+
+    /// The whole record as `(id, offset)` pairs, each offset measured
+    /// from `since`. For a failure message that has to say what actually
+    /// happened on the wire, and when.
+    pub fn timeline(&self, since: std::time::Instant) -> Vec<(String, std::time::Duration)> {
+        self.ids
+            .iter()
+            .cloned()
+            .zip(self.at.iter().map(|t| t.saturating_duration_since(since)))
+            .collect()
+    }
+}
+
 pub struct MockServer {
     pub addr: SocketAddr,
     /// Total BODY requests served (across all connections).
@@ -623,8 +721,10 @@ pub struct MockServer {
     pub bytes_out: Arc<AtomicU64>,
     /// Every BODY request's message-id (with angle brackets) in arrival
     /// order, across all connections - the M11 tests assert queue-order
-    /// effects (head/tail burst, seek promotion) against this.
-    pub body_log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// effects (head/tail burst, seek promotion) against this. It also
+    /// carries each request's arrival `Instant`, which is the only
+    /// honest clock for an ordering test - see [`BodyLog`].
+    pub body_log: Arc<std::sync::Mutex<BodyLog>>,
     /// Test-controllable serving gate: while true, every connection stops
     /// reading (and thus logging/serving) commands at its next loop turn.
     /// Lets ordering tests freeze the world, land a queue reorder at a
@@ -696,7 +796,7 @@ impl MockServer {
         let plane2 = plane.clone();
         let served = Arc::new(AtomicU64::new(0));
         let served2 = served.clone();
-        let body_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let body_log: Arc<std::sync::Mutex<BodyLog>> = Default::default();
         let body_log2 = body_log.clone();
         let stall_once: Arc<std::sync::Mutex<HashSet<String>>> =
             Arc::new(std::sync::Mutex::new(chaos.stall.clone()));
@@ -1068,17 +1168,17 @@ async fn serve_article(
     articles: &Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
     chaos: &Chaos,
     served: &Arc<AtomicU64>,
-    body_log: &Arc<std::sync::Mutex<Vec<String>>>,
+    body_log: &Arc<std::sync::Mutex<BodyLog>>,
     stall_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     gap_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     throttle: &Arc<ThrottleState>,
 ) -> std::io::Result<Served> {
-    let nth = {
-        let mut log = body_log.lock_ok();
-        log.push(id.to_string());
-        log.len() as u64
-    };
+    // Stamped HERE, before every chaos sleep below, so the record is
+    // the request's ARRIVAL and not its answer's departure - see
+    // [`BodyLog`] for why a test must read this rather than its own
+    // poller's clock.
+    let nth = body_log.lock_ok().record(id);
     // Desync: consume the request, answer NOTHING, keep the
     // connection - later responses shift one slot forward.
     if chaos.skip_nth_response > 0 && nth.is_multiple_of(chaos.skip_nth_response) {
@@ -1243,7 +1343,7 @@ async fn serve_conn(
     plane: Arc<HeaderPlane>,
     chaos: Chaos,
     served: Arc<AtomicU64>,
-    body_log: Arc<std::sync::Mutex<Vec<String>>>,
+    body_log: Arc<std::sync::Mutex<BodyLog>>,
     stall_once: Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>>,
     gap_once: Arc<std::sync::Mutex<HashSet<String>>>,

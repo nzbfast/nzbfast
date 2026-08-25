@@ -695,6 +695,10 @@ struct SlotCtx {
     /// §282 item 12: the held alternates, read once before the queue
     /// lock - see `PreLock::alt_held`.
     alt_held: Vec<crate::serve::altcand::HeldSpare>,
+    /// §282 item 20: `alt_auto_search`, read once per payload like
+    /// everything else here. It decides what a row with nothing held
+    /// means, not what it may do - see `altcand::offer_json`.
+    alt_auto_search: bool,
     /// Free bytes on the output disk, for the per-row unpack-space check.
     free_now: Option<u64>,
     /// Wall-clock seconds, for deriving each row's absolute `time_added`
@@ -748,6 +752,7 @@ fn slot_json(
         pw_wanted,
         health_defer,
         alt_held,
+        alt_auto_search,
         free_now,
         now_unix,
         speed_bps,
@@ -1071,7 +1076,7 @@ fn slot_json(
         //
         // Nothing here starts, stops or fails anything: the switch is
         // `mode=alt_switch` and it happens on a click.
-        "alt_offer": crate::serve::altcand::offer_json(j, alt_held),
+        "alt_offer": crate::serve::altcand::offer_json(j, alt_held, *alt_auto_search),
         "zip_packed": j.zip_packed,
         "archive_shape": shape,
         // Ours, like the keys around it: bytes the output disk
@@ -1116,6 +1121,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         pw_wanted,
         health_defer,
         alt_held,
+        alt_auto_search,
         disk_now,
         free_now,
         now_unix,
@@ -1187,6 +1193,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         pw_wanted,
         health_defer,
         alt_held,
+        alt_auto_search,
         free_now,
         now_unix,
         speed_bps,

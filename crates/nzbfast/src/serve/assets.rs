@@ -802,4 +802,229 @@ mod tests {
             "adopting a queue payload must record the window it answered"
         );
     }
+
+    /// §282 item 18: the switch MOMENT reaches an open tab, and it
+    /// reads the keys the daemon actually sends.
+    ///
+    /// Three daemon doors swap the release the user queued for another
+    /// one and every one of them announces it -
+    /// `Daemon::promote_held_alternative` and `altcand::alt_switch` as
+    /// `job.switched`, `hunt::hunt_enqueue` as `job.replaced`, all under
+    /// one payload shape. A webhook subscriber heard all three from the
+    /// day item 18 closed; `handleLifeEvents` dispatches on `e.kind`
+    /// through a chain with NO fallthrough arm and carried neither kind,
+    /// so an open dashboard heard none of it and a release name nobody
+    /// clicked simply appeared in the queue.
+    ///
+    /// **WHAT THIS PINS THAT NOTHING ELSE DOES.** The i18n gate holds
+    /// the four strings to 27 catalogues, and
+    /// `hunt_tests::a_hunted_replacement_announces_itself_in_the_promote_doors_vocabulary`
+    /// holds the EMIT to its key names - but nothing held the READER to
+    /// them. A rename of `replaces_name` on the page is invisible to
+    /// both: the toast simply renders "undefined could not finish", in
+    /// 27 languages, with every gate green. So the key names are
+    /// asserted here on the page side and there on the daemon side, and
+    /// they meet in the middle at these literals. Move one and move the
+    /// other in the same commit.
+    #[test]
+    fn the_dashboard_narrates_a_switch_with_the_keys_the_daemon_sends() {
+        let body = fn_body("handleLifeEvents");
+        assert!(
+            body.contains("e.kind==='job.switched'") && body.contains("e.kind==='job.replaced'"),
+            "handleLifeEvents must dispatch on both switch kinds"
+        );
+        for key in ["e.replaces_name", "e.replaces", "e.by", "e.name"] {
+            assert!(
+                body.contains(key),
+                "the switch arm must read {key} - it is a key all three doors send"
+            );
+        }
+        // The clicked door says nothing: `altSwitch()` already toasts
+        // off the API response and its own `tick()` pulls this event in
+        // the same breath, so an arm that fired here would clobber the
+        // confirmation the user's own click earned.
+        assert!(
+            body.contains("e.by!=='user'"),
+            "the user-clicked door must be suppressed by `by`, not narrated twice"
+        );
+        // A switch in the batch disarms the failure alarm for the row it
+        // replaces. The toast would be clobbered anyway; the desktop
+        // NOTIFICATION would not, and it said "Download FAILED" about a
+        // download that had already been replaced.
+        assert!(
+            body.contains("switchedFor.set(e.replaces, e)")
+                && body.contains("switchedFor.has(e.nzo_id)"),
+            "a same-batch replacement must suppress the failed row's alarm"
+        );
+    }
+
+    /// A batch of lifecycle events may not clobber itself down to one
+    /// sentence.
+    ///
+    /// `toast()` writes into ONE element: it clears the node, rebuilds
+    /// it and resets one timer, so the last caller in a tick wins and
+    /// every earlier one is destroyed without ever having been painted -
+    /// not shortened, never shown at all. `handleLifeEvents` walks the
+    /// whole batch since the page's cursor, which is routinely more than
+    /// one event (two jobs failing into held spares in one poll is two
+    /// `job.switched`; a completion racing a failover is two more), and
+    /// every arm but the `kept[]` collapse used to call `toast()`
+    /// inline. So the arms COLLECT and `toastRun` plays the batch.
+    ///
+    /// Pinned here because the defect is invisible from every other
+    /// angle: a new arm written the obvious way - copying the `toast(`
+    /// call from the arm above it, which is how the twelve got there -
+    /// compiles, renders, translates and ships, and silently destroys
+    /// whatever the batch had already said.
+    #[test]
+    fn a_batch_of_life_events_is_played_rather_than_clobbered() {
+        let body = fn_body("handleLifeEvents");
+        assert!(
+            !body.contains("toast("),
+            "no arm may toast directly - collect with notice() and let toastRun play the batch"
+        );
+        assert!(
+            body.contains("toastRun(notices)"),
+            "the collected batch must be handed to toastRun"
+        );
+        // Importance, not arrival. A red failure and "picked up a file
+        // from the watch folder" are not equally worth the one box
+        // there is, and an unsorted hand-off would give the slots to
+        // whichever events the daemon happened to emit first.
+        assert!(
+            body.contains("notices.sort((a,b)=>b.prio-a.prio)"),
+            "the batch must be ordered by importance before it is played"
+        );
+        // Every arm carries a tier. A `notice()` call that forgot one
+        // would sort as 0 and lose its slot to a completion.
+        // `const notice=(...)` is not a CALL, so the left side counts
+        // exactly the arms; the right subtracts the one declaration of
+        // each tier name.
+        assert_eq!(
+            body.matches("notice(").count(),
+            body.matches("P_ACT").count()
+                + body.matches("P_ENGINE").count()
+                + body.matches("P_GOOD").count()
+                - 3,
+            "every notice() call must name a priority tier"
+        );
+    }
+
+    /// The run player may not lose what `toast()` builds as NODES.
+    ///
+    /// The hidden `Error:` prefix is what makes an error toast an error
+    /// for a screen reader (border colour alone is not), and the
+    /// `- details` affordance is a separate node because the live region
+    /// reads `textContent` - without its leading space a screen reader
+    /// hears the last word run into it ("errors- details"). Both live in
+    /// `toastShow` now, which is the ONE renderer: `toast()` and the run
+    /// player both go through it, so a second code path cannot grow
+    /// beside it and quietly ship a box with neither.
+    #[test]
+    fn every_toast_goes_through_the_one_renderer() {
+        let show = fn_body("toastShow");
+        assert!(
+            show.contains("a11y.error") && show.contains("sr-only"),
+            "the hidden error prefix must survive in the renderer"
+        );
+        assert!(
+            show.contains("toast.details") && show.contains("' '+t('toast.details'"),
+            "the details affordance must stay a NODE with its leading space"
+        );
+        // The public door is a thin wrapper, and it CANCELS a run: a
+        // direct toast answers something the user just did, and making
+        // them sit through the rest of a batch to see it would be the
+        // clobber this whole change is about, pointed the other way.
+        let outer = fn_body("toast");
+        assert!(
+            outer.contains("toastRunQ=[]") && outer.contains("toastMore=0"),
+            "a direct toast must displace a run in flight"
+        );
+        assert!(
+            outer.contains("toastShow(msg, bad, go, TOAST_MS)"),
+            "the single-message lifetime must be unchanged"
+        );
+        // The overflow line is the last slot of a capped run, and it is
+        // the only part of this that is a COUNT: it stands for several
+        // messages with several different rows behind them, so it has no
+        // `go` (a box that picks one of them at random is worse than a
+        // box that picks none) and it is counted with the plural
+        // machinery, not with a bare number.
+        let next = fn_body("toastNext");
+        assert!(
+            next.contains("tn('toast.more'") && next.contains(", false, null,"),
+            "the overflow line must be plural-aware and carry no destination"
+        );
+    }
+
+    /// A toast that claims to be a button has to answer a key press.
+    ///
+    /// The click-through sets `role="button"` and `tabindex="0"`, so it
+    /// announces itself as a button and takes a tab stop - and it
+    /// answered a mouse click and nothing else. Surveyed 24 Aug 2026:
+    /// every other `role="button"` in either page is reachable from the
+    /// keyboard, four on the element and two through a delegated
+    /// Enter/Space listener (the queue tbody's, and the wall's over
+    /// `#wall`/`#strips`); this was the only one that was not. The
+    /// argument for fixing it is already written down three lines from
+    /// the layout drag handle in `renderCards` - a stop that leads
+    /// nowhere is worse than not being focusable at all.
+    ///
+    /// ONE action reached two ways, never two copies: a `follow` that
+    /// drifted from the click handler would end the run on one route
+    /// and leave it playing on the other.
+    #[test]
+    fn the_toast_click_through_is_reachable_from_the_keyboard() {
+        let show = fn_body("toastShow");
+        assert!(
+            show.contains("el.onkeydown=") && show.contains("e.key==='Enter'||e.key===' '"),
+            "the click-through must answer Enter and Space, not just a click"
+        );
+        assert!(
+            show.contains("const follow=") && show.contains("el.onclick=follow"),
+            "click and key press must run the SAME action, not two copies of it"
+        );
+        // The affordance may not outlive the box. `role=button` plus a
+        // tab stop on an INVISIBLE element is the same defect one step
+        // worse, and the attributes used to come off only when the next
+        // toast rendered - which on a quiet page is never.
+        let inert = fn_body("toastInert");
+        for attr in [
+            "onclick=null",
+            "onkeydown=null",
+            "removeAttribute('role')",
+            "removeAttribute('tabindex')",
+        ] {
+            assert!(inert.contains(attr), "toastInert must clear {attr}");
+        }
+        assert!(
+            fn_body("toastNext").contains("toastInert(el)"),
+            "the affordance must be stripped when the box goes dark, not at the next render"
+        );
+    }
+
+    /// The retired cue stays retired.
+    ///
+    /// Before item 18 the promote door was narrated by a queue-SNAPSHOT
+    /// diff in `sndQueueEvents` - "this row stopped being a Duplicate,
+    /// so say the copy it was held behind failed". It could not name the
+    /// abandoned release or the reason, said nothing on a page that
+    /// loaded after the promotion, could not see a hunt at all (that row
+    /// was never held), and fired on any hand-edit of a held row's
+    /// priority. It also ran AFTER `handleLifeEvents` in the tick, and
+    /// the toast element holds exactly one message - so reintroducing it
+    /// beside the event arm would silently overwrite the event's own
+    /// sentence and leave every gate green.
+    #[test]
+    fn the_queue_snapshot_diff_does_not_narrate_switches() {
+        let body = fn_body("sndQueueEvents");
+        assert!(
+            !body.contains("toast("),
+            "sndQueueEvents must not toast: the switch moment comes off the event ring              now, and this function runs after it (see handleLifeEvents)"
+        );
+        assert!(
+            !DASHBOARD_HTML.contains("qHeld"),
+            "the held-at-Duplicate snapshot set is retired - `job.switched` replaced it"
+        );
+    }
 }

@@ -388,6 +388,15 @@ impl Extractor {
         if inner.slots[slot].article_lost {
             buf.mark_lost();
         }
+        // A `ChaseReadPause` is in force: this volume is born paused.
+        // Set HERE rather than at registration so the window between the
+        // buffer existing and `st.vols.insert` below - which includes the
+        // seeding loop and its failure return - is covered too. See
+        // [`Extractor::pause_chase_reads`] for why the pause has to
+        // reach volumes that arrive during it.
+        if inner.chase_reads_paused {
+            buf.set_paused(true);
+        }
         // Seed with everything already seen. The header stash MOVES in
         // (like the holds): the buffer keeps every byte from offset 0
         // for the life of the chase - reads never consume it, and a
@@ -2037,6 +2046,23 @@ impl Extractor {
             pos: 0,
         }))
     }
+    /// Every registered chase volume's buffer, this extractor's groups
+    /// only (a nested chase is the CHILD's, and neither the pause nor
+    /// its resume has ever reached down there). Read under the routing
+    /// lock; the buffers are touched off it.
+    fn chase_buffers(inner: &Inner) -> Vec<Arc<FrontierBuffer>> {
+        let mut bufs: Vec<Arc<FrontierBuffer>> = Vec::new();
+        for g in inner.groups.values() {
+            let Some(ctl) = g.chase.as_ref() else {
+                continue;
+            };
+            for vol in ctl.shared.lock_ok().vols.values() {
+                bufs.push(vol.buf.clone());
+            }
+        }
+        bufs
+    }
+
     /// Hold every chased volume's decode still for the duration of a
     /// mapped repair (TODO 94 B, shape-coverage row 26). Returns a
     /// guard: the decode resumes when it drops, on the success path and
@@ -2048,27 +2074,41 @@ impl Extractor {
     /// a paused engine costs nothing at settle - the download is over,
     /// so no arrival is waiting on it.
     ///
-    /// A volume that registers DURING the pause would not be held. At
-    /// settle none can: registration is an arrival's job and the network
-    /// phase has drained. Stated rather than guarded, because the guard
-    /// would have to live on the ctl and this is the only caller.
+    /// A VOLUME THAT REGISTERS DURING THE PAUSE IS HELD TOO (§287, 24 Aug
+    /// 2026), through the `chase_reads_paused` latch this sets: the attach
+    /// reads it and the new buffer is born paused, and the guard's `Drop`
+    /// clears the latch and resumes the registry as it stands THEN rather
+    /// than the snapshot taken here. Until that landed the pause was a
+    /// snapshot of the volumes already registered, which is a hold on the
+    /// SET only for as long as the engine is still inside one of them -
+    /// pass the last snapshotted volume and the engine runs away through
+    /// buffers nothing paused. That is not a settle-time concern (the
+    /// network phase has drained, so no volume can register). The one
+    /// production shape that CAN register a volume under a live pause is
+    /// `nzbfast::repair`'s parity-as-a-source feed, which declined the
+    /// pair outright until this landed and stopped declining it on 24 Aug
+    /// 2026 (TODO 287.1) - but the snapshot is exactly what made
+    /// `holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up`
+    /// load-dependent, and a hold that is only true by argument is not one
+    /// a test can be built on.
     pub fn pause_chase_reads(&self) -> ChaseReadPause {
-        let mut bufs: Vec<Arc<FrontierBuffer>> = Vec::new();
-        {
-            let inner = self.inner.lock_ok();
-            for g in inner.groups.values() {
-                let Some(ctl) = g.chase.as_ref() else {
-                    continue;
-                };
-                for vol in ctl.shared.lock_ok().vols.values() {
-                    bufs.push(vol.buf.clone());
-                }
+        let (ex, bufs) = {
+            let mut inner = self.inner.lock_ok();
+            let ex = inner.self_weak.clone();
+            // The latch goes on only where something could ever clear
+            // it: the guard's `Drop` reaches this extractor through the
+            // same weak. A root with no live `self_weak` can never carry
+            // a chase either (`try_attach_chase` refuses on exactly
+            // that), so there is nothing to hold and nothing to leak.
+            if ex.strong_count() > 0 {
+                inner.chase_reads_paused = true;
             }
-        }
+            (ex, Self::chase_buffers(&inner))
+        };
         for b in &bufs {
             b.set_paused(true);
         }
-        ChaseReadPause { bufs }
+        ChaseReadPause { ex, bufs }
     }
     /// Stop a group's chase (demotion/abandon): the worker unblocks with
     /// errors, and every partial output slot the sink opened is
@@ -2192,12 +2232,36 @@ impl Extractor {
 /// nothing else's: a repair that returns early, errors, or panics still
 /// releases the engines.
 pub struct ChaseReadPause {
+    /// The extractor whose chases are held, weakly - the guard must not
+    /// keep a cancelled job alive. Its `self_weak`, which `anchor()`
+    /// sets; an attach already refuses on a root that has none, so a
+    /// pause with anything to hold always has one. When it does not
+    /// upgrade there is no extractor left to read a registry off, no
+    /// latch was set, and `bufs` below is what resumes - which is
+    /// exactly what this guard did before the latch existed.
+    ex: Weak<Extractor>,
+    /// The volumes registered when the pause was taken. A fallback for
+    /// the no-upgrade path above, not the resume set: volumes that
+    /// registered DURING the pause are not in it.
     bufs: Vec<Arc<FrontierBuffer>>,
 }
 
 impl Drop for ChaseReadPause {
     fn drop(&mut self) {
-        for b in &self.bufs {
+        let mut bufs = std::mem::take(&mut self.bufs);
+        if let Some(ex) = self.ex.upgrade() {
+            // Clear the latch and re-read the registry under ONE hold of
+            // the routing lock, so an attach racing this either sees the
+            // latch set and is resumed by the list below, or sees it
+            // clear and never pauses. Either way nothing is left paused.
+            let mut inner = ex.inner.lock_ok();
+            inner.chase_reads_paused = false;
+            bufs = Extractor::chase_buffers(&inner);
+        }
+        // Off the routing lock: resuming notifies each buffer's arrival
+        // condvar, which wakes the chase worker, and the first thing it
+        // does with the bytes is ask this extractor for more.
+        for b in &bufs {
             b.set_paused(false);
         }
     }

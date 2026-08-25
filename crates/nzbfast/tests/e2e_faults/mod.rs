@@ -1129,3 +1129,366 @@ async fn a_backend_serving_the_wrong_article_cannot_pass_as_complete() {
     );
     assert_eq!(landed("beta.bin"), b, "the other half of the swap:\n{log}");
 }
+
+/// How many recovery articles the repair-side fetch REPORTED AS FAILED,
+/// for the first fetch the repair ladder logged.
+///
+/// FAILURES, and not the ask: the number is parsed out of the planner's
+/// own `(N article failures)` tail, which is the numerator complement of
+/// §282 item 4's yield gate rather than its denominator. The ask itself
+/// is not in the log at all, and that was checked rather than assumed -
+/// `VolumeYield::asked` reaches a log line only through `describe()`, and
+/// all three of that method's call sites in
+/// `crates/nzbfast/src/repair.rs` sit inside a `source_will_not_serve()`
+/// arm, so the ask is printed only once the gate has already judged and
+/// is absent in exactly the under-the-floor case a caller would want it
+/// for. The planner's `need N block(s)` line counts volumes and blocks,
+/// never articles.
+///
+/// So a caller that wants the ask has to bring the equality with it.
+/// Shape 13 does: it refuses every article of every volume the ladder
+/// asks for, which makes the failure count and the ask the same number
+/// THERE, and that precondition is restated at the assertion where the
+/// reader will be. [`recovery_failure_rounds`] is the same reading over
+/// every round rather than the first.
+fn recovery_articles_failed(log: &str) -> Option<usize> {
+    let line = log
+        .lines()
+        .find(|l| l.contains("[repair]") && l.contains(" article failures)"))?;
+    line.rsplit_once('(')?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The census clause's two numbers, as `incomplete_reason` composed them.
+fn recovery_census(log: &str) -> Option<(u64, u64)> {
+    let (head, _) = log.split_once(" PAR2 recovery segment(s) are missing or damaged")?;
+    let (lost, total) = head.rsplit_once(" of the post's ")?;
+    Some((
+        lost.rsplit(' ').next()?.parse().ok()?,
+        total.trim().parse().ok()?,
+    ))
+}
+
+/// **Shape 13 - both recovery verdicts are true at once.**
+///
+/// `diag::incomplete_reason`'s recovery-casualty rung composes its
+/// evidence from two independent measurements of one recovery set: the
+/// DOWNLOAD-time census (`LossCauses::recovery_unusable`), and §282 item
+/// 4's REPAIR-time yield verdict (`recovery_unobtainable`, out of
+/// `RepairShortfall::Unservable`). It states both when both are true.
+/// That both-clauses arm was pinned only by a unit test that hands the
+/// code its own premise, so whether any real run could produce both at
+/// once was an assumption. It can, and this is the run.
+///
+/// **What makes the two populations overlap.** `get::plan` skips a
+/// NAMED `FileKind::Par2Volume` outright - no slot, no articles asked -
+/// so a conventional set's download-time census can only ever be about
+/// the main index, and shape 1 above is exactly that: census silent,
+/// verdict alone. (Written out rather than cited by name - the symbol
+/// does not fit one line and a name split over two is what ref-gate
+/// cannot see, which this section has already been bitten by once.)
+/// The exception is written into the same `if`: the ELECTED BOOTSTRAP
+/// volume does get a slot. A post that carries volumes and no main index
+/// - `NzbCollection::par2_seed_file`'s `Par2Volume` fallback, and the
+/// `no main .par2 in NZB - bootstrapping set from smallest volume` line
+/// it logs - fetches its smallest volume eagerly, as recovery data, and
+/// `get::census` charges its losses to the recovery counters. So one
+/// volume can be charged to the census while the volumes the repair
+/// ladder later asks for are refused, and each measurement carries a
+/// different remedy.
+///
+/// **Three constraints on the geometry, and each of them can make this
+/// shape pass while testing nothing.**
+///
+/// * The recovery set is posted at [`RECOVERY_YIELD_ART`], because item
+///   4's gate refuses to judge a sample under
+///   `sidefetch::MIN_RECOVERY_YIELD_SAMPLE` (16 articles). At one
+///   article per 64 KiB block the repair-side ask is about five, so
+///   `Unservable` is never set and the verdict clause silently cannot
+///   fire. Asserted below on the planner's own FAILURE count, which is
+///   the ask here only because this shape refuses every article it asks
+///   for - see [`recovery_articles_failed`], which cannot read the ask.
+/// * The bootstrap volume must lose an article and still BOOTSTRAP.
+///   par2cmdline writes a volume as one recovery slice followed by
+///   copies of the critical packets, so killing one article inside the
+///   slice holes the parity (nothing on disk can repair with it) while
+///   the Main/FileDesc/IFSC copies at the tail keep the set live. Kill
+///   the whole volume instead and there is no set, no repair ladder and
+///   no verdict - measured, on the way to this.
+/// * The payload has to stay nearly whole (`diag::PAYLOAD_INTACT_DEN`,
+///   at most one twentieth of segments missing) or the rung correctly
+///   declines to blame the parity. One article of forty.
+///
+/// **This shape pins WORDING, which the rest of this module does not.**
+/// The others assert outcomes because the §282 lanes were rewording the
+/// log as they landed. Here the composition IS the behaviour: a rung
+/// that stated only one of two true things would pass every
+/// outcome-shaped assertion in this file, and half the readers would be
+/// sent to the wrong remedy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_volume_and_a_refused_repair_fetch_are_both_stated() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("fault-bothclauses");
+    // One block per volume: the bootstrap's single slice is then holed
+    // by ONE dead article, so nothing usable survives on disk and the
+    // ladder has to go asking. At two blocks a volume, the second slice
+    // arrives whole and repairs the damage.
+    matrix_post_art(&mut fx, 40, 65_536, 8, Some(8), RECOVERY_YIELD_ART);
+    // The main index never reaches the post. That is what elects a
+    // volume as bootstrap, and the bootstrap is the only route by which
+    // a conventionally named recovery set is charged to the census.
+    fx.nzb_files
+        .retain(|(n, _)| nzbkit::faultplan::role_of(n) != nzbkit::nzb::FileKind::Par2Main);
+    let p = plan(&fx);
+    assert_eq!(
+        p.role(Role::Par2Main).len(),
+        0,
+        "a main index in the post means no bootstrap volume, and then \
+         nothing is charged to the download-time census:\n{}",
+        p.describe_post()
+    );
+    // `Role::SmallestVolume` resolves by the same min-encoded-bytes rule
+    // as `par2_seed_file`, so this IS the volume the product will elect.
+    let boot = p.files_in(Role::SmallestVolume)[0].name.clone();
+    let others: Vec<String> = p
+        .files_in(Role::Par2Volumes)
+        .iter()
+        .map(|f| f.name.clone())
+        .filter(|n| *n != boot)
+        .collect();
+    assert!(
+        !others.is_empty(),
+        "the ladder needs volumes left to ask for"
+    );
+
+    let mut chaos = Chaos::default();
+    p.role(Role::Payload)
+        .evenly(1)
+        .expect_nonempty(&p)
+        .missing(&mut chaos);
+    // One article INSIDE the bootstrap's recovery slice: `without_heads`
+    // leaves the head alone and `evenly(1)` then takes the first article
+    // after it, which is inside the slice at every geometry this fixture
+    // builds. The critical packets live past the slice and survive.
+    p.role(Role::SmallestVolume)
+        .without_heads(&p, Role::SmallestVolume)
+        .evenly(1)
+        .expect_nonempty(&p)
+        .missing(&mut chaos);
+    // Every other volume is refused outright - this is the repair-side
+    // fetch the yield gate measures.
+    for n in &others {
+        p.role(Role::Named(n.clone()))
+            .expect_nonempty(&p)
+            .missing(&mut chaos);
+    }
+
+    let (log, ok, _) = run_shape(&fx, chaos, 1).await;
+    trace("shape 13", &log);
+    assert!(!ok, "a job that cannot repair must exit nonzero:\n{log}");
+    // Without these two the shape is about a post with no PAR2 set at
+    // all, which reaches neither clause.
+    assert!(
+        log.contains("bootstrapping set from smallest volume"),
+        "the bootstrap election is what puts a recovery slot in the \
+         plan - no election, no census:\n{log}"
+    );
+    assert!(
+        log.contains("[par2] set live"),
+        "the set has to go live off the holed bootstrap volume, or \
+         there is no repair ladder to reach a verdict:\n{log}"
+    );
+    // Every article of every volume the ladder asks for is refused in
+    // this shape - the loop above takes each of `others` whole - so the
+    // fetch's FAILURE count is also its ask, and the floor can be read
+    // off it. The ask itself is nowhere in the log; the helper's own
+    // doc says why. A later shape of this family that refuses only PART
+    // of the recovery set must not reuse this reading: 200 asked with 16
+    // refused is a 92% yield, the gate rightly declines, and a floor test
+    // on the failure count would read 16 and go green on an inert shape.
+    let failed = recovery_articles_failed(&log)
+        .unwrap_or_else(|| panic!("no repair-side recovery fetch happened at all:\n{log}"));
+    assert!(
+        failed >= 16,
+        "the repair-side fetch failed {failed} article(s), and this shape \
+         refuses every article it asks for, so that is the ask too - under \
+         sidefetch::MIN_RECOVERY_YIELD_SAMPLE the yield gate declines to \
+         judge the sample, so this shape would pass while testing \
+         nothing. Post the recovery set smaller (RECOVERY_YIELD_ART):\n{log}"
+    );
+    let (lost, total) = recovery_census(&log)
+        .unwrap_or_else(|| panic!("the census clause did not fire at all:\n{log}"));
+    assert!(
+        lost > 0 && lost <= total,
+        "the census clause must be reporting a real loss on the \
+         bootstrap volume, not {lost} of {total}:\n{log}"
+    );
+    // The joined form, which is the whole point: either clause alone
+    // would satisfy an assertion on either fragment.
+    assert!(
+        log.contains(
+            "PAR2 recovery segment(s) are missing or damaged, and the PAR2 recovery \
+             volumes this repair needed could not be fetched from any server that has the post"
+        ),
+        "both measurements are true here and the message must state \
+         both - they carry different remedies, and dropping either \
+         sends half the readers to the wrong place:\n{log}"
+    );
+}
+
+/// Every `(N article failures)` count the repair ladder printed, in
+/// order.
+///
+/// FAILURES rather than asks, for the reason [`recovery_articles_failed`]
+/// sets out at length: the ask never reaches the log, so a caller reading
+/// a round as an ask has to be a shape that refuses every article it asks
+/// for. That helper answers for the FIRST fetch, which is all shape 13
+/// needs. Shape 14 is about the difference between the first fetch and
+/// the escalation, so it needs both - and needs them as a sequence,
+/// because the property it pins is that the two land on opposite sides of
+/// `sidefetch::MIN_RECOVERY_YIELD_SAMPLE`.
+fn recovery_failure_rounds(log: &str) -> Vec<usize> {
+    log.lines()
+        .filter(|l| l.contains("[repair]") && l.contains(" article failures)"))
+        .filter_map(|l| {
+            l.rsplit_once('(')?
+                .1
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// **Shape 14 - the LAST ask is the one nobody judged.**
+///
+/// §282 item 4's yield gate is read at three places in
+/// `crates/nzbfast/src/repair.rs`, and until 24 Aug 2026 all three were
+/// BEFORE an ask - which is what its own BUILT note says it is for,
+/// "read at every point that would otherwise ask for more". The
+/// escalation's own fetch is the last ask the job makes and there is
+/// nothing after it to gate, so its `VolumeYield` was discarded at the
+/// call and the function fell through to `repair failed even with every
+/// recovery volume` with `*shortfall` never written. A job could
+/// therefore demonstrate beyond doubt that its provider will not serve
+/// this recovery set and still reach the user with the plain
+/// missing-articles message that item 4 and item 17 exist to displace.
+///
+/// **The route in is the floor working correctly.** The gate refuses to
+/// judge a sample under `sidefetch::MIN_RECOVERY_YIELD_SAMPLE` (16
+/// articles), so a first ask under the floor declines - rightly - and
+/// escalates, and the escalation's ask is typically far larger. Shape 1
+/// above is the other side of this: its first ask clears the floor, so
+/// the PRE-ask guard fires and the escalation never runs. Between them
+/// the two shapes cover both exits from the ladder.
+///
+/// **The geometry is chosen to put the two asks on opposite sides of
+/// the floor**, which is the whole of this shape and is asserted rather
+/// than assumed below:
+///
+/// * The recovery set is posted at ONE article per block (the default,
+///   NOT [`RECOVERY_YIELD_ART`]) and split into twenty single-block
+///   volumes. One damaged payload block makes `needed` 1, the planner's
+///   ~10% margin makes its target 3, and `pick_volumes` buys three
+///   one-block volumes - a handful of articles, under the floor.
+/// * Every volume is refused, so the first fetch lands PARTIAL, its
+///   batch may not be excluded, and the escalation asks for the whole
+///   set. Twenty volumes at two articles each clears the floor
+///   comfortably.
+/// * The payload has to stay inside `diag::PAYLOAD_INTACT_DEN` (at most
+///   one twentieth of segments missing) or the recovery-casualty rung
+///   correctly declines and this shape proves nothing. One article of
+///   forty.
+/// * The main index ARRIVES. A conventionally named `Par2Volume` gets
+///   no slot in `get::plan`, so the download-time census is silent here
+///   and `mostly_gone` is false - the rung has no way in except the
+///   repair-time verdict, which is exactly the seam under test.
+///
+/// Verified to BITE: against the tree as it stood before the fix this
+/// fails on the last assertion, with `download incomplete: 1 file(s)
+/// with missing segments` after 40 recovery articles asked and none
+/// delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_escalation_is_judged_like_any_other_ask() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("fault-lastask");
+    matrix_post_vols(&mut fx, 40, 65_536, 20, Some(20));
+    let p = plan(&fx);
+    assert!(
+        !p.role(Role::Par2Main).is_empty(),
+        "the main index must be in the post - it is what makes the \
+         volumes DEFERRED, which is the whole situation:\n{}",
+        p.describe_post()
+    );
+    let mut chaos = Chaos::default();
+    // One block of forty: inside PAYLOAD_INTACT_DEN, and it is what
+    // makes `needed` 1 and the planner's first ask small.
+    p.role(Role::Payload)
+        .evenly(1)
+        .expect_nonempty(&p)
+        .missing(&mut chaos);
+    // Every recovery volume refused outright. The index survives.
+    p.role(Role::Par2Volumes)
+        .expect_nonempty(&p)
+        .missing(&mut chaos);
+
+    let (log, ok, wall) = run_shape(&fx, chaos, 1).await;
+    trace("shape 14", &log);
+    assert!(!ok, "a job that cannot repair must exit nonzero:\n{log}");
+    assert!(
+        log.contains("[par2] set live"),
+        "the index has to bring the set live or there is no repair \
+         ladder to reach a verdict:\n{log}"
+    );
+    // The geometry, proven rather than trusted: two rounds, the first
+    // under the floor and the second over it. Every article of every
+    // volume is refused here, so a round's failure count IS its ask.
+    let rounds = recovery_failure_rounds(&log);
+    assert!(
+        rounds.len() >= 2,
+        "this shape is about the ESCALATION's own yield, and the ladder \
+         did not escalate: rounds {rounds:?}\n{log}"
+    );
+    assert!(
+        rounds[0] < 16,
+        "the first ask was {} article(s), at or over \
+         sidefetch::MIN_RECOVERY_YIELD_SAMPLE - the pre-ask guard then \
+         fires and the escalation never runs, so this shape would be \
+         shape 1 wearing a different name:\n{log}",
+        rounds[0]
+    );
+    assert!(
+        rounds[1] >= 16,
+        "the escalation asked {} article(s), under \
+         sidefetch::MIN_RECOVERY_YIELD_SAMPLE - the gate declines to \
+         judge that sample and this shape would pass while testing \
+         nothing. Split the recovery set into more volumes:\n{log}",
+        rounds[1]
+    );
+    // The point. 40 asked, 0 delivered, and before 24 Aug 2026 the
+    // verdict still read as a payload problem.
+    assert!(
+        log.contains("the recovery data is what failed, not the payload"),
+        "the provider refused every article of every recovery volume \
+         across {} rounds ({rounds:?} failures) on a payload that \
+         arrived 97.5% intact - a message that reports this as missing \
+         segments sends the user to look at articles, which is where \
+         §282's 46 minutes went:\n{log}",
+        rounds.len()
+    );
+    assert!(
+        wall < Duration::from_secs(180),
+        "the job took {wall:?} to reach a verdict:\n{log}"
+    );
+}

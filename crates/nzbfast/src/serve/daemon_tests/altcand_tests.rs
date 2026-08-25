@@ -71,7 +71,7 @@ fn the_offer_appears_only_on_a_terminal_verdict_and_names_the_spares_it_can_prom
                 .cloned()
                 .unwrap();
             let g = j.lock_ok();
-            altcand::offer_json(&g, &held)
+            altcand::offer_json(&g, &held, false)
         };
         // No verdict, no offer - which is every row of every ordinary
         // queue, including the one holding a spare of its own.
@@ -309,4 +309,425 @@ fn a_recovery_verdict_short_of_the_bar_offers_nothing() {
             "answered {answered}/{servers}, absent {absent}/{sampled} is not a verdict"
         );
     }
+}
+
+// -- §284: the same surface on a row that has ALREADY failed ---------------
+
+/// A real spooled `.nzb` for a parked row.
+///
+/// `jv`'s default `nzb_path` is `/tmp/x.nzb`, which does not exist -
+/// and `altcand::parked_replaceable` requires the spool file, because
+/// the hunt's age gate and item 6's same-post admission test both read
+/// it and a button that can only ever refuse is worse than no button. So
+/// a test that wants the offer has to put a file there.
+///
+/// ONE path per process, shared by every test here and rewritten by
+/// each: `parked_replaceable` asks only whether it EXISTS, so the
+/// content never matters and two threads writing the same eleven bytes
+/// cannot race into a wrong answer. Per-process because `cargo test`
+/// puts these in one process and nextest puts each in its own, and
+/// neither may collide with the other's file.
+fn spooled() -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("nzbfast-284-spool-{}.nzb", std::process::id()));
+    std::fs::write(&p, b"<nzb></nzb>").expect("write spool fixture");
+    p
+}
+
+/// The verdict a parked row carries: the failure LEAD `fail_kind` reads
+/// by prefix, then its evidence. `fail_action` maps this to `"search"`,
+/// which is the retry surface's own "another release is the only move"
+/// answer and the bound §284 draws its offer at.
+const GONE_FAIL: &str = "post is gone: all 8 sampled article(s) were reported missing by every \
+                         one of your 1 configured server(s), and at 644 day(s) old the post is \
+                         past the point where propagation explains it [nzbfast 1.2.2]";
+
+fn parked(
+    id: &str,
+    name: &str,
+    spool: &std::path::Path,
+    extra: serde_json::Value,
+) -> Arc<Mutex<Job>> {
+    let mut v = serde_json::json!({
+        "state": "Failed",
+        "fail_message": GONE_FAIL,
+        "nzb_path": spool.to_string_lossy(),
+        "finished_unix": 1,
+    });
+    if let Some(m) = extra.as_object() {
+        for (k, val) in m {
+            v[k] = val.clone();
+        }
+    }
+    jv(id, name, v)
+}
+
+#[test]
+fn a_failed_row_offers_the_spare_still_held_for_it() {
+    with_daemon("altcand-parked-offer", |d| {
+        let spool = spooled();
+        let dead = parked(
+            "dead",
+            "Show.S01E01.2160p-A",
+            &spool,
+            serde_json::json!({"dupe_key": "show/s1e1"}),
+        );
+        d.history.lock_ok().push(dead);
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "spare",
+                "Show.S01E01.2160p-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "dead", "dupe_key": "show/s1e1",
+                }),
+            ));
+        }
+        let held = d.alt_held_spares();
+        let h = d.history.lock_ok();
+        let g = h[0].lock_ok();
+        let offer = altcand::parked_offer_json(&g, &held).expect("the parked row offers");
+        // TWO KEYS, and the absences are the design: the drawer has
+        // already printed this record's own Reason, so no `detail`, and
+        // this job HAS failed, so `auto`'s "one will be searched for
+        // when it does" is not a promise that can still be kept.
+        assert!(offer.get("detail").is_none(), "{offer}");
+        assert!(offer.get("auto").is_none(), "{offer}");
+        assert_eq!(offer["search"], true, "not an *arr row: {offer}");
+        let spares = offer["spares"].as_array().expect("spares array");
+        assert_eq!(spares.len(), 1, "the spare held for THIS job: {offer}");
+        assert_eq!(spares[0]["nzo_id"], "spare", "{offer}");
+    });
+}
+
+#[test]
+fn the_parked_offer_is_drawn_only_where_another_copy_is_the_move() {
+    with_daemon("altcand-parked-gate", |_d| {
+        let spool = spooled();
+        let held: Vec<altcand::HeldSpare> = Vec::new();
+        let open = |j: &Arc<Mutex<Job>>| {
+            let g = j.lock_ok();
+            altcand::parked_offer_json(&g, &held).is_some()
+        };
+        // The shape the whole section exists for.
+        assert!(
+            open(&parked(
+                "dead",
+                "Show.S01E01-A",
+                &spool,
+                serde_json::json!({})
+            )),
+            "a Gone failure with its spool still on disk"
+        );
+        // A repair that could not complete is `Unrepairable`, whose
+        // `fail_action` is also "search" - the recovery-set death §282
+        // was written against.
+        assert!(open(&parked(
+            "unrep",
+            "Show.S01E02-A",
+            &spool,
+            serde_json::json!({"fail_message": "repair could not complete: too few recovery blocks"}),
+        )));
+        // A job that finished has nothing to replace.
+        assert!(!open(&parked(
+            "done",
+            "Show.S02E01-A",
+            &spool,
+            serde_json::json!({"state": "Completed", "fail_message": ""}),
+        )));
+        // A LOCAL fault - a full disk, a permission error - fails a
+        // second copy the same way, so another one is not the move.
+        // `hunt_gates` would refuse it as `LocalFault` one step later;
+        // the offer must not be drawn on it in the first place.
+        assert!(!open(&parked(
+            "local",
+            "Show.S02E02-A",
+            &spool,
+            serde_json::json!({"fail_message": "unpack failed: no space left on device"}),
+        )));
+        // Pieces missing right now is what RETRY is for, and the row
+        // beside this one already says so.
+        assert!(!open(&parked(
+            "missing",
+            "Show.S02E03-A",
+            &spool,
+            serde_json::json!({"fail_message": "download incomplete: 12 articles missing"}),
+        )));
+        // THE AUTO-RETRY WINDOW (§284's second judgement). The original
+        // is coming back through the queue in minutes - `park_gen`
+        // guards both the promotion and the hunt on exactly this - so a
+        // button offered inside it spends a copy on a job that has not
+        // finished failing.
+        assert!(!open(&parked(
+            "armed",
+            "Show.S03E01-A",
+            &spool,
+            serde_json::json!({"auto_retry_at": unix_now().unsigned_abs() + 600}),
+        )));
+        // ...and a stamp in the PAST is a retry that never ran, which is
+        // not a reason to withhold the offer for good.
+        assert!(open(&parked(
+            "lapsed",
+            "Show.S03E02-A",
+            &spool,
+            serde_json::json!({"auto_retry_at": 1}),
+        )));
+        // Already replaced: item 14's stamp IS the record that this
+        // switch happened, and a second offer spends a third copy of one
+        // release.
+        assert!(!open(&parked(
+            "switched",
+            "Show.S04E01-A",
+            &spool,
+            serde_json::json!({"alt_to_name": "Show.S04E01-B"}),
+        )));
+        // The user's own delete is not a failure. Set on the Job
+        // rather than through `jv`: `tombstone` is runtime-only and
+        // `job_from_json` never reads it, so a wire fixture cannot
+        // carry it.
+        let tomb = parked("tomb", "Show.S05E01-A", &spool, serde_json::json!({}));
+        tomb.lock_ok().tombstone = true;
+        assert!(!open(&tomb));
+        // And a record whose spool has gone can only ever refuse the
+        // pick, because item 6's admission test has nothing to compare.
+        assert!(!open(&parked(
+            "nospool",
+            "Show.S06E01-A",
+            std::path::Path::new("/tmp/nzbfast-284-definitely-absent.nzb"),
+            serde_json::json!({}),
+        )));
+    });
+}
+
+#[test]
+fn switching_a_parked_row_promotes_the_spare_and_leaves_the_record_alone() {
+    with_daemon("altcand-parked-switch", |d| {
+        let spool = spooled();
+        let dead = parked(
+            "dead",
+            "Show.S01E01.2160p-A",
+            &spool,
+            serde_json::json!({"dupe_key": "show/s1e1", "finished_unix": 1000}),
+        );
+        d.history.lock_ok().push(dead);
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "spare",
+                "Show.S01E01.2160p-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "dead", "dupe_key": "show/s1e1",
+                }),
+            ));
+        }
+        assert_eq!(d.alt_switch("dead", "spare"), None, "the switch is taken");
+
+        // The spare runs and carries item 14's clause, exactly as it
+        // does on the queue road - `why` off the row's own sentence with
+        // the build stamp taken back off.
+        let q = d.queue.lock_ok();
+        assert_eq!(q.len(), 1);
+        let g = q[0].lock_ok();
+        assert_eq!(g.nzo_id, "spare");
+        assert!(!g.paused && g.priority == 0, "promoted, not still held");
+        assert!(g.held_for.is_empty(), "the hold is spent");
+        assert_eq!(g.alt_from_name, "Show.S01E01.2160p-A");
+        assert!(g.alt_why.starts_with("post is gone"), "{}", g.alt_why);
+        assert!(!g.alt_why.contains("[nzbfast "), "{}", g.alt_why);
+        drop(g);
+        drop(q);
+
+        // THE RECORD IS UNTOUCHED except for item 14's half that could
+        // not be known any earlier. It failed hours ago: rewriting its
+        // verdict would move it under readers who have already acted on
+        // it, and re-stamping `finished_unix` would jump it to the top
+        // of a history sorted by when things finished.
+        let h = d.history.lock_ok();
+        assert_eq!(h.len(), 1, "not filed a second time");
+        let g = h[0].lock_ok();
+        assert_eq!(g.nzo_id, "dead");
+        assert_eq!(g.alt_to_name, "Show.S01E01.2160p-B");
+        assert_eq!(g.fail_message, GONE_FAIL, "its own verdict, unrewritten");
+        assert_eq!(g.finished_unix, Some(1000), "and its own finished stamp");
+        drop(g);
+        drop(h);
+
+        // ONE event and not two. `job.failed` announces that a job has
+        // just failed; this one failed hours ago and `park_gen` said so
+        // then, so re-emitting it would tell every webhook, every *arr
+        // and the page's own failure alarm that a record they have
+        // already handled failed again.
+        let ring = d.life_events.lock_ok();
+        let sw: Vec<_> = ring
+            .iter()
+            .filter(|e| e["kind"] == "job.switched")
+            .collect();
+        assert_eq!(sw.len(), 1, "{ring:?}");
+        assert_eq!(sw[0]["by"], "user", "{ring:?}");
+        assert_eq!(sw[0]["replaces"], "dead", "{ring:?}");
+        assert_eq!(sw[0]["nzo_id"], "spare", "{ring:?}");
+        assert!(
+            !ring.iter().any(|e| e["kind"] == "job.failed"),
+            "the parked road must not re-announce a failure that already happened: {ring:?}"
+        );
+    });
+}
+
+#[test]
+fn a_parked_switch_is_refused_on_every_record_it_would_be_wrong_for() {
+    with_daemon("altcand-parked-refuse", |d| {
+        let spool = spooled();
+        {
+            let mut h = d.history.lock_ok();
+            h.push(parked(
+                "dead",
+                "Show.S01E01-A",
+                &spool,
+                serde_json::json!({"dupe_key": "show/s1e1"}),
+            ));
+            // A finished download: nothing to replace, and the offer is
+            // never drawn on it - so reaching here means the tab is old.
+            h.push(parked(
+                "done",
+                "Show.S02E01-A",
+                &spool,
+                serde_json::json!({"state": "Completed", "fail_message": ""}),
+            ));
+        }
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "spare",
+                "Show.S01E01-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "dead", "dupe_key": "show/s1e1",
+                }),
+            ));
+            q.push_back(jv("other", "Unrelated-A", serde_json::json!({})));
+        }
+        // In neither store.
+        assert!(d.alt_switch("absent", "spare").is_some());
+        // In history, but not a record another copy answers.
+        assert!(d.alt_switch("done", "spare").is_some());
+        // The spare half is still resolved against the QUEUE only: a
+        // spare is a queue row by definition.
+        assert!(d.alt_switch("dead", "absent").is_some());
+        // ...and it must be held for THIS record.
+        assert!(d.alt_switch("dead", "other").is_some());
+        assert_eq!(d.history.lock_ok().len(), 2, "nothing moved on a refusal");
+        assert_eq!(d.queue.lock_ok().len(), 2);
+        assert!(
+            d.life_events.lock_ok().is_empty(),
+            "and a refusal changed nothing, so it announced nothing"
+        );
+    });
+}
+
+/// A grab that held TWO spares and had one picked BY HAND does not
+/// strand the other.
+///
+/// `promote_held_alternative` repoints the runners-up at the winner on
+/// the automatic road, and says why: the original has left the queue, so
+/// nothing will ever park it again and `held_against` can never match
+/// them. The clicked switch reaches the same outcome and did not, on
+/// either road - which is a grab that holds two spares only ever trying
+/// one, because the user pressed the button instead of waiting.
+#[test]
+fn a_clicked_switch_repoints_the_spares_it_did_not_pick() {
+    with_daemon("altcand-switch-repoint", |d| {
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "doomed",
+                "Show.S01E01.2160p-A",
+                serde_json::json!({"health": gone_health(), "dupe_key": "show/s1e1"}),
+            ));
+            for (id, name, origin) in [
+                ("spare-a", "Show.S01E01.2160p-B", "spare"),
+                ("spare-b", "Show.S01E01.1080p-C", "spare"),
+                // The user's own duplicate keeps naming what it was added
+                // against, exactly as it did before §282 existed.
+                ("theirs", "Show.S01E01.720p-D", "dashboard"),
+            ] {
+                q.push_back(jv(
+                    id,
+                    name,
+                    serde_json::json!({
+                        "paused": true, "priority": DUPE_PRIORITY,
+                        "held_for": "doomed", "dupe_key": "show/s1e1",
+                        "origin": origin,
+                    }),
+                ));
+            }
+        }
+        assert_eq!(
+            d.alt_switch("doomed", "spare-a"),
+            None,
+            "the switch is taken"
+        );
+
+        let q = d.queue.lock_ok();
+        let held: Vec<(String, String)> = q
+            .iter()
+            .map(|j| {
+                let g = j.lock_ok();
+                (g.nzo_id.clone(), g.held_for.clone())
+            })
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                ("spare-a".to_string(), String::new()),
+                ("spare-b".to_string(), "spare-a".to_string()),
+                ("theirs".to_string(), "doomed".to_string()),
+            ],
+            "the runner-up must be held against the row that took the original's place"
+        );
+    });
+}
+
+/// The same, on §284's PARKED road - and the reason it is a second test
+/// rather than a second assertion is that the two roads strand the
+/// runner-up for different reasons. The queue road takes the original
+/// out of the queue; this one never had it there, and what ends the
+/// offer is `alt_to_name` being stamped, which is exactly what
+/// `parked_replaceable` reads to refuse a second switch on that record.
+#[test]
+fn a_clicked_switch_on_a_failed_row_repoints_the_spares_it_did_not_pick() {
+    with_daemon("altcand-parked-repoint", |d| {
+        let spool = spooled();
+        d.history.lock_ok().push(parked(
+            "dead",
+            "Show.S01E01.2160p-A",
+            &spool,
+            serde_json::json!({"dupe_key": "show/s1e1"}),
+        ));
+        {
+            let mut q = d.queue.lock_ok();
+            for (id, name) in [
+                ("spare-a", "Show.S01E01.2160p-B"),
+                ("spare-b", "Show.S01E01.1080p-C"),
+            ] {
+                q.push_back(jv(
+                    id,
+                    name,
+                    serde_json::json!({
+                        "paused": true, "priority": DUPE_PRIORITY,
+                        "held_for": "dead", "dupe_key": "show/s1e1",
+                        "origin": "spare",
+                    }),
+                ));
+            }
+        }
+        assert_eq!(d.alt_switch("dead", "spare-a"), None, "the switch is taken");
+        let q = d.queue.lock_ok();
+        let runner = q[1].lock_ok();
+        assert_eq!(runner.nzo_id, "spare-b");
+        assert_eq!(
+            runner.held_for, "spare-a",
+            "the runner-up still names a record that will never be offered again"
+        );
+    });
 }

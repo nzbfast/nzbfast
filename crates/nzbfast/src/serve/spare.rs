@@ -457,11 +457,22 @@ impl Daemon {
     /// The job that owned these spares is done with them: drop every one
     /// this daemon added for it.
     ///
-    /// Runs when the owner COMPLETED, and when the user deleted it. Both
-    /// are "there is nothing left for a spare to be a spare for", and a
-    /// row nobody asked for that outlives its reason is §4b's junk queue
-    /// - four held copies of an episode the user already has, reappearing
-    /// after every restart because the spooled NZB is re-adopted.
+    /// Runs from `daemon_park::park_gen` when the owner COMPLETED and
+    /// when the user deleted it, and from [`Self::drop_stranded_spares`]
+    /// when it left BOTH STORES some other way. All three are "there is
+    /// nothing left for a spare to be a spare for", and a row nobody
+    /// asked for that outlives its reason is §4b's junk queue - four held
+    /// copies of an episode the user already has, reappearing after every
+    /// restart because the spooled NZB is re-adopted.
+    ///
+    /// **THE PARK IS NOT A CHOKEPOINT AND WAS TREATED AS ONE FOR A
+    /// FORTNIGHT** (24 Aug 2026). It sees only the owners that finish
+    /// while it can still watch them; a history row reaped by retention,
+    /// deleted through an API, or a QUEUED job removed with no park
+    /// behind it all leave the spare here with nothing to promote,
+    /// nothing to offer it and nothing to drop it. That is what the sweep
+    /// exists for, and why "which event fired" is the wrong question to
+    /// build a second caller on - read its doc block before adding one.
     ///
     /// Only rows this daemon added: a duplicate the USER added is theirs,
     /// carries a different origin, and keeps the behaviour it had before
@@ -489,8 +500,11 @@ impl Daemon {
             // The spool copy goes with the row. `recover_orphaned_spool`
             // adopts any spooled NZB no record names, so leaving it
             // behind would put the dropped spare back in the queue at the
-            // next start - with nothing to hold it against.
-            let _ = std::fs::remove_file(path);
+            // next start - with nothing to hold it against. `drop_spool`
+            // rather than a swallowed `remove_file` (Codex sweep 24 Aug,
+            // F-04): a REFUSED unlink leaves exactly that adoptable
+            // survivor, so it is masked or emptied instead.
+            drop_spool(path);
             info!(target: "queue", "{id} dropped - the job it was a spare for is done ({name:?})");
         }
         self.save_queue_soon();
@@ -507,17 +521,150 @@ impl Daemon {
     /// Spares only. A duplicate the user added keeps naming what it was
     /// added against, exactly as it did before.
     pub(in crate::serve) fn repoint_spares(&self, from: &str, to: &str) {
-        let mut moved = 0;
-        for j in self.queue.lock_ok().iter() {
-            let mut g = j.lock_ok();
-            if g.held_for == from && is_spare_origin(&g.origin) && is_held_alternative(&g) {
-                g.held_for = to.to_string();
-                moved += 1;
-            }
-        }
+        let moved = repoint_spares_in(self.queue.lock_ok().iter(), from, to);
         if moved > 0 {
             info!(target: "queue", "{moved} spare(s) now held against {to}");
             self.save_queue_soon();
         }
     }
+
+    /// §282 item 5's OTHER half, and the one no chokepoint could reach:
+    /// drop a spare whose owner has left BOTH stores.
+    ///
+    /// [`Self::drop_spares_for`] is called from exactly one place -
+    /// `daemon_park::park_gen` - so it fires when the owner COMPLETED or
+    /// was deleted while the park could still see it. It cannot fire for
+    /// a record that leaves LATER, and there are at least four roads to
+    /// that: `history_enforce_retention`'s keep_count arm reaps a Failed
+    /// row like any other, the SAB and dashboard history deletes remove
+    /// one on request, and a QUEUED job that is not running is retained
+    /// out of the queue by the delete handler with no park behind it at
+    /// all. In every one of those the spare is left paused at
+    /// [`DUPE_PRIORITY`] naming an id that no longer exists, where
+    /// nothing promotes it (park never runs for that job again), nothing
+    /// offers it (§284's offer is drawn on the history row, which is
+    /// gone) and nothing drops it - and `recover_orphaned_spool` re-adopts
+    /// its spooled NZB at the next start, so it survives restarts. That
+    /// is §4b's junk queue arriving by the slow road.
+    ///
+    /// **WHY A SWEEP AND NOT A HOOK ON `history_tombstone`.** That
+    /// function is the nearest thing to a chokepoint for a record leaving
+    /// the store, and hooking it would be WRONG: of its eight callers,
+    /// `daemon_persist`'s load-time revert and `watchlist`'s upgrade are
+    /// not deletes at all, and the revert one moves the record back into
+    /// the QUEUE - so a spare dropped there would be dropped for a job
+    /// that is about to run. The state is what this rule is about, not
+    /// the event, and a state test is also the only version that can see
+    /// the fifth road. Written as "in neither store" rather than as a
+    /// list of routes for exactly that reason: the revert case passes it
+    /// automatically, because the job it reverted is in the queue.
+    ///
+    /// **THE THREE READS ARE ORDERED AND THE ORDER IS THE CORRECTNESS
+    /// ARGUMENT.** Queue, then history, then `hist_inflight` LAST. Every
+    /// path that moves a record between the two stores - `park_gen`,
+    /// `daemon_retry`, `moveseq` - registers in `hist_inflight` BEFORE it
+    /// mutates either one, so a job that vanished from the queue read
+    /// after this sweep passed it had registered earlier still, and the
+    /// final check sees it. Reading the inflight set first would leave
+    /// the reverse window open: a retry that registered after the check
+    /// could empty history before the history read and be missed by all
+    /// three.
+    ///
+    /// The one window it does NOT close is `sabcompat::editqueue_delete`,
+    /// which retains a non-active row out of the queue and pushes it to
+    /// history a few statements later with no inflight registration. A
+    /// sweep landing inside it drops that job's spares - which is the
+    /// answer a delete wants anyway, and the same one `park_gen`'s
+    /// tombstone arm gives, so the race has no wrong outcome to reach.
+    ///
+    /// Lock order is queue -> history and nothing is held across
+    /// [`Self::drop_spares_for`], which walks the queue and locks every
+    /// row in it: the history guard is released before the first drop.
+    /// Nothing in `serve/` takes history and then the queue, and this
+    /// does not start.
+    ///
+    /// A spare with an EMPTY `held_for` is never touched. That is the
+    /// pre-`held_for` shape `held_against` matches by `dupe_key`, and
+    /// there is no owner id in it to ask about - so this cannot answer
+    /// the question for one, and does not guess.
+    pub(in crate::serve) fn drop_stranded_spares(&self) {
+        // One queue walk: every id the queue holds, and the owner named
+        // by every spare in it. On an install holding no spares this is
+        // the only lock the sweep takes.
+        let (mut owners, live): (Vec<String>, std::collections::HashSet<String>) = {
+            let q = self.queue.lock_ok();
+            let mut owners: Vec<String> = Vec::new();
+            let mut live = std::collections::HashSet::with_capacity(q.len());
+            for j in q.iter() {
+                let g = j.lock_ok();
+                live.insert(g.nzo_id.clone());
+                // The same two guards `drop_spares_for` takes: a
+                // duplicate the USER queued is theirs and keeps its
+                // pre-§282 behaviour, and a spare that was promoted is a
+                // download in its own right. Repeated here to keep an
+                // owner off the nomination list rather than to enforce
+                // them - the refusal itself is `drop_spares_for`'s, which
+                // re-reads both, so loosening this line drops nothing it
+                // should not.
+                if !g.held_for.is_empty() && is_spare_origin(&g.origin) && is_held_alternative(&g) {
+                    owners.push(g.held_for.clone());
+                }
+            }
+            (owners, live)
+        };
+        owners.retain(|o| !live.contains(o));
+        owners.sort();
+        owners.dedup();
+        if owners.is_empty() {
+            return;
+        }
+        {
+            let h = self.history.lock_ok();
+            let filed: std::collections::HashSet<String> =
+                h.iter().map(|j| j.lock_ok().nzo_id.clone()).collect();
+            owners.retain(|o| !filed.contains(o));
+        }
+        if owners.is_empty() {
+            return;
+        }
+        // LAST, per the doc above: a record in transit between the two
+        // stores is absent from both for as long as its mover holds this
+        // registration, and it is not stranded.
+        {
+            let inflight = self.hist_inflight.lock_ok();
+            owners.retain(|o| !inflight.contains(o));
+        }
+        for owner in &owners {
+            info!(
+                target: "queue",
+                "{owner} is in neither the queue nor history - dropping the spare(s) held for it"
+            );
+            self.drop_spares_for(owner);
+        }
+    }
+}
+
+/// [`Daemon::repoint_spares`] over a queue the caller is ALREADY
+/// holding, returning how many rows moved.
+///
+/// Split out for `altcand::alt_switch`, which does the whole of its
+/// switch under one queue hold on purpose - "nothing can promote, delete
+/// or pick either half in between" - and would deadlock on the `Daemon`
+/// method, which takes that lock itself. One rule, one implementation:
+/// the two callers must not be able to disagree about what a spare is or
+/// about which ones a switch leaves behind.
+pub(in crate::serve) fn repoint_spares_in<'a>(
+    jobs: impl IntoIterator<Item = &'a Arc<Mutex<Job>>>,
+    from: &str,
+    to: &str,
+) -> usize {
+    let mut moved = 0;
+    for j in jobs {
+        let mut g = j.lock_ok();
+        if g.held_for == from && is_spare_origin(&g.origin) && is_held_alternative(&g) {
+            g.held_for = to.to_string();
+            moved += 1;
+        }
+    }
+    moved
 }

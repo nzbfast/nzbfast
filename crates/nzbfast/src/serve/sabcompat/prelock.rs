@@ -26,6 +26,9 @@ pub(super) struct PreLock {
     /// walk of the queue under the queue lock. Empty on the
     /// overwhelmingly common install, where nothing is held at all.
     pub(super) alt_held: Vec<crate::serve::altcand::HeldSpare>,
+    /// §282 item 20: `alt_auto_search`. Read here with the rest, for the
+    /// rest's reason - one instant for the whole payload.
+    pub(super) alt_auto_search: bool,
     pub(super) disk_now: Option<(u64, u64)>,
     pub(super) free_now: Option<u64>,
     pub(super) now_unix: u64,
@@ -63,6 +66,9 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     let health_defer = d.post_health_defer.load(Ordering::Relaxed);
     // §282 item 12, same rule: read once for the whole payload.
     let alt_held = d.alt_held_spares();
+    // §282 item 20: whether a row with nothing held can still expect a
+    // search when it finally fails. One atomic load per payload.
+    let alt_auto_search = d.alt.auto_search.load(Ordering::Relaxed);
     // Free space on the output disk, read once per payload: feeds the
     // per-slot unpack-space check below. This is per-job arithmetic,
     // deliberately separate from the min_free floor (which holds the
@@ -153,6 +159,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         pw_wanted,
         health_defer,
         alt_held,
+        alt_auto_search,
         disk_now,
         free_now,
         now_unix,

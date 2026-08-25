@@ -1192,7 +1192,8 @@ intact et le journal dit pourquoi.</p>
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (une reprise automatique a remis en file une tâche échouée),
 <code>job.switched</code> (une tâche qui ne pouvait pas aboutir a été remplacée
-par une copie de rechange gardée pour elle) et
+par une copie de rechange gardée pour elle), <code>job.replaced</code> (le même résultat, sauf qu'aucune copie
+n'était gardée, donc un remplacement a été cherché puis téléchargé) et
 <code>job.delete_kept</code> (une suppression a retiré l'entrée mais n'a pas pu
 supprimer ses fichiers), plus <code>watch.picked</code> (un .nzb a été retiré du
 dossier surveillé), <code>nzb.refeed</code> (le fichier NZB d’un téléchargement terminé a été ajouté à la file, en pause), <code>watchlist.upgraded</code> (une amélioration de liste de

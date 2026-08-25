@@ -419,6 +419,19 @@ impl HistQuery {
 pub(super) fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Value>, usize, Value) {
     // Snapshot the Arcs; drop the global lock before any job lock.
     let arcs: Vec<Arc<Mutex<Job>>> = d.history.lock_ok().clone();
+    // §284's spare snapshot, taken ONCE and BEFORE the loop below takes
+    // its first job lock. `alt_held_spares` walks the queue and locks
+    // every row in it, so calling it from inside `history_row` - where a
+    // history record's own mutex is held - is the job-then-queue order
+    // this tree deadlocks on. On the SUMMARY path it is not taken at
+    // all: the compact rows the dashboard polls carry no offer (see
+    // `history_row` for why the drawer's on-demand row is the only one
+    // that needs it), so the common every-second render pays nothing.
+    let held: Vec<crate::serve::altcand::HeldSpare> = if summary {
+        Vec::new()
+    } else {
+        d.alt_held_spares()
+    };
     let (mut all, mut done, mut failed, mut locked) = (0usize, 0usize, 0usize, 0usize);
     // What the header's one-click clear would take: Completed and not
     // password-locked (locked rows survive the value=completed sweep).
@@ -491,7 +504,7 @@ pub(super) fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Val
         slots.push(if summary {
             history_summary(d, &j)
         } else {
-            history_row(d, &j)
+            history_row(d, &j, &held)
         });
     }
     let counts = json!({"all": all, "done": done, "failed": failed, "locked": locked,
@@ -737,7 +750,7 @@ pub(super) fn history_json(
 /// The full SAB facade row - the pre-§129 key set, byte-stable for
 /// external clients (pinned by tests/integration/dashboard_rev.rs).
 /// Built under the caller's job lock.
-fn history_row(d: &Daemon, j: &Job) -> Value {
+fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -> Value {
     {
         // Truth-audit I: what this download is CALLED on disk, when
         // that is not what it was posted as. A de-obfuscation rename
@@ -794,6 +807,22 @@ fn history_row(d: &Daemon, j: &Job) -> Value {
             "alt_from_name": j.alt_from_name,
             "alt_why": j.alt_why,
             "alt_to_name": j.alt_to_name,
+            // §284: ...and what could still HAPPEN, which until now
+            // stopped existing the moment the job left the queue. Absent
+            // unless `altcand::parked_replaceable` says another copy is
+            // still the move for this record - which is almost every red
+            // row's answer of "no", so almost every row omits it.
+            //
+            // THE FULL ROW ONLY, and not `history_summary`. The drawer
+            // fetches this shape on demand for the one row a person
+            // opened (`histFullRow`), which is exactly where the offer is
+            // drawn and read; the summary is the compact list row the
+            // dashboard re-polls every second for every row on the page,
+            // and putting a per-row spare filter and a spool stat there
+            // would pay that cost on every tick to render a block the
+            // list has no room for. The list already carries the
+            // half it can act on, in `fail_action`'s own `find another`.
+            "alt_offer": crate::serve::altcand::parked_offer_json(j, held),
             "fail_message": if deleted { STORAGE_DELETED_MSG } else { j.fail_message.as_str() },
             "fail_detail": j.fail_detail,
             // This failure was a full disk, decided by the same

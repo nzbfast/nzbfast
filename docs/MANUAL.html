@@ -1112,7 +1112,8 @@ the add proceeds untouched and the log says why.</p>
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (an automatic retry has re-queued a failed download), <code>job.switched</code>
 (a job that could not finish was replaced by an alternate copy that was being
-held for it) and
+held for it), <code>job.replaced</code> (the same outcome, except that no copy
+was being held, so a replacement was searched for and downloaded) and
 <code>job.delete_kept</code> (a delete removed the record but could not remove
 its files), plus <code>watch.picked</code> (a .nzb was taken out of the watch
 folder), <code>nzb.refeed</code> (a finished download's own NZB file was added to the queue, paused), <code>watchlist.upgraded</code> (a watchlist upgrade landed and the

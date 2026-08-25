@@ -83,10 +83,14 @@ const REFEED_WALK_DEPTH: usize = 6;
 
 /// Every `.nzb` under `root`, breadth-bounded and symlink-safe.
 ///
-/// Symlinked directories are not followed, for the same reason
-/// `watch_scan` does not follow them: a cycle turns a bounded walk into
-/// an unbounded one, and a link pointing out of the download folder
-/// makes somebody else's files look like this job's output.
+/// No symlink of any kind is taken - not followed, not listed. A
+/// symlinked DIRECTORY turns a bounded walk into an unbounded one and
+/// was always refused; a symlinked FILE walked straight through the old
+/// is_dir test to the extension check, so `outside.nzb -> /elsewhere`
+/// planted in an extracted payload made a file OUTSIDE the completed
+/// job look like its output and queued it (Codex sweep 24 Aug, F-13).
+/// `DirEntry::file_type` is lstat-shaped, which is what makes the test
+/// honest: a link reports is_symlink, never what it points at.
 fn scan_nzbs(root: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
@@ -96,7 +100,13 @@ fn scan_nzbs(root: &std::path::Path) -> Vec<PathBuf> {
         };
         for e in entries.flatten() {
             let p = e.path();
-            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let Ok(t) = e.file_type() else {
+                continue;
+            };
+            if t.is_symlink() {
+                continue;
+            }
+            if t.is_dir() {
                 if depth < REFEED_WALK_DEPTH {
                     stack.push((p, depth + 1));
                 }
@@ -220,9 +230,16 @@ impl Daemon {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let Ok(meta) = std::fs::metadata(p) else {
+        // lstat, never stat: the walk refused symlinks by entry type,
+        // and this closes the enumerate-then-open gap the same way - a
+        // link that appeared since is refused rather than followed to a
+        // file outside the completed job (Codex sweep 24 Aug, F-13).
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
             return;
         };
+        if !meta.is_file() {
+            return;
+        }
         let len = meta.len();
         // Read only what the size gate admits. A file past the cap is
         // never read at all, which is the point of asking the metadata
@@ -235,10 +252,21 @@ impl Daemon {
             );
             return;
         }
-        let Ok(bytes) = std::fs::read(p) else {
-            return;
-        };
-        if let Some(why) = refeed_refusal(len, &bytes) {
+        // A capped read, judged by the bytes that actually arrived: the
+        // file can grow between the lstat above and this read, so the
+        // stale length is advisory and the byte count is the gate - the
+        // reader never takes more than one byte past the cap, whatever
+        // the file has become (F-13's other half).
+        let mut bytes = Vec::new();
+        {
+            use std::io::Read;
+            let ok = std::fs::File::open(p)
+                .and_then(|f| f.take(REFEED_MAX_BYTES + 1).read_to_end(&mut bytes));
+            if ok.is_err() {
+                return;
+            }
+        }
+        if let Some(why) = refeed_refusal(bytes.len() as u64, &bytes) {
             info!(target: "refeed", "{name} left alone: {why}");
             return;
         }
@@ -271,32 +299,59 @@ impl Daemon {
         // the child WAITS. The user reads its size and presses start.
         match self.enqueue(&bytes, &name, category, -2, None, None, "refeed", false) {
             Ok(e) => {
-                self.stamp_refeed_depth(&e.nzo_id, depth + 1);
-                info!(
-                    target: "refeed",
-                    "queued {name} from {parent_name} - paused, waiting for you to start it"
-                );
-                self.life_emit(
-                    "nzb.refeed",
-                    json!({
-                        "name": name,
-                        "parent": parent_name,
-                        "parent_id": parent_id,
-                        "nzo_id": e.nzo_id,
-                    }),
-                );
+                // The stamp answers WHERE the add landed, and the two
+                // announcements below hang on it. `enqueue` returns Ok
+                // for an add a pre-queue verdict filed straight to
+                // history as Failed, and this arm used to log "paused,
+                // waiting for you to start it" and emit `nzb.refeed`
+                // about a row that was never in the queue (Codex sweep
+                // 24 Aug, F-12).
+                if self.stamp_refeed_depth(&e.nzo_id, depth + 1) {
+                    info!(
+                        target: "refeed",
+                        "queued {name} from {parent_name} - paused, waiting for you to start it"
+                    );
+                    self.life_emit(
+                        "nzb.refeed",
+                        json!({
+                            "name": name,
+                            "parent": parent_name,
+                            "parent_id": parent_id,
+                            "nzo_id": e.nzo_id,
+                        }),
+                    );
+                } else {
+                    info!(
+                        target: "refeed",
+                        "{name} from {parent_name} was filed straight to history by a \
+                         pre-queue verdict - it is not waiting in the queue"
+                    );
+                }
             }
             Err(err) => info!(target: "refeed", "{name} was refused: {err}"),
         }
     }
 
     /// Record how deep a freshly queued child is, and make it durable.
+    /// Returns whether the child is LIVE ON THE QUEUE - the caller's
+    /// placement oracle for what to announce.
     ///
     /// Same shape and same reason as `enqueue_fetched`'s failure-link
     /// stamp: `enqueue` saved the queue BEFORE this field existed on the
     /// record, so without a second save a restart in the window puts the
     /// child back at depth 0 and its own output becomes eligible again.
-    fn stamp_refeed_depth(&self, nzo_id: &str, depth: u8) {
+    ///
+    /// The HISTORY arm is not optional. A pre-queue verdict files the
+    /// child there as Failed, and "depth 0 on a record that is not
+    /// going to run costs nothing" - this function's old excuse for
+    /// stamping only the queue - fails exactly at `retry`, which
+    /// re-publishes THAT record's Arc into the queue without re-running
+    /// the hook or touching the depth. A retried child then completed
+    /// at depth 0, below REFEED_MAX_DEPTH, and its output was scanned
+    /// for grandchildren past the declared one-level cap (Codex sweep
+    /// 24 Aug, F-12). Stamped wherever the record landed, and persisted
+    /// there, so the cap survives the retry.
+    fn stamp_refeed_depth(&self, nzo_id: &str, depth: u8) -> bool {
         let stamped = {
             let q = self.queue.lock_ok();
             match q.iter().find(|j| j.lock_ok().nzo_id == nzo_id) {
@@ -304,16 +359,26 @@ impl Daemon {
                     job.lock_ok().refeed_depth = depth;
                     true
                 }
-                // Not a fault: a duplicate hold or a pre-queue verdict
-                // can file the add somewhere other than the back of the
-                // queue. Depth 0 on a record that is not going to run
-                // costs nothing.
                 None => false,
             }
         };
         if stamped {
             self.save_queue();
+            return true;
         }
+        let filed = {
+            let h = self.history.lock_ok();
+            let found = h.iter().find(|j| j.lock_ok().nzo_id == nzo_id).cloned();
+            if let Some(j) = &found {
+                j.lock_ok().refeed_depth = depth;
+            }
+            found
+        };
+        // Outside the history lock: the upsert takes it itself.
+        if let Some(job) = filed {
+            let _ = self.history_upsert_if_present(&job);
+        }
+        false
     }
 }
 
@@ -553,5 +618,33 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["a.NZB", "b.nzb", "c.nzb"], "{found:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A symlink named like a candidate is refused, file and directory
+    /// alike. The old walk only refused the directory shape (and that
+    /// by accident of is_dir being false for links), so `outside.nzb ->
+    /// /elsewhere/real.nzb` planted in an extracted payload queued a
+    /// file from OUTSIDE the completed job - the exact thing the
+    /// "symlink-safe" doc promised could not happen (Codex sweep
+    /// 24 Aug, F-13).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_nzb_is_not_a_candidate() {
+        let base = std::env::temp_dir().join(format!("nzbfast-refeedln-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("job");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("real.nzb"), b"x").unwrap();
+        std::fs::write(root.join("honest.nzb"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.join("real.nzb"), root.join("planted.nzb")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("door")).unwrap();
+        let names: Vec<String> = scan_nzbs(&root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["honest.nzb"], "a symlink walked through");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

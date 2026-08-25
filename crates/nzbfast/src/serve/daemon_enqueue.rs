@@ -258,8 +258,12 @@ impl Daemon {
         {
             drop(publish);
             // The spool copy was written above; a refused add must not
-            // leave it behind.
-            let _ = std::fs::remove_file(&spool_path);
+            // leave it behind - and a refused UNLINK must not either,
+            // which is why this is `drop_spool` and not a swallowed
+            // `remove_file` (Codex sweep 24 Aug, F-04): the survivor is
+            // adoptable, so the discarded duplicate would download at
+            // the next start.
+            drop_spool(&spool_path);
             info!(
                 target: "queue",
                 "refused {stem:?} - duplicate of {} ({}, {}), and duplicates \
@@ -408,7 +412,11 @@ impl Daemon {
             if hold_for.is_some() {
                 drop(publish);
                 if let Some(p) = &spare_spool {
-                    let _ = std::fs::remove_file(p);
+                    // `drop_spool`, not a swallowed `remove_file`: the
+                    // refused spare has no record anywhere, so a copy
+                    // whose unlink fails is re-adopted at the next start
+                    // (Codex sweep 24 Aug, F-04).
+                    drop_spool(p);
                 }
                 anyhow::bail!("the pre-queue script refused this spare: {why}");
             }
@@ -488,8 +496,12 @@ impl Daemon {
             // asked for, while a spare whose job is gone is a download
             // NOBODY asked for, and letting it queue is the one thing a
             // spare may never do (see `spare::Daemon::hold_spares_with`).
+            // ...or (§284) a history record still being offered another
+            // copy - see `Daemon::parked_spare_owner`, which carries the
+            // argument and the lock note.
             if let Some(target) = hold_for {
-                orphan_spare = !q.iter().any(|j| j.lock_ok().nzo_id == target);
+                orphan_spare = !q.iter().any(|j| j.lock_ok().nzo_id == target)
+                    && !self.parked_spare_owner(target);
             }
             // Last look at the collision, under the very lock this add
             // publishes with. `add_lock` serializes adds against each
@@ -570,9 +582,10 @@ impl Daemon {
         if orphan_spare {
             // Never queued, so nothing names the spool copy - and
             // `recover_orphaned_spool` adopts exactly that shape at the
-            // next start.
+            // next start. `drop_spool` so a refused unlink is masked
+            // rather than left adoptable (Codex sweep 24 Aug, F-04).
             if let Some(p) = &spare_spool {
-                let _ = std::fs::remove_file(p);
+                drop_spool(p);
             }
             anyhow::bail!(
                 "the job this spare was held for is gone - it was deleted while the \

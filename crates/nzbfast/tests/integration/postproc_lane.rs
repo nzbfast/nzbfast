@@ -189,11 +189,13 @@ const SAB_QUEUE_STATUSES: &[&str] = &[
 /// §100 lane variant + the facade shape gate.
 ///
 /// Job 1 is the §100 encrypted store set with the post-publish ENOSPC
-/// injected once; job 2 is a clean plain post stretched by a per-article
-/// delay so its DOWNLOAD overlaps job 1's tail. Along the way every
-/// queue snapshot is schema-checked: only SAB's own status words, at
-/// most one Downloading row (§91 pairing), and the overlap itself must
-/// be observed (a `finishing` row beside a Downloading one).
+/// injected once; job 2 is a clean plain post whose DOWNLOAD is built to
+/// outlast job 1's whole tail, so job 1's Finishing window sits inside
+/// it. Along the way every queue snapshot is schema-checked: only SAB's
+/// own status words, at most one Downloading row (§91 pairing), and the
+/// overlap itself must be observed (a `finishing` row beside a
+/// Downloading one). The arithmetic that makes that last one
+/// deterministic is at the assertion.
 #[tokio::test(flavor = "multi_thread")]
 async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
     use nzbkit::rar::fixtures;
@@ -208,14 +210,24 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
     let vol = fixtures::rar5_volume_enc(&[("movie.mkv", &f, 0..n, false, false)], None);
     let mut articles = HashMap::new();
     let segs1 = make_file_articles("Lane.Enospc.2026.rar", &vol, 40_000, "le", &mut articles);
-    // Job 2: a clean plain post, big enough (and slowed below) that its
-    // network phase spans job 1's whole tail.
+    // Job 2: a clean plain post whose NETWORK PHASE is built to outlast
+    // job 1's whole tail - 201 articles at 180 ms of server-side delay
+    // each, over a fleet pinned to 4 connections below, so the download
+    // cannot drain in less than 201 x 180 ms / 4 = 9.0 s however fast
+    // the box is. That floor is the whole determinism argument at the
+    // overlap assertion; see the comment there before changing any of
+    // these three numbers, and change them together.
+    //
+    // The article size is what buys the article COUNT: 1.2 MB in 40 KB
+    // pieces is 31 articles, which a 25-connection fleet fetched in one
+    // round in under a second - the entire download landing inside job
+    // 1's stall with a ~0.5 s window for a 100 ms poll to find.
     let clean = payload(1_200_001, 91);
-    let segs2 = make_file_articles("Lane.Clean.2026.mkv", &clean, 40_000, "lc", &mut articles);
+    let segs2 = make_file_articles("Lane.Clean.2026.mkv", &clean, 6_000, "lc", &mut articles);
     let srv = MockServer::start(
         articles,
         Chaos {
-            delay_ms: 60,
+            delay_ms: 180,
             ..Chaos::default()
         },
     )
@@ -226,10 +238,20 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
     let xml2 = nzb_xml("Lane.Clean.2026.mkv", &segs2, None);
 
     let cfg = dir.join("config.json");
+    // The fleet is PINNED to 4 connections, and that is a timing
+    // control, not a preference: `delay_ms` is per BODY per connection,
+    // so the download rate is width / delay and the width is the only
+    // half of it the mock does not own. Left at the default the daemon
+    // asks for 100, the line cap trims it to 25, and a 25-wide fleet
+    // fetches this post in one round - a duration set by how fast the
+    // box can dial 25 sockets, which is exactly the quantity a loaded
+    // parallel run moves. `pin_connections` keeps the tuner from
+    // trimming it further, so the arithmetic at the overlap assertion
+    // is an equality rather than a hope.
     std::fs::write(
         &cfg,
         format!(
-            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false,\"connections\":4,\"pin_connections\":true}}]}}",
             srv.addr.ip(),
             srv.addr.port()
         ),
@@ -240,11 +262,14 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
             .env("NZBFAST_DECRYPT_ENOSPC_ONCE", "post")
-            // Hold every tail open ~4 s so job 2's download provably
-            // overlaps job 1's Finishing window - the real tail here is
-            // a 200 KB decrypt, far too quick to race a poll against,
-            // and under a loaded parallel run the 100 ms poll cadence
-            // stretches (one observed flake at 3 s).
+            // Hold every tail open ~4 s. This is what makes job 1's
+            // Finishing window long enough to be POLLED - the real tail
+            // here is a 200 KB decrypt, far too quick to race a 100 ms
+            // poll against. It is NOT what makes the overlap happen:
+            // that is job 2's download outlasting this stall, which is
+            // the arithmetic at the overlap assertion below. Raising
+            // this number widens the window and shortens the margin at
+            // the same time, so it is not the lever it looks like.
             .env("NZBFAST_TEST_STALL_TAIL_MS", "4000")
             .arg("--config")
             .arg(&cfg)
@@ -275,6 +300,13 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
 
         // Drive to the failure while schema-checking every snapshot.
         let mut saw_overlap = false;
+        // One line per CHANGE of (Downloading rows, finishing rows), for
+        // the overlap assertion's own failure message: the two ways it
+        // can fail - the window closing early and the poll skipping a
+        // window that was open - look identical from a bare `false`, and
+        // telling them apart from a daemon log took a day.
+        let mut trace: Vec<String> = Vec::new();
+        let t0 = std::time::Instant::now();
         let mut failed = serde_json::Value::Null;
         for _ in 0..300 {
             let q = queue_payload(port);
@@ -310,6 +342,10 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
                 if downloading == 1 && finishing >= 1 {
                     saw_overlap = true;
                 }
+                let mark = format!("{downloading}d/{finishing}f");
+                if trace.last().is_none_or(|l| !l.ends_with(&mark)) {
+                    trace.push(format!("{:.2}s {mark}", t0.elapsed().as_secs_f64()));
+                }
             }
             if let Some(s) = history_slot(port, "Lane.Enospc.2026", "Failed") {
                 failed = s;
@@ -325,10 +361,49 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
                 .contains("disk-full"),
             "expected the injected disk-full, got: {failed}"
         );
+        // The SUBJECT of this suite, and the one assertion in it that is
+        // about an INSTANT rather than an outcome - so it is the one
+        // that a timing drift silently deletes rather than reddens.
+        //
+        // What makes it deterministic is CONTAINMENT, not a wide-enough
+        // window: job 1's whole Finishing window sits inside job 2's
+        // download, so a poll can only miss the overlap by spending the
+        // entire window inside one iteration. The two floors, both
+        // wall-clock and both set above:
+        //
+        //   job 1 Finishing  = 4.0 s stall + its tail  (~4.2 s measured)
+        //   job 2 downloading = 201 articles x 180 ms / 4 conns = 9.0 s
+        //                       (9.6 s measured, dial included)
+        //
+        // and job 2 starts on job 1's hand-over, i.e. within ~0.3 s of
+        // job 1 entering the lane. So job 2 is still on the wire ~5 s
+        // after job 1 has been filed, and the window is ~40 polls wide.
+        //
+        // It was NOT like that until 24 Aug 2026: job 2 was 31 articles
+        // at 60 ms over a 25-wide fleet, so its whole download drained
+        // in 0.82 s INSIDE job 1's 4 s stall, and the overlap was a
+        // ~0.5 s sliver a 100 ms poll had to hit. That failed 1 run in 3
+        // of the full CI sweep and passed on nextest's retry, so the run
+        // reported `1 flaky` and exit 0 - the same shape TODO 27.2
+        // documents for the sibling copy of this test, `daemon_password
+        // ::enospc_after_decrypt_publish_retries_without_refetching`,
+        // where a 133/133 daemon suite hid a FLAKY 2/2 line nobody
+        // reads.
+        //
+        // Do NOT reach for `Chaos::slow_ttfb` to widen this: it was
+        // measured on 24 Aug 2026 and 400 ms of dead air pushes job 1's
+        // finish out past job 2's whole download, so the overlap stops
+        // happening at all (5 runs, 5 failures here). See the journal
+        // rider below, which is where that scaffold came from.
         assert!(
             saw_overlap,
             "never observed a finishing row beside a Downloading one - \
-             the lane overlap this suite exists for did not happen"
+             the lane overlap this suite exists for did not happen.\n\
+             (Downloading rows / finishing rows over time: {trace:?}) - \
+             an entry reading 0d/1f says job 2's download drained while \
+             job 1 was still in the lane, so the containment above \
+             broke; a trace with no 1f in it at all says the window was \
+             open and the poll stepped over it."
         );
         let nzo = failed["nzo_id"].as_str().expect("nzo_id").to_string();
         let failed_dir = failed["storage"].as_str().unwrap_or_default().to_string();
@@ -516,25 +591,35 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
         .unwrap();
     let clean = payload(4_000_001, 55);
     let clean_segs =
-        make_file_articles("Lane.Beside.2026.mkv", &clean, 40_000, "cb", &mut articles);
-    // The per-article delay stretches the clean job's network phase to
-    // several hundred milliseconds, so the 100 ms poll below cannot
-    // miss the Downloading-beside-Finishing window.
+        make_file_articles("Lane.Beside.2026.mkv", &clean, 10_000, "cb", &mut articles);
+    // 401 articles at 90 ms of server-side delay each, over the fleet
+    // pinned to 4 connections below: the clean job's network phase
+    // cannot drain in less than 401 x 90 ms / 4 = 9.0 s, which is what
+    // holds the Downloading-beside-Finishing window open for the whole
+    // of the damaged job's tail. See the overlap assertion below for
+    // why that floor and not a wider poll or a longer stall, and change
+    // the three numbers together.
     let srv = MockServer::start(
         articles,
         Chaos {
             missing,
-            delay_ms: 40,
+            delay_ms: 90,
             ..Chaos::default()
         },
     )
     .await;
 
     let cfg = dir.join("config.json");
+    // Pinned to 4 connections for the same reason as the §100 lane test
+    // above: `delay_ms` is per BODY per connection, so the download rate
+    // is width / delay and the width is the only half of it the mock
+    // does not own. Unpinned the daemon asks for 100 and the line cap
+    // trims to 25, which fetches the clean post in four rounds and puts
+    // the whole overlap at the mercy of how fast the box dials.
     std::fs::write(
         &cfg,
         format!(
-            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false,\"connections\":4,\"pin_connections\":true}}]}}",
             srv.addr.ip(),
             srv.addr.port()
         ),
@@ -544,10 +629,13 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
         let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         c.env("NZBFAST_OPEN", "1")
             .env("NZBFAST_NO_ENRICH", "1")
-            // Hold tails open so the repair window provably overlaps
-            // the second download whatever this machine's speed (4 s:
-            // the overlap window is exactly this stall, and a loaded
-            // parallel run stretches the observer's poll cadence).
+            // Hold tails open ~4 s, which is what makes the damaged
+            // job's Finishing window long enough to be POLLED. It is
+            // NOT what makes the overlap happen, and the comment here
+            // said "the overlap window is exactly this stall" until
+            // 24 Aug 2026, which was measurably false: the window ended
+            // when the CLEAN job's download did, 0.95 s in, while this
+            // stall ran to 4.95 s.
             .env("NZBFAST_TEST_STALL_TAIL_MS", "4000")
             .arg("--config")
             .arg(&cfg)
@@ -571,6 +659,11 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
         add_nzb(port, "Lane.Beside.2026", &xml2);
 
         let mut saw_overlap = false;
+        // Same trace the §100 lane test above keeps, for the same
+        // reason: a bare `false` cannot tell a window that closed early
+        // from a poll that stepped over an open one.
+        let mut trace: Vec<String> = Vec::new();
+        let t0 = std::time::Instant::now();
         let mut done = (false, false);
         for _ in 0..600 {
             let q = queue_payload(port);
@@ -581,6 +674,10 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
                 let finishing = slots.iter().any(|s| s["finishing"] == true);
                 if downloading && finishing {
                     saw_overlap = true;
+                }
+                let mark = format!("{}d/{}f", u8::from(downloading), u8::from(finishing));
+                if trace.last().is_none_or(|l| !l.ends_with(&mark)) {
+                    trace.push(format!("{:.2}s {mark}", t0.elapsed().as_secs_f64()));
                 }
             }
             done = (
@@ -594,9 +691,34 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
         }
         assert!(done.0, "the damaged job never completed");
         assert!(done.1, "the clean job never completed");
+        // Deterministic by CONTAINMENT, exactly as at the §100 lane
+        // test above, and this site carried the same defect until
+        // 24 Aug 2026. The damaged job's whole Finishing window sits
+        // inside the clean job's download:
+        //
+        //   damaged Finishing = 4.0 s stall + repair  (4.08 s measured)
+        //   clean downloading = 401 articles x 90 ms / 4 conns = 9.0 s
+        //                       (9.75 s measured, dial included)
+        //
+        // Before, the clean post was 101 articles at 40 ms over a
+        // 25-wide fleet: it drained 0.95 s in, so the window was 0.95 s
+        // and NOT the 4 s this file's comments claimed for it. A longer
+        // repair only ever HELPS here - the window is the intersection
+        // of the two, so a tail that runs late widens it and only the
+        // clean download running short can close it.
         assert!(
             saw_overlap,
-            "the damaged job's tail never overlapped the clean download"
+            "the damaged job's tail never overlapped the clean download.\n\
+             (a Downloading row / a finishing row over time: {trace:?}) - \
+             read the GAP, not any single entry: a `1d/0f` line followed \
+             straight by a `0d/1f` one says the clean download drained \
+             before the damaged job reached the lane, which is the \
+             containment above breaking, while `1d` and `1f` intervals \
+             that plainly overlap with no `1d/1f` line between them say \
+             the poll stepped over an open window. Unlike the §100 test \
+             above, this loop runs on until BOTH jobs are filed, so a \
+             trailing `0d/1f` is just the clean job in its own tail and \
+             means nothing."
         );
 
         let slot = history_slot(port, "Lane.Damaged.2026", "Completed").unwrap();

@@ -658,6 +658,13 @@ fn get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(String, String)]) ->
     // suites take (see e2e.rs run_get_win), and no enrichment worker may
     // reach the real internet from a test (CLAUDE.md invariant 5).
     cmd.env("NZBFAST_OPEN", "1").env("NZBFAST_NO_ENRICH", "1");
+    // The census lines this suite parses are INFO, and the child falls
+    // back to ambient RUST_LOG when NZBFAST_LOG is unset - a parent
+    // shell exporting RUST_LOG=warn silently emptied every census and
+    // failed all eight contract tests with no product defect (Codex
+    // sweep 24 Aug, F-22; third recurrence of the class, see
+    // tests/daemon.rs). Pin INFO at the child.
+    cmd.env("NZBFAST_LOG", "info").env_remove("RUST_LOG");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -1002,6 +1009,10 @@ async fn contract_crash_in_fault_window() {
             let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
                 .env("NZBFAST_OPEN", "1")
                 .env("NZBFAST_NO_ENRICH", "1")
+                // Same INFO pin as `get` above: this run's census is
+                // parsed too, and ambient RUST_LOG=warn empties it.
+                .env("NZBFAST_LOG", "info")
+                .env_remove("RUST_LOG")
                 .arg("--config")
                 .arg(&cfg)
                 .arg("get")
